@@ -34,6 +34,7 @@ import {
   type AmbientContext,
   type FromWorker,
   parseCellWorkerName,
+  thrownPayload,
   type ToWorker,
   WORKER_CLOSE_DRAIN_MS,
 } from "./cell-worker-protocol.ts";
@@ -44,10 +45,12 @@ import {
   settlePending,
 } from "../state/method-cancel.ts";
 import {
+  _trackReads,
   runWithRequest,
   runWithUser,
   type ServerRequest,
 } from "./auth-context.ts";
+import type { AioUser } from "./aio-types.ts";
 import { _setCallTimeouts, registerCall } from "../state/cell-impl.ts";
 import { log } from "../diagnostics/logger-api.ts";
 
@@ -203,6 +206,9 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
     },
   };
   let pending: Patch[] = [];
+  /** The owner's slice generation, as the last `init` reported it — stamped
+   *  on every `patches` batch (see FromWorker["patches"]). */
+  let gen = 0;
   // Set while tearing down. Destroy runs the cell's onDestroy (its resources
   // were opened HERE, so they must be released here) — but the state changes a
   // teardown produces are NOT data: `__Destroy` resets the slice to its initial
@@ -267,7 +273,9 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
       return;
     }
     if (pending.length === 0) return;
-    post({ t: "patches", ops: pending });
+    // Stamped with the slice generation it was committed against, so the
+    // owner can tell a batch from before a re-seed it has already applied.
+    post({ t: "patches", ops: pending, gen });
     pending = [];
   };
 
@@ -351,9 +359,9 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
   // from another call are reported back so it stops (see FromWorker
   // "adopted"). Never unsubscribed: the watcher lives as long as the thread.
   const callIds = new Map<string, number>();
-  _onCallAdopted((callId) => {
+  _onCallAdopted((callId, rerun) => {
     const id = callIds.get(callId);
-    if (id !== undefined) post({ t: "adopted", id });
+    if (id !== undefined) post({ t: "adopted", id, ...rerun ? { rerun } : {} });
   });
 
   self.onmessage = async (ev: MessageEvent<ToWorker>) => {
@@ -380,6 +388,7 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
       // main isolate, so this is the state of record, not our defaults.
       state = { [name]: { ...msg.state } };
       pending = []; // seeding is not a change to broadcast
+      gen = msg.gen;
       seeded = true;
       // NOT `initAll` here: `init` is also the RE-SEED message (time travel,
       // snapshot load), and at spawn the main isolate cannot apply a patch
@@ -471,6 +480,9 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
     }
     // t === "call"
     const { id, action, ctx } = msg;
+    // What of the caller this run reads, for the caller's ttl/"first" key.
+    const facts = msg.reads ? new Set<string>() : null;
+    const reads = () => facts?.size ? { reads: [...facts] } : {};
     // An ASYNC method's return value does not ride the dispatch promise: the
     // body runs as this cell's `__exec` effect, and its completion lands in
     // resolveCall(_callId) — in THIS isolate's pending-call registry, which the
@@ -490,8 +502,18 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
       const settled = callId ? registerCall(callId) : null;
       if (settled) settled.catch(() => {}); // observed via await below; never unhandled
       const run = () => dispatch(action);
+      // The identity is the ACTION's `_user` — the full object the transport
+      // stamped (or none, for a server-origin call) — exactly what in-isolate
+      // dispatch runs the reduce under (aio-dispatch.ts `hookedReduce`). Never
+      // an ambient read on the other side of the thread: see `ambient()` in
+      // cell-worker.ts for the three ways that answered differently.
+      const user = (action as { _user?: AioUser })._user;
       const withCtx = () =>
-        runWithRequest(reviveRequest(ctx), () => runWithUser(ctx?.user, run));
+        runWithRequest(
+          reviveRequest(ctx),
+          () =>
+            runWithUser(user, () => facts ? _trackReads(facts, run) : run()),
+        );
       const ret = await withCtx();
       const value = settled ? await settled : ret;
       flush(); // every commit this call produced, before the caller resolves
@@ -517,6 +539,7 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
         post({
           t: "fail",
           id,
+          ...reads(),
           message: refused.message,
           stack: refused.stack,
           name: refused.name,
@@ -527,6 +550,7 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
       post({
         t: "done",
         id,
+        ...reads(),
         ret: value as unknown,
         ...(refused
           ? { refused: { cell: name, reason: refused.message } }
@@ -537,6 +561,7 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
       post({
         t: "fail",
         id,
+        ...reads(),
         message: e instanceof Error ? e.message : String(e),
         stack: e instanceof Error ? e.stack : undefined,
         // What a caller branches on. Structured clone would carry `name` for
@@ -547,6 +572,7 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
         code: typeof (e as { code?: unknown } | null)?.code === "string"
           ? (e as { code: string }).code
           : undefined,
+        ...thrownPayload(e),
       });
     } finally {
       if (callId) callIds.delete(callId);

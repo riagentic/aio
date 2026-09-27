@@ -32,7 +32,11 @@ import { buildClient } from "./build/build-client.ts";
 import { buildCli } from "./build/build-cli.ts";
 import { buildAndroid } from "./build/build-android.ts";
 import { buildIos } from "./build/build-ios.ts";
-import { runDenoCompile, writeServiceFile } from "./build/build-compile.ts";
+import {
+  recoverInterruptedLinks,
+  runDenoCompile,
+  writeServiceFile,
+} from "./build/build-compile.ts";
 import { buildElectron } from "./build/build-electron.ts";
 import { bakesElectronVersion } from "./build/electron-bake.ts";
 import {
@@ -76,6 +80,10 @@ export async function build(cfg?: BuildConfig): Promise<void> {
   // return below (`doCompile` is false), and exited 0 — a successful-looking
   // command that did a fraction of what its flag implies, which is the shape
   // this project refuses everywhere else.
+
+  // Before anything resolves a package: a build killed mid-compile may have
+  // left node_modules links aside (see recoverInterruptedLinks).
+  await recoverInterruptedLinks(join(root, "node_modules"));
 
   // ── Step 1: Bundle dist/app.js ───────────────────────────────────────────
   // Skip for targets that don't need browser bundles

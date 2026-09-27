@@ -34,7 +34,7 @@ import { resolveSelfAction } from "./self.ts";
 import { inServerOrigin } from "./call-origin.ts";
 import { materializeValue, withDraftDo } from "./cell-impl.ts";
 import { current, type Draft, isDraft } from "immer";
-import { type AioError, createAioError } from "../diagnostics/error.ts";
+import { AioError, createAioError } from "../diagnostics/error.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { refuseRetired, removalOf, removalsAreFatal } from "./removals-core.ts";
 import {
@@ -457,6 +457,35 @@ function _warnShortCall(
       `still counts \`x\`; give it a default (\`= undefined\`). ` +
       `Said once per method and count.`,
   );
+}
+
+/** Calls rejected by each DISPATCH_LOOP error, not yet logged. */
+const _overflowRejected = new Map<AioError, number>();
+
+/** Is `e` the dispatch overflow's rejection? Then it is COUNTED, not logged
+ *  per call: one loop strands every queued call (up to 10 000), and a line —
+ *  or an EFFECT_ASYNC_ERROR report — for each buried the DISPATCH_LOOP
+ *  error that names the cause and filled the log budget. The callers are
+ *  still rejected one by one; only what is said is collapsed, into one line
+ *  once the rejections of this turn have settled. */
+function _countOverflowRejection(e: unknown): boolean {
+  if (!(e instanceof AioError) || e.code !== "DISPATCH_LOOP") return false;
+  const n = _overflowRejected.get(e) ?? 0;
+  _overflowRejected.set(e, n + 1);
+  if (n === 0) {
+    setTimeout(() => {
+      const count = _overflowRejected.get(e) ?? 0;
+      _overflowRejected.delete(e);
+      log.error(
+        "cell",
+        `${count} pending call${
+          count === 1 ? "" : "s"
+        } rejected by the dispatch overflow — the DISPATCH_LOOP error ` +
+          `above is the cause`,
+      );
+    }, 0);
+  }
+  return true;
 }
 
 const _eventArgWarned = new Set<string>();
@@ -908,7 +937,7 @@ export function buildMethodsExecutor(
   /** Methods already told that time travel paused them mid-flight. */
   const ttPausedWarned = new Set<string>();
 
-  return (app: ScopedApp, effect: Msg): void => {
+  const exec = (app: ScopedApp, effect: Msg): void => {
     // Handle async method execution
     if (effect.type === `${prefix}:__exec`) {
       const { _method, _args, _callId } = effect.payload as {
@@ -969,12 +998,19 @@ export function buildMethodsExecutor(
         // not when the adopted outcome lands (cell-worker-host.ts).
         _noteCallAdopted(_callId);
         decision.outcome.then(
-          (o) =>
+          (o) => {
+            if (o.rerun) {
+              // The `"first"` run it waited on answered ANOTHER caller (it
+              // read `serverUser()`): not this caller's result — run it.
+              _noteCallAdopted(_callId, true);
+              return exec(app, effect);
+            }
             resolveCall(
               _callId,
               o.value,
               o.error === undefined ? undefined : o.error as Error,
-            ),
+            );
+          },
           // Whatever goes wrong between the runner's outcome and this caller
           // is THIS caller's rejection — never an unhandled one, which takes
           // the process down and leaves the adopter waiting forever.
@@ -1054,7 +1090,7 @@ export function buildMethodsExecutor(
       // Run the method once. For serialize, this is deferred until the previous
       // transactional call has committed (so its snapshot is fresh); otherwise
       // it runs now, concurrently, exactly as before.
-      const runOnce = (): Promise<unknown> => {
+      const runBody = (): Promise<unknown> => {
         const batcher = createBatcher(prefix, (a) => app.dispatch(a), {
           deferred: transactional,
         });
@@ -1218,7 +1254,9 @@ export function buildMethodsExecutor(
           if (resolved.length === 0) return;
           app.dispatch(markInflight({
             type: `${prefix}:__effects`,
-            payload: { effects: resolved },
+            // The method that produced them: an exact redactActions pattern
+            // for it must cover this frame too (`actionOrigin`).
+            payload: { effects: resolved, _method },
             _source: "Effect",
           }) as Msg);
         };
@@ -1476,7 +1514,7 @@ export function buildMethodsExecutor(
               );
               app.dispatch(markInflight({
                 type: `${prefix}:__effects`,
-                payload: { effects: resolved },
+                payload: { effects: resolved, _method },
                 _source: "Effect",
               }) as Msg);
             }
@@ -1528,7 +1566,10 @@ export function buildMethodsExecutor(
             const _onError = (app as Record<string, unknown>)._onError as
               | ((err: AioError) => void)
               | undefined;
-            if (_isTTPausedRefusal(e)) {
+            const overflow = _countOverflowRejection(e);
+            if (overflow) {
+              // counted — said once for the whole loop (see above)
+            } else if (_isTTPausedRefusal(e)) {
               // The developer paused time travel while this method was still
               // running — not an app failure, so not an ERROR (and not an
               // error diagnostic, which feedback auto-capture would file as a
@@ -1574,7 +1615,14 @@ export function buildMethodsExecutor(
               // `_callId` names WHICH call failed, so a sink that recorded
               // the call (the timeline) can mark it — `_method` alone matches
               // every call of the method.
-              payload: { _method, error: String(e), _callId },
+              // `_overflow`: debug.log's per-failure error line stands down
+              // too — the count above is that line (logger-observe.ts).
+              payload: {
+                _method,
+                error: String(e),
+                _callId,
+                ...(overflow ? { _overflow: true } : {}),
+              },
               _source: "Effect",
             }) as Msg);
           })
@@ -1598,6 +1646,9 @@ export function buildMethodsExecutor(
             batcher.close();
           });
       };
+      // Inside the policy's scope: `ttl`/`"first"` learn whether the run read
+      // the caller, which decides who its result may answer.
+      const runOnce = () => decision.track(runBody);
       // serialize: chain behind the previous transactional call (runs on both
       // fulfil + reject so one failure doesn't wedge the queue). Else run now.
       // Tracked, not just started: shutdown has to know this call is still
@@ -1669,4 +1720,5 @@ export function buildMethodsExecutor(
       }
     }
   };
+  return exec;
 }

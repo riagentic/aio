@@ -225,7 +225,7 @@ Deno.test({
         `${dir}/app.ts`,
         `import { aio, cell } from "aio";\n` +
           `const c = cell("caps", { state: { n: 0 }, methods: { bump(s: { n: number }) { s.n++; } } });\n` +
-          `await aio.run({ cells: [c], client: "server-only", libraryMode: true, appDir: ${
+          `await aio.run({ cells: [c], client: "server-only", appDir: ${
             JSON.stringify(dir + "/data")
           } });\n`,
       );

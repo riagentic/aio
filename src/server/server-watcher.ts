@@ -22,7 +22,7 @@ import {
   transpile,
 } from "./server-transpile.ts";
 import { setUiRootProbe } from "./server-html-classify.ts";
-import { ensureLockDirOf, lockDir } from "./single-instance-lock.ts";
+import { ensureLockDirOf, lockDir, ownPidTag } from "./single-instance-lock.ts";
 import { log } from "../diagnostics/logger-api.ts";
 
 /** File extensions that trigger live reload */
@@ -340,7 +340,7 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
   // it tests. A port is only known after the listener binds — which is after
   // this watcher starts — and `port: 0` (the documented "pick a free port")
   // gave every such app the same name, `watch-0.tmp`.
-  const SENTINEL = join(lockDir(), `watch-${Deno.pid}.tmp`);
+  const SENTINEL = join(lockDir(), `watch-${ownPidTag()}.tmp`);
   let lastWatcherEvent = Date.now();
   let watcherRestarts = 0;
   const MAX_WATCHER_RESTARTS = 3;

@@ -343,9 +343,6 @@ What was measured, in order:
 - **Android: no directory `fsync` after `renameTo`.** The file contents are
   durable; the directory entry is not, so a power cut in the window can lose the
   rename. Needs a JNI or `FileChannel` path.
-- **Android: `addJavascriptInterface` injects into iframes**, while
-  `onPageStarted` is main-frame only, so a third-party iframe sees the bridge.
-  `removeJavascriptInterface` only takes effect on the NEXT page load.
 - **Android: a failed native read at boot can still overwrite good state** in
   paths the `has(key)` fix does not cover.
 - **Write-burst cost, measured:** at 1.08 MB of state, the per-dispatch fsync
@@ -832,22 +829,24 @@ in the CHANGELOG ("Review round"). Open items it found and left:
       same shape Android already had. `apply` throws too, for the `updates.auto`
       door. tests/updates-macos-app.test.ts.
 
-      **Remaining work — a real macOS install strategy.** What exists is an
-      honest refusal, not an update. To make a `.app` self-update, all three
-      are needed and none can be proven without a Mac:
-
-      - `aio ship` must accept a macOS artifact. A `.dmg` is still refused at
-        the publisher (`shipTargetFor`), and a `.zip` of a `.app` is currently
-        mislabelled `electron-zip` — the zip's CONTENTS decide, and nothing
-        reads them.
-      - the swap itself: stage the new `.app` beside the old one, `xattr -d
-        com.apple.quarantine`, verify with `codesign -v --deep --strict`, then
-        exchange the bundle directories (`renamex_np(RENAME_SWAP)` is the
-        atomic form) and relaunch through `open -a`. Replacing a file inside
-        the running bundle is exactly what must never happen.
-      - a rollback that survives a bundle macOS refuses to open, which the
-        pending-update marker cannot observe from inside a process that never
-        starts.
+      **1.0.13-beta: a real macOS install strategy** (target
+      `"electron-app"`): the Mac that signs the `.app` also packs it as
+      `<bin>-mac-<arch>.app.tar.gz`; `am publish` names it in
+      `darwin-<arch>.json` and copies the `.dmg` beside it (found by its `koly`
+      trailer). The client stages the bundle beside `X.app`, runs
+      `codesign --verify --deep --strict` and the bundle executable's
+      `--version`, then the detached shell swaps the folders and relaunches
+      with `open -n`. A translocated or unwritable copy refuses before
+      downloading. Verified on the macOS 14 VM (swap + relaunch, seal and
+      sha256 refusals, real App Translocation).
+      tests/macos-app-self-update.test.ts, tests/updates-e2e.test.ts.
+- [x] macOS `.app` / Electron `.zip` rollback when the new version never boots:
+      the swap helper waits 120 s for the first boot to take the first-boot
+      token (one atomic claim on each side), then stops the new version, puts
+      the old folder back and relaunches it. The next boot logs it and dismisses
+      that version (no reinstall loop). Verified on the macOS 14 VM (a v2 that
+      exits at start: v1 back after 120 s) and on Windows 11 (the PowerShell
+      helper, both outcomes). tests/updates-first-boot-rollback.test.ts.
 
       Verify on the real OS before believing any of it — `ssh aio-macos`,
       `.katana/targets.md`.

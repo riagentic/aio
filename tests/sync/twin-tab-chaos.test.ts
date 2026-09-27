@@ -13,7 +13,9 @@
 // Model:
 //  - one or two profiles, the first with 2–3 tabs on one queue; real engines
 //    on the real localStorage queue (one shim), the real server handler over
-//    a real SQLite op-log.
+//    a real SQLite op-log. In half the episodes each tab reads its own cache
+//    of it, which gets the other tabs' writes only a moment later (a second
+//    RNG decides when, so a seed's main sequence is the same either way).
 //  - A non-commutative, refusable cell: `add` (unique value), `put` (a value
 //    from a small pool — refused when present), `rm` / `top` (refused when
 //    absent) — so the server refuses ops the origin accepted, and an op it
@@ -21,13 +23,15 @@
 //  - client→server: any frame of a tab's outbox, in any order, sometimes
 //    duplicated; server→client: FIFO per connection, acks/ops sometimes
 //    duplicated right after the original; disconnects lose both queues;
-//    tabs close mid-flight, reload (a new session on the same queue), ask
+//    tabs close mid-flight, close right after queueing a change (before
+//    their twins saw the write), reload (a new session on the same queue), ask
 //    for catch-ups at random, and in a quarter of the episodes a small frame
 //    budget slices every flush.
 // Invariants after quiescence: every open tab's confirmed state AND view
 // equal the server's; the server holds no duplicate; no op is both acked and
-// refused; every open profile's queue drains; the network goes quiet (no
-// re-sync storm).
+// refused; every open profile's queue drains, and every `add` call that
+// resolved in it reached the server; the network goes quiet (no re-sync
+// storm).
 //
 // Replay one episode: TWIN_CHAOS_SEED=<seed> (add TWIN_CHAOS_TRACE=1 for the
 // frame log); widen a sweep with TWIN_CHAOS_EPISODES=<n>.
@@ -36,7 +40,6 @@ import { fuzzEnvInt } from "../fuzz-seed.ts";
 import { createServerSyncHandler } from "../../src/sync/server-handler.ts";
 import { _resetServerTsForTest } from "../../src/sync/server-store.ts";
 import { createOpBuffer, type OpBuffer } from "../../src/sync/op-buffer.ts";
-import { createLocalStorageOpStorage } from "../../src/sync/browser-storage.ts";
 import {
   createSyncEngine,
   type SyncEngine,
@@ -49,6 +52,7 @@ import {
   rememberPeerHello,
 } from "../../src/protocol/protocol-version.ts";
 import { createTestDb } from "./_test-db.ts";
+import { tabViews } from "./_tab-views.ts";
 
 type State = { items: string[] };
 type Frame = { t: string; d: Record<string, unknown> };
@@ -62,22 +66,6 @@ function mulberry32(seed: number): () => number {
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
-}
-
-function shimLocalStorage(): void {
-  const store = new Map<string, string>();
-  Object.defineProperty(globalThis, "localStorage", {
-    configurable: true,
-    value: {
-      getItem: (k: string) => store.get(k) ?? null,
-      setItem: (k: string, v: string) => void store.set(k, v),
-      removeItem: (k: string) => void store.delete(k),
-      key: (i: number) => [...store.keys()][i] ?? null,
-      get length() {
-        return store.size;
-      },
-    },
-  });
 }
 
 /** The cell's method — the server dispatches it, every tab replays it. */
@@ -114,6 +102,8 @@ interface Tab {
    *  (`refuseIfRefusedBefore`), so the same refusal reaches a tab more than
    *  once, and the app must hear it once. */
   rejected: Map<string, number>;
+  /** This tab's localStorage cache (see `shimLocalStorage`). */
+  idx: number;
 }
 
 interface Stats {
@@ -121,6 +111,7 @@ interface Stats {
   twins: number;
   closes: number;
   reloads: number;
+  dies: number;
 }
 
 async function episode(seed: number, stats: Stats): Promise<string[]> {
@@ -129,7 +120,10 @@ async function episode(seed: number, stats: Stats): Promise<string[]> {
   const trace = Deno.env.get("TWIN_CHAOS_TRACE") === "1";
   const say = (m: string) => trace && console.log(m);
   _resetServerTsForTest();
-  shimLocalStorage();
+  const ls = tabViews();
+  // Stale caches: decided by their own RNG, so the main sequence is untouched.
+  const late = mulberry32(seed ^ 0x5bd1e995);
+  const stale = late() < 0.5;
   const sliced = rnd() < 0.25;
   if (sliced) {
     // Every reconnect flush goes out in slices of a couple of ops.
@@ -139,13 +133,16 @@ async function episode(seed: number, stats: Stats): Promise<string[]> {
   }
   const { db, close } = createTestDb();
   let live: State = { items: [] };
+  const added = new Set<string>(); // every `add` the server ever applied
   const tabs: Tab[] = [];
   const refused = new Set<string>();
   const acked = new Set<string>();
   const problems: string[] = [];
   const handler = createServerSyncHandler({
     dispatch: (a) => {
-      live = apply(live, a.type.slice(a.type.indexOf(":") + 1), a.payload);
+      const action = a.type.slice(a.type.indexOf(":") + 1);
+      live = apply(live, action, a.payload);
+      if (action === "add") added.add(a.payload as string);
     },
     db,
     syncCellIds: ["c"],
@@ -184,7 +181,8 @@ async function episode(seed: number, stats: Stats): Promise<string[]> {
   }
 
   function addTab(profile: string): Tab {
-    const buffer = createOpBuffer(createLocalStorageOpStorage(`q-${profile}`));
+    const { idx, s } = ls.open(`q-${profile}`, !stale);
+    const buffer = createOpBuffer(s);
     const t = {
       name: `${profile}#${tabs.length}`,
       profile,
@@ -196,6 +194,7 @@ async function episode(seed: number, stats: Stats): Promise<string[]> {
       online: true,
       closed: false,
       rejected: new Map<string, number>(),
+      idx,
     } as unknown as Tab;
     connect(t);
     t.engine = createSyncEngine({
@@ -272,10 +271,15 @@ async function episode(seed: number, stats: Stats): Promise<string[]> {
     t.online = true;
     t.engine.setOnline(true);
   }
-  function shut(t: Tab): void {
+  // A tab hears the others' writes within a millisecond, far sooner than a
+  // person closes it: one that closes has heard everything written before —
+  // unless it closes in the very moment of a call (`sudden`, below).
+  function shut(t: Tab, sudden = false): void {
+    if (!sudden) ls.deliver(t.idx);
     goOffline(t);
     t.closed = true;
     t.engine.dispose();
+    ls.kill(t.idx);
   }
 
   // Always a profile with twin tabs; mostly a second profile beside it.
@@ -286,11 +290,15 @@ async function episode(seed: number, stats: Stats): Promise<string[]> {
     for (let i = 0; i < n; i++) addTab(`p${p}`);
   }
   let nextVal = 0;
+  const calls: [profile: string, v: string][] = []; // resolved `add` calls
   try {
     for (const t of tabs) await t.engine.requestSync();
     for (let step = 0; step < 200; step++) {
       const open = tabs.filter((t) => !t.closed);
       const t = pick(open);
+      if (stale && late() < 0.3) {
+        ls.deliver(tabs[Math.floor(late() * tabs.length)]!.idx);
+      }
       const r = rnd();
       if (r < 0.25) {
         const items = t.view.items ?? [];
@@ -305,7 +313,10 @@ async function episode(seed: number, stats: Stats): Promise<string[]> {
         say(`${t.name} ${action}(${v})`);
         // A method that throws on the tab's own view rejects the call and
         // is never queued — the model's `put`/`rm` do that by design.
-        await t.engine.handleLocalAction("c", action, v).catch(() => {});
+        await t.engine.handleLocalAction("c", action, v).then(
+          () => action === "add" && calls.push([t.profile, v]),
+          () => {},
+        );
       } else if (r < 0.5) {
         if (t.outbox.length) {
           const i = Math.floor(rnd() * t.outbox.length);
@@ -332,7 +343,20 @@ async function episode(seed: number, stats: Stats): Promise<string[]> {
         say(`${t.name} closes`);
         stats.closes++;
         shut(t);
-      } else if (r < 0.915) {
+      } else if (
+        r < 0.912 && open.some((o) => o !== t && o.profile === t.profile)
+      ) {
+        // Queues a change and closes at once: its twins may not have seen
+        // the write yet when they write the queue back. (It has heard what
+        // came before its call — that was a click ago.)
+        const v = `v${nextVal++}`;
+        say(`${t.name} add(${v}) and closes`);
+        ls.deliver(t.idx);
+        await t.engine.handleLocalAction("c", "add", v);
+        calls.push([t.profile, v]);
+        stats.dies++;
+        shut(t, true);
+      } else if (r < 0.92) {
         say(`${t.name} reloads`);
         stats.reloads++;
         shut(t);
@@ -344,6 +368,7 @@ async function episode(seed: number, stats: Stats): Promise<string[]> {
     // Quiesce: everyone online, every frame delivered, then two more rounds
     // of catch-ups so anything asked for has been answered.
     for (let round = 0; round < 3; round++) {
+      for (const t of tabs) ls.deliver(t.idx);
       for (const t of tabs) if (!t.closed && !t.online) goOnline(t);
       let idle = 0;
       let i = 0;
@@ -355,6 +380,7 @@ async function episode(seed: number, stats: Stats): Promise<string[]> {
             await toServer(t, 0);
           }
         }
+        for (const t of tabs) ls.deliver(t.idx);
         await tick();
         for (const t of tabs) {
           while (!t.closed && t.inbox.length) {
@@ -372,6 +398,13 @@ async function episode(seed: number, stats: Stats): Promise<string[]> {
     }
 
     const want = JSON.stringify(live);
+    // A call that resolved is a change the server gets, while its profile
+    // has a tab open to send it — whoever queued it, and whenever it closed.
+    for (const [profile, v] of calls) {
+      if (
+        !added.has(v) && tabs.some((t) => !t.closed && t.profile === profile)
+      ) problems.push(`${profile}'s add(${v}) never reached the server`);
+    }
     if (new Set(live.items).size !== live.items.length) {
       problems.push(`the server holds a duplicate: ${want}`);
     }
@@ -417,7 +450,13 @@ async function episode(seed: number, stats: Stats): Promise<string[]> {
 const HARDCODED_SEEDS = [9001, 9004, 9025, 9030];
 
 Deno.test("sync twin-tab chaos: tabs sharing a queue converge on the server's state", async () => {
-  const stats: Stats = { refused: 0, twins: 0, closes: 0, reloads: 0 };
+  const stats: Stats = {
+    refused: 0,
+    twins: 0,
+    closes: 0,
+    reloads: 0,
+    dies: 0,
+  };
   const hasEnv = Deno.env.get("TWIN_CHAOS_SEED") !== undefined;
   const run = async (seed: number) => {
     const problems = await episode(seed, stats);
@@ -444,4 +483,5 @@ Deno.test("sync twin-tab chaos: tabs sharing a queue converge on the server's st
   assert(stats.twins > 0, "no episode had two tabs on one queue");
   assert(stats.refused > 0, "no episode had a refusal the server decided");
   assert(stats.reloads + stats.closes > 0, "no tab ever closed or reloaded");
+  assert(stats.dies > 0, "no tab ever closed right after queueing");
 });

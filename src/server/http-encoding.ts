@@ -338,37 +338,62 @@ export function etagMatches(header: string | null, etag: string): boolean {
   return false;
 }
 
-/** A bounded memo of compressed bodies, keyed by `etag + encoding`.
+/** Byte equality, a 32-bit word at a time when both views are aligned
+ *  (`bufferUpTo` allocates fresh, offset-0 buffers). Measured ~11 µs on
+ *  162 KB, against ~120 µs for `etagOf` — the memo's hit check. */
+function sameBytes(a: Bytes, b: Bytes): boolean {
+  if (a.byteLength !== b.byteLength) return false;
+  const w = (a.byteOffset | b.byteOffset) % 4 === 0 ? a.byteLength >>> 2 : 0;
+  const x = new Uint32Array(a.buffer, a.byteOffset, w);
+  const y = new Uint32Array(b.buffer, b.byteOffset, w);
+  for (let i = 0; i < w; i++) if (x[i] !== y[i]) return false;
+  for (let i = w * 4; i < a.byteLength; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/** A bounded memo of compressed bodies, keyed by `etag + encoding` and
+ *  VERIFIED against the source bytes it was compressed from.
  *
  *  The same bundle is requested by every tab and every reload; compressing it
  *  once per process rather than once per request is the difference between
- *  3.4 ms of CPU per page load and none. Bounded by BYTES, not entries, so a
- *  server with many distinct assets cannot grow without limit. */
+ *  3.4 ms of CPU per page load and none. Bounded by BYTES (source + compressed),
+ *  not entries, so a server with many distinct assets cannot grow without
+ *  limit.
+ *
+ *  A handler tag is unique per URL at best (the static path's weak
+ *  `W/"<mtime>-<size>"` is shared by any two same-size files with one mtime —
+ *  a tarball, a Nix store, an npm package), so the tag alone must never pick
+ *  the bytes: an entry is a hit only when its source equals this body. A byte
+ *  compare, not a per-request content hash — the bundle carries a tag, and
+ *  hashing its 162 KB on every request is ~10x the compare. */
 class EncodedCache {
-  #map = new Map<string, Bytes>();
+  #map = new Map<string, { src: Bytes; out: Bytes }>();
   #bytes = 0;
   constructor(private readonly maxBytes: number) {}
-  get(key: string): Bytes | undefined {
+  get(key: string, src: Bytes): Bytes | undefined {
     const v = this.#map.get(key);
-    if (v) {
-      // LRU: re-insert so the oldest key is always first out.
-      this.#map.delete(key);
-      this.#map.set(key, v);
-    }
-    return v;
+    if (!v || !sameBytes(v.src, src)) return undefined;
+    // LRU: re-insert so the oldest key is always first out.
+    this.#map.delete(key);
+    this.#map.set(key, v);
+    return v.out;
   }
-  set(key: string, value: Bytes): void {
-    if (value.byteLength > this.maxBytes) return;
+  set(key: string, src: Bytes, out: Bytes): void {
+    const size = src.byteLength + out.byteLength;
+    if (size > this.maxBytes) return;
     const prev = this.#map.get(key);
-    if (prev) this.#bytes -= prev.byteLength;
-    this.#map.set(key, value);
-    this.#bytes += value.byteLength;
+    if (prev) {
+      this.#bytes -= prev.src.byteLength + prev.out.byteLength;
+      this.#map.delete(key);
+    }
+    this.#map.set(key, { src, out });
+    this.#bytes += size;
     while (this.#bytes > this.maxBytes) {
       const oldest = this.#map.keys().next();
       if (oldest.done) break;
       const dropped = this.#map.get(oldest.value)!;
       this.#map.delete(oldest.value);
-      this.#bytes -= dropped.byteLength;
+      this.#bytes -= dropped.src.byteLength + dropped.out.byteLength;
     }
   }
   get size(): number {
@@ -383,8 +408,8 @@ class EncodedCache {
 /** 32 MB of compressed bodies — a few hundred assets, or one very large one. */
 const _cache = new EncodedCache(32 * 1024 * 1024);
 
-/** @internal test seam — empty the compressed-body memo. The cache is keyed by
- *  content hash, so it is self-invalidating: product code has no reason to
+/** @internal test seam — empty the compressed-body memo. Every hit is checked
+ *  against its source bytes, so it is self-invalidating: product code has no reason to
  *  drop it, and dropping it re-compresses every live asset. */
 // aio-ok: test-only seam — the memo is self-invalidating in production
 export function _clearEncodedCache(): void {
@@ -457,7 +482,7 @@ export async function encodeResponse(
   if (resp.status !== 200) return resp;
   if (resp.headers.has("Content-Encoding")) return resp;
 
-  // HEAD is headers-only, and the handler's headers are the answer.
+  // A BODYLESS HEAD is headers-only, and the handler's headers are the answer.
   //
   // Deno's HTTP layer drops a HEAD body itself, so there is nothing to
   // compress; and the handler has already declared the length the matching GET
@@ -467,7 +492,7 @@ export async function encodeResponse(
   // because the whole point of the method is to ask the size.
   // Found by tests/blobs.test.ts, once a handler-supplied ETag stopped being
   // an early exit.
-  if (req.method.toUpperCase() === "HEAD") return resp;
+  const isHead = req.method.toUpperCase() === "HEAD";
 
   // A 304 answers a conditional GET, and nothing else. RFC 9110 §13.1.2:
   // If-None-Match on any other method is a PRECONDITION (412 before acting),
@@ -476,7 +501,10 @@ export async function encodeResponse(
   // away the response of a write that happened (`If-None-Match: *` on a POST
   // did exactly that). Non-GET responses still compress; they just never
   // collapse into "not modified".
-  const conditional = req.method.toUpperCase() === "GET";
+  // HEAD too: RFC 9110 §13.1.2 — If-None-Match on GET *or HEAD* answers
+  // 304; a HEAD with a matching validator got a 200 while the blob route (and
+  // the GET beside it) said 304.
+  const conditional = req.method.toUpperCase() === "GET" || isHead;
 
   const ct = resp.headers.get("Content-Type");
   const cacheControl = resp.headers.get("Cache-Control") ?? "";
@@ -522,6 +550,11 @@ export async function encodeResponse(
     return new Response(null, { status: 304, headers: h });
   }
   if (!isCompressible(ct)) return resp;
+  // A HEAD with no body is headers-only (see above). A HEAD whose handler
+  // built the same body as the GET takes the GET's path — the runtime drops
+  // the body on the wire — so it gets the same ETag, Vary, encoding, length
+  // and 304. Returning every HEAD here left a buffered text asset with no
+  // validator on HEAD while its GET had one.
   if (!resp.body) return resp;
 
   // Deno does NOT put `Content-Length` on an in-process Response — it is added
@@ -530,6 +563,8 @@ export async function encodeResponse(
   // is absent, `bufferUpTo` bounds the read and replays what it took.
   const declared = Number(resp.headers.get("Content-Length"));
   if (Number.isFinite(declared) && declared > MAX_BUFFER_BYTES) {
+    // A HEAD is never streamed: that drops the Content-Length it exists to report.
+    if (isHead) return resp;
     // Too big to BUFFER is not too big to COMPRESS — see `streamCompressed`.
     return (opts.compress !== false && streamCompressed(resp, req)) || resp;
   }
@@ -543,15 +578,33 @@ export async function encodeResponse(
       statusText: resp.statusText,
       headers: resp.headers,
     });
+    if (isHead) return replayed;
     return (opts.compress !== false && streamCompressed(replayed, req)) ||
       replayed;
   }
   const bytes = read.bytes;
+  // A HEAD takes the GET's path only when its body IS the representation. An
+  // empty body, or one that disagrees with the handler's own Content-Length,
+  // is a placeholder (`new Response("", {headers: {"content-length": "1234"}})`)
+  // — hashing and measuring it would answer `content-length: 0` and the ETag
+  // of nothing. The handler's headers are the answer, as before.
+  if (
+    isHead && (bytes.byteLength === 0 ||
+      (resp.headers.has("Content-Length") && declared !== bytes.byteLength))
+  ) {
+    return new Response(bytes, {
+      status: 200,
+      statusText: resp.statusText,
+      headers: resp.headers,
+    });
+  }
   // A handler that already knows its own tag keeps it. The prod static path
   // caches `{mtime, size, bytes, etag}` and sets one, so the common request —
-  // the app bundle — skips a hash of 162 KB per request; a content-addressed
-  // blob's tag is its id. Hashing here is the fallback, not the rule.
-  const etag = resp.headers.get("ETag") ?? etagOf(bytes);
+  // the app bundle — answers a revalidation without hashing 162 KB; a
+  // content-addressed blob's tag is its id. Hashing here is the fallback, not
+  // the rule. (The compressed-body memo below verifies content on every hit —
+  // a handler's tag names a representation of a URL, not a byte string.)
+  const etag = handlerTag ?? etagOf(bytes);
   const noStore = cacheControl.includes("no-store");
 
   // ── Conditional request: the whole point of `no-cache` ──
@@ -582,11 +635,13 @@ export async function encodeResponse(
       await availableEncodings(),
     );
     if (enc) {
+      // A hit is verified against the body (see EncodedCache): two different
+      // bodies carrying one handler tag are never served each other's bytes.
       const key = `${etag}\x00${enc}`;
-      let out = _cache.get(key);
+      let out = _cache.get(key, bytes);
       if (!out) {
         out = await compress(enc, bytes);
-        _cache.set(key, out);
+        _cache.set(key, bytes, out);
       }
       // A "compressed" body that grew is a worse answer than the original.
       if (out.byteLength < bytes.byteLength) {

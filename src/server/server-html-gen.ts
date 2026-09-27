@@ -308,7 +308,7 @@ function headContent(
     }</style>`
     : "";
   const cssLink = hasCSS
-    ? `\n  <link rel="stylesheet" href="${assetBase}style.css">`
+    ? `\n  <link rel="stylesheet" href="${assetBase}style.css" data-aio-app-css>`
     : "";
   const statusScript = showStatus === false
     ? "\n  <script>window.__aioShowStatus=false</script>"

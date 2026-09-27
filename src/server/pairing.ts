@@ -30,7 +30,7 @@
 // said "restart the app". `am pair` is the honest answer now, and both places
 // say so; /__aio/pair's 401 (in server.ts) states the window from PIN_TTL_MS
 // rather than a typed-out copy, so the two can never disagree.
-import { _timingSafeEqual } from "./server-auth.ts";
+import { _timingSafeEqual, abuseBucket } from "./server-auth.ts";
 import { log } from "../diagnostics/logger-api.ts";
 
 /** Wrong-guess budget per client key before that key is refused. */
@@ -111,7 +111,8 @@ export function verifyPin(
     _states.delete(scope);
     return false;
   }
-  const key = clientKey ?? "*";
+  // Bucketed like every auth budget: an IPv6 /64 is one client.
+  const key = abuseBucket(clientKey);
   if ((s.attempts.get(key) ?? 0) >= MAX_ATTEMPTS) return false;
 
   const ok = _timingSafeEqual(submitted, s.pin);

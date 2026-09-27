@@ -284,6 +284,23 @@ await aio.run({
 });
 ```
 
+`homeWasRequested()` (also `aio/server`) says whether the person running the app
+asked for a home at all (`--profile`, `--home`, `AIO_PROFILE`) — true for
+`--home=/srv/x` too, which names no profile; false when `resolveHome()` answers
+the app's default (or its `appDir`). An app with its own dev default counts a
+profile from aio's base only when one was asked for:
+
+```ts
+import { homeWasRequested, resolveHome } from "aio/server";
+
+const { home } = homeWasRequested()
+  ? resolveHome({ appId: "wallet" }) // --profile=tasks → ~/.wallet-tasks
+  : resolveHome({
+    appId: "wallet",
+    appDir: `${Deno.env.get("HOME")}/.wallet-dev`,
+  });
+```
+
 Under a profile, an explicit `dbPath` (config or `--db-path`) outside the
 profile's home refuses to boot, naming both paths — it would open the everyday
 database under the profile's lock and logs.

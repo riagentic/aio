@@ -81,7 +81,8 @@ import {
   versionsDir,
 } from "../server/framework-pin.ts";
 import {
-  GIT_NO_PROMPT_ENV,
+  GIT_REPO_ENV_VARS,
+  gitOwnRepoEnv,
   looksLikeAuthChallenge,
 } from "../server/git-noninteractive.ts";
 
@@ -98,30 +99,7 @@ export function gitCeiling(cwd: string): string {
   }
 }
 
-/** The variables that make git address a repo OTHER than the one its cwd is
- *  in: git's own `git rev-parse --local-env-vars` list (what git itself clears
- *  before it runs in a submodule), plus `GIT_NAMESPACE` and
- *  `GIT_QUARANTINE_PATH`. `tests/am-git-env.test.ts` pins it as a superset of
- *  the installed git's list. */
-export const GIT_REPO_ENV_VARS: readonly string[] = [
-  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-  "GIT_CONFIG",
-  "GIT_CONFIG_PARAMETERS",
-  "GIT_CONFIG_COUNT",
-  "GIT_OBJECT_DIRECTORY",
-  "GIT_DIR",
-  "GIT_WORK_TREE",
-  "GIT_IMPLICIT_WORK_TREE",
-  "GIT_GRAFT_FILE",
-  "GIT_INDEX_FILE",
-  "GIT_NO_REPLACE_OBJECTS",
-  "GIT_REPLACE_REF_BASE",
-  "GIT_PREFIX",
-  "GIT_SHALLOW_FILE",
-  "GIT_COMMON_DIR",
-  "GIT_NAMESPACE",
-  "GIT_QUARANTINE_PATH",
-];
+export { GIT_REPO_ENV_VARS };
 
 /** THE spawn environment for every `git` that `am` runs — spread into the
  *  options: `new Deno.Command("git", { …, ...gitEnvFor(cwd) })`.
@@ -142,20 +120,10 @@ export function gitEnvFor(
   cwd: string | null,
   extra: Record<string, string> = {},
 ): { clearEnv: true; env: Record<string, string> } {
-  const drop = new Set(GIT_REPO_ENV_VARS);
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(Deno.env.toObject())) {
-    if (!drop.has(k.toUpperCase())) env[k] = v;
-  }
-  return {
-    clearEnv: true,
-    env: {
-      ...env,
-      ...GIT_NO_PROMPT_ENV,
-      ...(cwd !== null ? { GIT_CEILING_DIRECTORIES: gitCeiling(cwd) } : {}),
-      ...extra,
-    },
-  };
+  return gitOwnRepoEnv({
+    ...(cwd !== null ? { GIT_CEILING_DIRECTORIES: gitCeiling(cwd) } : {}),
+    ...extra,
+  });
 }
 
 async function git(
@@ -908,7 +876,11 @@ async function ensureGitIgnored(appDir: string, entry: string): Promise<void> {
 /** Write `aioVersion` into an app's deno.json, preserving formatting elsewhere.
  *  A targeted text edit rather than a JSON round-trip: the app's config is the
  *  developer's file, and reformatting it as a side effect of pinning is rude. */
-async function writeDenoJsonPin(appDir: string, ref: string): Promise<void> {
+/** @internal exported for tests. */
+export async function writeDenoJsonPin(
+  appDir: string,
+  ref: string,
+): Promise<void> {
   // WHICH file: the one Deno reads (`DENO_JSON_NAMES`, first match) — so a
   // `deno.jsonc` app gets its pin written INTO deno.jsonc. Hardcoding
   // `deno.json` here made `am pin <ver>` on such an app provision the
@@ -922,7 +894,10 @@ async function writeDenoJsonPin(appDir: string, ref: string): Promise<void> {
     const hadComma = /^\s*"aioVersion"[^\n]*,\s*$/m.test(raw);
     await Deno.writeTextFile(
       path,
-      raw.replace(existing, line + (hadComma ? "," : "")),
+      // A replacer FUNCTION: the pin ref is the user's text (a local path),
+      // and `$&` / `$'` in a replacement STRING would splice the match or the
+      // rest of deno.json into it.
+      raw.replace(existing, () => line + (hadComma ? "," : "")),
     );
     return;
   }

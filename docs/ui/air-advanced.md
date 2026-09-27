@@ -86,6 +86,10 @@ Three guarantees, each of which is a bug in every hand-rolled version:
 `key: null` holds nothing and releases whatever it held. The handle carries
 `value`, `loading`, `error`, `key` and `dispose()`.
 
+`open` and `close` take the key type that `key()` returns, without its `null`.
+With `key: () => lang` of type `string | null`, a loader typed
+`(lang: string) => …` checks, and so does one typed `(k: string | number)`.
+
 ---
 
 ## Reacting to state -- onChange()

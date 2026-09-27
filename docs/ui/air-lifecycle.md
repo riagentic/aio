@@ -271,6 +271,42 @@ const TodoList = () => {
 Multiple `addOptimistic()` calls stack. When `passthrough` reference changes,
 all pending overlays clear.
 
+The overlay is tied to `passthrough`, not to the call. A call that FAILS writes
+nothing, so `passthrough` never changes and the overlay stays until something
+else changes it. To drop it on failure, fold a refusal count into the
+passthrough, so a refused call is a change too:
+
+```tsx
+// src/LikeButton.tsx
+import type { JSX } from "aio";
+import { useMemo, useOptimistic, useSignal } from "aio/air";
+import { likes } from "./cell/likes.ts";
+
+export default function LikeButton(): JSX.Element {
+  const refused = useSignal(0);
+  // A new object whenever the count moves OR a call is refused.
+  const real = useMemo(() => ({ count: likes.count }), [
+    likes.count,
+    refused.value,
+  ]);
+  const [shown, addOptimistic] = useOptimistic(
+    real,
+    (current, delta: number) => ({ count: current.count + delta }),
+  );
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        addOptimistic(1);
+        likes.like().catch(() => refused.set(refused.peek() + 1));
+      }}
+    >
+      {shown.count} likes
+    </button>
+  );
+}
+```
+
 ---
 
 ## Context
@@ -500,3 +536,43 @@ The handler is read at event time, so it always sees the latest render's closure
 — the same discipline as `onGlobalKey`, `useRaf` and `useInterval`. For a
 keyboard shortcut specifically, prefer `onGlobalKey`, which also handles chords
 and ignores keys typed into a field.
+
+## Android Back: `onBackButton`
+
+An app whose screens are cell state (no URL router, and a standalone APK's page
+is `/assets/index.html`) would exit on Android Back from any screen.
+`history.pushState` does not rescue it: a WebView ignores entries pushed before
+the first user gesture, so the first Back after a cold start exits anyway.
+
+`onBackButton(handler)` registers a handler and returns its disposer. On Back
+the Android shell asks the page first. Handlers run last-registered first, so a
+dialog opened over a screen gets Back before the screen does. A handler returns
+`true` when it handled Back, and the app stays. It returns `false` to pass Back
+to the next handler. When no handler takes it, Android does its default: WebView
+history, then leave the app. A handler that throws is logged and counts as
+handled, so a bug never closes the app.
+
+```tsx
+import { onBackButton, onMount } from "aio/air";
+import { nav } from "./nav.ts";
+
+function Reader() {
+  // onMount runs the returned disposer at unmount.
+  onMount(() =>
+    onBackButton(() => {
+      if (nav.screen === "home") return false; // leave the app
+      nav.up();
+      return true;
+    })
+  );
+  return <Screen />;
+}
+```
+
+It works from a cold start, before any tap, because the shell calls it through
+`evaluateJavascript`, which needs no gesture. It behaves the same in a
+standalone APK and in one that talks to a server (`android-client`, a dev
+build). On desktop and in a browser nothing calls it, so registering is inert.
+An app that ships its own `android/…/MainActivity.kt` must keep the template's
+`onBackPressed`. If it does not, the build warns
+([targets](../build/targets.md#the-back-button)).

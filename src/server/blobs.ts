@@ -14,7 +14,7 @@
 // `put()` STREAMS: chunks are hashed and written to a temp file as they
 // arrive, then the temp file is fsynced and renamed to its hash — a blob is
 // either fully present under its correct id or absent; a crash leaves only a
-// `.tmp-*` file (swept on the next put). The whole blob is never buffered, so
+// `.tmp-*` file (swept by a later put, at most every 10 minutes). The whole blob is never buffered, so
 // a multi-GB upload costs one chunk of memory. Same bytes → same id → one
 // file (dedup by construction).
 
@@ -22,6 +22,7 @@ import { join } from "@std/path";
 import { createHash } from "node:crypto";
 import { appDirs } from "./app-dirs.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { syncDir } from "../db/durable.ts";
 
 /** What the store knows about one blob. */
 export type BlobInfo = {
@@ -155,9 +156,21 @@ async function sweepStaleTmp(dir: string): Promise<void> {
   } catch { /* dir vanished — nothing to sweep */ }
 }
 
+/** How often a store re-sweeps stale `.tmp-*` files on `put`. */
+const SWEEP_EVERY_MS = 10 * 60_000;
+
 function makeStore(dir: string): BlobStore {
   let ensured = false;
+  let lastSweep = -Infinity;
   async function ensureDir(): Promise<void> {
+    // Swept on a put at most every SWEEP_EVERY_MS — not once per process:
+    // the sweep only removes files older than an hour, so the single sweep at
+    // the first put missed a crash's leftovers from under an hour before the
+    // restart, and a long-running process never swept again.
+    if (Date.now() - lastSweep >= SWEEP_EVERY_MS) {
+      lastSweep = Date.now();
+      if (ensured) void sweepStaleTmp(dir);
+    }
     if (ensured) return;
     await Deno.mkdir(dir, { recursive: true });
     ensured = true;
@@ -229,6 +242,9 @@ function makeStore(dir: string): BlobStore {
         }
       }
     }
+    // The rename is atomic, not durable: until the directory is fsynced a
+    // power cut can undo it, and state would hold an id whose file is gone.
+    await syncDir(dir);
     // Metadata: first name wins (the blob identity is its content — a second
     // put with a different name must not rewrite what the first recorded).
     let name = await readName(dir, id);

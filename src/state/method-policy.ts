@@ -32,6 +32,10 @@ export type CallOutcome = { value?: unknown; error?: unknown };
 type Inflight = {
   promise: Promise<CallOutcome>;
   settle: (o: CallOutcome) => void;
+  /** The caller that started it, and what of that caller its run has read
+   *  (`serverUser()`, `serverRequest()` fields). */
+  who: CallerSnapshot;
+  reads: ReadonlySet<string>;
 };
 
 /** The bookkeeping `first`, `ttl` and `queue` keep — ONE PER CELL.
@@ -49,6 +53,10 @@ export type PolicyStore = {
   inflight: Map<string, Inflight>;
   cache: Map<string, { at: number; value: unknown; ttl: number }>;
   queueTail: Map<string, Promise<unknown>>;
+  /** Per `cell:method`, every caller fact any run of it has read — from then
+   *  on keyed on those from the start, so `"first"` never waits on a run it
+   *  would only have to rerun. */
+  reads: Map<string, Set<string>>;
 };
 
 /** A new, empty store — one per cell executor. @internal */
@@ -58,6 +66,7 @@ export function createPolicyStore(): PolicyStore {
     inflight: new Map(),
     cache: new Map(),
     queueTail: new Map(),
+    reads: new Map(),
   };
 }
 
@@ -74,6 +83,7 @@ function current(store: PolicyStore): PolicyStore {
     store.inflight.clear();
     store.cache.clear();
     store.queueTail.clear();
+    store.reads.clear();
     store.gen = _gen;
   }
   return store;
@@ -280,16 +290,84 @@ function privateCopy(v: unknown): unknown {
 /** What the executor should do with this call. */
 export type PolicyDecision =
   /** Run it. `settle` records the outcome for `first` / `ttl`. */
-  | { kind: "run"; settle: (o: CallOutcome) => void }
+  | {
+    kind: "run";
+    settle: (o: CallOutcome) => void;
+    /** Run the call inside this — it learns whether the run read the caller. */
+    track: <T>(fn: () => T) => T;
+  }
   /** Run it AFTER `after` — or NOW when `after` is undefined (nothing of
    *  this method is queued or running). `settle` as above. */
   | {
     kind: "queue";
     after: Promise<unknown> | undefined;
     settle: (o: CallOutcome) => void;
+    track: <T>(fn: () => T) => T;
   }
-  /** Do not run: adopt this outcome instead (a `first` dedup or a `ttl` hit). */
-  | { kind: "adopt"; outcome: Promise<CallOutcome>; why: "first" | "ttl" };
+  /** Do not run: adopt this outcome instead (a `first` dedup or a `ttl` hit).
+   *  `rerun`: the adopted run turned out to answer ANOTHER caller (it read
+   *  `serverUser()`) — run this call after all. */
+  | {
+    kind: "adopt";
+    outcome: Promise<CallOutcome & { rerun?: true }>;
+    why: "first" | "ttl";
+  };
+
+/** One caller fact (`"user"`, `"ip"`, `"h:<header>"`, `"c:<cookie>"`, …) as
+ *  a key, or null when it cannot be keyed. */
+export type CallerSnapshot = (fact: string) => string | null;
+
+/** Who is calling, and what of it a run read.
+ *
+ *  A method may answer from `serverUser()` or from `serverRequest()` (a
+ *  cookie, a header), so one shared `ttl` answer or `"first"` adoption across
+ *  two callers handed Alice's `myOrders()` to Bob. Keying EVERY call per
+ *  caller closed that and broke the other half: a ttl as a shared upstream
+ *  shield, `"first"` as a global single-flight. So a result is keyed on
+ *  exactly the caller facts the run that produced it READ: `track` runs a call
+ *  with a set that `serverUser()` and every field read of `serverRequest()`
+ *  add to (and that of every call it runs inside). A run that reads the
+ *  `session` cookie is shared by every request carrying that cookie, and by no
+ *  other; one that reads nothing stays everyone's. Installed by the server
+ *  runtime, which owns the ambient caller; with none (browser, standalone)
+ *  there is one caller and no run can read it. */
+export type CallerScope = {
+  /** The calling context as it is NOW, to key facts on later. */
+  snapshot: () => CallerSnapshot;
+  track: <T>(reads: Set<string>, fn: () => T) => T;
+  /** The running calls' read scope as it is NOW, to re-enter later — or
+   *  undefined when no `ttl`/`"first"` call is running. */
+  capture: () => Reenter | undefined;
+};
+/** Run `fn` inside a captured read scope. */
+export type Reenter = <T>(fn: () => T) => T;
+let _caller: CallerScope = {
+  snapshot: () => () => "",
+  track: (_r, fn) => fn(),
+  capture: () => undefined,
+};
+
+/** The read scope of the calls running at the point a method is CALLED, for
+ *  the dispatch loop to run that method's reduce and body in. A call made
+ *  from inside a running method is queued and run by the loop that is already
+ *  draining — outside the caller's scope — so a ttl'd `greet()` that awaited
+ *  `profile.name()` never learned that `name()` read the caller's cookie.
+ *  @internal */
+export const _captureCaller = (): Reenter | undefined => _caller.capture();
+
+/** @internal installed by `src/server/auth-context.ts`. */
+export function _installCallerScope(scope: CallerScope): void {
+  _caller = scope;
+}
+
+/** A snapshot that computes each fact at most once. */
+function memoSnapshot(at: CallerSnapshot): CallerSnapshot {
+  const seen = new Map<string, string | null>();
+  return (f) => {
+    if (!seen.has(f)) seen.set(f, at(f));
+    return seen.get(f) ?? null;
+  };
+}
 
 /** Decide, and register this call's in-flight entry when it is going to run. */
 export function beginPolicyCall(
@@ -300,21 +378,39 @@ export function beginPolicyCall(
   ttlMs: number | undefined,
   store: PolicyStore = _defaultStore,
 ): PolicyDecision {
-  const { inflight, cache, queueTail } = current(store);
+  const { inflight, cache, queueTail, reads } = current(store);
   const key = `${prefix}:${method}`;
   const ak = argsKey(args);
-  const cacheKey = ak === null ? null : `${key}|${ak}`;
+  const who = memoSnapshot(_caller.snapshot());
+  // A result from a run that read no caller fact is everyone's; one from a
+  // run that did is shared only by callers equal on every fact it read (null:
+  // an unkeyable fact shares nothing). The facts go BEFORE the args, and `ak`
+  // is one JSON value, so no argument can spell another key.
+  const sharedKey = ak === null ? null : `${key}|${ak}`;
+  const keyOn = (facts: ReadonlySet<string> | undefined): string | null => {
+    if (ak === null || !facts || facts.size === 0) return sharedKey;
+    const pairs: [string, string][] = [];
+    for (const f of [...facts].sort()) {
+      const v = who(f);
+      if (v === null) return null;
+      pairs.push([f, v]);
+    }
+    return `${key}|${JSON.stringify(pairs)}|${ak}`;
+  };
+  const callerKey = keyOn(reads.get(key));
 
   // TTL first: a fresh result answers whatever the concurrency mode is, and
   // checking it second would start a call the cache was there to avoid.
-  if (ttlMs !== undefined && cacheKey) {
-    const hit = cache.get(cacheKey);
-    if (hit && Date.now() - hit.at < ttlMs) {
-      return {
-        kind: "adopt",
-        outcome: Promise.resolve({ value: privateCopy(hit.value) }),
-        why: "ttl",
-      };
+  if (ttlMs !== undefined) {
+    for (const k of new Set([sharedKey, callerKey])) {
+      const hit = k === null ? undefined : cache.get(k);
+      if (hit && Date.now() - hit.at < ttlMs) {
+        return {
+          kind: "adopt",
+          outcome: Promise.resolve({ value: privateCopy(hit.value) }),
+          why: "ttl",
+        };
+      }
     }
   }
 
@@ -323,7 +419,11 @@ export function beginPolicyCall(
   // NO key is not deduped at all. It used to fall back to the method name, so
   // every keyless call adopted whatever call of that method was running:
   // `scan(new Set(["/b"]))` resolved `scan:/a`.
-  const inflightKey = cacheKey;
+  //
+  // Whether a running call answers only its own caller is known when it ENDS,
+  // so a method not yet seen reading the caller dedups on the shared key, and
+  // an adopter whose runner turned out to read ANOTHER caller runs itself.
+  const inflightKey = callerKey;
   if (mode === "first" && inflightKey !== null) {
     const running = inflight.get(inflightKey);
     if (running) {
@@ -331,7 +431,14 @@ export function beginPolicyCall(
         kind: "adopt",
         // Each adopter gets its own copy — see `privateCopy`.
         outcome: running.promise.then((o) =>
-          o.error === undefined ? { value: privateCopy(o.value) } : o
+          [...running.reads].some((f) => {
+              const v = who(f);
+              return v === null || v !== running.who(f);
+            })
+            ? { rerun: true as const }
+            : o.error === undefined
+            ? { value: privateCopy(o.value) }
+            : o
         ),
         why: "first",
       };
@@ -342,8 +449,11 @@ export function beginPolicyCall(
   const promise = new Promise<CallOutcome>((res) => {
     settleFn = res;
   });
-  const entry: Inflight = { promise, settle: settleFn };
+  const mark = new Set<string>();
+  const entry: Inflight = { promise, settle: settleFn, who, reads: mark };
   if (inflightKey !== null) inflight.set(inflightKey, entry);
+  const track = <T>(fn: () => T): T =>
+    mode === "first" || ttlMs !== undefined ? _caller.track(mark, fn) : fn();
 
   const settle = (o: CallOutcome) => {
     // Only the entry THIS call registered — a later call that replaced it owns
@@ -351,6 +461,14 @@ export function beginPolicyCall(
     if (inflightKey !== null && inflight.get(inflightKey) === entry) {
       inflight.delete(inflightKey);
     }
+    let facts = reads.get(key);
+    if (mark.size > 0) {
+      if (!facts) reads.set(key, facts = new Set());
+      for (const f of mark) facts.add(f);
+    }
+    // Keyed on EVERY fact this method is known to read, not only this run's:
+    // the lookup above can only ask with that set.
+    const cacheKey = mark.size > 0 ? keyOn(facts) : sharedKey;
     if (ttlMs !== undefined && cacheKey && o.error === undefined) {
       // Successes only. Caching a failure would make one bad minute last for
       // the whole ttl, which is the opposite of what a ttl is for.
@@ -377,9 +495,9 @@ export function beginPolicyCall(
     // runs one at a time, and a per-argument tail would let two different
     // arguments interleave — which is the thing being asked for the opposite
     // of.
-    return { kind: "queue", after, settle };
+    return { kind: "queue", after, settle, track };
   }
-  return { kind: "run", settle };
+  return { kind: "run", settle, track };
 }
 
 /** Record the new tail for a queued method. */

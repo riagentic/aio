@@ -24,12 +24,16 @@
 //   deno task clean:tmp              also SIGTERM them, remove ownerless
 //                                    /tmp/aio-* dirs, stale lock dirs and
 //                                    stale watcher sentinels
-import { join } from "@std/path";
+import { basename, join } from "@std/path";
 import {
+  foreignOwnerRefusal,
+  isLockOwnerAlive,
+  type LockData,
   pruneDeadLockDirAt,
   removeLockFileIf,
   rootRegistryEntry,
   sweepRootRegistry,
+  taggedOwnerGone,
 } from "../src/server/single-instance-lock.ts";
 
 const clean = Deno.args.includes("--clean");
@@ -54,6 +58,18 @@ function alive(pid: number): boolean {
   } catch (e) {
     return e instanceof Deno.errors.PermissionDenied;
   }
+}
+
+/** Is the owner of `lock` (read from a file in `dir`) alive — judged as the
+ *  lock module judges it, never by a bare pid: a lock written in another pid
+ *  namespace (a container sharing the dir) names a pid that is a stranger
+ *  here, and only its hold file says whether it lives. */
+function ownerAlive(lock: Partial<LockData> | null, dir: string): boolean {
+  if (typeof lock?.pid !== "number" || !(lock.pid > 0)) return false;
+  const hold = typeof lock.hold === "string"
+    ? join(dir, basename(lock.hold))
+    : undefined;
+  return isLockOwnerAlive({ ...lock, pid: lock.pid, hold });
 }
 
 /** /proc only — elsewhere the answer is "unknown", which counts as orphan. */
@@ -135,9 +151,9 @@ const orphans: Orphan[] = [];
 const staleDirs: string[] = [];
 
 /** Everything a lock dir ever holds: `<key>.lock`, the app's `.sock` /
- *  `.http.sock`, am's `<appId>.launch.json`, and the dev watcher's
- *  `watch-<pid>.tmp` sentinel (see `lockDir()` and its callers). Files only —
- *  a lock dir has no subdirectories.
+ *  `.http.sock`, its `.hold` file, am's `<appId>.launch.json`, and the dev
+ *  watcher's `watch-<pid>.tmp` sentinel (see `lockDir()` and its callers).
+ *  Files only — a lock dir has no subdirectories.
  *
  *  A lock dir is named `aio` / `aio-<scope>`, and so is every other aio temp
  *  directory in `/tmp` — a test's scratch, a build's staging dir. The sweep
@@ -155,8 +171,8 @@ const staleDirs: string[] = [];
  *  the directory alone, which is the only safe answer. */
 function isLockDirEntry(e: Deno.DirEntry): boolean {
   if (e.isDirectory) return false;
-  return /\.(?:lock|sock|launch\.json)$/.test(e.name) ||
-    /^watch-\d+\.tmp$/.test(e.name);
+  return /\.(?:lock|sock|hold|launch\.json)$/.test(e.name) ||
+    /^watch-\d+(?:d[0-9a-f]{8})?\.tmp$/.test(e.name);
 }
 
 /** A lock dir touched this recently belongs to a run that is making it right
@@ -209,24 +225,18 @@ for (const root of lockRoots()) {
       if (!f.isFile) continue;
       const path = join(dir, f.name);
       if (f.name.endsWith(".lock")) {
-        let lock:
-          | {
-            pid?: number;
-            appId?: string;
-            port?: number;
-            cwd?: string;
-            home?: string;
-            startedAt?: number;
-          }
-          | null = null;
+        let lock: Partial<LockData> | null = null;
         let raw: string | null = null;
         try {
           raw = Deno.readTextFileSync(path);
           lock = JSON.parse(raw);
         } catch { /* corrupt — stale */ }
         const pid = lock?.pid ?? 0;
-        if (pid > 0 && alive(pid)) {
+        if (ownerAlive(lock, dir)) {
           live++;
+          // Another pid namespace's app: its pid is a stranger here — never
+          // an orphan to report, and never one to SIGTERM.
+          if (foreignOwnerRefusal({ pid, ns: lock?.ns }) !== null) continue;
           // The SHARED dir holds the machine's real apps — reporting those
           // would be wrong, and skipping it wholesale was the hole.
           //
@@ -273,9 +283,10 @@ for (const root of lockRoots()) {
         }
       } else if (f.name.startsWith("watch-") && f.name.endsWith(".tmp")) {
         // A watcher sentinel whose process is gone is a hard-killed app. The
-        // name carries the PID of the process that wrote it.
-        const pid = Number(f.name.slice(6, -4));
-        if (pid > 0 && alive(pid)) live++;
+        // name carries the PID (and pid namespace) of the process that wrote
+        // it — a pid from another namespace proves nothing here.
+        const m = /^watch-(\d+)(?:d([0-9a-f]{8}))?\.tmp$/.exec(f.name);
+        if (!m || !taggedOwnerGone(path, Number(m[1]), m[2])) live++;
         else if (clean && !foreign) Deno.removeSync(path);
       }
     }
@@ -437,8 +448,8 @@ function leftoverLockDir(dir: string): boolean {
     for (const f of Deno.readDirSync(dir)) {
       if (!f.name.endsWith(".lock")) continue;
       try {
-        const pid = JSON.parse(Deno.readTextFileSync(join(dir, f.name))).pid;
-        if (typeof pid === "number" && alive(pid)) return false;
+        const lock = JSON.parse(Deno.readTextFileSync(join(dir, f.name)));
+        if (ownerAlive(lock, dir)) return false;
       } catch { /* aio-ok: unreadable — no live owner to protect */ }
     }
   } catch {

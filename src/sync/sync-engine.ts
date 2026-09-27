@@ -156,21 +156,6 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
    *  invisible, forever, with nothing said. The session nonce already in every
    *  op id is the identity that is actually per client instance. */
   const isOwnSessionOp = (opId: string): boolean => opId.startsWith(_ownPrefix);
-  /** The ids this session actually ISSUED — what an echo can be. The prefix
-   *  alone is public (every broadcast carries it), so another writer could
-   *  submit an op under it, and dropping that as "our echo" kept it off this
-   *  screen alone while the server and every peer applied it
-   *  (tests/sync/session-prefix-bound.test.ts). Bounded FIFO: an echo comes
-   *  back within a reconnect's race, and one older than the cap falls to the
-   *  id dedup (`_appliedIds`, `_foldedAhead`) like any repeated op. */
-  const _issuedIds = new Set<string>();
-  const ISSUED_IDS_CAP = 4096;
-  function noteIssued(id: string): void {
-    _issuedIds.add(id);
-    if (_issuedIds.size > ISSUED_IDS_CAP) {
-      _issuedIds.delete(_issuedIds.values().next().value!);
-    }
-  }
   const clock: HLClock = createHLC(deps.clientId);
   let online = true;
 
@@ -287,6 +272,18 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
   }
 
   const statuses = new Map<string, SyncStatus>();
+  /** Per blocked cell: how many ops were queued when the buffer refused one.
+   *  "blocked" means "the queue is full" — once fewer are queued there is room
+   *  again, and the status must say so (see `rebaseCell`). The engine does not
+   *  know the buffer's cap; the count at the refusal IS the cap, as the buffer
+   *  saw it. */
+  const _blockedAt = new Map<string, number>();
+  /** What each cell's last rebase folded, onto which confirmed state — see
+   *  `rebaseCell`. */
+  const _lastRebase = new Map<
+    string,
+    [base: object, ids: string[], view: Record<string, unknown>]
+  >();
 
   // Per-cell async mutex — serializes all state mutations (local, ack, remote, sync)
   const _locks = new Map<string, Promise<void>>();
@@ -359,6 +356,34 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     if (!set) return;
     set.delete(id);
     if (set.size === 0) _ownInFlight.delete(cell);
+  }
+  // ── Own ops the buffer EVICTED, whose ack may still come ─────────────
+  // Backpressure eviction (`stale-evicted`, op-buffer.ts) drops an unconfirmed
+  // op that may already have been SENT — its ack can simply be late. The
+  // eviction forgets it (`untrackOwn`, so it is not blamed on a twin tab), and
+  // a late ack then found no pending op and no tracked one: nothing folded,
+  // nothing re-synced. But that ack is proof the server applied the change,
+  // and nothing else will ever bring it here — the catch-up leaves out this
+  // session's own ops. Server and peers held it, this client never would.
+  // So evicted ids are remembered (bounded FIFO per cell — an ack older than
+  // the last EVICTED_IDS_CAP evictions is past saving by this route) and an
+  // ack for one asks for the cell. dropReport("stale-evicted") tells the user
+  // to read the cell to see whether the change is there; this makes it true.
+  const EVICTED_IDS_CAP = 256;
+  const _evictedOwn = new Map<string, Set<string>>();
+  function noteEvictedOwn(cell: string, id: string): void {
+    let set = _evictedOwn.get(cell);
+    if (!set) _evictedOwn.set(cell, set = new Set());
+    set.add(id);
+    if (set.size > EVICTED_IDS_CAP) set.delete(set.values().next().value!);
+  }
+  /** Was `id` an own op this engine's buffer evicted? Forgets it either way —
+   *  one ack, one answer. */
+  function takeEvictedOwn(cell: string, id: string): boolean {
+    const set = _evictedOwn.get(cell);
+    if (!set?.delete(id)) return false;
+    if (set.size === 0) _evictedOwn.delete(cell);
+    return true;
   }
   /** Own ops of `cell` that left the queue without this engine folding or
    *  dropping them — forgotten here, and the cell marked for a re-sync. */
@@ -450,6 +475,14 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
   /** `ops` (the cell's queue) without the ones confirmed state already holds
    *  — and forget those that are no longer queued. */
   function notYetFolded(cell: string, ops: SyncOp[]): SyncOp[] {
+    // An op this engine already folded that is queued AGAIN: a twin tab
+    // working from a stale copy of the shared queue wrote it back after it
+    // was confirmed and pruned. Replayed on top of confirmed state (and
+    // folded a second time at its re-ack) it showed the item twice, for
+    // good. Moved here, where the id outlives `_appliedIds`' eviction.
+    for (const o of ops) {
+      if (alreadyApplied(cell, o.id)) noteFoldedAhead(cell, o.id);
+    }
     const ahead = _foldedAhead.get(cell);
     if (ahead === undefined) return ops;
     const queued = new Set(ops.map((o) => o.id));
@@ -832,13 +865,30 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     // that reconnect; only a cross-tab `storage` listener would cover it.)
     if (ownOpsTakenElsewhere(cell, unconfirmed)) scheduleResync(cell);
     const replay = notYetFolded(cell, unconfirmed);
+    // The last rebase's replay plus ONE op, on the same confirmed state — a
+    // local call queued behind the others: fold that op onto the last view
+    // instead of replaying all of them again. Every call of a burst (a seed,
+    // an import) re-ran the whole queue, 125k reducer calls for 500 calls,
+    // and froze the page for seconds. `result` then describes that one op;
+    // the earlier ones' failures were reported by the rebase that folded them.
+    const [base, ids, view] = _lastRebase.get(cell) ?? [];
+    const last = replay.length - 1;
+    const from = base === confirmedState && ids!.length === last &&
+        ids!.every((id, i) => replay[i]!.id === id)
+      ? replay.slice(last)
+      : replay;
     const result = rebase(
-      confirmedState,
-      replay,
+      from === replay ? confirmedState : view!,
+      from,
       quietFor !== undefined && deps.pureReducer
-        ? checkingReducer(cell, replay.findIndex((o) => o.id === quietFor))
+        ? checkingReducer(cell, from.findIndex((o) => o.id === quietFor))
         : deps.reducer,
     );
+    _lastRebase.set(cell, [
+      confirmedState,
+      replay.map((o) => o.id),
+      result.optimistic,
+    ]);
     // The op the client itself is holding could not be replayed. Ack,
     // catch-up and broadcast have always said so; rebase returned the fact in
     // `dropped` and NOTHING read it, so the one path replaying the user's own
@@ -860,6 +910,24 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     // were awaiting an ack while the buffer held some, and the same
     // under-count hid an op the reducer could not replay.
     updateStatus(cell, { pending: unconfirmed.length });
+    // …and "blocked" ends where `pending` is measured. It was set when the
+    // buffer refused an op, and only `requestSync` or going offline ever moved
+    // a cell off it — so a connected tab whose acks drained the queue kept
+    // reporting "cannot queue more" while it was queueing again, until some
+    // unrelated reconnect. An op leaving the queue is room for the next one.
+    const blockedAt = _blockedAt.get(cell);
+    if (blockedAt !== undefined && unconfirmed.length < blockedAt) {
+      _blockedAt.delete(cell);
+      if (statuses.get(cell)?.status === "blocked") {
+        updateStatus(cell, {
+          status: !online
+            ? "offline"
+            : _catchup.has(cell)
+            ? "syncing"
+            : "online",
+        });
+      }
+    }
     return result;
   }
 
@@ -889,7 +957,8 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     // position: an op of the shared queue this session did not issue (see
     // `foldRemoteOp`). Its ack confirms it; folding it again would double it.
     const folded = pending !== undefined &&
-      (_foldedAhead.get(cell)?.has(opId) ?? false);
+      ((_foldedAhead.get(cell)?.has(opId) ?? false) ||
+        alreadyApplied(cell, opId));
     // A modern server (it stated a snapshot watermark) that cannot state THIS
     // op's position: the only way that happens is a compaction tombstone
     // written before the `server_ts` column existed (pre-alpha43), re-acking a
@@ -963,6 +1032,19 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       const held = serverTs !== undefined && snapTs !== undefined &&
         serverTs <= snapTs;
       if (!held) scheduleResync(cell);
+    } else if (pending === undefined && takeEvictedOwn(cell, opId)) {
+      // Ours, evicted under backpressure before its ack came (see
+      // `_evictedOwn`). The server applied it; confirmed state here does not
+      // have it and never will by itself — same rule as above.
+      const held = serverTs !== undefined && snapTs !== undefined &&
+        serverTs <= snapTs;
+      if (!held) {
+        deps.log?.debug?.(
+          `[sync] ${cell}: late ack for ${opId}, an op evicted from the ` +
+            `offline queue — the server has it, re-syncing the cell`,
+        );
+        scheduleResync(cell);
+      }
     }
     if (pending !== undefined) {
       untrackOwn(cell, opId);
@@ -1107,8 +1189,8 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     // as folded ahead (`_foldedAhead`); its ack — if one ever comes to this engine (a reload's resend,
     // or this tab flushing the other's op) — then confirms it without folding
     // it twice (`foldAck`), and the rebase does not replay it on top of
-    // itself meanwhile (`notYetFolded`). This session's own ops never reach
-    // here: `handleRemoteOp` drops their echo, and their ack is certain.
+    // itself meanwhile (`notYetFolded`). This session's own ops' echoes take
+    // the same path (see `handleRemoteOp`).
     const queued = op.hlc[2] === deps.clientId &&
       (await deps.buffer.getUnconfirmed(op.cell)).some((o) => o.id === op.id);
     clock.receive(op.hlc);
@@ -1496,7 +1578,6 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         const id = `${deps.clientId}-${_session}-${
           (++_opCounter).toString(36)
         }.${randomUuid().replaceAll("-", "").slice(0, 12)}`;
-        noteIssued(id);
         const op: SyncOp = {
           id,
           cell,
@@ -1516,6 +1597,10 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         // 20 ops). Pinned by tests/sync/cap-drop-reported-once.test.ts.
         const accepted = await deps.buffer.add(op);
         if (!accepted) {
+          _blockedAt.set(
+            cell,
+            (await deps.buffer.getUnconfirmed(cell)).length,
+          );
           updateStatus(cell, { status: "blocked" });
           // THROW, do not return. `return` resolved the caller's promise, and
           // `handleSyncLocalAction` turns a resolve into `_resolveAck(cid)` —
@@ -1532,7 +1617,8 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
           throw new Error(
             `[sync] ${cell}:${action} was DROPPED — the offline queue is ` +
               `full (pending cap reached), so this change never reached the ` +
-              `server and is gone. Reconnect, or reduce the mutation rate.`,
+              `server and is gone. Offline too long, or calls made faster ` +
+              `than acks return (a burst: make it one call).`,
           );
         }
 
@@ -1549,6 +1635,8 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         // attribution is exact.)
         for (const gone of deps.buffer.takeEvicted?.() ?? []) {
           untrackOwn(gone.cell, gone.id);
+          // …but its ack may still be on the way (see `_evictedOwn`).
+          noteEvictedOwn(gone.cell, gone.id);
         }
         const { notApplied } = await rebaseCell(cell, id);
 
@@ -1604,9 +1692,17 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     handleRejection(cell, opId, reason) {
       return withLock(cell, async () => {
         // Said once. A repeat is the server re-refusing an op this client
-        // already dropped (see `_reportedRefusals`) — nothing left to prune,
-        // nothing changed to rebase, and the app was told.
+        // already dropped (see `_reportedRefusals`), and the app was told.
+        // Dropped again if it is queued again — a twin tab working from a
+        // stale copy of the shared queue can write it back; left there it
+        // was re-sent and re-refused on every reconnect, forever.
         if (refusalAlreadyReported(cell, opId)) {
+          if (
+            (await deps.buffer.getUnconfirmed(cell)).some((o) => o.id === opId)
+          ) {
+            await deps.buffer.pruneStale(cell, opId);
+            await rebaseCell(cell);
+          }
           deps.log?.debug?.(
             `[sync] ${cell}: the server refused op ${opId} again (${reason}) ` +
               `— already dropped and already reported`,
@@ -1647,25 +1743,18 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
 
     handleRemoteOp(op) {
       if (!this.isSyncCell(op.cell)) return Promise.resolve();
-      // Self-origin guard (chaos-suite finding, 2026-07-21): a reconnect race
-      // can echo our OWN op back as a "remote" broadcast — the server excludes
-      // the socket the op arrived on, but after a reconnect we hold a NEW
-      // socket, so the exclusion misses. Applying the echo would double the
-      // op's effect: once here, once via the sync-ack path (the op is still
-      // pending locally). Own ops only ever enter confirmed state through
-      // handleAck.
+      // Our OWN op's echo is folded here like any other, at its position in
+      // the server's order, and its ack then only confirms it (`foldAck`).
+      // It used to be dropped, on the ground that its ack is certain — and
+      // it is not WHERE it lands: a twin tab sharing this queue may flush the
+      // op first, and the ack that then reaches this tab (its own frame's,
+      // a duplicate by now) comes after ops the server ordered after it —
+      // folded there, this tab's confirmed state held an order the server
+      // never had, until a resync that need not come (twin-tab chaos,
+      // 2026-09-26; tests/sync/twin-tab-own-op.test.ts). A reconnect's echo
+      // of an op still awaiting its ack is the same case: folded ahead, then
+      // confirmed without a second fold.
       //
-      // Keyed on the exact op IDs this session issued (`_issuedIds`), not the
-      // HLC node — the node is the shared, persisted client id, and two clones
-      // of one profile carry the same one (see `isOwnSessionOp`) — and not the
-      // session prefix, which any writer can copy. An op of the shared queue this session did
-      // NOT issue — an earlier page load's, or a twin tab's — is folded here
-      // like any other and its ack, if one comes, only confirms it (see
-      // `foldRemoteOp`).
-      if (_issuedIds.has(op.id)) {
-        logDuplicate(op.cell, op.id, "own-op echo");
-        return Promise.resolve();
-      }
       // Held while a catch-up is outstanding: this op is AHEAD of the response
       // in flight, and applying it first would make the response's older ops
       // replay on top of it (see `hold`).
@@ -1961,13 +2050,20 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
           // — stale precisely while its buffer is full and it most needs the
           // server's latest.
           await rebaseCell(cell);
-          const s = statuses.get(cell);
-          if (s?.status === "blocked") return;
-          updateStatus(cell, { status: "syncing" });
-          updateStatus(cell, {
-            status: online ? "online" : "offline",
-            lastSync: Date.now(),
-          });
+          // Still blocked after the rebase (it clears "blocked" once the
+          // queue has room): the status stays, and the catch-up is reported
+          // all the same. This used to RETURN, so `onSync` never delivered
+          // "blocked" — one of its four documented statuses — and a catch-up
+          // that landed while the queue was full was not reported at all.
+          if (statuses.get(cell)?.status === "blocked") {
+            updateStatus(cell, { lastSync: Date.now() });
+          } else {
+            updateStatus(cell, { status: "syncing" });
+            updateStatus(cell, {
+              status: online ? "online" : "offline",
+              lastSync: Date.now(),
+            });
+          }
           // The catch-up for this cell is DONE — tell the app, which is what
           // `sync.onSync` is documented (with a code example) to be for. It
           // was declared in `SyncConfig`, normalized by `normalizeSyncConfig`,
@@ -2154,6 +2250,18 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         if (slice.length > 0 && sliceBytes + n > budget) break;
         slice.push(op);
         sliceBytes += n;
+      }
+      // Gone offline while the buffer was read (the awaits above): the
+      // transport has no channel, so the frame would be dropped and the gate
+      // below armed for a response nothing will send. The offline→online
+      // transition asks again.
+      if (!online) {
+        for (const cell of Object.keys(deps.cells)) {
+          if (statuses.get(cell)?.status === "syncing") {
+            updateStatus(cell, { status: "offline" });
+          }
+        }
+        return;
       }
       const more = allPending.length > slice.length;
       _flushing = more;

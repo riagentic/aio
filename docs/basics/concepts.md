@@ -242,9 +242,12 @@ store creation, no manual server setup.
 never raw dispatch with string action types.
 
 **AIO6** All bound cell methods return a Promise — sync methods resolve with
-`void` once the dispatch is applied, async methods resolve with the return
-value. Use `await` to read state after the change is applied. Unawaited calls
-are fire-and-forget.
+their return value (`undefined` when they return nothing) once the dispatch is
+applied, async methods resolve with the return value. A failing call rejects. A
+REFUSED call (a `validate` hook, a machine guard) rejects over the wire; in
+process it resolves unchanged unless the app sets `refusalsReject: true` (the
+test harnesses do). Use `await` to read state after the change is applied.
+Unawaited calls are fire-and-forget.
 
 **AIO7** Sync methods (reducers) MUST NOT contain side effects -- only state
 mutations and fire-and-forget dispatches. No fetch, file I/O, or timers in sync

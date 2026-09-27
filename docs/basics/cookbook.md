@@ -280,9 +280,12 @@ export const likes = cell("likes", {
 });
 ```
 
-If the call fails the optimistic layer still clears — it is tied to the
-passthrough value changing, not to success. Show the failure from
-`cell:__error`, never by guessing in the component.
+The layer is tied to the passthrough value changing, not to the call. A call
+that FAILS writes nothing, so the count never moves and the `+1` stays painted
+until something else changes it. To drop it on failure, make a refused call a
+change of the passthrough too —
+[`useOptimistic`](../ui/air-lifecycle.md#useoptimistic) shows the pattern. Show
+the failure itself from `cell:__error`, never by guessing in the component.
 
 ## 5. One method calling another
 
@@ -486,6 +489,43 @@ export const prefs = cell("prefs", {
   },
 });
 ```
+
+A **type** change is the one case the first argument cannot carry: the restore
+merge puts the declared default where a stored value of the old type was. The
+hook's third argument is the slice **as stored**, so read the old value there:
+
+```ts
+// src/cell/labels.ts
+import { cell } from "aio";
+
+export type Labels = { tags: string[] };
+
+/** v1 stored `tags: "a,b"`; v2 declares `tags: string[]`. */
+export function migrateLabels(
+  s: Labels,
+  from: number,
+  stored?: Record<string, unknown>,
+): Labels {
+  return from < 2 && typeof stored?.tags === "string"
+    ? { ...s, tags: stored.tags.split(",") }
+    : s;
+}
+
+export const labels = cell("labels", {
+  version: 2,
+  onMigrate: migrateLabels,
+  state: { tags: [] } as Labels,
+  methods: {
+    add(s, tag: string) {
+      s.tags.push(tag);
+    },
+  },
+});
+```
+
+`stored?:` is spelled out because the declared hook type names two parameters. A
+hook that never reads a retyped field from `stored` migrates on the default, and
+boot warns naming the field whose stored value that drops.
 
 Renaming the CELL (`cell("prefs", …)` → `cell("settings", …)`) is not a
 migration — the string is the persistence key, and a rename orphans the data.

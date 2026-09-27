@@ -34,6 +34,9 @@ export { own } from "../state/own.ts";
 export { notify } from "../state/notify.ts";
 import type { NotifyOptions } from "../state/notify.ts";
 import { showDesktopNotification } from "./desktop-notify.ts";
+// Static, not `import()`: a dynamic import of it made the bundler wrap the
+// whole renderer graph in lazy-init shims (see `_rootHooks`).
+import { swapRootComponent } from "../air/hot-swap.ts";
 
 // ── Transport helpers (shared between browser.ts and browser-air.ts) ──
 
@@ -205,7 +208,6 @@ export function handleControlFrame(
             `${path}?v=${d?.v ?? Date.now()}`
           ) as { default?: unknown };
           const next = mod.default;
-          const { swapRootComponent } = await import("../air/hot-swap.ts");
           if (
             typeof next !== "function" ||
             swapRootComponent(next as never) === 0
@@ -266,13 +268,22 @@ export function handleControlFrame(
       return true;
     case "proto": {
       const theirs = parseProtoHello(f.d);
-      if (theirs) {
-        rememberPeerHello(theirs);
-        const result = negotiateProtocol(protoHello(stampedVersion()), theirs);
-        if (!result.ok) {
-          console.error(`[aio] protocol version mismatch: ${result.reason}`);
-          onFatal?.(result.reason);
-        }
+      if (!theirs) {
+        // An unreadable hello is not "no check": the gate failed open, and
+        // the server's advertised limits were never learned. Stop, loudly,
+        // as a mismatch does.
+        const reason = `unreadable server protocol hello: ${
+          JSON.stringify(f.d)?.slice(0, 120)
+        }`;
+        console.error(`[aio] ${reason}`);
+        onFatal?.(reason);
+        return true;
+      }
+      rememberPeerHello(theirs);
+      const result = negotiateProtocol(protoHello(stampedVersion()), theirs);
+      if (!result.ok) {
+        console.error(`[aio] protocol version mismatch: ${result.reason}`);
+        onFatal?.(result.reason);
       }
       return true;
     }

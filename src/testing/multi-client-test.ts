@@ -42,7 +42,17 @@ export interface TestClient {
   state<T = Record<string, unknown>>(cell: string): T;
   /** Whole state as this client sees it. */
   fullState(): Record<string, unknown>;
-  /** Dispatch over this client's socket, resolving when the server acks. */
+  /** Dispatch over this client's socket. Resolves on the FIRST of: the
+   *  server's ack for THIS action (success or refusal), a patch while this is
+   *  the client's only dispatch in flight, or a short no-op grace (250 ms)
+   *  that also runs only while it is alone. It never rejects: a long-running
+   *  method (a poller, a game loop), one that waits on a peer, and a refused
+   *  one all resolve. With several dispatches in flight neither a patch nor
+   *  the grace settles any of them — each waits for its own ack, or for the
+   *  others to settle, with a 5 s ceiling after which it resolves anyway (so
+   *  concurrent never-acked methods cannot hang the test). For the
+   *  strict form — resolve with the return value, reject on refusal — use
+   *  `call()`. */
   dispatch(action: { type: string; payload?: unknown }): Promise<void>;
   /** Every patch this client RECEIVED over its socket, in arrival order — the
    *  immer-style `{ op, path, value }` objects the server broadcast, exactly as
@@ -339,11 +349,52 @@ export async function testMultiClient(
           });
         });
       };
+      /** `dispatch()`es on this socket not yet settled. A patch settles one
+       *  only when it is alone — then nothing else of ours could have caused
+       *  it. Deferred a macrotask: this listener runs before `cli` applies
+       *  the same frame, and the caller must see the new state. */
+      const inflight = new Set<() => void>();
+      patchListeners.add(() => {
+        if (inflight.size === 1) { for (const d of inflight) setTimeout(d, 0); }
+      });
       const onPatch = (cb: (b: readonly Patch[]) => void) => {
         patchListeners.add(cb);
         return () => {
           patchListeners.delete(cb);
         };
+      };
+      /** Send `action` with a fresh correlation id and settle on the server's
+       *  ack for THAT frame — its return value, or its refusal. */
+      const sendAcked = (
+        action: { type: string; payload?: unknown },
+      ): Promise<unknown> => {
+        const cid = crypto.randomUUID();
+        const p = new Promise<unknown>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            acks.delete(cid);
+            reject(
+              new Error(
+                `testMultiClient: client ${i} got no ack for ` +
+                  `"${action.type}" within ${CALL_TIMEOUT_MS}ms.`,
+              ),
+            );
+          }, CALL_TIMEOUT_MS);
+          acks.set(cid, {
+            ok: (v) => {
+              clearTimeout(timer);
+              resolve(v);
+            },
+            fail: (e) => {
+              clearTimeout(timer);
+              reject(e);
+            },
+          });
+        });
+        lastSendAt = Date.now();
+        // `cid` rides on the action frame — cli-client passes the object
+        // through untouched, and the server answers any frame carrying one.
+        cli.send({ ...action, cid } as { type: string; payload?: unknown });
+        return p;
       };
       /** The client path, end to end: an action frame with a correlation id
        *  goes out this socket, the server sanitizes it (`_source: "UI"`),
@@ -376,39 +427,9 @@ export async function testMultiClient(
             ),
           );
         }
-        const cid = crypto.randomUUID();
-        const p = new Promise<T>((resolve, reject) => {
-          const timer = setTimeout(() => {
-            acks.delete(cid);
-            reject(
-              new Error(
-                `testMultiClient: client ${i} got no ack for ` +
-                  `"${cellName}.${method}" within ${CALL_TIMEOUT_MS}ms.`,
-              ),
-            );
-          }, CALL_TIMEOUT_MS);
-          acks.set(cid, {
-            ok: (v) => {
-              clearTimeout(timer);
-              resolve(v as T);
-            },
-            fail: (e) => {
-              clearTimeout(timer);
-              reject(e);
-            },
-          });
-        });
-        lastSendAt = Date.now();
-        // `cid` rides on the action frame — cli-client passes the object
-        // through untouched, and the server answers any frame carrying one.
-        cli.send(
-          {
-            type: `${cellName}:${method}`,
-            payload: { args },
-            cid,
-          } as unknown as { type: string; payload?: unknown },
-        );
-        return p;
+        return sendAcked(
+          { type: `${cellName}:${method}`, payload: { args } },
+        ) as Promise<T>;
       };
 
       clients.push({
@@ -421,26 +442,34 @@ export async function testMultiClient(
         state: <T>(cell: string) =>
           ((cli.state ?? {}) as Record<string, unknown>)[cell] as T,
         fullState: () => (cli.state ?? {}) as Record<string, unknown>,
-        dispatch: async (action) => {
-          // Wait for the WORK, not for a fixed delay. `send` is
-          // fire-and-forget, so a naive sleep either flakes on a slow round
-          // trip or wastes time on a fast one — and, worse, `converged()`
-          // would then pass TRIVIALLY, comparing two states that are equal
-          // only because the action hasn't reached the server yet.
-          const before = canon(cli.state ?? {});
-          lastSendAt = Date.now();
-          cli.send(action);
-          const startedAt = Date.now();
-          const deadline = startedAt + 2000;
-          while (Date.now() < deadline) {
-            if (canon(cli.state ?? {}) !== before) return; // the patch came back
-            // Nothing after the grace period ⇒ this action changes nothing
-            // visible to this client. Return instead of waiting out the
-            // deadline; `converged()` still enforces the quiet period.
-            if (Date.now() - startedAt > NOOP_GRACE_MS) break;
-            await sleep(5);
-          }
-        },
+        // See TestClient.dispatch. A patch is attributed only when exactly
+        // one dispatch is in flight; the ack (which follows the broadcast on
+        // the same socket) settles the rest. Never rejects — that was the
+        // contract long-running, peer-waiting and refused methods rely on.
+        dispatch: (action) =>
+          new Promise<void>((resolve) => {
+            const cid = crypto.randomUUID();
+            const done = () => {
+              if (!inflight.delete(done)) return;
+              clearTimeout(grace);
+              clearTimeout(ceiling);
+              acks.delete(cid);
+              resolve();
+            };
+            // The grace settles a lone dispatch only: with others in flight
+            // it re-arms, so load cannot resolve concurrent calls early.
+            const arm = (): ReturnType<typeof setTimeout> =>
+              setTimeout(() => {
+                if (inflight.size > 1) grace = arm();
+                else done();
+              }, NOOP_GRACE_MS);
+            let grace = arm();
+            const ceiling = setTimeout(done, CALL_TIMEOUT_MS);
+            inflight.add(done);
+            acks.set(cid, { ok: done, fail: done });
+            lastSendAt = Date.now();
+            cli.send({ ...action, cid } as { type: string; payload?: unknown });
+          }),
       });
     }
   } catch (e) {

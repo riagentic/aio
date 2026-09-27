@@ -24,6 +24,7 @@ import {
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { testDisplayEnv } from "../src/testing/test-display.ts";
+import { childEnv } from "./e2e-app-harness.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
@@ -134,7 +135,12 @@ Deno.writeTextFileSync(Deno.env.get("READY")!, "1");
             `--port=${freePort()}`,
           ],
           cwd: app,
-          env: {
+          // childEnv (AIO_PARENT_PID): without it every check:orphans that
+          // ran while this test was mid-run — any other suite on the machine;
+          // the lock sits in the shared runtime dir — reported this app as
+          // an orphan, and a killed test left it running until its window
+          // ended.
+          env: childEnv({
             // A DISPLAY so the launch happens at all — the test's own, never
             // the desktop (the stub opens nothing either way).
             ...testDisplayEnv(),
@@ -142,7 +148,7 @@ Deno.writeTextFileSync(Deno.env.get("READY")!, "1");
             AIO_APPS_DIR: home,
             MARK: mark,
             READY: ready,
-          },
+          }),
           stdout: "piped",
           stderr: "piped",
         }).spawn();

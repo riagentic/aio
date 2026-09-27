@@ -436,6 +436,10 @@ let _syncCellIds: Set<string> | null = null;
  *  through the engine once ready (or as plain sends if boot fails). */
 const _syncPending: Array<{ type: string; payload?: unknown }> = [];
 
+/** The engine is on its way (sync cells known, import not yet resolved): a
+ *  sync frame now has no handler BY DESIGN — its boot catch-up re-delivers. */
+export const _syncBooting = (): boolean => !!_syncCellIds && !_syncRoute;
+
 /** True when `action` targets a sync cell's real (non-framework) method — the
  *  exact set `handleSyncLocalAction` will route, so buffering matches routing.
  *  `cell:__method` framework-internal calls stay on the plain path. */

@@ -153,17 +153,139 @@ const _workerScope = new AsyncLocalStorage<string | undefined>();
  *  left: with one boot alive it only ever answers "that boot".
  *  @internal */
 export function _armBootScope(
-  install: (scope: BootScope) => void,
+  install: (scope: BootScope) => () => Fence | undefined,
 ): void {
-  install(_bootScope);
+  _liveFence = install(_bootScope);
+  _fenceTimers();
 }
-const _bootAls = new AsyncLocalStorage<
-  Parameters<BootScope["run"]>[0] | undefined
->();
+type Fence = Parameters<BootScope["run"]>[0];
+/** A fence plus what started the code running in it: the method (its reduce,
+ *  its async body), or a timer and the line that armed it. */
+type BootCtx = { fence: Fence; method?: string; timer?: string };
+const _bootAls = new AsyncLocalStorage<BootCtx | undefined>();
 const _bootScope: BootScope = {
-  run: (fence, fn) => _bootAls.run(fence, fn),
-  get: () => _bootAls.getStore(),
+  run: (fence, fn, method) =>
+    _bootAls.run({ fence, method: method ?? _bootAls.getStore()?.method }, fn),
+  get: () => _bootAls.getStore()?.fence,
+  origin: () => {
+    const ctx = _bootAls.getStore();
+    if (!ctx?.method && !ctx?.timer) return undefined;
+    const inside = ctx.method ? `inside "${ctx.method}"` : "";
+    return ctx.timer ? `${ctx.timer}${inside && `, ${inside}`}` : inside;
+  },
+  inTimer: () => _bootAls.getStore()?.timer !== undefined,
 };
+let _liveFence: () => Fence | undefined = () => undefined;
+
+// ── Which mount is running this code ─────────────────────────────────────
+//
+// A timer armed outside every boot's own code is attributed to the MOUNT that
+// is active when it is armed: the one whose root is rendering (its
+// mount/render/hydrate, its effect and afterRender flushes — `_activeRoot`),
+// or the one whose handle is driving it (its queued actions, its settle/
+// waitFor drains — `_inMount`). Only code with no active mount (the test body
+// between calls) falls to the outermost live mount. Without this, a timer an
+// INNER nested mount's component armed went to the outer mount and, once the
+// inner one closed, committed there — silently, the exact write the fence
+// exists to refuse.
+const _mountAls = new AsyncLocalStorage<Fence | undefined>();
+const _rootFences = new WeakMap<object, Fence>();
+let _renderingRoot: () => object | null | undefined = () => null;
+
+/** Run `fn` (and what it starts) as the mount `fence` belongs to — a
+ *  harness's own driving of its mount. @internal */
+export function _inMount<T>(fence: Fence | undefined, fn: () => T): T {
+  return fence ? _mountAls.run(fence, fn) : fn();
+}
+
+/** Attribute what renders under `root` (a mount's root element) to `fence`;
+ *  `rendering` answers which root element is rendering right now. @internal */
+export function _fenceMountRoot(
+  root: object,
+  fence: Fence | undefined,
+  rendering: () => object | null | undefined,
+): void {
+  if (fence) _rootFences.set(root, fence);
+  _renderingRoot = rendering;
+}
+
+/** The fence a timer armed right now belongs to: the rendering mount's, else
+ *  the boot code's running (a method, an onInit, an attributed timer's
+ *  callback — so a chain inherits), else the driving mount's, else the
+ *  outermost live mount's. */
+function _armingFence(outer: BootCtx | undefined): Fence | undefined {
+  const root = _renderingRoot();
+  return (root ? _rootFences.get(root) : undefined) ?? outer?.fence ??
+    _mountAls.getStore() ?? _liveFence();
+}
+
+// ── Real timers, fenced ──────────────────────────────────────────────────
+//
+// A `setTimeout` a mount's COMPONENT armed (an idle lock, a poll) runs in the
+// test body's context, outside every fence — so when it fired after its mount
+// was disposed, its cell call went through the handle, which the NEXT mount
+// had re-bound, and committed there without a word. One armed by a METHOD was
+// refused, but the refusal named only the boot, never the timer: it landed on
+// an innocent later test with nothing to say which timer, armed where (a
+// desktop wallet app's field report).
+//
+// So every real timer armed while a boot is live — by code outside aio's own
+// `src/`, which cleans up its own — runs in a boot's fence, remembering the
+// line that armed it: the mount or boot whose code armed it (`_armingFence`),
+// or — armed by the test body between calls — the OUTERMOST live mount, never
+// the innermost: a timer the test arms inside a nested mount is not that
+// mount's, and was refused once it closed while the outer mount lived. Live, the fence changes nothing; retired, a cell call from the timer
+// is refused (a rejected call) naming that line. Nothing is cancelled: a timer
+// that never calls a cell (a module's own poll) keeps running as it would in
+// the app. Installed once per process; a fake clock installed later wraps it,
+// one installed earlier is wrapped.
+const _AIO_SRC = new URL("../", import.meta.url).href;
+const _FENCED = Symbol("aio.fencedTimer");
+/** The frame that called `fn` — or undefined when that is aio's own code. */
+// deno-lint-ignore ban-types
+function _appCaller(fn: Function): string | undefined {
+  const o: { stack?: string } = {};
+  const limit = Error.stackTraceLimit;
+  Error.stackTraceLimit = 1;
+  try {
+    Error.captureStackTrace(o, fn);
+  } finally {
+    Error.stackTraceLimit = limit;
+  }
+  const frame = o.stack?.split("\n")[1]?.trim().replace(/^at /, "");
+  return frame && !frame.includes(_AIO_SRC) ? frame : undefined;
+}
+function _fenceTimers(): void {
+  type Timer = (handler: unknown, ...rest: unknown[]) => unknown;
+  const g = globalThis as unknown as Record<string, Timer>;
+  for (const name of ["setTimeout", "setInterval"]) {
+    const real = g[name]!;
+    if ((real as { [_FENCED]?: true })[_FENCED]) continue;
+    const fenced: Timer = (handler, ...rest) => {
+      const outer = _bootAls.getStore();
+      const fence = _armingFence(outer);
+      const at = typeof handler === "function" && fence
+        ? _appCaller(fenced)
+        : undefined;
+      if (!at) return real(handler, ...rest);
+      const ctx: BootCtx = {
+        fence: fence!,
+        method: outer?.method,
+        timer: `${name} armed at ${at}`,
+      };
+      return real(
+        (...args: unknown[]) =>
+          _bootAls.run(
+            ctx,
+            () => (handler as (...a: unknown[]) => unknown)(...args),
+          ),
+        ...rest,
+      );
+    };
+    (fenced as unknown as { [_FENCED]: true })[_FENCED] = true;
+    g[name] = fenced;
+  }
+}
 
 /** Start a harness body OUTSIDE every in-process scope — the boot fence and
  *  the worker scope — whatever context the runner handed it. Called first,
@@ -186,6 +308,7 @@ const _bootScope: BootScope = {
  *  @internal */
 export function _shedLeakedScopes(): void {
   _bootAls.enterWith(undefined);
+  _mountAls.enterWith(undefined);
   _workerScope.enterWith(undefined);
 }
 

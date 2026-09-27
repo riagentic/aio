@@ -9,6 +9,7 @@ import { computeDiffs, formatDiff } from "./state-diff.ts";
 import { sweepStaleTmps, uuidTmpAfter } from "./tmp-sweep.ts";
 import { createActionLog } from "./action-log.ts";
 import {
+  CHECKPOINT_DEBOUNCE_MS,
   type CheckpointView,
   createCheckpoint,
   readCheckpoint,
@@ -199,8 +200,8 @@ export function initDiagnostics(
       );
     }
     const debounce = typeof opts.checkpoint === "object"
-      ? (opts.checkpoint.debounce ?? 5000)
-      : 5000;
+      ? (opts.checkpoint.debounce ?? CHECKPOINT_DEBOUNCE_MS)
+      : CHECKPOINT_DEBOUNCE_MS;
     // The checkpoint honours the SAME redaction list as the other three sinks.
     // It was the one that did not, and it is the one that writes the most.
     cpWriter = createCheckpoint(logDir, debounce, redact, () => cpView);

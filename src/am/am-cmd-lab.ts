@@ -1481,7 +1481,7 @@ async function installedVersions(storage: string): Promise<string[]> {
         found.push(e.name);
       }
     }
-  } catch { /* absent */ }
+  } catch { /* aio-ok: absent */ }
   return found.sort();
 }
 

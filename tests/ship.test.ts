@@ -972,7 +972,10 @@ async function contractFixture(): Promise<
       `  onMigrate: (s: Record<string, unknown>) => s,\n` +
       `  methods: {},\n` +
       `});\n` +
-      `await aio.run({ cells: [notes], libraryMode: true, baseDir: "${dir}" });\n`,
+      // The id the release is signed for (`name: "notes"` below) — `ship`
+      // refuses a release named for an id the artifact does not run as.
+      `await aio.run({ cells: [notes], appId: "notes", libraryMode: true, ` +
+      `baseDir: "${dir}" });\n`,
   );
   // A file `probeDataContract` can spawn — the shape a compiled binary has.
   const script = join(dir, "app.bin");

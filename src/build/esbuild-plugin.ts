@@ -7,8 +7,21 @@
 // dev boot is the graph that ships. The metafile it leaves behind is what
 // graph-audit.ts reads: a static edge into the stub namespace is a leak.
 
-import { SERVER_FILE_RE } from "../entries.ts";
+import { isServerOnlyMarker, SERVER_FILE_RE } from "../entries.ts";
 import { SERVER_ONLY_STUB_NS } from "./graph-audit.ts";
+import {
+  isBrowserEntry,
+  isFrameworkEntry,
+} from "../server/server-html-importmap.ts";
+import {
+  aioOwnSpecAdvice,
+  dynamicImportsOutsideMethods,
+  dynamicOutsideMethodsAdvice,
+} from "../server/server-only-specs.ts";
+
+/** An aio entry a page cannot load — THE decider the dev graph check uses. */
+const nonBrowserEntry = (spec: string) =>
+  isFrameworkEntry(spec) && !isBrowserEntry(spec);
 
 /** Where the dev-only chunk is served FROM, as the bundle names it.
  *
@@ -125,10 +138,34 @@ export function aioBrowserPlugin(): {
       // whole server entry into the client graph (one field report kept an
       // opaque-specifier trick purely to defeat that). Dynamic only: a STATIC
       // import stays a loud build error, as it must.
+      //
+      // Every entry a page cannot load, by THE decider (isBrowserEntry) the
+      // dev graph check uses — not a hand list. `await import("aio/extras")`
+      // in a method was inlined, then refused as a server-only leak, while
+      // `aio/sync` bundled and dev blocked both as "not in the import map".
+      // Outside a cell method the PAGE runs that import and dies at that
+      // moment: warned with the dev graph check's decider and words.
+      const outside = new Map<string, Promise<Set<string>>>();
+      const outsideIn = (importer: string) => {
+        let hit = outside.get(importer);
+        if (!hit) {
+          hit = Deno.readTextFile(importer).then(
+            (src) =>
+              new Set(
+                dynamicImportsOutsideMethods(src, nonBrowserEntry).map((f) =>
+                  f.spec
+                ),
+              ),
+            () => new Set<string>(), // aio-ok: not a local file (remote framework) — nothing to read
+          );
+          outside.set(importer, hit);
+        }
+        return hit;
+      };
       build.onResolve(
-        { filter: /^aio\/(server|build)$/ },
-        (args: { path: string; kind: string; importer: string }) => {
-          if (args.kind === "dynamic-import") {
+        { filter: /^aio(\/|$)/ },
+        async (args: { path: string; kind: string; importer: string }) => {
+          if (args.kind === "dynamic-import" && nonBrowserEntry(args.path)) {
             // RECORDED, not just externalized. This is the one server-only
             // door that was opened silently: every other route into server
             // code lands in `serverOnlyDynamic`, and a standalone Android
@@ -140,9 +177,40 @@ export function aioBrowserPlugin(): {
             // see: build SUCCEEDS, APK installs, UI renders, buttons do
             // nothing.
             recordDynamic(args.importer, args.path);
-            return { path: args.path, external: true };
+            if (!(await outsideIn(args.importer)).has(args.path)) {
+              return { path: args.path, external: true };
+            }
+            const { message, fix } = dynamicOutsideMethodsAdvice(args.path);
+            return {
+              path: args.path,
+              external: true,
+              warnings: [{ text: message, notes: [{ text: fix }] }],
+            };
           }
           return undefined;
+        },
+      );
+
+      // A STATIC import of an aio entry a page cannot load (`aio/sync`,
+      // `aio/testing`, `aio/cli`, …): refused here with the sentence the dev
+      // graph check says, by THE decider it uses (isBrowserEntry). The bundle
+      // used to take some of these (tree-shaken to what happened to load)
+      // while dev left the page blank. The `aio/server-only` marker keeps
+      // graph-audit's refusal, which names the whole import chain.
+      build.onResolve(
+        { filter: /^aio(\/|$)/ },
+        (args: { path: string; kind: string }) => {
+          const spec = args.path;
+          if (
+            args.kind === "dynamic-import" || !isFrameworkEntry(spec) ||
+            isBrowserEntry(spec) || isServerOnlyMarker(spec)
+          ) return undefined;
+          return {
+            errors: [{
+              text: `"${spec}" cannot be imported by UI code. ` +
+                aioOwnSpecAdvice(spec),
+            }],
+          };
         },
       );
 

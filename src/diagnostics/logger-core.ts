@@ -29,6 +29,10 @@ import { noRedaction } from "./redact.ts";
 import type { Redactor } from "./redact.ts";
 import { logPerf, logVitals, logVitalsSummary } from "./logger-vitals.ts";
 import { count } from "./fmt.ts";
+import { capDelay, MIN_INTERVAL_MS } from "../state/timer-ceiling.ts";
+
+/** Default app.log heartbeat period, in seconds (1 h). */
+const LOG_HEARTBEAT_S = 3600;
 /** The local socket an app's `started` line names — set by the boot before
  *  `onStart`. A side channel, not a parameter: `AioLogger` is public surface
  *  (`aio/log`) and its `onStart` signature is frozen. Not re-exported from
@@ -36,6 +40,46 @@ import { count } from "./fmt.ts";
 const _startSocket = new WeakMap<AioLogger, string>();
 export function _setStartSocket(logger: AioLogger, socketPath: string): void {
   _startSocket.set(logger, socketPath);
+}
+
+/** Buffer a "repeated N times" line for every file with suppressed repeats
+ *  pending, and reset those counts — the summary is now queued. A module
+ *  function, not a method: `AioLogger`'s shape is frozen public surface. */
+function queueRepeatSummaries(
+  lastLine: Map<string, { key: string; count: number }>,
+  buffers: Map<string, string[]>,
+): void {
+  for (const [path, last] of lastLine) {
+    if (last.count > 1) {
+      const buf = buffers.get(path) ?? [];
+      buf.push(`  … last message repeated ${last.count - 1} times`);
+      buffers.set(path, buf);
+      last.count = 1;
+    }
+  }
+}
+
+/** Loggers holding lines not yet on disk. The file sink writes on a 250 ms
+ *  timer that does not keep the process alive, so a process that EXITS right
+ *  after a line — a rollback's `Deno.exit(1)`, a failed boot, an app's own
+ *  exit in `onStart` — lost it: measured on real update rollbacks, where
+ *  `app.log` missed "boot attempt 2/2" and both rollback lines (a macOS boot
+ *  that exited never created it at all). `unload` fires on `Deno.exit()` and
+ *  on a normal end, and each logger here writes what it holds, synchronously.
+ *  One listener for the process; the set only ever holds loggers with
+ *  something to write. */
+const _unflushed = new Set<AioLogger>();
+let _unloadArmed = false;
+/** Loggers whose `init()` was called: this process owns their files (a
+ *  `--help` run that never inits writes none of its early lines, even at
+ *  exit). Module state, not a member: the class is frozen public surface. */
+const _initStarted = new WeakSet<AioLogger>();
+function armUnloadFlush(): void {
+  if (_unloadArmed || typeof addEventListener !== "function") return;
+  _unloadArmed = true;
+  addEventListener("unload", () => {
+    for (const l of [..._unflushed]) flushAtExit(l);
+  });
 }
 
 /** Structured file logger — routes entries to app.log, debug.log, error.log, warning.log, and perf.log. */
@@ -66,7 +110,7 @@ export class AioLogger {
       level: config.level ?? "info",
       dir: config.dir ?? DEFAULT_LOG_DIR,
       console: config.console ?? isRunningFromSource(),
-      heartbeat: config.heartbeat ?? 3600,
+      heartbeat: config.heartbeat ?? LOG_HEARTBEAT_S,
       suppressTypes: config.suppressTypes ?? [],
       backupLogs: config.backupLogs ?? true,
       backupKeep: config.backupKeep ?? DEFAULT_BACKUP_KEEP,
@@ -89,6 +133,9 @@ export class AioLogger {
    *   duplicate start, was left in. */
   async init(opts: { rotate?: boolean } = {}): Promise<void> {
     const wantRotate = opts.rotate !== false;
+    _initStarted.add(this);
+    armUnloadFlush();
+    if (this._preInit.length > 0) _unflushed.add(this);
     try {
       // 0700, like the recovery path below and `ensureAppDirs`: 0600 files
       // inside a world-readable directory still hand every local account the
@@ -157,10 +204,17 @@ export class AioLogger {
           },
         );
       }
-      if (this.cfg.heartbeat > 0) {
+      // `0` (or less) turns it off; NaN is a mistake, said by capDelay.
+      if (!(this.cfg.heartbeat <= 0)) {
         this.heartbeatTimer = setInterval(
           () => this.heartbeat(),
-          this.cfg.heartbeat * 1000,
+          capDelay(
+            "logging.heartbeat",
+            this.cfg.heartbeat * 1000,
+            (m) => this.emit("warn", "app", m),
+            LOG_HEARTBEAT_S * 1000,
+            MIN_INTERVAL_MS,
+          ),
         );
         // A HEARTBEAT MUST NEVER BE WHY A PROCESS IS STILL RUNNING.
         //
@@ -406,6 +460,7 @@ export class AioLogger {
       // was short.)
       if (this._preInit.length < AioLogger.MAX_PREINIT) {
         this._preInit.push({ path, entry });
+        if (_initStarted.has(this)) _unflushed.add(this);
       } else {
         this._preInitDropped++;
       }
@@ -436,6 +491,7 @@ export class AioLogger {
     this._lastLine.set(path, { key, count: 1 });
     buf.push(line);
     this._buffers.set(path, buf);
+    _unflushed.add(this);
     if (buf.length >= AioLogger.MAX_BUFFERED) {
       this._flushBuffers();
       return;
@@ -519,6 +575,7 @@ export class AioLogger {
       });
       this._pending.add(p);
     }
+    _unflushed.delete(this);
     this._maybeBudgetPass();
   }
 
@@ -603,7 +660,10 @@ export class AioLogger {
     // The live files are new files: their creation mode is right, but the
     // "already tightened" memo now points at inodes that are gone, and the
     // repeat-suppression memo describes lines that are no longer in the file.
+    // Repeats counted while this pass ran are not in any file yet: queue
+    // their summary first, or clearing the memo erases them without a trace.
     this._modeFixed.clear();
+    queueRepeatSummaries(this._lastLine, this._buffers);
     this._lastLine.clear();
     const after = await enforceBudget(this.dir, budget);
     this.emit(
@@ -696,14 +756,7 @@ export class AioLogger {
    *  has to announce it. */
   async flush(timeoutMs = 500): Promise<void> {
     // Surface trailing "repeated N times" summaries before the final write
-    for (const [path, last] of this._lastLine) {
-      if (last.count > 1) {
-        const buf = this._buffers.get(path) ?? [];
-        buf.push(`  … last message repeated ${last.count - 1} times`);
-        this._buffers.set(path, buf);
-        last.count = 1;
-      }
-    }
+    queueRepeatSummaries(this._lastLine, this._buffers);
     this._flushBuffers();
     if (this._pending.size === 0) return;
     const snapshot = [...this._pending];
@@ -741,4 +794,53 @@ function tightenOnce(fixed: Set<string>, path: string): Promise<void> {
   if (Deno.build.os === "windows") return Promise.resolve();
   // aio-ok: a mode-less filesystem must not cost the app its voice
   return Deno.chmod(path, 0o600).catch(() => {});
+}
+
+/** Write every line `l` holds NOW, synchronously — the process is exiting and
+ *  no timer or promise will run again. Lines held before `init()` finished go
+ *  to their files as they are (an exit mid-init never rotates). Reaches the
+ *  logger's private fields by bracket access: a module function, not a
+ *  member, because the class is frozen public surface.
+ *
+ *  A directory that is gone is created again, as a running logger's write
+ *  does: the last lines (a shutdown or crash reason) are the ones an operator
+ *  reads, and a GUI exe or a service has no stderr to catch them. A test that
+ *  drops its sandbox stops its logger first. An async write already handed to the OS when
+ *  the process exits is not waited for: it lands, or it does not, before
+ *  these lines (Deno.exit does not drain it). */
+function flushAtExit(l: AioLogger): void {
+  const timer = l["_flushTimer"];
+  if (timer !== null) {
+    clearTimeout(timer);
+    l["_flushTimer"] = null;
+  }
+  _unflushed.delete(l);
+  queueRepeatSummaries(l["_lastLine"], l["_buffers"]);
+  const out = new Map<string, string[]>();
+  if (!l["ready"] && _initStarted.has(l)) {
+    for (const h of l["_preInit"]) {
+      const lines = out.get(h.path) ?? [];
+      lines.push(l["_capLine"](formatText(h.entry)));
+      out.set(h.path, lines);
+    }
+    l["_preInit"] = [];
+  }
+  for (const [path, lines] of l["_buffers"]) {
+    if (lines.length > 0) out.set(path, [...(out.get(path) ?? []), ...lines]);
+  }
+  l["_buffers"].clear();
+  for (const [path, lines] of out) {
+    try {
+      Deno.mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+      Deno.writeTextFileSync(path, lines.join("\n") + "\n", {
+        append: true,
+        mode: 0o600,
+      });
+    } catch (e) {
+      // The last thing this process says: to stderr, the one channel left.
+      console.error(
+        `[logger] ${lines.length} line(s) could not reach ${path} at exit: ${e}`,
+      );
+    }
+  }
 }

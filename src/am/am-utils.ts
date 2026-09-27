@@ -17,6 +17,7 @@ import {
   lockKey,
   noteDeadHolder,
   printable,
+  projectAppId,
   readLock,
   removeLockIfOwner,
   resolveAppId,
@@ -205,27 +206,25 @@ export function resolveAmAppId(flag?: string): string {
   } catch { /* no deno.json */ }
   const ec = readEntryConfig();
   if (ec.appId) return resolveAppId(ec.appId);
-  // Zero-config apps (aio.run() with no appId) — mirror the server's
-  // inference chain: deno.json title/name, then the project directory name.
-  try {
-    const cfg = readDenoJsonSync(projectRoot())?.config as
-      | { title?: string; name?: string }
-      | undefined;
-    const fromCfg = cfg?.title ?? cfg?.name?.split("/").pop();
-    if (fromCfg) return resolveAppId(fromCfg);
-  } catch { /* no deno.json */ }
-  // `basename`, not `split("/")`: the server infers the same last rung from a
-  // `file:` URL (always `/`-separated), but `Deno.cwd()` on Windows is
-  // `C:\proj\app` — which `split("/")` returns WHOLE, so `am` computed the
-  // appId `c-proj-app` for the app the runtime calls `app`. Two identities for
-  // one project means two lock files, and `am` talking past its own app.
+  // Zero-config apps (aio.run() with no appId) — THE project rule the server
+  // and the build use (`projectAppId`): deno.json title/name, then the project
+  // directory's name.
   //
-  // `projectRoot()`, not the cwd, everywhere above and here: from a
-  // SUBDIRECTORY of the app the cwd has no deno.json and its basename is
-  // "src" — a different app id from the one the running app derived, so
-  // `cd src && am status` reported a stopped app called "src".
-  const dir = basename(projectRoot());
-  if (dir) return resolveAppId(dir);
+  // `projectRoot()`, not the cwd: from a SUBDIRECTORY of the app the cwd has
+  // no deno.json and its basename is "src" — a different app id from the one
+  // the running app derived, so `cd src && am status` reported a stopped app
+  // called "src". (And `basename` — inside `projectAppId` — not `split("/")`,
+  // which returned a Windows cwd `C:\proj\app` WHOLE.)
+  const root = projectRoot();
+  let cfg: { title?: string; name?: string } | undefined;
+  try {
+    cfg = readDenoJsonSync(root)?.config as typeof cfg;
+  } catch { /* no/unreadable deno.json — the directory name decides */ }
+  // `appId` is left out on purpose: the rung above already answered it, and
+  // an entry's `aio.run({ appId })` outranks deno.json's title/name.
+  if (cfg?.title || cfg?.name || basename(root)) {
+    return projectAppId(root, { title: cfg?.title, name: cfg?.name });
+  }
   throw new Error(
     '[am] missing appId — pass --app=X, add "appId" to deno.json, or set appId in aio.run()',
   );
@@ -844,20 +843,27 @@ export function resolvePath(
     }
     const src = parent.value as Record<string, unknown>;
     const result: Record<string, unknown> = {};
+    let any = false;
     for (const key of picks) {
       // Support nested picks: {stats.pnl} traverses into the picked parent
       if (key.includes(".")) {
         const r = resolvePath(src, key);
-        if (r.found) result[key] = r.value;
+        if (r.found) {
+          result[key] = r.value;
+          any = true;
+        }
       } else {
-        const idx = /^\d+$/.test(key) ? Number(key) : undefined;
-        const val = idx !== undefined && Array.isArray(src)
-          ? src[idx]
-          : src[key];
-        if (val !== undefined) result[key] = val;
+        const r = resolvePath(src, key);
+        if (r.found && r.value !== undefined) {
+          result[key] = r.value;
+          any = true;
+        }
       }
     }
-    return { found: true, value: result };
+    // A pick that found NOTHING is a miss, not an empty object: `{}` made
+    // `am expect 'counter.{cnt}' exists` pass on a typo while `absent` on the
+    // same path failed — "a typo in the path is never a PASS".
+    return any ? { found: true, value: result } : { found: false };
   }
 
   const segments = path.split(".");
@@ -872,6 +878,11 @@ export function resolvePath(
       continue;
     }
     if (cur == null || typeof cur !== "object") return { found: false };
+    // OWN properties only (an array index and its `length` are own): a
+    // plain lookup reached Object.prototype, so `counter.constructor` or
+    // `items.map` was "found", `absent` on them failed, and `--json`
+    // printed a bare `undefined` for a function it cannot serialise.
+    if (!Object.hasOwn(cur, seg)) return { found: false };
     const idx = /^\d+$/.test(seg) ? Number(seg) : undefined;
     if (idx !== undefined && Array.isArray(cur)) {
       cur = cur[idx];

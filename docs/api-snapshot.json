@@ -87,7 +87,7 @@
         },
         "AioMeta": {
           "kind": "typeAlias",
-          "sig": "7a58cd322aee2798",
+          "sig": "7dd233a6ce9e7a54",
           "members": {
             "title": "opt:2fb40568533c1a6d",
             "width": "opt:f6522636230fa080",
@@ -95,12 +95,13 @@
             "childWindows": "opt:0ecca0fe3beba89b",
             "requireSandbox": "opt:0ecca0fe3beba89b",
             "unsandboxedChildWindows": "opt:0ecca0fe3beba89b",
+            "permissions": "opt:8da42e37586d60a5",
             "chrome": "opt:0cb8e5493e58cfb7",
             "tray": "opt:bb7b2f54156b6da6",
             "profileName": "opt:2fb40568533c1a6d"
           },
           "sigs": [
-            "7a58cd322aee2798"
+            "7dd233a6ce9e7a54"
           ]
         },
         "AioUser": {
@@ -791,13 +792,14 @@
         },
         "ElectronConfig": {
           "kind": "typeAlias",
-          "sig": "4b2a128528d98bb5",
+          "sig": "2d64d8eb0299b527",
           "members": {
             "requireSandbox": "opt:0ecca0fe3beba89b",
-            "unsandboxedChildWindows": "opt:0ecca0fe3beba89b"
+            "unsandboxedChildWindows": "opt:0ecca0fe3beba89b",
+            "permissions": "opt:d09e2eedb122e382"
           },
           "sigs": [
-            "4b2a128528d98bb5"
+            "2d64d8eb0299b527"
           ]
         },
         "errorCode": {
@@ -1123,6 +1125,18 @@
           },
           "sigs": [
             "3fd23a6aa59672df"
+          ]
+        },
+        "nativeFetch": {
+          "kind": "function",
+          "sig": "3848235289fca01f",
+          "members": {
+            "param0": "req:378b024623875305|336e2b46aff6c271~string+8e53337ed0600874~Request+b114979807419fc0~URL",
+            "param1": "opt:4bef5a613787cb8c|7b5bfa2deb2245c5~RequestInit",
+            "return": "req:ea7721aca848e8ac"
+          },
+          "sigs": [
+            "791cfe1061fe5fb3"
           ]
         },
         "notify": {
@@ -2506,6 +2520,18 @@
             "da446580845f1b00"
           ]
         },
+        "nativeFetch": {
+          "kind": "function",
+          "sig": "3848235289fca01f",
+          "members": {
+            "param0": "req:378b024623875305|336e2b46aff6c271~string+8e53337ed0600874~Request+b114979807419fc0~URL",
+            "param1": "opt:4bef5a613787cb8c|7b5bfa2deb2245c5~RequestInit",
+            "return": "req:ea7721aca848e8ac"
+          },
+          "sigs": [
+            "791cfe1061fe5fb3"
+          ]
+        },
         "navigate": {
           "kind": "function",
           "sig": "f991ae89a2d6c286",
@@ -2547,6 +2573,17 @@
           },
           "sigs": [
             "ff29b8583e708d39"
+          ]
+        },
+        "onBackButton": {
+          "kind": "function",
+          "sig": "d6b24f19be3bccbd",
+          "members": {
+            "param0": "req:98ff24cca61b0c3d|c2e0f463c4224b93~fnOrConstructor",
+            "return": "req:97f6d0647f4a9786"
+          },
+          "sigs": [
+            "2c4a910cc9102d26"
           ]
         },
         "onChange": {
@@ -3353,14 +3390,11 @@
         },
         "useResource": {
           "kind": "function",
-          "sig": "48491bf6334cda64",
-          "members": {
-            "param0": "req:5ea2d6d8142b57ee|bc2b3871083b62fd~UseResourceConfig",
-            "return": "req:d9e02dd5fedaa01a",
-            "typeParams": "req:ddf4493b60497953"
-          },
+          "sig": "9f8eb6dba4082051",
           "sigs": [
-            "313bd4cd3facc497"
+            "313bd4cd3facc497",
+            "b7734173ca22c3a5",
+            "d1ce4b3321c7f0bf"
           ]
         },
         "UseResourceConfig": {
@@ -3375,6 +3409,20 @@
           },
           "sigs": [
             "2b1c3a133a695737"
+          ]
+        },
+        "UseResourceConfigOf": {
+          "kind": "typeAlias",
+          "sig": "7a5e2f1718ad850f",
+          "members": {
+            "typeParams": "req:cdad93c9e39b5d23",
+            "key": "req:a14183c2ec816cf8",
+            "open": "req:e8deb1ac1bc66c3b",
+            "close": "opt:9107b4530ef00fd3",
+            "scope": "opt:2fb40568533c1a6d"
+          },
+          "sigs": [
+            "7a5e2f1718ad850f"
           ]
         },
         "useRoute": {
@@ -4678,7 +4726,7 @@
         },
         "LockData": {
           "kind": "typeAlias",
-          "sig": "b925ff518131cb01",
+          "sig": "5dccd00b2ad07c2c",
           "members": {
             "appId": "req:2fb40568533c1a6d",
             "pid": "req:f6522636230fa080",
@@ -4689,6 +4737,9 @@
             "maintenance.op": "req:2fb40568533c1a6d",
             "maintenance.since": "opt:f6522636230fa080",
             "maintenance.partial": "opt:2fb40568533c1a6d",
+            "waiting": "opt:object",
+            "waiting.reason": "req:2fb40568533c1a6d",
+            "waiting.since": "req:f6522636230fa080",
             "cwd": "req:2fb40568533c1a6d",
             "home": "opt:2fb40568533c1a6d",
             "socketPath": "opt:2fb40568533c1a6d",
@@ -4704,10 +4755,12 @@
             "dataDir": "opt:2fb40568533c1a6d",
             "startToken": "opt:2fb40568533c1a6d",
             "startEpoch": "opt:f6522636230fa080",
+            "ns": "opt:f6522636230fa080",
+            "hold": "opt:2fb40568533c1a6d",
             "settings": "opt:09b94ba87da5c3f0"
           },
           "sigs": [
-            "b925ff518131cb01"
+            "5dccd00b2ad07c2c"
           ]
         },
         "markAsync": {
@@ -5489,6 +5542,17 @@
             "68b3405a06dc5203"
           ]
         },
+        "homeWasRequested": {
+          "kind": "function",
+          "sig": "c066c3898d4e2998",
+          "members": {
+            "param0": "req:e29fe17fdfc7f7ce|",
+            "return": "req:0ecca0fe3beba89b"
+          },
+          "sigs": [
+            "2727bc6e1bc47652"
+          ]
+        },
         "initSchema": {
           "kind": "function",
           "sig": "1f8a6574b6d74ca9",
@@ -5852,6 +5916,17 @@
             "26e93de95a7fbee1"
           ]
         },
+        "buildReleaseManifest": {
+          "kind": "function",
+          "sig": "79e6496c68e41cb6",
+          "members": {
+            "param0": "req:cc424ff4939ccd8d|f74bb6ba390535ef~intersection",
+            "return": "req:508ab3f54e202014"
+          },
+          "sigs": [
+            "82ef6c19ce629841"
+          ]
+        },
         "buildShipManifest": {
           "kind": "function",
           "sig": "627b9d15ea6cc111",
@@ -5928,6 +6003,17 @@
             "d1677584fb987bb8"
           ]
         },
+        "isReleaseTarget": {
+          "kind": "function",
+          "sig": "29cb41b8018b15fd",
+          "members": {
+            "param0": "req:8a0195ffd96928c3|e2e9e83e047a6f75~unknown",
+            "return": "req:7a84d59c1e0c1a1b"
+          },
+          "sigs": [
+            "9f9abdc02b3a8d51"
+          ]
+        },
         "isUpdateTarget": {
           "kind": "function",
           "sig": "f3c2390e51853854",
@@ -5994,6 +6080,31 @@
           },
           "sigs": [
             "d4fb71e3212ff7eb"
+          ]
+        },
+        "probeArtifact": {
+          "kind": "function",
+          "sig": "d002aa854adc79a3",
+          "members": {
+            "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
+            "return": "req:310f469b5560e449"
+          },
+          "sigs": [
+            "25a839ccc8c6ec54"
+          ]
+        },
+        "RELEASE_TARGETS": {
+          "kind": "variable",
+          "sig": "233e17a3ce60b345",
+          "sigs": [
+            "233e17a3ce60b345"
+          ]
+        },
+        "ReleaseTarget": {
+          "kind": "typeAlias",
+          "sig": "27a50c693b0a5bb8",
+          "sigs": [
+            "27a50c693b0a5bb8"
           ]
         },
         "SAFE_TOKEN": {

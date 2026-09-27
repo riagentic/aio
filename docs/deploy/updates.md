@@ -186,6 +186,32 @@ manifest is not at exactly that path is invisible. Not an error — invisible. T
 app reports "no updates available" forever, on the users' machines, and nothing
 anywhere says why.
 
+A platform's manifest carries ONE artifact, so where a build makes two for one
+platform, publish picks the one an update can install as the platform's
+`<os>-<arch>.json`. An Electron build for Windows makes two **install kinds**:
+the self-contained `<name>-win-x64.exe` (kind `binary`) is the platform's
+update, and the `.zip` gets a manifest of its own,
+`<os>-<arch>.electron-zip.json` — an install unpacked from the zip reads that
+one first and falls back to `<os>-<arch>.json` when the channel has none (a 404
+or 410, then not asked again for a day; a timeout fails the check). A zip
+install running aio older than 1.0.13-beta only reads `<os>-<arch>.json`, is
+offered the `.exe` it cannot install, and must be updated by hand once;
+publish's summary says so. Any other tie is refused, naming both files. A macOS
+`.dmg` is download-only: `downloads` in `--json` lists it, `stranded` lists any
+download whose platform got no manifest, and each of `releases` names its
+`kind`.
+
+**The data contract.** Publish asks each artifact it can run here
+(`<binary> --aio-data-contract`) and stamps that answer into the manifests of
+the ones it cannot — the same cells compile into every artifact of one build. On
+a Mac, a `<bin>-mac-<arch>.app.tar.gz` built on this kind of Mac is unpacked and
+its bundle executable asked, unless `--data` or `--no-data` already answers. A
+`.app` nothing here can ask, with no other artifact to answer for it, is
+**refused** unless you pass `--data=contract.json` (captured on a Mac) or
+`--no-data` (publish without one, on purpose). Every release that goes out
+without a contract is warned about on stderr, in `--json` mode too, with the
+reason per file.
+
 Useful flags: `--dir=/srv/releases` (where to stage), `--channel=test`,
 `--notes="fixes the sync bug"`, `--no-build` (publish what `dist/` already
 holds). Unsigned is allowed for a local or air-gapped channel, and every step
@@ -200,6 +226,13 @@ deno task ship ./dist/wallet --channel=prod   # signs with ~/.aio/keys/wallet-re
 # → wallet.ship.json, next to the artifact. Copy BOTH into <source>/prod/,
 #   with the manifest named <os>-<arch>.json.
 ```
+
+The release is named from `deno.json` (`appId` > `title` > `name`), and every
+install refuses a release whose name is not its own `appId`. So `ship` (and
+`am publish`) asks the artifact which id it runs as and refuses a mismatch — for
+example `aio.run({ appId: "wallet" })` in code with only `"title": "My Wallet"`
+in `deno.json`. Fix it once with `"appId": "wallet"` in `deno.json`, or pass
+`--name=wallet` to `ship`.
 
 Or let CI do it:
 
@@ -264,9 +297,39 @@ refuses anything that fails verification or the data gate.
 The failure this design cares about is the 3am one: the new build does not come
 up, and a supervisor restarts it forever. So the **new build verifies itself**.
 The swap writes a pending marker; the new version gets two boots to reach a
-serving state; if it does not, it puts the previous artifact back and exits so
-the supervisor starts a version that works, naming the backup if the update had
-migrated data.
+serving state with the app's own `onStart` through (an async one settled, still
+running after 30 s, or the app quit cleanly — exit code 0); if it does not, it
+puts the previous artifact back and exits so the supervisor starts a version
+that works, naming the backup if the update had migrated data.
+
+A new version that never boots at all cannot judge itself. For the directory
+swaps (Electron `.zip` and macOS `.app`) the swap helper covers that case: it
+waits up to 120 s for the new version's first boot to take a first-boot token.
+If that never happens (macOS refused to open it, or it exited or hung before
+booting), the helper takes the token itself, stops whatever still runs from the
+new folder, puts the old folder back and starts it. Taking the token is one
+atomic file operation on each side, so exactly one of them wins, even when the
+first boot arrives at the moment the wait runs out; a new version that lost
+exits before it writes anything. Whichever way an update is rolled back, the
+next boot logs `update X → Y was rolled back: …` and dismisses Y, so it is not
+installed again automatically. A newer release is offered as usual, and
+`undismiss()` offers Y again.
+
+If the helper cannot move a folder (a file lock held by antivirus or an open
+Explorer window), it retries each move for 10 s. If the move still fails, it
+puts back what it moved, starts the old version, and records why; the next boot
+logs `update X → Y could not be installed: <why>`. If it cannot move the old
+folder back during a rollback, it starts the version in place and the next boot
+logs `ROLLBACK FAILED of update X → Y: … — this is still Y`, naming the folder
+to put back by hand. When neither folder can be moved back, it records that
+first and starts the old copy where it was set aside
+(`— this is X, started
+from where it was set aside`). A pending marker found by
+the very executable it was meant to replace is recorded as a failed update,
+never confirmed. A new version built with aio 1.0.12 or older never takes the
+token; its boot rewrites the pending marker instead, and the helper counts that
+as its first boot. On Windows, the in-app rollback of a `.zip` install also goes
+through the helper, because a running folder cannot be moved from inside.
 
 Under systemd (or any supervisor), aio exits and lets the unit restart it rather
 than launching a competing process. On a plain CLI launch it starts the
@@ -329,6 +392,32 @@ thrown error, so a method can show it.
   running one, verified, and renamed over it. Renaming a running executable is
   safe on Unix (writing to one is not: `ETXTBSY`); the running process keeps its
   inode, and the path now resolves to the new version. Then the app restarts.
+- **Electron (macOS `.app`)** — the release is the signed bundle as
+  `<bin>-mac-<arch>.app.tar.gz` (`am publish` names it in `darwin-<arch>.json`;
+  the `.dmg` beside it stays the first download). It is unpacked beside the
+  running `X.app`, its seal checked with `codesign --verify --deep --strict` (a
+  failure keeps the running version, untouched), then a detached shell swaps the
+  folders once the app exits and relaunches it with `open -n`.
+  - **Move it to /Applications first.** An app opened straight from the disk
+    image or from Downloads runs from a read-only App Translocation copy (the
+    browser's quarantine mark does that); it refuses to update, before
+    downloading anything, with "Move X.app to /Applications … then update". A
+    folder the user cannot write is refused the same way.
+  - **Keychain.** An aio app creates no Keychain item. This was measured on
+    macOS 14 across an update from 1.0.0 to 1.0.2: before and after it, there
+    was no `<App> Safe Storage` entry, no SecurityAgent prompt, and
+    `document.cookie` did not persist on the `aio://` page. A new ad-hoc
+    identity per version therefore leaves nothing for macOS to ask about.
+  - A swapped-in version carries no quarantine mark (it was never downloaded by
+    a browser), so Gatekeeper does not hold its launch.
+- **Electron (Windows)** — the self-contained `.exe` is replaced like a Linux
+  binary; an install unpacked from the `.zip` is a folder, swapped by a detached
+  helper once the app exits (it waits up to 30 s for every process running from
+  the install, retries each move for 10 s, and always ends with a version
+  started). The helper starts through `CreateProcessW` with no console window;
+  without `--allow-ffi`, through `cmd.exe`. The `--version` check of a new
+  download runs off the app's thread, so the antivirus scan of a new exe does
+  not freeze the window.
 - **A CLI binary you launched yourself** — with no `auto`, the check at startup
   asks on the terminal: `Update to 2.1.0? The app will restart. [y/N]`. A
   non-interactive launch is never asked, because a service blocking on stdin

@@ -24,10 +24,13 @@
 //
 // Deliberately NOT here: `aio/extras` and `aio/sync`. Both entries pull server
 // code (`parseCli`/`instances`, `server-handler.ts`), so importing either from
-// a page is a mistake — but a bundler may tree-shake an app down to the part
-// that does work, and turning today's working build into a refusal is not a
-// fix. `tests/entry-classification.test.ts` holds them as a named, deliberate
-// gap rather than letting them sit in an unwatched middle.
+// a page is a mistake, and dev and the bundle both refuse a static import of
+// either (isBrowserEntry) — just not with the SERVER-entry wording.
+// `tests/entry-classification.test.ts` holds them as a named, deliberate
+// middle.
+
+import { justifiedFor } from "../diagnostics/ok-marker.ts";
+import { codeMask } from "../diagnostics/code-mask.ts";
 
 /** aio's own entries that cannot resolve — or cannot run — in a browser. */
 export const SERVER_ONLY_SPECS: ReadonlySet<string> = new Set([
@@ -123,10 +126,9 @@ export function explainServerOnlyImport(
 
 /** Is `spec` one of aio's OWN entries? Broader than {@link SERVER_ONLY_SPECS}
  *  on purpose: that set is the hard, named subset, while `aio/extras` and
- *  `aio/sync` are deliberately outside it (a bundler may tree-shake an app
- *  down to the part that works, and turning a working build into a refusal is
- *  not a fix). Both families still share ONE fact — the browser import map
- *  omits them and no npm package exists — so both must get the same truthful
+ *  `aio/sync` are deliberately outside it. Both families share ONE fact — the
+ *  browser import map omits them and no npm package exists — so both must get
+ *  the same truthful
  *  advice when a browser file cannot resolve one. They did not: `aio/extras`
  *  fell through to "add `npm:aio/extras` to deno.json", the exact advice this
  *  module's header calls actively harmful. */
@@ -144,4 +146,280 @@ export function aioOwnSpecAdvice(spec: string): string {
     `\`npm:${spec}\` package, and editing deno.json will not help. Use it ` +
     `from a cell METHOD (\`const { … } = await import("${spec}")\` — methods ` +
     `run on the server), or from a *.server.ts module imported lazily.`;
+}
+
+/** `// aio-ok: server-only` — the acknowledgement path the warning had none of.
+ *
+ *  A field report ran for weeks with `⚠ src/cell/job.ts:292 — Deno.remove is
+ *  server-only` on every launch, pointing at a `finally` block inside a method
+ *  that only ever runs on the server, cleaning up a file it had itself created.
+ *  The rule is right in general and wrong there, and with no way to say so the
+ *  line became permanent noise printed next to the ✖ errors that genuinely
+ *  break the client — which trains people to skim the one output they most need
+ *  to read carefully. `aiol` already had this idiom (`// aiol-ok`).
+ *
+ *  Accepted on the flagged line, or on a comment line immediately above it
+ *  (where the reason belongs, and where `deno fmt` cannot move it).
+ *
+ *  Deliberately NOT accepted for blocking categories: "this path never runs in
+ *  the browser" is a claim a developer can make, "this import exists in the
+ *  browser build" is not — that one is a guaranteed blank screen, and a
+ *  silenceable one would be worse than the noise. */
+export function isServerOnlySuppressed(
+  lines: readonly string[],
+  lineNum: number,
+): boolean {
+  // TWO SPELLINGS, both permanent. The original is `// aio-ok: server-only`,
+  // which is what every existing suppression in the wild says and must keep
+  // meaning. `// aio-ok(server-only): why` is the repo's general scoped form
+  // (src/diagnostics/ok-marker.ts) and lands here too, so someone who learned
+  // the marker anywhere else does not have to learn a second grammar.
+  const legacy = /\/\/.*\baiol?-ok\b\s*[:\-—]?\s*server-only/;
+  // `justifiedFor`, not `justified`: the scope is REQUIRED here. The
+  // permissive form let an unscoped `// aio-ok: some other reason` silence a
+  // server-only finding, which this function's own test forbids in so many
+  // words — "a marker for one rule must not quietly cover another".
+  const hit = (line: string) =>
+    legacy.test(line) ||
+    (line.includes("//") && justifiedFor(line, "server-only"));
+  const own = lines[lineNum - 1] ?? "";
+  if (hit(own)) return true;
+  const above = (lines[lineNum - 2] ?? "").trim();
+  return above.startsWith("//") && hit(above);
+}
+
+/** The DYNAMIC imports of aio entries a page cannot load (`isNonBrowser`)
+ *  that `source` writes where the PAGE provably runs them — minus
+ *  `// aio-ok: server-only` lines.
+ *
+ *  Dev and the bundle both leave such an import external (the server runs
+ *  it). In a server cell's methods (however the object is spelled or where it
+ *  lives), `onInit`/`onDestroy`, or a helper only those call (the `db()`
+ *  pattern in docs/build/imports.md) that is right — and a regex scanner
+ *  cannot tell such code from UI code. A warning there fired on every dev
+ *  launch of a correct app: noise that trains people to skip the output. So
+ *  only code that is browser code BY SYNTAX is reported:
+ *  - a JSX event handler — `onClick={async () => (await import("aio/extras")).x()}`,
+ *    or `onClick={save}` / `onClick={() => save()}` whose `save` this file
+ *    declares;
+ *  - anything inside a `cell(…)` call that says `scope: "client"` — its
+ *    methods run in the tab.
+ *  There the page runs the import and dies right then, in dev and in prod,
+ *  with "Failed to resolve module specifier". Warned, not refused. ONE
+ *  decider for dev and the build. Pure. */
+export function dynamicImportsOutsideMethods(
+  source: string,
+  isNonBrowser: (spec: string) => boolean,
+): { spec: string; line: number }[] {
+  const mask = codeMask(source);
+  // The offset of the bracket closing the one at `open` (code only).
+  const close = (open: number) => {
+    const o = source[open]!, c = o === "{" ? "}" : ")";
+    let depth = 0, i = open;
+    for (; i < source.length; i++) {
+      if (!mask[i]) continue;
+      if (source[i] === o) depth++;
+      else if (source[i] === c && --depth === 0) break;
+    }
+    return i;
+  };
+  // Past a type argument list at `at` (`<` / `>` counted, `=>` is no
+  // bracket) and the whitespace after it; `at` itself when there is none.
+  const pastTypeArgs = (at: number) => {
+    if (source[at] !== "<") return at;
+    for (let depth = 0; at < source.length; at++) {
+      if (!mask[at]) continue;
+      if (source[at] === "<") depth++;
+      else if (source[at] === ">" && source[at - 1] !== "=" && --depth === 0) {
+        break;
+      }
+    }
+    at++;
+    while (/\s/.test(source[at] ?? "")) at++;
+    return at;
+  };
+  // Where the declaration statement starting at `from` ends: a depth-0 `;`
+  // or `,`, a bracket closing below it, or a depth-0 newline the expression
+  // does not continue past (a trailing operator / `=>`, or a leading `.`/`?`/`:`).
+  const statementEnd = (from: number) => {
+    let depth = 0, i = from;
+    for (; i < source.length; i++) {
+      if (!mask[i]) continue;
+      const c = source[i]!;
+      if ("([{".includes(c)) depth++;
+      else if (")]}".includes(c) && --depth < 0) break;
+      else if (depth === 0 && (c === ";" || c === ",")) break;
+      else if (depth === 0 && c === "\n") {
+        let k = i - 1; // the last CODE char — never a comment's
+        while (k >= from) {
+          if (!mask[k] || /\s/.test(source[k]!)) k--;
+          else if (source[k] === "/" && source[k - 1] === "/") k -= 2;
+          else if (source[k] === "/" && source[k - 1] === "*") {
+            k = source.lastIndexOf("/*", k - 2) - 1;
+          } else break;
+        }
+        const before = k < from ? "" : source[k]!;
+        const after = source.slice(i).trimStart()[0] ?? "";
+        if (!"=>+-*/?:&|".includes(before) && !".?:".includes(after)) break;
+      }
+    }
+    return i;
+  };
+  const browser: [number, number][] = [];
+  // Every called name → the handler brackets that call it (resolved once, below).
+  const calls = new Map<string, number[]>();
+  // A JSX attribute, not `const onSave = { … }` or `el.onFoo = {…}`.
+  const handler = /(?<=\s)(?<!\b(?:const|let|var)\s+)on[A-Z]\w*\s*=\s*\{/g;
+  for (const m of source.matchAll(handler)) {
+    if (!mask[m.index]) continue;
+    const open = m.index + m[0].length - 1, end = close(open);
+    browser.push([open, end]);
+    // `onClick={save}`, or `onClick={() => save()}` — a function this file
+    // declares runs in the page too (one level: its own calls are not chased).
+    const attr = source.slice(open, end + 1);
+    const names = new Set<string>();
+    const bare = /^\{\s*([A-Za-z_$][\w$]*)\s*\}$/.exec(attr)?.[1];
+    if (bare) names.add(bare);
+    else {
+      // A bare CALL in code — `console.log()` / `api.save()` are members.
+      for (const c of attr.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*\(/g)) {
+        if (mask[open + c.index]) names.add(c[1]!);
+      }
+    }
+    for (const name of names) {
+      calls.get(name)?.push(open) ?? calls.set(name, [open]);
+    }
+  }
+  if (calls.size) resolveCalls();
+  /** Mark the declaration each called name resolves to — the innermost one
+   *  whose block also holds the handler (a same-named helper local to a
+   *  server method is another binding) — as browser code. One linear scan. */
+  function resolveCalls(): void {
+    // The innermost `{` holding each offset (-1 = module level), and its `}`.
+    const block = new Int32Array(source.length);
+    const shut = new Map<number, number>();
+    const stack: number[] = [];
+    for (let i = 0; i < source.length; i++) {
+      block[i] = stack.at(-1) ?? -1;
+      if (!mask[i]) continue;
+      if (source[i] === "{") stack.push(i);
+      else if (source[i] === "}" && stack.length) shut.set(stack.pop()!, i);
+    }
+    const holds = (b: number, at: number) =>
+      b < 0 || (b < at && (shut.get(b) ?? source.length) > at);
+    const decls = new Map<string, RegExpExecArray[]>();
+    const decl =
+      /\b(?:(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=|function\s*\*?\s*([A-Za-z_$][\w$]*)\s*[(<])/g;
+    for (const d of source.matchAll(decl)) {
+      const name = d[1] ?? d[2]!;
+      if (!mask[d.index] || !calls.has(name)) continue;
+      decls.get(name)?.push(d) ?? decls.set(name, [d]);
+    }
+    const marked = new Set<RegExpExecArray>();
+    for (const [name, all] of decls) {
+      for (const h of calls.get(name)!) {
+        // Every declaration in that innermost block (overloads share one).
+        const seen = all.filter((d) => holds(block[d.index]!, h));
+        const inner = Math.max(...seen.map((d) => block[d.index]!));
+        for (const d of seen) if (block[d.index] === inner) marked.add(d);
+      }
+    }
+    for (const d of marked) {
+      const at = d.index + d[0].length;
+      if (d[0].endsWith("=")) browser.push([at, statementEnd(at)]);
+      else {
+        // A generic `function f<T>(…)`: its parameters follow the `<…>`.
+        const params = pastTypeArgs(at - 1);
+        const body = source[params] === "("
+          ? functionBody(close(params) + 1)
+          : -1;
+        if (body >= 0) browser.push([body, close(body)]);
+      }
+    }
+  }
+  /** The `{` of a function body after its parameter list — past a return
+   *  type (`: { a: 1 }` is a type literal, not the body); -1 for a body-less
+   *  signature (`declare function f(): void;`, an overload).
+   *
+   *  The rule is the type grammar's: at depth 0 a `{` is a type literal
+   *  exactly where a TYPE operand is still expected — after the annotation
+   *  `:`, a type operator (`|` `&` `=>`, a conditional's `?` / `:`, `keyof`,
+   *  `readonly`, `extends`, `is`, `asserts … is`, `infer`, `typeof`). After a
+   *  COMPLETE type (a name, a literal's closing quote, `)` `]` `}` `>`) the
+   *  next `{` is the body. `in` and mapped types only occur inside braces. */
+  function functionBody(from: number): number {
+    const typeWord = /(?<![\w$.])(?:keyof|readonly|extends|is|infer|typeof)$/;
+    let depth = 0, prev = -1; // the previous code char's offset
+    for (let i = from; i < source.length; i++) {
+      if (!mask[i] || /\s/.test(source[i]!)) continue;
+      const c = source[i]!;
+      if (
+        depth === 0 && c === "{" &&
+        !":|&,?".includes(source[prev] ?? " ") &&
+        !(source[prev] === ">" && source[prev - 1] === "=") &&
+        !typeWord.test(source.slice(Math.max(0, prev - 9), prev + 1))
+      ) return i;
+      if ("([{<".includes(c)) depth++;
+      else if (")]}".includes(c) || (c === ">" && source[i - 1] !== "=")) {
+        if (--depth < 0) return -1;
+      } else if (depth === 0 && c === ";") return -1;
+      prev = i;
+    }
+    return -1;
+  }
+  // A cell whose OPTIONS say `scope: "client"` — depth 1 inside the call, so
+  // a state field `{ scope: "client" }` of a server cell is not it.
+  for (const m of source.matchAll(/\bcell\s*(?=[<(])/g)) {
+    if (!mask[m.index]) continue;
+    // `cell<{ f: () => void }>(…)` is still this call.
+    const open = pastTypeArgs(m.index + m[0].length);
+    if (source[open] !== "(") continue;
+    const end = close(open);
+    let depth = 0;
+    for (let i = open; i < end; i++) {
+      if (!mask[i]) continue;
+      if (source[i] === "{") depth++;
+      else if (source[i] === "}") depth--;
+      else if (
+        depth === 1 &&
+        /^scope\s*:\s*(["'])client\1/.test(source.slice(i, i + 20)) &&
+        !/[\w$]/.test(source[i - 1]!)
+      ) {
+        browser.push([open, end]);
+        break;
+      }
+    }
+  }
+  const lines = source.split("\n");
+  const out: { spec: string; line: number }[] = [];
+  for (const m of source.matchAll(/\bimport\s*\(\s*(["'])([^"'\n]+)\1/g)) {
+    const spec = m[2]!;
+    if (!mask[m.index] || !isNonBrowser(spec)) continue;
+    if (!browser.some(([a, b]) => m.index > a && m.index < b)) continue;
+    // A TYPE (`import("aio/db").DB`, `typeof import(…)`): erased, never runs.
+    const after = source.slice(m.index + m[0].length);
+    if (
+      /^\s*\)\s*\.(?!\s*(?:then|catch|finally)\b)/.test(after) ||
+      /\btypeof\s*$/.test(source.slice(0, m.index))
+    ) continue;
+    const line = source.slice(0, m.index).split("\n").length;
+    if (!isServerOnlySuppressed(lines, line)) out.push({ spec, line });
+  }
+  return out;
+}
+
+/** What dev and the build both say about one of those imports. */
+export function dynamicOutsideMethodsAdvice(
+  spec: string,
+): { message: string; fix: string } {
+  return {
+    message: `\`import("${spec}")\` sits in browser code (a JSX event ` +
+      `handler or a \`scope: "client"\` cell) — a page cannot load ` +
+      `"${spec}" (the browser import map omits it), so it fails right then ` +
+      `with "Failed to resolve module specifier", in dev and in prod`,
+    fix: `Move the import into a server cell's METHOD (those run on the ` +
+      `server) and call the method from the page. If this path only ever runs on ` +
+      `the server, say so: \`// aio-ok: server-only — <reason>\` on the line ` +
+      `or the line above. See docs/build/imports.md.`,
+  };
 }

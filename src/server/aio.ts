@@ -19,7 +19,7 @@ import {
   registerRuntime,
   runtimeCount,
 } from "./shutdown.ts";
-import { _registerAuthStore, serverUser } from "./auth-context.ts";
+import { _registerAuthStore } from "./auth-context.ts";
 import type { ServerHandle } from "./server-types.ts";
 import type { UDSHandle } from "./uds.ts";
 import {
@@ -115,6 +115,7 @@ import {
   dbPathOf,
   exposeFlagOf,
   hostOf,
+  isolateOf,
   keepServerOf,
   persistOf,
   pick,
@@ -205,6 +206,7 @@ import {
   type FeedbackSlot,
 } from "../state/feedback-cell.ts";
 import { createCostMeter } from "../vitals/cost-meter.ts";
+import { DEFAULT_HEARTBEAT_INTERVAL } from "../vitals/types.ts";
 
 // CLI + path resolution
 import {
@@ -218,12 +220,12 @@ import {
   VERSION,
   versionLine,
 } from "./aio-cli.ts";
-import { awaitPredecessor } from "./updates-apply.ts";
+import { awaitPredecessor, ownReplayArgs } from "./updates-apply.ts";
 import { beginFeedback, startFeedback } from "./feedback-boot.ts";
 import {
   beginUpdates,
-  confirmPendingUpdate,
   judgePendingUpdate,
+  pendingConfirmer,
   startUpdates,
   ttyPrompt,
 } from "./updates-boot.ts";
@@ -239,7 +241,11 @@ import {
 } from "./paths.ts";
 import { openSessionStore, type SessionStore } from "./sessions.ts";
 import { openUserStore } from "./auth-users.ts";
-import { holdFileSizeGuard, resolveAppId } from "./single-instance-lock.ts";
+import {
+  holdFileSizeGuard,
+  inferredIdFallbackWarning,
+  resolveAppId,
+} from "./single-instance-lock.ts";
 import { appKeyPath, defaultAppKeyConfig, resolveAppKey } from "./app-key.ts";
 import { assertDenoVersion } from "./deno-version.ts";
 import { removalMessage, removalOf } from "../state/removals.ts";
@@ -1066,9 +1072,8 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
       (c): c is NonNullable<typeof c> => c !== undefined,
     );
 
-    // Isolate filter
-    const cliIsolate = parseCli().isolate;
-    const isolate = fc.isolate ?? cliIsolate;
+    // Isolate filter — the flag overrides the config (config-sources.ts).
+    const isolate = isolateOf(parseCli(), fc)?.value;
     // Zero-config cells: every cell() self-registers on definition — boot
     // whatever the entry imported (same behavior as the standalone runtime).
     //
@@ -1362,6 +1367,14 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
         request,
         profiles: fc.profiles,
       });
+      // A zero-config id whose inference rule changed under an app that
+      // already has data: the resolver kept the OLD id (never a silent fresh
+      // start, never a refused boot) — said once per boot, with both paths
+      // and both fixes (see legacyIdFallback). Only a DERIVED home moves.
+      if (!fc.appId && !fc.appDir && !fc.libraryMode && !plan.requested) {
+        const fallback = inferredIdFallbackWarning();
+        if (fallback) log.warn(fallback);
+      }
       // An explicit dbPath outside the requested home opens the DEFAULT
       // home's database under a profile's lock and logs — refused BEFORE the
       // plan is recorded, so a caught refusal leaves no profile behind.
@@ -1414,7 +1427,12 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
     // Which cells `startUpdates`/`startFeedback` wire, handed to the boot by
     // the config object's identity rather than as a config KEY (which every
     // layer of validation would have to learn about).
-    _appSlots.set(config, { updates: _updatesSlot, feedback: _feedbackSlot });
+    const slots: {
+      updates?: UpdatesSlot;
+      feedback?: FeedbackSlot;
+      confirm?: (atExit?: boolean) => void;
+    } = { updates: _updatesSlot, feedback: _feedbackSlot };
+    _appSlots.set(config, slots);
     const app = await _run(composed.initialState, config);
     appRef.current = app;
 
@@ -1432,6 +1450,23 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
     // throwing onStart must not abort a successful boot.
     // Guarded for a sync throw AND an async rejection: an `async onStart` used
     // to bypass the catch entirely and surface as an unhandled rejection.
+    // The pending update is confirmed only once the app's hook came through:
+    // `failed` has already ended the process for a fatal one.
+    let confirmed = false;
+    const confirmOnce = (atExit = false) => {
+      if (confirmed || fc.libraryMode) return;
+      confirmed = true;
+      removeEventListener("unload", onCleanExit);
+      slots.confirm?.(atExit);
+    };
+    // A CLEAN exit (code 0: the user quit, a one-shot `onStart` finished)
+    // before the hook came through is a build that worked — left unconfirmed,
+    // two quick quits rolled a healthy update back. A crash, a fatal
+    // `onStart` and `Deno.exit(n)` exit non-zero and stay unconfirmed.
+    const onCleanExit = () => {
+      if (Deno.exitCode === 0) confirmOnce(true);
+    };
+    if (!fc.libraryMode) addEventListener("unload", onCleanExit);
     if (fc.onStart) {
       // `fatalOnStart` is documented to end the process when `onStart` fails
       // (docs/state/lifecycle.md), and it only ever guarded aio's OWN start
@@ -1449,12 +1484,22 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
       try {
         const r = fc.onStart(app) as unknown;
         if (r && typeof (r as Promise<unknown>).then === "function") {
-          (r as Promise<unknown>).catch(failed);
-        }
+          // Confirmed when it settles (a fatal failure has exited by then),
+          // or after the backstop for a hook that never settles.
+          const backstop = fc.libraryMode
+            ? undefined
+            : setTimeout(() => confirmOnce(), CONFIRM_BACKSTOP_MS);
+          if (backstop !== undefined) Deno.unrefTimer(backstop);
+          (r as Promise<unknown>).catch(failed).finally(() => {
+            clearTimeout(backstop);
+            confirmOnce();
+          });
+        } else confirmOnce();
       } catch (e) {
         failed(e);
+        confirmOnce();
       }
-    }
+    } else confirmOnce();
     return app;
   } catch (e) {
     // A BOOT THAT REFUSES LEAVES NOTHING BEHIND.
@@ -1540,11 +1585,19 @@ function createBootUndo(): BootUndo {
  *  that asserts a refusal. Each step registers its undo as it starts, and a
  *  throw runs them in reverse — dev and prod alike. */
 /** The per-app `updates` / `feedback` slots `run()` chose, keyed by the
- *  config it hands `_run`. */
+ *  config it hands `_run` — and the update confirmation `_run` hands back,
+ *  which `run()` calls once the app's own `onStart` has come through. */
 const _appSlots = new WeakMap<
   object,
-  { updates?: UpdatesSlot; feedback?: FeedbackSlot }
+  {
+    updates?: UpdatesSlot;
+    feedback?: FeedbackSlot;
+    confirm?: (atExit?: boolean) => void;
+  }
 >();
+/** How long an `async onStart` that has not settled holds the confirmation
+ *  back: a hook that serves forever still proves the build boots. */
+const CONFIRM_BACKSTOP_MS = 30_000;
 
 async function _run<S, A, E>(
   initialState: S,
@@ -1622,6 +1675,19 @@ async function _runPhases<S, A, E>(
     console.error(
       `[aio] persisting-cells: ${(config._persistingCellIds ?? []).length}`,
     );
+    // …and the identity this build RUNS as — the name every install compares a
+    // manifest's signed `name` against. `ship` names a release from deno.json;
+    // an `aio.run({ appId })` in code that disagrees made every release
+    // refused by every install, with nothing said at publish time. Unresolvable
+    // (no id anywhere) → no marker: that app cannot boot, and says so there.
+    let runsAs: string | undefined;
+    try {
+      runsAs = resolveAppId(config.appId);
+    } catch {
+      // aio-ok: no id to report; the boot path throws the teaching error.
+    }
+    // aio-ok: a marker `aio ship` parses off stderr, beside the JSON on stdout.
+    if (runsAs) console.error(`[aio] app-id: ${runsAs}`);
     Deno.exit(0);
   }
 
@@ -1831,9 +1897,6 @@ async function _runPhases<S, A, E>(
     },
   );
   bootUndo.push("lock", () => appLock?.release());
-  // The lock is ours (or this boot takes none): only now may it write data/.
-  await _stampDataDir?.();
-
   // Did the last boot install something? Count this attempt, or — having spent
   // them — put the old artifact back and let the supervisor start it. Runs in
   // the NEW build, because it is the only thing present to judge itself.
@@ -1842,10 +1905,18 @@ async function _runPhases<S, A, E>(
   // the singleton lock still burned an attempt: start an already-running app
   // twice and the third launch rolled back a perfectly healthy update. A boot
   // that never got as far as owning the app cannot be evidence about the build.
-  if (!config.libraryMode && await judgePendingUpdate(_dirs.data, log)) {
+  if (
+    !config.libraryMode &&
+    await judgePendingUpdate(_dirs.data, log, await _appVersion())
+  ) {
     appLock?.release();
     Deno.exit(1);
   }
+
+  // The lock is ours (or this boot takes none): only now may it write data/.
+  // After the judge: a build the swap helper already rolled back exits there
+  // without having stamped this data dir as its own.
+  await _stampDataDir?.();
 
   // Electron-only flags on a non-Electron client are refused HERE, before the
   // thin-client path can act on one: `--connect` with `--client=browser` used
@@ -2187,7 +2258,12 @@ async function _runPhases<S, A, E>(
   // real cause. `getTT` stays a closure, so the only ordering that matters is
   // that `tt` is initialized before an error is reported, which it now is.
   let tt: TTState<S, { type: string }> | null = null;
-  const _reportOpts = buildReportOpts({ onError, getTT: () => tt, prod });
+  const _reportOpts = buildReportOpts({
+    onError,
+    getTT: () => tt,
+    prod,
+    redact,
+  });
 
   const boot = await bootStorage({
     appId,
@@ -2240,6 +2316,7 @@ async function _runPhases<S, A, E>(
     syncBroadcastRef,
     strayJournal,
     storeSavedElsewhere,
+    journalHeld,
   } = boot;
   bootUndo.push("sqlite", () => asyncDb?.close());
   bootUndo.push("kv", () => kvDb?.close());
@@ -2513,33 +2590,38 @@ async function _runPhases<S, A, E>(
     return (out ?? replayed) as S;
   }
 
-  /** The replayed state, with every `onPersist`-shaped cell the replay
-   *  touched sent through the round trip a clean restart gives it: the slice
-   *  is shaped exactly as the store writes it (filter, then `onPersist`, then
-   *  JSON), merged over the declared state, and repaired by the cell's
-   *  `onRestore`.
+  /** The replayed state, with every cell the replay touched sent through the
+   *  round trip a clean restart gives it: the slice is written exactly as the
+   *  store writes it (filter, then `onPersist`, then JSON) and read back the
+   *  way boot reads it (`_restartedSlice`).
    *
-   *  A shape names no fields, so `_keepUnpersistedFields` cannot read one:
-   *  `onPersist: (s) => ({ data: s.data })` kept `cache` off disk, and a
-   *  `setBoth(7)` came back `cache: 0` after a clean stop and `cache: 7` after
-   *  a SIGKILL — the journal replayed the write the shape exists to drop.
-   *  Only the round trip itself is exact for a shape that RESHAPES, too.
+   *  This used to run for `onPersist`-shaped cells only — a shape names no
+   *  fields, so `_keepUnpersistedFields` cannot read one (`onPersist: (s) =>
+   *  ({ data: s.data })` kept `cache` off disk, and a `setBoth(7)` came back
+   *  `cache: 0` after a clean stop and `cache: 7` after a SIGKILL). But a
+   *  PLAIN cell's restore is `deepMerge(declared, stored)` too, and replay
+   *  kept its slice as the method left it: `delete s.m.a; s.m.extra = 5` came
+   *  back `{ b: 2, extra: 5 }` after a SIGKILL and `{ a: 1, b: 2 }` after a
+   *  clean stop — the deleted declared key filled back in and the undeclared
+   *  one dropped, as the write guard promises. Every cell takes the one read
+   *  now, so the two stops cannot drift apart again one cell kind at a time.
+   *
+   *  A sync cell is not restored from the store (its op-log is its record —
+   *  `replaySyncOps`), so it keeps what replay produced.
    *
    *  A shape that throws here is the same failure the persist path reports on
    *  its next write; the replayed slice is kept and the throw is said now. */
-  function _roundTripShapedCells(restored: S, replayed: S): S {
-    const shaped = config._cellPersistShaped;
-    if (!shaped?.length || replayed === restored) return replayed;
+  function _roundTripReplayedCells(restored: S, replayed: S): S {
+    if (replayed === restored) return replayed;
     const from = restored as Record<string, unknown>;
     const declared = initialState as Record<string, unknown>;
-    const restores = config._cellRestores;
     let out: Record<string, unknown> | null = null;
-    for (const cell of shaped) {
+    for (const cell of Object.keys(declared)) {
       const now = (replayed as Record<string, unknown>)[cell];
-      if (now === from[cell] || !_isRecord(now) || !_isRecord(declared[cell])) {
-        continue;
-      }
-      let slice: Record<string, unknown>;
+      if (
+        now === from[cell] || !_isRecord(now) || !_isRecord(declared[cell]) ||
+        syncCellIds.includes(cell)
+      ) continue;
       let disk: Record<string, unknown>;
       try {
         const stored = (getDBState({ [cell]: now } as S) as
@@ -2548,10 +2630,6 @@ async function _runPhases<S, A, E>(
         disk = stored === undefined
           ? {}
           : JSON.parse(JSON.stringify(stored)) as Record<string, unknown>;
-        slice = deepMerge(
-          structuredClone(declared[cell]) as Record<string, unknown>,
-          disk,
-        );
       } catch (e) {
         log.error(
           `journal: could not shape the replayed "${cell}" slice the way ` +
@@ -2562,18 +2640,39 @@ async function _runPhases<S, A, E>(
         );
         continue;
       }
-      const hook = restores?.get(cell);
-      if (hook) {
-        slice = runCellRestore(cell, hook, slice, {
-          stored: disk,
-          declared: declared[cell],
-          retyped: true,
-        }, log);
-      }
       out ??= { ...(replayed as Record<string, unknown>) };
-      out[cell] = slice;
+      out[cell] = _restartedSlice(cell, disk);
     }
     return (out ?? replayed) as S;
+  }
+
+  /** One cell's slice as a clean restart reads it back from `disk` (its
+   *  stored form, already through JSON): the declared state with the stored
+   *  fields merged over it — `bootStorage`'s `deepMerge`, so a declared key
+   *  the store lacks is filled in and an undeclared one is dropped — and, for
+   *  an `onPersist`-shaped cell, its `onRestore` handed the stored shape. A
+   *  plain cell's `onRestore` runs in `_rerunRestoreHooks`, in boot's order.
+   *  The one read every replay path shares (`_roundTripReplayedCells`,
+   *  `_restoreStoredSlice`). */
+  function _restartedSlice(
+    cell: string,
+    disk: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const declared = (initialState as Record<string, unknown>)[cell];
+    const slice = deepMerge(
+      structuredClone(declared) as Record<string, unknown>,
+      disk,
+    );
+    const hook = config._cellPersistShaped?.includes(cell)
+      ? config._cellRestores?.get(cell)
+      : undefined;
+    return hook
+      ? runCellRestore(cell, hook, slice, {
+        stored: disk,
+        declared,
+        retyped: true,
+      }, log)
+      : slice;
   }
 
   /** A time-travel line's STORED fields as the cell's live slice (see
@@ -2582,7 +2681,7 @@ async function _runPhases<S, A, E>(
    *  over it, the cell's `onRestore` — because the fields are its SHAPE, not
    *  its state, and spreading them over the live slice produced
    *  `{ n: 0, saved: 1 }` for `onPersist: (s) => ({ saved: s.n })`, which
-   *  `_roundTripShapedCells` then reshaped from `n: 0` (external review, rev4).
+   *  `_roundTripReplayedCells` then reshaped from `n: 0` (external review, rev4).
    *  Every other cell keeps the spread. */
   function _restoreStoredSlice(
     cell: string,
@@ -2603,22 +2702,10 @@ async function _runPhases<S, A, E>(
       return _unpersistedFromBoot(
         config._cellPersist?.[cell] ?? "all",
         live,
-        deepMerge(structuredClone(declared) as Record<string, unknown>, disk),
+        _restartedSlice(cell, disk),
       );
     }
-    let slice = deepMerge(
-      structuredClone(declared) as Record<string, unknown>,
-      disk,
-    );
-    const hook = config._cellRestores?.get(cell);
-    if (hook) {
-      slice = runCellRestore(cell, hook, slice, {
-        stored: disk,
-        declared,
-        retyped: true,
-      }, log);
-    }
-    return slice;
+    return _restartedSlice(cell, disk);
   }
 
   /** Say it when the tail holds lines with NO version stamp for a cell this
@@ -2771,10 +2858,18 @@ async function _runPhases<S, A, E>(
    *  state is its last snapshot, and a line from before the crash applied to
    *  it would fold a write onto a shape it was never taken on. They stay on
    *  disk (`retireCells` spares them), and are NAMED — fixing the cell's
-   *  version/onMigrate and restarting replays them. */
+   *  version/onMigrate and restarting replays them.
+   *
+   *  The same for a cell this build does not DECLARE (`journalHeld`): it has
+   *  no methods to re-run them through, and its stored slice is preserved
+   *  untouched — so are its lines, held by the journal (`journalHeldCellsKey`)
+   *  until a build declares the cell and replays them onto that slice. They
+   *  used to be "replayed" as no-ops, counted recovered, and compacted away
+   *  by the first save. */
   function _quarantinedTail(tail: JournalEntry[]): JournalEntry[] {
-    const q = asyncDb ? getSyncReplayContext(asyncDb)?.quarantined : undefined;
-    if (!q?.size || tail.length === 0) return tail;
+    const sq = asyncDb ? getSyncReplayContext(asyncDb)?.quarantined : undefined;
+    const q = new Set([...(sq ?? []), ...journalHeld]);
+    if (!q.size || tail.length === 0) return tail;
     const own = (e: JournalEntry): string | undefined => {
       if (e.only?.length) {
         return e.only.every((k) => q.has(k)) ? e.only[0] : undefined;
@@ -2793,6 +2888,16 @@ async function _runPhases<S, A, E>(
       return false;
     });
     for (const [c, seqs] of held) {
+      if (journalHeld.has(c)) {
+        log.warn(
+          `journal: "${c}" is not declared by this build — ${
+            count(seqs.length, "journalled line")
+          } written for it (seq ${seqs[0]}–${seqs.at(-1)}) are KEPT in ` +
+            `${journal!.path}, not applied, like its stored data. Re-declare ` +
+            `"${c}" and restart: they are replayed onto that data then.`,
+        );
+        continue;
+      }
       log.error(
         `journal: "${c}" is quarantined — ${
           count(seqs.length, "journalled line")
@@ -3060,7 +3165,7 @@ async function _runPhases<S, A, E>(
       );
       state = _rerunRestoreHooks(
         state,
-        _roundTripShapedCells(
+        _roundTripReplayedCells(
           state,
           _keepUnpersistedFields(state, replay.state),
         ),
@@ -3385,7 +3490,14 @@ async function _runPhases<S, A, E>(
         return;
     }
     if (tt === prev) return;
-    const restored = stateAt(tt);
+    // Only a MOVE replaces live state. `pause`/`resume` return a new TTState
+    // (the flag) at the same position, and treating that as a jump rewound
+    // live state to the last RECORDED entry — undoing every action
+    // `skipActions` had let through since (they "dispatch, broadcast and
+    // persist normally"), and journalling the rewind. Same position, same
+    // entries: the flag changes, the state does not.
+    const moved = tt.index !== prev.index || tt.entries !== prev.entries;
+    const restored = moved ? stateAt(tt) : null;
     if (restored !== null) {
       const before = state;
       state = restored;
@@ -3509,7 +3621,7 @@ async function _runPhases<S, A, E>(
         // screening through the filter alone still wrote the session token an
         // `onPersist` strips — the field the store has never once held, put
         // on disk by pressing undo. The replay side already asks this getter
-        // (`_roundTripShapedCells`); this is the write side asking it too.
+        // (`_roundTripReplayedCells`); this is the write side asking it too.
         //
         // `persist: "none"` ⇒ nothing of this cell is stored, so the line
         // names it not at all; replay leaves such a cell where it is either
@@ -4518,9 +4630,12 @@ async function _runPhases<S, A, E>(
 
   // Vitals periodic check
   if (vitalsSystem) {
+    // 0 / NaN / a negative reach startVitalsCheck, which says so and uses
+    // the default (a silent `|| 1000` here hid them).
     const interval = (typeof diagResolvedOpts === "object" &&
-      typeof diagResolvedOpts.vitals === "object" &&
-      diagResolvedOpts.vitals.heartbeatInterval) || 1000;
+        typeof diagResolvedOpts.vitals === "object"
+      ? diagResolvedOpts.vitals.heartbeatInterval
+      : undefined) ?? DEFAULT_HEARTBEAT_INTERVAL;
     _vitalsCheckTimer = startVitalsCheck({
       vitalsSystem,
       heartbeatInterval: interval,
@@ -4728,7 +4843,17 @@ async function _runPhases<S, A, E>(
     const i = type.indexOf(":");
     const cellId = i === -1 ? type : type.slice(0, i);
     if (!_inIsolateWorkerCells.has(cellId)) return dispatch(a);
-    const sent = _cloneAcrossWorkerBoundary(a, "action payload", cellId) as A;
+    // A clone failure is the call's REJECTION, as `postMessage`'s is on the
+    // real bridge (cell-worker.ts `call`) — a synchronous throw out of here
+    // escaped every door's ack: a WS caller whose `_user` could not be cloned
+    // waited out its ceiling with no answer, where the real worker refused it
+    // at once by name.
+    let sent: A;
+    try {
+      sent = _cloneAcrossWorkerBoundary(a, "action payload", cellId) as A;
+    } catch (e) {
+      return Promise.reject(e);
+    }
     // An ASYNC method answers through its registered call, not through this
     // dispatch's promise (that one resolves `undefined` once the method is
     // queued) — so its return value is cloned where the call settles.
@@ -4765,9 +4890,11 @@ async function _runPhases<S, A, E>(
   const appDispatch = workerPool.size > 0
     ? (((a: _RoutedMsg) => {
       // A worker call with a user in scope opens a window for its notify —
-      // see `_workerUserCalls`. The same "user in scope" the worker's method
-      // itself runs under (the ambient user it is handed), or the stamped one.
-      const user = serverUser() ?? (a as { _user?: unknown })._user;
+      // see `_workerUserCalls`. The same user the worker's method itself runs
+      // under: the action's `_user` stamp, never the ambient (cell-worker.ts
+      // `ambient`) — a server-origin call inside some user's scope is
+      // anonymous there, as it is in-isolate.
+      const user = (a as { _user?: unknown })._user;
       if (!user || !workerPool.owns(a)) return _routed(a);
       // Counted AFTER the call is posted, so a synchronous throw cannot leave
       // the window open forever; the worker's effects arrive by message, later.
@@ -5390,7 +5517,7 @@ async function _runPhases<S, A, E>(
       },
       exposed: expose,
       log,
-      argv: Deno.args,
+      argv: ownReplayArgs(),
       snapshot: _snapshotDb,
       // The app's ONE shutdown — not the orchestrator alone, which is what
       // this was, and the worker pool was never closed on an update. NOT
@@ -5623,14 +5750,17 @@ async function _runPhases<S, A, E>(
     log,
   });
 
-  // Whatever was pending has now booted far enough to SERVE — confirm it, so a
-  // later boot does not roll back a version that works.
-  //
-  // After startLifecycle, not before it. "Healthy" used to mean "bound a
-  // socket", which a build that throws in `onStart`, fails to open its window
-  // or dies in a schedule passes without doing anything an app is for — and
-  // confirming it threw away the only rollback it had.
-  if (!config.libraryMode) confirmPendingUpdate(_dirs.data, log);
+  // Whatever was pending has booted far enough to SERVE. It is confirmed —
+  // so a later boot does not roll back a version that works — by `run()`,
+  // once the APP's `onStart` has come through too: that hook fires after
+  // this returns, and a build that died in it was confirmed first and never
+  // rolled back (measured on a real AppImage update). "Healthy" used to mean
+  // "bound a socket", which a build that fails to open its window or dies in
+  // a schedule passes without doing anything an app is for.
+  const slot = _appSlots.get(config);
+  if (!config.libraryMode && slot) {
+    slot.confirm = pendingConfirmer(_dirs.data, log);
+  }
 
   // Boot is DONE: the crash guard may now supervise runtime rejections. Until
   // this line a rejection means "the app refused to start" (a throwing

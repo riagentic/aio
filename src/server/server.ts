@@ -2,7 +2,12 @@
 // Thin orchestrator — delegates to server-*.ts modules
 import { APP_STYLE, appHasStylesheet, UI_ENTRY } from "./app-files.ts";
 import { declaresOverLimit, readBounded } from "./read-body.ts";
-import { ensureLockDirOf, instances, slugify } from "./single-instance-lock.ts";
+import {
+  ensureLockDirOf,
+  instances,
+  isOwnLock,
+  slugify,
+} from "./single-instance-lock.ts";
 import { isPipePath, listenLocal } from "./local-listen.ts";
 import { serveHttpOverLocal } from "./http-over-conn.ts";
 import { enc } from "../protocol/envelope.ts";
@@ -36,7 +41,7 @@ export {
   MIME,
   TEXT_EXTENSIONS,
 } from "./server-html.ts";
-import { hasVendorImmer } from "./server-vendor.ts";
+import { appLocalImmer, hasVendorImmer } from "./server-vendor.ts";
 import { appDenoJson, appDenoJsonLocated } from "./aio-run-helpers.ts";
 import { assetDirCandidates, isCompiled } from "./paths.ts";
 import { PIN_TTL_MS, verifyPin } from "./pairing.ts";
@@ -60,7 +65,11 @@ import {
 } from "./auth-context.ts";
 import type { AioUser } from "./aio-types.ts";
 import { buildBrowserImportMap } from "./server-html.ts";
-import { readAppDenoImports } from "./server-html-importmap.ts";
+import {
+  devLocalAliases,
+  graphImportMap,
+  readAppDenoImports,
+} from "./server-html-importmap.ts";
 import {
   _buildUserResolver,
   _extractTokenWithSource,
@@ -605,9 +614,12 @@ export function createServer(config: ServerConfig): ServerHandle {
   const importMapObj = buildBrowserImportMap(denoImports, {
     // prod serves bundles and the vendor route is dev-only — never point a
     // prod import map at it.
-    vendorImmer: !prod && hasVendorImmer(),
+    vendorImmer: !prod && hasVendorImmer(appLocalImmer(absBaseDir)),
   });
   const IMPORT_MAP = JSON.stringify({ imports: importMapObj });
+  // What the client graph is judged against: the served map plus the app's
+  // local aliases, which the dev server rewrites to their file's url.
+  const graphMapObj = graphImportMap(absBaseDir, importMapObj);
 
   const absDistDir = distDir ? resolve(distDir) : null;
   const hasCSS = absBaseDirs.some((d) => appHasStylesheet(d, absDistDir));
@@ -672,7 +684,7 @@ export function createServer(config: ServerConfig): ServerHandle {
   const graphValidation = !prod
     ? startGraphValidation(
       absBaseDir,
-      importMapObj,
+      graphMapObj,
       debug,
       uiEntry,
       config.shell,
@@ -869,8 +881,17 @@ export function createServer(config: ServerConfig): ServerHandle {
     // watched where it lives. Build output the page never loads stays out.
     onModuleServed: (file) => watcher?.watchServed(file),
     absDistDir,
-    hasCSS,
+    // Dev asks again per shell: a `style.css` created (or deleted) while dev
+    // runs — by hand or by `am theme adopt` — must be linked, and `"auto"` must
+    // step aside, on the next reload, as the docs promise. Prod keeps the boot
+    // answer: its files do not change under it.
+    get hasCSS() {
+      return prod
+        ? hasCSS
+        : absBaseDirs.some((d) => appHasStylesheet(d, absDistDir));
+    },
     importMap: IMPORT_MAP,
+    localAliases: devLocalAliases(absBaseDir, importMapObj),
     noCache,
     showStatus: config.showStatus,
     uiEntry: config.uiEntry,
@@ -925,7 +946,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     watcher = createFileWatcher({
       absBaseDir,
       uiEntry,
-      importMapObj,
+      importMapObj: graphMapObj,
       // `aio.run({ watch })` — false, or the paths to watch.
       watch: config.watch,
       debug,
@@ -990,6 +1011,8 @@ export function createServer(config: ServerConfig): ServerHandle {
             index: m.index,
             id: m.id,
             clientType: m.clientType,
+            mac: m.mac,
+            peer: m.peer,
             user: m.user?.id,
             readyState: ws.readyState,
           },
@@ -1037,7 +1060,30 @@ export function createServer(config: ServerConfig): ServerHandle {
     secure: !!config.cert,
     operatorCert: config.operatorCert,
   });
-  // AS THIS APP. `Deno.serve` runs its handler outside the AsyncLocalStorage
+
+  /** The security headers on a response — an explicit header from a route or
+   *  the auth flows always wins. A response whose headers are IMMUTABLE
+   *  (`Response.redirect()`, a proxied `fetch()` — the fetch spec's
+   *  "immutable" guard) is copied first: setting on it threw, and the route's
+   *  redirect became a 500. */
+  const withSecurityHeaders = (resp: Response): Response => {
+    let out = resp;
+    for (const [k, v] of Object.entries(_securityHeaders)) {
+      if (out.headers.has(k)) continue;
+      try {
+        out.headers.set(k, v);
+      } catch {
+        // aio-ok: immutable headers — the copy below carries them and ours.
+        out = new Response(out.body, {
+          status: out.status,
+          statusText: out.statusText,
+          headers: new Headers(out.headers),
+        });
+        out.headers.set(k, v);
+      }
+    }
+    return out;
+  }; // AS THIS APP. `Deno.serve` runs its handler outside the AsyncLocalStorage
   // context `createServer` was called in, so with two apps in one process a
   // route, a socket and everything they logged or reported belonged to no app
   // — and fell back to the last one booted. The boot's own context, captured
@@ -1051,12 +1097,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     // A 101 is a protocol switch: its headers are the handshake, and adding to
     // them is at best ignored and at worst a failed upgrade.
     if (resp.status === 101) return resp;
-    for (const [k, v] of Object.entries(_securityHeaders)) {
-      // An explicit header from a route or the auth flows always wins — the
-      // app said something specific and the default must not overwrite it.
-      if (!resp.headers.has(k)) resp.headers.set(k, v);
-    }
-    return await encodeResponse(req, resp, {
+    return await encodeResponse(req, withSecurityHeaders(resp), {
       compress: config.security?.compress,
     });
   };
@@ -1496,7 +1537,7 @@ export function createServer(config: ServerConfig): ServerHandle {
       debug(`http: ${req.method} ${pathname} user=${user.id}`);
       // Custom routes run authenticated in per-user mode too — the handler's
       // ctx.user is this resolved user.
-      const routed = await tryRoutes(req, pathname, user, addr);
+      const routed = await tryRoutes(req, pathname, user, clientKey);
       if (routed) return routed;
       const resp = await staticHandler.serveStatic(pathname, req);
       resp.headers.set("X-Content-Type-Options", "nosniff");
@@ -1583,7 +1624,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     if (pathname === "/ws") return wsMgr.handleWs(req, undefined, clientKey);
     debug(`http: ${req.method} ${pathname}`);
     // ── Custom user routes (uploads, webhooks, API endpoints) ──
-    const routed = await tryRoutes(req, pathname, undefined, addr);
+    const routed = await tryRoutes(req, pathname, undefined, clientKey);
     if (routed) return withKeyCookie(routed);
 
     const resp = await staticHandler.serveStatic(pathname, req);
@@ -1599,14 +1640,16 @@ export function createServer(config: ServerConfig): ServerHandle {
     req: Request,
     pathname: string,
     user: AioUser | undefined,
-    addr: Deno.Addr | undefined,
+    /** THE client key (the trusted proxy hop when `trustProxyHeader` is set),
+     *  never the raw TCP peer: behind a proxy the peer is the proxy, and a WS
+     *  call already saw the client key — one app, two answers to "which ip". */
+    ip: string | undefined,
   ): Promise<Response | null> {
     if (!config.routes) return null;
     // The framework's own namespace is never routable — the SAME rule the boot
     // check applies to a literal pattern, applied to the path a wildcard would
     // otherwise have swallowed (see isReservedRoutePath).
     if (isReservedRoutePath(pathname)) return null;
-    const ip = addr && "hostname" in addr ? addr.hostname : undefined;
     // Ambient request + identity: a handler (and every cell method / serverFn
     // it calls, across awaits) can ask serverRequest() for the client IP,
     // headers and cookies without the route threading them down by hand.
@@ -1832,7 +1875,7 @@ export function createServer(config: ServerConfig): ServerHandle {
         let holder = "";
         try {
           const h = instances().find((i) =>
-            i.port === port && i.pid !== Deno.pid && i.alive
+            i.port === port && !isOwnLock(i) && i.alive
           );
           if (h) {
             holder = ` It is held by aio app ${h.appId}${
@@ -1901,11 +1944,9 @@ export function createServer(config: ServerConfig): ServerHandle {
     // entirely — a second listener serving the same routes with different
     // hardening is the shape this file keeps closing elsewhere.
     const harden = (r: Response): Response => {
-      for (const [k, v] of Object.entries(_securityHeaders)) {
-        if (!r.headers.has(k)) r.headers.set(k, v);
-      }
-      r.headers.set("X-Content-Type-Options", "nosniff");
-      return r;
+      const out = withSecurityHeaders(r);
+      out.headers.set("X-Content-Type-Options", "nosniff");
+      return out;
     };
     // The Host gate is a security rule, so it holds on BOTH listeners —
     // this one is plain HTTP on loopback, which is exactly what a rebound

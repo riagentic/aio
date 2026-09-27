@@ -14,7 +14,7 @@ import type {
 import { DEFAULT_THRESHOLDS } from "./types.ts";
 import { createLoopProbe, type LoopProbeAPI } from "./loop-probe.ts";
 import { createTransportProbeServer } from "./transport-probe.ts";
-import { createServerDiagReporter } from "./diag-reporter.ts";
+import { callVitalsHook, createServerDiagReporter } from "./diag-reporter.ts";
 import {
   createPressureMonitor,
   type PressureMonitorAPI,
@@ -256,11 +256,7 @@ export function createVitalsSystem(
     // User callbacks run on the heartbeat timer: a throwing hook here was an
     // unhandled exception in a bare timer callback → server down. Report and
     // keep the heartbeat alive; a broken hook must not take the app with it.
-    try {
-      onAlert?.(alert);
-    } catch (e) {
-      log.error("vitals", `onVitalAlert hook threw — ${e}`);
-    }
+    callVitalsHook("onVitalAlert", onAlert, alert);
     try {
       reporter?.onAlert(alert, unit);
     } catch (e) {

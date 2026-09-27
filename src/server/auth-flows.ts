@@ -24,6 +24,7 @@
 
 import {
   accountLockoutOf,
+  loginVerificationRefusal,
   signupPolicyRefusal,
   totpReplayOf,
   type UserStore,
@@ -31,9 +32,11 @@ import {
 import { declaresOverLimit, readBounded } from "./read-body.ts";
 import type { SessionStore } from "./sessions.ts";
 import {
+  abuseBucket,
   authFailBudgetExceeded,
   bearerToken,
   chargeAuthWork,
+  chargeMail,
   chargeSignup,
   originVerdict,
   recordAuthFail,
@@ -48,6 +51,7 @@ import {
   isExternalId,
   oidcCallback,
   type OidcConfig,
+  type OidcDeps,
   oidcStart,
 } from "./auth-oidc.ts";
 import type { AioUser } from "./aio-types.ts";
@@ -289,6 +293,22 @@ export async function handleAuthFlow(
     }
   };
   const str = (v: unknown): string | null => typeof v === "string" ? v : null;
+  /** What the OIDC door needs — built in ONE place, so the account gates the
+   *  password routes read from `cfg` (`signup`, `requireVerified`) reach the
+   *  SSO door too. They used to be dropped here: `signup: false` closed
+   *  `POST /signup` and left the callback creating an account for any
+   *  identity the provider vouched for, and `requireVerified` refused a
+   *  password login the callback then served. */
+  const oidcDeps = (oidc: OidcConfig): OidcDeps => ({
+    cfg: oidc,
+    users: cfg.users,
+    sessions: cfg.sessions,
+    ttlMs: cfg.ttlMs,
+    cookie: sessionCookie,
+    secure: cfg.secure,
+    signup: oidc.signup === undefined ? cfg.signup : oidc.signup === true,
+    requireVerified: cfg.requireVerified === true,
+  });
 
   // GET routes first (no CSRF check — no state change without verified tokens).
   if (route === "GET me") {
@@ -316,24 +336,10 @@ export async function handleAuthFlow(
     if (!chargeAuthWork(clientKey)) {
       return json(429, { error: "too_many_attempts" });
     }
-    return await oidcStart(req, {
-      cfg: cfg.oidc,
-      users: cfg.users,
-      sessions: cfg.sessions,
-      ttlMs: cfg.ttlMs,
-      cookie: sessionCookie,
-      secure: cfg.secure,
-    });
+    return await oidcStart(req, oidcDeps(cfg.oidc));
   }
   if (cfg.oidc && route === "GET oidc/callback") {
-    return await oidcCallback(req, url, {
-      cfg: cfg.oidc,
-      users: cfg.users,
-      sessions: cfg.sessions,
-      ttlMs: cfg.ttlMs,
-      cookie: sessionCookie,
-      secure: cfg.secure,
-    });
+    return await oidcCallback(req, url, oidcDeps(cfg.oidc));
   }
 
   if (req.method !== "POST") return json(404, { error: "unknown_auth_route" });
@@ -500,9 +506,8 @@ export async function handleAuthFlow(
       // to prevent, arriving from the other direction.
       refundAuthWork(clientKey);
       const rec = cfg.users.get(id);
-      if (cfg.requireVerified && rec && !rec.verified) {
-        return json(403, { error: "email_unverified" });
-      }
+      const unverified = loginVerificationRefusal(cfg.requireVerified, rec);
+      if (unverified) return json(403, { error: unverified });
       // TOTP enrolled → the password alone is HALF a login. Hand back a
       // short-lived one-shot pending token; /totp completes it.
       //
@@ -589,9 +594,20 @@ export async function handleAuthFlow(
     }
 
     case "logout": {
-      const token = bearer();
+      // EVERY session this request carries: the Bearer token AND the cookie.
+      // `bearer()` answers one (`token ?? cookie`), so a request holding both
+      // ended the token's session and only cleared the cookie in the reply —
+      // its session stayed live on the server, and a copy of that cookie
+      // still signed in after "log out".
       const legacy = ownLegacySession();
-      if (token) cfg.sessions.revoke(token);
+      for (
+        const t of new Set([
+          bearerToken(req),
+          sessionTokenFromCookie(req, cookieName),
+        ])
+      ) {
+        if (t) cfg.sessions.revoke(t);
+      }
       // This browser's pre-upgrade session ends with it — otherwise the
       // fallback read would sign it straight back in on the next request.
       if (legacy) cfg.sessions.revoke(legacy);
@@ -651,6 +667,15 @@ export async function handleAuthFlow(
       const rec = cfg.users.get(user.id);
       if (!rec?.email) return json(400, { error: "no_email_on_account" });
       if (rec.verified) return json(200, { ok: true, alreadyVerified: true });
+      // A MAIL TRIGGER, budgeted exactly like reset/request. Unbudgeted, one
+      // signup with someone else's address plus a loop here turned the app's
+      // own transport into an unbounded mail bomb aimed at that inbox. The
+      // caller is authenticated, so over budget is said plainly (429).
+      // Its own budget, per account: a resend is not a failed login.
+      if (!chargeMail(`verify:${user.id}`)) {
+        return json(429, { error: "too_many_attempts" });
+      }
+      log.info("auth", `mail request: verify for id=${user.id}`);
       const token = cfg.users.issueToken("verify", user.id, VERIFY_TTL_MS);
       await cfg.sendMail({
         to: rec.email,
@@ -672,11 +697,6 @@ export async function handleAuthFlow(
 
     case "reset/request": {
       if (!cfg.sendMail) return MAIL_OFF();
-      // Rate-cap the mail trigger (per-IP budget) so a known-id attacker can't
-      // mail-bomb an inbox / run up send costs. Still ALWAYS 200 below.
-      if (authFailBudgetExceeded(clientKey)) {
-        return json(200, { ok: true }); // silent — reveal nothing
-      }
       const b = body();
       const id = str(b?.id);
       // ALWAYS 200 at the SAME latency — a reset probe must reveal nothing
@@ -686,7 +706,18 @@ export async function handleAuthFlow(
       // mail send is fire-and-forget (not awaited), so the SMTP round-trip is
       // never on the response path.
       if (id) {
-        recordAuthFail(clientKey, `reset request for id=${id}`); // budget the trigger
+        // Rate-cap the mail trigger, on its own budget (a
+        // reset request is not a failed login), so a known-id attacker can't
+        // mail-bomb an inbox / run up send costs. Over it: the same silent
+        // 200 — reveal nothing.
+        // Two caps: per client+id (one inbox) and per client (one source
+        // spraying many accounts). Both are charged; either refuses.
+        const bucket = abuseBucket(clientKey);
+        const perClient = chargeMail(`reset:${bucket}`);
+        if (!chargeMail(`reset:${bucket}|${id}`) || !perClient) {
+          return json(200, { ok: true });
+        }
+        log.info("auth", `mail request: reset for id=${id}`);
         const rec = cfg.users.get(id);
         // An EXTERNAL identity has no password to reset — its credentials live
         // at the IdP. Minting a reset token for one would turn "controls this

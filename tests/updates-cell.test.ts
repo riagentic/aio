@@ -5,6 +5,7 @@
 // updates-optin.test.ts asserts does NOT happen from the server machinery.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { testCell } from "../src/cell-test.ts";
+import { _setCallTimeouts } from "../src/state/cell-impl.ts";
 import {
   type ApplyOptions,
   type CheckOptions,
@@ -14,6 +15,7 @@ import {
   type UpdatesRuntime,
   type UpdatesState,
 } from "../src/updates.ts";
+import { readyUpdates } from "../src/state/updates-cell.ts";
 
 // `UpdatesCell` is the app-facing shape (methods + readable state), not the
 // `CellDef` generic `testCell` is typed over — so the harness sees it through
@@ -597,6 +599,115 @@ testCell(
       });
       assertStringIncludes(threw, "non-empty string");
       assertEquals(state(t).backupPath, null);
+    } finally {
+      installUpdatesRuntime(null);
+    }
+  },
+);
+
+// A refused install (a tampered download: "refusing to install: …sha256…")
+// set `error` — and the poll's next check, re-offering the SAME release,
+// cleared it. Measured on a real Windows machine: the user clicked Update, the
+// banner came back seconds later as if nothing had happened, and no trace of
+// the refusal was left anywhere.
+testCell(
+  cellDef,
+  "a refused install stays visible across the poll's next check of the same release",
+  async (t) => {
+    let versionOffered = "2.0.0";
+    let refuse = true;
+    const rt: UpdatesRuntime = {
+      ...stub("2.0.0", []),
+      check: () =>
+        Promise.resolve({
+          kind: "offer" as const,
+          update: offer(versionOffered),
+        }),
+      apply: () =>
+        refuse
+          ? Promise.reject(new Error("refusing to install: sha256 mismatch"))
+          : Promise.resolve(),
+    };
+    installUpdatesRuntime(rt);
+    try {
+      await check(t);
+      await t.send.apply!();
+      assertStringIncludes(state(t).error!, "sha256 mismatch");
+      // The poll.
+      await check(t);
+      assertEquals(state(t).status, "available", "still installable");
+      assertStringIncludes(
+        state(t).error ?? "(cleared)",
+        "sha256 mismatch",
+        "the refusal survives a re-offer of the same release",
+      );
+      // A NEW release is a new question: the old refusal does not stick to it.
+      versionOffered = "2.0.1";
+      await check(t);
+      assertEquals(state(t).error, null);
+      // …and a retry that succeeds clears it too.
+      versionOffered = "2.0.0";
+      await check(t);
+      refuse = false;
+      await t.send.apply!();
+      await check(t);
+      assertEquals(state(t).error, null);
+    } finally {
+      installUpdatesRuntime(null);
+    }
+  },
+);
+
+// An install is a download, a program run and a swap: on Windows 11 a 265 MB
+// build's antivirus scan of the new exe alone took ~20 s of the 30 s call
+// ceiling. Past it the CALLER was told "stopped waiting" while the install went
+// on and restarted the app — the button reported a failure, and `auto` logged
+// "NOT installed" and backed off for an update that was being installed. A git
+// `check` clones, so it is the same. Both are `long`: every step inside the
+// runtime carries its own bound.
+testCell(
+  cellDef,
+  "apply and check outlive the call ceiling — an install is never 'stopped waiting'",
+  async (t) => {
+    const slow = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+    const base = stub("2.0.0", []);
+    installUpdatesRuntime({
+      ...base,
+      check: async (opts) => {
+        await slow(150);
+        return base.check(opts);
+      },
+      apply: () => slow(150),
+    });
+    _setCallTimeouts(50);
+    try {
+      assertEquals((await check(t)).kind, "offer");
+      await t.send.apply!();
+      assertEquals(state(t).error, null);
+      assertEquals(state(t).status, "staged");
+    } finally {
+      _setCallTimeouts();
+      installUpdatesRuntime(null);
+    }
+  },
+);
+
+testCell(
+  cellDef,
+  "a release this machine rolled back is dismissed at boot, even with no poll — a manual check does not offer it",
+  async (t) => {
+    const asked: CheckOptions[] = [];
+    installUpdatesRuntime(stub("2.0.0", asked));
+    try {
+      await readyUpdates(undefined, "2.0.0");
+      assertEquals(state(t).dismissed, "2.0.0");
+      const r = await check(t);
+      assertEquals(r.kind, "current");
+      assertEquals(asked.at(-1)?.dismissed, "2.0.0");
+      // Handed over once: the next boot's ready() leaves the choice alone.
+      t.send.undismiss!();
+      await readyUpdates();
+      assertEquals(state(t).dismissed, null);
     } finally {
       installUpdatesRuntime(null);
     }

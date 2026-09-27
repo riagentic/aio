@@ -6,6 +6,7 @@
 import { join } from "@std/path";
 import { appDirs } from "../server/app-dirs.ts";
 import { collectElementPaths, type UISurfaceNode } from "../air/ui-surface.ts";
+import { parseChord, pressChord } from "../air/key-chord.ts";
 import type { GlobalFlags, OutputMode } from "./am-types.ts";
 import {
   detectMode,
@@ -103,6 +104,8 @@ type ClientRow = {
   index: number;
   type?: string;
   transport?: string;
+  /** Apple platform, from the client's User-Agent (WS clients only). */
+  mac?: boolean;
 };
 
 /** Which client a UI command should drive.
@@ -130,6 +133,17 @@ export async function resolveUiClient(
   explicit: number | undefined,
   mode: OutputMode,
 ): Promise<number | null> {
+  return (await pickUiClient(port, appId, explicit, mode))?.index ?? null;
+}
+
+/** {@linkcode resolveUiClient}, with the chosen client's roster row — `mac`
+ *  is what `mod` in a pressed chord resolves against. */
+async function pickUiClient(
+  port: number,
+  appId: string | undefined,
+  explicit: number | undefined,
+  mode: OutputMode,
+): Promise<ClientRow | null> {
   const roster = await trojanGet(port, "clients", appId, 10_000);
   if (!roster.ok || !Array.isArray(roster.data)) {
     // An index the caller typed is still usable without a roster (an `am`
@@ -137,7 +151,7 @@ export async function resolveUiClient(
     // the answer — a production build has no control API, and this used to
     // fall through to "no UI client connected", which a field report took
     // for a blank window that was in fact rendering fine.
-    if (explicit !== undefined) return explicit;
+    if (explicit !== undefined) return { index: explicit };
     outError(
       `cannot list this app's UI clients: ${
         roster.ok ? "the roster was not a list" : roster.error
@@ -151,7 +165,10 @@ export async function resolveUiClient(
     outError(choice.error, mode);
     Deno.exit(1);
   }
-  return choice.index;
+  const rows = roster.data as ClientRow[];
+  return choice.index === null
+    ? null
+    : rows.find((r) => r.index === choice.index) ?? { index: choice.index };
 }
 
 /** The decision half of {@linkcode resolveUiClient} — pure, so the refusals
@@ -1506,42 +1523,9 @@ export async function cmdSurface(
   if (wantRects) reportRects(measured);
 }
 
-/** Parse a chord like `"ctrl+shift+Enter"` (or a bare `"ctrl+alt"`) into the
- *  modifier flags plus the key, so one spelling drives keys and pointer
- *  gestures alike. Unknown segments are the KEY — `"Enter"`, `"a"`, `"F2"` —
- *  and a bare modifier list yields no key at all. */
-export function parseChord(
-  spec: string,
-): { mods?: Record<string, boolean>; key: string } {
-  const MODS: Record<string, string> = {
-    ctrl: "ctrlKey",
-    control: "ctrlKey",
-    cmd: "metaKey",
-    meta: "metaKey",
-    super: "metaKey",
-    alt: "altKey",
-    option: "altKey",
-    shift: "shiftKey",
-  };
-  const parts = spec.split("+").filter(Boolean);
-  const mods: Record<string, boolean> = {};
-  const keys: string[] = [];
-  for (const p of parts) {
-    const flag = MODS[p.toLowerCase()];
-    if (flag) mods[flag] = true;
-    else keys.push(p);
-  }
-  // The literal `+` key: splitting on "+" swallows it, so `press "+"` (zoom
-  // in — a real gesture) and `press "ctrl++"` would silently fall back to the
-  // caller's default key. A spec that ENDS in a separator with no key parsed
-  // means the key IS "+".
-  let key = keys.join("+");
-  if (key === "" && spec.endsWith("+") && spec.length > 0) key = "+";
-  return {
-    mods: Object.keys(mods).length ? mods : undefined,
-    key,
-  };
-}
+/** Chord parsing lives in `air/key-chord.ts` — ONE reading of a key spelling
+ *  for `am trigger` and testUI alike. Re-exported here for existing callers. */
+export { parseChord };
 
 /** `am trigger [clientIdx] <path> <action> [text]` — faithfully simulate a
  *  user interaction on a live client via the semantic surface (same event
@@ -1654,11 +1638,16 @@ export async function cmdTrigger(
   // Resolved from the roster BEFORE the first action: a stale index or the dev
   // server's reload socket is refused here, instantly and by name, instead of
   // being sent an action nothing will ever answer.
-  const idx = await resolveUiClient(port, appId, wantIdx, mode);
-  if (idx === null) {
+  const picked = await pickUiClient(port, appId, wantIdx, mode);
+  if (picked === null) {
     outError(NO_UI_CLIENT_HINT, mode);
     Deno.exit(1);
   }
+  const idx = picked.index;
+  // `mod` is the modifier of the PAGE's platform (its User-Agent, on the
+  // roster), not of the machine running am; a client the roster says nothing
+  // about (an Electron UDS window — local by construction) takes this one's.
+  const mac = picked.mac;
   const post = async (body: Record<string, unknown>): Promise<unknown> => {
     const r = await trojanPost(port, `trigger/${idx}`, body, appId, timeout);
     if (!r.ok) {
@@ -1695,8 +1684,16 @@ export async function cmdTrigger(
     wire === "dragTo"
   ) body.text = text ?? "";
   if (wire === "press" || wire === "keyDown" || wire === "keyUp") {
-    const chord = parseChord(text ?? "Enter");
-    body.key = chord.key || "Enter";
+    // Throws on a spelling that names no key (`"a+"`, `"hyper+k"`) — sending
+    // some other key instead is the harness lying about what it pressed.
+    let chord;
+    try {
+      chord = pressChord(text ?? "Enter", mac);
+    } catch (e) {
+      outError((e as Error).message, mode);
+      Deno.exit(1);
+    }
+    body.key = chord.key;
     if (chord.mods) body.mods = chord.mods;
   }
   // Modified pointer gestures — ctrl+click to add, shift+click to extend.
@@ -1704,7 +1701,7 @@ export async function cmdTrigger(
   // so the two drivers of ONE UI could not express the same interaction; an
   // app whose primary gesture is ctrl+click was undrivable from the CLI.
   if (wire === "click" || wire === "dblclick" || wire === "hover") {
-    const chord = parseChord(text ?? "");
+    const chord = parseChord(text ?? "", mac);
     if (chord.mods) body.mods = chord.mods;
   }
   const replied = await post(body);

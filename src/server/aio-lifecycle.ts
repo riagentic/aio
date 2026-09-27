@@ -40,8 +40,9 @@ import { appKeyPath } from "./app-key.ts";
 import { type Log, log as globalLog } from "../diagnostics/logger-api.ts";
 import type { DB } from "../db/mod.ts";
 import type { ScheduleDef } from "../state/schedule.ts";
-import { appIconPngBase64 } from "../build/app-icon.ts";
-import { artifactPath, relaunch } from "./updates-apply.ts";
+import { appIconLabel, appIconPngBase64 } from "../build/app-icon.ts";
+import { appConfigTitle } from "./deno-json.ts";
+import { artifactPath, ownReplayArgs, relaunch } from "./updates-apply.ts";
 import { isCompiled } from "./paths.ts";
 import {
   isRestarting,
@@ -457,7 +458,7 @@ export function noDesktopSessionWarning(
     `--client=server-only to say no window is wanted.`;
 }
 
-/** @internal The dev Electron window's generated icon: the title's letter on
+/** @internal The dev Electron window's generated icon: THE label's letter (appIconLabel) on
  *  the APPID's hue — the key the theme and every packaged icon tint on. The
  *  title hashed alone gave every app with no title the "AIO App" fallback's
  *  colour, unrelated to its own buttons. */
@@ -1019,7 +1020,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     // launch, so the dev window is identified exactly like the packaged one
     // (which reads dist/icon.png, written by the same generator). A failure to
     // draw it must never stop the app from starting — it is an icon.
-    devWindowIcon(title, appId)
+    devWindowIcon(appIconLabel(appConfigTitle(deps.baseDir), appId), appId)
       .catch(() => "")
       .then((defaultIcon) =>
         launchElectron(
@@ -1239,7 +1240,7 @@ export async function processFacts(): Promise<ProcessFacts> {
     artifact: compiled ? artifactPath() : Deno.execPath(),
     sourceBlocked: compiled ? null : await restartBlockedReason(),
     sourceArgs: compiled ? [] : await relaunchArgs(),
-    args: Deno.args,
+    args: ownReplayArgs(),
   };
 }
 

@@ -664,20 +664,34 @@ function _readStreams(
   ) => {
     const dec = new TextDecoder();
     let buf = "";
-    for await (const chunk of stream) {
-      buf += dec.decode(chunk, { stream: true });
+    // A `\r` that ENDED the previous read may be the first half of a `\r\n`:
+    // its `\n` opening this read is not a second line end. Split across two
+    // reads, one CRLF was reported as a line plus an empty line nobody
+    // printed.
+    let afterCR = false;
+    const emit = (text: string, final: boolean) => {
+      if (afterCR && text.startsWith("\n")) text = text.slice(1);
+      buf += text;
+      afterCR = !final && buf.endsWith("\r");
       // `\r` ends a line too — a progress bar rewriting one line emits no
       // newline for the whole job.
       const parts = buf.split(/\r\n|\n|\r/);
       buf = parts.pop() ?? "";
-      for (const line of parts) {
-        if (which === "stdout" && line.startsWith(PGID_MARKER)) {
-          const n = Number(line.slice(PGID_MARKER.length));
-          if (Number.isInteger(n) && n > 0) resolvePgid(n);
-          continue; // never surfaced: it is framework plumbing, not output
-        }
-        onLine?.(line, which);
+      return parts;
+    };
+    const lines = async function* () {
+      for await (const chunk of stream) {
+        yield* emit(dec.decode(chunk, { stream: true }), false);
       }
+      yield* emit(dec.decode(), true); // a trailing partial character
+    };
+    for await (const line of lines()) {
+      if (which === "stdout" && line.startsWith(PGID_MARKER)) {
+        const n = Number(line.slice(PGID_MARKER.length));
+        if (Number.isInteger(n) && n > 0) resolvePgid(n);
+        continue; // never surfaced: it is framework plumbing, not output
+      }
+      onLine?.(line, which);
     }
     if (buf.length > 0) onLine?.(buf, which);
   };

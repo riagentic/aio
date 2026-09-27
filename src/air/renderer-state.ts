@@ -43,6 +43,13 @@ export const _rootStateMap = new WeakMap<MountHandle, RootState>();
  *  (`testUI` / `am surface`). Entries are removed on unmount. */
 export const _liveRoots = new Set<RootState>();
 
+/** `_rerenderRoot`, installed by renderer-flush (which every root's mount
+ *  imports), so `hot-swap.ts` can reach it without importing the renderer:
+ *  browser-shared imports hot-swap statically, and a dynamic import of it
+ *  made the bundler wrap the whole renderer graph in lazy-init shims (~400 B
+ *  gz on every page). @internal */
+export const _rootHooks: { rerender?: (state: RootState) => void } = {};
+
 export function _registerRoot(handle: MountHandle, state: RootState): void {
   _rootStateMap.set(handle, state);
   _liveRoots.add(state);

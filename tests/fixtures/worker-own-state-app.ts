@@ -42,6 +42,19 @@ export const ownState = cell("ownState", {
       await Promise.resolve();
       throw new WalletLockedError();
     },
+    /** Own enumerable fields a caller reads (`e.detail`) beyond name/code. */
+    async failDetail(_s: S) {
+      await Promise.resolve();
+      throw Object.assign(new Error("bad input"), {
+        detail: { field: "amount", min: 1 },
+        retryable: false,
+      });
+    },
+    /** A thrown non-Error value. */
+    async failString(_s: S) {
+      await Promise.resolve();
+      throw "plain refusal";
+    },
   },
 });
 

@@ -236,6 +236,12 @@ async function pairWith(win, info) {
       throw new Error(res.status === 401 ? 'Invalid or expired pairing code': 'Pairing failed (HTTP ' + res.status + ')');
     }
     const pr = res.json;
+    // The pairing reply is as untrusted as a .aioapp file: the same port rule
+    // loadProfileFile applies, or a reply's port like "1@evil.example" turned
+    // the saved URL's authority into another host.
+    if (!Number.isInteger(pr.port) || pr.port < 1 || pr.port > 65535) {
+      throw new Error('Pairing failed: the app answered with an invalid port');
+    }
     pr.host = info.host; // the server doesn't know its own LAN address — we do
     const rec = profileToRecent(pr);
     pinCert(rec.host, rec.cert);
@@ -276,7 +282,12 @@ async function connectTo(win, url) {
       saveRecent({ url, name: meta.title || new URL(url).host, title: meta.title, host: new URL(url).hostname, port: Number(new URL(url).port) || (url.startsWith('https') ? 443: 80), tls: url.startsWith('https'), needsAuth: /[?&]token=/.test(url), cert: prev.cert || null, key: prev.key || null });
     } catch {}
 
-    const iconUrl = url.replace(/\\/$/, '') + '/icon.png';
+    // The app's icon ROUTE, with the connect URL's query kept: appending
+    // '/icon.png' to a URL carrying '?token=K' put the path inside the query
+    // ('…/?token=K/icon.png'), so a token-guarded app never got its icon —
+    // and '/icon.png' only exists when the app ships one; /__aio/icon always
+    // answers (the generated monogram otherwise).
+    const iconUrl = (() => { const u = new URL(url); u.pathname = '/__aio/icon'; return u.href; })();
     const iconBuf = await fetchBuffer(iconUrl);
     if (iconBuf && iconBuf.length > 0) {
       try { win.setIcon(nativeImage.createFromBuffer(iconBuf)); } catch {}

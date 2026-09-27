@@ -27,11 +27,13 @@ Deno.test("SSR doubles the leading newline of pre and textarea content for the p
     [h("pre", null, "\nabc"), "<pre>\n\nabc</pre>"],
     [h("pre", null, h(Code, null)), "<pre>\n\nconst x = 1\n</pre>"],
     [h("textarea", { value: "\nnote" }), "<textarea>\n\nnote</textarea>"],
+    // Children, not a value prop: the streamed writer only handled pre/listing.
+    [h("textarea", null, "\nbody"), "<textarea>\n\nbody</textarea>"],
     // No leading newline — nothing added.
     [h("pre", null, "abc\n"), "<pre>abc\n</pre>"],
     [h("div", null, "\nabc"), "<div>\nabc</div>"],
   ];
-  assertEquals(cases.length, 5);
+  assertEquals(cases.length, 6);
   for (const [v, want] of cases) {
     assertEquals(renderToString(v), want);
     assertEquals(await streamed(v), want);

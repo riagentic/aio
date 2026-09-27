@@ -191,10 +191,10 @@ for (const prod of [false, true]) {
       for (
         const [p, want] of [
           ["/b.SVG", "image/svg+xml"],
-          ["/f.CSS", "text/css"],
+          ["/f.CSS", "text/css; charset=utf-8"],
           ["/d.JPG", "image/jpeg"],
           ["/i.Png", "image/png"],
-          ["/t.TXT", "text/plain"],
+          ["/t.TXT", "text/plain; charset=utf-8"],
         ] as const
       ) {
         const r = await serveStatic(p);

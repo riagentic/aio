@@ -149,6 +149,16 @@ function pendingOf(io: CliIO): Uint8Array {
   return _pending.get(io) ?? new Uint8Array(0);
 }
 
+/** Hand bytes BACK: what a raw reader read past its own line end belongs to
+ *  the next reader, exactly as `readLine` keeps it. */
+export function putBackPending(io: CliIO, bytes: Uint8Array): void {
+  const rest = pendingOf(io);
+  const merged = new Uint8Array(bytes.length + rest.length);
+  merged.set(bytes, 0);
+  merged.set(rest, bytes.length);
+  _pending.set(io, merged);
+}
+
 /** Bytes `readLine` read past its newline and has not handed out yet. A raw
  *  reader (`password`) must drain these BEFORE touching `io.read`, or the
  *  first keystrokes of the secret are the tail of the previous answer. */

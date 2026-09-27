@@ -26,6 +26,8 @@ import { repairProxiedSiblings } from "./happy-dom-repair.ts";
 import {
   _armBootScope,
   _callAcrossWorkerBoundary,
+  _fenceMountRoot,
+  _inMount,
   _isolateWorkerCellsInProcess,
   _refuseUnsafeCells,
   _shedLeakedScopes,
@@ -65,7 +67,7 @@ import { _resetUntrackedReadWarnings } from "../air/untracked-read.ts";
 import { _readAsClient, getRegisteredCells } from "../state/cell-reactive.ts";
 import type { ComponentFn } from "../air/vdom-types.ts";
 import type { MountHandle, RootState } from "../air/renderer-types.ts";
-import { _rootStateMap } from "../air/renderer-state.ts";
+import { _activeRoot, _rootStateMap } from "../air/renderer-state.ts";
 import { _setRenderErrorSink } from "../air/renderer-rerender.ts";
 import { _setContainedErrorSink } from "../air/hook-error.ts";
 import {
@@ -80,6 +82,7 @@ import {
   type UISurfaceNode,
 } from "../air/ui-surface.ts";
 import type { KeyModifiers } from "../air/ui-trigger.ts";
+import { isMacPlatform, pressChord } from "../air/key-chord.ts";
 import type { CellDef } from "../state/cell-types.ts";
 import { cellAccessAllowed } from "../server/server-auth.ts";
 import {
@@ -432,6 +435,37 @@ export type TestUI = {
 };
 
 const tick = (ms = 5) => new Promise((r) => setTimeout(r, ms));
+
+/** The key a test MEANT: `"enter"` → `"Enter"`, `"esc"` → `"Escape"`,
+ *  `"space"` → `" "`, and the `am trigger` chord spelling (`"ctrl+k"`,
+ *  `"shift+Enter"`) → the key plus its modifiers, merged with any passed.
+ *  These used to dispatch a KeyboardEvent whose `key` was the literal
+ *  spelling — no handler or default action matched it, and the test stayed
+ *  green having pressed nothing. A spelling that can mean no key (an unknown
+ *  modifier like `"hyper+k"`, an empty string) throws. */
+function resolveKey(
+  spec: string,
+  mods: KeyModifiers | undefined,
+  /** The DOM window's `navigator.platform` — what `mod` resolves against. */
+  platform: string | undefined,
+): { key: string; mods?: KeyModifiers } {
+  let chord;
+  try {
+    chord = pressChord(
+      spec,
+      platform === undefined ? undefined : isMacPlatform(platform),
+    );
+  } catch (e) {
+    throw new Error(
+      `testUI: ${(e as Error).message} Or pass the modifiers: ` +
+        `press("k", { ctrlKey: true }).`,
+    );
+  }
+  return {
+    key: chord.key,
+    mods: chord.mods || mods ? { ...chord.mods, ...mods } : undefined,
+  };
+}
 
 /** Does this component instance put anything on screen?
  *
@@ -1007,6 +1041,262 @@ function _persistRunKey(): string {
     }
   });
   return key;
+}
+
+/** The backing stores of the live hermetic mounts, newest last — the one
+ *  `localStorage` reads and writes while any is live. */
+const _lsStack: Map<string, string>[] = [];
+let _lsUndo: (() => void) | undefined;
+
+/** Give this mount its own fresh `localStorage`; returns its release.
+ *
+ *  The global is ONE view for the whole span of live mounts — only what it
+ *  reads and writes switches — and a host `Storage` (Deno's is one on-disk
+ *  store per project, shared by every test file and `--parallel` process) is
+ *  never cleared: its prototype routes the host instance to the top mount's
+ *  store, so a module that took `const ls = localStorage` at import time is
+ *  isolated per mount too (swapping the global per mount left it writing to
+ *  the host store, or to a dead mount's). Releases may come in any order; the
+ *  host is restored exactly when the last one goes. */
+function _isolateLocalStorage(): () => void {
+  const store = new Map<string, string>();
+  if (_lsStack.push(store) === 1) _lsUndo = _installLocalStorage();
+  return () => {
+    const i = _lsStack.indexOf(store);
+    if (i >= 0) _lsStack.splice(i, 1);
+    if (_lsStack.length === 0) {
+      _lsUndo?.();
+      _lsUndo = undefined;
+    }
+  };
+}
+
+/** Storage.prototype's methods as the runtime ships them, taken at import —
+ *  before any test can stub them. Anything else found there is a stub. */
+const _nativeStorage: Record<string, AnyDoc> | undefined = (() => {
+  const S = (globalThis as AnyDoc).Storage?.prototype;
+  return S && Object.fromEntries(
+    ["getItem", "setItem", "removeItem", "clear", "key"].map((n) => [n, S[n]]),
+  );
+})();
+
+function _installLocalStorage(): () => void {
+  const top = () => _lsStack[_lsStack.length - 1] ?? new Map<string, string>();
+  const shim: Record<string, (...a: AnyDoc[]) => unknown> = {
+    getItem: (k) => top().get(String(k)) ?? null,
+    setItem: (k, v) => void top().set(String(k), String(v)),
+    removeItem: (k) => void top().delete(String(k)),
+    clear: () => top().clear(),
+    key: (i) => [...top().keys()][i] ?? null,
+  };
+  const g = globalThis as AnyDoc;
+  const host = g.localStorage;
+  const desc = Object.getOwnPropertyDescriptor(g, "localStorage");
+  // The GLOBAL is a Storage-shaped view of the top mount's store — methods,
+  // named properties, `length`, `key(i)` AND enumeration (`Object.keys`,
+  // `for…in`, `JSON.stringify`), which a prototype patch cannot reach: Deno's
+  // Storage answers `ownKeys` from its native store.
+  //
+  // Not "clear the host and restore it after": Deno's store is ONE on-disk
+  // store per project, shared live by every `--parallel` test process. A
+  // clear deletes another process's data mid-test (the bug this replaced),
+  // and the restore would then overwrite whatever that process wrote since.
+  // Symbol keys (inspection, coercion) are never items.
+  const item = (k: string | symbol): k is string =>
+    typeof k === "string" && top().has(k);
+  // `stub(localStorage, "setItem", quotaError)` is a silent no-op in a
+  // browser (the define stores an ITEM named "setItem"; the method stays), so
+  // a quota test would run the happy path. Refused here, on the global and on
+  // a captured reference alike; a stub on Storage.prototype is what works.
+  const isMethod = (k: unknown): k is string =>
+    typeof k === "string" && Object.hasOwn(shim, k);
+  const refuse = (k: string): never => {
+    throw new TypeError(
+      `testUI: replacing localStorage.${k} on the instance does nothing in a ` +
+        `browser (it stores an item named "${k}"; the method stays), so the ` +
+        `test would run the happy path — stub Storage.prototype.${k} instead: ` +
+        `stub(Storage.prototype, "${k}", …).`,
+    );
+  };
+  const S = g.Storage?.prototype;
+  // The mount's entry methods, by name (installed below): they call whatever
+  // Storage.prototype holds now — a test's stub, or our routed method.
+  const entry: Record<string, (...a: unknown[]) => unknown> = {};
+  const method = (k: string) => entry[k] ?? shim[k];
+  const view = new Proxy({}, {
+    get: (_t, k) =>
+      k === "length"
+        ? top().size
+        : isMethod(k)
+        ? method(k)
+        : typeof k === "string"
+        ? shim[k] ?? top().get(k)
+        : undefined,
+    set(_t, k, v) {
+      if (isMethod(k) && typeof v === "function") refuse(k);
+      if (typeof k === "string") top().set(k, String(v));
+      return true;
+    },
+    defineProperty(_t, k, d) {
+      if (isMethod(k) && typeof d.value === "function") refuse(k);
+      if (typeof k !== "string" || !("value" in d)) {
+        throw new TypeError(
+          `testUI: localStorage cannot define ${String(k)} — set an item.`,
+        );
+      }
+      top().set(k, String(d.value));
+      return true;
+    },
+    deleteProperty(_t, k) {
+      if (typeof k === "string") top().delete(k);
+      return true;
+    },
+    // aio-ok(proto-in): a real Storage answers `"toString" in ls` true too.
+    has: (_t, k) => item(k) || (typeof k === "string" && k in shim),
+    ownKeys: () => [...top().keys()],
+    getOwnPropertyDescriptor: (_t, k) =>
+      item(k)
+        ? {
+          value: top().get(k),
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        }
+        : undefined,
+  });
+  Object.defineProperty(g, "localStorage", { value: view, configurable: true });
+  const undoGlobal = () => {
+    if (desc) Object.defineProperty(g, "localStorage", desc);
+    else delete g.localStorage;
+  };
+  const nat = _nativeStorage;
+  if (!host || !S || !nat || Object.getPrototypeOf(host) !== S) {
+    return undoGlobal;
+  }
+  // This process's `{ persist: true }` entry — "a hermetic mount in between
+  // resets the flow" — and never anyone else's data.
+  try {
+    if (_runKey) host.removeItem(_runKey);
+  } catch {
+    // aio-ok: a read-only host store — the key is unique to this run, so a
+    // leftover entry can never be restored by another one.
+  }
+  // A reference taken BEFORE the mount (`const ls = localStorage` at import)
+  // is the host instance itself: its prototype routes it to the top mount's
+  // store too. Only its enumeration cannot follow (see above) — read keys
+  // through the global, or through `length`/`key(i)`, which do.
+  const names = [...Object.keys(shim), "length"];
+  const saved = names.map((n) =>
+    [n, Object.getOwnPropertyDescriptor(S, n)!] as const
+  );
+  // A named read (`ls.foo`) reaches getItem with `this` = the proxy's raw
+  // target, not `host`: learn it, so both are routed and sessionStorage not.
+  let raw: unknown;
+  Object.defineProperty(S, "getItem", {
+    value(this: unknown) {
+      raw = this;
+      return null;
+    },
+    configurable: true,
+  });
+  try {
+    void host["\0aio-probe"];
+  } finally {
+    Object.defineProperty(S, "getItem", saved[0]![1]);
+  }
+  // The view too: a spy on Storage.prototype calls through with it as `this`.
+  // Dead once released, so a stub restored after the last mount (putting a
+  // routed method back) just calls the host's own.
+  let live = true;
+  const mine = (t: unknown) => live && (t === host || t === raw || t === view);
+  // What sits under our routed method, per name: the native one (→ the
+  // mount's store) or a stub made BEFORE the mount, which answers for the
+  // mount exactly as one made inside it does.
+  const base = new Map(saved);
+  // Every stub is called with the mount's store as `this`: one that calls
+  // through to the native method (which knows only the host's store) fails
+  // loudly instead of writing past the mount.
+  let brand = "";
+  try {
+    nat.getItem.call({}, "");
+  } catch (e) {
+    brand = (e as Error).message;
+  }
+  const call = (n: string, f: AnyDoc, a: unknown[]) => {
+    try {
+      return f.apply(view, a);
+    } catch (e) {
+      if (!(e instanceof TypeError) || e.message !== brand) throw e;
+      throw new TypeError(
+        `testUI: a Storage.prototype.${n} stub called the native method, ` +
+          `which only reaches the host's store, never the mount's — make ` +
+          `the stub after testUI().`,
+        { cause: e },
+      );
+    }
+  };
+  const under = (n: string, a: unknown[]) => {
+    const f = base.get(n)!.value;
+    return f === nat[n] ? shim[n]!(...a) : call(n, f, a);
+  };
+  const routed = (n: string): PropertyDescriptor => {
+    const d = base.get(n)!;
+    return n === "length"
+      ? {
+        ...d,
+        get(this: unknown) {
+          return mine(this) ? top().size : d.get!.call(this);
+        },
+      }
+      : {
+        ...d,
+        value(this: unknown, ...a: unknown[]) {
+          if (!mine(this)) return base.get(n)!.value.apply(this, a);
+          // Deno's Storage turns a define/assign on the captured instance
+          // into setItem of that NAME — the same no-op stub as above.
+          if (
+            n === "setItem" && isMethod(a[0]) && typeof a[1] === "function"
+          ) refuse(a[0]);
+          return under(n, a);
+        },
+      };
+  };
+  for (const n of names) Object.defineProperty(S, n, routed(n));
+  // The host's own chain starts at the mount's entry methods, which call
+  // whatever the prototype holds now. A pre-mount stub restored mid-mount
+  // puts the native method back there: the mount's store again, never the
+  // host's — our routed method goes back under it.
+  for (const n of Object.keys(shim)) {
+    entry[n] = function (this: unknown, ...a: unknown[]) {
+      if (live && S[n] === nat[n]) {
+        base.set(n, Object.getOwnPropertyDescriptor(S, n)!);
+        Object.defineProperty(S, n, routed(n));
+      }
+      return live ? call(n, S[n], a) : S[n].apply(this, a);
+    };
+  }
+  Object.setPrototypeOf(
+    host,
+    Object.create(
+      S,
+      Object.fromEntries(
+        Object.entries(entry).map((
+          [n, value],
+        ) => [n, { value, configurable: true }]),
+      ),
+    ),
+  );
+  return () => {
+    live = false;
+    Object.setPrototypeOf(host, S);
+    // What was under ours goes back — never a stub that was restored.
+    for (const n of names) {
+      if (n === "length" || S[n] !== nat[n]) {
+        Object.defineProperty(S, n, base.get(n)!);
+      }
+    }
+    undoGlobal();
+  };
 }
 
 export function testUI(
@@ -1665,35 +1955,12 @@ async function _buildTestUI(
   // localStorage isolation. The standalone runtime needs localStorage;
   // some hosts (Deno test) already expose a PERSISTENT one. Either way, an
   // un-isolated store bleeds writes test→test while signals get correctly
-  // reset. So: install a fresh in-memory shim when absent (owned → torn down →
-  // fresh next mount), or CLEAR the existing one per mount for a hermetic
-  // start. `{ persist: true }` opts into continuity and skips the clear.
-  const _existingLS = (globalThis as AnyDoc).localStorage;
-  if (!_existingLS) {
-    const store = new Map<string, string>();
-    Object.defineProperty(globalThis, "localStorage", {
-      value: {
-        getItem: (k: string) => store.get(k) ?? null,
-        setItem: (k: string, v: string) => void store.set(k, String(v)),
-        removeItem: (k: string) => void store.delete(k),
-        clear: () => store.clear(),
-        key: (i: number) => [...store.keys()][i] ?? null,
-        get length() {
-          return store.size;
-        },
-      },
-      configurable: true,
-    });
-    _ownedGlobals.push("localStorage");
-  } else if (!opts.persist) {
-    try {
-      _existingLS.clear();
-    } catch {
-      // aio-ok: the host's localStorage is read-only (Deno's --location store
-      // under some permissions). Clearing is a hermeticity nicety, not a
-      // correctness requirement — the mount below uses a per-mount persist
-      // key, so a stale entry cannot reach this test's state.
-    }
+  // reset. So every hermetic mount gets a fresh in-memory store (see
+  // `_isolateLocalStorage` — the host store is never cleared, and a reference
+  // captured at import time is isolated too). `{ persist: true }` opts into
+  // the host store for continuity.
+  if (!opts.persist || !(globalThis as AnyDoc).localStorage) {
+    _restoreGlobals.push(_isolateLocalStorage());
   }
 
   // Boot the cells on the local dispatch loop (the android/standalone runtime —
@@ -1707,6 +1974,9 @@ async function _buildTestUI(
   // ui.serverState()/ui.fullState() so a test can read UNFILTERED state,
   // including `ui.exclude`d fields a server route legitimately reads.
   let standaloneApp: { getState: () => Record<string, unknown> } | undefined;
+  /** This mount's boot fence: what the mount runs — its renders, its queued
+   *  actions, its drains — arms timers as THIS mount's (boot-refusals.ts). */
+  let mountFence: Parameters<typeof _inMount>[0];
   let seedState:
     | ((p: Record<string, Record<string, unknown>>) => void)
     | undefined;
@@ -1803,12 +2073,17 @@ async function _buildTestUI(
         : `testui:${crypto.randomUUID().slice(0, 8)}`,
       cellDefaults: opts.cellDefaults,
       localFirst: opts.localFirst,
+      // The harness is the STRICTEST environment (pitfalls.md): a refused
+      // write rejects the method that made it, as it does over the wire —
+      // whatever the app chose for its own in-process callers.
+      refusalsReject: true,
       // The app's budgets — the effect budget AND the per-method call
       // ceiling: a method budgeted at 300 ms must reject at 300 here too, not
       // wait the built-in 30 s. (It was handed to the boot refusals above and
       // never to the runtime.)
       perfBudget: opts.perfBudget,
     }) as unknown as { getState: () => Record<string, unknown> };
+    mountFence = standalone._bootFence(standaloneApp);
     // Undoable from HERE: everything after the boot can throw (a refused
     // seed, the gates below), and a boot left live dispatched a later test's
     // plain `cell.method()` into this dead mount's store. It used to be armed
@@ -1994,7 +2269,8 @@ async function _buildTestUI(
   });
   // A mount that fails from here on records nothing: give the name back.
   partial.unmount = () => video?.cancel();
-  const handle: MountHandle = mount(root, App);
+  _fenceMountRoot(root, mountFence, () => _activeRoot?.root);
+  const handle: MountHandle = _inMount(mountFence, () => mount(root, App));
   partial.unmount = () => {
     video?.cancel();
     _unmount(handle);
@@ -2021,7 +2297,10 @@ async function _buildTestUI(
    *  `ui.advance()`) throw it. The retry loops (`expectCell`, `waitFor`) pass
    *  `strict: false` — giving up on one poll is normal there — and fold
    *  `_gaveUp` into their own timeout message instead. */
-  async function settle(strict = false): Promise<void> {
+  function settle(strict = false): Promise<void> {
+    return _inMount(mountFence, () => _settle(strict));
+  }
+  async function _settle(strict: boolean): Promise<void> {
     let prev = "";
     for (let i = 0; i < maxIter; i++) {
       // Timers ALREADY DUE fire, as the event loop would fire them: a
@@ -2173,7 +2452,7 @@ async function _buildTestUI(
   // below. Deciding at drain time is what makes "awaited" mean awaited-ever.
   const _failures: { err: unknown; seen: () => boolean }[] = [];
   function enqueue<T>(fn: () => Promise<T>): Promise<T> {
-    const run = _tail.then(fn);
+    const run = _tail.then(() => _inMount(mountFence, fn));
     // A failure the caller AWAITED (attached a rejection handler to) is
     // delivered there and must NOT resurface at the next drain point — else
     // an `assertRejects(() => ui.X.click())` test re-fails at dispose.
@@ -2192,11 +2471,20 @@ async function _buildTestUI(
         delivered = true;
         return run.catch(onR);
       },
-      finally: (onC) => run.finally(onC),
+      // `.finally()` hands the rejection on to whoever holds ITS promise — an
+      // `assertRejects(() => ui.X.click().finally(…))` observed it there, and
+      // the next drain threw it a second time.
+      finally: (onC) => {
+        delivered = true;
+        return run.finally(onC);
+      },
       [Symbol.toStringTag]: "Promise",
     } as Promise<T>;
   }
-  async function drain(): Promise<void> {
+  function drain(): Promise<void> {
+    return _inMount(mountFence, _drain);
+  }
+  async function _drain(): Promise<void> {
     let t: Promise<void>;
     do {
       t = _tail;
@@ -2316,7 +2604,14 @@ async function _buildTestUI(
       press(key: string, mods?: KeyModifiers) {
         return act(
           "press a key on",
-          (e) => triggerAction(e, "press", key, mods),
+          (e) => {
+            const k = resolveKey(
+              key,
+              mods,
+              e.ownerDocument?.defaultView?.navigator?.platform,
+            );
+            triggerAction(e, "press", k.key, k.mods);
+          },
           false,
           `press ${modsLabel(mods)}${key}`,
         );
@@ -2324,7 +2619,14 @@ async function _buildTestUI(
       keyDown(key: string, mods?: KeyModifiers) {
         return act(
           "hold a key on",
-          (e) => triggerAction(e, "keyDown", key, mods),
+          (e) => {
+            const k = resolveKey(
+              key,
+              mods,
+              e.ownerDocument?.defaultView?.navigator?.platform,
+            );
+            triggerAction(e, "keyDown", k.key, k.mods);
+          },
           false,
           `hold ${modsLabel(mods)}${key}`,
         );
@@ -2332,7 +2634,14 @@ async function _buildTestUI(
       keyUp(key: string, mods?: KeyModifiers) {
         return act(
           "release a key on",
-          (e) => triggerAction(e, "keyUp", key, mods),
+          (e) => {
+            const k = resolveKey(
+              key,
+              mods,
+              e.ownerDocument?.defaultView?.navigator?.platform,
+            );
+            triggerAction(e, "keyUp", k.key, k.mods);
+          },
           false,
           `release ${modsLabel(mods)}${key}`,
         );
@@ -3028,7 +3337,8 @@ async function _buildTestUI(
           // Resolve the document at ACT time, off the window itself: a
           // caller-supplied window outlives this mount, and a stale document
           // would dispatch into a detached tree that nothing listens to.
-          triggerAction(uiWindow.document ?? doc, action, key, mods);
+          const k = resolveKey(key, mods, uiWindow.navigator?.platform);
+          triggerAction(uiWindow.document ?? doc, action, k.key, k.mods);
           await settle();
         } finally {
           video?.after();
@@ -3102,7 +3412,7 @@ async function _buildTestUI(
     // drives toast auto-dismiss / debounce / backoff / poll deterministically
     // in tests. Then settles so the UI reflects the fired actions.
     advance: async (ms: number) => {
-      await advanceSchedules?.(ms);
+      await _inMount(mountFence, async () => await advanceSchedules?.(ms));
       await drain();
       await settle(true); // an observation point too — see settle above
       video?.observe();
@@ -3179,7 +3489,10 @@ async function _buildTestUI(
       // raise it instead of a timeout that says nothing about the TypeError
       // that actually happened.
       let lastErr: unknown;
-      while (Date.now() < deadline) {
+      // The predicate is asked BEFORE the deadline is: checked first, a
+      // `timeoutMs: 0` (or a first settle() slower than the budget) timed out
+      // without asking once — failing a condition that was already true.
+      for (;;) {
         await settle();
         try {
           if (pred()) return video?.observe();
@@ -3187,6 +3500,7 @@ async function _buildTestUI(
         } catch (e) {
           lastErr = e;
         }
+        if (Date.now() >= deadline) break;
         await tick(20);
       }
       if (lastErr !== undefined) throw lastErr;
@@ -3195,7 +3509,8 @@ async function _buildTestUI(
           "  current surface: " + surfaceDigest(currentSurface()) +
           // "waited 3s and the predicate stayed false" reads as an app bug; if
           // settle() was giving up every poll, it is not (see settle()).
-          (_gaveUp ? `\n  ${_gaveUp}` : ""),
+          (_gaveUp ? `\n  ${_gaveUp}` : "") +
+          (_traceSource ? writeTrace(_traceSource()) : ""),
       );
     },
     find(component: string, key?: string | number): UIComponentHandle {

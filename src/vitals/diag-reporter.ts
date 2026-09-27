@@ -6,6 +6,24 @@ const stripTag = (s: string) => s.replace(/^\[aio:vitals\]\s*/, "");
 import type { DiagEvent, VitalAlert } from "./types.ts";
 import { DIAG_THROTTLE_MS, formatDiagEvent } from "./diag-formatter.ts";
 
+/** Call a user vitals hook, guarded: these run from timers, so a sync throw
+ *  OR a rejected promise (an `async` hook type-checks against `void`) would
+ *  otherwise be an uncaught error. Both are reported on the same line. */
+export function callVitalsHook<T>(
+  name: string,
+  hook: ((arg: T) => unknown) | undefined,
+  arg: T,
+): void {
+  const failed = (e: unknown) =>
+    log.error("vitals", `${name} hook threw — ${e}`);
+  try {
+    const r = hook?.(arg) as PromiseLike<unknown> | undefined;
+    if (typeof r?.then === "function") r.then(undefined, failed);
+  } catch (e) {
+    failed(e);
+  }
+}
+
 /** Point-in-time snapshot of the dispatch loop for diagnostic reporting. */
 export type LoopSnapshot = {
   status: string;
@@ -196,12 +214,8 @@ export function createServerDiagReporter(config: ServerDiagReporterConfig) {
       const event = buildEvent(kind, alert, loop, transport, unit);
 
       // Always fire hook (no throttling). Guarded: this runs from a timer,
-      // so a throwing user hook would otherwise take the process down.
-      try {
-        config.onDiagnostic?.(event);
-      } catch (e) {
-        log.error("vitals", `onDiagnostic hook threw — ${e}`);
-      }
+      // so a throwing/rejecting user hook would otherwise take the process down.
+      callVitalsHook("onDiagnostic", config.onDiagnostic, event);
 
       // Console throttling
       const throttleKey = `${kind}:${event.detail.trigger ?? ""}`;

@@ -47,6 +47,24 @@ export function useState<T>(
   return [sig.value, setter];
 }
 
+// ── deps ───────────────────────────────────────────────────────────
+
+/** Whether a hook's deps array changed since `prev` — React's rule: LENGTH
+ *  first, then element-wise `Object.is`. ONE decider for every deps hook in
+ *  this file. `useMemo` once kept its own copy with `===` while `useEffect`
+ *  used `Object.is`, so a `NaN` dep (a `parseFloat` of an empty field) was
+ *  "changed" on EVERY render there: `useMemo` recomputed forever and
+ *  `useCallback` handed out a fresh identity, re-subscribing each effect that
+ *  depended on it. `prev === null` is "never recorded". */
+function _depsChanged(
+  prev: readonly unknown[] | null,
+  next: readonly unknown[],
+) {
+  return prev === null ||
+    prev.length !== next.length ||
+    next.some((d, i) => !Object.is(d, prev[i]));
+}
+
 // ── useEffect ──────────────────────────────────────────────────────
 
 /**
@@ -70,9 +88,7 @@ export function useEffect(
     fnRef.current = fn;
 
     const prev = store.current.deps;
-    const changed = prev === null ||
-      deps.length !== prev.length ||
-      deps.some((d, i) => !Object.is(d, prev[i]));
+    const changed = _depsChanged(prev, deps);
 
     const disposeCleanup = () => {
       if (store.current.cleanup) {
@@ -195,14 +211,13 @@ export function useMemo<T>(fn: () => T, _deps?: unknown[]): T {
   // returned 3 and never recomputed. That is a wrong VALUE rendered to the
   // page, not a missed optimisation. Its twin `useEffect` in this same file
   // already compares lengths — two deciders for one question, and this was the
-  // half that had not been done.
+  // half that had not been done — now `_depsChanged`, shared with it.
   const prev = ref.current?.deps;
   if (
     ref.current === null ||
     !_deps ||
     !prev ||
-    prev.length !== _deps.length ||
-    !_deps.every((d, i) => d === prev[i])
+    _depsChanged(prev, _deps)
   ) {
     ref.current = { deps: _deps, value: fn() };
   }

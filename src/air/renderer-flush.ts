@@ -15,6 +15,7 @@ import {
   _currentCollector,
   _instanceStack,
   _isolationBases,
+  _rootHooks,
   _setActiveRoot,
   _setCurrentCollector,
   _setInsideMount,
@@ -317,6 +318,8 @@ export function _flushPending(root: RootState): void {
 }
 
 // ── Full root re-render ───────────────────────────────────────────────
+
+_rootHooks.rerender = _rerenderRoot; // for hot-swap.ts (see `_rootHooks`)
 
 /** Full root-level re-render (used when lazy components resolve). */
 export function _rerenderRoot(state: RootState): void {

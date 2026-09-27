@@ -274,6 +274,15 @@ function placed(name: string, size: number): { pts: Pt[][]; width: number } {
   };
 }
 
+/** THE monogram's LETTER source, one rule for dev and every build target:
+ *  the name a person sees (`--display-name`, else deno.json `title`), else
+ *  the appId. The shipped artifact is what users see, so dev follows it —
+ *  dev drew the appId's letter ("N" for `notes-app`) where every built
+ *  target drew the title's ("M" for "My Notes"). Pure. */
+export function appIconLabel(title: unknown, appId: string): string {
+  return typeof title === "string" && title ? title : appId;
+}
+
 /** The app's default icon as an SVG document.
  *
  *  Self-contained and font-free: it renders identically in a browser tab, a
@@ -541,8 +550,12 @@ export const ICO_SIZES = [256, 48, 32, 16] as const;
 
 /** The app's default icon as a Windows `.ico` — the same monogram as the PNG,
  *  rendered at each {@link ICO_SIZES} rather than scaled. */
-export async function appIconIco(name: string): Promise<Uint8Array> {
+export async function appIconIco(
+  name: string,
+  /** The appId the colour is hashed from — as every other icon path passes. */
+  id: string = name,
+): Promise<Uint8Array> {
   return icoFromPngs(
-    await Promise.all(ICO_SIZES.map((s) => appIconPng(name, s))),
+    await Promise.all(ICO_SIZES.map((s) => appIconPng(name, s, id))),
   );
 }

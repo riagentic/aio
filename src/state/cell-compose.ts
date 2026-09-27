@@ -150,6 +150,9 @@ export function composeCells(
 
   // ── Shared mutable state (passed by reference into subsystems) ──
   const disabledCells = new Set<string>();
+  /** Bumped by every disable — an async call that saw a different value
+   *  started in an incarnation of the cell that no longer exists. */
+  const disableEpoch = new Map<string, number>();
   const cellLastAction = new Map<string, { type: string; at: number }>();
 
   // ── Registry (includes countCellError, setCbApp, clearCell) ──
@@ -157,6 +160,7 @@ export function composeCells(
     buildRegistry(
       cells,
       disabledCells,
+      disableEpoch,
       cellLastAction,
       opts?.circuitBreaker,
       _reportError,
@@ -176,6 +180,7 @@ export function composeCells(
   const reduceCtx = {
     appId: opts?.appId ?? "",
     disabledCells,
+    disableEpoch,
     cellLastAction,
     reportError: _reportError,
     perfCheck: _perfCheck,

@@ -230,8 +230,13 @@ const CEILING_GZ = {
   //     reason; the renderer's portal, range, select and style fixes.
   //   · round 2 (+~1 KB) — client-runtime and renderer fixes of that round.
   air: 82,
-  /** The same, plus one cell — measured 2 KB, which is what a cell costs. */
-  app: 84,
+  /** The same, plus one cell — measured 2 KB, which is what a cell costs.
+   *  84 → 85 for the round after 1.0.12-beta: measured 85.3 (AIR 82.4). Every
+   *  byte is a fix with a red-without-it test — SSR/createDom tag-name
+   *  validation, the client read seam for dotted excludes and useAio().state,
+   *  hydrate boundary/text-position fixes, the sync engine's frame ownership
+   *  and skipped-frame catch-up, Link relative active state. */
+  app: 85,
 };
 
 const RUN = Deno.env.get("AIO_BUNDLE_SIZE") === "1";

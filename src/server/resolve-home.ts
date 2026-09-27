@@ -8,7 +8,7 @@
 // and appId), without recording anything.
 
 import { declareAppFlags, homeRequest } from "./aio-cli.ts";
-import { planAppDirs } from "./app-dirs.ts";
+import { asksForHome, planAppDirs } from "./app-dirs.ts";
 import { resolveAppId } from "./single-instance-lock.ts";
 
 /** Where `aio.run()` with the same `appId`/`appDir`/`profiles`/`appFlags`
@@ -41,4 +41,26 @@ export function resolveHome(opts: {
     profiles: opts.profiles,
   });
   return profile ? { home: dirs.home, profile } : { home: dirs.home };
+}
+
+/** Whether the person running the app asked for a data home — `--profile`,
+ *  `--home` or `AIO_PROFILE` — i.e. whether {@linkcode resolveHome} (and
+ *  `aio.run()`) answer a REQUESTED home rather than the app's default (or its
+ *  `appDir`). True for `--home=/srv/x` too, which names no profile. Same
+ *  answer in a `worker: true` cell's thread. Records nothing.
+ *
+ *  ```ts
+ *  import { homeWasRequested, resolveHome } from "aio/server";
+ *  const { home } = homeWasRequested()
+ *    ? resolveHome({ appId: "wallet" }) // the profile counts from aio's base
+ *    : resolveHome({ appId: "wallet", appDir: devHome });
+ *  ```
+ *
+ *  `appFlags`: as for {@linkcode resolveHome} — a flag the app claims is not
+ *  a request to aio. */
+export function homeWasRequested(
+  opts: { appFlags?: readonly string[] } = {},
+): boolean {
+  if (opts.appFlags !== undefined) declareAppFlags(opts.appFlags);
+  return asksForHome(homeRequest());
 }

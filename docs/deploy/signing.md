@@ -90,6 +90,11 @@ Rotation is an ordinary release, done in this order:
 The roster is not a recovery mechanism: it has to reach the install _before_ the
 old key stops signing.
 
+A configured roster **replaces** the first-use pin: while `keys` is set, no key
+is pinned, and a key an install pinned earlier is trusted only if the roster (or
+`key`) still lists it. A later release whose roster omits the old key retires it
+on every install that runs it.
+
 ## Building a manifest
 
 `shipApp` is the whole command as a function — read the binary, scan the
@@ -147,20 +152,28 @@ host: a failure that appears in production only, silently, at the moment a user
 most needs the update.
 
 `target` is one of `UPDATE_TARGETS`: `"binary"`, `"appimage"`,
-`"electron-appimage"`, `"electron-zip"`, `"android"`, `"macos-app"`, `"source"`.
-Validate a string with `isUpdateTarget(v)` rather than casting —
-`--target=binry` used to sail through as a `UpdateTarget` and produce a
-perfectly signed manifest that every client refused with "target mismatch", days
-later, on someone else's machine.
+`"electron-appimage"`, `"electron-zip"`, `"android"`, `"source"` — or, since
+1.0.13-beta, `"electron-app"`. That one is a member of `RELEASE_TARGETS` /
+`ReleaseTarget` (checked by `isReleaseTarget`, built by `buildReleaseManifest`):
+the frozen tuple and `UpdateTarget` never widen, so an exhaustive `switch` over
+them keeps compiling, but a manifest READ at run time may carry the newer value.
+`shipApp` / `am publish` infer it from a `.app.tar.gz`. Validate a string with
+`isUpdateTarget(v)` rather than casting — `--target=binry` used to sail through
+as a `UpdateTarget` and produce a perfectly signed manifest that every client
+refused with "target mismatch", days later, on someone else's machine.
 
-Two of those install NOTHING, because the OS owns the step: `"android"` (an APK
-goes through the system installer) and `"macos-app"` (every file in a `.app` is
-covered by the bundle's code signature, so replacing one from inside leaves an
-app macOS will not open). A running install of either still CHECKS for updates
-and still tells its user a new version exists — it answers `incompatible` with
-the download link and the manual step, never `offer`. Before 1.0.7-beta a macOS
-`.app` reported itself as `"binary"` and would have accepted a plain-binary
-release over `Contents/MacOS/<exe>`, breaking its own seal.
+`"android"` installs NOTHING, because the OS owns the step (an APK goes through
+the system installer): a running install still CHECKS for updates and answers
+`incompatible` with the download link and the manual step, never `offer`.
+
+A macOS `.app` (installed shape `"macos-app"`) installs only `"electron-app"`:
+the whole signed bundle, packed as `<bin>-mac-<arch>.app.tar.gz` by the Mac that
+signed it, and swapped whole from outside. Every file in a `.app` is covered by
+the bundle's code signature, so replacing one file from inside leaves an app
+macOS will not open — any other target answers `incompatible` with the `.dmg`
+link. Before 1.0.7-beta a macOS `.app` reported itself as `"binary"` and would
+have accepted a plain-binary release over `Contents/MacOS/<exe>`, breaking its
+own seal.
 
 ## What the signature covers — `manifestCore`
 

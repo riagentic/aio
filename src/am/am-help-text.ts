@@ -199,6 +199,8 @@ Release:
                           --targets=… --target=<one, when two build for one
                           platform> --no-build (publish what dist/ holds)
                           --allow-dirty (publish a -dirty/-nogit build; logged)
+                          --data=contract.json | --no-data (when no artifact
+                          can be asked its data contract on this machine)
 
 Visual manager:
   ui                      Open amui, the visual app manager (Electron;

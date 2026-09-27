@@ -142,6 +142,10 @@ export function applyProps(
     if (_RESERVED_PROPS.has(k)) continue;
     if (!(k in next)) {
       if (k.startsWith("on")) {
+        // Only a handler that was REGISTERED has a slot to give back. A null
+        // `onInput` has none — and dropping `input` anyway took the slot the
+        // `onChange` beside it owns, which then never fired again.
+        if (!prev[k]) continue;
         // The name it was registered UNDER (prev's context) — not the name
         // next's props would give it.
         const evt = k === "onChange" && prevChangeEvt
@@ -252,16 +256,17 @@ export function applyProps(
       if (changeMoved && !(prevChangeEvt === "input" && _hasOnInput)) {
         _dropListener(el, prevChangeEvt!, prev[k] as EventListener);
       }
-      // AIO-106: null/false handler = removal only, don't wrap non-function
+      // AIO-106: null/false handler = removal only, don't wrap non-function.
+      // Removed under the name it was registered UNDER, and only if it was:
+      // `onInput={cond ? f : undefined}` turning off used to delete the
+      // `input` slot the `onChange` beside it owns, and `onChange={null}` next
+      // to a departing `onInput` left the real (`change`) registration live.
       if (rv == null || rv === false) {
-        if (!_DELEGATED_EVENTS.has(evt)) {
-          const oldWrapped = _getWrapped(el, evt);
-          if (oldWrapped) el.removeEventListener(evt, oldWrapped);
-          else if (prev[k]) {
-            el.removeEventListener(evt, prev[k] as EventListener);
-          }
+        if (!prev[k]) continue;
+        const was = k === "onChange" ? prevChangeEvt ?? evt : evt;
+        if (k !== "onChange" || was !== "input" || !_hasOnInput) {
+          _dropListener(el, was, prev[k] as EventListener);
         }
-        _deleteWrapped(el, evt);
         continue;
       }
       // One wrapper for both paths (vdom-events.ts): signal writes batched
@@ -298,13 +303,14 @@ export function applyProps(
           }
         }
       }
-      // A style OBJECT may itself hold per-property signals; those are driven
-      // by their own effects (bindSignalProps) and must not be written here.
-      const value = (k === "style" && rv && typeof rv === "object")
-        ? _withoutSignals(rv as Record<string, unknown>)
-        : rv;
-      const before = (k === "style" && prev[k] && typeof prev[k] === "object")
-        ? _withoutSignals(prev[k] as Record<string, unknown>)
+      // A style OBJECT may hold per-declaration signals. Their bindings write
+      // them; here they count at their CURRENT value, so an equal one is not
+      // rewritten and a declaration the new style dropped is retired — left
+      // out entirely, a dropped `color: sig` stayed on the element for good.
+      // A `style={sig}` last render is on the DOM as the signal's value, too.
+      const value = k === "style" ? _peekSignals(rv) : rv;
+      const before = k === "style"
+        ? _peekSignals(resolveSignalProp(prev[k]))
         : prev[k];
       _writeProp(el, k, value, before);
     }
@@ -338,19 +344,11 @@ function _dropListener(
   _deleteWrapped(el, evt);
 }
 
-/** A style object with its signal-valued declarations dropped — those have
- *  their own effects and writing their peeked value here would fight them. */
-function _withoutSignals(o: Record<string, unknown>): Record<string, unknown> {
-  let has = false;
-  for (const v of Object.values(o)) {
-    if (isSignal(v)) {
-      has = true;
-      break;
-    }
-  }
-  if (!has) return o;
+/** A style object with each signal-valued declaration at its current value. */
+function _peekSignals(o: unknown): unknown {
+  if (!o || typeof o !== "object") return o;
   const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(o)) if (!isSignal(v)) out[k] = v;
+  for (const [k, v] of Object.entries(o)) out[k] = resolveSignalProp(v);
   return out;
 }
 
@@ -367,5 +365,20 @@ export function _hasSignalPropChange(
   for (const [k, v] of Object.entries(prev)) {
     if (isSignal(v) && !isSignal(next[k])) return true;
   }
-  return false;
+  // `style={{ color: sig }}` binds per declaration. Those bindings outlived a
+  // style that dropped (or swapped) the signal: the old effect kept writing
+  // `color` into an element whose style no longer mentions it.
+  const n = _styleSigs(next.style), p = _styleSigs(prev.style);
+  return n.length !== p.length || n.some((x, i) => x !== p[i]);
+}
+
+/** A style object's per-declaration signals, flattened as [key, signal, …]. */
+function _styleSigs(style: unknown): unknown[] {
+  const out: unknown[] = [];
+  if (style && typeof style === "object" && !isSignal(style)) {
+    for (const [k, v] of Object.entries(style)) {
+      if (isSignal(v)) out.push(k, v);
+    }
+  }
+  return out;
 }

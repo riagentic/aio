@@ -568,6 +568,52 @@ One launch path cannot honour the key: `--client=electron` in CONNECT mode,
 where the window belongs to no app config and there is nothing to read it from.
 Declare `requireSandbox` in the app that opens its own window.
 
+## Permissions (`electron: { permissions }`)
+
+Electron grants every permission a page asks for unless the main process says
+otherwise. aio's main process answers for every session — the default one and
+every `<webview>` partition, including ones created later:
+
+- **Default (no key):** a `<webview>` guest, or a frame from another origin
+  inside your window, gets nothing but fullscreen — no clipboard read, camera,
+  microphone, geolocation or notifications. Your app's own page keeps every
+  permission it asks for, and so does an `openWindow` child window for its own
+  origin (as in 1.0.12).
+- **With `electron.permissions`:** the list is the whole policy. Your app's own
+  page gets exactly the permissions listed, and guests, foreign frames and child
+  windows get nothing at all, not even fullscreen (a guest that fills the window
+  could draw a fake one).
+
+```ts
+await aio.run({
+  electron: {
+    permissions: {
+      "clipboard-sanitized-write": ["app"], // copy buttons
+      notifications: ["app"], // aio's `notify` desktop notifications
+    },
+  },
+});
+```
+
+The names are Electron's own (camera and microphone are both `media`). The only
+scope is `"app"`, meaning your app's own page: a window asking from the origin
+it shows. Nothing is ever granted to a guest. An unknown name or scope stops the
+boot. Each denial is logged to `app.log` once per permission and origin, and
+names the entry that would grant it:
+`[aio:electron] permission "clipboard-read" DENIED to the app's own page …`. A
+page that only asks whether it holds a permission
+(`navigator.permissions
+.query`) is logged the same way. The line names the
+origin, never the full URL, so the app's key stays out of the log. Chromium
+checks `media`, `web-app-installation` and `geolocation` by itself on every
+load. A denied check of those three is not logged, because the page did not ask.
+Their real use (a camera, a location fix) is a request, and that is logged.
+
+For a wallet, grant `clipboard-sanitized-write`, which is what a copy button
+uses, and never `clipboard-read`: that keeps any page from reading a copied seed
+phrase. `--client=electron` in CONNECT mode has no app config, so it uses the
+default.
+
 ## Headless and VM hosts (`AIO_ELECTRON_ARGS`)
 
 Electron on a real desktop needs nothing. On a VM, a container or a box with no

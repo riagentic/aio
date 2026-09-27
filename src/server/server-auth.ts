@@ -506,11 +506,13 @@ type AuthLedger = {
   fails: Map<string, number[]>;
   work: Map<string, number[]>;
   signups: Map<string, number[]>;
+  mail: Map<string, number[]>;
 };
 const _newLedger = (): AuthLedger => ({
   fails: new Map(),
   work: new Map(),
   signups: new Map(),
+  mail: new Map(),
 });
 let _processLedger = _newLedger();
 let _ledgerOf = new WeakMap<object, AuthLedger>();
@@ -523,12 +525,51 @@ function _ledger(): AuthLedger {
   return l;
 }
 
+/** The abuse BUCKET a client key is charged to: an IPv4 address as is, an
+ *  IPv6 address by its /64. A host is routinely handed a whole /64, so a
+ *  budget keyed on the exact IPv6 address was a fresh bucket per request —
+ *  unlimited signups and unmetered password-hash work from one machine
+ *  (`pairing.ts` already names this). IPv4-mapped IPv6 unwraps to IPv4, and
+ *  loopback / non-address keys stay as they are. A trusted proxy hop is read
+ *  for its address: an RFC 7239 `for=` value, quotes, brackets and a port are
+ *  dropped (a per-connection source port was a fresh bucket per request).
+ *  @internal */
+export function abuseBucket(clientKey: string | undefined): string {
+  const key = clientKey ?? "*";
+  let a = key.trim();
+  const fwd = /(?:^|;)\s*for=("?)([^";]*)\1/i.exec(a);
+  if (fwd) a = fwd[2]!;
+  a = /^\[([^\]]+)\](?::\d+)?$/.exec(a)?.[1] ?? a;
+  const v4 = /^(\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?$/.exec(a);
+  if (v4) return v4[1]!;
+  if (!a.includes(":")) return key;
+  a = a.replace(/%.*$/, "").toLowerCase();
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(a);
+  if (mapped) return mapped[1]!;
+  if (a === "::1") return a;
+  const halves = a.split("::");
+  if (halves.length > 2) return key;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const fill = halves.length === 2 ? 8 - head.length - tail.length : 0;
+  const groups = [...head, ...Array(Math.max(0, fill)).fill("0"), ...tail];
+  if (
+    groups.length !== 8 || !groups.every((g) => /^[0-9a-f]{1,4}$/.test(g))
+  ) return key;
+  const n = groups.map((g) => parseInt(g, 16));
+  // `::ffff:0102:0304` is `::ffff:1.2.3.4` spelled in hex.
+  if (n.slice(0, 5).every((x) => x === 0) && n[5] === 0xffff) {
+    return [n[6]! >> 8, n[6]! & 255, n[7]! >> 8, n[7]! & 255].join(".");
+  }
+  return `${n.slice(0, 4).map((x) => x.toString(16)).join(":")}::/64`;
+}
+
 /** True when this client key has exhausted its failed-auth budget. */
 export function authFailBudgetExceeded(
   clientKey: string | undefined,
   now = Date.now(),
 ): boolean {
-  const key = clientKey ?? "*";
+  const key = abuseBucket(clientKey);
   const failMap = _ledger().fails;
   const fails = failMap.get(key);
   if (!fails) return false;
@@ -573,7 +614,7 @@ export function recordAuthFail(
   detail: string,
   now = Date.now(),
 ): void {
-  const key = clientKey ?? "*";
+  const key = abuseBucket(clientKey);
   const failMap = _ledger().fails;
   if (failMap.size >= AUTH_FAIL_MAX_KEYS && !failMap.has(key)) {
     _sweepExpired(failMap, now);
@@ -686,7 +727,7 @@ export function refundAuthWork(
   clientKey: string | undefined,
   now = Date.now(),
 ): void {
-  const key = clientKey ?? "*";
+  const key = abuseBucket(clientKey);
   const work = _ledger().work;
   const stamps = work.get(key);
   if (!stamps || stamps.length === 0) return;
@@ -702,7 +743,7 @@ export function chargeAuthWork(
 ): boolean {
   return _charge(
     _ledger().work,
-    clientKey ?? "*",
+    abuseBucket(clientKey),
     AUTH_WORK_MAX,
     AUTH_WORK_WINDOW_MS,
     now,
@@ -716,11 +757,24 @@ export function chargeSignup(
 ): boolean {
   return _charge(
     _ledger().signups,
-    clientKey ?? "*",
+    abuseBucket(clientKey),
     SIGNUP_MAX,
     SIGNUP_WINDOW_MS,
     now,
   );
+}
+
+/** Mails one trigger key may send in a window — the mail-bomb cap. */
+const MAIL_MAX = 10;
+const MAIL_WINDOW_MS = 5 * 60_000;
+
+/** Charge one MAIL TRIGGER (verify/reset request) to `key`, which the route
+ *  scopes to what it protects. `false` ⇒ over budget. Its own ledger: a mail
+ *  request is not a failed authentication, and charging the failure budget
+ *  for it turned ten "resend" clicks into a `429` for one mistyped
+ *  password. */
+export function chargeMail(key: string, now = Date.now()): boolean {
+  return _charge(_ledger().mail, key, MAIL_MAX, MAIL_WINDOW_MS, now);
 }
 
 /** Test isolation. */

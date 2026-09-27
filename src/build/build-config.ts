@@ -5,7 +5,7 @@
 import { isArtifactName } from "../build-all.ts";
 import { readDenoJson } from "../server/deno-json.ts";
 import { BUNDLE_JS, DIST_DIR, UI_ENTRY } from "../server/app-files.ts";
-import { basename, dirname, join, resolve, SEPARATOR } from "@std/path";
+import { dirname, join, resolve, SEPARATOR } from "@std/path";
 import { slugify } from "./build-helpers.ts";
 import { bad, step, warn } from "./build-say.ts";
 import { NO } from "../diagnostics/fmt.ts";
@@ -14,7 +14,7 @@ import {
   buildVersionFor,
   buildVersionNotes,
 } from "./build-version.ts";
-import { appIdFromConfig } from "../server/single-instance-lock.ts";
+import { projectAppId } from "../server/single-instance-lock.ts";
 import { bakedServerUrl, resolveEntryPath } from "../server/paths.ts";
 import { resolveMacHost } from "./dmg.ts";
 import { isValidBundleId } from "./build-ios.ts";
@@ -372,7 +372,12 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
     "--out=".length,
   );
   const configEntry = resolveEntry(mainConfig, entryArg);
-  const defaultName = appIdFromConfig(mainConfig) ?? slugify(basename(root));
+  // THE project rule, shared with the dev runtime and `am` — a binary with no
+  // declared id is named, and so identified, exactly as `deno run` was.
+  const defaultName = projectAppId(
+    root,
+    mainConfig as { appId?: string; title?: string; name?: string },
+  );
   const rawName = Deno.args.find((a) => a.startsWith("--name="))?.slice(7);
   const binaryName = rawName ? slugify(rawName) : defaultName;
   // THE display-name decider: `--display-name=` is how a per-target `title`

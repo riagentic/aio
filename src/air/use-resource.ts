@@ -141,6 +141,25 @@ export type UseResourceConfig<T> = {
   scope?: string;
 };
 
+/** {@linkcode UseResourceConfig} with the key's OWN type: `K` is inferred
+ *  from `key()`'s non-null return only (`NoInfer` elsewhere, so a loader's
+ *  annotation never decides it). With `key: () => lang` (`string | null`),
+ *  `open` may take `(lang: string)` — a field report had to widen a correctly
+ *  typed loader to `string | number` to make it check. `useResource` accepts
+ *  either shape. */
+export type UseResourceConfigOf<T, K extends string | number> = {
+  /** The key, read reactively — see {@linkcode UseResourceConfig}. */
+  key: () => K | null | undefined;
+  /** Acquire it; `signal` aborts when the key moves on or the holder goes. */
+  open: (key: NoInfer<K>, opts: { signal: AbortSignal }) => T | Promise<T>;
+  /** Release it, once, when the LAST holder of this key lets go. */
+  close?:
+    | ((value: T, key: NoInfer<K>) => Promise<void>)
+    | ((value: T, key: NoInfer<K>) => void);
+  /** Holders with the same `scope` and key SHARE one open. Default `""`. */
+  scope?: string;
+};
+
 /** A hold on one keyed resource — what it is, how it is going, and the way to
  *  let go. Returned by {@linkcode useResource}. */
 export type ResourceHandle<T> = {
@@ -208,7 +227,16 @@ export function _openResourceCount(): number {
  *    resource before opening the new one, so two pipelines never fight over
  *    one device.
  *  @tier Kit */
-export function useResource<T>(cfg: UseResourceConfig<T>): ResourceHandle<T> {
+export function useResource<T>(cfg: UseResourceConfig<T>): ResourceHandle<T>;
+/** The same hold, with `open`/`close` taking `key()`'s own key type — see
+ *  {@linkcode UseResourceConfigOf}. */
+export function useResource<T, K extends string | number>(
+  cfg: UseResourceConfigOf<T, K>,
+): ResourceHandle<T>;
+export function useResource<T>(keyed: unknown): ResourceHandle<T> {
+  // Every key `open`/`close` see comes from `key()`, so either shape is the
+  // widened one at runtime.
+  const cfg = keyed as UseResourceConfig<T>;
   // A `use*` HOOK, which it was named like and did not behave like.
   //
   // It registered no cleanup and was not idempotent across renders, so it had

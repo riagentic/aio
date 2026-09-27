@@ -1,6 +1,12 @@
 // Static file serving & virtual route handler — extracted from server.ts
 // Handles all HTTP requests (non-WS): HTML pages, transpilation, __aio/* endpoints, static files
-import { APP_ICON, BUNDLE_JS, UI_ENTRY } from "./app-files.ts";
+import {
+  APP_ICON,
+  APP_ICON_SVG,
+  BUNDLE_JS,
+  svgIconHint,
+  UI_ENTRY,
+} from "./app-files.ts";
 import {
   declaresOverLimit,
   readBounded,
@@ -19,7 +25,7 @@ import {
   SEPARATOR,
   toFileUrl,
 } from "@std/path";
-import { locateDenoJsonAbove } from "./deno-json.ts";
+import { appConfigTitle, locateDenoJsonAbove } from "./deno-json.ts";
 import { formatPrometheus, healthCells } from "./server-metrics.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import type { RenderBudget } from "../vitals/types.ts";
@@ -31,6 +37,8 @@ import {
   MIME,
   TEXT_EXTENSIONS,
 } from "./server-html.ts";
+import { htmlOpen } from "./server-html-gen.ts";
+import { escHtml } from "./server-html-constants.ts";
 import type { ShareRoot } from "./app-dirs.ts";
 import type { GraphResult } from "./graph-validator.ts";
 import type { UiTheme } from "./aio-types.ts";
@@ -40,9 +48,9 @@ import {
   transpile,
 } from "./server-transpile.ts";
 import { handleTrojan as _handleTrojanRoute } from "./server-trojan.ts";
-import { loadVendorImmer } from "./server-vendor.ts";
+import { appLocalImmer, loadVendorImmer } from "./server-vendor.ts";
 import { BLOB_ID_RE, BLOB_URL_PREFIX, type BlobStore } from "./blobs.ts";
-import { appIconSvg } from "../build/app-icon.ts";
+import { appIconLabel, appIconSvg } from "../build/app-icon.ts";
 import { etagMatches, etagOf, MAX_BUFFER_BYTES } from "./http-encoding.ts";
 
 // Framework module URLs — this file lives in src/server/, so entry files at the
@@ -54,6 +62,29 @@ const AIR_TS_URL = new URL("../air.ts", import.meta.url);
 const LISTENERS_TS_URL = new URL("../state/listeners.ts", import.meta.url);
 // Base for resolving sub-module imports served under /__aio/ (src/ root).
 const AIO_SRC_BASE_URL = new URL("../", import.meta.url);
+
+/** A 416 describes the ERROR body it carries: plain text, with the
+ *  Content-Range naming the size (RFC 9110 §15.5.17). It used to carry the
+ *  file's own Content-Type and ETag — a "image/png" label, and a validator,
+ *  on the text "Range Not Satisfiable". */
+function unsatisfiable(size: number): Response {
+  return new Response("Range Not Satisfiable", {
+    status: 416,
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Content-Range": `bytes */${size}`,
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+/** `text/*` gets `; charset=utf-8` (what the server decoded it as); every
+ *  other type is left exactly as it is. */
+function withUtf8(ct: string): string {
+  return ct.startsWith("text/") && !ct.includes("charset")
+    ? `${ct}; charset=utf-8`
+    : ct;
+}
 
 /** DEV ONLY: where a module the app imports from OUTSIDE its app root is
  *  served — `/__aio-src/<path relative to the project root>`.
@@ -119,6 +150,30 @@ function _declaresServerOnly(source: string): boolean {
 function _within(dir: string, a: string): boolean {
   const pfx = dir.endsWith(SEPARATOR) ? dir : dir + SEPARATOR;
   return a === dir || a.startsWith(pfx);
+}
+
+/** A module whose source declares `import "aio/server-only"` — refused
+ *  exactly like a `*.server.ts` (see `_declaresServerOnly`). THE decider for
+ *  "this file's CONTENT makes it server-only": the static server 404s it and
+ *  the APK packer (`_packAssetMounts`) leaves it out. `source` is asked for
+ *  only when `file` is a module, so a packer never reads a video as text. */
+export function isServerOnlySource(
+  file: string,
+  source: () => string,
+): boolean {
+  return DEV_MODULE.has(fileExt(file)) && _declaresServerOnly(source());
+}
+
+/** `path`, symlinks resolved, is `root` (symlinks resolved) or inside it.
+ *  THE symlink containment rule: the static server answers 403 for a link
+ *  that leads out of the root it serves, and the APK packer refuses to ship
+ *  one — a mount's `env.txt -> ../.env` must not reach a phone either.
+ *  Throws `NotFound` when either path does not exist. */
+export async function realPathInside(
+  root: string,
+  path: string,
+): Promise<boolean> {
+  return _within(await Deno.realPath(root), await Deno.realPath(path));
 }
 
 /** Is this (decoded) URL path under {@link SRC_TREE_PREFIX}? Pure. */
@@ -198,6 +253,32 @@ export function _rewriteRelativeImports(
       const url = canonicalUrl(file, spec);
       if (url === null || _decodePathname(url) === natural) return m;
       return `${head}${q}${url}${suffix}${q}`;
+    },
+  );
+}
+
+/** A bare import specifier (not relative, not rooted, no scheme) in the
+ *  same output shapes as {@link REL_IMPORT_RE}. */
+const BARE_IMPORT_RE =
+  /(\bfrom\s*|\bimport\s*\(\s*|\bimport\s*)(["'])([^"'\n./][^"'\n:]*)\2/g;
+
+/** Rewrite each import of an EXACT local import-map alias (`"fmt"` →
+ *  `./lib/fmt.ts` in deno.json, see `readAppLocalAliases`) to its file's one
+ *  dev url — the file the bundler's `alias` loads for it. The browser import
+ *  map cannot carry it (its target is a filesystem path). Pure given its
+ *  callback; exported for tests. @internal */
+export function _rewriteAliasImports(
+  code: string,
+  aliases: Readonly<Record<string, string>>,
+  canonicalUrl: (file: string, spec: string) => string | null,
+): string {
+  return code.replace(
+    BARE_IMPORT_RE,
+    (m, head: string, q: string, spec: string) => {
+      const target = Object.hasOwn(aliases, spec) ? aliases[spec] : undefined;
+      if (!target?.startsWith("file:")) return m;
+      const url = canonicalUrl(fromFileUrl(target), spec);
+      return url === null ? m : `${head}${q}${url}${q}`;
     },
   );
 }
@@ -812,6 +893,9 @@ export interface StaticDeps {
   absDistDir: string | null;
   hasCSS: boolean;
   importMap: string; // JSON stringified import map
+  /** DEV ONLY: the app's local import-map aliases (`readAppLocalAliases`);
+   *  an exact one imported by a served module is rewritten to its file. */
+  localAliases?: Record<string, string>;
   noCache: Record<string, string>;
   showStatus?: boolean;
   width?: number;
@@ -1110,7 +1194,12 @@ export function createStaticHandler(deps: StaticDeps): {
             "unavailable; serve a UI target or use the app headlessly (API/CLI)",
         );
         const body =
-          `<!doctype html><meta charset=utf-8><title>${title} — headless` +
+          // Escaped and `lang`-tagged like every other shell: the title is
+          // the app's own text (`Q&A`), not markup.
+          `<!doctype html>${
+            htmlOpen(deps.lang, deps.dir)
+          }<meta charset=utf-8>` +
+          `<title>${escHtml(title)} — headless` +
           `</title><body style="font:15px/1.6 system-ui;max-width:38rem;` +
           `margin:12vh auto;padding:0 1.25rem;color:#ddd;background:#0d1117">` +
           `<h1 style="font-size:1.15rem">Headless build — no browser UI</h1>` +
@@ -1188,7 +1277,7 @@ export function createStaticHandler(deps: StaticDeps): {
     // ── AIO virtual JS modules ──
     // Framework npm deps served locally — dev must not need the internet.
     if (!prod && pathname === "/__aio/vendor/immer.js") {
-      const src = loadVendorImmer();
+      const src = loadVendorImmer(appLocalImmer(deps.absBaseDir));
       if (src) {
         return new Response(src, {
           headers: { "Content-Type": "text/javascript", ...noCache },
@@ -1306,8 +1395,9 @@ export function createStaticHandler(deps: StaticDeps): {
     // ── App icon ──
     //
     // ONE url for every consumer (the `<link rel="icon">` below, an OG card, a
-    // README), and one decider behind it: the app's own `icon.png`/`icon.svg`
-    // if it drew one, otherwise its generated monogram. Serving a default
+    // README), and one decider behind it: the app's own `icon.png` if it
+    // drew one, otherwise its generated monogram — exactly what the build
+    // ships. Serving a default
     // rather than a 404 is deliberate — a browser with no favicon shows the
     // same grey globe for every tab, which is precisely the "which of my apps
     // is this?" problem the icon exists to answer.
@@ -1382,10 +1472,14 @@ export function createStaticHandler(deps: StaticDeps): {
       prod && absDistDir &&
       (pathname === "/app.js" || pathname === "/style.css")
     ) {
+      // Read-only like every served file: this branch ran before the check
+      // below, so DELETE /app.js answered 200 with the bundle.
+      const denied = _readOnly(req);
+      if (denied) return denied;
       const file = pathname.slice(1);
       try {
         await _warnIfStaleArtifact(file);
-        const body = await readDistCached(join(absDistDir, file));
+        const { body, etag } = await readDistCached(join(absDistDir, file));
         // The bundle records which UI component it was built from
         // (__aioBundleUi; absent = the App.tsx convention, which is what every
         // pre-stamp build bundled). Serving a bundle built from a DIFFERENT
@@ -1424,7 +1518,7 @@ export function createStaticHandler(deps: StaticDeps): {
           ? "text/css"
           : "application/javascript";
         return new Response(body, {
-          headers: { "Content-Type": ct, ...noCache, ETag: _lastDistEtag },
+          headers: { "Content-Type": ct, ...noCache, ETag: etag },
         });
       } catch {
         return new Response("Not Found", { status: 404 });
@@ -1510,25 +1604,26 @@ export function createStaticHandler(deps: StaticDeps): {
     string,
     { mtime: number; size: number; body: string; etag: string }
   >();
-  async function readDistCached(path: string): Promise<string> {
+  /** Body AND its tag, returned together: the tag used to travel through a
+   *  shared `_lastDistEtag` the caller read after an `await`, so /app.js and
+   *  /style.css fetched in parallel (every page load) got each other's ETag —
+   *  and a revalidation could answer 304 for a bundle that had changed. */
+  async function readDistCached(
+    path: string,
+  ): Promise<{ body: string; etag: string }> {
     const st = await Deno.stat(path);
     const mtime = st.mtime?.getTime() ?? 0;
     const hit = _distCache.get(path);
     if (hit && hit.mtime === mtime && hit.size === st.size) {
-      _lastDistEtag = hit.etag;
-      return hit.body;
+      return { body: hit.body, etag: hit.etag };
     }
     const body = await Deno.readTextFile(path);
     const etag = etagOf(
       new TextEncoder().encode(body) as Uint8Array<ArrayBuffer>,
     );
     _distCache.set(path, { mtime, size: st.size, body, etag });
-    _lastDistEtag = etag;
-    return body;
+    return { body, etag };
   }
-  /** The tag `readDistCached` just resolved — read by the response below,
-   *  which is the only caller and is synchronous with it. */
-  let _lastDistEtag = "";
 
   /** Transpile and serve an AIO internal module by URL */
   async function serveAioModule(
@@ -1581,9 +1676,13 @@ export function createStaticHandler(deps: StaticDeps): {
     const etag = `"${id}"`;
     const baseHeaders: Record<string, string> = {
       // Content-addressed: the bytes behind this URL can never change.
+      // `no-transform`: served as STORED. The strong ETag names these bytes and
+      // a Range reply is never encoded, so a gzipped 200 under the same tag
+      // was one validator for two byte streams — a resumed download spliced
+      // raw bytes onto a gzip prefix.
       "Cache-Control": `${
         deps.blobsPrivate ? "private" : "public"
-      }, max-age=31536000, immutable`,
+      }, max-age=31536000, immutable, no-transform`,
       "ETag": etag,
       "Accept-Ranges": "bytes",
       // Derived from an INERT allowlist, never from the uploaded filename —
@@ -1604,12 +1703,7 @@ export function createStaticHandler(deps: StaticDeps): {
     }
 
     const range = parseByteRange(req?.headers.get("range") ?? null, blob.size);
-    if (range === "unsatisfiable") {
-      return new Response("Range Not Satisfiable", {
-        status: 416,
-        headers: { ...baseHeaders, "Content-Range": `bytes */${blob.size}` },
-      });
-    }
+    if (range === "unsatisfiable") return unsatisfiable(blob.size);
     // HEAD carries the SAME response (headers included) — the HTTP runtime
     // strips the body and cancels the stream, and building it identically is
     // what keeps a HEAD's Content-Length from drifting to 0 (a null-body
@@ -1770,29 +1864,40 @@ export function createStaticHandler(deps: StaticDeps): {
    *  a server-side forever-cache would quietly break that promise while the
    *  header keeps making it. */
   let _iconCache: { body: Uint8Array | string; type: string } | null = null;
+  /** The unread-`icon.svg` sentence is said once per server, not per tab. */
+  let _svgIconSaid = false;
   async function handleIcon(): Promise<Response> {
     if (!deps.prod) _iconCache = null;
     if (!_iconCache) {
       // The app's own art wins, in the same dir every other app asset comes
-      // from (THE app-dir decider). PNG first: that is the file the build,
-      // Electron and Android all read, so a project with both cannot end up
-      // with a browser tab that disagrees with its taskbar entry.
+      // from (THE app-dir decider). `icon.png` ONLY: that is the file the
+      // build, Electron and Android read. This also took `icon.svg`, so an
+      // app that drew one saw it in the dev tab while every built target
+      // carried the monogram — dev showing what prod never does.
       const dirs = [deps.absDistDir, ..._appRoots].filter(
         Boolean,
       ) as string[];
       for (const dir of dirs) {
-        for (
-          const [file, type] of [
-            [APP_ICON, "image/png"],
-            ["icon.svg", "image/svg+xml"],
-          ] as const
-        ) {
+        try {
+          _iconCache = {
+            body: await Deno.readFile(join(dir, APP_ICON)),
+            type: "image/png",
+          };
+          break;
+        } catch { /* next candidate */ }
+      }
+      if (!_iconCache && !_svgIconSaid) {
+        for (const dir of _appRoots) {
+          const svg = join(dir, APP_ICON_SVG);
           try {
-            _iconCache = { body: await Deno.readFile(join(dir, file)), type };
-            break;
-          } catch { /* next candidate */ }
+            if (!(await Deno.stat(svg)).isFile) continue;
+          } catch {
+            continue; // aio-ok: no icon.svg here — nothing to say
+          }
+          _svgIconSaid = true;
+          log.warn(svgIconHint(svg, join(dir, APP_ICON)));
+          break;
         }
-        if (_iconCache) break;
       }
       _iconCache ??= {
         // The IDENTITY, not the window title — the same name the page's theme
@@ -1805,7 +1910,16 @@ export function createStaticHandler(deps: StaticDeps): {
         // page it labels. Measured: page `--aio-hue: 148`, icon gradient 190.
         // CLAUDE.md and the `ui.theme` docs both promise "one app is one
         // colour everywhere it appears".
-        body: appIconSvg(deps.themeName || deps.title),
+        // The LETTER is what the built app shows (appIconLabel: deno.json
+        // `title`, else the appId) — not the appId's own initial.
+        body: appIconSvg(
+          appIconLabel(
+            appConfigTitle(deps.absBaseDir),
+            deps.themeName || deps.title,
+          ),
+          512,
+          deps.themeName || deps.title,
+        ),
         type: "image/svg+xml",
       };
     }
@@ -1924,8 +2038,12 @@ export function createStaticHandler(deps: StaticDeps): {
   ): Promise<Response> {
     const etag = `W/"${st.mtime?.getTime() ?? 0}-${st.size}"`;
     const headers: Record<string, string> = {
-      "Content-Type": MIME[ext] ??
-        (isText ? "text/plain" : "application/octet-stream"),
+      // Text is served as the UTF-8 the server decodes it as: without a
+      // charset a browser may fall back to windows-1252 and garble non-ASCII
+      // in a .txt / .md / .css file.
+      "Content-Type": withUtf8(
+        MIME[ext] ?? (isText ? "text/plain" : "application/octet-stream"),
+      ),
       // A VALIDATOR. Prod sets `Cache-Control: no-cache` on every static
       // file, and `no-cache` means "you may cache, but revalidate" —
       // revalidation needs a validator, and images, fonts, wasm and video had
@@ -1951,12 +2069,7 @@ export function createStaticHandler(deps: StaticDeps): {
     const range = ranged
       ? parseByteRange(req?.headers.get("range") ?? null, st.size)
       : null;
-    if (range === "unsatisfiable") {
-      return new Response("Range Not Satisfiable", {
-        status: 416,
-        headers: { ...headers, "Content-Range": `bytes */${st.size}` },
-      });
-    }
+    if (range === "unsatisfiable") return unsatisfiable(st.size);
     let file: Deno.FsFile;
     try {
       file = await Deno.open(filepath, { read: true });
@@ -2093,12 +2206,7 @@ export function createStaticHandler(deps: StaticDeps): {
     }
     // Symlinks inside the root must not escape it either
     try {
-      const real = await Deno.realPath(filepath);
-      const realBase = await Deno.realPath(root);
-      const realPfx = realBase.endsWith(SEPARATOR)
-        ? realBase
-        : realBase + SEPARATOR;
-      if (real !== realBase && !real.startsWith(realPfx)) {
+      if (!(await realPathInside(root, filepath))) {
         return new Response("Forbidden", { status: 403 });
       }
     } catch { /* file doesn't exist — later handlers 404 */ }
@@ -2173,28 +2281,33 @@ export function createStaticHandler(deps: StaticDeps): {
     }
     // A module that declares `import "aio/server-only"` is a `*.server.ts` by
     // another spelling — the same 404 (see `_declaresServerOnly`).
-    if (DEV_MODULE.has(ext) && _declaresServerOnly(body)) {
+    if (isServerOnlySource(filepath, () => body)) {
       return new Response("Not found", { status: 404 });
     }
     // Before the transpile: a module that fails to compile is still on the
     // page, and the edit that fixes it must reload it.
     if (devModule) deps.onModuleServed?.(filepath);
 
-    let contentType = MIME[ext] ?? "text/plain";
+    let contentType = withUtf8(MIME[ext] ?? "text/plain");
 
     // Dev only: a plain-JS module is served as written, except for the
     // relative imports whose browser resolution is not the file's one url.
     if (devModule && !transpiled) {
       body = _rewriteRelativeImports(body, filepath, pathname, _canonicalUrl);
+      body = _rewriteAliasImports(body, deps.localAliases ?? {}, _canonicalUrl);
     }
 
     // Dev only: live-transpile .ts/.tsx/.jsx via esbuild
     if (transpiled) {
       try {
-        body = _rewriteRelativeImports(
-          await transpile(body, filepath, debug),
-          filepath,
-          pathname,
+        body = _rewriteAliasImports(
+          _rewriteRelativeImports(
+            await transpile(body, filepath, debug),
+            filepath,
+            pathname,
+            _canonicalUrl,
+          ),
+          deps.localAliases ?? {},
           _canonicalUrl,
         );
         contentType = "application/javascript";

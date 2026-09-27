@@ -2,6 +2,7 @@
 // Extracted from aio.ts to reduce monolith and enable isolated testing.
 
 import type { SkvInstance, SkvStmt } from "./skv.ts";
+import { MAX_TIMER_DELAY } from "../state/timer-ceiling.ts";
 import type { DB } from "../db/mod.ts";
 import {
   checkTableShape,
@@ -647,8 +648,14 @@ export function createPersistenceManager(
 
   /** WHAT gets stamped — one decider, used by both the planned (in-transaction)
    *  and the direct write paths. Empty when nothing needs stamping or when the
-   *  stored map could not be read. */
-  function _versionStamp(written: readonly string[] = []): {
+   *  stored map could not be read.
+   *
+   *  `kept` names the cells this write carries through with their OLD bytes (a
+   *  held or refused cell): those keep their stored version too. */
+  function _versionStamp(
+    written: readonly string[] = [],
+    kept: ReadonlySet<string> = new Set(),
+  ): {
     pairs: [string, unknown][];
     commit: () => void;
   } {
@@ -663,6 +670,17 @@ export function createPersistenceManager(
       const merged = { ..._storedVersions };
       let changed = false;
       for (const [cell, v] of Object.entries(cfg.cellVersions)) {
+        // The same rule as the shapes below, from the other side: a HELD cell
+        // keeps its last clean bytes on disk (in single mode they are literally
+        // written back), which may be an older build's. Stamping it with this
+        // build's version put v2 beside v1 bytes, and the next boot skipped the
+        // `onMigrate` those bytes needed ("amounts are now cents" never ran).
+        // Only the held cells are skipped: every other cell either carries this
+        // build's bytes (written now, or by an earlier window of this process —
+        // multi mode only skips a cell it has already written), or has no bytes
+        // in the snapshot at all (a sync cell's home is its op log), so the
+        // stamp says what is true.
+        if (kept.has(cell)) continue;
         const highest = Math.max(v, merged[cell] ?? 0);
         if (highest !== merged[cell]) {
           merged[cell] = highest;
@@ -711,8 +729,11 @@ export function createPersistenceManager(
    *  ships today). Same decider, same monotonicity — but NOT atomic with the
    *  snapshot, which is why the planned path above is the one every real app
    *  takes. */
-  async function _stampVersions(written: readonly string[]): Promise<void> {
-    const stamp = _versionStamp(written);
+  async function _stampVersions(
+    written: readonly string[],
+    kept: ReadonlySet<string>,
+  ): Promise<void> {
+    const stamp = _versionStamp(written, kept);
     if (!stamp.pairs.length) return;
     try {
       for (const [k, v] of stamp.pairs) await kvDb!.set(k, v);
@@ -1078,7 +1099,9 @@ export function createPersistenceManager(
       const rows = kv.planSetMulti?.(persistKey, toWrite, removedKeys) ??
         null;
       const written = Object.keys(toWrite);
-      const stamp = _versionStamp(written);
+      // Held or refused: its row keeps whatever bytes it had before.
+      const kept = new Set([...held, ...scan.refused]);
+      const stamp = _versionStamp(written, kept);
       const planned = asyncDb !== null && rows !== null;
       const wm = planned && whole ? _planWatermark(seq) : [];
       return {
@@ -1101,7 +1124,7 @@ export function createPersistenceManager(
             _lastGood.delete(k);
           }
           if (planned) stamp.commit(); // stamped inside the transaction above
-          else await _stampVersions(written);
+          else await _stampVersions(written, kept);
           if (wm.length) _committedWm = seq;
           // The watermark advances only on a committed write of EVERY cell.
           if (whole) cfg.onPersisted?.(seq);
@@ -1143,7 +1166,8 @@ export function createPersistenceManager(
     const written = perCell
       ? Object.keys(doc).filter((c) => !keep.includes(c))
       : [];
-    const stamp = _versionStamp(written);
+    const kept = new Set(keep);
+    const stamp = _versionStamp(written, kept);
     const planned = asyncDb !== null && row !== null;
     const wm = planned && whole ? _planWatermark(seq) : [];
     return {
@@ -1163,7 +1187,7 @@ export function createPersistenceManager(
           _lastGood.set(k, e.ref); // the bytes this row now holds
         }
         if (planned) stamp.commit(); // stamped inside the transaction above
-        else await _stampVersions(written);
+        else await _stampVersions(written, kept);
         if (wm.length) _committedWm = seq;
         // The watermark advances only on a committed write of EVERY cell.
         if (whole) cfg.onPersisted?.(seq);
@@ -1540,7 +1564,8 @@ export function createPersistenceManager(
         return;
       }
       inFlight = _runPersistCycle();
-    }, persistMs);
+      // Past the ceiling setTimeout fires in ~1 ms (config.ts warns).
+    }, Math.min(persistMs, MAX_TIMER_DELAY));
   }
 
   function schedulePersist(patches?: CellPatches): void {

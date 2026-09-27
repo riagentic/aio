@@ -275,8 +275,8 @@ export function dropReport(
           "and is gone.",
         hint:
           "The offline queue holds SYNC_DEFAULTS.pendingCap unconfirmed ops " +
-          "per cell and is full, so the client has not reached the server in " +
-          "a long time. Check connectivity and backpressure.",
+          "per cell and is full: offline too long, or calls made faster " +
+          "than acks return, even online (a burst — make it one call).",
       };
     case "stale-evicted":
       return {

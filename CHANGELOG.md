@@ -1,5 +1,231 @@
 # Changelog
 
+## v1.0.13-beta — self-update on macOS, Windows and Linux; Android and Electron field asks (2026-09-27)
+
+> **Additive only — nothing is removed and nothing changes shape.** What an app
+> may notice (see
+> [the upgrade guide](docs/upgrade/from-1.0.12-beta-to-1.0.13-beta.md)):
+> `ship`/`am publish` refuse a release signed for a name the artifact does not
+> run as; a Windows install unpacked from the `.zip` by 1.0.12 needs one manual
+> update; `electron.permissions` (opt-in) denies everything it does not list.
+
+### Self-update
+
+- **A macOS `.app` updates itself.** When a Mac signs the bundle, the build also
+  writes `<bin>-mac-<arch>.app.tar.gz` (new update target `"electron-app"`, in
+  the new `RELEASE_TARGETS`; `UPDATE_TARGETS` is unchanged). `am publish` names
+  it in `darwin-<arch>.json`; the `.dmg` stays beside it as the first download.
+  The app stages the bundle next to `X.app`, checks it with
+  `codesign --verify --deep --strict` (a failure keeps the running version),
+  swaps the folders after it exits and relaunches with `open -n`. A copy running
+  from App Translocation or an unwritable folder refuses before downloading: it
+  says to move it to /Applications, or — already in an unwritable
+  `/Applications` — to update from an administrator account or install in
+  `~/Applications`. `aio ship --target=electron-app` is accepted. Verified on
+  macOS 14.
+- **Windows: an installed update now relaunches.** The successor (and the
+  directory swap helper) died with the exiting app, so the app just closed after
+  installing. The helper now starts through `CreateProcessW` with a console that
+  has no window; without `--allow-ffi`, through `cmd.exe` with the script in the
+  environment (cmd refuses a command line that long). It waits up to 30 s for
+  every process running from the install (Electron outlives the server) before
+  it moves a folder. Verified on Windows 11.
+- **Windows installs unpacked from the `.zip` update.** Publish ships the `.zip`
+  under its own manifest, `<os>-<arch>.electron-zip.json`, and a zip install
+  reads it before the platform's `<os>-<arch>.json`: only a 404 or 410 counts as
+  "none" (remembered for a day), and a timeout fails the check instead of
+  offering the platform manifest. A zip install on 1.0.12 still reads only the
+  platform manifest and needs one manual update; publish says so. The download
+  is unpacked with .NET's `ZipFile` (`Expand-Archive` refused the updater's file
+  name). The in-app rollback of a zip install goes through the swap helper
+  (Windows refuses to move the folder a program runs from).
+- **Windows: no ~20 s freeze while installing.** The check that the downloaded
+  program runs (`--version`) starts it from a worker; starting a new unsigned
+  exe waits for the antivirus scan, and that wait held the app's own thread.
+- **A directory update whose new version never boots is rolled back** (macOS,
+  Linux, Windows). The two-boot rollback ran inside the new build, so a bundle
+  macOS refused to open, or one that exited at start, left the app gone. The
+  swap helper now waits 120 s for the first boot to take a first-boot token; if
+  none does, it takes the token itself (one atomic file operation on each side,
+  so the two can't both win), stops what runs from the new folder, puts the old
+  one back and starts it. A new version built with aio 1.0.12 or older, which
+  never takes the token, counts by rewriting or removing the pending marker, as
+  before. The helper needs no `cmp`, never reads a read error as a first boot,
+  and on Windows never blocks the new build's rename of the marker.
+- **The swap helper always ends with an app running.** A move blocked by a file
+  lock (antivirus, an open Explorer window) is retried for 10 s; if it still
+  fails, the helper puts back what it moved and starts the old version. A failed
+  Windows process list (WMI), a marker held by a scanner, or a move back that
+  fails no longer end it with nothing started: it records what happened first,
+  then starts whichever copy is left. The next boot logs it —
+  `update X → Y could not be installed: <why>`,
+  `ROLLBACK FAILED of update X →
+  Y: … — this is still Y`, or
+  `… started from where it was set aside` — keeps the helper's record, and
+  dismisses Y so it is not reinstalled in a loop. A helper that cannot start at
+  all (e.g. AppLocker) logs `Y was NOT installed`, removes the unpacked copy and
+  the marker, and starts this version again.
+- **A new version that dies in the app's own `onStart` is rolled back.** It was
+  confirmed healthy just before the hook ran, so the rollback was gone and the
+  installed app never started again. An update is now confirmed once `onStart`
+  has come through (an async one settled, still running after 30 s, or a clean
+  exit with code 0 — recorded then, and confirmed with its cleanup by the next
+  boot), and only the marker that boot judged — never a newer one an install
+  wrote meanwhile. Each update also no longer adds one more `--client=…` to the
+  relaunched app's arguments, and an aio-built binary no longer replays its own
+  baked one over the new build's (arguments after a bare `--` are replayed
+  untouched). A rolled-back version is dismissed at the next boot even with
+  `check: false`; a manual `check()` offered it again, and one click reinstalled
+  it. Its record is removed only once the dismissal landed, and auto-install
+  never picks it again in that process either way.
+- **`app.log` keeps the lines a process says right before it exits.** The file
+  sink wrote on a timer that never ran after `Deno.exit()`, so a rollback's own
+  "rolling back" lines (and an early exit's whole log) reached only the console.
+  Held lines are now written synchronously at exit (a log directory removed
+  while the app ran is created again, as a running write does).
+- On Linux an updated or restarted app no longer inherits its predecessor's open
+  descriptors: an AppImage's old runtime and its mount of the replaced file
+  lived as long as the new version did. The handover runs through `/bin/bash -p`
+  (all of them; `$BASH_ENV` is not sourced) or `/bin/sh` (busybox: all; dash:
+  3–9, it cannot close a two-digit one), a descriptor that cannot be closed
+  never stops the new version from starting, and the new version gets the
+  environment it would have inherited directly (`env` restores what the shell
+  dropped or rewrote).
+- An AppImage's `AppRun` runs `bash -p`: a `$BASH_ENV` script that exits ended
+  every launch before the app ran.
+- A download of the wrong size names both exact byte counts, an oversize one too
+  (it read "sent 186.7 MB, but the manifest promises 186.7 MB").
+- **An old version never confirms an update that did not take effect.** A
+  pending marker found by the very executable it was meant to replace (the same
+  file, not the same version string) is recorded as a failed update. A new build
+  that reports the old version (a rebuild from a repository) is judged as the
+  new build; a marker written by 1.0.12 is never judged old.
+- **A boot attempt that can't be recorded no longer stops the boot**: it is
+  logged and the boot goes on uncounted. A torn, empty or unreadable
+  `update-failed.json` is moved aside (`update-failed.json.bad-<time>`) and said
+  once, and it is written atomically.
+- **An update that takes longer than 30 s is no longer reported as failed while
+  it installs.** `updates.apply()` and `check()` are `long` (no call ceiling);
+  each step inside keeps its own limit.
+- **Each directory update leaked one whole old install.** The confirmed boot
+  keeps the newest three.
+- **A refused unattended install is logged and backs off.** It was never logged,
+  and the successful check before it reset the failure count, so it
+  re-downloaded at full cadence. A refused install (a tampered download) is
+  logged once — by the button and by `auto` alike, with when it retries — and
+  its error stays visible across the next poll of the same release.
+- A rolled-back update says "macOS refused to open it" only on macOS.
+- An `$APPIMAGE` inherited from a parent AppImage no longer makes a plain binary
+  update as that AppImage. `isCompiled()` uses the same rule: a `deno run` of a
+  dev checkout started from an AppImage's terminal (an AppImage editor) ran as a
+  shipped binary, with dev mode off. The "unpacked into a world-writable
+  directory" warning no longer names the host AppImage's mount.
+- Download progress is reported per whole percent, not per chunk (~4000
+  dispatches for one desktop update). The boot report says `every 10s` for a
+  sub-minute cadence, not `every 0m`.
+- A field a cell does not persist (`persist: { include | exclude }`, e.g. the
+  built-in `updates` cell's) is no longer reported at every restart as "not in
+  the stored data".
+
+### Publish
+
+- **`ship` and `am publish` refuse a release signed for a name the artifact does
+  not run as**, e.g. `aio.run({ appId: "x" })` in code with only a `title` in
+  `deno.json`. Every install refused those releases, and nothing said so. The
+  artifact now reports its id beside `--aio-data-contract`; an artifact built by
+  1.0.12 reports none and publishes as before. Fix: `"appId"` in `deno.json`, or
+  `--name=<id>`.
+- **`am publish` refused every multi-platform Electron build that includes
+  Windows.** Per platform it now publishes the artifact an update installs (the
+  self-contained `.exe`) and copies the `.zip` beside it as a download, in the
+  same `downloads` list as a `.dmg`. A choice offered in an error message is
+  never the same string twice.
+- **`am publish` skipped every `.dmg`.** It read only a file's first bytes; a
+  disk image is known by its `koly` trailer. Files it does not publish are a
+  loud `⚠ NOT published` line, and a `.dmg` whose platform got no update
+  manifest is a stderr warning.
+- **A macOS release published with no data contract was refused by every Mac
+  install holding data.** On a Mac, `am publish` unpacks the Mac-built
+  `.app.tar.gz` and asks its executable. Where nothing can ask it (an archive,
+  another OS's or arch's binary), publish refuses like `aio ship` unless
+  `--data=contract.json` or `--no-data` (now an `am publish` flag) is given;
+  both are used as given, without running the artifact. The no-contract warning
+  is on stderr in `--json` mode too, with the real reason per file.
+
+### Android
+
+- **New: `nativeFetch()`** (`aio`, `aio/air`) — `fetch` sent by a standalone
+  Android APK natively: no `Origin`, no CORS, no WebView cookies, for APIs that
+  refuse browser requests. Plain `fetch` everywhere else. Own-origin only
+  (`addWebMessageListener`), http(s) only, timeouts and 8 MiB body caps. See
+  [Native fetch](docs/build/targets.md#native-fetch).
+- **New: `onBackButton(handler)`** (`aio/air`): Android Back asks the page
+  first. It works from a cold start and in standalone and server APKs, runs last
+  registered first, and does the default only when no handler returns `true`.
+  Inert on desktop; an unused one adds 0 bytes to the bundle.
+- **Security: a third-party `<iframe>` in a standalone APK can no longer read or
+  write the app's saved state.** Every `AioNativeStore` method takes a
+  per-launch key, handed only to the app's own origin by a document-start
+  script. State saved by 1.0.12 loads unchanged. See
+  [State survives a kill](docs/build/targets.md#state-survives-a-kill).
+- An own `<app>/android/` activity that drops the native fetch bridge or
+  `onBackButton`, or still installs the unkeyed store, warns at build time.
+- **A standalone APK packages deno.json `assets` mounts** under the page, so one
+  relative `fetch` works on the desktop and on the phone. It ships exactly what
+  the production server would serve; a symlink out of a mount, or a mount
+  holding the build output, is refused by name.
+
+### Electron
+
+- 🔒 **New, opt-in: `electron: { permissions }`**, an Electron permission
+  allow-list. With it set, the app's own page gets exactly the listed
+  permissions (e.g. `{ "clipboard-sanitized-write": ["app"] }`), and `<webview>`
+  guests, foreign frames and `openWindow` child windows get none, not even
+  fullscreen. Unknown names or scopes stop the boot. Without it nothing changes:
+  the app's own page and `openWindow` child windows keep what 1.0.12 gave them,
+  and guests and foreign frames get only fullscreen. A real-Electron test shows
+  a guest and a foreign iframe reading the app's copied text with no guard, and
+  denied it (and camera, microphone, geolocation, notifications) with it.
+- The main process's `[aio:electron]` warnings (a permission `DENIED`, an
+  `openWindow`, a main-process crash) reach `app.log` in a packaged app too. A
+  refused permission query (`navigator.permissions.query`) is logged once per
+  origin and permission. A line names the origin, never the URL, so the app's
+  `?token=` key stays out of the log. Node and Electron deprecation warnings are
+  logged as WARN, not ERROR.
+- If the aio server dies, the window no longer loops on the dead stderr pipe
+  (EPIPE → uncaught exception → log → EPIPE).
+
+### Server, dev and docs
+
+- `homeWasRequested()` in `aio/server`: whether `--profile`, `--home` or
+  `AIO_PROFILE` asked for a data home — the fact `resolveHome()` leaves out.
+- `visible: { publicFields }` alone counts as a `visible` declaration: no more
+  "access does NOT hide state" warning (or `--expose` refusal) for it.
+- The browser check no longer warns "Circular import" for a loop that only a
+  dynamic `import()` closes; every all-static cycle still warns.
+- `build.minify` says at build time that server stack traces point into the
+  minified code.
+- Docs: a serverFn and its `access` predicate read the caller's address from
+  `serverRequest().ip` (the `trustProxyHeader` hop behind a proxy), with a
+  per-address login-throttle example; pinned by a test.
+- **`useResource`**: `open`/`close` take `key()`'s own key type, so a
+  `(lang: string)` loader checks. `(k: string | number)` still compiles.
+- **`am start --cdp`** names `am shot` for screenshots. The JSON is unchanged.
+- **`am agent`**: `ship` says what a standalone APK does and does not carry.
+  `ui` gives the JSX attribute spelling (`autoComplete`, not `autocomplete`).
+
+### Testing
+
+- `testUI`/`bootCells`: a real timer a disposed mount's component armed no
+  longer commits into the next mount silently — it is refused like a method's,
+  as the call's rejection (`.catch` sees it). A timer belongs to the mount
+  active when it was armed (its render, method, or handle's actions/drains — and
+  a timer's own timers inherit it), so an inner nested mount's timer is refused
+  once it closes; one the test body arms between calls still reaches the live
+  outer mount. The "torn-down runtime" refusal names what started the call (the
+  method, or the timer and the line that armed it) and counts boots since, not
+  in total.
+
 ## v1.0.12-beta — six bug-hunt rounds after 1.0.11, each fix proven by a test that fails without it (2026-09-25)
 
 > **Additive only — nothing is removed and nothing changes shape.** About 350

@@ -194,6 +194,33 @@ export function _assertAttrName(name: string, where: string): void {
   );
 }
 
+// A TAG name is the same hole one step earlier. `h(`h${level}`)` with a level
+// from content, or a tag picked from a CMS field, reached the SSR writers as
+// `<${tag}` verbatim, so `h("img src=x onerror=alert(1)")` shipped a live
+// handler from the server — while the browser's `createElement` refuses that
+// name with `InvalidCharacterError`. Same rule, same module, both sides: the
+// SSR writers and `createDom` call `_assertTagName` before they emit/create,
+// so client and server fail identically (and with the tag named, rather than
+// the engine's bare DOMException). The predicate is the attribute one — the
+// XML `Name` production is exactly what `createElement` accepted before the
+// DOM spec's 2025 relaxation, and it admits every tag aio renders: custom
+// elements (`my-el`), SVG's camelCase (`foreignObject`, `linearGradient`),
+// and prefixed names (`svg:rect`). What it refuses — whitespace, `/`, `>`,
+// quotes, `=` — is what would end the tag name in raw markup.
+
+/** Refuse an element name no document can hold, naming it. Throws on BOTH
+ *  sides for the reason {@linkcode _assertAttrName} does. */
+export function _assertTagName(tag: string): void {
+  if (_VALID_ATTR_NAME.test(tag)) return;
+  throw new Error(
+    `[aio] ${JSON.stringify(tag)} is not a legal element name. A tag may ` +
+      `not contain spaces, quotes, "=", "<", ">" or "/", and may not start ` +
+      `with a digit or "-". Emitting it would write raw HTML into the page, ` +
+      `so it is refused on the server exactly as createElement refuses it ` +
+      `in the browser. Check where this h()/JSX tag is computed from data.`,
+  );
+}
+
 /** The namespace an attribute name belongs to, or null for the default one. */
 export function _attrNS(k: string): string | null {
   if (k.startsWith("xlink:")) return _XLINK_NS;
@@ -223,6 +250,14 @@ export function _writeProp(
   }
   if (k === "style") {
     if (typeof v === "string") {
+      // An EMPTY string is no style at all, as SSR writes it (`if (v)`):
+      // `cssText = ""` created a bare `style=""` attribute, so mount and the
+      // server disagreed and hydrate warned about identical props — the
+      // divergence AIO-170 closed for null/false below.
+      if (v === "") {
+        el.removeAttribute("style");
+        return;
+      }
       el.style.cssText = v;
       return;
     }

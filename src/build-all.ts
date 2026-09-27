@@ -378,6 +378,7 @@ const ARTIFACT_EXTS = new Set([
   ".apk",
   ".zip",
   ".dmg",
+  ".gz", // `<bin>-mac-<arch>.app.tar.gz`, the signed macOS update artifact
   ".service",
   ".exe",
 ]);
@@ -791,8 +792,14 @@ export function unsafeOutDir(
   const distDir = trimSep(join(rootDir, DIST_DIR));
   if (out !== distDir && within(out, distDir)) return true;
   // Both directions: `out` may not sit inside a protected dir, and may not
-  // swallow one.
-  return protectedDirs.some((d) => within(out, d) || within(d, out));
+  // swallow one. Compared CASE-FOLDED: on a case-insensitive filesystem (the
+  // macOS and Windows defaults) `--out=Src` IS `src/`, passed a byte-exact
+  // check, and the out-dir wipe deleted the app's source. Folding everywhere
+  // costs a Linux user only the name `SRC` for a build folder.
+  const lo = (p: string) => p.toLowerCase();
+  return protectedDirs.some((d) =>
+    within(lo(out), lo(d)) || within(lo(d), lo(out))
+  );
 }
 
 /** Move a file, falling back to copy+delete across filesystem boundaries — a
@@ -1442,7 +1449,7 @@ export async function buildAll(): Promise<number> {
           console.error(
             `${C.red}✗ ${label} — ${why}${C.r}\n  ${C.dim}looked for: ` +
               `${targetBin}, ${targetBin}-client, ${targetBin}-<platform>, ` +
-              `${targetBin}*.{AppImage,apk,zip,dmg,exe,service}, aio-client-*, ` +
+              `${targetBin}*.{AppImage,apk,zip,dmg,app.tar.gz,exe,service}, aio-client-*, ` +
               `the ${iosArtifactName(targetBin)}/ directory — new since the ` +
               `build began.\n  fix: the single-target build wrote elsewhere ` +
               `or under another name. A per-target "name" in build.targets ` +

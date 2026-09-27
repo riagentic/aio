@@ -23,6 +23,7 @@ import {
   TEMPLATES,
 } from "../src/am/am-help-text.ts";
 import { helpBlock } from "../src/am/am-cmd-meta.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 Deno.test("am create --help and am agent describe templates from ONE object", () => {
   // Not "equal contents" — the SAME object. Two records that happen to match
@@ -70,5 +71,36 @@ Deno.test("am agent still carries the same sentences", () => {
   }
   for (const t of TARGETS) {
     assert(page.includes(BRIEF_TARGETS[t]), `am agent lost target ${t}`);
+  }
+});
+
+Deno.test("am create with no name: its usage line offers every template", async () => {
+  // It listed counter|todo|cli — canvas and assets were missing from the one
+  // line a person sees after typing `am create` alone.
+  const dir = await tempDir("am-create-usage-");
+  try {
+    const p = await new Deno.Command(Deno.execPath(), {
+      args: [
+        "run",
+        "-A",
+        new URL("../src/am.ts", import.meta.url).pathname,
+        "create",
+        "--json",
+      ],
+      cwd: dir,
+      env: { AIO_APPS_DIR: `${dir}/.aio-home` },
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    const said = new TextDecoder().decode(p.stdout) +
+      new TextDecoder().decode(p.stderr);
+    assert(p.code !== 0, said);
+    assert(TEMPLATES.length >= 5, "empty template list");
+    assert(
+      said.includes(`--template=${TEMPLATES.join("|")}`),
+      `usage does not offer every template: ${said}`,
+    );
+  } finally {
+    await dropTempDir(dir);
   }
 });

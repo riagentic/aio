@@ -455,8 +455,10 @@ export function testCell(
     _refuseUnsafeCells([f]);
 
     // Compose a single-cell system
+    // refusalsReject: the harness is the STRICTEST environment — a refused
+    // write rejects the method that made it, as over the wire (pitfalls.md).
     // aio-ok(persist-decider): testCell is in-memory — its state lives in a local variable and never reaches a store.
-    const composed = composeCells([f]);
+    const composed = composeCells([f], { refusalsReject: true });
     const machine = f.__aio.machine;
 
     let state = { ...composed.initialState };
@@ -1262,6 +1264,10 @@ export async function bootCells(
     persist: false,
     cellDefaults: opts.cellDefaults,
     localFirst: opts.localFirst,
+    // The harness is the STRICTEST environment (pitfalls.md): a refused
+    // write rejects the method that made it, as it does over the wire —
+    // whatever the app chose for its own in-process callers.
+    refusalsReject: true,
     // The app's budgets, so the harness measures what production measures.
     perfBudget: opts.perfBudget,
   }).finally(() => inits.restore());

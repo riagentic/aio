@@ -429,6 +429,8 @@ export async function writeWindowsIcon(
     root: string;
     appDir: string;
     name: string;
+    /** The appId: the icon's colour, so the exe matches every other target. */
+    id?: string;
     warn?: (msg: string) => void;
   },
 ): Promise<string> {
@@ -456,7 +458,7 @@ export async function writeWindowsIcon(
         `${join(opts.appDir, APP_ICON_ICO)} to use your own.`,
     );
   }
-  await Deno.writeFile(out, await appIconIco(opts.name));
+  await Deno.writeFile(out, await appIconIco(opts.name, opts.id));
   return out;
 }
 

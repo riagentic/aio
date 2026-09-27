@@ -197,12 +197,59 @@ Deno.test("encoding: HEAD is the handler's headers, untouched", async () => {
   assertEquals(out.headers.get("Content-Length"), "43");
   assertEquals(out.headers.get("Content-Encoding"), null);
 
-  // …and a compressible one is equally untouched.
-  const js = await encodeResponse(
-    get({ "Accept-Encoding": "br" }, "HEAD"),
-    jsResponse(),
+  // A compressible HEAD whose handler built the GET's body is answered as the
+  // GET is (RFC 9110 §9.3.2: same header fields) — same ETag, encoding and
+  // length; the runtime drops the body. It used to go out untouched, with no
+  // validator, while its GET had one.
+  const [h, g] = await Promise.all(
+    ["HEAD", "GET"].map((m) =>
+      encodeResponse(get({ "Accept-Encoding": "br" }, m), jsResponse())
+    ),
   );
-  assertEquals(js.headers.get("Content-Encoding"), null);
+  for (const k of ["ETag", "Vary", "Content-Encoding", "Content-Length"]) {
+    assertEquals(h!.headers.get(k), g!.headers.get(k), k);
+  }
+});
+
+// A handler's HEAD placeholder — an empty body plus the GET's declared length —
+// is not the representation. Taking the GET path on it answered
+// `content-length: 0` and the ETag of the empty string.
+Deno.test("encoding: a HEAD placeholder body keeps the handler's Content-Length", async () => {
+  _clearEncodedCache();
+  const out = await encodeResponse(
+    get({ "Accept-Encoding": "gzip" }, "HEAD"),
+    new Response("", {
+      headers: {
+        "Content-Type": "application/javascript",
+        "Content-Length": "1234",
+      },
+    }),
+  );
+  assertEquals(out.status, 200);
+  assertEquals(out.headers.get("Content-Length"), "1234");
+  assertEquals(out.headers.get("ETag"), null, "no ETag of an empty body");
+  assertEquals(out.headers.get("Content-Encoding"), null);
+});
+
+// Over the buffer ceiling a GET streams gzip and drops Content-Length; a HEAD
+// must keep the length it exists to report.
+Deno.test("encoding: a HEAD over the buffer ceiling keeps Content-Length", async () => {
+  const size = String(MAX_BUFFER_BYTES + 1);
+  const mk = () =>
+    new Response("x", {
+      headers: { "Content-Type": "application/json", "Content-Length": size },
+    });
+  const out = await encodeResponse(
+    get({ "Accept-Encoding": "gzip" }, "HEAD"),
+    mk(),
+  );
+  await out.body?.cancel();
+  assertEquals(out.headers.get("Content-Length"), size);
+  assertEquals(out.headers.get("Content-Encoding"), null);
+  // The GET beside it still streams gzip.
+  const g = await encodeResponse(get({ "Accept-Encoding": "gzip" }), mk());
+  await g.body?.cancel();
+  assertEquals(g.headers.get("Content-Encoding"), "gzip");
 });
 
 Deno.test("encoding: non-200 responses are never touched", async () => {

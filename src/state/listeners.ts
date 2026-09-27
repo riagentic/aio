@@ -38,6 +38,10 @@ export class Listeners<T> {
    *  loudly, and the notification still reaches everyone else. */
   notify(value: T): void {
     for (const fn of Array.from(this.fns)) {
+      // The snapshot keeps a listener ADDED mid-notify out of this round; a
+      // listener REMOVED mid-notify (an earlier one unsubscribed it) must not
+      // run — unsubscribing cancels the pending notification, as in signal.ts.
+      if (!this.fns.has(fn)) continue;
       try {
         fn(value);
       } catch (e) {

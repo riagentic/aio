@@ -203,12 +203,48 @@ export function applyOp(s: { data: Data }, op: Op, log: unknown[]): void {
     // is not even self-consistent: on a plain array the method assigned into
     // the draft moments earlier, `delete` DOES leave a hole. So the sync side
     // is the one that departs from JavaScript, and no async behaviour can match
-    // both halves of it. Post-commit the question is moot (a hole and an
-    // `undefined` both serialize to `null`), so the divergence lives only in
-    // in-method reads. Use `splice` when you mean "remove".
+    // both halves of it. Post-commit there is nothing to fix: measured, the
+    // COMMITTED array is identical on both sides — `[undefined,2,3]` (dense)
+    // for a delete on a state array, a real hole for one on an array the
+    // method assigned — in `in`, `Object.keys` and `.reduce` alike, and a hole
+    // and an `undefined` both serialize to `null` on the wire and in state.db.
+    // The divergence lives only in in-method reads after a delete on a STATE
+    // array (the sync draft reads `undefined`, the async side a real hole, as
+    // plain JS does), and matching either half would break the other. A hole
+    // in an array the method assigned IS fuzzed — `arr_fresh_hole_iterate`.
+    // Use `splice` when you mean "remove".
     case "arr_set_length":
       d.nums.length = op.i % (d.nums.length + 1);
       break;
+    // …the ONE sparse shape that does have a parity target: a hole in an
+    // array the method ASSIGNED (a plain array on both sides, so plain-JS
+    // semantics on both). The skipping methods (reduce/forEach/map/filter/
+    // some/every) must skip it; find/findIndex must visit it. The live
+    // proxy's rebuilt view used to fill the hole with `undefined`, so
+    // `.reduce` was NaN where the sync body got the sum. Re-densified at the
+    // end so no later op inherits the hole.
+    case "arr_fresh_hole_iterate": {
+      d.nums = [op.v, 2, 3];
+      delete d.nums[op.i % 3];
+      const a = d.nums;
+      let each = 0, mapped = 0;
+      a.forEach(() => each++);
+      a.map(() => mapped++);
+      log.push(
+        op.i % 3 in a,
+        a.reduce((x, y) => x + y, 0),
+        a.reduceRight((x, y) => x + y, 0),
+        each,
+        mapped,
+        a.filter(() => true).length,
+        a.some((x) => x === undefined),
+        a.every((x) => x !== undefined),
+        a.findIndex((x) => x === undefined),
+        a.findLastIndex((x) => x === undefined),
+      );
+      d.nums = [op.v, 2, 3];
+      break;
+    }
     case "arr_copy_within":
       if (d.nums.length > 1) d.nums.copyWithin(0, 1);
       break;
@@ -824,10 +860,66 @@ export function applyOp(s: { data: Data }, op: Op, log: unknown[]): void {
       delete d.obj[`k${op.i % 3}`];
       log.push(Object.keys(d.obj).sort().join(","));
       break;
+    case "objarr_at_write": {
+      const it = d.items.at(op.i % 2 === 0 ? 0 : -1);
+      if (it) it.q = op.v;
+      break;
+    }
+    case "objarr_find_last_write": {
+      const it = d.items.findLast((x) => x.q <= op.v);
+      if (it) it.q = op.v + 1;
+      break;
+    }
+    case "objarr_reduce_write": {
+      const top = d.items.reduce<{ id: number; q: number } | undefined>(
+        (a, x) => (a === undefined || x.q > a.q ? x : a),
+        undefined,
+      );
+      if (top) top.q = op.v;
+      break;
+    }
+    case "read_with":
+      if (d.nums.length > 0) log.push(d.nums.with(0, op.v).join(","));
+      break;
+    case "read_find_last_index":
+      log.push(d.nums.findLastIndex((n) => n < op.v));
+      break;
+    case "deep_obj_assign":
+      Object.assign(d.deep.l1, { [`x${op.i % 2}`]: op.v });
+      log.push(JSON.stringify(d.deep));
+      break;
+    case "objarr_sort_then_write":
+      d.items.sort((x, y) => y.q - x.q);
+      if (d.items[0]) d.items[0].q = op.v;
+      log.push(JSON.stringify(d.items));
+      break;
+    case "read_obj_from_entries":
+      log.push(JSON.stringify(Object.fromEntries(Object.entries(d.obj))));
+      break;
+    case "objarr_spread_elem_back":
+      if (d.items[0]) d.items[0] = { ...d.items[0], q: op.v };
+      break;
+    case "read_own_names":
+      log.push(Object.getOwnPropertyNames(d.nums).join(","));
+      break;
+    case "grid_row_reassign_map":
+      if (d.grid[0]) d.grid[0] = d.grid[0].map((n) => n + op.v);
+      break;
   }
 }
 
 export const KINDS = [
+  "objarr_at_write",
+  "objarr_find_last_write",
+  "objarr_reduce_write",
+  "read_with",
+  "read_find_last_index",
+  "deep_obj_assign",
+  "objarr_sort_then_write",
+  "read_obj_from_entries",
+  "objarr_spread_elem_back",
+  "read_own_names",
+  "grid_row_reassign_map",
   "set_scalar",
   "rmw_scalar",
   "set_nested",
@@ -868,6 +960,7 @@ export const KINDS = [
   "read_entries",
   "push_then_write_pushed",
   "arr_set_length",
+  "arr_fresh_hole_iterate",
   "arr_copy_within",
   "deep_push",
   "deep_set_idx",

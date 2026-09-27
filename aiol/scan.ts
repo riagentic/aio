@@ -32,6 +32,139 @@ export function codeMatches(
   return [...src.matchAll(re)].filter((m) => mask[m.index!] === 1);
 }
 
+/** One slot of an import/export `{…}` list — the text between two code
+ *  commas (or a brace and a comma). */
+export type ListEntry = {
+  /** The slot's CODE, comments dropped and whitespace collapsed: `a`,
+   *  `type A`, `a as b`. Empty for the slot after a trailing comma. */
+  readonly text: string;
+  /** The code span in the source: first char, one past the last. Both equal
+   *  `slotStart` when `text` is empty. */
+  readonly start: number;
+  readonly end: number;
+  /** The whole slot, separators excluded (comments and layout included). */
+  readonly slotStart: number;
+  readonly slotEnd: number;
+};
+
+/** A static `import … from "x"` / `export … from "x"` / `import "x"`. */
+export type ModuleStatement = {
+  readonly kind: "import" | "export";
+  /** Offset of the `import`/`export` keyword. */
+  readonly start: number;
+  /** One past the closing quote of the specifier (a `;` is not included). */
+  readonly end: number;
+  /** `import type …` / `export type …` — erased before any bundler runs. */
+  readonly typeOnly: boolean;
+  /** The clause between the keyword (and `type`) and `from`, as code with
+   *  comments blanked; "" for a side-effect `import "x"`. */
+  readonly clause: string;
+  readonly spec: string;
+  readonly specStart: number;
+  readonly specEnd: number;
+  /** The `{…}` list, when the clause has one. */
+  readonly list: {
+    readonly open: number;
+    readonly close: number;
+    readonly entries: readonly ListEntry[];
+  } | null;
+};
+
+/** A list slot's code as written: comments dropped and whitespace collapsed
+ *  — except inside a quoted name (`"x-y" as xy`), whose body `codeText`
+ *  blanked and is restored from `src` verbatim. `slot` is the slot's
+ *  `codeText` with comment delimiters blanked; offsets are 1:1 with `src`. */
+function entryText(src: string, slot: string, at: number): string {
+  const quoted: string[] = [];
+  let bare = "";
+  for (let j = 0; j < slot.length; j++) {
+    const q = slot[j]!;
+    const close = q === '"' || q === "'" ? slot.indexOf(q, j + 1) : -1;
+    if (close === -1) {
+      bare += q;
+      continue;
+    }
+    quoted.push(src.slice(at + j, at + close + 1));
+    bare += "\0";
+    j = close;
+  }
+  let k = 0;
+  return bare.trim().replace(/\s+/g, " ").replace(/\0/g, () => quoted[k++]!);
+}
+
+/** Every static module statement of `src`, in source order, multi-line safe.
+ *  Pure.
+ *
+ *  THE import-clause reader for aiol's rules and fixes. They each used to
+ *  carry a one-line regex — `(?:import|export)\s+.*?\s+from` — and `.` never
+ *  crosses a newline, so the multi-line import `deno fmt` itself writes for a
+ *  long specifier list was invisible: the same `@std/fs` import was an ERROR on
+ *  one line and silence on three. The fixes split `{…}` on every "," and
+ *  re-joined it on ONE line, so a `// comment` after a specifier swallowed the
+ *  rest of the statement (`} from "aio";` landed inside the comment) and
+ *  --safe-fix left a file that no longer parsed.
+ *
+ *  The structure is matched on `codeText` (comments and string bodies
+ *  blanked, offsets preserved), so a statement inside a comment or a
+ *  generator's template literal is nothing, a comment inside a list is never
+ *  a specifier, and a comma inside a comment never splits one. The clause is
+ *  constrained to the shapes the grammar allows (`type`? default? `{…}` or
+ *  `* as ns`), so a match can never run from one statement into the next. */
+export function moduleStatements(src: string): ModuleStatement[] {
+  const code = codeText(src);
+  const out: ModuleStatement[] = [];
+  const re =
+    /\b(import|export)\b(?:\s*(type\b\s*)?((?:[\w$]+\s*,\s*)?(?:\{[^{}]*\}|\*(?:\s*as\s+[\w$]+)?|[\w$]+))\s*from)?\s*(['"])/g;
+  for (const m of code.matchAll(re)) {
+    const kind = m[1] as "import" | "export";
+    const at = m.index!;
+    if (code[at - 1] === "." || code[at - 1] === "$") continue; // `x.import`
+    const clauseRaw = m[3];
+    if (clauseRaw === undefined && kind === "export") continue; // not a form
+    const q = at + m[0].length - 1;
+    const specEnd = src.indexOf(src[q]!, q + 1);
+    if (specEnd === -1 || src.slice(q + 1, specEnd).includes("\n")) continue;
+    let list: ModuleStatement["list"] = null;
+    const open = clauseRaw === undefined ? -1 : code.indexOf("{", at);
+    if (open !== -1 && open < q) {
+      const close = code.indexOf("}", open);
+      const entries: ListEntry[] = [];
+      let slotStart = open + 1;
+      for (let i = open + 1; i <= close; i++) {
+        if (code[i] !== "," && i !== close) continue;
+        // Comment BODIES are already blank in `code`; their `//` `/*` `*/`
+        // delimiters are not, and no `/` or `*` is legal inside a list.
+        const slot = code.slice(slotStart, i).replace(/[/*]/g, " ");
+        const lead = slot.length - slot.trimStart().length;
+        const start = slotStart + (slot.trim() ? lead : 0);
+        const end = slot.trim() ? slotStart + slot.trimEnd().length : start;
+        entries.push({
+          text: entryText(src, slot, slotStart),
+          start,
+          end,
+          slotStart,
+          slotEnd: i,
+        });
+        slotStart = i + 1;
+      }
+      list = { open, close, entries };
+    }
+    out.push({
+      kind,
+      start: at,
+      end: specEnd + 1,
+      typeOnly: m[2] !== undefined,
+      clause: (clauseRaw ?? "").replace(/\/\/|\/\*|\*\//g, " ")
+        .replace(/\s+/g, " ").trim(),
+      spec: src.slice(q + 1, specEnd),
+      specStart: q + 1,
+      specEnd,
+      list,
+    });
+  }
+  return out;
+}
+
 /** Offsets of the TOP-LEVEL `<key>:` positions inside the object literal whose
  *  `{` sits at `open`. Depth-aware and mask-aware, so a key of a NESTED object
  *  is not this object's key and a `key:` inside a string or comment is nothing

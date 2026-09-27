@@ -337,7 +337,7 @@ export function createCellWorkerPool(opts: {
   );
   const counted = (
     type: string,
-    run: (onAdopted: () => void) => Promise<unknown>,
+    run: (onAdopted: (rerun: boolean) => void) => Promise<unknown>,
   ): Promise<unknown> => {
     if (!asyncTypes.has(type)) return run(() => {});
     bumpPending(type, 1);
@@ -347,7 +347,14 @@ export function createCellWorkerPool(opts: {
       released = true;
       bumpPending(type, -1);
     };
-    const p = run(release);
+    // An adopter whose `"first"` run answered another caller runs after all.
+    const onAdopted = (rerun: boolean) => {
+      if (!rerun) return release();
+      if (!released) return;
+      released = false;
+      bumpPending(type, 1);
+    };
+    const p = run(onAdopted);
     p.then(release, release);
     return p;
   };

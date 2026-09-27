@@ -119,8 +119,9 @@ On `aio.run()`, state restores in this order:
    on first boot
 2. **Snapshot restore** — load persisted state from `aio_kv`, merge with
    `initialState`
-3. **Table load** — `SELECT * FROM` each table, merge into state
-4. **`onRestore` hook** — your transform runs on the merged state
+3. **`onRestore` hook** — your transform runs on the restored snapshot, before
+   any table rows are loaded
+4. **Table load** — `SELECT * FROM` each table, merge into state
 5. **CRDT restore** — for each `sync: true` cell, the committed op-log is
    replayed through the reducer (HLC-ordered) so sync cells recover their state
    on a headless restart, **before any client connects** (logged as

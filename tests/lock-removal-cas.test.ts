@@ -13,6 +13,7 @@ import {
   boundUnixSockets,
   instances,
   lockPath,
+  ownPidTag,
   pruneDeadLockDirAt,
   readLock,
   removeLockFileIf,
@@ -196,7 +197,10 @@ Deno.test({
       // Names THIS process, but no lock it holds wrote it: a planted record.
       await put("mine.lock", lock(Deno.pid));
       await put("plain.sock", "a FILE named like a socket — not ours to judge");
-      await put(`watch-${gone.pid}.tmp`, "");
+      await put(
+        `watch-${gone.pid}${ownPidTag().slice(`${Deno.pid}`.length)}.tmp`,
+        "",
+      );
       await put("a.lock.mx", "");
       // A socket whose process was SIGKILLed: the file stays, nobody is bound
       // to it. (A clean `close()` unlinks it — not the case this is about.)

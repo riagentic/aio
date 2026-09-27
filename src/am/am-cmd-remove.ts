@@ -42,7 +42,8 @@ import {
 } from "./am-output.ts";
 import { instances } from "../server/single-instance-lock.ts";
 import { readRecord } from "../server/install-record.ts";
-import { readPending } from "../server/updates-apply.ts";
+import { clearPending, readPending } from "../server/updates-apply.ts";
+import type { PendingUpdate } from "../server/updates-apply.ts";
 import { cmdUpdate } from "./am-cmd-meta.ts";
 import { appNameError, reservedAppNameError } from "./am-utils.ts";
 
@@ -245,6 +246,29 @@ export async function cmdRemove(
         `  This is not a terminal, so it cannot be confirmed here.\n` +
         `  fix: am remove ${name} --data --force   (say it twice, on purpose)\n` +
         `  or:  am remove ${name}                  (removes the PROGRAM, keeps the data)`,
+      mode,
+    );
+    Deno.exit(1);
+  }
+
+  // A LIVE app's data is never deleted out from under it — `--force` or not.
+  // `--force` confirms the delete ("say it twice"); it is not an order to stop
+  // anything, and am remove stops nothing. Stopping here would not hold
+  // either: a supervisor (dev session, systemd Restart=, an installed service)
+  // brings the app back, and it recreates a half-empty home over the one just
+  // deleted, while an open state.db keeps its handles on unlinked files.
+  // Only an instance on THIS home counts: a profile (`~/.<name>-dev`) is a
+  // different data directory.
+  const onData = flags.data && hasData
+    ? instances(name).find((i) =>
+      resolve(i.home ?? dataDir) === resolve(dataDir)
+    )
+    : undefined;
+  if (onData) {
+    outError(
+      `"${name}" is running (pid ${onData.pid}) from ${dataDir} — refusing ` +
+        `to delete a live app's data (--force does not override this).\n` +
+        `  fix: am stop --app=${name}   then re-run am remove ${name} --data`,
       mode,
     );
     Deno.exit(1);
@@ -523,6 +547,17 @@ export function isCheckoutArg(arg: string): boolean {
   }
 }
 
+/** The in-app update `am upgrade` must not race: a pending marker that has
+ *  not proven itself. One its build stamped confirmed at a clean exit (the
+ *  app quit before it could say so) has — nothing waits on the kept-aside
+ *  copy, so it is cleared here and not reported. */
+export function updateInFlight(dataDir: string): PendingUpdate | null {
+  const pending = readPending(dataDir);
+  if (!pending?.confirmedAt) return pending;
+  clearPending(dataDir);
+  return null;
+}
+
 export async function cmdUpgrade(
   args: string[],
   flags: GlobalFlags,
@@ -570,7 +605,7 @@ export async function cmdUpgrade(
   // Running both is how the version a rollback marker names as `previous` gets
   // pruned out from under it — the app then fails, tries to roll back, and
   // finds nothing to roll back TO. So: refuse, name the fix.
-  const pending = readPending(appDirs(name).data);
+  const pending = updateInFlight(appDirs(name).data);
   if (pending) {
     outError(
       `"${name}" has an in-app update in flight (${pending.from} → ` +

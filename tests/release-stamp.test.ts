@@ -97,3 +97,26 @@ Deno.test("release stamp: verify refuses without a stamp, after an edit, and on 
     await dropTempDir(dir);
   }
 });
+
+Deno.test("release stamp: a lock file the check's own run rewrote does not void the stamp; a committed one does", async () => {
+  const dir = await repo();
+  try {
+    await Deno.writeTextFile(join(dir, "deno.lock"), '{"v":1}\n');
+    await git(dir, "add", "-A");
+    await git(dir, "commit", "-qm", "lock");
+    const clean = await workingTreeHash(dir);
+    await Deno.writeTextFile(join(dir, "deno.lock"), '{"v":2}\n');
+    assertEquals(
+      await workingTreeHash(dir),
+      clean,
+      "a rewritten lock voided it",
+    );
+    await git(dir, "commit", "-qam", "lock 2");
+    assert(
+      await workingTreeHash(dir) !== clean,
+      "a committed lock change was ignored",
+    );
+  } finally {
+    await dropTempDir(dir);
+  }
+});

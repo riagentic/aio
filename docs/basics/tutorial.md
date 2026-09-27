@@ -210,7 +210,11 @@ const wallet = cell("wallet", {
 ```
 
 `onMigrate` runs when persisted version < current `version`, receiving old state
-(already deep-merged with defaults) and the old version number.
+(already deep-merged with defaults, plus every stored field the new shape no
+longer declares) and the old version number. A field whose **type** the new
+version changed holds its declared default there; its old value is in the third
+argument, the slice as stored — see
+[cookbook #10](cookbook.md#10-migrate-when-the-state-shape-changes).
 
 ## 7. Guard Lines
 

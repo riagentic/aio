@@ -96,7 +96,7 @@ app.commandLine.appendSwitch('disable-features', 'CloudPrintEnable');
 Menu.setApplicationMenu(null);
 app.name = ${JSON.stringify(slug)};
 ${tmplCrashGuard()}
-${tmplPermissionGuard()}
+${tmplPermissionGuard(opts.meta?.permissions)}
 ${tmplParentWatch()}
 
 // ── Where the page comes from: disk (prod), the app's socket (dev, zero
@@ -762,6 +762,7 @@ ${tmplRendererDiagnostics(true)}
         },
       });
       dappWindows.add(child);
+      __aioChildWindows.add(child.webContents); // never "app" (tmplPermissionGuard)
       child.on('closed', () => dappWindows.delete(child));
       child.setMenuBarVisibility(false);
       child.loadURL(u.href);

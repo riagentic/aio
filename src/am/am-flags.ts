@@ -193,6 +193,7 @@ export const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
     "--no-build",
     "--key",
     "--data",
+    "--no-data",
     "--version",
     "--notes",
     "--min-from",

@@ -5,14 +5,20 @@ import { hash8, slugify } from "../server/single-instance-lock.ts";
 import { appsDirEnv, profileOfHome } from "../server/app-dirs.ts";
 import { homedir } from "../server/paths.ts";
 import { generateHTML } from "../server/server-html-gen.ts";
-import type { TrayConfig, UiTheme } from "../server/aio-types.ts";
+import type {
+  ElectronPermissions,
+  TrayConfig,
+  UiTheme,
+} from "../server/aio-types.ts";
 import {
+  MAIN_TAG,
   MOUNT_DEADLINE_MS,
   MOUNT_LINE,
   mountLine,
   RENDERER_TAG,
 } from "./electron-renderer-log.ts";
 import { upstreamNoiseMatcherSource } from "../diagnostics/upstream-noise.ts";
+import { redactUrlTokenSource } from "../diagnostics/redact.ts";
 import {
   HOST_KEY_EVENT,
   HOST_KEY_MAX_LEN,
@@ -83,6 +89,9 @@ export type AioMeta = {
    *  Chromium sandbox of a window this app opens is the app's decision, never
    *  the page's. See ElectronConfig. */
   unsandboxedChildWindows?: boolean;
+  /** `electron: { permissions }` — the app page's exact allow-list; null ⇒
+   *  the default (the app page keeps every permission). See ElectronConfig. */
+  permissions?: ElectronPermissions | null;
   /** `ui.chrome` — how much of the window the OS draws. See UiConfig. */
   chrome?: "standard" | "themed" | "none";
   /** `ui.tray` — a system tray icon, menu and close-to-tray. See UiConfig. */
@@ -104,10 +113,14 @@ export type AioMeta = {
  *  version of it: the app believes it is protected. */
 export function electronMetaPolicy(
   cfg: import("../server/aio-types.ts").ElectronConfig | undefined,
-): Pick<AioMeta, "requireSandbox" | "unsandboxedChildWindows"> {
+): Pick<
+  AioMeta,
+  "requireSandbox" | "unsandboxedChildWindows" | "permissions"
+> {
   return {
     requireSandbox: !!cfg?.requireSandbox,
     unsandboxedChildWindows: !!cfg?.unsandboxedChildWindows,
+    permissions: cfg?.permissions ?? null,
   };
 }
 
@@ -168,9 +181,38 @@ export function electronProfileName(
  *  Installing a handler suppresses that dialog; we log the error prominently to
  *  stderr instead (visible in the dev console and app log). During quit a late
  *  socket/window callback must never dialog or crash — it just exits clean.
+ *
+ *  It also tags the main process's `console.warn`/`console.error` with
+ *  `MAIN_TAG` (one line each, newlines folded): the Deno parent routes a
+ *  tagged line into the framework log at that level (`classifyElectronLine`),
+ *  so a permission DENIED, an openWindow or a main-process crash lands
+ *  in the app log and `am logs` — a packaged app has no terminal to show a
+ *  plain stderr line on. A Node/Electron process warning (a deprecation) is
+ *  printed by Node through `console.error` as `(node:PID) [CODE] …Warning:` —
+ *  that one is a warning, so it is tagged `warn`, not `error`. Every line is
+ *  token-redacted first (`redactUrlToken`): app.log is copied into reports.
  *  Expects `app` to be in scope. Set `__aioQuitting = true` on window close. */
 export function tmplCrashGuard(): string {
   return `
+const __aioRedact = ${redactUrlTokenSource()};
+const __aioTag = ${JSON.stringify(MAIN_TAG)};
+// A pipe whose reader died (the aio server gone) must not turn every later
+// line into an EPIPE 'error' -> uncaughtException -> console.error loop: the
+// streams swallow their errors, and the lines go through Node's own console,
+// which ignores a write error instead of throwing it.
+for (const __aioS of [process.stdout, process.stderr]) {
+  try { __aioS.on('error', () => {}); } catch {}
+}
+for (const __aioLv of ['warn', 'error']) {
+  const __aioOut = console[__aioLv].bind(console);
+  console[__aioLv] = (...a) => {
+    try {
+      const s = __aioRedact(require('util').format(...a));
+      const lv = /^\\(node:\\d+\\) (\\[\\w+\\] )?\\w*Warning: /.test(s) ? 'warn' : __aioLv;
+      __aioOut(__aioTag + lv + '] ' + s.replace(/\\r?\\n/g, ' \u23ce '));
+    } catch {}
+  };
+}
 let __aioQuitting = false;
 app.on('before-quit', () => { __aioQuitting = true; });
 app.on('will-quit', () => { __aioQuitting = true; });
@@ -202,13 +244,30 @@ process.on('unhandledRejection', (reason) => {
  *   • anything else — a guest, a foreign-origin frame — is denied, except
  *     \`fullscreen\` (a video player's button). Each denial is said once per
  *     origin and permission: a refusal nobody can see is the bug class this
- *     file keeps closing. A guest that needs more should be a window, where the
- *     request is explicit (the same line the \`<webview>\` preload rule draws).
+ *     file keeps closing. An \`openWindow\` child window keeps what its own
+ *     origin asks for (1.0.12, unchanged without \`electron.permissions\`).
+ *
+ *  With `electron.permissions` set (`allow`), it is the whole list: the app's
+ *  own page gets exactly the permissions scoped `"app"` there, and everything
+ *  else gets nothing at all — not even fullscreen (a guest that fills
+ *  the window can draw a fake one). Each denial to the app's own page is said
+ *  once too, naming the entry that would grant it.
  *  Expects \`app\` in scope. */
-export function tmplPermissionGuard(): string {
+export function tmplPermissionGuard(
+  allow: ElectronPermissions | null = null,
+): string {
   return `
+const __aioPermAllow = ${JSON.stringify(allow)};
+// openWindow's child windows show someone else's site: never "app".
+const __aioChildWindows = new WeakSet();
 const __aioPermSeen = new WeakSet();
 const __aioPermSaid = new Set();
+// Chromium CHECKS these by itself at every load and navigation (measured,
+// Electron 44: media video+audio, web-app-installation, geolocation), with the
+// page's origin — the page asked nothing. A denied check of them is not said
+// (it would tell the dev to grant what the app never used); their real use
+// is a REQUEST (getUserMedia, getCurrentPosition, install), and that is said.
+const __aioProbed = new Set(['media', 'web-app-installation', 'geolocation']);
 // A custom scheme (aio://app) and data: both have origin "null" — compare
 // scheme + host there, so a data: frame is not the app's own page.
 function __aioOrigin(u) {
@@ -217,20 +276,45 @@ function __aioOrigin(u) {
     return x.origin !== 'null' ? x.origin : x.protocol + '//' + x.host;
   } catch { return ''; }
 }
-function __aioPermOk(wc, permission, requesting) {
-  if (permission === 'fullscreen') return true;
+function __aioAppPage(wc, requesting) {
   if (!wc || typeof wc.getType !== 'function' || wc.getType() !== 'window') return false;
-  const own = __aioOrigin(wc.getURL());
-  return !requesting || __aioOrigin(requesting) === own;
+  // An openWindow child window keeps its own origin's permissions by default
+  // (1.0.12); electron.permissions says it is never the app.
+  if (__aioPermAllow !== null && __aioChildWindows.has(wc)) return false;
+  return !requesting || __aioOrigin(requesting) === __aioOrigin(wc.getURL());
 }
-function __aioPermDenied(permission, requesting) {
-  const key = permission + ' ' + requesting;
+function __aioPermOk(wc, permission, requesting) {
+  if (__aioPermAllow === null) {
+    return permission === 'fullscreen' || __aioAppPage(wc, requesting);
+  }
+  return Object.hasOwn(__aioPermAllow, permission) &&
+    __aioPermAllow[permission].includes('app') && __aioAppPage(wc, requesting);
+}
+function __aioPermDenied(wc, permission, requesting) {
+  // One line per (page kind, origin, permission): a check fires far more often
+  // than a request, and the two say the same thing. Only the ORIGIN is shown —
+  // the app's own URL carries its key (?token=), and app.log is shared.
+  const app = __aioAppPage(wc, requesting);
+  const origin = __aioOrigin(requesting);
+  const key = (app ? 'app ' : 'embedded ') + permission + ' ' + origin;
   if (__aioPermSaid.has(key)) return;
+  // Bounded: a guest browsing without end cannot grow this without end.
+  if (__aioPermSaid.size >= 256) {
+    if (__aioPermSaid.size === 256) {
+      __aioPermSaid.add('');
+      console.warn('[aio:electron] 256 permission denials said — further ones are refused without a line');
+    }
+    return;
+  }
   __aioPermSaid.add(key);
-  console.warn('[aio:electron] permission "' + permission + '" DENIED to embedded page ' +
-    (requesting || '(unknown origin)') + ' — a <webview> guest or foreign-origin frame gets no ' +
-    'permissions (clipboard, camera, microphone, geolocation, notifications…). Only the app\\'s ' +
-    'own page keeps them.');
+  console.warn('[aio:electron] permission "' + permission + '" DENIED to ' +
+    (app
+      ? "the app's own page " + origin + ' — electron.permissions does not grant it; add "' +
+        permission + '": ["app"] to allow it.'
+      : 'embedded page ' + (origin || '(unknown origin)') + ' — a <webview> guest, a ' +
+        'foreign-origin frame' + (__aioPermAllow === null ? '' : ' or an openWindow child window') +
+        ' gets no permissions (clipboard, camera, microphone, geolocation, ' +
+        "notifications…). Only the app's own page can hold them."));
 }
 function __aioGuardSession(ses) {
   if (!ses || __aioPermSeen.has(ses)) return;
@@ -238,11 +322,16 @@ function __aioGuardSession(ses) {
   ses.setPermissionRequestHandler((wc, permission, cb, details) => {
     const requesting = (details && details.requestingUrl) || (wc && wc.getURL()) || '';
     const ok = __aioPermOk(wc, permission, requesting);
-    if (!ok) __aioPermDenied(permission, requesting);
+    if (!ok) __aioPermDenied(wc, permission, requesting);
     cb(ok);
   });
-  ses.setPermissionCheckHandler((wc, permission, requestingOrigin) =>
-    __aioPermOk(wc, permission, requestingOrigin));
+  ses.setPermissionCheckHandler((wc, permission, requestingOrigin) => {
+    const ok = __aioPermOk(wc, permission, requestingOrigin);
+    if (!ok && !__aioProbed.has(permission)) {
+      __aioPermDenied(wc, permission, requestingOrigin);
+    }
+    return ok;
+  });
 }
 app.on('session-created', __aioGuardSession);
 app.on('ready', () => __aioGuardSession(require('electron').session.defaultSession));`;
@@ -725,7 +814,7 @@ function tmplHostKeyRelay(): string {
 // ── Client connect page HTML (used by electronClientScript) ──
 
 export const CONNECT_HTML = `<!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">

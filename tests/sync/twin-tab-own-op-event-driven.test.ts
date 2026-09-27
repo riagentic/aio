@@ -3,9 +3,9 @@
 //
 // Two tabs of one app share the offline queue, so tab B can flush tab A's op,
 // get the ack and confirm it in the shared document before A hears anything.
-// A's ack goes to B's socket; A's own broadcast comes back echo-suppressed
-// (`isOwnSessionOp`); and the server never replays a requester's own session's
-// ops into its catch-ups. So A must NOTICE that one of its ops left the queue —
+// A's ack goes to B's socket; the op's broadcast, which A would fold, can be
+// lost on the way (a dropped connection); and the server never replays a
+// requester's own session's ops into its catch-ups. So A must NOTICE that one of its ops left the queue —
 // `_ownInFlight` — and ask for the cell.
 //
 // It did, in `requestSync` and nowhere else. A tab that stays connected has no
@@ -63,14 +63,17 @@ Deno.test("twin tabs: a peer op repairs the tab whose op the other tab flushed",
     // A makes a change whose own frame dies on the way out…
     await a.engine.handleLocalAction("c", "add", "x");
     a.outbox.length = 0;
-    // …and B's catch-up carries the shared queue, so the server gets it.
+    // …and B's catch-up carries the shared queue, so the server gets it —
+    // its broadcast lost on the way to A too.
+    a.online = false;
     await b.engine.requestSync();
     await net.pump();
+    a.online = true;
     assertEquals(net.live(), { items: ["s0", "x"] }, "the server has A's op");
     assertEquals(
       a.confirmed(),
       { items: ["s0"] },
-      "A has not folded it — its ack went to B's socket",
+      "A has not folded it — its ack went to B's socket, its broadcast lost",
     );
 
     // A stays connected and never calls requestSync. The next thing that

@@ -331,6 +331,608 @@ Deno.test("build: symlinks restored after failed --cli compile", async () => {
   }
 });
 
+// A build KILLED mid-compile (Ctrl-C, a CI timeout) never runs `finally`, so
+// the links it held aside stayed gone — deno does not re-create a top-level
+// `node_modules/<pkg>` it believes it wrote, and every later bundle failed
+// `Could not resolve "<pkg>"`. The next build must put them back.
+Deno.test("build: links an interrupted compile held aside come back on the next build", async () => {
+  const tmp = await tempDir("aio-build-");
+  try {
+    const nm = join(tmp, "node_modules");
+    const pkg = join(nm, ".deno", "esbuild@0.1.0", "node_modules", "esbuild");
+    await Deno.mkdir(pkg, { recursive: true });
+    const link = join(nm, "esbuild");
+    await Deno.symlink(pkg, link);
+    const mod = new URL("../src/build/build-compile.ts", import.meta.url).href;
+    // The dying build: `fn` exits the process, as a signal would.
+    const died = await new Deno.Command(Deno.execPath(), {
+      args: [
+        "eval",
+        `const { withDevExcluded } = await import(${JSON.stringify(mod)});` +
+        `await withDevExcluded(${JSON.stringify(nm)}, () => Deno.exit(130));`,
+      ],
+      stdout: "null",
+      stderr: "null",
+    }).output();
+    assertEquals(died.code, 130);
+    await assertRejects(() => Deno.readLink(link)); // held aside, never put back
+
+    const { recoverInterruptedLinks, withDevExcluded } = await import(
+      "../src/build/build-compile.ts"
+    );
+    // A LIVE build holding them: its own `finally` restores — hands off.
+    const lock = join(nm, ".aio-build-lock");
+    await Deno.writeTextFile(lock, String(Deno.ppid));
+    await recoverInterruptedLinks(nm);
+    await assertRejects(() => Deno.readLink(link));
+    // The dead build's lock: the next build's FIRST step (before the bundle
+    // resolves anything) puts them back.
+    await Deno.writeTextFile(lock, "999999999");
+    await recoverInterruptedLinks(nm);
+    assertEquals(await Deno.readLink(link), pkg);
+    // …and a later compile still holds them aside and restores them.
+    await withDevExcluded(nm, () => Promise.resolve(true));
+    assertEquals(await Deno.readLink(link), pkg);
+  } finally {
+    await dropTempDir(tmp);
+  }
+});
+
+// The journal is node_modules-relative: a project MOVED after a killed build
+// (renamed folder, CI cache restored elsewhere) is still repaired.
+Deno.test("build: a project moved after an interrupted compile still gets its links back", async () => {
+  const tmp = await tempDir("aio-build-");
+  try {
+    const nm = join(tmp, "a", "node_modules");
+    await Deno.mkdir(
+      join(nm, ".deno", "esbuild@0.1.0", "node_modules", "esbuild"),
+      {
+        recursive: true,
+      },
+    );
+    const target = ".deno/esbuild@0.1.0/node_modules/esbuild"; // as deno writes it
+    await Deno.symlink(target, join(nm, "esbuild"));
+    const mod = new URL("../src/build/build-compile.ts", import.meta.url).href;
+    const died = await new Deno.Command(Deno.execPath(), {
+      args: [
+        "eval",
+        `const { withDevExcluded } = await import(${JSON.stringify(mod)});` +
+        `await withDevExcluded(${JSON.stringify(nm)}, () => Deno.exit(130));`,
+      ],
+      stdout: "null",
+      stderr: "null",
+    }).output();
+    assertEquals(died.code, 130);
+    await Deno.rename(join(tmp, "a"), join(tmp, "b"));
+    const moved = join(tmp, "b", "node_modules");
+    const { recoverInterruptedLinks } = await import(
+      "../src/build/build-compile.ts"
+    );
+    await recoverInterruptedLinks(moved);
+    assertEquals(await Deno.readLink(join(moved, "esbuild")), target);
+    await assertRejects(() => Deno.lstat(join(tmp, "a")));
+  } finally {
+    await dropTempDir(tmp);
+  }
+});
+
+// A build that took the lock over after the 60 s wait runs BESIDE a live
+// holder. One shared journal was read-modify-written by both, so concurrent
+// writes lost the other's entries (measured: 10 of 20 kept) and a kill then
+// lost those links for good. Each build now owns its journal file.
+Deno.test("build: two builds journaling at once lose no link", async () => {
+  const tmp = await tempDir("aio-build-");
+  try {
+    const nm = join(tmp, "node_modules");
+    await Deno.mkdir(nm);
+    const { _linkJournal, recoverInterruptedLinks, withDevExcluded } =
+      await import("../src/build/build-compile.ts");
+    const entries = (p: string) =>
+      [...Array(10)].map((_, i) => ({
+        path: `${p}${i}`,
+        target: `.deno/${p}${i}`,
+        isDir: false,
+      }));
+    const A = entries("a"), B = entries("b");
+    const a = _linkJournal(nm), b = _linkJournal(nm);
+    const writer = async (j: typeof a, all: typeof A) => {
+      for (let i = 1; i <= all.length; i++) await j.write(all.slice(0, i));
+    };
+    await Promise.all([writer(a, A), writer(b, B)]);
+    const journaled = async () => {
+      const out: string[] = [];
+      for await (const e of Deno.readDir(nm)) {
+        if (!e.name.startsWith(".aio-build-links")) continue;
+        const list = JSON.parse(await Deno.readTextFile(join(nm, e.name)));
+        out.push(...(list as { path: string }[]).map((x) => x.path));
+      }
+      return out.sort();
+    };
+    assertEquals(
+      await journaled(),
+      [...A, ...B].map((e) => e.path).sort(),
+    );
+    // Both writers are live (this pid): recovery leaves them alone.
+    await recoverInterruptedLinks(nm);
+    assertEquals((await journaled()).length, 20);
+    await a.remove();
+    await b.remove();
+
+    // End to end: a compile that finishes removes only its own journal.
+    const pkg = join(nm, ".deno", "esbuild@0.1.0", "node_modules", "esbuild");
+    await Deno.mkdir(pkg, { recursive: true });
+    await Deno.symlink(pkg, join(nm, "esbuild"));
+    const other = _linkJournal(nm);
+    await withDevExcluded(nm, async () => {
+      assertEquals(await journaled(), ["esbuild"]); // journaled before removal
+      await other.write([A[0]!]); // another build's entry
+      return true;
+    });
+    assertEquals(await journaled(), ["a0"]);
+    await other.remove();
+
+    // A dead build's journal, and an older build's single file, come back.
+    const e = await Deno.readLink(join(nm, "esbuild"));
+    await Deno.remove(join(nm, "esbuild"));
+    await Deno.writeTextFile(
+      join(nm, ".aio-build-links.999999999-0badf00d.json"),
+      JSON.stringify([{ path: "esbuild", target: e, isDir: false }]),
+    );
+    await Deno.writeTextFile(
+      join(nm, ".aio-build-links.json"),
+      JSON.stringify([{ path: "electron", target: e, isDir: false }]),
+    );
+    await recoverInterruptedLinks(nm);
+    assertEquals(await Deno.readLink(join(nm, "esbuild")), e);
+    assertEquals(await Deno.readLink(join(nm, "electron")), e);
+    assertEquals(await journaled(), []);
+  } finally {
+    await dropTempDir(tmp);
+  }
+});
+
+// A journal or lock naming OUR pid is a previous run's unless this process
+// holds it — in a container every build is pid 1, so a killed build's links
+// were never recovered (next `dev`: "Could not resolve") and every build
+// waited 60 s on its own dead lock. A LIVE pid the kernel has since recycled
+// (its start stamp differs) is no holder either.
+Deno.test("build: own-pid and recycled-pid journals and locks are recovered", async () => {
+  const tmp = await tempDir("aio-build-");
+  try {
+    const nm = join(tmp, "node_modules");
+    const pkg = join(nm, ".deno", "esbuild@0.1.0", "node_modules", "esbuild");
+    await Deno.mkdir(pkg, { recursive: true });
+    const { recoverInterruptedLinks, withDevExcluded } = await import(
+      "../src/build/build-compile.ts"
+    );
+    const link = join(nm, "esbuild");
+    const journal = (name: string) =>
+      Deno.writeTextFile(
+        join(nm, name),
+        JSON.stringify([{ path: "esbuild", target: pkg, isDir: false }]),
+      );
+    await journal(`.aio-build-links.${Deno.pid}-0badf00d.json`);
+    await recoverInterruptedLinks(nm);
+    assertEquals(await Deno.readLink(link), pkg);
+    await Deno.remove(link);
+    // A start stamp that is not the live parent's: its pid was recycled.
+    // (Linux ticks `a<hex>`, macOS epoch `e<hex>`; none on Windows.)
+    const tag = Deno.build.os === "darwin" ? "e1" : "a1";
+    const knows = Deno.build.os === "linux" || Deno.build.os === "darwin";
+    if (knows) {
+      await journal(`.aio-build-links.${Deno.ppid}-0badf00d${tag}.json`);
+      await recoverInterruptedLinks(nm);
+      assertEquals(await Deno.readLink(link), pkg);
+      // …while the live parent's TRUE stamp keeps its journal hands-off.
+      const { ownerIdentity } = await import(
+        "../src/server/single-instance-lock.ts"
+      );
+      const id = ownerIdentity(Deno.ppid);
+      const live = join(
+        nm,
+        `.aio-build-links.${Deno.ppid}-0badf00d${
+          id.startToken
+            ? `a${Number(id.startToken).toString(16)}`
+            : `e${id.startEpoch!.toString(16)}`
+        }.json`,
+      );
+      await Deno.writeTextFile(live, "[]");
+      await recoverInterruptedLinks(nm);
+      assertEquals(await Deno.readTextFile(live), "[]");
+      await Deno.remove(live);
+    }
+
+    const owners: [string, string | null][] = [[`${Deno.pid}`, null]];
+    if (knows) owners.push([`${Deno.ppid}`, `${Deno.ppid}-${tag}`]);
+    for (const [owner, id] of owners) {
+      await Deno.writeTextFile(join(nm, ".aio-build-lock"), owner);
+      if (id) await Deno.writeTextFile(join(nm, ".aio-build-lock.id"), id);
+      const t0 = Date.now();
+      await withDevExcluded(nm, () => Promise.resolve(true));
+      assertEquals(Date.now() - t0 < 5_000, true, `stale lock ${owner}`);
+    }
+  } finally {
+    await dropTempDir(tmp);
+  }
+});
+
+// Taking over a dead build's lock removed the lock and left its `.id`
+// stamp. Until the new holder wrote its own, a waiter paired the new pid with
+// the dead holder's stamp — "that pid was recycled" whenever the two pids
+// matched (a restarted container: pid 1 again) — and deleted the LIVE lock:
+// two builds moving node_modules links at once.
+Deno.test("build: taking over a dead build's lock leaves no stale stamp beside the new one", async () => {
+  const tmp = await tempDir("aio-build-");
+  try {
+    const nm = join(tmp, "node_modules");
+    await Deno.mkdir(nm);
+    const { withDevExcluded } = await import("../src/build/build-compile.ts");
+    const lock = join(nm, ".aio-build-lock");
+    await Deno.writeTextFile(lock, String(Deno.pid)); // a previous run's
+    await Deno.writeTextFile(`${lock}.id`, `${Deno.pid}-a1`);
+    // What a waiter would read the instant the new holder stamps its lock.
+    const seen: (string | null)[] = [];
+    const peek = (p: string | URL) => {
+      if (!String(p).endsWith(".aio-build-lock.id")) return;
+      try {
+        seen.push(Deno.readTextFileSync(`${lock}.id`));
+      } catch {
+        seen.push(null); // aio-ok: no stale stamp — the point
+      }
+    };
+    const w = Deno.writeTextFile, ws = Deno.writeTextFileSync;
+    Deno.writeTextFile = (p, d, o) => (peek(p), w(p, d, o));
+    Deno.writeTextFileSync = (p, d, o) => (peek(p), ws(p, d, o));
+    try {
+      await withDevExcluded(nm, () => Promise.resolve(true));
+    } finally {
+      Deno.writeTextFile = w;
+      Deno.writeTextFileSync = ws;
+    }
+    assertEquals(seen, [null]);
+    await assertRejects(() => Deno.lstat(`${lock}.id`));
+    await assertRejects(() => Deno.lstat(lock));
+  } finally {
+    await dropTempDir(tmp);
+  }
+});
+
+// Two containers sharing one bind-mounted node_modules can both be pid 1.
+// Our own pid on a lock or journal counted as dead unless THIS process held
+// it, so container B took A's LIVE lock at once and put back the links A had
+// excluded mid-compile. A lock or journal from another pid namespace cannot
+// be judged from here: it counts as live (the 60 s wait still applies).
+Deno.test({
+  name:
+    "build: a lock or journal from another pid namespace is never taken over at once",
+  ignore: Deno.build.os !== "linux",
+  fn: async () => {
+    const tmp = await tempDir("aio-build-");
+    try {
+      const nm = join(tmp, "node_modules");
+      const pkg = join(nm, ".deno", "esbuild@0.1.0", "node_modules", "esbuild");
+      await Deno.mkdir(pkg, { recursive: true });
+      const { recoverInterruptedLinks, withDevExcluded } = await import(
+        "../src/build/build-compile.ts"
+      );
+      const own = Number(
+        /\[(\d+)\]/.exec(Deno.readLinkSync("/proc/self/ns/pid"))![1],
+      );
+      const hex = (n: number) => n.toString(16).padStart(8, "0");
+      const foreign = `d${hex(own === 1 ? 2 : own - 1)}`;
+      const link = join(nm, "esbuild");
+      const lock = join(nm, ".aio-build-lock");
+      const journal = join(
+        nm,
+        `.aio-build-links.${Deno.pid}-0badf00d${foreign}a1.json`,
+      );
+      await Deno.writeTextFile(
+        journal,
+        JSON.stringify([{ path: "esbuild", target: pkg, isDir: false }]),
+      );
+      // Held by pid 1-in-another-container that happens to be our pid: its
+      // links stay aside.
+      await Deno.writeTextFile(lock, String(Deno.pid));
+      await Deno.writeTextFile(`${lock}.id`, `${Deno.pid}-${foreign}a1`);
+      await recoverInterruptedLinks(nm);
+      await assertRejects(() => Deno.readLink(link));
+      // …and a build waits for that lock rather than taking it.
+      let entered = false;
+      const build = withDevExcluded(nm, () => {
+        entered = true;
+        return Promise.resolve(true);
+      });
+      await new Promise((r) => setTimeout(r, 1_500));
+      assertEquals(entered, false, "took a foreign namespace's lock at once");
+      await Deno.remove(`${lock}.id`);
+      await Deno.remove(lock);
+      // With no lock, its journal is still not ours to judge: kept, loudly.
+      const warn = console.warn, said: string[] = [];
+      console.warn = (m: string) => said.push(m);
+      try {
+        await build;
+      } finally {
+        console.warn = warn;
+      }
+      assertEquals(entered, true);
+      await assertRejects(() => Deno.readLink(link));
+      await Deno.lstat(journal); // kept
+      assertStringIncludes(said.join("\n"), "another pid namespace");
+      await Deno.remove(journal);
+      // Our OWN namespace's stale stamp is still taken over at once.
+      await Deno.writeTextFile(lock, String(Deno.pid));
+      await Deno.writeTextFile(`${lock}.id`, `${Deno.pid}-d${hex(own)}a1`);
+      const t0 = Date.now();
+      await withDevExcluded(nm, () => Promise.resolve(true));
+      assertEquals(Date.now() - t0 < 5_000, true);
+    } finally {
+      await dropTempDir(tmp);
+    }
+  },
+});
+
+// A restarted container (or a new flatpak sandbox) always has a NEW pid
+// namespace, so a build killed mid-compile left its lock and journal
+// "foreign" forever: links never restored, every build waited 60 s, and the
+// stale lock kept even our own namespace's journals unrecovered. A live
+// holder heartbeats both. A waiter takes the lock only once THIS process
+// watched it untouched for `staleMs` (an old mtime alone is not enough: a
+// suspend or a lagging host clock fakes it); the one-shot recovery every
+// build runs first — it never takes the lock — judges an unwatched one by its
+// mtime, as it judges the journals, and with the lock dead recovers them.
+Deno.test({
+  name:
+    "build: another namespace's lock and journal untouched for 2 min are recovered",
+  ignore: Deno.build.os !== "linux",
+  fn: async () => {
+    const tmp = await tempDir("aio-build-");
+    const { _lockTiming } = await import("../src/server/pid-lock.ts");
+    const was = { ..._lockTiming };
+    _lockTiming.staleMs = 300;
+    try {
+      const nm = join(tmp, "node_modules");
+      const pkg = join(nm, ".deno", "esbuild@0.1.0", "node_modules", "esbuild");
+      const pkg2 = join(nm, ".deno", "electron@0.1.0", "node_modules", "e");
+      await Deno.mkdir(pkg, { recursive: true });
+      await Deno.mkdir(pkg2, { recursive: true });
+      const { recoverInterruptedLinks, withDevExcluded } = await import(
+        "../src/build/build-compile.ts"
+      );
+      const own = Number(
+        /\[(\d+)\]/.exec(Deno.readLinkSync("/proc/self/ns/pid"))![1],
+      );
+      const hex = (n: number) => n.toString(16).padStart(8, "0");
+      const foreign = `d${hex(own === 1 ? 2 : own - 1)}`;
+      const lock = join(nm, ".aio-build-lock");
+      const fJournal = join(
+        nm,
+        `.aio-build-links.1-deadbeef${foreign}a10.json`,
+      );
+      // Our own namespace, a dead pid: recoverable — once the lock allows.
+      const oJournal = join(nm, `.aio-build-links.999999999-0badf00d.json`);
+      await Deno.writeTextFile(
+        fJournal,
+        JSON.stringify([{ path: "esbuild", target: pkg, isDir: false }]),
+      );
+      await Deno.writeTextFile(
+        oJournal,
+        JSON.stringify([{ path: "electron", target: pkg2, isDir: false }]),
+      );
+      await Deno.writeTextFile(lock, "1");
+      await Deno.writeTextFile(`${lock}.id`, `1-${foreign}a10`);
+      const old = new Date(Date.now() - 3 * 60_000);
+      for (const p of [`${lock}.id`, fJournal]) {
+        await Deno.utime(p, old, old);
+      }
+      const warn = console.warn;
+      console.warn = () => {};
+      try {
+        // A heartbeated lock (fresh mtime): a live build — nothing.
+        await recoverInterruptedLinks(nm);
+        await assertRejects(() => Deno.readLink(join(nm, "esbuild")));
+        await Deno.lstat(fJournal);
+        // Untouched for 2 min: dead — even at first sight, since every
+        // `deno task build` runs this once and never watches the lock.
+        await Deno.utime(lock, old, old);
+        await recoverInterruptedLinks(nm);
+      } finally {
+        console.warn = warn;
+      }
+      assertEquals(await Deno.readLink(join(nm, "esbuild")), pkg);
+      assertEquals(await Deno.readLink(join(nm, "electron")), pkg2);
+      await assertRejects(() => Deno.lstat(fJournal));
+      await assertRejects(() => Deno.lstat(oJournal));
+      // …and a build takes the stale foreign lock at once, not after 60 s.
+      const t0 = Date.now();
+      assertEquals(
+        await withDevExcluded(nm, () => Promise.resolve(true)),
+        true,
+      );
+      assertEquals(Date.now() - t0 < 5_000, true, "waited on a dead lock");
+      await assertRejects(() => Deno.lstat(lock)); // released
+      // A fresh stale-looking foreign lock is taken over once watched
+      // `staleMs` — past the 60 s a same-namespace lock gets, never after it.
+      await Deno.writeTextFile(lock, "1");
+      await Deno.writeTextFile(`${lock}.id`, `1-${foreign}a11`);
+      await Deno.utime(lock, old, old);
+      const t1 = Date.now();
+      assertEquals(
+        await withDevExcluded(nm, () => Promise.resolve(true)),
+        true,
+      );
+      assertEquals(Date.now() - t1 < 5_000, true, "never took it over");
+      await assertRejects(() => Deno.lstat(lock));
+    } finally {
+      Object.assign(_lockTiming, was);
+      await dropTempDir(tmp);
+    }
+  },
+});
+
+// A lock this process WATCHED is judged by what it saw, never by its mtime:
+// a lagging host clock makes a live holder's heartbeat look 2 min old.
+Deno.test({
+  name: "build: recovery trusts a watched foreign lock over its old mtime",
+  ignore: Deno.build.os !== "linux",
+  fn: async () => {
+    const tmp = await tempDir("aio-build-");
+    const { _lockTiming, tryPidLock } = await import(
+      "../src/server/pid-lock.ts"
+    );
+    const was = { ..._lockTiming };
+    _lockTiming.staleMs = 300;
+    try {
+      const nm = join(tmp, "node_modules");
+      const pkg = join(nm, ".deno", "esbuild@0.1.0", "node_modules", "esbuild");
+      await Deno.mkdir(pkg, { recursive: true });
+      const { recoverInterruptedLinks } = await import(
+        "../src/build/build-compile.ts"
+      );
+      const own = Number(
+        /\[(\d+)\]/.exec(Deno.readLinkSync("/proc/self/ns/pid"))![1],
+      );
+      const foreign = `d${
+        (own === 1 ? 2 : own - 1).toString(16).padStart(8, "0")
+      }`;
+      const lock = join(nm, ".aio-build-lock");
+      const journal = join(nm, `.aio-build-links.999999999-0badf00d.json`);
+      await Deno.writeTextFile(
+        journal,
+        JSON.stringify([{ path: "esbuild", target: pkg, isDir: false }]),
+      );
+      await Deno.writeTextFile(lock, "1");
+      await Deno.writeTextFile(`${lock}.id`, `1-${foreign}a10`);
+      const old = new Date(Date.now() - 3 * 60_000);
+      await Deno.utime(lock, old, old);
+      assertEquals(tryPidLock(lock).held, false); // a waiter watches it
+      await recoverInterruptedLinks(nm);
+      await assertRejects(() => Deno.readLink(join(nm, "esbuild")));
+      await Deno.lstat(journal);
+      const warn = console.warn;
+      console.warn = () => {};
+      try {
+        await new Promise((r) => setTimeout(r, 350)); // watched long enough
+        await recoverInterruptedLinks(nm);
+      } finally {
+        console.warn = warn;
+      }
+      assertEquals(await Deno.readLink(join(nm, "esbuild")), pkg);
+    } finally {
+      Object.assign(_lockTiming, was);
+      await dropTempDir(tmp);
+    }
+  },
+});
+
+// An older aio reads the lock as `Number(text)` and journals by
+// /^\.aio-build-links(?:\.(\d+)-[0-9a-f]+)?\.json$/ — both must still parse,
+// or an older build beside this one waits 60 s or never recovers our links.
+Deno.test("build: the lock and journal names stay readable by an older aio", async () => {
+  const tmp = await tempDir("aio-build-");
+  try {
+    const nm = join(tmp, "node_modules");
+    const pkg = join(nm, ".deno", "esbuild@0.1.0", "node_modules", "esbuild");
+    await Deno.mkdir(pkg, { recursive: true });
+    await Deno.symlink(pkg, join(nm, "esbuild"));
+    const { withDevExcluded } = await import("../src/build/build-compile.ts");
+    await withDevExcluded(nm, async () => {
+      const lock = await Deno.readTextFile(join(nm, ".aio-build-lock"));
+      assertEquals(Number(lock), Deno.pid);
+      const names: string[] = [];
+      for await (const e of Deno.readDir(nm)) {
+        if (e.name.startsWith(".aio-build-links")) names.push(e.name);
+      }
+      assertEquals(names.length, 1);
+      assertEquals(
+        /^\.aio-build-links(?:\.(\d+)-[0-9a-f]+)?\.json$/.exec(names[0]!)?.[1],
+        String(Deno.pid),
+      );
+      return true;
+    });
+  } finally {
+    await dropTempDir(tmp);
+  }
+});
+
+// A kill mid-write tore the journal; recovery read it as [] and deleted it,
+// losing every link it held. Writes are temp + rename now, and a journal that
+// does not parse is kept, loudly.
+Deno.test("build: a torn link journal is never lost", async () => {
+  const tmp = await tempDir("aio-build-");
+  try {
+    const nm = join(tmp, "node_modules");
+    await Deno.mkdir(nm);
+    const { _linkJournal, recoverInterruptedLinks } = await import(
+      "../src/build/build-compile.ts"
+    );
+    const a = { path: "a", target: ".deno/a", isDir: false };
+    const j = _linkJournal(nm);
+    await j.write([a]);
+    const write = Deno.writeTextFile;
+    Deno.writeTextFile = async (p, d) => {
+      await write(p, String(d).slice(0, 5)); // killed mid-write
+      throw new Error("killed");
+    };
+    try {
+      await assertRejects(() => j.write([a, a]));
+    } finally {
+      Deno.writeTextFile = write;
+    }
+    assertEquals(JSON.parse(await Deno.readTextFile(j.path)), [a]);
+    await j.remove();
+
+    const torn = join(nm, ".aio-build-links.999999999-0badf00d.json");
+    await Deno.writeTextFile(torn, '[{"pa');
+    const warn = console.warn, said: string[] = [];
+    console.warn = (m: string) => said.push(m);
+    try {
+      await recoverInterruptedLinks(nm);
+    } finally {
+      console.warn = warn;
+    }
+    assertEquals(await Deno.readTextFile(torn), '[{"pa');
+    // Actionable: which file to delete, and how to get the links back.
+    const msg = said.join("\n");
+    assertStringIncludes(msg, `delete ${torn}`);
+    assertStringIncludes(msg, `remove ${nm} and run \`deno install\``);
+    // …and following it ends the warning.
+    await Deno.remove(torn);
+    said.length = 0;
+    console.warn = (m: string) => said.push(m);
+    try {
+      await recoverInterruptedLinks(nm);
+    } finally {
+      console.warn = warn;
+    }
+    assertEquals(said, []);
+  } finally {
+    await dropTempDir(tmp);
+  }
+});
+
+// A kill between the temp write and the rename left `<journal>.tmp` behind
+// for good. Its links were never removed (removal follows the rename), so a
+// dead owner's temp is just deleted — a live build's is left alone.
+Deno.test("build: a dead build's journal temp file is cleaned up, a live one's kept", async () => {
+  const tmp = await tempDir("aio-build-");
+  try {
+    const nm = join(tmp, "node_modules");
+    await Deno.mkdir(nm);
+    const { _linkJournal, recoverInterruptedLinks } = await import(
+      "../src/build/build-compile.ts"
+    );
+    const dead = join(nm, ".aio-build-links.999999999-0badf00d.json.tmp");
+    await Deno.writeTextFile(dead, "[");
+    const live = `${_linkJournal(nm).path}.tmp`;
+    await Deno.writeTextFile(live, "[");
+    await recoverInterruptedLinks(nm);
+    await assertRejects(() => Deno.lstat(dead));
+    assertEquals(await Deno.readTextFile(live), "[");
+  } finally {
+    await dropTempDir(tmp);
+  }
+});
+
 // ── Android template generation ─────────────────────────────────
 
 Deno.test("build: android template placeholders are valid", async () => {

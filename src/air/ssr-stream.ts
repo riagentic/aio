@@ -14,6 +14,7 @@ import {
 import type { Signal } from "../state/signal.ts";
 import { _hasRawHtml } from "./vdom-types.ts";
 import { _notANode } from "./vdom-create.ts";
+import { _assertTagName } from "./prop-write.ts";
 import {
   escapeHtml as _escapeHtml,
   keepLeadingNewline,
@@ -138,6 +139,7 @@ function _renderSync(
   // Element
   nodes.n++;
   const tag = vnode.tag as string;
+  _assertTagName(tag); // pasted into markup below — see prop-write.ts
   const selfClosing = VOID_ELEMENTS.has(tag);
   const ownValue = resolveSignalProp(
     vnode.props.value ?? vnode.props.defaultValue,
@@ -533,6 +535,7 @@ async function* _stream(
 
   // Element — yield opening tag, children, closing tag
   const tag = vnode.tag as string;
+  _assertTagName(tag); // pasted into markup below — see prop-write.ts
   const selfClosing = VOID_ELEMENTS.has(tag);
   const render = _ssrRenderOf(scope);
   // Every signal the element reads (its value, its attributes, a textarea's
@@ -565,7 +568,7 @@ async function* _stream(
           yield rawTextContent(tag, String(child), isDevMode());
         } else yield* _stream(child, scope);
       }
-    } else if (tag === "pre" || tag === "listing") {
+    } else if (tag === "pre" || tag === "listing" || tag === "textarea") {
       yield* _keepLeadingNewline(tag, vnode.children, scope);
     } else for (const child of vnode.children) yield* _stream(child, scope);
   } finally {
@@ -575,8 +578,8 @@ async function* _stream(
   return 1;
 }
 
-/** A `<pre>`'s children with `keepLeadingNewline` applied to the first
- *  non-empty chunk — the only one that can start the element's text. */
+/** A `<pre>`'s (or `<textarea>`'s) children with `keepLeadingNewline` applied
+ *  to the first non-empty chunk — the only one that can start the text. */
 async function* _keepLeadingNewline(
   tag: string,
   children: VNode["children"],

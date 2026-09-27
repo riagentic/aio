@@ -16,6 +16,7 @@ import {
   getOpServerTs,
   hasSyncSnapshot,
   isKnownOpId,
+  issuedHighWater,
   loadOpsSince,
   persistOp,
   reserveServerTs,
@@ -444,6 +445,64 @@ export function createServerSyncHandler(
     if (_heldSaid.has(socket)) return;
     _heldSaid.add(socket);
     sendTo(socket, enc("sync-err", { reason: why }), "sync-err (held)");
+  }
+  /** An op whose persist FAILED (disk full, I/O error, a busy database): not
+   *  in the log, not applied, not acked — and the origin must be TOLD. Both
+   *  persist sites used to log and return "client will retry", but the client
+   *  has no ack timeout on an open connection: its resends come from engine
+   *  boot, offline→online, the catch-up watchdog (armed only behind a held
+   *  frame) and a `sync-err` frame. So on a live connection the op sat pending
+   *  until some unrelated reconnect, with nothing for the app to surface. D11:
+   *  the origin is always told. `sync-err`, not `op-rejected`: the failure is
+   *  the server's, not the op's — the client keeps the op and its re-request
+   *  carries it again. Not deduped per socket like `sayHeld`: a persist that
+   *  failed is news every time, and the client's one retry timer absorbs a
+   *  burst. The error itself (SQLite/disk text: paths, schema) stays in the
+   *  server log both callers write — the client gets a generic reason. */
+  function sayPersistFailed(
+    socket: WebSocket,
+    opId: string,
+    cell: string,
+  ): void {
+    sendTo(
+      socket,
+      enc("sync-err", {
+        reason: `the server could not persist a change to "${cell}" ` +
+          `— it was not applied and stays pending; re-requesting resends it`,
+      }),
+      `sync-err (${opId}, persist failed)`,
+    );
+  }
+  /** Refuse an op `isValidSyncOp` turned away — OUT LOUD whenever its origin
+   *  can hear it: the entry still names a string `id` and `cell`, so it is
+   *  addressable in the client's queue. Both doors (the `op` frame and each
+   *  `sync-req.pendingOps` entry) used to skip it with a server-side warn,
+   *  the one refusal on these paths that told nobody: a malformed HLC from a
+   *  skewed bundle, or a reserved action name, was re-sent on every reconnect
+   *  forever and `onRejected` never fired. Same frame and shape as the
+   *  unknown-cell refusal. An entry with no usable id or cell has no queue
+   *  slot to drop, so it stays a warn. D11: the origin is always told. */
+  function refuseInvalid(raw: unknown, socket: WebSocket, what: string): void {
+    deps.log.warn(`[sync:server] ${what}`);
+    const o = (raw && typeof raw === "object" ? raw : {}) as {
+      id?: unknown;
+      cell?: unknown;
+    };
+    if (
+      typeof o.id !== "string" || !o.id || typeof o.cell !== "string" ||
+      FORBIDDEN.includes(o.cell)
+    ) return;
+    sendTo(
+      socket,
+      enc("op-rejected", {
+        opId: o.id,
+        cell: o.cell,
+        reason: "malformed sync op — this server cannot accept it (an op " +
+          "needs string id/cell/action, an [number, number, string] hlc, " +
+          "and an action that is not framework-internal)",
+      }),
+      `op-rejected (${o.id}, malformed)`,
+    );
   }
   /** The backstop: dispatch refused an op because the server was not TAKING
    *  input — dispatch closed or draining (a shutdown in progress), or time
@@ -1176,7 +1235,7 @@ export function createServerSyncHandler(
     },
     async handleOp(raw, meta, socket) {
       if (!isValidSyncOp(raw)) {
-        deps.log.warn(`[sync:server] invalid op from ${meta.id} — dropping`);
+        refuseInvalid(raw, socket, `invalid op from ${meta.id} — refusing`);
         return;
       }
       const op = raw;
@@ -1257,7 +1316,9 @@ export function createServerSyncHandler(
           );
         } catch (e) {
           deps.log.error(`[sync:server] failed to persist op ${op.id}: ${e}`);
-          return; // Don't ack — client will retry
+          // Don't ack — and say so, or nothing makes the client retry.
+          sayPersistFailed(socket, op.id, op.cell);
+          return;
         }
         // Under another connection's session — see `_foreign`.
         if (serverTs !== null && sessionOwnedElsewhere(op.id, socket)) {
@@ -1558,7 +1619,14 @@ export function createServerSyncHandler(
         ownPrefix !== null
           // …except one another connection submitted under it while its
           // owner was away (see `_foreign`): the owner never had it.
-          ? o.id.startsWith(ownPrefix) && !_foreign.has(o.id)
+          //
+          // The WHOLE prefix, never `startsWith`: a client id may itself
+          // contain `-` (it is a UUID), so a writer announcing clientId
+          // `<victim>-<victimSession>` owns ops whose ids START with the
+          // victim's prefix — and a prefix test served its ops to nobody but
+          // the server and the other peers, hiding them from the victim's
+          // catch-up for good.
+          ? sessionPrefix(o.id) === ownPrefix && !_foreign.has(o.id)
           : o.hlc[2] === sync.clientId;
 
       (async () => {
@@ -1570,7 +1638,11 @@ export function createServerSyncHandler(
         // the client's cursor, the mark moves over it, and a client holding a
         // different history's cursor is served "incrementally" — it keeps
         // every op the other history had (tests/sync/foreign-cursor.test.ts).
-        const highWaterBefore = await reserveServerTs(deps.db);
+        //
+        // `issuedHighWater`, not the durable mark alone: deleting a refused
+        // op's row can LOWER the durable mark below a cursor this very
+        // process handed out (see issuedHighWater).
+        const highWaterBefore = await issuedHighWater(deps.db);
         /** A pending op was held (see holdIfHeld): `sync-err` is sent, the
          *  rest of the request — its later ops, its response — waits for the
          *  client's resend. */
@@ -1579,8 +1651,10 @@ export function createServerSyncHandler(
         for (const pending of sync.pendingOps ?? []) {
           if (heldMid) return;
           if (!isValidSyncOp(pending)) {
-            deps.log.warn(
-              "[sync:server] handleSync: invalid pending op — skipping",
+            refuseInvalid(
+              pending,
+              socket,
+              "handleSync: invalid pending op — refusing",
             );
             continue;
           }
@@ -1672,7 +1746,11 @@ export function createServerSyncHandler(
               deps.log.error(
                 `[sync:server] failed to persist pending op ${pending.id}: ${e}`,
               );
-              return; // Don't ack — client keeps it pending and retries
+              // Don't ack — the client keeps it pending, and the `sync-err`
+              // is what makes it retry. The rest of the request goes on: the
+              // catch-up it asked for is still owed.
+              sayPersistFailed(socket, pending.id, pending.cell);
+              return;
             }
             if (foreign && serverTs !== null) noteForeign(pending.id);
             // Reconnect-queued ops must reach live state too (same contract
@@ -1911,9 +1989,11 @@ export function createServerSyncHandler(
 
             // A cursor ABOVE this log's high-water mark (as it stood before
             // this request wrote anything — `highWaterBefore`) was never
-            // issued by this log: `reserveServerTs` IS the durable maximum,
-            // and every position a client can hold — an echoed cursor, an
-            // ack, a broadcast stamp — was taken from it. So the client synced
+            // issued by this log: `issuedHighWater` bounds every position
+            // this process handed out for it (the durable maximum, kept from
+            // going down when a refused op's row is deleted), and every
+            // position a client can hold — an echoed cursor, an ack, a
+            // broadcast stamp — was taken from it. So the client synced
             // with a different history: the server restarted on a restored
             // backup, a wiped data dir, or another app now answering on the
             // same port. Its cursor is meaningless here, and serving it

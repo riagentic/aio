@@ -19,7 +19,13 @@ old data files still exist under the old id). Pin `appId` in `deno.json` (or
 The chain is the same one the build names the binary with, so `deno run` and the
 compiled artifact resolve the **same** id — compiling never moves your data
 directory. (It used to: the build read `title` and ignored `appId`, so an app
-that pinned `appId` got one id in dev and another once compiled.)
+that pinned `appId` got one id in dev and another once compiled.) Dev applies
+this project rule to the entry the build compiles (`deno.json` `entry`, else
+`src/app.ts`, or a `build.targets` entry); any other entry is named by the
+launch directory's `deno.json` (only when the entry lies inside that directory),
+else its own folder. If an app's data sits under the id an older aio inferred,
+dev keeps using that id and warns at every boot until you pin `appId` or move
+the directory.
 
 **Cell names are wire/persistence identity.** `cell("counter", …)` — the string,
 not the variable, keys the persisted state, the action prefix
@@ -75,12 +81,15 @@ paths are for `exclude`.
 
 **Schema changes need a version bump.** Changed the state shape? Persisted state
 deep-merges with defaults, which covers additions — but renames and type changes
-need `version: N` + `onMigrate`. Bumping `version` without an `onMigrate` boots
-with a loud warning (the old shape is kept as-is). Running an **older** build
-against data a **newer** build wrote (stored version > code version) is a
-downgrade: boot warns loudly and keeps the state untouched rather than silently
-misreading moved/renamed fields — re-deploy the newer build, or add an
-`onMigrate` that down-converts.
+need `version: N` + `onMigrate`. Bumping a DECLARED `version` without an
+`onMigrate` boots with a loud warning (the old shape is kept as-is). The first
+time a cell declares a `version` at all, boot only stamps it (an info line):
+nothing on disk carries an older number to convert from, so add `onMigrate` in
+that same change if the shape changed too. Running an **older** build against
+data a **newer** build wrote (stored version > code version) is a downgrade:
+boot warns loudly and keeps the state untouched rather than silently misreading
+moved/renamed fields — re-deploy the newer build, or add an `onMigrate` that
+down-converts.
 
 Boot also detects **shape drift** without any version machinery: if stored data
 holds a field your cell's `initialState` no longer declares (a rename/removal
@@ -186,7 +195,10 @@ const after = s.jobs.find((j) => j.id === id);
 It counts on the flagged line, or anywhere in the contiguous comment block
 directly above it — which is where the reason naturally goes, and where
 `deno fmt` cannot move it out from under the code. A blank line ends the block,
-so a stray marker higher up cannot silently cover unrelated code.
+so a stray marker higher up cannot silently cover unrelated code. In `aiol`,
+when the formatter wraps a statement (`const x =`, `f(` or `[` ends the line), a
+marker above the statement also covers its first continuation line — but never
+the next element or argument of a list: mark each one.
 
 There used to be two markers one letter apart (`aio-ok` and `aiol-ok`), placed
 by copying nearby code. `aiol-ok` still works and always will — a suppression

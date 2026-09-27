@@ -4,6 +4,7 @@
 
 import type { DiagEvent } from "./types.ts";
 import { DIAG_THROTTLE_MS, formatDiagEvent } from "./diag-formatter.ts";
+import { callVitalsHook } from "./diag-reporter.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import {
   type BudgetLedger,
@@ -78,12 +79,8 @@ export function createPressureMonitor(
   });
 
   function emit(event: DiagEvent, throttleKey: string): void {
-    // Timer-driven: a throwing user hook must not kill the process.
-    try {
-      config.onDiagnostic?.(event);
-    } catch (e) {
-      log.error("vitals", `onDiagnostic hook threw — ${e}`);
-    }
+    // Timer-driven: a throwing/rejecting user hook must not kill the process.
+    callVitalsHook("onDiagnostic", config.onDiagnostic, event);
 
     const now = Date.now();
     const lastEmit = lastConsoleEmit.get(throttleKey) ?? 0;

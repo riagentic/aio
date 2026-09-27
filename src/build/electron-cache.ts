@@ -43,7 +43,7 @@ export function electronCacheRoot(): string {
 
 /** What a single thing in the cache is. `zip` entries are the cross-build
  *  download cache (`44.3.0-win32-x64.zip`, 144–151 MB each) and their
- *  `.sha256` siblings; `stage` is an interrupted unpack (`.incoming.<pid>`);
+ *  `.sha256` siblings; `stage` is an interrupted unpack (`.incoming.<pid>[-<nonce>]`);
  *  `lock` is a claim another process may be holding right now. */
 export type CacheEntryKind = "runtime" | "zip" | "stage" | "lock" | "other";
 
@@ -105,7 +105,7 @@ export function cacheEntryIdentity(
 ): { version: string | null; slug: string | null } {
   return parseCacheName(
     name.replace(/\.zip(\.sha256)?$/, "")
-      .replace(/\.incoming\.\d+$/, "")
+      .replace(/\.incoming\.\d+(-[0-9a-f]+)?$/, "")
       .replace(/\.lock$/, ""),
   );
 }
@@ -113,7 +113,7 @@ export function cacheEntryIdentity(
 /** Which of the five kinds `name` is, from the name alone. Pure. */
 export function cacheEntryKind(name: string): CacheEntryKind {
   if (name.endsWith(".lock")) return "lock";
-  if (/\.incoming\.\d+$/.test(name)) return "stage";
+  if (/\.incoming\.\d+(-[0-9a-f]+)?$/.test(name)) return "stage";
   if (name.endsWith(".zip") || name.endsWith(".zip.sha256")) return "zip";
   if (parseCacheName(name).version !== null) return "runtime";
   return "other";

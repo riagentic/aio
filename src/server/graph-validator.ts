@@ -5,6 +5,12 @@ import { resolveShare, type ShareRoot } from "./app-dirs.ts";
 import { ESBUILD_SPEC } from "../build/esbuild-shared.ts";
 import { importOutsideApp } from "./outside-app.ts";
 import {
+  isBrowserEntry,
+  isFrameworkEntry,
+  localPrefixAlias,
+  prefixAliasMessage,
+} from "./server-html-importmap.ts";
+import {
   BUNDLE_ENTRY_KEY,
   bundleClient,
   type EsbuildModule,
@@ -12,9 +18,13 @@ import {
 } from "../build/client-bundle.ts";
 import {
   aioOwnSpecAdvice,
+  dynamicImportsOutsideMethods,
+  dynamicOutsideMethodsAdvice,
   isAioOwnSpec,
+  isServerOnlySuppressed,
   SERVER_ONLY_SPECS,
 } from "./server-only-specs.ts";
+export { isServerOnlySuppressed };
 import {
   AIO_LIBRARY_ENTRIES,
   entrySubpath,
@@ -169,6 +179,21 @@ export function resolveSpecifier(
   }
 
   const mapped = importMap[spec];
+  // A local PREFIX key (`"@/": "./src/"`): not a missing package — the one
+  // sentence the build says too (prefixAliasMessage).
+  const prefix = mapped ? null : localPrefixAlias(spec, importMap);
+  if (prefix) {
+    return {
+      kind: "error",
+      error: {
+        file: importerPath,
+        category: "missing-import-map",
+        message: prefixAliasMessage(spec, prefix.key, prefix.value),
+        fix: `Import the file by a relative path, or map "${spec}" exactly ` +
+          `in deno.json imports.`,
+      },
+    };
+  }
   if (!mapped) {
     return {
       kind: "error",
@@ -196,6 +221,23 @@ export function resolveSpecifier(
     mapped.startsWith("node:")
   ) {
     return { kind: "external", url: mapped };
+  }
+  // A local alias the app's deno.json declares, already resolved against
+  // THAT deno.json's folder (readAppLocalAliases) — walked like any module.
+  if (mapped.startsWith("file:")) {
+    const file = fromFileUrl(mapped);
+    for (const p of [file, ...EXTENSIONS.map((e) => file + e)]) {
+      if (_exists(p)) return { kind: "local", path: p };
+    }
+    return {
+      kind: "error",
+      error: {
+        file: importerPath,
+        category: "file-not-found",
+        message: `Import map alias "${spec}" → ${file} not found`,
+        fix: `deno.json maps "${spec}" to ${file}, which does not exist.`,
+      },
+    };
   }
   // Absolute URL paths (e.g. "/__aio/ui.js") are server-resolved routes, not filesystem paths
   if (mapped.startsWith("/")) {
@@ -267,7 +309,6 @@ export function appImportFixLine(
 import { SERVER_ONLY_AIO_SYMBOLS } from "../entries.ts";
 import { codeMask, codeText } from "../diagnostics/code-mask.ts";
 import { count } from "../diagnostics/fmt.ts";
-import { justifiedFor } from "../diagnostics/ok-marker.ts";
 
 /** Detect server-only APIs in browser-bound code.
  *  AIO-427: severity is split by CERTAINTY of breakage —
@@ -276,46 +317,6 @@ import { justifiedFor } from "../diagnostics/ok-marker.ts";
  *  `server-only-import` (BLOCKING, shows the diagnostic page). `@std/*` (often
  *  browser-safe) and `Deno.*` *usage* (only breaks if that path runs client-
  *  side) are CONDITIONAL → `server-only-api` (warning). */
-/** `// aio-ok: server-only` — the acknowledgement path the warning had none of.
- *
- *  A field report ran for weeks with `⚠ src/cell/job.ts:292 — Deno.remove is
- *  server-only` on every launch, pointing at a `finally` block inside a method
- *  that only ever runs on the server, cleaning up a file it had itself created.
- *  The rule is right in general and wrong there, and with no way to say so the
- *  line became permanent noise printed next to the ✖ errors that genuinely
- *  break the client — which trains people to skim the one output they most need
- *  to read carefully. `aiol` already had this idiom (`// aiol-ok`).
- *
- *  Accepted on the flagged line, or on a comment line immediately above it
- *  (where the reason belongs, and where `deno fmt` cannot move it).
- *
- *  Deliberately NOT accepted for blocking categories: "this path never runs in
- *  the browser" is a claim a developer can make, "this import exists in the
- *  browser build" is not — that one is a guaranteed blank screen, and a
- *  silenceable one would be worse than the noise. */
-export function isServerOnlySuppressed(
-  lines: readonly string[],
-  lineNum: number,
-): boolean {
-  // TWO SPELLINGS, both permanent. The original is `// aio-ok: server-only`,
-  // which is what every existing suppression in the wild says and must keep
-  // meaning. `// aio-ok(server-only): why` is the repo's general scoped form
-  // (src/diagnostics/ok-marker.ts) and lands here too, so someone who learned
-  // the marker anywhere else does not have to learn a second grammar.
-  const legacy = /\/\/.*\baiol?-ok\b\s*[:\-—]?\s*server-only/;
-  // `justifiedFor`, not `justified`: the scope is REQUIRED here. The
-  // permissive form let an unscoped `// aio-ok: some other reason` silence a
-  // server-only finding, which this function's own test forbids in so many
-  // words — "a marker for one rule must not quietly cover another".
-  const hit = (line: string) =>
-    legacy.test(line) ||
-    (line.includes("//") && justifiedFor(line, "server-only"));
-  const own = lines[lineNum - 1] ?? "";
-  if (hit(own)) return true;
-  const above = (lines[lineNum - 2] ?? "").trim();
-  return above.startsWith("//") && hit(above);
-}
-
 export function checkPlatformSafety(code: string, file: string): GraphError[] {
   const errors: GraphError[] = [];
   let m;
@@ -669,9 +670,9 @@ export async function validateGraph(
   const modules = new Map<string, ModuleNode>();
   const errors: GraphError[] = [];
   const visited = new Set<string>();
-  const stack = new Set<string>(); // recursion stack for cycle detection
   // Static (eager) import edges only — used to decide whether a server-only
-  // import is eagerly linked (block) or reached only via dynamic import (defer).
+  // import is eagerly linked (block) or reached only via dynamic import
+  // (defer), and to find import cycles.
   const staticEdges = new Map<string, string[]>();
   // Static imports of `*.server.ts(x)` — aio's serving convention: the dev
   // server 404s those files to the browser (server-static.ts isProtectedPath)
@@ -691,21 +692,9 @@ export async function validateGraph(
   >();
 
   async function walk(filePath: string, importerPath?: string): Promise<void> {
-    if (visited.has(filePath)) {
-      if (stack.has(filePath)) {
-        errors.push({
-          file: importerPath ?? filePath,
-          category: "circular-dependency",
-          message: `Circular import: ${importerPath} → ${filePath}`,
-          fix:
-            "Circular imports are allowed in JS but may cause initialization issues. Consider restructuring.",
-        });
-      }
-      return;
-    }
+    if (visited.has(filePath)) return;
     if (visited.size >= MAX_FILES) return;
     visited.add(filePath);
-    stack.add(filePath);
 
     let source: string;
     try {
@@ -727,14 +716,10 @@ export async function validateGraph(
             `Deno does not have permission to read "${filePath}". Check --allow-read flags.`,
         });
       }
-      stack.delete(filePath);
       return;
     }
 
-    if (source.length > MAX_FILE_SIZE) {
-      stack.delete(filePath);
-      return;
-    }
+    if (source.length > MAX_FILE_SIZE) return;
 
     // A JSON module (`import data from "./x.json" with { type: "json" }`) is
     // data, not code: the browser and the bundler both load it as JSON. Fed
@@ -751,7 +736,6 @@ export async function validateGraph(
           fix: `Fix the JSON in ${filePath}.`,
         });
       }
-      stack.delete(filePath);
       return;
     }
 
@@ -789,7 +773,6 @@ export async function validateGraph(
           fix: `Transpile failed for ${filePath}. Check syntax.`,
         });
       }
-      stack.delete(filePath);
       return;
     }
 
@@ -819,6 +802,23 @@ export async function validateGraph(
     ]);
     for (const d of dynamicSpecs) {
       if (staticSpecs.has(d)) dynamicSpecs.delete(d);
+    }
+    // Skipped below as external — right inside a cell method, a runtime
+    // failure anywhere else. The build warns with the same decider.
+    for (
+      const { spec, line } of dynamicImportsOutsideMethods(
+        source,
+        (s) => isFrameworkEntry(s) && !isBrowserEntry(s),
+      )
+    ) {
+      if (staticSpecs.has(spec)) continue; // refused as a static import
+      errors.push({
+        file: filePath,
+        line,
+        lineText: source.split("\n")[line - 1]?.trim(),
+        category: "server-only-api",
+        ...dynamicOutsideMethodsAdvice(spec),
+      });
     }
     const specifiers = [...staticSpecs, ...dynamicSpecs];
     const staticDeps: string[] = [];
@@ -873,6 +873,14 @@ export async function validateGraph(
           lineText: source.split("\n")[line - 1]?.trim(),
         });
       }
+      // A DYNAMIC import of an aio entry a page cannot load
+      // (`await import("aio/extras")` in a cell method) is external — the
+      // server runs it — exactly as the bundle treats it (esbuild-plugin.ts),
+      // by the same decider. A static one is still refused above and below.
+      if (
+        !staticSpecs.has(spec) && isFrameworkEntry(spec) &&
+        !isBrowserEntry(spec)
+      ) continue;
       const resolution = resolveSpecifier(
         spec,
         filePath,
@@ -914,11 +922,10 @@ export async function validateGraph(
       valid: true,
       errors: [],
     });
-
-    stack.delete(filePath);
   }
 
   await walk(entrypoint);
+  errors.push(...staticCycles(entrypoint, staticEdges));
 
   // Eager set: modules reachable from the entry through STATIC imports only.
   // Everything else is reached solely via dynamic `import()` — a code-split
@@ -1237,6 +1244,39 @@ export function extractImportsByKind(
  *  the author's text, not esbuild's. {@link scanImports} is the decider. */
 export function extractSourceImports(source: string): FoundImport[] {
   return scanImports(source);
+}
+
+/** One warning per back edge of a DFS over the STATIC import edges. A loop
+ *  closed only by a dynamic `import()` is no cycle: the import runs after
+ *  every module finished loading, so it cannot cause the initialization
+ *  problem the warning is about — and it is the documented way out of a real
+ *  cycle. A DFS over static edges alone (not a filter on the full walk's back
+ *  edges) keeps every all-static cycle visible. Pure. */
+function staticCycles(
+  entry: string,
+  edges: ReadonlyMap<string, readonly string[]>,
+): GraphError[] {
+  const out: GraphError[] = [];
+  const done = new Set<string>();
+  const stack = new Set<string>();
+  const dfs = (file: string): void => {
+    done.add(file);
+    stack.add(file);
+    for (const dep of edges.get(file) ?? []) {
+      if (stack.has(dep)) {
+        out.push({
+          file,
+          category: "circular-dependency",
+          message: `Circular import: ${file} → ${dep}`,
+          fix:
+            "Circular imports are allowed in JS but may cause initialization issues. Consider restructuring (or move one edge behind a dynamic import()).",
+        });
+      } else if (!done.has(dep)) dfs(dep);
+    }
+    stack.delete(file);
+  };
+  for (const file of [entry, ...edges.keys()]) if (!done.has(file)) dfs(file);
+  return out;
 }
 
 /** All import specifiers (static + dynamic) from transpiled JS output. */

@@ -7,7 +7,11 @@
 // was intended rather than what is true is worse than no report at all.
 //
 // Nothing here has side effects, so the whole report is testable as data.
-import { detectTarget, type InstalledTarget } from "./updates-apply.ts";
+import {
+  detectTarget,
+  type InstalledTarget,
+  ownAppImage,
+} from "./updates-apply.ts";
 
 /** Facts about the artifact and the machine, derived from the process. */
 export type BuildFacts = {
@@ -27,11 +31,10 @@ export type BuildFacts = {
 
 export function buildFacts(): BuildFacts {
   const target = detectTarget();
-  const appImage = Deno.env.get("APPIMAGE");
   return {
     build: target === "source" ? "source" : "compiled",
     target,
-    artifact: appImage ?? Deno.execPath(),
+    artifact: ownAppImage() ?? Deno.execPath(),
     platform: `${Deno.build.os}/${Deno.build.arch}`,
     runtime: `deno ${Deno.version.deno}`,
   };
@@ -223,7 +226,12 @@ export function bootLines(
       ? "manual"
       : u.intervalMs % 3_600_000 === 0
       ? `every ${u.intervalMs / 3_600_000}h`
-      : `every ${Math.round(u.intervalMs / 60_000)}m`;
+      : u.intervalMs % 60_000 === 0
+      ? `every ${u.intervalMs / 60_000}m`
+      // Exact below a minute: `check: 10_000` printed "every 0m".
+      : u.intervalMs % 1000 === 0
+      ? `every ${u.intervalMs / 1000}s`
+      : `every ${u.intervalMs}ms`;
     lines.push([
       "updates",
       `${u.channel} · ${u.kind} · ${cadence} · ${

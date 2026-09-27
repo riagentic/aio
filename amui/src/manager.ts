@@ -404,7 +404,10 @@ export function reconcileDetail(
   // Down → the whole live snapshot (config/cells/build/errors/schedules) came
   // from the trojan of a now-dead process; drop it so Overview can't show the
   // config of an app that is no longer running.
-  const live = up ? {} : {
+  // …and so did a REPLACED one (a restart with a new pid): its errors, cells
+  // and config describe the old process, and Overview listed that process's
+  // failures under the new pid.
+  const live = sameProc ? {} : {
     config: null,
     cells: null,
     build: null,
@@ -449,6 +452,7 @@ interface ScanTarget {
   history: unknown;
   mem: unknown;
   aioVersion: string | null;
+  controlError: string | null;
 }
 
 /** Drop every reading that belongs to a specific PROCESS.
@@ -472,6 +476,9 @@ function clearLiveDiagnostics(s: ScanTarget): void {
   s.history = null;
   s.mem = null;
   s.aioVersion = null;
+  // The dead process's control-plane refusal: a stopped app kept a red
+  // "the panels below are the LAST reading" banner over emptied panels.
+  s.controlError = null;
 }
 
 /** Fold a fresh scan into state: replace the list + reconcile the selection
@@ -1151,7 +1158,17 @@ export const manager = cell("manager", {
         // state — not the default instance's, on a zero-port socket.
         proj.running.pid,
       );
-      s.dispatchMsg = r.ok ? `dispatched ${type}` : `error: ${r.error}`;
+      // The reply's warnings are the point of reading it: a call short an
+      // argument ran with `undefined`, an unsaved write will not survive a
+      // restart — `am dispatch` shows both; a bare "dispatched" hid them.
+      const d = (r.ok ? r.data : null) as
+        | { short?: string; unsaved?: string }
+        | null;
+      s.dispatchMsg = !r.ok ? `error: ${r.error}` : [
+        `dispatched ${type}`,
+        d?.short ? `⚠ ${d.short}` : "",
+        d?.unsaved ? `⚠ NOT SAVED — ${d.unsaved}` : "",
+      ].filter(Boolean).join(" · ");
     },
 
     /** Start a stopped project's app (browser shell, detached). Waits for the
@@ -1268,7 +1285,10 @@ export const manager = cell("manager", {
       // Boot the SAME instance again: a profile instance restarted without
       // its profile comes back as the default one.
       const before = await pidsAt(path);
-      const r = await startApp(path, "browser", running?.profile);
+      const r = await startApp(path, "browser", running?.profile, {
+        home: running?.home,
+        appId: running?.appId,
+      });
       if (!r.ok) {
         s.actionMsg = `restart failed: ${r.error}`;
         return;

@@ -16,10 +16,10 @@ import { join } from "@std/path";
 import type { Log } from "../diagnostics/logger-api.ts";
 import {
   keyFingerprint,
+  type ReleaseTarget,
   SAFE_TOKEN,
   type ShipExpectations,
   type ShipManifest,
-  type UpdateTarget,
   verifyManifestClaims,
 } from "../build/ship.ts";
 import {
@@ -45,6 +45,7 @@ import {
   fetchManifest,
   fileSha256,
   gitLsRemote,
+  installManifestUrl,
   pinKey,
   readTrust,
   recordInstalledSha256,
@@ -53,18 +54,26 @@ import {
 } from "./updates-check.ts";
 import {
   artifactPath,
+  clearPending,
   detectTarget,
+  firstBootPath,
   installableTargets,
   installDir,
   type InstalledTarget,
+  KEEP_OLD,
+  macAppUpdateBlocker,
+  macBundleExecutable,
   type PendingMark,
   pruneKeepingNewest,
   pruneOld,
   relaunch,
+  replacedExeIdentity,
   smokeTestArtifact,
   swapArtifact,
   swapDirectoryDetached,
+  unpackAppTarball,
   unpackArchive,
+  verifyMacBundle,
   zipLauncher,
 } from "./updates-apply.ts";
 import { dataCompatibility, followsPrereleases } from "./updates-core.ts";
@@ -72,9 +81,6 @@ import { rebuildFromGit } from "./updates-rebuild.ts";
 import { retireProfile } from "./updates-retire.ts";
 import { isServiceSupervised } from "./aio-lifecycle.ts";
 import { splitRuntimeVersion } from "./app-version.ts";
-
-/** How many superseded artifacts to keep so a manual rollback is a rename. */
-const KEEP_OLD = 3;
 
 export type UpdatesRuntimeDeps = {
   config: ResolvedUpdates;
@@ -108,7 +114,7 @@ export type UpdatesRuntimeDeps = {
   artifact?: string;
   /** Install strategies this process can perform. Defaults to what the running
    *  artifact supports. */
-  canInstall?: UpdateTarget[];
+  canInstall?: ReleaseTarget[];
   /** What this install IS, as opposed to what it can take. Defaults to the
    *  detected target; injected so a test can be a macOS `.app` on Linux. */
   installedTarget?: InstalledTarget;
@@ -117,6 +123,9 @@ export type UpdatesRuntimeDeps = {
   relaunch?: (opts: { artifact: string; args: string[] }) => void;
   /** Hand a directory swap to the system shell. Injected in tests. */
   swapDirectory?: typeof swapDirectoryDetached;
+  /** `codesign --verify` of a staged `.app` (`electron-app`). Injected in
+   *  tests — Linux has no codesign. */
+  verifyBundle?: typeof verifyMacBundle;
   /** Where a git rebuild works. Injected in tests; defaults to a temp dir. */
   makeWorkDir?: () => Promise<string>;
 };
@@ -151,7 +160,10 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       name: deps.appName,
       channel,
       platform,
-      key: config.key ?? trust.key,
+      // A configured roster is the whole statement of trust: dropping a key
+      // from `keys` (the last step of a rotation) must retire it even when it
+      // was pinned on first use — an explicit `key` already replaces the pin.
+      key: config.key ?? (config.keys?.length ? undefined : trust.key),
       keys: config.keys,
       allowUnsigned: config.allowUnsigned,
     };
@@ -185,7 +197,10 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
     const known = readTrust(deps.dataDir).installedSha256;
     if (known) return known;
     if (!m.sha256) return undefined;
-    if (m.target === "electron-zip" || m.target === "android") return undefined;
+    const t = releaseTarget(m);
+    if (t === "electron-zip" || t === "electron-app" || t === "android") {
+      return undefined;
+    }
     const path = targetOf();
     try {
       if (!(await Deno.stat(path)).isFile) return undefined;
@@ -215,11 +230,24 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
 
   async function checkManifest(opts: CheckOptions): Promise<CheckResult> {
     const trust = readTrust(deps.dataDir);
-    const url = manifestUrl(config.source, channel, platform);
+    // A zip install reads its own kind's manifest when the channel has one.
+    let url: string;
+    try {
+      url = await installManifestUrl(
+        manifestUrl(config.source, channel, platform),
+        installedTarget(),
+      );
+    } catch (e) {
+      return { kind: "error", error: e instanceof Error ? e.message : `${e}` };
+    }
     // Sent only for the verdict it was cached under — see `etagCurrentFor`.
     const cachedFor = trust.etagCurrentFor;
+    // …and the SETTING it was judged under: "X is a prerelease" is current
+    // only while prereleases are not followed — cached across turning
+    // `prerelease: true` on, the 304 kept the release hidden for good.
+    const pre = followsPrereleases(config, deps.appVersion);
     const validator = cachedFor?.version === deps.appVersion &&
-        cachedFor.url === url
+        cachedFor.url === url && cachedFor.prerelease === pre
       ? trust.etagCurrent
       : undefined;
     const got = await fetchManifest(url, validator);
@@ -250,7 +278,12 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
     // `data/update-trust.json` FOREVER, and every genuine release afterwards
     // refused. The tests exercised `pinKey` directly with a URL, so the gate
     // could not see the one caller that actually uses it.
-    if (!expect.key && m.publicKey && m.signature) {
+    //
+    // Only with NO configured trust: a `keys` roster replaces the first-use pin
+    // (see `expectations`), so pinning under one rewrote update-trust.json and
+    // warned "on first use" on EVERY check — and over plain http to a LAN host,
+    // `pinKey`'s transport refusal turned every check into an error.
+    if (!expect.key && !expect.keys?.length && m.publicKey && m.signature) {
       try {
         // `pinFrom`, not `url`: the manifest may have come over a redirect,
         // and the leg that served it is the one that must authenticate.
@@ -330,7 +363,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
     ) {
       writeTrust(deps.dataDir, {
         etagCurrent: got.etag,
-        etagCurrentFor: { version: deps.appVersion, url },
+        etagCurrentFor: { version: deps.appVersion, url, prerelease: pre },
       });
     }
     if (d.kind === "incompatible") {
@@ -482,15 +515,23 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       );
     }
 
-    const isDirectory = m.target === "electron-zip";
+    const isMacApp = releaseTarget(m) === "electron-app";
+    const isDirectory = m.target === "electron-zip" || isMacApp;
     const current = isDirectory ? (deps.artifact ?? installDir()) : targetOf();
     if (!current) {
       throw new Error(
-        "this is a .zip release, but the running app is not inside an " +
-          "unpacked Electron install (no launcher + electron/ above it) — " +
-          "nothing to replace",
+        isMacApp
+          ? "this is a macOS .app release, but the running app is not inside " +
+            "a .app bundle — nothing to replace"
+          : "this is a .zip release, but the running app is not inside an " +
+            "unpacked Electron install (no launcher + electron/ above it) — " +
+            "nothing to replace",
       );
     }
+    // Translocated / unwritable: refused BEFORE a byte is downloaded, with
+    // the one move that fixes it.
+    const stuck = isMacApp ? macAppUpdateBlocker(current) : null;
+    if (stuck) throw new Error(stuck);
     const staged = isDirectory
       ? `${current}.staged-${m.version}`
       : `${current}.new-${m.version}`;
@@ -540,7 +581,9 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
 
     if (isDirectory) {
       await Deno.remove(staged, { recursive: true }).catch(() => {});
-      const unpacked = await unpackArchive(download, staged);
+      const unpacked = isMacApp
+        ? await unpackAppTarball(download, staged)
+        : await unpackArchive(download, staged);
       await Deno.remove(download).catch(() => {});
       if (!unpacked.ok) {
         await Deno.remove(staged, { recursive: true }).catch(() => {});
@@ -560,7 +603,21 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       // The launcher is the right thing to run: it is generated by
       // `build-electron.ts` as `exec "$HERE/<binary>" "$@"`, so `--version`
       // reaches the aio CLI and returns without opening a window.
-      const smoked = await smokeTestArtifact(zipLauncher(staged));
+      // A `.app`: its seal FIRST (every file, symlink and exec bit), then the
+      // bundle executable runs `--version` like any launcher. Nothing inside
+      // the bundle is touched after unpacking.
+      const sealed = isMacApp
+        ? await (deps.verifyBundle ?? verifyMacBundle)(staged)
+        : { ok: true as const };
+      const exe = isMacApp ? macBundleExecutable(staged) : zipLauncher(staged);
+      const smoked = !sealed.ok ? sealed : exe === null
+        ? {
+          ok: false as const,
+          error: `the downloaded app has no readable Contents/Info.plist ` +
+            `CFBundleExecutable — the update was NOT installed; the running ` +
+            `version is untouched.`,
+        }
+        : await smokeTestArtifact(exe);
       if (!smoked.ok) {
         await Deno.remove(staged, { recursive: true }).catch(() => {
           // aio-ok: the throw below carries the reason the update was
@@ -588,6 +645,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       from: deps.appVersion,
       to: m.version,
       backup,
+      exe: replacedExeIdentity(current),
     };
 
     if (isDirectory) {
@@ -600,14 +658,52 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       );
       recordInstalledSha256(deps.dataDir, m.sha256);
       deferHandOver(
-        () =>
-          void (deps.swapDirectory ?? swapDirectoryDetached)({
-            current,
-            staged,
-            fromVersion: deps.appVersion,
-            args: deps.argv,
-            pending,
-          }),
+        () => {
+          try {
+            (deps.swapDirectory ?? swapDirectoryDetached)({
+              current,
+              staged,
+              fromVersion: deps.appVersion,
+              // A `.app` comes back through LaunchServices, like a Dock
+              // click; `-n` so a still-closing old window is never merely
+              // re-focused.
+              ...(isMacApp
+                ? {
+                  launcher: "/usr/bin/open",
+                  args: ["-n", current, "--args", ...deps.argv],
+                }
+                : { args: deps.argv }),
+              pending,
+            });
+          } catch (e) {
+            // The helper never started (a policy such as AppLocker refused
+            // it): NOTHING was swapped. Undo what was written for the swap,
+            // say so, and start this version again.
+            clearPending(deps.dataDir);
+            for (
+              const [path, recursive] of [
+                [firstBootPath(deps.dataDir), false],
+                [staged, true],
+              ] as const
+            ) {
+              try {
+                Deno.removeSync(path, { recursive });
+              } catch { /* aio-ok: absent, or left for pruneOld to reclaim */ }
+            }
+            writeTrust(deps.dataDir, { installedSha256: undefined });
+            log.error(
+              "updates",
+              `${m.version} was NOT installed: the update helper could not ` +
+                `start (${e}). ${deps.appVersion} is starting again.`,
+            );
+            if (!isServiceSupervised()) {
+              (deps.relaunch ?? relaunch)({
+                artifact: Deno.execPath(),
+                args: deps.argv,
+              });
+            }
+          }
+        },
         retire,
       );
       return;
@@ -694,6 +790,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
           from: deps.appVersion,
           to: built.sha.slice(0, 8),
           backup,
+          exe: replacedExeIdentity(current),
         },
       });
       await pruneOld(current, KEEP_OLD);
@@ -755,6 +852,34 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       // because the UI could not be told about it would trade a real guarantee
       // for a cosmetic one. The same shape as `phase()` above.
     }
+  }
+
+  /** Every refusal and failure of an install is LOGGED, once. It was only
+   *  handed back to the cell as `error` — which the next poll's check clears —
+   *  so a tampered download refused on a real machine left no trace, in the UI
+   *  or in the logs. The boot's own unattended install says it in ITS line,
+   *  with the retry it schedules ({@link unattendedInstall}), so the runtime
+   *  keeps quiet for that one call: one refusal, one line. */
+  function loggingFailure(
+    apply: (opts?: ApplyOpts) => Promise<void>,
+  ): (opts?: ApplyOpts) => Promise<void> {
+    return async (opts) => {
+      try {
+        await apply(opts);
+      } catch (e) {
+        if (unattended.has(self)) throw e;
+        log.error(
+          "updates",
+          // The boot's unattended line has the same shape, plus its retry.
+          `${
+            offered?.version ?? "the update"
+          } was NOT installed (${deps.appVersion} keeps running): ${
+            e instanceof Error ? e.message : e
+          }`,
+        );
+        throw e;
+      }
+    };
   }
 
   /** Stop cleanly, start the successor, and get out of its way.
@@ -873,7 +998,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
     );
   }
 
-  return {
+  const self: UpdatesRuntime = {
     exposed: deps.exposed,
     kind: config.kind,
     get channel() {
@@ -899,20 +1024,26 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
     },
     check: (opts) =>
       config.kind === "git" ? checkGit(opts) : checkManifest(opts),
-    apply: async (opts: ApplyOpts = {}) => {
-      if (!deps.canInstall && installedTarget() === "macos-app") {
-        // Belt AND braces: `decide` already refuses every release for a
-        // bundle, so the button is never offered. This is the other door —
-        // `apply` called directly, or by `updates.auto`. A macOS bundle that
-        // swapped a file inside itself would break its own code signature and
-        // never launch again, so the last thing between here and that is a
-        // throw, not a strategy.
+    apply: loggingFailure(async (opts: ApplyOpts = {}) => {
+      const next = offered ?? blocked?.manifest ?? null;
+      if (
+        !deps.canInstall && installedTarget() === "macos-app" &&
+        (config.kind === "git" || !next ||
+          releaseTarget(next) !== "electron-app")
+      ) {
+        // Belt AND braces: `decide` refuses every non-bundle release for a
+        // `.app`, so the button is never offered. This is the other door —
+        // `apply` called directly, by `updates.auto`, or over a blocker. A
+        // bundle that swapped a file inside itself would break its own code
+        // signature and never launch again, so only a whole signed bundle
+        // (`electron-app`) gets past here.
         throw new Error(
-          "this is a macOS .app, and an app cannot replace itself inside a " +
+          "this is a macOS .app, and an app cannot replace a file inside its " +
             "signed bundle — every file in it is covered by the signature. " +
-            "Download the new release and drag it into /Applications, " +
-            "replacing this one; your data lives in ~/Library/Application " +
-            "Support and is kept.",
+            "Only a signed-bundle release (.app.tar.gz, target " +
+            '"electron-app") installs itself; otherwise download the new ' +
+            "release and drag it into /Applications, replacing this one; your " +
+            "data lives in ~/Library/Application Support and is kept.",
         );
       }
       if (!deps.canInstall && detectTarget() === "source") {
@@ -933,7 +1064,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
         return;
       }
       await applyManifest(opts);
-    },
+    }),
     setChannel: async (next: string) => {
       // Crossing channels can legitimately move the version backwards, and a
       // dismissal on one channel says nothing about another — so everything
@@ -961,6 +1092,26 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       await Promise.resolve();
     },
   } as UpdatesRuntime;
+  return self;
+}
+
+/** Runtimes whose current install is the boot's unattended one — see
+ *  `loggingFailure`. */
+const unattended = new WeakSet<UpdatesRuntime>();
+
+/** Run the boot's unattended install of `rt`: its refusal is said once, by the
+ *  caller, together with the retry it schedules — not a second time here.
+ *  @internal */
+export async function unattendedInstall(
+  rt: UpdatesRuntime,
+  run: () => Promise<void>,
+): Promise<void> {
+  unattended.add(rt);
+  try {
+    await run();
+  } finally {
+    unattended.delete(rt);
+  }
 }
 
 /** Why `next` cannot be followed as a channel, or `null` when it can.
@@ -1001,7 +1152,16 @@ function channelNameReason(
  *
  *  Used for one warning, and deliberately conservative: a plain binary can be a
  *  service or a CLI, so it is not counted. An Electron install always has a UI. */
+/** A manifest's target as a {@linkcode ReleaseTarget}. The public
+ *  `ShipManifest.target` is typed with the FROZEN `UpdateTarget`; a release
+ *  made after the freeze (`"electron-app"`) carries a newer member at run
+ *  time, and this is the one place that says so (an upcast, never a guess). */
+function releaseTarget(m: ShipManifest): ReleaseTarget {
+  return m.target;
+}
+
 function isDesktopTarget(): boolean {
   const t = detectTarget();
-  return t === "electron-appimage" || t === "electron-zip";
+  return t === "electron-appimage" || t === "electron-zip" ||
+    t === "macos-app";
 }

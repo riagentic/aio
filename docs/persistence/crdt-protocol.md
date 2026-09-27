@@ -250,9 +250,10 @@ unread, so a whole large queue in one request was never delivered at all.
 3. Apply to confirmed state, rebase, update optimistic
 
 Snapshot fallback triggers when `lastHlc < lowWater` (ops compacted), when the
-client's `server_ts` cursor sits below the compaction boundary, when it sits
-ABOVE the log's high-water mark (a cursor from another history — see `reset`),
-or > 500 pending.
+client's `server_ts` cursor sits below the compaction boundary, or when it sits
+ABOVE the log's high-water mark (a cursor from another history — see `reset`).
+The number of pending ops never forces one: a large offline queue is flushed in
+slices (see above).
 
 ## Server-Side Compaction
 

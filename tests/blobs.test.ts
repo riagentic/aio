@@ -488,7 +488,7 @@ Deno.test("blobs over HTTP: gated blobs are Cache-Control private, open ones pub
     });
     assertEquals(
       await cacheControl(srv, { Authorization: "Bearer tok-alice" }),
-      "private, max-age=31536000, immutable",
+      "private, max-age=31536000, immutable, no-transform",
     );
   }
   {
@@ -502,14 +502,14 @@ Deno.test("blobs over HTTP: gated blobs are Cache-Control private, open ones pub
     const { token } = await su.json() as { token: string };
     assertEquals(
       await cacheControl(srv, { Authorization: `Bearer ${token}` }),
-      "private, max-age=31536000, immutable",
+      "private, max-age=31536000, immutable, no-transform",
     );
   }
   {
     await using srv = await testServer({ cells: [mk()] });
     assertEquals(
       await cacheControl(srv, {}),
-      "public, max-age=31536000, immutable",
+      "public, max-age=31536000, immutable, no-transform",
     );
   }
 });

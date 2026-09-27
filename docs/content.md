@@ -166,10 +166,10 @@
 
 ## Upgrade guides — version-to-version migration notes
 
-- [Upgrade Guides](upgrade/README.md) — every one, newest first (87 pages)
+- [Upgrade Guides](upgrade/README.md) — every one, newest first (88 pages)
+- [Upgrading from 1.0.12-beta to 1.0.13-beta](upgrade/from-1.0.12-beta-to-1.0.13-beta.md) — Nothing is removed and nothing changes shape.
 - [Upgrading from 1.0.11-beta to 1.0.12-beta](upgrade/from-1.0.11-beta-to-1.0.12-beta.md) — Nothing is removed and nothing changes shape.
 - [Upgrading from 1.0.10-beta to 1.0.11-beta](upgrade/from-1.0.10-beta-to-1.0.11-beta.md) — Nothing is removed and nothing changes shape.
-- [Upgrading from 1.0.9-beta to 1.0.10-beta](upgrade/from-1.0.9-beta-to-1.0.10-beta.md) — Nothing is removed and nothing changes shape; the surface only grows (the
 - [The aio restructure — alpha27/alpha28 breaking changes](upgrade/restructure.md) — This guide tracks every breaking change of the restructure
 
 ## Design specs — decision records — background, not manuals

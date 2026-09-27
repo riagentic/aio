@@ -548,7 +548,11 @@ export async function buildReport(
     },
   };
   if (input.body) {
-    report.body = input.body.slice(0, REPORT_LIMITS.bodyChars);
+    // Masked like the title: a pasted log line carries the same share-link
+    // tokens and pairing codes the diagnostics section masks.
+    report.body = redactLogCredentials(
+      input.body.slice(0, REPORT_LIMITS.bodyChars),
+    );
     if (input.body.length > REPORT_LIMITS.bodyChars) {
       truncated.push(
         `body truncated to ${REPORT_LIMITS.bodyChars} of ${input.body.length} chars`,

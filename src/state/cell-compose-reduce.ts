@@ -21,6 +21,7 @@ import { resolveCall } from "./cell-impl.ts";
 import { cloneExecEffect, isExecEffect } from "./exec-effect.ts";
 import type { AioError } from "../diagnostics/error.ts";
 import { createAioError } from "../diagnostics/error.ts";
+import { describeThrown } from "../diagnostics/fmt.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import {
   type CellDef,
@@ -54,7 +55,7 @@ function methodThrew(
   e: unknown,
   hint = "",
 ): Error {
-  const orig = e instanceof Error ? e.message : String(e);
+  const orig = describeThrown(e);
   // ONE voice for the two paths. Immer refuses `Object.defineProperty` and
   // `Object.setPrototypeOf` on a draft with a message that names neither the
   // cell, the method, nor the spelling that works — it was only ever readable
@@ -131,7 +132,7 @@ type CellPatches = { cell: string; ops: WirePatch[] };
  *  ONE decider, because there are two reduce paths: the simple one and the
  *  machine one that `listensTo` synthesises. */
 function _frozenMutationHint(e: unknown): string {
-  const orig = e instanceof Error ? e.message : String(e);
+  const orig = describeThrown(e);
   // THE frozen-write decider (immutable.ts), not a private copy of it. This
   // one matched a bare `read-only` — so an EROFS ("Read-only file system")
   // thrown by a method that writes a file grew a paragraph about mutating
@@ -179,6 +180,8 @@ export type ReduceContext = {
    *  `""` (unknown) matches all. */
   appId?: string;
   disabledCells: Set<string>;
+  /** Per cell, how many times it has been disabled (cell-compose.ts). */
+  disableEpoch: Map<string, number>;
   cellLastAction: Map<string, { type: string; at: number }>;
   reportError: ((err: AioError) => void) | undefined;
   perfCheck: boolean;
@@ -810,6 +813,12 @@ export function buildRootReducer(
             cell: owner.__aio.id,
             reason: ownerRefusal,
           });
+          // …and the CALLER is told, the way a validate refusal tells it: a
+          // sync call has no _callId to reject through, so under
+          // refusalsReject it resolved as if applied while the async twin
+          // rejected — a dropped write, reported as success.
+          if (ctx.refusalsReject) throw new Error(ownerRefusal);
+          if (isDevMode()) _warnSwallowedRefusal(action.type, ownerRefusal);
         } else if (owner) {
           // A cell's reducer only ever handles its OWN action types by prefix
           // (foreign types never share the prefix — detectForeignActions), so

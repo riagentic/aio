@@ -27,6 +27,11 @@ import {
 } from "./graph-audit.ts";
 import { EVAL_USER_AGENT, evaluateBundle } from "./graph-eval.ts";
 import { explainServerOnlyImport } from "../server/server-only-specs.ts";
+import {
+  localPrefixAlias,
+  prefixAliasMessage,
+  untakenAliases,
+} from "../server/server-html-importmap.ts";
 
 /** The generated entry's name — esbuild's `stdin.sourcefile`, and therefore
  *  its key in the metafile (the audit walks the graph from it). */
@@ -113,6 +118,38 @@ export function sharePlugin(shares: readonly ShareRoot[]): {
   };
 }
 
+/** Refuse a UI import through a LOCAL import-map prefix key (`"@/": "./src/"`)
+ *  with THE sentence the dev server says (`prefixAliasMessage`) — esbuild's
+ *  alias cannot take a prefix key, and a raw "Could not resolve" names no
+ *  fix. Exported for tests. @internal */
+export function prefixAliasPlugin(imports: Record<string, string>): {
+  name: string;
+  // deno-lint-ignore no-explicit-any
+  setup(build: any): void;
+} {
+  return {
+    name: "aio-prefix-alias",
+    setup(build) {
+      const keys = Object.keys(imports).filter((k) =>
+        k.endsWith("/") && localPrefixAlias(k + "x", imports) !== null
+      );
+      if (keys.length === 0) return;
+      const esc = keys.map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+      build.onResolve(
+        { filter: new RegExp(`^(?:${esc.join("|")})`) },
+        (args: { path: string }) => {
+          const p = localPrefixAlias(args.path, imports);
+          return p
+            ? {
+              errors: [{ text: prefixAliasMessage(args.path, p.key, p.value) }],
+            }
+            : undefined;
+        },
+      );
+    },
+  };
+}
+
 /** The esbuild module — passed in, never imported here: the build path keeps
  *  a LITERAL `npm:esbuild@…` import (deno prefetches it), the dev path a
  *  computed one (so `am`/compile never pull the native binary). */
@@ -145,6 +182,8 @@ export type ClientBundleOpts = {
 export type ClientBundle = {
   ok: boolean;
   errors: string[];
+  /** esbuild's warnings, as text (a written build also prints them). */
+  warnings?: string[];
   inputs: MetaInputs;
   entryKey: string;
   format: "esm" | "iife";
@@ -189,9 +228,18 @@ export async function bundleClient(o: ClientBundleOpts): Promise<ClientBundle> {
       [spec, rel],
     ) => [spec, join(resolve(o.frameworkSrcDir, ".."), rel)]),
   );
-  // esbuild alias: skip npm:/jsr: specifiers (resolved via node_modules)
+  // esbuild alias: skip npm:/jsr: specifiers (resolved via node_modules), and
+  // PREFIX keys (`"@/"`) — esbuild's alias rejects them outright ("Invalid
+  // alias name"); a UI import through a local one gets THE aio sentence the
+  // dev server says too (prefixAliasPlugin).
   const alias: Record<string, string> = {};
-  for (const [k, v] of Object.entries({ ...o.imports, ...aioImports })) {
+  for (
+    const [k, v] of Object.entries({
+      ...untakenAliases(o.imports, aioImports),
+      ...aioImports,
+    })
+  ) {
+    if (k.endsWith("/")) continue;
     if (!v.startsWith("npm:") && !v.startsWith("jsr:")) alias[k] = v;
   }
   const format = o.doAndroid ? "iife" : "esm";
@@ -211,9 +259,11 @@ export async function bundleClient(o: ClientBundleOpts): Promise<ClientBundle> {
       )]
       : []),
     sharePlugin(o.shares),
+    prefixAliasPlugin({ ...o.imports, ...aioImports }),
   ];
   let result: {
     errors?: unknown[];
+    warnings?: { text: string }[];
     metafile?: {
       inputs: MetaInputs;
       /** Per OUTPUT file, what each input contributed to it AFTER tree-shaking
@@ -328,6 +378,7 @@ export async function bundleClient(o: ClientBundleOpts): Promise<ClientBundle> {
   return {
     ok: errors.length === 0,
     errors,
+    warnings: (result.warnings ?? []).map((w) => w.text),
     inputs: result.metafile?.inputs ?? {},
     ...(bytesInOutput ? { bytesInOutput } : {}),
     entryKey: BUNDLE_ENTRY_KEY,

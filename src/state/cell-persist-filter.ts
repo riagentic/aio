@@ -41,11 +41,19 @@ export function persistFilterOf(cell: ComposedCell): CellFieldFilter {
  *  never be restored either (a blob written by an older build, or by a
  *  downgrade, would otherwise come back into a cell that asked for none).
  *
+ *  A `scope: "client"` cell is never one of them, whatever its `persist`:
+ *  its state lives only on its own client signal, so the composed slice is a
+ *  stale declaration. The server never meets one (aio-composition.ts drops
+ *  client cells before composing); the standalone runtime composes them, and
+ *  counting them here wrote that stale slice on every change and restored a
+ *  stored one into the cell at boot — only once packaged.
+ *
  *  @decider */
 export function persistingCellIds(composed: ComposedCells): Set<string> {
   return new Set(
-    composed.cells.filter((f) => persistFilterOf(f) !== "none")
-      .map((f) => f.__aio.id),
+    composed.cells.filter((f) =>
+      persistFilterOf(f) !== "none" && f.__aio.scope !== "client"
+    ).map((f) => f.__aio.id),
   );
 }
 

@@ -614,3 +614,39 @@ export function describe(value: unknown, opts: DescribeOptions = {}): string {
   }
   return parts.filter(Boolean).join("\n");
 }
+
+/** Text for a THROWN value, for the code that reports it — which must never
+ *  throw in its place. `String(x)` does: for an `Object.create(null)` value
+ *  ("Cannot convert object to primitive value"), for a `toString` that
+ *  throws, for a Symbol-keyed trap. At a reporter that meant the crash
+ *  handler logged its own TypeError and skipped the emergency checkpoint, a
+ *  `log.*` call threw at its call site, and a method's thrown value reached
+ *  its caller as the framework's error instead of the app's. Each fallback is
+ *  guarded; the last answer is a constant. */
+export function describeThrown(v: unknown): string {
+  if (typeof v === "string") return v;
+  try {
+    if (v instanceof Error) return String(v.message);
+  } catch {
+    // aio-ok: a hostile `message` getter — fall through to the value itself.
+  }
+  try {
+    return String(v);
+  } catch {
+    // aio-ok: not convertible to a primitive; try its JSON next.
+  }
+  try {
+    const j = JSON.stringify(v);
+    if (j !== undefined) return j;
+  } catch {
+    // aio-ok: a cycle or a BigInt; the tag below always answers.
+  }
+  try {
+    // Reads `Symbol.toStringTag` — through a Proxy's `get` trap, which may
+    // throw too.
+    return Object.prototype.toString.call(v);
+  } catch {
+    // aio-ok: nothing about the value can be read; say exactly that.
+    return "[unreadable value]";
+  }
+}

@@ -31,6 +31,8 @@ import {
 import {
   _appHref,
   _normalizeRoutePath,
+  _resolveTo,
+  _routePathOf,
   type LinkProps,
   matchPath,
   navigate,
@@ -153,7 +155,8 @@ export type RouteParams<S extends string> = string extends S
   : S extends `${string}:${infer P}/${infer Rest}`
     ? { [K in P]: string } & RouteParams<`/${Rest}`>
   : S extends `${string}:${infer P}` ? { [K in P]: string }
-  : S extends `${string}*${string}` ? { "*": string }
+  // `*` is a wildcard only as a WHOLE segment; `/a*b` is a literal.
+  : S extends "*" | `${string}/*` | `${string}/*/${string}` ? { "*": string }
   : Record<never, string>;
 
 /** Current route state -- reads routePath/routeSearch signals (auto-tracked by AIR).
@@ -273,6 +276,36 @@ export function Outlet(): VNode | null {
     : (outlet as VNode);
 }
 
+/** The route path a `<Link to>` leads to from the route `at`, normalised for
+ *  comparison — or null when it leaves the app (another origin or scheme,
+ *  or no URL at all), which is never the current route. */
+function _linkTarget(to: string, at: string): string | null {
+  // An ABSOLUTE `to` (a scheme, or `//host`) is never active. Whether it is
+  // this app's origin is only knowable in the browser: a server render has no
+  // origin to compare with, so judging it there and again in the browser gave
+  // the SSR markup one `class` and the first client render another. An in-app
+  // link is written as a path; this is the answer both sides can give.
+  if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(to.trim())) return null;
+  // The page's own URL at that route. No `location` (a server render), or one
+  // that cannot hold a path (`about:blank`), still has a route to resolve
+  // against — a stand-in origin keeps the answer about paths only.
+  let from: URL;
+  try {
+    from = new URL(_appHref(at), location.href);
+  } catch {
+    from = new URL(_appHref(at), "http://aio.invalid/");
+  }
+  try {
+    const url = _resolveTo(to, from);
+    if (url.protocol !== from.protocol || url.origin !== from.origin) {
+      return null;
+    }
+    return _normalizeRoutePath(_routePathOf(url));
+  } catch {
+    return null;
+  }
+}
+
 /** Anchor that navigates without page reload. Adds activeClass when path matches. */
 export function Link(
   { to, replace: rep, exact, activeClass, activeStyle, children, ...rest }:
@@ -282,9 +315,18 @@ export function Link(
   // pathname and `to` is what the author wrote, so `to="/about us"` (url
   // `/about%20us`), `to="/users/"`, `to="/users?tab=1"` and `to="/users#top"`
   // were never active on the very page they point at.
-  const path = _normalizeRoutePath(_pathNow()); // auto-tracked signal read
-  const target = _normalizeRoutePath(to);
-  const isActive = (exact || target === "/")
+  //
+  // And `to` is resolved first, by `navigate`'s own resolver: a relative
+  // `to="api"` from `/docs/x` leads to `/docs/api`, and was compared as the
+  // raw string "api" — never active on the very page a click takes you to.
+  // Resolved against the ROUTE being rendered (not `location`), so a server
+  // render, which has no `location`, answers the same as the browser.
+  const raw = _pathNow(); // auto-tracked signal read
+  const path = _normalizeRoutePath(raw);
+  const target = _linkTarget(to, raw);
+  const isActive = target === null
+    ? false
+    : (exact || target === "/")
     ? path === target
     : path === target || path.startsWith(target + "/");
   // A click this router must NOT take over. Every one of these is a gesture the
@@ -315,6 +357,14 @@ export function Link(
       const url = new URL(to, location.href);
       if (url.origin !== location.origin) return true;
       if (url.protocol !== "http:" && url.protocol !== "https:") return true;
+      // A fragment on THIS document (`#install`, `/docs#install` at /docs):
+      // the browser scrolls to it and fires `hashchange`; `pushState` does
+      // neither, so taking the click over broke every in-page anchor.
+      const dest = new URL(_appHref(to), location.href);
+      if (
+        dest.hash && dest.pathname === location.pathname &&
+        dest.search === location.search
+      ) return true;
     } catch {
       // Not a URL this router can resolve — let the anchor try.
       return true;

@@ -14,6 +14,30 @@ import { join } from "@std/path";
 import { readDenoJson } from "./deno-json.ts";
 import type { DataContract } from "../build/ship.ts";
 import type { Log } from "../diagnostics/logger-api.ts";
+import { runBackgroundGit } from "./updates-check.ts";
+import { gitOwnRepoEnv } from "./git-noninteractive.ts";
+
+/** A clone may be big and slow, never stuck: it is given up after this long
+ *  WITHOUT progress, and the next check tries again. `--progress` writes only
+ *  as sideband packets (<= 64 KiB) arrive, so a moving clone is silent for up
+ *  to ~64 KiB / throughput: this trips only below ~220 B/s. A fixed wall here killed a slow-but-moving
+ *  clone (150 MB over 1 Mbit/s ≈ 20 min) on every check, forever. The
+ *  transport itself also gives up after `GIT_CLONE_STALL_SEC` without a byte. */
+const GIT_CLONE_IDLE_MS = 5 * 60_000;
+const GIT_CLONE_STALL_SEC = 60;
+
+/** Progress lines (`Receiving objects:  45% (9/20)`, `remote: Counting
+ *  objects: 5, done.`) — noise in an error message. */
+const PROGRESS = /^(remote: +)?[A-Z][\w ]*: +\d+(%|,|\s|$)/;
+
+/** What a terminal would have shown of git's stderr, minus progress: each
+ *  `\r` redraw keeps only its last frame. */
+function gitErrText(err: string): string {
+  return err.split("\n")
+    .map((l) => l.slice(l.lastIndexOf("\r") + 1).trimEnd())
+    .filter((l) => l && !PROGRESS.test(l))
+    .join("\n");
+}
 
 export type RebuildResult =
   | {
@@ -39,6 +63,10 @@ async function run(
       cwd,
       stdout: "piped",
       stderr: "piped",
+      // The build (and the binary it made) runs git on the CLONE — the
+      // version stamp counts its commits. An inherited GIT_DIR (an app
+      // started from a git hook) pointed that at the hook's repo.
+      ...gitOwnRepoEnv(),
     }).output();
     return {
       ok: p.success,
@@ -125,27 +153,63 @@ export async function rebuildFromGit(opts: {
   /** Where to work. Removed by the caller. */
   workDir: string;
   log: Log;
+  /** Test seam: the clone's no-progress deadline (default
+   *  `GIT_CLONE_IDLE_MS`). */
+  timeoutMs?: number;
 }): Promise<RebuildResult> {
   const { log } = opts;
   const src = join(opts.workDir, "src");
 
   log.info("updates", `cloning ${opts.source} @ ${opts.ref}`);
-  const cloned = await run("git", [
+  // Through `runBackgroundGit`, like the poll that found this ref: a plain
+  // clone prompted for credentials (terminal or askpass GUI) on a challenged
+  // remote, had no deadline on a stalled one, and outlived the app on stop —
+  // with `auto` updates, a hang nobody asked for.
+  const timeoutMs = opts.timeoutMs ?? GIT_CLONE_IDLE_MS;
+  const git = (args: string[], cwd?: string) =>
+    runBackgroundGit(args, {
+      cwd,
+      timeoutMs,
+      stallSec: GIT_CLONE_STALL_SEC,
+      idle: true,
+    }).catch((e) => ({
+      ok: false,
+      timedOut: false,
+      out: "",
+      err: /No such file|not found|os error 2/i.test(String(e))
+        ? "git is not installed or not on PATH — a git update source needs it"
+        : e instanceof Error
+        ? e.message
+        : String(e),
+    }));
+  // `--` first: the source and ref come from config, and git would otherwise
+  // read either as an option.
+  const cloned = await git([
     "clone",
+    // Progress on a pipe too: it is what keeps the idle deadline from
+    // firing on a clone that is slow but moving.
+    "--progress",
     "--depth=1",
     "--branch",
     opts.ref,
+    "--",
     opts.source,
     src,
   ]);
   if (!cloned.ok) {
     return {
       ok: false,
-      error: `git clone failed: ${cloned.err || "see the build output"}`,
+      error: cloned.timedOut
+        ? `git clone ${opts.source} made no progress for ${
+          timeoutMs / 1000
+        }s — the remote is unreachable or stalled; the next check tries again`
+        : `git clone failed: ${
+          gitErrText(cloned.err) || "see the build output"
+        }`,
     };
   }
 
-  const head = await run("git", ["rev-parse", "HEAD"], src);
+  const head = await git(["rev-parse", "HEAD"], src);
   if (!head.ok || !/^[0-9a-f]{40}$/.test(head.out)) {
     return {
       ok: false,

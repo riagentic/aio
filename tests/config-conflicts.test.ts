@@ -64,6 +64,29 @@ Deno.test("auth.requireVerified without sendMail is refused — it is a lockout 
   );
 });
 
+// ── SSO under the account gates: behaviours an upgrade must hear about ──
+
+const oidc = { issuer: "https://idp.example", clientId: "app1" };
+
+Deno.test("auth.signup:false + oidc warns that unknown SSO identities are refused, naming both fixes", () => {
+  const c = one({ auth: { signup: false, oidc } });
+  assertEquals(c.level, "warn");
+  assertEquals(c.keys, ["auth.signup", "auth.oidc"]);
+  assertStringIncludes(c.what, "signup_disabled");
+  assertStringIncludes(c.fix, "am auth create");
+  assertStringIncludes(c.fix, "auth.oidc.signup: true");
+  // An explicit oidc.signup is a decision — either way, nothing to say.
+  for (const signup of [true, false]) {
+    assertEquals(
+      configConflicts({ auth: { signup: false, oidc: { ...oidc, signup } } }),
+      [],
+    );
+  }
+  // Signup on, or no OIDC → nothing changed for this app.
+  assertEquals(configConflicts({ auth: { oidc } }), []);
+  assertEquals(configConflicts({ auth: { signup: false } }), []);
+});
+
 Deno.test("journal: true with nothing to journal into is refused", () => {
   const noPersist = one({ journal: true, persist: false });
   assertEquals(noPersist.level, "error");

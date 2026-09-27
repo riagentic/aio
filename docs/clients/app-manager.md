@@ -841,7 +841,8 @@ am installed              # list installed apps, with version + where each came 
 am upgrade <app>          # rebuild and reinstall an installed APP from its recorded source
 am remove <app> [--data]  # uninstall one — the PROGRAM; --data also deletes ~/.<app>/
                           # (only when it is an aio data dir — data/state.db, data/meta.json,
-                          #  launch.json… — never another program's ~/.<name>, --force or not)
+                          #  launch.json… — never another program's ~/.<name>, --force or not;
+                          #  never while the app runs from it: am stop first)
 am theme adopt            # take aio's stylesheet INTO this app (src/aio-theme.css) — yours from then on
 am publish [--key=K]      # build, sign and lay out the channel directory an update client fetches
 ```
@@ -996,6 +997,12 @@ aiming the key at an `<input>` instead does nothing at all, because
 `onGlobalKey` ignores the chord while focus is in a field. It accepts `press` /
 `keyDown` / `keyUp` and refuses everything else: a click on the window is not a
 gesture a user can make.
+
+`mod` in a chord (`press "mod+k"`) is ⌘ when the **driven page** runs on
+macOS/iOS and Ctrl elsewhere — read from that client's User-Agent, which
+`am clients` shows as `mac` — not from the machine running `am`. A client the
+roster has no `mac` for (an Electron window on the local socket) takes `am`'s
+own platform.
 
 **Which client?** With no index, `surface` and `trigger` drive the **newest UI
 client** — the page in front of you. An explicit index is the server's

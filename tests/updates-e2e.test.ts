@@ -7,13 +7,18 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import {
+  buildReleaseManifest,
   buildShipManifest,
   generateSigningKey,
   type ShipManifest,
 } from "../src/build/ship.ts";
 import { createUpdatesRuntime } from "../src/server/updates-runtime.ts";
 import { resolveUpdates } from "../src/server/updates-core.ts";
-import { readPending } from "../src/server/updates-apply.ts";
+import {
+  firstBootPath,
+  readPending,
+  writePending,
+} from "../src/server/updates-apply.ts";
 import { readTrust, writeTrust } from "../src/server/updates-check.ts";
 import type { Log } from "../src/diagnostics/logger.ts";
 
@@ -131,6 +136,8 @@ async function publish(r: Rig, opts: {
 }
 
 function runtimeFor(r: Rig, opts: {
+  /** Collects every `log.error` line. */
+  errors?: string[];
   channel?: string;
   appVersion?: string;
   cells?: Record<string, number>;
@@ -152,7 +159,13 @@ function runtimeFor(r: Rig, opts: {
     appVersion: opts.appVersion ?? "1.0.0",
     local: { schema: 1, cells: opts.cells ?? { todos: 1 } },
     exposed: false,
-    log: silentLog,
+    log: opts.errors
+      ? {
+        ...silentLog,
+        error: (...a: unknown[]) =>
+          void opts.errors!.push(a.map(String).join(" ")),
+      } as Log
+      : silentLog,
     argv: [],
     artifact: r.artifact,
     canInstall: ["binary"],
@@ -273,12 +286,24 @@ Deno.test("updates e2e: a SAME-SIZE tampered artifact is refused by its digest",
       channel: "prod",
       corruptSameSize: true,
     });
-    const rt = runtimeFor(r, {});
+    const logged: string[] = [];
+    const rt = runtimeFor(r, { errors: logged });
     assertEquals((await rt.check({ dismissed: null })).kind, "offer");
 
     let failed = "";
+    // …and the refusal is LOGGED. It used to reach only the cell's `error`,
+    // which the next poll clears: on a real machine a tampered download left
+    // no trace anywhere.
     await rt.apply().catch((e) => (failed = String(e)));
     assertStringIncludes(failed, "does not match the manifest");
+    const line = logged.find((l) => l.includes("was NOT installed")) ?? "";
+    assert(
+      line.startsWith("updates "),
+      `logged under the updates module: ${line}`,
+    );
+    assertStringIncludes(line, "2.0.0");
+    assertStringIncludes(line, "does not match the manifest");
+    assertStringIncludes(line, "keeps running");
     // Nothing was installed, and nothing was left behind.
     assertEquals(await Deno.readTextFile(r.artifact), appBody("1.0.0"));
     assertEquals(readPending(r.dataDir), null);
@@ -581,6 +606,71 @@ Deno.test("updates e2e: a .zip release is verified, unpacked, and handed to the 
   }
 });
 
+// A policy (AppLocker) that refuses the swap helper used to leave the log
+// saying "the new version is installed" with the marker in place, and the app
+// gone. Nothing was swapped: it is said, undone, and this version restarts.
+Deno.test("updates e2e: a swap helper that cannot start — not installed, undone, this version restarts", async () => {
+  if (Deno.build.os === "windows") return;
+  const r = await rig();
+  try {
+    await publishZip(r, { version: "2.0.0", channel: "prod" });
+    const install = join(r.root, "MyApp");
+    await Deno.mkdir(join(install, "electron"), { recursive: true });
+    await Deno.writeTextFile(join(install, "VERSION"), "1.0.0");
+    writeTrust(r.dataDir, { installedSha256: "ab".repeat(32) });
+    const errors: string[] = [];
+    const relaunched: string[] = [];
+    let staged = "";
+    const rt = createUpdatesRuntime({
+      config: resolveUpdates({
+        source: `file://${r.releases}`,
+        channel: "prod",
+      }),
+      dataDir: r.dataDir,
+      appVersion: "1.0.0",
+      local: { schema: 1, cells: { todos: 1 } },
+      exposed: false,
+      log: {
+        ...silentLog,
+        error: (...a: unknown[]) => void errors.push(a.join(" ")),
+      } as Log,
+      argv: ["--x"],
+      artifact: install,
+      canInstall: ["electron-zip"],
+      exit: () => {},
+      relaunch: ({ artifact }) => void relaunched.push(artifact),
+      swapDirectory: (o) => {
+        staged = o.staged;
+        // What the real one does before it spawns — then the spawn fails.
+        writePending(o.pending!.dataDir, {
+          from: "1.0.0",
+          to: "2.0.0",
+          previous: "",
+          attempts: 0,
+          startedAt: "",
+        });
+        Deno.writeTextFileSync(firstBootPath(r.dataDir), "{}");
+        throw new Deno.errors.PermissionDenied("blocked by policy");
+      },
+      shutdown: () => Promise.resolve(),
+    });
+    assertEquals((await rt.check({ dismissed: null })).kind, "offer");
+    await rt.apply();
+    await settle(rt);
+    assertStringIncludes(errors.join("\n"), "2.0.0 was NOT installed");
+    assertEquals(readPending(r.dataDir), null);
+    assertEquals(
+      await Deno.stat(firstBootPath(r.dataDir)).catch(() => null),
+      null,
+    );
+    assertEquals(await Deno.stat(staged).catch(() => null), null);
+    assertEquals(readTrust(r.dataDir).installedSha256, undefined);
+    assertEquals(relaunched, [Deno.execPath()]);
+  } finally {
+    await Deno.remove(r.root, { recursive: true });
+  }
+});
+
 Deno.test("updates e2e: a corrupted .zip is refused before anything is unpacked", async () => {
   if (Deno.build.os === "windows") return;
   const r = await rig();
@@ -630,6 +720,182 @@ Deno.test("updates e2e: a corrupted .zip is refused before anything is unpacked"
     assertEquals(
       await Deno.stat(`${install}.zip-2.0.0`).catch(() => null),
       null,
+    );
+  } finally {
+    await Deno.remove(r.root, { recursive: true });
+  }
+});
+
+// ── signed macOS bundles (electron-app) ─────────────────────────────────────
+
+/** A real `.app.tar.gz`, laid out as the Mac build host packs it: the bundle
+ *  folder at the archive root, an Info.plist naming the executable. */
+async function publishAppTarball(r: Rig, opts: { version: string }) {
+  const stage = join(r.root, `app-stage-${opts.version}`);
+  const contents = join(stage, "Counter.app", "Contents");
+  await Deno.mkdir(join(contents, "MacOS"), { recursive: true });
+  await Deno.writeTextFile(
+    join(contents, "Info.plist"),
+    `<?xml version="1.0"?><plist><dict>` +
+      `<key>CFBundleExecutable</key><string>Counter</string>` +
+      `</dict></plist>`,
+  );
+  const exe = join(contents, "MacOS", "Counter");
+  await Deno.writeTextFile(exe, appBody(opts.version));
+  await Deno.chmod(exe, 0o755);
+  await Deno.writeTextFile(join(contents, "VERSION"), opts.version);
+
+  const dir = join(r.releases, "prod");
+  await Deno.mkdir(dir, { recursive: true });
+  const name = `counter-${opts.version}-mac-x64.app.tar.gz`;
+  const packed = await new Deno.Command("tar", {
+    args: ["-czf", join(dir, name), "-C", stage, "Counter.app"],
+    stderr: "piped",
+  }).output();
+  assert(packed.success, "tar failed");
+  const manifest = await buildReleaseManifest({
+    name: "counter",
+    version: opts.version,
+    binary: await Deno.readFile(join(dir, name)),
+    sources: [],
+    sign: r.keys,
+    channel: "prod",
+    target: "electron-app",
+    platform,
+    url: name,
+    data: { schema: 1, cells: { todos: { version: 1, migratesFrom: 1 } } },
+  });
+  await Deno.writeTextFile(
+    join(dir, `${platform.os}-${platform.arch}.json`),
+    JSON.stringify(manifest, null, 2),
+  );
+}
+
+type DirSwap = Parameters<
+  NonNullable<Parameters<typeof createUpdatesRuntime>[0]["swapDirectory"]>
+>[0];
+type Sealed = { ok: true } | { ok: false; error: string };
+
+/** An installed v1 bundle at `where`, and a runtime that runs from it. */
+async function macRig(
+  r: Rig,
+  seal: Sealed,
+  where = join("Applications", "Counter.app"),
+) {
+  const app = join(r.root, where);
+  await Deno.mkdir(join(app, "Contents", "MacOS"), { recursive: true });
+  await Deno.writeTextFile(join(app, "Contents", "VERSION"), "1.0.0");
+  const swaps: DirSwap[] = [];
+  const sealed: string[] = [];
+  const rt = createUpdatesRuntime({
+    config: resolveUpdates({ source: `file://${r.releases}`, channel: "prod" }),
+    dataDir: r.dataDir,
+    appVersion: "1.0.0",
+    local: { schema: 1, cells: { todos: 1 } },
+    exposed: false,
+    log: silentLog,
+    argv: ["--client=electron"],
+    artifact: app, // what installDir() walks up to on darwin
+    installedTarget: "macos-app",
+    canInstall: ["electron-app"],
+    exit: () => {},
+    verifyBundle: (staged) => {
+      sealed.push(staged);
+      return Promise.resolve(seal);
+    },
+    swapDirectory: (o) => {
+      swaps.push(o);
+      return { previous: `${o.current}.old-1.0.0` };
+    },
+    shutdown: () => Promise.resolve(),
+  });
+  return { app, rt, swaps, sealed };
+}
+
+Deno.test("updates e2e: a .app release is unpacked AS the bundle, seal-checked, and relaunched via open -n", async () => {
+  if (Deno.build.os === "windows") return;
+  const r = await rig();
+  try {
+    await publishAppTarball(r, { version: "2.0.0" });
+    const { app, rt, swaps, sealed } = await macRig(r, { ok: true });
+    assertEquals((await rt.check({ dismissed: null })).kind, "offer");
+    await rt.apply();
+    await settle(rt);
+
+    const staged = `${app}.staged-2.0.0`;
+    // The seal is checked on the staged bundle — before the swap, never after.
+    assertEquals(sealed, [staged]);
+    assertEquals(swaps.length, 1);
+    const s = swaps[0]!;
+    assertEquals([s.current, s.staged], [app, staged]);
+    // The staged dir IS the bundle (the archive's `Counter.app/` stripped).
+    assertEquals(
+      await Deno.readTextFile(join(staged, "Contents", "VERSION")),
+      "2.0.0",
+    );
+    // Back through LaunchServices, a NEW instance, the app's own argv kept.
+    assertEquals(s.launcher, "/usr/bin/open");
+    assertEquals(s.args, ["-n", app, "--args", "--client=electron"]);
+    assertEquals(s.pending?.to, "2.0.0");
+    assertEquals(
+      await Deno.stat(`${app}.zip-2.0.0`).catch(() => null),
+      null,
+      "the downloaded tarball is cleaned up",
+    );
+  } finally {
+    await Deno.remove(r.root, { recursive: true });
+  }
+});
+
+Deno.test("updates e2e: a .app whose code signature does not verify is refused and v1 stays", async () => {
+  if (Deno.build.os === "windows") return;
+  const r = await rig();
+  try {
+    await publishAppTarball(r, { version: "2.0.0" });
+    const { app, rt, swaps } = await macRig(r, {
+      ok: false,
+      error: "the downloaded app's code signature does not verify",
+    });
+    assertEquals((await rt.check({ dismissed: null })).kind, "offer");
+    let failed = "";
+    await rt.apply().catch((e) => (failed = String(e)));
+    assertStringIncludes(failed, "code signature does not verify");
+    assertEquals(swaps.length, 0);
+    assertEquals(readPending(r.dataDir), null);
+    assertEquals(
+      await Deno.stat(`${app}.staged-2.0.0`).catch(() => null),
+      null,
+      "the refused bundle is removed",
+    );
+    assertEquals(
+      await Deno.readTextFile(join(app, "Contents", "VERSION")),
+      "1.0.0",
+    );
+  } finally {
+    await Deno.remove(r.root, { recursive: true });
+  }
+});
+
+Deno.test("updates e2e: a translocated .app refuses before downloading, naming /Applications", async () => {
+  if (Deno.build.os === "windows") return;
+  const r = await rig();
+  try {
+    await publishAppTarball(r, { version: "2.0.0" });
+    const { app, rt, swaps, sealed } = await macRig(
+      r,
+      { ok: true },
+      join("AppTranslocation", "X", "d", "Counter.app"),
+    );
+    assertEquals((await rt.check({ dismissed: null })).kind, "offer");
+    let failed = "";
+    await rt.apply().catch((e) => (failed = String(e)));
+    assertStringIncludes(failed, "App Translocation");
+    assertStringIncludes(failed, "Move Counter.app to /Applications");
+    assertEquals([swaps.length, sealed.length], [0, 0]);
+    assertEquals(
+      await Deno.stat(`${app}.zip-2.0.0`).catch(() => null),
+      null,
+      "refused BEFORE a byte was downloaded",
     );
   } finally {
     await Deno.remove(r.root, { recursive: true });

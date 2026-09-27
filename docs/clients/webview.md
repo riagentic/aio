@@ -157,7 +157,10 @@ things follow:
   (`[aio:electron] permission "clipboard-read" DENIED to embedded page …`). Your
   app's own page keeps what it had. A page that truly needs a permission belongs
   in its own window (`__aioIPC.openWindow`), where it keeps the ones asked for
-  by its own origin.
+  by its own origin. Set
+  [`electron.permissions`](electron.md#permissions-electron--permissions-) to
+  deny child windows and guests everything (fullscreen too) and give your own
+  page only what you list.
 
 ## See also
 

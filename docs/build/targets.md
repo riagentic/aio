@@ -325,10 +325,16 @@ a `Contents/Info.plist`, an icon, and a bundle identifier, which is what the OS
 reads to draw the Dock entry, the menu bar and the window. So the `electron`
 target produces:
 
-| Platform      | Artifact                                               |
-| ------------- | ------------------------------------------------------ |
-| macOS (x64)   | `<name>-<version>-mac-x64.dmg` (a `<name>.app` inside) |
-| macOS (arm64) | `<name>-<version>-mac-arm64.dmg`                       |
+| Platform      | Artifact                                                                                     |
+| ------------- | -------------------------------------------------------------------------------------------- |
+| macOS (x64)   | `<name>-<version>-mac-x64.dmg` (a `<name>.app` inside) + `<bin>-mac-x64.app.tar.gz` (update) |
+| macOS (arm64) | `<name>-<version>-mac-arm64.dmg` + `<bin>-mac-arm64.app.tar.gz` (update)                     |
+
+The `.app.tar.gz` is the **self-update artifact** (target `electron-app`): the
+same signed `.app`, packed by the Mac right after it sealed it — tar, so the
+framework symlinks and exec bits the seal covers survive. It exists only when a
+Mac signs the bundle (the DMG paths below); the `.dmg` is the first download,
+the tarball is what `am publish` names in `darwin-<arch>.json`.
 
 The `.app` is assembled **on any host** (a bundle is a directory tree and
 Electron's runtime is a download), with the shape a real macOS app has:
@@ -757,9 +763,9 @@ bundle is already minified; turn the server side on too:
 
 Every compiled target (app, `server`, Electron, the Windows exe, `cli`) then
 ships each server module minified: no comments, short local names. The build
-says `build.minify: N server modules minified`. The Android APK has no server
-binary: it ships only the client bundle, which is always minified, and never its
-map.
+says `build.minify: N server modules minified`, and that stack traces change.
+The Android APK has no server binary: it ships only the client bundle, which is
+always minified, and never its map.
 
 - **Type check first.** Your ORIGINAL code is type-checked, then the minified
   copy is compiled with `--no-check`. A type error still fails the build.
@@ -769,7 +775,10 @@ map.
   `constructor.name` works the same as unminified.
 - **The client source map is left out** (`dist/.app.js.map` — it holds every UI
   name and path).
-- **Stack traces** from the server point into the minified code.
+- **Stack traces** from the server keep function names, but their `line:column`
+  point into the minified code, not your source. There is no server source map
+  (it would ship the names back). To debug a trace, reproduce it with
+  `build.minify` off.
 - **Not a lock.** Minified JS is still readable by someone who tries hard. It
   removes the free gift: the comments and names that explain the design.
 - `true` or `false` only — `"true"` (a string) fails the build.
@@ -786,6 +795,7 @@ Does everything `compile` does, plus packages the binary with Electron:
 | -------- | ---------------------------------------------------------- | -------------------------------------- |
 | Linux    | `<name>-x86_64.AppImage` or `<name>-aarch64.AppImage`      | self-contained, double-click           |
 | macOS    | `<name>-mac-x64.dmg` / `…-mac-arm64.dmg` (a `.app` inside) | drag to Applications, double-click     |
+| Windows  | `<name>-win-x64.exe` (self-contained)                      | double-click                           |
 | Windows  | `<name>-win-x64.zip`                                       | extract, run `run.bat` or `<name>.exe` |
 
 Build steps: bundle dist/app.js -> compile deno binary (which embeds it) -> copy
@@ -1070,13 +1080,22 @@ The bridge is a security surface: `addJavascriptInterface` hands its methods to
 state lives on the server anyway. If a page from any other origin somehow loads,
 the shell removes the bridge and logs it.
 
-**An `<iframe>` is the exception.** `addJavascriptInterface` injects the bridge
-into every _frame_ too, and the removal above watches the main frame only — so a
-third-party page an app embeds in an `<iframe>` can call `AioNativeStore` and
-read or overwrite the app's saved state. Embed only content you trust, or open
-it outside the app with a plain link. The page says so the moment such a frame
-appears (`[aio] ⚠ security: this page embeds an <iframe> from …`, once per
-origin); closing it natively is on the roadmap.
+**An `<iframe>` gets nothing either.** `addJavascriptInterface` injects the
+bridge into every _frame_ too, and the removal above watches the main frame only
+— so every store method takes a **per-launch key** first and throws without it.
+The key is 32 random bytes made at each launch and handed to the page by a
+document-start script whose only allowed origin is the app's own
+(`addDocumentStartJavaScript`), so a third-party page the app embeds sees the
+object and can neither read nor write through it (logcat:
+`native store call
+REFUSED`). The files on disk are laid out exactly as before,
+so an app upgraded from 1.0.12 keeps its state. A WebView too old for
+document-start scripts gets no key: the app then starts from its initial state
+and writes nothing over the saved one, saying why, until Android System WebView
+is updated. An app whose own `android/` activity still installs the unkeyed
+store of 1.0.12 is warned at build time, and its page warns the moment a
+third-party frame appears
+(`[aio] ⚠ security: this page embeds an <iframe> from …`).
 
 **A restore that fails never costs the saved state.** If the state on disk
 cannot be used at boot, the app does not write over it:
@@ -1098,6 +1117,46 @@ In a desktop browser the same bundle finds no such object and falls back to
 `localStorage`, which is all a preview can offer — the boot line names it and
 says it is lossy.
 
+### Native fetch
+
+A standalone APK runs every cell inside its WebView, so every `fetch()` carries
+`Origin: https://appassets.androidplatform.net` and is subject to CORS. Some
+public APIs refuse any request with an Origin (a public JSON-RPC that answers
+403), so no page code can reach them. Use `nativeFetch` for those calls:
+
+```ts
+import { nativeFetch } from "aio"; // also on "aio/air"
+
+const r = await nativeFetch("https://rpc.example.com", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ping" }),
+});
+```
+
+It takes the same arguments as `fetch` and returns a real `Response`.
+
+- **In a standalone APK** the app sends the request (`HttpURLConnection`), not
+  the WebView. There is no `Origin`, no `Referer`, no WebView cookie, and no
+  CORS check. `Set-Cookie` is not handed back, and nothing is stored.
+- **Everywhere else** (server, desktop, Electron, a browser, tests) it is plain
+  `fetch`. The server already sends no Origin. A browser page cannot avoid it.
+- **Limits:** http and https only, 15 s to connect, 30 s between bytes, and 8
+  MiB per body each way. `signal` aborts. `mode`, `credentials` and `cache` have
+  no effect. A standalone APK allows no cleartext, so an `http://` URL fails
+  natively just as it does in the WebView. Use https.
+- **Security:** the bridge (`AioNativeFetch`) is installed only in a standalone
+  APK, never in a client or dev APK that opens a server's pages. It is given
+  only to the app's own origin (`addWebMessageListener`), so an embedded
+  third-party `<iframe>` does not get it. It is removed if a foreign page ever
+  loads.
+- **Fails loud:** a WebView too old for `addWebMessageListener` (update Android
+  System WebView), or an `<app>/android/` activity that dropped the bridge,
+  makes `nativeFetch` reject with the reason. It never falls back to a fetch
+  that carries an Origin.
+
+`fetch` itself is not patched: it keeps its browser behaviour in every runtime.
+
 ### The system bars
 
 The template targets **API 35** (`compileSdk`/`targetSdk` 35, `minSdk` 24) —
@@ -1113,6 +1172,34 @@ status bar).
 Full-bleed is a per-app decision, not a default: take it by overlaying your own
 `MainActivity` under `<app>/android/`
 ([below](#adding-native-android-code-android)).
+
+### Content: deno.json `assets` travel into the APK
+
+A standalone APK has no server, so nothing serves a mount there. The build
+packages each deno.json `assets` mount at the same path under the page instead.
+With `{ "assets": { "/text": "./text" } }`, a **relative**
+`fetch("text/en/a.md")` reads the mount on the desktop and the packaged copy in
+the APK. The APK carries exactly what the production server would serve, asked
+of the server's own rules: dotfiles, `*.server.*` (any case), modules that
+`import "aio/server-only"` and `.ts`/`.tsx`/`.jsx` source are never packaged. A
+symlink is followed only while it stays inside its mount; one that leads out
+(`env.txt -> ../.env`) is refused by name, as the server refuses to serve it,
+and so is a link that loops back or points at nothing. A mount that contains the
+build output (`"/data": "."`) is refused too. A mount at `/`, one named like the
+page's own files (`index.html`, the bundle, the stylesheet), or one with a
+`.`/`..` segment is refused, and so is a directory outside the project or one
+that does not exist. The build prints how many files each mount packaged.
+
+### The Back button
+
+Android Back reaches the page before Android acts on it. The template's
+`onBackPressed` calls `window.__aioBack()` through `evaluateJavascript`, which
+needs no user gesture, so the first Back after a cold start is asked too. That
+global runs the app's
+[`onBackButton`](../ui/air-lifecycle.md#android-back-onbackbutton) handlers,
+last registered first. When none returns `true`, Android does the default:
+WebView history, then (a client APK) the connect form, then leave the app. This
+holds for a standalone APK and for one that talks to a server.
 
 ### The camera is opt-in
 
@@ -1245,25 +1332,44 @@ the build reaches for, or that step quietly does nothing:
 | `AndroidManifest.xml` | `{{APPLICATION_ID}}`, `{{APP_NAME}}`, `{{ICON_ATTR}}`, `{{CLEARTEXT_ATTR}}` and `{{CAMERA_PERMISSION}}` — `{{CLEARTEXT_ATTR}}` becomes `android:usesCleartextTraffic="true"` for a dev or `--remote` build and nothing for a standalone one; `{{CAMERA_PERMISSION}}` becomes the CAMERA declaration only with [`android: { camera: true }`](#the-camera-is-opt-in) |
 | `MainActivity.kt`     | `{{CAMERA_DECLARED}}` — the same flag, so the WebView's refusal cannot disagree with the manifest                                                                                                                                                                                                                                                                  |
 
-A replacement `MainActivity.kt` also replaces two things the template's activity
-does in `onCreate`, and the build **warns** when an overlay drops either:
+A replacement `MainActivity.kt` also replaces four things the template's
+activity does, and the build **warns** when an overlay drops any of them:
 
 - **The durable store** (standalone APK only). Without it the page falls back to
   `localStorage` and a change can be lost on a kill right after it (see
   [State survives a kill](#state-survives-a-kill)). Copy `class AioNativeStore`
   from aio's `android-template/app/src/main/java/aio/app/MainActivity.kt` and
   install it under the exact JS name the page looks for — for a standalone APK
-  only, as the template does (`TALKS_TO_SERVER` false), and keep the template's
+  only, as the template does (`TALKS_TO_SERVER` false), together with the
+  document-start script that hands its per-launch key to the app's own origin
+  (without it any third-party `<iframe>` can read and overwrite the state — see
+  [State survives a kill](#state-survives-a-kill)), and keep the template's
   `onPageStarted` removal of it:
 
   ```kotlin
-  addJavascriptInterface(AioNativeStore(File(filesDir, "aio-store")), "AioNativeStore")
+  val store = AioNativeStore(File(filesDir, "aio-store"))
+  addJavascriptInterface(store, "AioNativeStore")
+  WebViewCompat.addDocumentStartJavaScript(this,
+      "Object.defineProperty(window, \"__aioNativeStoreKey\", { value: \"" + store.key + "\" });",
+      setOf("https://appassets.androidplatform.net"))
   ```
+
+  An activity copied from aio 1.0.12 or earlier installs the unkeyed store; the
+  build warns about it. Its files load unchanged in the keyed one.
+
+- **The native fetch bridge** (standalone APK only). Without it
+  [`nativeFetch`](#native-fetch) rejects. Copy `object AioNativeFetch` and its
+  `WebViewCompat.addWebMessageListener(…, "AioNativeFetch", …)` line from the
+  same file, inside the same standalone-only block.
 
 - **The insets frame** (every APK). targetSdk 35 draws edge-to-edge, so a
   WebView set as the content view draws under the status bar. Keep the
   template's `FrameLayout` + `setOnApplyWindowInsetsListener` block from the end
   of its `onCreate` (see [The system bars](#the-system-bars)).
+
+- **Back asks the page** (every APK). Keep the template's `onBackPressed` and
+  `defaultBack`. Without them no `onBackButton` handler ever runs (see
+  [The Back button](#the-back-button)).
 
 ### The page is a secure origin, so `ws://` is blocked
 

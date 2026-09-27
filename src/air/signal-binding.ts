@@ -52,6 +52,7 @@ const _signalBindingCleanups = new WeakMap<Element, (() => void)[]>();
 export function bindSignalProps(
   el: HTMLElement,
   props: Record<string, unknown>,
+  prevProps?: Record<string, unknown>,
 ): void {
   const cleanups: (() => void)[] = [];
 
@@ -70,15 +71,23 @@ export function bindSignalProps(
     if (isSignal(v)) {
       const sig = v as Signal<unknown>;
       // `prev` lets a style OBJECT retire the declarations it dropped, exactly
-      // as the diff path does — the old copy cleared `cssText` wholesale.
-      let prev: unknown;
+      // as the diff path does — the old copy cleared `cssText` wholesale. It
+      // starts at what the LAST render put there: `style={{ fontSize }}`
+      // becoming `style={sig}` kept `font-size` forever, as the first write
+      // had nothing to retire it against.
+      let prev: unknown = resolveSignalProp(prevProps?.[k]);
       const dispose = effect(() => {
         const val = sig.value;
         // A controlled prop already showing `val` is not rewritten: assigning
         // an <input>'s `value` its own string still moves the caret to the end
         // in every browser, and the effect re-runs for reasons the user did not
         // cause. Same rule as the diff path, same decider.
-        if (_isControlled(el, k) && !_controlDrifted(el, k, val)) {
+        // Not for null: that is the prop ABSENT, a removal `_controlDrifted`
+        // cannot see — a checkbox showing `value=""` reads the same as null,
+        // and skipping kept the attribute, so `.value` said "" and not "on".
+        if (
+          val != null && _isControlled(el, k) && !_controlDrifted(el, k, val)
+        ) {
           prev = val;
           return;
         }

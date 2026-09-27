@@ -22,9 +22,9 @@ import {
   type ToWorker,
   WORKER_CLOSE_DEADLINE_MS,
 } from "./cell-worker-protocol.ts";
-import { serverRequest, serverUser } from "./auth-context.ts";
+import { _ambientRequest, _readsSink } from "./auth-context.ts";
 import { recordRejection } from "../state/rejection-tracker.ts";
-import { resolveCall } from "../state/cell-impl.ts";
+import { _workerUserCloneError, resolveCall } from "../state/cell-impl.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { degraded } from "../diagnostics/degraded.ts";
 import {
@@ -82,7 +82,7 @@ export type CellWorker = {
    *  rejects with the method's error. */
   /** `onAdopted` fires if the worker's executor answers the call from
    *  another call instead of running it (FromWorker "adopted"). */
-  call(action: Msg, onAdopted?: () => void): Promise<unknown>;
+  call(action: Msg, onAdopted?: (rerun: boolean) => void): Promise<unknown>;
   /** Wait until the host is bound and serving. */
   ready(): Promise<void>;
   /** Run the cell's `onInit` in the worker — once, when the main isolate is
@@ -159,25 +159,30 @@ export function closedWorkerCall(
   return Promise.reject(err);
 }
 
-/** Snapshot the ambient caller context as plain data for the thread hop. */
+/** Snapshot the ambient REQUEST as plain data for the thread hop.
+ *
+ *  Only the request. The caller's identity is not ambient state to snapshot:
+ *  it is the action's own `_user` stamp, which rides the action across and is
+ *  what the host runs the method under — the one rule in-isolate dispatch
+ *  follows (aio-dispatch.ts `runWithUser(a._user, …)`). This used to forward
+ *  the MAIN isolate's ambient `serverUser()` at route time, trimmed to
+ *  `{ id, role }`: a WS caller (stamped, no ambient on main) reached the
+ *  worker anonymous, a server-origin call made inside some user's scope (no
+ *  stamp) ran AS that user, and every `resolveUser` extra (a tenant) was
+ *  dropped — three ways a worker cell's authorization differed from the same
+ *  cell's in-isolate. */
 function ambient(): AmbientContext | undefined {
-  const user = serverUser();
-  const req = serverRequest();
-  if (!user && !req) return undefined;
+  const req = _ambientRequest();
+  if (!req) return undefined;
   return {
-    ...(user ? { user: { id: user.id, role: user.role } } : {}),
-    ...(req
-      ? {
-        request: {
-          ip: req.ip,
-          headers: [...req.headers.entries()],
-          cookies: { ...req.cookies },
-          url: req.url,
-          method: req.method,
-          via: req.via,
-        },
-      }
-      : {}),
+    request: {
+      ip: req.ip,
+      headers: [...req.headers.entries()],
+      cookies: { ...req.cookies },
+      url: req.url,
+      method: req.method,
+      via: req.via,
+    },
   };
 }
 
@@ -195,6 +200,8 @@ export function createCellWorker(
   });
 
   let seq = 0;
+  /** The slice generation the worker was last seeded with — see `reseed`. */
+  let gen = 0;
   // `callId` is set for ASYNC-method calls: the value the app awaits lives in
   // the main isolate's pending-call registry (registerCall, cell-catalog), so
   // `done`/`fail` must settle THAT — the dispatch promise here is transport.
@@ -205,7 +212,10 @@ export function createCellWorker(
       reject: (e: Error) => void;
       callId?: string;
       /** See `CellWorker.call`. */
-      onAdopted?: () => void;
+      onAdopted?: (rerun: boolean) => void;
+      /** The caller's running `ttl`/`"first"` calls — what the run read of
+       *  the caller is theirs to key on, as it is for an in-isolate cell. */
+      sink?: (facts: readonly string[]) => void;
       /** The caller's OWN action object — what `action-ack.ts` keys a refusal
        *  to. The worker refused a structured clone of it in another isolate,
        *  so the note comes home as data and is recorded against this one. */
@@ -284,6 +294,23 @@ export function createCellWorker(
         readyResolve?.();
         return;
       case "patches":
+        // Committed against a slice this isolate has since replaced (a call
+        // in flight across `reseed`): the worker's own re-seed discards it, so
+        // applying it here would put the write on top of the snapshot on ONE
+        // side only — main and worker apart for good, every later return
+        // value and patch base disagreeing with what clients see. Dropped, it
+        // is what the load means on both sides: the call ran BEFORE the
+        // snapshot, which replaces it like any earlier write. The call itself
+        // still settles — its `done`/`fail` carries its own value — and a
+        // write it commits AFTER the re-seed carries the new generation and
+        // lands on both.
+        if (msg.gen !== gen) {
+          log.debug(
+            `cell-worker(${name}) dropped ${msg.ops.length} op(s) committed ` +
+              `before a re-seed (gen ${msg.gen}, now ${gen})`,
+          );
+          return;
+        }
         deps.applyPatches(name, msg.ops);
         return;
       case "effects":
@@ -316,7 +343,7 @@ export function createCellWorker(
         return;
       }
       case "adopted":
-        inflight.get(msg.id)?.onAdopted?.();
+        inflight.get(msg.id)?.onAdopted?.(msg.rerun === true);
         return;
       case "disabled":
         disabling.shift()?.(msg.ok);
@@ -324,6 +351,7 @@ export function createCellWorker(
       case "done": {
         const entry = inflight.get(msg.id);
         inflight.delete(msg.id);
+        if (msg.reads) entry?.sink?.(msg.reads);
         // The reduce refused this write in the WORKER's isolate, where the
         // tracker that `action-ack.ts` reads does not reach. Recorded here
         // against the caller's own action object, so the ack path answers
@@ -343,10 +371,15 @@ export function createCellWorker(
       case "fail": {
         const entry = inflight.get(msg.id);
         inflight.delete(msg.id);
-        const err = new Error(msg.message) as Error & { code?: string };
-        if (msg.stack) err.stack = msg.stack;
-        if (msg.name) err.name = msg.name;
-        if (msg.code !== undefined) err.code = msg.code;
+        if (msg.reads) entry?.sink?.(msg.reads);
+        const e = Object.assign(new Error(msg.message), msg.fields) as
+          & Error
+          & { code?: string };
+        if (msg.stack) e.stack = msg.stack;
+        if (msg.name && msg.name !== e.name) e.name = msg.name;
+        if (msg.code !== undefined) e.code = msg.code;
+        // A thrown non-Error arrives as itself, as it does in-process.
+        const err: unknown = msg.thrown ? msg.thrown.value : e;
         // A throw out of the worker's reduce — a sync method that threw. The
         // owner's composed reduce counts the same throw for a local cell.
         if (msg.code === "REDUCE_ERROR") deps.countError?.();
@@ -354,9 +387,9 @@ export function createCellWorker(
           // The awaiter sees the rejection via the registry; the transport
           // promise resolves so the fire-and-forget dispatch inside the bound
           // method (cell-catalog) can't become an unhandled rejection.
-          resolveCall(entry.callId, undefined, err);
+          resolveCall(entry.callId, undefined, err as Error);
           entry.resolve(undefined);
-        } else entry?.reject(err);
+        } else entry?.reject(err as Error);
         return;
       }
       case "boot-error":
@@ -406,28 +439,28 @@ export function createCellWorker(
   const devFlag = (): boolean =>
     (globalThis as Record<string, unknown>).__aioDev === true;
 
-  send({
-    t: "init",
-    state: deps.initialState(),
-    prod: deps.prod,
-    freezeState: deps.freezeState,
-    dev: devFlag(),
-    refusalsReject: deps.refusalsReject,
-  });
+  const seed = (state: Record<string, unknown>): void =>
+    send({
+      t: "init",
+      state,
+      prod: deps.prod,
+      freezeState: deps.freezeState,
+      dev: devFlag(),
+      refusalsReject: deps.refusalsReject,
+      gen,
+    });
+  seed(deps.initialState());
 
   return {
     cell: name,
     ready: () => readyPromise,
     reseed(slice: Record<string, unknown>): void {
       if (closed) return;
-      send({
-        t: "init",
-        state: slice,
-        prod: deps.prod,
-        freezeState: deps.freezeState,
-        dev: devFlag(),
-        refusalsReject: deps.refusalsReject,
-      });
+      // A new generation BEFORE the send: from this line on, a batch the
+      // worker committed against the slice just discarded is stale here,
+      // whenever it arrives (see the `patches` case).
+      gen++;
+      seed(slice);
     },
     start(): void {
       if (closed) return;
@@ -446,18 +479,28 @@ export function createCellWorker(
       if (closed) return;
       send({ t: "enable" });
     },
-    call(action: Msg, onAdopted?: () => void): Promise<unknown> {
+    call(
+      action: Msg,
+      onAdopted?: (rerun: boolean) => void,
+    ): Promise<unknown> {
       const callId = (action as { payload?: { _callId?: string } }).payload
         ?._callId;
       if (closed) {
         return closedWorkerCall(name, crashError?.message ?? null, action);
       }
       const id = ++seq;
+      const sink = _readsSink();
       const p = new Promise<unknown>((resolve, reject) => {
-        inflight.set(id, { resolve, reject, callId, action, onAdopted });
+        inflight.set(id, { resolve, reject, callId, action, onAdopted, sink });
       });
       try {
-        send({ t: "call", id, action, ctx: ambient() });
+        send({
+          t: "call",
+          id,
+          action,
+          ctx: ambient(),
+          ...(sink ? { reads: true as const } : {}),
+        });
       } catch (e) {
         // `postMessage` refuses an uncloneable argument SYNCHRONOUSLY, so this
         // used to throw out of a call the contract says always returns a
@@ -468,7 +511,9 @@ export function createCellWorker(
         // hosted. Reject, in the same words.
         inflight.delete(id);
         const why = e instanceof Error ? e.message : String(e);
-        const err = new Error(
+        // The caller's identity rides the action too (`_user`) — when IT is
+        // what refused the clone, say so: the arguments are fine.
+        const err = _workerUserCloneError(action, name) ?? new Error(
           `cell "${name}" is a worker cell, and its action payload cannot ` +
             `cross a worker boundary: ${why}.\n` +
             `It is reached by postMessage, so every argument is ` +
@@ -507,7 +552,14 @@ export function createCellWorker(
         ]);
         if (t !== undefined) clearTimeout(t);
       } catch { /* already gone */ }
-      failAll(new Error(`[aio] cell worker "${name}" closed`));
+      // A clean close is a shutdown: DISPATCH_CLOSED, which a schedule stops
+      // on quietly (see `closedWorkerCall`). Code-less, a call still running
+      // at the drain deadline was logged at ERROR on every clean stop.
+      const closedErr = new Error(`[aio] cell worker "${name}" closed`) as
+        & Error
+        & { code?: string };
+      closedErr.code = "DISPATCH_CLOSED";
+      failAll(closedErr);
       worker.terminate();
     },
     terminate(reason: string): void {

@@ -6,6 +6,7 @@
 // it verbatim (`schedule.blocking` went out in alpha70; `blocking` is its own
 // top-level export, server-only — see src/state/removals.ts).
 import { selfMethodOf } from "./self.ts";
+import { MAX_TIMER_DELAY } from "./timer-ceiling.ts";
 import { removalOf, retiredSpellingLine } from "./removals-core.ts";
 import { teachableError } from "../diagnostics/error.ts";
 import { log } from "../diagnostics/logger-api.ts";
@@ -359,8 +360,9 @@ export function validateSchedules(defs: readonly unknown[]): void {
  *  dispatched IMMEDIATELY — the second turning a rate-limit backoff into a hot
  *  loop aimed at the very API it was backing off from. One constant, one
  *  arming path (`armDeadline` below), used by after/at/cron alike.
+ *  The constant itself lives in the leaf `timer-ceiling.ts` (no cycle).
  *  @internal */
-export const MAX_TIMER_DELAY = 2_147_483_647; // 2^31-1 ms ≈ 24.85 days
+export { MAX_TIMER_DELAY };
 
 /** How often a beyond-ceiling timer re-checks how far away its deadline is. */
 const RECHECK_MS = 86_400_000; // 24h
@@ -960,6 +962,14 @@ export type CronFields = {
   dow: number[]; // 0-6 (Sun=0)
 };
 
+/** A cron number: DIGITS only. `Number()` read `""` as 0 (so `"5,"` added
+ *  minute 0 and `"9,,17"` a midnight run), `"0x10"` as 16 and `"1e1"` as 10 —
+ *  typos that ran at the wrong time instead of failing where they were
+ *  written. NaN here reaches each branch's existing loud refusal. */
+function cronInt(s: string): number {
+  return /^\d+$/.test(s) ? Number(s) : NaN;
+}
+
 /** One cron field, expanded.
  *
  *  `name` and `pattern` exist only for the error messages. The old text was
@@ -982,7 +992,7 @@ function parseField(
     if (trimmed === "*") {
       for (let i = min; i <= max; i++) values.push(i);
     } else if (trimmed.startsWith("*/")) {
-      const step = Number(trimmed.slice(2));
+      const step = cronInt(trimmed.slice(2));
       if (!Number.isInteger(step) || step < 1) {
         throw new Error(
           `invalid step "${trimmed}" in the ${where} — a step must be a ` +
@@ -993,15 +1003,16 @@ function parseField(
     } else if (trimmed.includes("-")) {
       // Range: "1-5" or "1-5/2"
       const [rangePart, stepPart] = trimmed.split("/");
-      const [startStr, endStr] = (rangePart ?? "").split("-");
-      if (!startStr || !endStr) {
+      const ends = (rangePart ?? "").split("-");
+      const [startStr, endStr] = ends;
+      if (!startStr || !endStr || ends.length !== 2) {
         throw new Error(
           `invalid range "${trimmed}" in the ${where} — a range needs both ` +
             `ends, written low-high within ${min}-${max}, e.g. "${min}-${max}".`,
         );
       }
-      const start = Number(startStr), end = Number(endStr);
-      const step = stepPart ? Number(stepPart) : 1;
+      const start = cronInt(startStr), end = cronInt(endStr);
+      const step = stepPart !== undefined ? cronInt(stepPart) : 1;
       if (
         !Number.isInteger(start) || !Number.isInteger(end) || start < min ||
         end > max || start > end
@@ -1019,7 +1030,7 @@ function parseField(
       }
       for (let i = start; i <= end; i += step) values.push(i);
     } else {
-      const n = Number(trimmed);
+      const n = cronInt(trimmed);
       if (!Number.isInteger(n) || n < min || n > max) {
         throw new Error(
           `invalid value "${trimmed}" in the ${where} — ${name} accepts a ` +

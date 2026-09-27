@@ -83,6 +83,23 @@ Deno.test("boot report: minutes for sub-hour cadences", () => {
   assert(m.updates!.includes("every 1m"));
 });
 
+// `check: 10_000` printed "every 0m" — a cadence that reads as "never".
+Deno.test("boot report: a sub-minute cadence is said exactly, never '0m'", () => {
+  const at = (intervalMs: number) =>
+    asMap(bootLines(facts, {
+      updates: {
+        source: "file:///mnt/rel",
+        kind: "manifest",
+        channel: "dev",
+        intervalMs,
+        auto: false,
+      },
+    })).updates!;
+  assert(at(10_000).includes("every 10s"), at(10_000));
+  assert(at(90_000).includes("every 90s"), at(90_000));
+  assert(at(1_500).includes("every 1500ms"), at(1_500));
+});
+
 Deno.test("boot report: data dir, protocol and cells appear only when known", () => {
   const bare = asMap(bootLines(facts));
   assertEquals(bare.data, undefined);

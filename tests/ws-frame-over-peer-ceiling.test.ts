@@ -123,7 +123,11 @@ Deno.test("cli client: a frame the runtime refuses is loud, and does not spin a 
         // landing before the fatal one must not put the retry clock back to
         // its 1 s floor.
         socket.send(
-          JSON.stringify({ v: 2, t: "proto", d: { v: 2, ver: "test" } }),
+          JSON.stringify({
+            v: 2,
+            t: "proto",
+            d: { v: 3, min: 3, ver: "test" },
+          }),
         );
         socket.send(
           JSON.stringify({ v: 2, t: "state", d: { big: { blob: HUGE } } }),

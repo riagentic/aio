@@ -7,7 +7,7 @@ import { isFrameworkCell } from "./framework-cells.ts";
 import { pendingCalls } from "./method-cancel.ts";
 import type { ReduceBreakdown } from "../diagnostics/time-travel.ts";
 import {
-  type AioError,
+  AioError,
   type AioErrorCode,
   clearCorrelationId,
   createAioError,
@@ -17,6 +17,7 @@ import {
   setCorrelationId,
 } from "../diagnostics/error.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
+import { REDACTED } from "../diagnostics/redact.ts";
 import { isDeliberateRejection, rejectionLine } from "./method-rejection.ts";
 export type { AioError } from "../diagnostics/error.ts";
 
@@ -217,10 +218,8 @@ import { deepFreeze } from "./immutable.ts";
 import { cloneExecEffect, isExecEffect } from "./exec-effect.ts";
 import { count } from "../diagnostics/fmt.ts";
 import { _outsideTracking } from "./signal.ts";
+import { _captureCaller, type Reenter } from "./method-policy.ts";
 
-/** Queue depth limit — prevents unbounded memory growth from burst dispatches.
- *  THE number: whatever the queue is allowed to hold, the drain must be
- *  allowed to process. */
 /** True while the app's own `onStop` hook is running.
  *
  *  The one thing the drop warning below could not say, and the one an app
@@ -238,6 +237,9 @@ export function _setUserStopHookActive(active: boolean): void {
   _inUserStopHook = active;
 }
 
+/** Queue depth limit — prevents unbounded memory growth from burst dispatches.
+ *  THE number: whatever the queue is allowed to hold, the drain must be
+ *  allowed to process. */
 const QUEUE_MAX = 10_000;
 /** Safety limit — prevents infinite effect→dispatch loops.
  *
@@ -247,8 +249,13 @@ const QUEUE_MAX = 10_000;
  *  its actions REJECTED as a "possible infinite loop" — an accusation the app
  *  could do nothing about, because the queue itself had said yes. Loud and
  *  recoverable, but wrong. The loop guard is the same bound as the queue: past
- *  it, something really is generating actions without end. */
-const DISPATCH_MAX = QUEUE_MAX;
+ *  it, something really is generating actions without end.
+ *
+ *  `+ 1` because the drain also counts the action that STARTED it: that one
+ *  has left the queue by the time its fan-out fills it, so one drain can
+ *  legitimately process a full queue plus its initiator. Without it the last
+ *  row of an accepted 10 000-row fan-out was rejected as a loop. */
+const DISPATCH_MAX = QUEUE_MAX + 1;
 
 /** Dependencies injected into the dispatch loop by the host runtime */
 export type DispatchDeps<S, A, E> = {
@@ -432,6 +439,8 @@ export function createDispatch<S, A, E>(
     resolve: (value?: unknown) => void; // AIO-427: carries a method's return value
     reject: (e: AioError) => void;
     cid: string;
+    /** The caller's `ttl`/`"first"` read scope — see `_captureCaller`. */
+    enter?: Reenter;
   };
   const queue: QueueEntry[] = [];
 
@@ -443,10 +452,18 @@ export function createDispatch<S, A, E>(
       errors++;
     },
     prod: deps.reportOpts?.prod,
+    redactState: deps.reportOpts?.redactState,
+    redactAction: deps.reportOpts?.redactAction,
   };
 
   function tag(v: unknown): string {
     const o = v as Record<string, unknown>;
+    // A `redactActions` method's payload is its secret: an overflow or a
+    // non-cloneable effect must not print it into the logs either.
+    if (
+      typeof o?.type === "string" &&
+      _reportOpts.redactAction?.(o.type, o.payload)
+    ) return `${o.type} ${REDACTED}`;
     // A label must never be the thing that throws: JSON.stringify dies on a
     // BigInt or a cycle, and tag() is called from the error and debug paths —
     // i.e. exactly when the payload is already unusual.
@@ -747,7 +764,7 @@ export function createDispatch<S, A, E>(
     // fire-and-forget callers (B-4: awaiters still receive the rejection).
     promise.catch(() => {});
     const cid = generateCorrelationId();
-    queue.push({ action, resolve, reject, cid });
+    queue.push({ action, resolve, reject, cid, enter: _captureCaller() });
     if (dispatching) return promise;
     dispatching = true;
 
@@ -809,7 +826,9 @@ export function createDispatch<S, A, E>(
           // comparison and the message happen only on the throw path.
           const queuedBefore = queue.length;
           try {
-            reduced = reduce(getState(), current);
+            reduced = entry.enter
+              ? entry.enter(() => reduce(getState(), current))
+              : reduce(getState(), current);
           } catch (e) {
             // A refusal (`throw new Error("insufficient")`) is reported as one
             // info line, a bug as the error box — method-rejection.ts.
@@ -1065,7 +1084,9 @@ export function createDispatch<S, A, E>(
             const effectStart = performance.now();
 
             try {
-              const r = execute(effect);
+              const r = entry.enter
+                ? entry.enter(() => execute(effect))
+                : execute(effect);
               const effectDuration = performance.now() - effectStart;
               totalEffectDuration += effectDuration;
 
@@ -1161,6 +1182,14 @@ export function createDispatch<S, A, E>(
                       return;
                     }
                     settled = true;
+                    // An effect that awaited a dispatch the overflow guard
+                    // dropped: DISPATCH_LOOP was already reported under its
+                    // own heading. Re-wrapped here it printed a second time
+                    // as "[EFFECT_ASYNC_ERROR] … async method threw" — the
+                    // wrong diagnosis for a loop.
+                    if (e instanceof AioError && e.code === "DISPATCH_LOOP") {
+                      return;
+                    }
                     const err = createAioError(
                       "EFFECT_ASYNC_ERROR",
                       e,

@@ -2,6 +2,7 @@
 
 import type { CheckpointData } from "./types.ts";
 import { log } from "./logger-api.ts";
+import { capDelay } from "../state/timer-ceiling.ts";
 import { noRedaction, REDACTED } from "./redact.ts";
 import type { Redactor } from "./redact.ts";
 
@@ -9,6 +10,8 @@ import { sweepStaleTmps, uuidTmpAfter } from "./tmp-sweep.ts";
 
 const FILE = "checkpoint.json";
 const TMP = "checkpoint.json.tmp";
+/** The checkpoint's default write debounce. */
+export const CHECKPOINT_DEBOUNCE_MS = 5000;
 
 /** Owner-only. The checkpoint holds FULL application state — every value the
  *  journal and the action log are careful not to keep. It was written at the
@@ -147,6 +150,12 @@ export function createCheckpoint(
   /** The app's persist filter, late-bound (see `setCheckpointView`). */
   view: () => CheckpointView | null = () => null,
 ) {
+  debounceMs = capDelay(
+    "diagnostics checkpoint.debounce",
+    debounceMs,
+    (m) => log.warn("checkpoint", m),
+    CHECKPOINT_DEBOUNCE_MS,
+  );
   let timer: ReturnType<typeof setTimeout> | null = null;
   let pending: CheckpointData | null = null;
   // The tmps a crash between a write and its rename left (see

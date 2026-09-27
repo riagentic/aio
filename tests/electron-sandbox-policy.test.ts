@@ -13,7 +13,12 @@
 // instead. The decision is a pure table with the measurement injected — the
 // same seam `sandboxUsable`/`usernsAvailable` already use, because a fleet of
 // VMs is not a unit test.
-import { assert, assertEquals, assertRejects } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "@std/assert";
 import {
   SandboxRefusal,
   sandboxSwitches,
@@ -21,6 +26,7 @@ import {
 } from "../src/electron/electron-spawn.ts";
 import { electronLaunchFailurePlan } from "../src/server/aio-lifecycle.ts";
 import {
+  electronPermissionsRefusal,
   NESTED_CONFIGS,
   SHAPE_VALUES,
   VALID_ELECTRON_KEYS,
@@ -165,18 +171,24 @@ Deno.test("electron config: every key of the block reaches the window's meta", (
   // not copied at the one call site that matters, so it is `undefined` all the
   // way down while the app believes it is protected. `electronMetaPolicy` is
   // the one mapping; this is what keeps it TOTAL.
-  const on = electronMetaPolicy({
+  const set: Record<string, unknown> = {
     requireSandbox: true,
     unsandboxedChildWindows: true,
-  }) as Record<string, unknown>;
+    permissions: { "clipboard-sanitized-write": ["app"] },
+  };
+  const on = electronMetaPolicy(set) as Record<string, unknown>;
   const off = electronMetaPolicy(undefined) as Record<string, unknown>;
   for (const key of VALID_ELECTRON_KEYS) {
     assertEquals(
       on[key],
-      true,
+      set[key],
       `electron.${key} is dropped on the way to meta`,
     );
-    assertEquals(off[key], false, `electron.${key} has no default`);
+    assertEquals(
+      off[key],
+      key === "permissions" ? null : false,
+      `electron.${key} has no default`,
+    );
   }
   assertEquals(
     Object.keys(on).length,
@@ -200,4 +212,33 @@ Deno.test("electron config: the block is real, nested-validated and shape-checke
   assert(refused({ electron: true }), "a non-object block must be refused");
   assertEquals(SHAPE_VALUES.electron, "object");
   assert("electron" in NESTED_CONFIGS, "the block must be walked as a config");
+});
+
+Deno.test("electron config: permissions — only Electron names, scoped to app, or the boot is refused", () => {
+  const ok = (permissions: unknown) => !refused({ electron: { permissions } });
+  assert(ok({}), "an empty list (deny everything) must boot");
+  assert(ok({ "clipboard-sanitized-write": ["app"], media: ["app"] }));
+  assert(ok({ notifications: [] }), "an empty scope list grants nothing");
+  for (
+    const bad of [
+      { camera: ["app"] }, // Electron says "media"
+      { "clipboard-raed": ["app"] },
+      { notifications: ["guest"] },
+      { notifications: ["app", "webview"] },
+      { notifications: "app" },
+      ["notifications"],
+      true,
+    ]
+  ) {
+    assert(!ok(bad), `accepted ${JSON.stringify(bad)}`);
+  }
+  assertStringIncludes(
+    electronPermissionsRefusal({ camera: ["app"] })!,
+    'camera and microphone are both "media"',
+  );
+  assertStringIncludes(
+    electronPermissionsRefusal({ media: ["guest"] })!,
+    'the only scope is "app"',
+  );
+  assertEquals(electronPermissionsRefusal(undefined), null);
 });

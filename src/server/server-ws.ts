@@ -38,11 +38,13 @@ import { INFLIGHT } from "../state/dispatch.ts";
 import { inServerOrigin } from "../state/call-origin.ts";
 import { parseTTCommand } from "../diagnostics/time-travel.ts";
 import {
+  abuseBucket,
   originVerdict,
   rawStateControlAllowed,
   requestHost,
 } from "./server-auth.ts";
 import type { ClientLogEntry } from "../air/dom-inspector-types.ts";
+import { isMacPlatform } from "../air/key-chord.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
 import { VERSION } from "./aio-cli.ts";
 import {
@@ -208,6 +210,43 @@ function retryAfter(windowStart: number | undefined): number {
   return Math.max(0, 1000 - elapsed) + 100;
 }
 
+/** Open a one-second rate window. At its end the message count resets and the
+ *  byte charge is paid down by one window's budget; a charge still over zero
+ *  (DEBT from a frame larger in UTF-8 than the budget) opens the next window
+ *  straight away, so idle time pays it off and sustained throughput can never
+ *  exceed `bytesPerSec` UTF-8 bytes. */
+function openRateWindow(
+  meta: Pick<
+    ClientMeta,
+    "msgCount" | "bytesThisSec" | "msgResetTimer" | "msgWindowStart"
+  >,
+  bytesPerSec: number,
+): void {
+  meta.msgWindowStart = Date.now();
+  meta.msgResetTimer = setTimeout(() => {
+    meta.msgCount = 0;
+    meta.bytesThisSec = Math.max(0, meta.bytesThisSec - bytesPerSec);
+    meta.msgResetTimer = undefined;
+    if (meta.bytesThisSec > 0) openRateWindow(meta, bytesPerSec);
+  }, 1000);
+}
+
+/** When a frame of `units` UTF-16 units will be admitted: at the first
+ *  window end after which the paid-down charge leaves `units` of room (see
+ *  the admission test in `onMessage`). */
+function byteRetryAfter(
+  windowStart: number | undefined,
+  charged: number,
+  units: number,
+  bytesPerSec: number,
+): number {
+  const windows = Math.max(
+    1,
+    Math.ceil((charged + units - bytesPerSec) / bytesPerSec),
+  );
+  return retryAfter(windowStart) + (windows - 1) * 1000;
+}
+
 /** THE framework-internal action gate — defined in protocol/ (one spelling
  *  for every door, the sync validator included), re-exported here for the
  *  server-side callers. */
@@ -331,6 +370,10 @@ export type ClientMeta = {
   index: number;
   clientType: ClientType;
   isElectron: boolean;
+  /** The client's platform is Apple's (from its User-Agent) — what
+   *  `am trigger press "mod+k"` resolves `mod` against: ⌘ on the page's
+   *  platform, not on the machine running `am`. */
+  mac?: boolean;
   user?: AioUser;
   /** The server this socket belongs to authenticates INDIVIDUALS (`WsDeps.
    *  perUserAuth`). Carried per socket so a sender that only holds the
@@ -351,6 +394,9 @@ export type ClientMeta = {
    *  green. Cleared by a full send. */
   needsFull?: boolean;
   msgCount: number;
+  /** UTF-8 bytes charged to the current window. May exceed `bytesPerSec`:
+   *  the excess is DEBT, paid down by `bytesPerSec` per window (see
+   *  `openRateWindow`). */
   bytesThisSec: number;
   msgResetTimer?: ReturnType<typeof setTimeout>;
   /** When the current one-second budget window opened — what a dropped
@@ -685,6 +731,14 @@ export function createWsManager(deps: WsDeps): WsManager {
   const _fuseShare = new Map<ClientMeta, number>();
 
   const connections = new Map<WebSocket, ClientMeta>();
+  /** Sockets upgraded but not yet open → when they were admitted. A socket
+   *  joins `connections` only at `onopen`, so a ceiling that counted
+   *  `connections` alone admitted every handshake of a burst: measured, 20
+   *  concurrent connects against `maxConnections: 5` all opened. An entry
+   *  that never opens nor closes is dropped after `UPGRADE_PENDING_MS`, so a
+   *  lost handshake cannot shrink the ceiling for good. */
+  const upgrading = new Map<WebSocket, number>();
+  const UPGRADE_PENDING_MS = 30_000;
 
   /** Run `onConnect` / `onDisconnect` — observe-only, so a failure is reported
    *  and never breaks the socket's lifecycle, WHICHEVER way it fails. The
@@ -1036,8 +1090,10 @@ export function createWsManager(deps: WsDeps): WsManager {
   const _abuseExpired = (e: AbuseEntry, now: number) =>
     now > e.until && now - e.lastStrike > ABUSE_STRIKE_MEMORY_MS;
   /** The block on `key` still has this many ms to run, or 0. */
-  function _deniedFor(key: string | undefined): number {
-    if (!key) return 0;
+  function _deniedFor(clientKey: string | undefined): number {
+    if (!clientKey) return 0;
+    // Bucketed like every auth budget: an IPv6 /64 is one client.
+    const key = abuseBucket(clientKey);
     const entry = abuseDenylist.get(key);
     if (entry === undefined) return 0;
     const now = Date.now();
@@ -1062,9 +1118,10 @@ export function createWsManager(deps: WsDeps): WsManager {
   }
   /** Block `key`; returns the block's length and which strike this is. */
   function _addToDenylist(
-    key: string | undefined,
+    clientKey: string | undefined,
   ): { ms: number; strike: number } {
-    if (!key) return { ms: 0, strike: 0 };
+    if (!clientKey) return { ms: 0, strike: 0 };
+    const key = abuseBucket(clientKey);
     const now = Date.now();
     // BOUNDED, because every entry is remote-fed. Entries were removed only
     // when the SAME key came back and found itself expired — an attacker
@@ -1170,7 +1227,11 @@ export function createWsManager(deps: WsDeps): WsManager {
     }
 
     const maxConn = deps.maxConnections ?? WS_MAX_CONNECTIONS;
-    if (connections.size >= maxConn) {
+    const now = Date.now();
+    for (const [s, at] of upgrading) {
+      if (now - at > UPGRADE_PENDING_MS) upgrading.delete(s);
+    }
+    if (connections.size + upgrading.size >= maxConn) {
       // A CEILING THAT IS HIT IS SAID OUT LOUD — once, then debug.
       //
       // This was `deps.debug` alone: the 101st user of an exposed app got a
@@ -1230,6 +1291,7 @@ export function createWsManager(deps: WsDeps): WsManager {
         { status: 400 },
       );
     }
+    upgrading.set(socket, now);
     const clientId = crypto.randomUUID();
     // Meter the SOCKET, not the callers. Frames reach a client from several
     // places — the broadcaster, the handshake's first state, per-action acks,
@@ -1277,6 +1339,9 @@ export function createWsManager(deps: WsDeps): WsManager {
       index: clientIndex,
       clientType: "unknown",
       isElectron,
+      // No User-Agent = unknown, not "not a Mac": `am` then falls back to
+      // its own platform rather than being told Ctrl.
+      mac: userAgent ? isMacPlatform(userAgent) : undefined,
       user,
       perUserAuth: deps.perUserAuth === true,
       msgCount: 0,
@@ -1392,6 +1457,7 @@ export function createWsManager(deps: WsDeps): WsManager {
         log.warn("ws", `error ${clientId.slice(0, 8)} — ${detail}`);
       }
       connections.delete(socket);
+      upgrading.delete(socket);
       _clearTimers(meta);
       _cleanupVitals(meta);
       _settlePending(meta);
@@ -1407,6 +1473,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       // the peers whose base they describe; this one gets a snapshot that
       // already holds them (see drainBeforeSnapshot).
       drainBeforeSnapshot();
+      upgrading.delete(socket);
       connections.set(socket, meta);
       // The freeze watchdog's clock starts HERE, not at this client's first
       // vitals-ping — a peer that upgrades and then says nothing at all is
@@ -1523,6 +1590,7 @@ export function createWsManager(deps: WsDeps): WsManager {
 
     socket.onclose = () => {
       connections.delete(socket);
+      upgrading.delete(socket);
       _clearTimers(meta);
       // A gone client's degradations are no longer live signal for health.
       _clearClientDegraded(meta.id);
@@ -1623,14 +1691,7 @@ export function createWsManager(deps: WsDeps): WsManager {
 
     // Rate limiting — per-second counter (original behavior)
     meta.msgCount++;
-    if (!meta.msgResetTimer) {
-      meta.msgWindowStart = Date.now();
-      meta.msgResetTimer = setTimeout(() => {
-        meta.msgCount = 0;
-        meta.bytesThisSec = 0;
-        meta.msgResetTimer = undefined;
-      }, 1000);
-    }
+    if (!meta.msgResetTimer) openRateWindow(meta, wsBytesPerSec);
 
     // Reset global rolling-window counter once per second (lazy)
     if (!_globalRateTimer) {
@@ -1671,7 +1732,9 @@ export function createWsManager(deps: WsDeps): WsManager {
           } flagged — ${meta.consecutiveDrops} consecutive drops over its ` +
           `${wsRateLimit} msg/sec budget; closed${
             block.ms > 0
-              ? ` and ${meta.clientKey} blocked for ${block.ms / 1000}s ` +
+              ? ` and ${abuseBucket(meta.clientKey)} blocked for ${
+                block.ms / 1000
+              }s ` +
                 `(strike ${block.strike}; a repeat within ` +
                 `${ABUSE_STRIKE_MEMORY_MS / 60_000} min doubles it, up to ` +
                 `${ABUSE_DENYLIST_MS / 1000}s)`
@@ -1884,6 +1947,12 @@ export function createWsManager(deps: WsDeps): WsManager {
     // pacer and re-sent it 8 times, and every other call on that socket waited
     // behind it (a 1.5 MB put against 1 MB/s: rejected after 8.8 s, an
     // unrelated `inc()` answered after 9.9 s, 17 server errors).
+    // "Too big for the whole budget" is judged in UTF-16 units, like
+    // `maxMessageBytes` above: 1.0.12 took a non-ASCII frame of up to
+    // `bytesPerSec` units, and an app with `{ maxMessageBytes: N,
+    // bytesPerSec: N }` must keep taking it — never refuse FOREVER what used
+    // to pass.
+    // aio-ok(utf16-bytes): UTF-16 units on purpose (compat, as maxMessageBytes)
     if (e.data.length > wsBytesPerSec) {
       const msg = `ws: frame of ${
         (e.data.length / 1_000_000).toFixed(1)
@@ -1910,12 +1979,27 @@ export function createWsManager(deps: WsDeps): WsManager {
       );
       return;
     }
+    // The ROLLING budget is CHARGED in UTF-8 bytes: charged in UTF-16 units, a
+    // stream of non-ASCII frames (CJK text, emoji) cost a third of its size
+    // and a connection could send ~3x its per-second budget. What a frame
+    // costs beyond one window is DEBT, paid down one budget per window
+    // (`openRateWindow`), so sustained throughput stays within the budget.
+    //
+    // ADMISSION is the 1.0.12 test, in UTF-16 units: a frame is taken when the
+    // charge so far leaves room for its length. Admitting a frame bigger than
+    // the budget in UTF-8 only at a charge of exactly zero starved it: any
+    // unpaced frame (a vitals ping, the sync engine) landing after a reset
+    // refused it again, and after the client's retry cap the call failed —
+    // one 1.0.12 took.
+    //
     // NOT charged when refused: a dropped frame cost the server nothing, and
     // counting it refused every frame behind it for the rest of the window
     // (the 100-byte `inc()` above was refused with the 1.5 MB put, each time).
+    const charge = utf8Size(e.data);
+    // aio-ok(utf16-bytes): 1.0.12's admission, in units on purpose (see above)
     if (meta.bytesThisSec + e.data.length > wsBytesPerSec) {
       const msg = `ws: byte rate exceeded for ${meta.id.slice(0, 8)} (${
-        ((meta.bytesThisSec + e.data.length) / 1_000_000).toFixed(1)
+        ((meta.bytesThisSec + charge) / 1_000_000).toFixed(1)
       }MB/s)`;
       log.error("ws", msg);
       writeClientLog(meta.index, {
@@ -1934,11 +2018,16 @@ export function createWsManager(deps: WsDeps): WsManager {
         `raise it with aio.run({ wsLimits: { bytesPerSec: N } }) — a photo is ` +
           `base64'd and JSON-wrapped on the way here, so it arrives about ` +
           `1.35x its size on disk`,
-        retryAfter(meta.msgWindowStart),
+        byteRetryAfter(
+          meta.msgWindowStart,
+          meta.bytesThisSec,
+          e.data.length,
+          wsBytesPerSec,
+        ),
       );
       return;
     }
-    meta.bytesThisSec += e.data.length;
+    meta.bytesThisSec += charge;
 
     // v2 envelope demux (B4b): every frame is {v:2, t, d} — one decode,
     // one switch. A legacy v1 hello (`__proto:{...}`) is answered with the

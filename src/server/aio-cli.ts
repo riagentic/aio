@@ -27,7 +27,7 @@ import { BUILD_BOOL_FLAGS, BUILD_VALUE_FLAGS } from "../build/build-flags.ts";
  *  annotation is a WIDENING for every consumer — with the literal type,
  *  `VERSION === "1.0.0-alpha76"` was a compile error for having no overlap;
  *  now it is an ordinary comparison. */
-export const VERSION: string = "1.0.12-beta";
+export const VERSION: string = "1.0.13-beta";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *
@@ -515,6 +515,16 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
           (m[2] ?? "b").toLowerCase() as "b" | "kb" | "mb" | "gb"
         ];
         r.logBudget = Math.floor(Number(m[1]) * mult);
+        // 0 is the documented "unlimited" — only when it was SAID. A budget
+        // under one byte (`0.5`, `0.4B`) floored to 0 and silently removed
+        // the ceiling the flag was written to set.
+        if (r.logBudget === 0 && Number(m[1]) !== 0) {
+          throw badValue(
+            "--log-budget",
+            raw,
+            "at least 1 byte (0 alone means unlimited), e.g. --log-budget=200MB",
+          );
+        }
       } else {
         throw badValue(
           "--log-budget",

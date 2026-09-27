@@ -32,13 +32,21 @@ export type ElectronLineRoute =
   | { route: "drop" }
   /** Anything Electron/Chromium wrote on its own: passed through to stderr. */
   | { route: "raw"; text: string }
-  /** A renderer line the shell tagged: framework log at this level. */
-  | { route: RendererLevel; text: string };
+  /** A line the shell tagged: framework log at this level, under the log
+   *  category `from` — a renderer's, or the main process's own. */
+  | { route: RendererLevel; text: string; from: "renderer" | "electron" };
 
 /** The tag the generated shell writes — ONE spelling, read by `classify`. */
 export const RENDERER_TAG = "[aio:renderer:";
 
 const RENDERER_LINE = /^\[aio:renderer:(info|warn|error)\] (.*)$/s;
+
+/** The tag the main process's own `console.warn`/`console.error` carry
+ *  (`tmplCrashGuard`) — a packaged app has no terminal, so an untagged
+ *  `[aio:electron] … DENIED` line reached nobody. */
+export const MAIN_TAG = "[aio:main:";
+
+const MAIN_LINE = /^\[aio:main:(warn|error)\] (.*)$/s;
 
 /** Lines Electron's graphics stack emits while ENUMERATING devices, which say
  *  nothing about the app. Exact shapes only — see the file comment. */
@@ -52,7 +60,11 @@ export const GPU_PROBE_NOISE: readonly RegExp[] = [
 /** Sort one line of the Electron child's stderr. Pure. */
 export function classifyElectronLine(line: string): ElectronLineRoute {
   const m = RENDERER_LINE.exec(line);
-  if (m) return { route: m[1] as RendererLevel, text: m[2]! };
+  if (m) return { route: m[1] as RendererLevel, text: m[2]!, from: "renderer" };
+  const mm = MAIN_LINE.exec(line);
+  if (mm) {
+    return { route: mm[1] as RendererLevel, text: mm[2]!, from: "electron" };
+  }
   const t = line.trim();
   if (GPU_PROBE_NOISE.some((re) => re.test(t))) return { route: "drop" };
   return { route: "raw", text: line };

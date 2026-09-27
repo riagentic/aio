@@ -995,7 +995,7 @@ export async function setupTransport<S, A>(
 
   // Wire sync broadcast now that server handle is available. v2 parity:
   // UDS peers receive op broadcasts too (no per-conn exclude there — the
-  // client engine's self-origin guard absorbs own-op echoes).
+  // client engine folds an own-op echo once and its ack only confirms it).
   if (syncHandler) {
     syncBroadcastRef.fn = (msg, exclude) => {
       server.broadcastRaw(msg, exclude);

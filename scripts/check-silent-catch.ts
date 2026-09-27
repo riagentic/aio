@@ -50,14 +50,16 @@ import { justified as okMarker } from "../src/diagnostics/ok-marker.ts";
 // private-mode storage adopt (browser-storage) — absence is the wanted outcome.
 // 315 → 313 in 1.0.11: two fewer unjustified swallows after this release's
 // fixes (ratcheted to the measured count).
-const CEILING = 308;
+// 308 → 306 measured when the bug-class ratchets (check-proto-in and
+// friends) joined check:ratchets: the round's fixes had already removed two.
+const CEILING = 303;
 
 /** The budget for the PROMISE spelling, counted separately.
  *
  *  Separately because the two are one rule but not one number: folding 102
  *  pre-existing swallows into `CEILING` would move it upward, and this file's
  *  own contract is that it only ever moves down. Two ratchets, both falling. */
-const HANDLER_CEILING = 82;
+const HANDLER_CEILING = 77;
 
 const ROOT = new URL("../src/", import.meta.url).pathname;
 

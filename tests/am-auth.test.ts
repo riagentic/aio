@@ -11,7 +11,12 @@
 // What is asserted here is the CLI layer: that the operator's command actually
 // reaches those guarantees, that it edits the app it was asked to, and that the
 // generated password is one a person can be handed.
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "@std/assert";
 import { _generatePassword, cmdAuth } from "../src/am/am-cmd-auth.ts";
 import { appDirs } from "../src/server/app-dirs.ts";
 import { openUserStore } from "../src/server/auth-users.ts";
@@ -156,6 +161,48 @@ Deno.test("am auth: --app decides which database is written", async () => {
       a.close();
     }
   }, ["app-a", "app-b"]);
+});
+
+// ── seeding an SSO identity ──────────────────────────────────
+//
+// Under `auth.signup: false` the OIDC callback creates no accounts, and the
+// `oidc:` namespace is reserved from every anonymous door — so this console is
+// how an operator admits an SSO user ahead of their first login.
+
+Deno.test("am auth create: seeds an SSO (oidc:) identity that never verifies a password", async () => {
+  await withApp(async (appId) => {
+    const id = "oidc:idp.example:00uAlice";
+    const r = await run(["create", id, "--role=admin"], { app: appId });
+    assertEquals(r.code, null, r.errors.join("\n"));
+    const rec = json<{ id: string; role: string; password?: string }>(r);
+    assertEquals(rec.id, id);
+    assertEquals(rec.role, "admin");
+    assertEquals(rec.password, undefined, "no password to hand out");
+
+    // An SSO account asked for with a password is refused, not half-honoured.
+    const pw = await run(
+      ["create", "oidc:idp.example:bob", "--password=correct-horse-9"],
+      { app: appId },
+    );
+    assertEquals(pw.code, 1);
+    assertStringIncludes(pw.errors.join("\n") + pw.logs.join("\n"), "SSO");
+
+    // A folded spelling of the namespace is still reserved: only the exact
+    // prefix the callback mints is an SSO identity.
+    await assertRejects(
+      () => run(["create", "OIDC:idp.example:carol"], { app: appId }),
+      Error,
+      "reserved_id",
+    );
+
+    const users = openUserStore(appDirs(appId).authDb);
+    try {
+      assertEquals(users.list().map((u) => u.id), [id]);
+      assertEquals(await users.verify(id, "anything-at-all"), null);
+    } finally {
+      users.close();
+    }
+  });
 });
 
 Deno.test("am auth: an app with no auth.db is refused by name, with the fix", async () => {

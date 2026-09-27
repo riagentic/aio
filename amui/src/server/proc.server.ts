@@ -92,15 +92,24 @@ export async function startApp(
   /** The profile to boot under (`--profile=<name>`) — a restart of a
    *  profile instance must come back as that instance. */
   profile?: string,
+  /** The instance's data home and app id: a `--home=<dir>` instance records
+   *  its home but no profile, and a restart without it booted the DEFAULT
+   *  instance — another state.db under the same row. Passed as `--home` when
+   *  it is not the app's default home (the rule `am`'s stopCommandFor uses). */
+  instance?: { home?: string; appId?: string },
 ): Promise<{ ok: boolean; pid?: number; error?: string }> {
   const resolved = await resolveEntry(dir);
   if (!resolved.ok) return { ok: false, error: resolved.error };
   const entry = resolved.entry;
   const logFile = startLogPath(dir);
   const esc = (s: string) => "'" + s.replace(/'/g, "'\\''") + "'";
+  const home = !profile && instance?.home && instance.appId &&
+      normalize(instance.home) !== normalize(appDirs(instance.appId).home)
+    ? instance.home
+    : undefined;
   const inner = `deno run -A --unstable-kv ${esc(entry)} --client=${client}${
     profile ? ` ${esc(`--profile=${profile}`)}` : ""
-  }`;
+  }${home ? ` ${esc(`--home=${home}`)}` : ""}`;
   const cmd = `nohup ${inner} >${esc(logFile)} 2>&1 & echo $!`;
   try {
     const out = await new Deno.Command("sh", {

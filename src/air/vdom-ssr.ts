@@ -20,6 +20,7 @@ import {
 import { isDevMode } from "../state/dev-flag.ts";
 import {
   _assertAttrName,
+  _assertTagName,
   _classProp,
   _propAttr,
   _RESERVED_PROPS,
@@ -166,7 +167,12 @@ export function _renderPropsHtml(
       // Filtering the raw value (`!= null`, AIO-164) missed `false` and a
       // signal that resolves to null, and emitted `display:false`.
       const pairs = Object.entries(v as Record<string, unknown>)
-        .map(([sk, sv]) => [sk, _styleValue(sk, resolveSignalProp(sv))])
+        .map(([sk, sv]) => {
+          const r = resolveSignalProp(sv);
+          // NaN is no declaration: the client's `setProperty` drops the
+          // invalid `NaNpx`, so SSR writing it rendered a different element.
+          return [sk, _styleValue(sk, Number.isNaN(r) ? null : r)];
+        })
         .filter(([_, sv]) => sv !== "")
         .map(([sk, sv]) => `${_camelToKebab(sk!)}:${sv}`)
         .join(";");
@@ -885,6 +891,7 @@ function _rts(
   // Element
   nodes.n++;
   const tag = vnode.tag as string;
+  _assertTagName(tag); // pasted into markup below — see prop-write.ts
   const selfClosing = VOID_ELEMENTS.has(tag);
   // An <option> inside a <select> whose value it matches gains `selected` —
   // see `ssrOptionProps`. <select> itself has no `value` attribute, so

@@ -10,9 +10,11 @@
 // `get("k")` read 1 instead of 0.
 //
 // Differential: the same call sequence against the in-isolate harness and a
-// real worker; every reading must agree. Readings are taken after a timer
-// tick: the worker reports an adopted call one thread hop after the call is
-// posted, and a read in the same synchronous turn as the call still sees it.
+// real worker; every reading must agree. Readings are taken after a ROUND
+// TRIP (`ping`): the worker reports an adopted call or a ttl hit one thread
+// hop after the call is posted, and until that report lands the owner still
+// counts it — as it must, since only the worker knows. A reading one timer
+// tick after the call raced that hop under load (a ttl hit read 1).
 import { assert, assertEquals } from "@std/assert";
 import { testServer } from "../src/testing/server-test.ts";
 import { wpp } from "./fixtures/worker-pending-policy-app.ts";
@@ -21,38 +23,41 @@ const ENTRY = import.meta.resolve("./fixtures/worker-pending-policy-app.ts");
 
 type W = {
   scan: (k: string) => Promise<string>;
+  open: (k: string) => Promise<void>;
+  ping: () => Promise<void>;
   get: (k: string) => Promise<string>;
   runs: number;
   $pending: (m?: string) => number;
 };
 const C = wpp as unknown as W;
-const tick = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** Every report the executor posted before now has landed. */
+const settled = () => C.ping();
 
 async function readings(): Promise<Record<string, unknown>> {
   const out: Record<string, unknown> = {};
   // `first`: two overlapping identical calls — one runs, one adopts.
   const a = C.scan("a");
   const b = C.scan("a");
-  await tick(30);
+  await settled();
   out.firstShared = C.$pending("scan");
   const c = C.scan("b"); // different args — a second RUNNING call
-  await tick(10);
+  await settled();
   out.firstDistinct = C.$pending("scan");
   // The shared pair settles while "b" still runs: exactly one left. (An
   // adopter released twice — once when adopted, again when its outcome
   // lands — took "b" off the count while it was still running.)
+  await C.open("a");
   const pair = await Promise.all([a, b]);
-  await tick(5);
+  await settled();
   out.pairDone = C.$pending("scan");
+  await C.open("b");
   out.scanResults = [...pair, await c];
-  await tick(10);
+  await settled();
   out.scanAfter = C.$pending("scan");
   // `ttl`: the first call runs, a repeat within the ttl is a cache hit.
   out.getMiss = await C.get("k");
   const hit = C.get("k");
-  await tick(1);
-  out.ttlHitTick = C.$pending("get");
-  await tick(20);
+  await settled();
   out.ttlHit = C.$pending("get");
   out.getHit = await hit;
   out.getAfter = C.$pending("get");

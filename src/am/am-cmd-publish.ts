@@ -22,17 +22,19 @@
 
 import { join, resolve } from "@std/path";
 import type { GlobalFlags } from "./am-types.ts";
-import { PLATFORMS } from "../build/platforms.ts";
+import { hostPlatform, PLATFORMS } from "../build/platforms.ts";
 import { detectMode, fail, out, sayErr } from "./am-output.ts";
 import { readDenoJson } from "../server/deno-json.ts";
 import {
   artifactFormat,
   type DataContract,
   defaultKeyPath,
+  kindManifestFileName,
   manifestFileName,
+  probeArtifact,
   resolveSigningKey,
-  shipApp,
   type ShipManifest,
+  shipRelease,
 } from "../build/ship.ts";
 import { appIdFromConfig } from "../server/single-instance-lock.ts";
 import { count } from "../diagnostics/fmt.ts";
@@ -46,6 +48,8 @@ type BuildManifest = {
   commit?: string | null;
   dirty?: boolean;
   buildNumber?: number;
+  /** The platform the build ran on (`hostPlatform()` there). */
+  builtOn?: string;
   targets?: {
     target: string;
     ok?: boolean;
@@ -56,24 +60,80 @@ type BuildManifest = {
   }[];
 };
 
-/** Is this file a runnable program, rather than a companion the build wrote
- *  beside one (a systemd unit, a checksum, a desktop entry)?
+/** What KIND of artifact this file is (`artifactFormat`), or null for a
+ *  companion the build wrote beside one (a systemd unit, a checksum, a desktop
+ *  entry).
  *
- *  Read from the file's own first bytes, not from its name or its target: the
- *  set of companion files grows, and a rule keyed on extensions would have to
- *  grow with it silently. An unreadable file is treated as a program so the
- *  refusal comes from `shipApp`, which can say why. */
-function isProgram(path: string): boolean {
-  let head: Uint8Array;
+ *  Read from the file's own bytes, not from its name or its target: the set of
+ *  companion files grows, and a rule keyed on extensions would have to grow
+ *  with it silently. The first 8 bytes AND the last 512: a `.dmg` is known only
+ *  by its `koly` trailer, so a head-only read put every DMG in `skipped` and a
+ *  release shipped without macOS. An unreadable file answers "program" so the
+ *  refusal comes from `shipApp`, which can say why.
+ *
+ *  @internal exported for tests. */
+export function fileFormat(path: string): string | null {
   try {
     using f = Deno.openSync(path, { read: true });
-    head = new Uint8Array(8);
-    const n = f.readSync(head) ?? 0;
-    head = head.subarray(0, n);
+    const size = f.statSync().size;
+    const read = (at: number, len: number) => {
+      const b = new Uint8Array(len);
+      f.seekSync(at, Deno.SeekMode.Start);
+      let n = 0;
+      while (n < len) {
+        const got = f.readSync(b.subarray(n));
+        if (got === null) break;
+        n += got;
+      }
+      return b.subarray(0, n);
+    };
+    // Head + tail laid end to end keeps the trailer exactly 512 bytes from
+    // the end, which is where `artifactFormat` looks for it.
+    const bytes = size <= 520
+      ? read(0, size)
+      : new Uint8Array([...read(0, 8), ...read(size - 512, 512)]);
+    return artifactFormat(bytes);
   } catch {
-    return true; // aio-ok: unreadable here means shipApp reports it, with the path
+    return "unreadable"; // aio-ok: unreadable here means shipApp reports it, with the path
   }
-  return artifactFormat(head) !== null;
+}
+
+/** Of the programs ONE target built for ONE platform, the one the update
+ *  manifest carries — the rest are published beside it for download only.
+ *
+ *  The manifest names one artifact, and an install accepts only its own shape
+ *  (`installableTargets`). The Windows Electron target builds two: the
+ *  self-contained `.exe` — the double-click download, which runs offline and
+ *  installs as `binary` — and the `.zip` a user must unpack first. The one a
+ *  user runs is the one that must update, so an archive loses to a program
+ *  that runs as it is. Any other tie is refused by file name: guessing would
+ *  sign the wrong install strategy. Pure. */
+export function pickUpdateArtifact(
+  files: string[],
+): { file: string; downloads: string[] } | { error: string } {
+  const runnable = files.filter((f) => !/\.zip$/i.test(f));
+  const pool = runnable.length > 0 ? runnable : files;
+  if (pool.length !== 1) {
+    return {
+      error: `it built ${choiceList(pool, (f) => f, "and")} for one ` +
+        `platform, and an update manifest carries ONE artifact — build ` +
+        `them as separate targets, then pick one with --target=`,
+    };
+  }
+  return { file: pool[0]!, downloads: files.filter((f) => f !== pool[0]) };
+}
+
+/** `"a", "b" and "c"` — each value ONCE. A choice offered as the same string
+ *  twice ("--target=electron (or --target=electron)") is no choice. Pure. */
+export function choiceList(
+  values: string[],
+  show: (v: string) => string,
+  last: "and" | "or",
+): string {
+  const u = [...new Set(values)].map(show);
+  return u.length < 2
+    ? u.join("")
+    : `${u.slice(0, -1).join(", ")} ${last} ${u.at(-1)}`;
 }
 
 /** Run a command with the user's terminal attached — a build prints its own
@@ -101,11 +161,85 @@ const PUBLISH_VALUE_FLAGS: readonly string[] = [
   "--min-from",
 ];
 
+/** Ask a Mac-built `.app.tar.gz` its data contract: unpack it and run the
+ *  bundle's own executable (`CFBundleExecutable` — the aio server binary, see
+ *  macos-app.ts) with `--aio-data-contract`, exactly as a host binary is
+ *  asked. Only on a Mac: the executable is a Mach-O. Throws with the reason. */
+async function probeMacApp(
+  archive: string,
+): Promise<{ contract: DataContract; appId?: string }> {
+  const dir = await Deno.makeTempDir({ prefix: "aio-publish-app-" });
+  try {
+    const tar = await new Deno.Command("tar", {
+      args: ["-xzf", archive, "-C", dir],
+      stdout: "null",
+      stderr: "piped",
+    }).output();
+    if (!tar.success) {
+      throw new Error(
+        `${archive} did not unpack (tar exit ${tar.code}): ${
+          new TextDecoder().decode(tar.stderr).trim()
+        }`,
+      );
+    }
+    const app = [...Deno.readDirSync(dir)].find((e) =>
+      e.isDirectory && e.name.endsWith(".app")
+    );
+    if (!app) throw new Error(`${archive} holds no top-level .app bundle`);
+    const contents = join(dir, app.name, "Contents");
+    const exe = /<key>CFBundleExecutable<\/key>\s*<string>([^<]+)<\/string>/
+      .exec(await Deno.readTextFile(join(contents, "Info.plist")))?.[1];
+    if (!exe) {
+      throw new Error(
+        `${archive}: ${app.name}/Contents/Info.plist names no CFBundleExecutable`,
+      );
+    }
+    return await probeArtifact(join(contents, "MacOS", exe));
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+}
+
+/** Why an artifact cannot be asked its data contract on THIS machine — the
+ *  reason the no-contract warning prints, per file. Pure. */
+export function notProbedHere(a: {
+  file: string;
+  format: string | null;
+  platform: string;
+  builtOn?: string;
+  here: string;
+}): string {
+  if (/\.app\.tar\.gz$/i.test(a.file)) {
+    return a.here.startsWith("macos")
+      ? `a ${
+        a.platform === "host"
+          ? `.app built on ${a.builtOn ?? "another Mac"}`
+          : `${a.platform} .app`
+      }, and this Mac is ${a.here}`
+      : `a signed .app packed as an archive — only a Mac can unpack and ` +
+        `run it, and this machine is ${a.here}`;
+  }
+  if (a.format === "ZIP" || a.format === "gzip") {
+    return `an archive, not a program`;
+  }
+  if (a.platform !== "host" && a.platform !== a.here) {
+    return `built for ${a.platform}, and this machine is ${a.here}`;
+  }
+  if (a.builtOn && a.builtOn !== a.here) {
+    return `built on ${a.builtOn}, and this machine is ${a.here}`;
+  }
+  return `the build recorded it as not runnable on the machine that built it`;
+}
+
+/** `am publish`. `deps.hostPlatform` is a test seam (a Mac publish on
+ *  Linux); every real call takes the default. @internal */
 export async function cmdPublish(
   args: string[],
   flags: GlobalFlags,
+  deps: { hostPlatform?: () => string } = {},
 ): Promise<void> {
   const mode = detectMode(flags);
+  const here = (deps.hostPlatform ?? hostPlatform)();
   const flag = (k: string) =>
     args.find((a) => a.startsWith(`--${k}=`))?.slice(k.length + 3);
   // Every value is read as `--k=v` only, so `--channel beta` (space) left
@@ -121,7 +255,7 @@ export async function cmdPublish(
       `am publish takes no arguments (got ${
         stray.map((a) => JSON.stringify(a)).join(" ")
       }) — every setting is a --flag=value: --channel= --dir= --targets= ` +
-        `--target= --key= --notes= --version= --min-from= --data=`,
+        `--target= --key= --notes= --version= --min-from= --data= --no-data`,
       mode,
     );
   }
@@ -192,66 +326,144 @@ export async function cmdPublish(
   const publishing: {
     target: string;
     file: string;
-    host: boolean;
+    /** How THIS machine asks it its data contract: run it (`exec`), unpack
+     *  the `.app` and run its executable (`app`), or not at all (`null`). */
+    probe: "exec" | "app" | null;
+    /** Why `probe` is null — said in the no-contract warning. */
+    why: string;
     platform?: { os: string; arch: string };
+    /** A second install kind's own manifest name (the Windows `.zip`). */
+    manifestName?: string;
   }[] = [];
   const skipped: string[] = [];
+  /** Published beside the manifests for download only: first-install images
+   *  (`.dmg`), which no update target installs, and a platform's other
+   *  programs (see {@link pickUpdateArtifact}). */
+  const downloads: { file: string; platform: string }[] = [];
   const only = flag("target");
   /** An explicitly supplied data contract — see the spread in `shipApp` below. */
   const dataFlag = flag("data");
+  /** Publish without a contract on purpose — `aio ship`'s own hatch. */
+  const noData = args.includes("--no-data");
   for (const t of built) {
     if (only && t.target !== only) continue;
+    // A fleet entry can produce COMPANION files beside its program — the
+    // `server`/`server-app` targets emit a systemd `.service` unit next to
+    // the binary. Only a runnable program is a release artifact: a companion
+    // claiming a platform made the guard below read ONE target as two
+    // competitors and refuse with a message suggesting the flag that was
+    // already in effect ("both build for linux … --target=server (or
+    // --target=server)"), which made `server` and `server-app` impossible to
+    // publish at all. `artifactFormat` is the same decider `shipApp` uses to
+    // refuse a non-program artifact, so the two cannot disagree about what a
+    // program is.
+    const programs: string[] = [];
     for (const a of t.artifacts ?? []) {
-      // A fleet entry can produce COMPANION files beside its program — the
-      // `server`/`server-app` targets emit a systemd `.service` unit next to
-      // the binary. Only a runnable program is a release artifact: a companion
-      // claiming a platform made the guard below read ONE target as two
-      // competitors and refuse with a message suggesting the flag that was
-      // already in effect ("both build for linux … --target=server (or
-      // --target=server)"), which made `server` and `server-app` impossible to
-      // publish at all. `artifactFormat` is the same decider `shipApp` uses to
-      // refuse a non-program artifact, so the two cannot disagree about what a
-      // program is.
-      if (!isProgram(join(distDir, a.file))) {
-        skipped.push(a.file);
-        continue;
-      }
-      const key = t.platform ?? "host";
-      const owner = claims.get(key);
-      if (owner !== undefined) {
-        fail(
-          `targets "${owner}" and "${t.target}" both build for ${key}, and an ` +
-            `update client fetches ONE manifest per platform ` +
-            `(<channel>/<os>-<arch>.json) — publishing both would leave only ` +
-            `the last one.\n` +
-            `Pick which one this channel serves: am publish --target=${t.target}` +
-            ` (or --target=${owner}).`,
-          mode,
-        );
-      }
-      claims.set(key, t.target);
+      const format = fileFormat(join(distDir, a.file));
+      if (format === null) skipped.push(a.file);
+      else if (format === "DMG") {
+        downloads.push({ file: a.file, platform: t.platform ?? "host" });
+      } else programs.push(a.file);
+    }
+    if (programs.length === 0) continue;
+    // …and ONE target can build two PROGRAMS for one platform: Windows
+    // Electron is the self-contained `.exe` AND the `.zip`. Claiming the
+    // platform per artifact read that as two targets and refused with
+    // "--target=electron (or --target=electron)" — no Windows release at all.
+    const pick = pickUpdateArtifact(programs);
+    if ("error" in pick) fail(`target "${t.target}": ${pick.error}`, mode);
+    const key = t.platform ?? "host";
+    // `PLATFORMS` is the same table the build resolved this artifact from,
+    // so the manifest cannot disagree with the binary about what it is for.
+    // An unknown name yields undefined and `shipApp` falls back to the host
+    // — which is right for a single-platform build and is what it did
+    // before this existed.
+    const platform = PLATFORMS[key]
+      ? { os: PLATFORMS[key]!.os, arch: PLATFORMS[key]!.arch }
+      : undefined;
+    // A `.zip` beside a program (Windows Electron) is ANOTHER install kind of
+    // the same platform: an install unpacked from it is `electron-zip` and
+    // refuses the program's `binary` release. It gets its own manifest,
+    // `<os>-<arch>.electron-zip.json`, which a zip install reads first.
+    const zips = pick.downloads.filter((f) => /\.zip$/i.test(f));
+    downloads.push(
+      ...pick.downloads.filter((f) => !zips.includes(f)).map((file) => ({
+        file,
+        platform: key,
+      })),
+    );
+    for (const file of zips) {
       publishing.push({
         target: t.target,
-        file: a.file,
-        host: t.host !== false,
-        // `PLATFORMS` is the same table the build resolved this artifact from,
-        // so the manifest cannot disagree with the binary about what it is for.
-        // An unknown name yields undefined and `shipApp` falls back to the host
-        // — which is right for a single-platform build and is what it did
-        // before this existed.
-        platform: PLATFORMS[t.platform ?? ""]
-          ? {
-            os: PLATFORMS[t.platform!]!.os,
-            arch: PLATFORMS[t.platform!]!.arch,
-          }
-          : undefined,
+        file,
+        probe: null,
+        why: `an archive, not a program`,
+        platform,
+        manifestName: kindManifestFileName(
+          platform ?? { os: Deno.build.os, arch: Deno.build.arch },
+          "electron-zip",
+        ),
       });
     }
+    const owner = claims.get(key);
+    if (owner !== undefined) {
+      fail(
+        `targets ${
+          choiceList([owner, t.target], (x) => `"${x}"`, "and")
+        } build for ${key}, and an update client fetches ONE manifest per ` +
+          `platform (<channel>/<os>-<arch>.json) — publishing both would ` +
+          `leave only the last one.\n` +
+          (owner === t.target
+            ? `dist/manifest.json records "${owner}" twice for ${key} — ` +
+              `rebuild (deno task build) and publish that.`
+            : `Pick which one this channel serves: am publish ${
+              choiceList([t.target, owner], (x) => `--target=${x}`, "or")
+            }.`),
+        mode,
+      );
+    }
+    claims.set(key, t.target);
+    // Can THIS machine ask it its data contract? `host` is the build
+    // machine's answer: a dist/ built on a Mac and published from Linux
+    // claimed it, and an archive is not a program on any machine — both were
+    // exec'd and refused as a "BROKEN BUILD" (measured: a native Mac build).
+    // A Mac-built `.app.tar.gz` published ON a Mac of its platform is asked
+    // through its unpacked bundle — it used to go out with no contract, and
+    // every Mac install holding data refused every release.
+    const format = fileFormat(join(distDir, pick.file));
+    // `host` is the BUILD machine, which is this one only if it built it.
+    const runsHere = key === here ||
+      (key === "host" && (build!.builtOn ?? here) === here);
+    const probe = /\.app\.tar\.gz$/i.test(pick.file)
+      ? (runsHere && here.startsWith("macos") ? "app" : null)
+      : t.host !== false && (build!.builtOn ?? here) === here &&
+          !["gzip", "ZIP"].includes(format ?? "")
+      ? "exec"
+      : null;
+    publishing.push({
+      target: t.target,
+      file: pick.file,
+      probe,
+      why: notProbedHere({
+        file: pick.file,
+        format,
+        platform: key,
+        builtOn: build!.builtOn,
+        here,
+      }),
+      platform,
+    });
   }
   if (publishing.length === 0) {
     fail(
-      `no artifact for --target=${only} in ${join(distDir, "manifest.json")} ` +
-        `— it holds: ${built.map((t) => t.target).join(", ")}`,
+      `no updatable artifact${only ? ` for --target=${only}` : ""} in ${
+        join(distDir, "manifest.json")
+      } — it holds: ${built.map((t) => t.target).join(", ")}` +
+        (downloads.length > 0
+          ? ` (only first-install images: ${
+            downloads.map((d) => d.file).join(", ")
+          } — build with a Mac host so the signed .app.tar.gz is made too)`
+          : ""),
       mode,
     );
   }
@@ -267,13 +479,40 @@ export async function cmdPublish(
   // Windows or macOS install holding data refused every release forever, with
   // a message telling the publisher to re-publish with `aio ship` — which is
   // what they had just done.
+  //
+  // A Mac `.app` nobody here can ask, with no other artifact to derive the
+  // contract from, is refused the way `aio ship` refuses a binary it cannot
+  // probe: without a contract every Mac install holding data refuses every
+  // release. `--data` / `--no-data` are the explicit ways out.
+  const macBlind = publishing.filter((p) =>
+    p.probe === null && /\.app\.tar\.gz$/i.test(p.file)
+  );
+  if (
+    macBlind.length > 0 && !dataFlag && !noData &&
+    !publishing.some((p) => p.probe !== null)
+  ) {
+    fail(
+      `${macBlind.map((p) => p.file).join(", ")}: ${
+        macBlind[0]!.why
+      } — so this release cannot say what it does with existing data, and ` +
+        `no other artifact of this build runs here to answer for it.\n` +
+        `       Publishing anyway is allowed but NOT the default: a manifest ` +
+        `with no data contract is refused by every install that already has ` +
+        `data, on every machine, silently.\n` +
+        `       Fix: publish from a Mac, or run \`<X.app>/Contents/MacOS/<bin> ` +
+        `--aio-data-contract > contract.json\` on one and pass ` +
+        `--data=contract.json — or --no-data publishes without a contract on ` +
+        `purpose.`,
+      mode,
+    );
+  }
   await Deno.mkdir(join(outDir, channel), { recursive: true });
   // Manifest AND the spec that produced it, together — the two used to be
   // parallel arrays indexed by position, which the host-first ordering below
   // would silently misalign.
   const shipped: { m: ShipManifest; spec: typeof publishing[number] }[] = [];
   const ordered = [...publishing].sort((a, b) =>
-    a.host === b.host ? 0 : a.host ? -1 : 1
+    (a.probe === null) === (b.probe === null) ? 0 : a.probe !== null ? -1 : 1
   );
   let hostContract: DataContract | undefined;
   const stamped: string[] = [];
@@ -281,7 +520,12 @@ export async function cmdPublish(
     const binaryPath = join(distDir, p.file);
     let m: ShipManifest;
     try {
-      m = await shipApp({
+      // An explicit --data / --no-data is the operator's answer: the bundle
+      // is not asked over it.
+      const probed = p.probe === "app" && !dataFlag && !noData
+        ? await probeMacApp(binaryPath)
+        : undefined;
+      m = await shipRelease({
         binaryPath,
         // The version the BUILD resolved (dist/manifest.json), so the manifest
         // says what the artifact says. A pre-versioning dist/ has none; ship
@@ -306,6 +550,7 @@ export async function cmdPublish(
         // the platform inside the signature too, so the wrong one is refused
         // even when the path happens to resolve.
         ...(p.platform ? { platform: p.platform } : {}),
+        ...(p.manifestName ? { manifestName: p.manifestName } : {}),
         // A cross-compiled artifact cannot be asked what it does with data — it
         // does not run here. It does not have to be asked: a host artifact of the
         // SAME build already answered. Only when there is no host artifact at all
@@ -319,8 +564,11 @@ export async function cmdPublish(
         // holding data refused the release forever — the precise failure this
         // command exists to eliminate. An explicit contract outranks the
         // derived one: it is the operator stating the fact.
-        ...(p.host
-          ? {}
+        // A directly-run artifact is asked by `shipRelease` itself — unless
+        // --data / --no-data answered, as for a `.app`.
+        ...(p.probe === "exec" && !dataFlag && !noData ? {} : probed
+          // …and the id it runs as, so the release name is checked against it.
+          ? { data: probed.contract, runsAs: probed.appId }
           : dataFlag
           ? { dataPath: dataFlag }
           : hostContract
@@ -332,8 +580,8 @@ export async function cmdPublish(
       // the fix in it — print it, never a stack.
       fail(e instanceof Error ? e.message : String(e), mode);
     }
-    if (p.host && m!.data && !hostContract) hostContract = m!.data;
-    if (!p.host && hostContract) stamped.push(p.file);
+    if (p.probe !== null && m!.data && !hostContract) hostContract = m!.data;
+    if (p.probe === null && hostContract) stamped.push(p.file);
     const mm = m!;
     // …and the artifact itself. A channel directory with a manifest and no
     // binary is a 404 at download time, which is the half-publish the docs'
@@ -341,6 +589,13 @@ export async function cmdPublish(
     await Deno.copyFile(binaryPath, join(outDir, channel, p.file));
     shipped.push({ m: mm, spec: p });
   }
+  for (const d of downloads) {
+    await Deno.copyFile(join(distDir, d.file), join(outDir, channel, d.file));
+  }
+  // A download whose platform got NO manifest: those installs never update.
+  const stranded = downloads.filter((d) => !claims.has(d.platform)).map((d) =>
+    d.file
+  );
   const manifests = shipped.map((x) => x.m);
 
   const rel = (p: string) => p.replace(root + "/", "");
@@ -354,6 +609,12 @@ export async function cmdPublish(
       `am publish: ✓ signed with ${key.path} (the ship keygen default; --key=<path> picks another)`,
     );
   }
+  // A platform whose installs can never update is said on stderr in every
+  // mode — never only inside the JSON.
+  if (stranded.length > 0) sayErr(strandedWarning(stranded));
+  // …and so is a release with NO data contract, with the reason per file.
+  const blind = shipped.filter((x) => !x.m.data).map((x) => x.spec);
+  if (blind.length > 0) sayErr(noContractWarning(blind, noData));
   if (mode === "json") {
     out({
       channel,
@@ -368,12 +629,29 @@ export async function cmdPublish(
       // The same fact the text output prints: a scripted publisher must be
       // able to see what was built and NOT published.
       skipped,
+      /** Copied beside the manifests for download only — no manifest names
+       *  them (a `.dmg`, the Windows `.zip`). */
+      downloads: downloads.map((d) => d.file),
+      /** Downloads whose platform has no update manifest in this release. */
+      stranded,
+      /** Kind manifests (`<os>-<arch>.electron-zip.json`): read by zip
+       *  installs on aio ≥ 1.0.13-beta. A zip install on an older aio reads
+       *  only the platform manifest and cannot install it — stranded until
+       *  updated by hand once. */
+      kindManifests: shipped.flatMap((x) =>
+        x.spec.manifestName ? [join(channel, x.spec.manifestName)] : []
+      ),
       releases: manifests.map((m, i) => ({
         target: shipped[i]!.spec.target,
         name: m.name,
         version: m.version,
         platform: m.platform,
-        manifest: join(channel, manifestFileName(m.platform)),
+        /** What installs it: `binary`, `electron-zip`, `electron-app`, … */
+        kind: m.target,
+        manifest: join(
+          channel,
+          shipped[i]!.spec.manifestName ?? manifestFileName(m.platform),
+        ),
         artifact: join(channel, shipped[i]!.spec.file),
         data: m.data ? Object.keys(m.data.cells).length : null,
       })),
@@ -387,7 +665,9 @@ export async function cmdPublish(
     }/${channel}/`,
     ...manifests.flatMap((m, i) => [
       `    ${shipped[i]!.spec.file}`,
-      `    ${manifestFileName(m.platform)}  (${shipped[i]!.spec.target}, ${
+      `    ${shipped[i]!.spec.manifestName ?? manifestFileName(m.platform)}  (${
+        shipped[i]!.spec.target
+      }, ${m.target}, ${
         m.data
           ? `${count(Object.keys(m.data.cells).length, "cell")} declared`
           : "data NOT declared"
@@ -412,21 +692,35 @@ export async function cmdPublish(
         ``,
       ]
       : []),
-    ...(manifests.some((m) => !m.data)
+    // A second install kind's manifest is read only by clients that know to
+    // ask for it (1.0.13-beta on); an older zip install still reads the
+    // platform's own manifest and is offered nothing it can install.
+    ...(shipped.some((x) => x.spec.manifestName)
       ? [
-        `  ⚠ published WITHOUT a data contract: ` +
-        shipped.filter((x) => !x.m.data).map((x) => x.spec.file).join(", ") +
-        ` — no artifact of this build runs on this machine, so nothing could ` +
-        `be asked what it does with persisted data. Every install that ALREADY ` +
-        `HAS data will refuse these releases. Publish from a machine that can ` +
-        `run one of them, or pass --data=<contract.json>.`,
+        `  zip installs update from ` +
+        shipped.filter((x) => x.spec.manifestName).map((x) =>
+          x.spec.manifestName
+        ).join(", ") +
+        ` — a zip install running aio older than 1.0.13-beta reads the ` +
+        `platform's own manifest (the .exe, kind binary) and cannot install ` +
+        `it: those installs are stranded until updated by hand once.`,
         ``,
       ]
       : []),
+    ...(downloads.length > 0
+      ? [
+        `  download only (no manifest names these — an installed app updates ` +
+        `from its platform's update artifact): ` +
+        downloads.map((d) => d.file).join(", "),
+        ``,
+      ]
+      : []),
+    // Loud, not a footnote: a built file that went out with no manifest may
+    // be a whole platform missing from this release.
     ...(skipped.length > 0
       ? [
-        `  not published (not a program — a companion file beside one): ` +
-        skipped.join(", "),
+        `  ⚠ NOT published (not a program aio recognises — a companion file, ` +
+        `or a platform this release is now missing): ${skipped.join(", ")}`,
         ``,
       ]
       : []),
@@ -435,6 +729,30 @@ export async function cmdPublish(
     ``,
   ];
   out(lines.join("\n"), mode);
+}
+
+/** The no-contract warning, one text for both output modes, the reason per
+ *  file. */
+export function noContractWarning(
+  files: { file: string; why: string }[],
+  onPurpose: boolean,
+): string {
+  return `am publish: warning: published WITHOUT a data contract: ${
+    files.map((f) => `${f.file} (${onPurpose ? "--no-data" : f.why})`).join(
+      ", ",
+    )
+  } — every install that ALREADY HAS data will refuse ${
+    files.length > 1 ? "these releases" : "this release"
+  }. Publish from a machine that can run one of them, or pass ` +
+    `--data=<contract.json>.`;
+}
+
+/** A first-install image published with no update artifact beside it. */
+export function strandedWarning(files: string[]): string {
+  return `am publish: warning: ${files.join(", ")} published as a download, ` +
+    `but its platform has NO update manifest — those installs will never ` +
+    `update. The signed .app.tar.gz is built only when a Mac signs the .app ` +
+    `(build.macos.host or AIO_MACOS_SSH).`;
 }
 
 /** The unsigned warning, one text for both output modes. */

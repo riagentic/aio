@@ -21,6 +21,7 @@ import {
   claimHome,
   instances,
   isHold,
+  isOwnLock,
   lockDir,
   type LockMeta,
   printable,
@@ -36,57 +37,10 @@ import { findUnserializable, PersistSerializeError } from "./persist-guard.ts";
 import { deepFreeze } from "../state/immutable.ts";
 import { detectShapeDrift } from "../state/cell-migrate.ts";
 
-/** Cache key for a user — a STABLE serialization of everything `ui.forUser`
- *  can observe, not just the id.
- *
- *  Keying on `user.id` alone was a cross-user leak: `resolveUser` may return
- *  `{id:"alice", role:"admin"}` for one token and `{id:"alice", role:"viewer"}`
- *  for another (impersonation, a role switch, a re-issued session, two devices
- *  with different scopes). `forUser` receives the WHOLE user object, so two
- *  users that differ anywhere are two different views — and the admin's view
- *  was being served to the viewer whenever no dispatch happened in between.
- *  The `""` bucket was worse still: every user-less caller (UDS, trojan,
- *  anonymous WS) shared one slot with any user whose id was empty.
- *
- *  Object keys are sorted so two structurally-equal users still share a slot,
- *  and the key is recomputed per call so an IN-PLACE mutation of a
- *  connection's user object (a role change on a live socket) invalidates it.
- *
- *  Cost: one JSON pass over a user record (a handful of small fields) per
- *  client per broadcast, against a `forUser` call that structuredClones and
- *  rewrites the whole cell slice — two to three orders of magnitude apart on
- *  any state worth memoizing. The memo keeps its purpose; it just can no
- *  longer answer a question it was not asked.
- *
- *  Returns null when the user cannot be serialized (cycles, exotic values) —
- *  the caller then SKIPS the cache entirely and recomputes. A cache miss costs
- *  time; a wrong cache hit costs someone else's data. */
-export function userMemoKey(user?: AioUser): string | null {
-  // "no user" is its OWN bucket, and cannot be spelled by any serialized user:
-  // every JSON.stringify of an object starts with "{".
-  if (user === undefined || user === null) return "no-user";
-  try {
-    const key = JSON.stringify(user, (_k, v) => {
-      // Values JSON drops or mangles become OBJECTS, never marker strings — a
-      // marker string could be forged by a user field holding that exact text,
-      // which would alias two different users into one cache slot.
-      if (v === undefined) return { __aioUndefined: true };
-      if (typeof v === "function") return { __aioFunction: true };
-      if (typeof v === "bigint") return { __aioBigInt: String(v) };
-      if (v && typeof v === "object" && !Array.isArray(v)) {
-        const sorted: Record<string, unknown> = {};
-        for (const k of Object.keys(v as Record<string, unknown>).sort()) {
-          sorted[k] = (v as Record<string, unknown>)[k];
-        }
-        return sorted;
-      }
-      return v;
-    });
-    return typeof key === "string" ? key : null;
-  } catch {
-    return null; // cyclic / unserializable → no caching, ever
-  }
-}
+// Moved to auth-context.ts, where the caller identity lives; re-exported for
+// its existing importers.
+import { userMemoKey } from "./auth-context.ts";
+export { userMemoKey };
 
 let _memoKeyWarned = false;
 
@@ -132,9 +86,21 @@ export function buildReportOpts<S>(opts: {
   onError: AioConfig<S, unknown, unknown>["onError"];
   getTT: () => TTState<S, { type: string }> | null;
   prod: boolean;
+  /** The app's `redactActions` — a redacted cell's slice of an error's state
+   *  snapshot is withheld from the console and the log files. */
+  redact?: Redactor;
 }): ReportErrorOpts {
+  const redact = opts.redact;
   return {
     onError: opts.onError,
+    ...(redact
+      ? {
+        redactState: (s: Record<string, unknown>) =>
+          _redactCheckpointState(s, redact),
+        redactAction: (type: string, payload: unknown) =>
+          hidesPayload(redact, type, payload),
+      }
+      : {}),
     // Asked AT EACH REPORT, like the getter below — and never asserted. In one
     // process a `logging: false` app falls back to another app's logger, and
     // when that app closes there is none: `getLogger()!.pub` threw inside
@@ -188,6 +154,15 @@ export function startVitalsCheck(opts: {
   /** THIS app's cell health rows (`AioConfig._cellHealth`). */
   cellHealth?: (state: Record<string, unknown>) => CellStatus[];
 }): ReturnType<typeof setInterval> {
+  // Past the ceiling — or at 0, a negative, NaN — setInterval fires every
+  // ~1 ms: a hot loop.
+  const period = capDelay(
+    "diagnostics vitals.heartbeatInterval",
+    opts.heartbeatInterval,
+    (m) => log.warn("vitals", m),
+    DEFAULT_HEARTBEAT_INTERVAL,
+    MIN_INTERVAL_MS,
+  );
   return setInterval(() => {
     opts.vitalsSystem.loopProbe.updateQueueDepth(
       opts.dispatch.getQueueDepth(),
@@ -204,7 +179,7 @@ export function startVitalsCheck(opts: {
       opts.vitalsSystem.loopProbe.updateCircuitBreakers(tripped);
     }
     opts.vitalsSystem.checkAndAlert();
-  }, opts.heartbeatInterval);
+  }, period);
 }
 
 /** The app object as the server holds it INTERNALLY.
@@ -692,7 +667,7 @@ export async function acquireSingletonLock(
   }
   appLock.attach(claim.close);
   const foreign = instances(appId).filter((i) =>
-    i.pid !== Deno.pid && resolve(i.home ?? "") !== appLock.home
+    !isOwnLock(i) && resolve(i.home ?? "") !== appLock.home
   );
   if (foreign.length > 0) {
     log.info(
@@ -738,7 +713,9 @@ import {
   purgeDisabledArtifacts,
 } from "../diagnostics/mod.ts";
 import { type Redactor, redactUrlToken } from "../diagnostics/redact.ts";
+import { hidesPayload } from "../diagnostics/logger-observe.ts";
 import { getLogDir } from "../diagnostics/logger-api.ts";
+import { _redactCheckpointState } from "../diagnostics/checkpoint.ts";
 import {
   DEV_DEFAULTS,
   type DiagnosticsOptions,
@@ -747,6 +724,8 @@ import {
 import { diagnosticsConfigProblems } from "./config.ts";
 import { teachMessage } from "../diagnostics/error.ts";
 import { createVitalsSystem } from "../vitals/mod.ts";
+import { capDelay, MIN_INTERVAL_MS } from "../state/timer-ceiling.ts";
+import { DEFAULT_HEARTBEAT_INTERVAL } from "../vitals/types.ts";
 
 /** Initialize diagnostics + vitals from config — returns hooks and vitals system */
 export function initDiagAndVitals(

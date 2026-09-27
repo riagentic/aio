@@ -50,6 +50,11 @@ server can serve. It is one rule, applied identically by the dev server
 (`baseDir`) and by every build target (`BuildConfig.appDir`), which is what
 makes dev and prod render the same page.
 
+The app icon is `icon.png` only (512×512 is a good size): every target's icon
+slot — window, taskbar, AppImage, `.icns`, Android launcher — needs a PNG. An
+`icon.svg` is not read, in dev or in the build. Both show the generated monogram
+and say so until `icon.png` exists.
+
 The consequence that surprises people: **move the entry deeper and you move the
 root with it.**
 

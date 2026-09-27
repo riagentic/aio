@@ -17,6 +17,7 @@ import { _resetInitialShapeKeys } from "../protocol/protocol-diagnostics.ts";
 import {
   _applyFullState,
   _getOrCreateCellSignal,
+  _serverDrivesCellSignal,
   _stateSignal,
 } from "./state-signals.ts";
 import { _accessedPaths, cancelSubsTimer } from "./state-subs.ts";
@@ -26,6 +27,8 @@ import { log } from "../diagnostics/logger-api.ts";
 // ── Module state ─────────────────────────────────────────────────────
 
 let _initialStateReceived = false;
+/** Deltas dropped before the first state since the last one; cleared by it. */
+let _resyncAsked = 0;
 let _readyResolve: ((state: any) => void) | null = null;
 let _readyPromise = new Promise<any>((resolve) => {
   _readyResolve = resolve;
@@ -49,10 +52,18 @@ export function handleMessage(data: any): HandleResult {
   // AIO-272: validate input — null/undefined messages crash transport
   if (!data || typeof data !== "object") return "noop";
   if (!_initialStateReceived) {
-    // Delta before first state — drop (reconnect race)
-    if (data.$patches) return "dropped";
+    // Delta before first state — drop (reconnect race), and ask for the
+    // full state like every other drop path: a transport whose state frame
+    // raced its open (IPC) otherwise dropped every later patch in silence.
+    if (data.$patches) {
+      // Once per 32 drops, not per drop: each ask costs the server a full
+      // snapshot, yet a lost ask must still be asked again.
+      if (_resyncAsked++ % 32 === 0) _requestResync();
+      return "dropped";
+    }
     const firstEver = _accessedPaths.size === 0;
     _initialStateReceived = true;
+    _resyncAsked = 0;
     _applyFullState(data);
     // Clear ONLY on the true first state of the session.
     //
@@ -161,6 +172,9 @@ export function handleMessage(data: any): HandleResult {
       batch(() => {
         _stateSignal.set(next);
         for (const cellName of changedCells) {
+          // A sync cell's signal is the engine's optimistic view — see
+          // `_serverDrivesCellSignal`.
+          if (!_serverDrivesCellSignal(cellName)) continue;
           // `_cellSignals` is a Map, so any cell name is a safe key there;
           // `__proto__` cannot reach this line (refused above). OWN keys only:
           // a removed cell named `constructor` must read as gone, not as
@@ -227,6 +241,7 @@ export function isInitialStateReceived(): boolean {
 /** Reset message handler state (for test isolation). */
 export function _resetMessageState(): void {
   _initialStateReceived = false;
+  _resyncAsked = 0;
   // The state-SHAPE memory is the same fact as `_initialStateReceived`: after
   // a reset the next full state re-baselines, so the shape it is compared
   // against must be the one that arrives, not the one from the run before.
@@ -254,4 +269,5 @@ export function _markInitialStateReceived(): void {
  *  Does NOT reset the ready promise — that stays resolved once fired. */
 export function _resetInitialStateFlag(): void {
   _initialStateReceived = false;
+  _resyncAsked = 0;
 }

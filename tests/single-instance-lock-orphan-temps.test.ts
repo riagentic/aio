@@ -13,6 +13,7 @@ import {
   lockDir,
   lockKey,
   lockPath,
+  ownPidTag,
 } from "../src/server/single-instance-lock.ts";
 
 function deadPid(): number {
@@ -31,18 +32,22 @@ Deno.test("lock: acquire sweeps a dead process's temp files, and only those", as
   const was = Deno.env.get("AIO_APPS_DIR");
   Deno.env.set("AIO_APPS_DIR", join(dir, "apps"));
   const live = new Deno.Command("sleep", { args: ["30"] }).spawn();
+  let planted: string[] = [];
   try {
     const home = join(dir, "home");
     const key = lockKey("orphans", home);
     const base = lockPath(key);
     await Deno.mkdir(lockDir(), { recursive: true });
     const dead = deadPid();
-    const orphans = [`${base}.${dead}.0a1b2c3d.tmp`];
+    // Named in OUR pid namespace: only there does a dead pid prove anything.
+    const ns = ownPidTag().slice(`${Deno.pid}`.length);
+    const orphans = [`${base}.${dead}${ns}.0a1b2c3d.tmp`];
     const kept = [
       `${base}.${live.pid}.0a1b2c3d.tmp`, // a live process, mid-publish
       join(lockDir(), `other.lock.${dead}.0a1b2c3d.tmp`), // another app's
     ];
-    for (const f of [...orphans, ...kept]) await Deno.writeTextFile(f, "x");
+    planted = [...orphans, ...kept];
+    for (const f of planted) await Deno.writeTextFile(f, "x");
     const lock = new AppLock("orphans", home);
     const r = await lock.acquire(0);
     try {
@@ -63,6 +68,9 @@ Deno.test("lock: acquire sweeps a dead process's temp files, and only those", as
   } finally {
     live.kill("SIGKILL");
     await live.status;
+    // The kept fixtures are the test's, not debris the lock may sweep: left
+    // behind, they keep the scoped lock dir from its exit prune.
+    for (const f of planted) await Deno.remove(f).catch(() => {});
     if (was === undefined) Deno.env.delete("AIO_APPS_DIR");
     else Deno.env.set("AIO_APPS_DIR", was);
   }

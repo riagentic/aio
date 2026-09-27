@@ -24,6 +24,7 @@ import { log } from "../diagnostics/logger-api.ts";
 import {
   instances,
   isLockOwnerAlive,
+  isOwnLock,
   type LockData,
   lockKey,
   ownerIdentity,
@@ -292,7 +293,7 @@ export async function restartForCellChange(
  *  holds none (an app booted with `singleton: false`) or it cannot be read. */
 function ownLock(): LockData | null {
   try {
-    const mine = instances().find((i) => i.pid === Deno.pid);
+    const mine = instances().find((i) => isOwnLock(i));
     return mine ? readLock(lockKey(mine.appId, mine.home, mine.profile)) : null;
   } catch {
     return null; // aio-ok: no lock dir — the supervisor runs without a slot
@@ -318,10 +319,12 @@ function fileChildPlaceholder(
   self: LockData,
   child: number,
   port: number | undefined,
+  waiting?: LockData["waiting"],
 ): string | null {
   try {
     const data: LockData = {
       ...self,
+      waiting,
       pid: child,
       port: port ?? self.port,
       status: "starting",
@@ -330,12 +333,14 @@ function fileChildPlaceholder(
       startEpoch: undefined,
       socketPath: undefined,
       trojanPort: undefined,
+      // The previous instance's hold file proves nothing about the child.
+      hold: undefined,
       ...ownerIdentity(child),
     };
     const seen = readLock(slotOf(self));
     const wrote = !seen
       ? replaceLockIf(null, data)
-      : seen.pid !== child && !isLockOwnerAlive(seen) &&
+      : !isOwnLock(seen, child) && !isLockOwnerAlive(seen) &&
         replaceLockIf(seen, data);
     // The BYTES written — what `replaceLockIf` stores — so only this exact
     // placeholder is ever taken back (see the removal after the child exits).
@@ -355,7 +360,7 @@ function rivalOf(self: LockData | null, child: number): LockData | null {
   if (!self) return null;
   try {
     const l = readLock(slotOf(self));
-    return l && l.pid !== child && l.pid !== Deno.pid && isLockOwnerAlive(l)
+    return l && !isOwnLock(l, child) && !isOwnLock(l) && isLockOwnerAlive(l)
       ? l
       : null;
   } catch {
@@ -385,13 +390,23 @@ async function superviseForever(
         `watcher and restart by hand.`,
     );
   }
-  const stop = { child: null as Deno.ChildProcess | null };
+  const stop = {
+    child: null as Deno.ChildProcess | null,
+    /** The lock bytes this supervisor filed for ITSELF while it waits for a
+     *  save (see the failed-restart branch) — taken back on the way out. */
+    waiting: null as string | null,
+  };
+  const dropWaiting = () => {
+    if (self && stop.waiting !== null) removeLockIf(slotOf(self), stop.waiting);
+    stop.waiting = null;
+  };
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
     try {
       Deno.addSignalListener(sig, () => {
         try {
           stop.child?.kill(sig);
         } catch { /* already gone */ }
+        dropWaiting();
         Deno.exit(0);
       });
     } catch { /* signal not supported here */ }
@@ -425,7 +440,10 @@ async function superviseForever(
       // next save). Closing the terminal there swallowed the hang-up outright
       // and left an orphaned supervisor with a recursive `Deno.watchFs`,
       // outliving the session that started it with nothing to show for it.
-      if (!stop.child) Deno.exit(0);
+      if (!stop.child) {
+        dropWaiting();
+        Deno.exit(0);
+      }
       try {
         stop.child.kill("SIGHUP");
       } catch {
@@ -516,9 +534,23 @@ async function superviseForever(
         `error above). The dev session stays up: fix it and save, and the ` +
         `app relaunches. Ctrl-C to quit.`,
     );
+    // The wait is still THIS app's dev session, so the slot names it while it
+    // lasts. With no lock, `am status` said "stopped", `am stop` said "not
+    // running" (exit 1) and could not end it — and the next save brought the
+    // app back up after the operator had "stopped" it. Filed under the
+    // supervisor's own pid: `am stop` SIGTERMs it (the handler above takes
+    // the lock back), and the relaunch below replaces it.
+    if (self) {
+      stop.waiting = fileChildPlaceholder(self, Deno.pid, port, {
+        reason: `the app exited with code ${status.code} right after a ` +
+          `restart — the file saved last does not load`,
+        since: Date.now(),
+      });
+    }
     // …and a rival that shows up WHILE waiting ends the wait too: the lock
     // slot is polled beside the watcher, never only after the next save.
     const late = await waitForSourceChange(() => rivalOf(self, 0)?.pid ?? null);
+    dropWaiting();
     if (late !== null) stepAside(late);
     // While we waited, `am start` (or a second `deno task dev`) may have
     // brought the app up on its own. Relaunching would only be refused with
@@ -608,7 +640,7 @@ function stepAside(pid: number): never {
 function otherInstancePid(): number | null {
   try {
     const live = instances(resolveAppId()).find((i) =>
-      i.alive && i.pid !== Deno.pid
+      i.alive && !isOwnLock(i)
     );
     return live ? live.pid : null;
   } catch {

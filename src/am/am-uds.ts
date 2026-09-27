@@ -47,15 +47,43 @@ async function readUntil(
   const decoder = new TextDecoder();
   const reader = conn.readable.getReader();
   let pending = "";
-  while (Date.now() < deadline) {
-    const { value, done } = await reader.read();
-    if (done) return; // peer closed
-    pending += decoder.decode(value, { stream: true });
-    let nl: number;
-    while ((nl = pending.indexOf("\n")) !== -1) {
-      const line = pending.slice(0, nl);
-      pending = pending.slice(nl + 1);
-      if (line && onLine(line)) return;
+  // Each read races the REMAINING deadline. Checking the clock only between
+  // reads bounded nothing: a peer that accepted the connection and then went
+  // quiet (a wedged app, a handler that never answers) left `reader.read()`
+  // pending forever, and `am` hung instead of returning the named "never
+  // answered" error the caller builds from an empty result.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    while (true) {
+      const left = deadline - Date.now();
+      if (left <= 0) return;
+      const timedOut = new Promise<"timeout">((res) => {
+        timer = setTimeout(() => res("timeout"), left);
+      });
+      const r = await Promise.race([reader.read(), timedOut]);
+      clearTimeout(timer);
+      if (r === "timeout") return;
+      if (r.done) return; // peer closed
+      pending += decoder.decode(r.value, { stream: true });
+      let nl: number;
+      while ((nl = pending.indexOf("\n")) !== -1) {
+        const line = pending.slice(0, nl);
+        pending = pending.slice(nl + 1);
+        if (line && onLine(line)) return;
+      }
+    }
+  } finally {
+    clearTimeout(timer);
+    // Settle the read still in flight on a timeout (it resolves `done`) and
+    // release the stream, so the caller's `conn.close()` leaves no pending op.
+    await reader.cancel().catch(() => {
+      // aio-ok: cancelling a stream that already ended or errored — the
+      // request's outcome was decided above and is what the caller gets.
+    });
+    try {
+      reader.releaseLock();
+    } catch {
+      // aio-ok: the lock is already released; nothing is left to free.
     }
   }
 }

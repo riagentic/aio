@@ -176,9 +176,12 @@ export function resolveClassName(v: unknown): string {
  *  - `ms` is the one vendor prefix written lower-case in JS (`msTransform`,
  *    as the CSSOM spells it), so it gained no leading dash and shipped
  *    `ms-transform`, a property no browser has. `WebkitX`/`MozX` already came
- *    out right because their capital produces the dash. */
+ *    out right because their capital produces the dash.
+ *  - `cssFloat` (the CSSOM's name, which React accepts) became `css-float`,
+ *    a property no browser has, so the float silently did nothing. */
 export function camelToKebab(s: string): string {
   if (s.startsWith("--")) return s;
+  if (s === "cssFloat") return "float";
   const k = s.replace(/[A-Z]/g, (m) => "-" + m.toLowerCase());
   return k.startsWith("ms-") ? "-" + k : k;
 }

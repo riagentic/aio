@@ -9,6 +9,12 @@
 // `~/.thing` compiled — the data directory MOVED when you compiled, which is
 // exactly the asterisk `app-dirs.ts` promises does not exist.
 //
+// Dev had the mirror-image bug: it read deno.json from the launch CWD only, so
+// the same project was a different app depending on where `deno run` started.
+// Dev is therefore driven here the way it runs — a real entry inside the
+// project, launched from an UNRELATED cwd — and resolves THE project rule
+// (`projectAppId`) the build names the binary with.
+//
 // This is a DIFFERENTIAL test, not a pair of unit tests: it runs both resolvers
 // over the same project shapes and fails on any disagreement. Extend the shapes
 // when the identity chain grows — never hand-reason about equivalence.
@@ -16,9 +22,11 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { basename, join } from "@std/path";
 import {
   appIdFromConfig,
-  resolveAppId,
+  projectAppId,
   slugify,
 } from "../src/server/single-instance-lock.ts";
+
+const AIO_ROOT = new URL("..", import.meta.url).pathname;
 
 /** What a compiled artifact ends up with: the build names the binary, and
  *  `resolveAppId` slugifies that name out of the `deno-compile-<name>` segment
@@ -27,23 +35,44 @@ function compiledAppId(
   cfg: Record<string, unknown> | null,
   root: string,
 ): string {
-  const binaryName = appIdFromConfig(cfg) ?? slugify(basename(root));
+  const binaryName = projectAppId(root, cfg);
   return slugify(binaryName); // what the compiled binary infers from its name
 }
 
-/** What a dev run ends up with, driven through the REAL resolver by putting a
- *  deno.json in a temp cwd. */
-function devAppId(cfg: Record<string, unknown> | null, dir: string): string {
-  const prevCwd = Deno.cwd();
-  try {
-    if (cfg) {
-      Deno.writeTextFileSync(join(dir, "deno.json"), JSON.stringify(cfg));
-    }
-    Deno.chdir(dir);
-    return resolveAppId();
-  } finally {
-    Deno.chdir(prevCwd);
+/** What a dev run ends up with, driven through the REAL resolver: the
+ *  project's declared entry (the default `src/app.ts` — what the build
+ *  compiles), launched from a cwd that is NOT the project. */
+async function devAppId(
+  cfg: Record<string, unknown> | null,
+  dir: string,
+): Promise<string> {
+  if (cfg) {
+    await Deno.writeTextFile(join(dir, "deno.json"), JSON.stringify(cfg));
   }
+  await Deno.mkdir(join(dir, "src"), { recursive: true });
+  const entry = join(dir, "src", "app.ts");
+  await Deno.writeTextFile(
+    entry,
+    `import { resolveAppId } from ${
+      JSON.stringify(join(AIO_ROOT, "src/server/single-instance-lock.ts"))
+    };\nconsole.log("IDPROBE " + resolveAppId());\n`,
+  );
+  const r = await new Deno.Command(Deno.execPath(), {
+    args: ["run", "-A", `--config=${join(AIO_ROOT, "deno.json")}`, entry],
+    cwd: AIO_ROOT, // a foreign project with an identity of its own ("aio")
+    // Homes are looked at (legacyIdFallback) — never the real HOME's.
+    env: { AIO_APPS_DIR: join(dir, "apps") },
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  const out = new TextDecoder().decode(r.stdout);
+  const line = out.split("\n").find((l) => l.startsWith("IDPROBE "));
+  if (!line) {
+    throw new Error(
+      `no id (exit ${r.code})\n${out}\n${new TextDecoder().decode(r.stderr)}`,
+    );
+  }
+  return line.slice("IDPROBE ".length).trim();
 }
 
 const SHAPES: Array<{ what: string; cfg: Record<string, unknown> }> = [
@@ -66,16 +95,19 @@ const SHAPES: Array<{ what: string; cfg: Record<string, unknown> }> = [
     what: "appId beats both",
     cfg: { appId: "vault", name: "@me/wallet", title: "Ledger" },
   },
+  // No identity field: both fall back to the PROJECT folder's name — dev used
+  // to take the launch cwd's deno.json (or the entry's folder) instead.
+  { what: "no identity field — the project folder's name", cfg: {} },
 ];
 
 Deno.test("app identity: dev and compiled resolve the SAME id", async (t) => {
   for (const { what, cfg } of SHAPES) {
-    await t.step(what, () => {
+    await t.step(what, async () => {
       // The directory name deliberately matches NOTHING in the config: a rule
       // that quietly falls back to it is the bug this test exists for.
       const dir = Deno.makeTempDirSync({ prefix: "aio-identity-thing-" });
       try {
-        const dev = devAppId(cfg, dir);
+        const dev = await devAppId(cfg, dir);
         const compiled = compiledAppId(cfg, dir);
         assertEquals(
           compiled,
@@ -94,7 +126,8 @@ Deno.test("app identity: the compiled binary's NAME is the app's id", () => {
   // Not a coincidence to preserve by accident — `--print-app-tmpdir` and every
   // "where is my data" answer depend on it.
   for (const { cfg } of SHAPES) {
-    const binaryName = appIdFromConfig(cfg)!;
+    const binaryName = appIdFromConfig(cfg);
+    if (binaryName === null) continue; // named by its folder — not a config id
     assertEquals(
       slugify(binaryName),
       binaryName,
@@ -121,8 +154,8 @@ Deno.test("app identity: the build uses the SHARED decider, not its own copy", a
   );
   assertStringIncludes(
     src,
-    "appIdFromConfig(mainConfig)",
-    "the binary name must come from the shared identity chain",
+    "projectAppId(\n    root,\n    mainConfig",
+    "the binary name must come from the shared project rule (projectAppId)",
   );
   assert(
     !/slugify\(\s*appTitle\s*\?\?/.test(src),

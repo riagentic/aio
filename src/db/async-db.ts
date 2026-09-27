@@ -10,6 +10,7 @@ import type {
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isCompiled } from "../server/paths.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { capDelay } from "../state/timer-ceiling.ts";
 import { looksLikeWrite, statementVerb } from "./sql-shape.ts";
 import { syncDir, syncFile } from "./durable.ts";
 import { dirname, resolve } from "@std/path";
@@ -153,11 +154,27 @@ function _afterTriggerBody(sql: string): number {
     if (!/[A-Za-z_]/.test(c)) continue;
     let j = i;
     while (j < sql.length && /[\w$]/.test(sql[j]!)) j++;
-    const word = sql.slice(i, j).toUpperCase();
+    // A QUALIFIED name (`new.begin`, `old . end`) is a column, never the
+    // keyword: `WHEN new.begin > 0 BEGIN … END; DROP TABLE x` read the column
+    // as the body's BEGIN, so the real END never closed it and the DROP after
+    // it was swallowed into "one statement".
+    // `1. END` is a number with a trailing dot, not a qualifier.
+    let b = i - 1;
+    while (b >= 0 && /\s/.test(sql[b]!)) b--;
+    let q = b - 1;
+    while (q >= 0 && /\s/.test(sql[q]!)) q--;
+    let t = q;
+    while (t >= 0 && /[\w$]/.test(sql[t]!)) t--;
+    const qualified = sql[b] === "." &&
+      (/[\x22\x60\]]/.test(sql[q] ?? "") ||
+        (q > t && !/^\d/.test(sql.slice(t + 1, q + 1))));
+    const word = qualified ? "" : sql.slice(i, j).toUpperCase();
     i = j - 1;
+    // Only BEGIN opens the body: a `CASE … END` in the WHEN clause (before
+    // BEGIN) nests but must not count as the body closing.
     if (word === "BEGIN" || word === "CASE") {
       depth++;
-      opened = true;
+      if (word === "BEGIN") opened = true;
     } else if (word === "END" && depth > 0) {
       depth--;
       if (depth === 0 && opened) {
@@ -339,6 +356,23 @@ type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void };
  *  police slow queries. */
 export const DB_REQUEST_TIMEOUT_MS = 120_000;
 
+/** A `tx` used after its `db.transaction()` callback settled would run in
+ *  autocommit — or inside ANOTHER callback's open transaction, and be rolled
+ *  back with it after reporting success. */
+const _staleTx =
+  "tx used after its db.transaction() callback settled — it would run " +
+  "outside any transaction, or inside another one; use db.execute()/query(), " +
+  "or keep the work inside the callback";
+
+/** A callback transaction whose writer connection was torn down (a worker in
+ *  the pool died): SQLite already rolled it back, and a statement sent on
+ *  would run on a NEW connection in autocommit — outside the transaction. */
+const _txLostWriter =
+  "db.transaction(): the writer connection this transaction began on was " +
+  "torn down (a worker in the pool died), so SQLite rolled the transaction " +
+  "back — this statement was NOT run, since on the new connection it would " +
+  "commit on its own, outside the transaction. Retry the whole transaction.";
+
 /** Dev-only: how long an in-memory read may wait for an open callback
  *  transaction before dev says it may be a deadlock (observe-only). */
 const MEMORY_READ_WAIT_WARN_MS = 2_000;
@@ -453,7 +487,12 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
   }
 
   // Send a message to a specific worker (no gate — used for open and close)
-  const timeoutMs = opts.requestTimeoutMs ?? DB_REQUEST_TIMEOUT_MS;
+  const timeoutMs = capDelay(
+    "requestTimeoutMs",
+    opts.requestTimeoutMs ?? DB_REQUEST_TIMEOUT_MS,
+    (m) => log.warn("db", m),
+    DB_REQUEST_TIMEOUT_MS,
+  );
   function sendTo<T>(w: Worker, msg: WorkerMsg): Promise<T> {
     const id = nextId++;
     return new Promise<T>((resolve, reject) => {
@@ -540,6 +579,27 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
   function _teardownPool(): void {
     for (const w of [writerWorker, ...readerWorkers, sideReader]) {
       if (!w) continue;
+      // Every request still waiting on a worker this kills is answered NOW,
+      // by name. They used to wait out the full request ceiling (120 s) —
+      // and a writer killed mid-transaction held the writer lock that long.
+      const ids = workerPending.get(w);
+      if (ids) {
+        for (const id of ids) {
+          const p = pending.get(id);
+          if (p) {
+            pending.delete(id);
+            p.reject(
+              new Error(
+                "db worker terminated: another worker in the pool died, so " +
+                  "the pool was rebuilt before this request answered — its " +
+                  "outcome is UNKNOWN: a write may still have committed " +
+                  "(check before retrying, or a retry writes twice).",
+              ),
+            );
+          }
+        }
+        ids.clear();
+      }
       try {
         w.terminate();
       } catch {
@@ -608,7 +668,11 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
     return w;
   }
 
-  async function gate<T>(msg: WorkerMsg, toWriter = true): Promise<T> {
+  async function gate<T>(
+    msg: WorkerMsg,
+    toWriter = true,
+    onWorker?: (w: Worker) => void,
+  ): Promise<T> {
     if (closed) {
       throw new Error(
         `db: this handle is CLOSED — ${
@@ -622,6 +686,7 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
     }
     await ensureWorkers();
     const w = toWriter ? writerWorker! : pickReader();
+    onWorker?.(w);
     return sendTo<T>(w, msg);
   }
 
@@ -936,25 +1001,42 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
         // (an app's own `execute("BEGIN")`) — rolling back then undid THAT
         // one, and its later statements landed alone in autocommit.
         let begun = false;
+        // The transaction lives on the connection BEGIN ran on. A pool
+        // teardown (any worker dying) kills it — SQLite rolls the open
+        // transaction back — and `gate()` would carry every later tx
+        // statement to a FRESH writer in autocommit: `BEGIN; INSERT A` →
+        // teardown → `INSERT B; COMMIT` left B committed without A. Pinned to
+        // its writer, a tx statement after the teardown is refused by name.
+        let txWriter: Worker | null = null;
+        const txSend = <T>(msg: WorkerMsg): Promise<T> =>
+          closed
+            ? gate<T>(msg) // says CLOSED, loudly
+            : !txWriter || writerWorker !== txWriter
+            ? Promise.reject(new Error(_txLostWriter))
+            : sendTo<T>(txWriter, msg);
         try {
           await _txProgress(
-            gate<QueryResult>({ type: "execute", sql: "BEGIN" }),
+            gate<QueryResult>({ type: "execute", sql: "BEGIN" }, true, (w) => {
+              txWriter = w;
+            }),
           );
           begun = true;
           const tx: Tx = {
             // tx.query goes to writer — must see current transaction's own writes
             query: <T>(sql: string, params?: unknown[]) => {
+              if (!scope.open) return Promise.reject(new Error(_staleTx));
               const bad = multiStatementRejection(sql, "tx.query()");
               if (bad) return Promise.reject(new Error(bad));
               return _txProgress(
-                gate<QueryResult<T>>({ type: "query", sql, params }, true),
+                txSend<QueryResult<T>>({ type: "query", sql, params }),
               );
             },
             execute: (sql: string, params?: unknown[]) => {
+              if (!scope.open) return Promise.reject(new Error(_staleTx));
               const bad = multiStatementRejection(sql, "tx.execute()");
               if (bad) return Promise.reject(new Error(bad));
               return _txProgress(
-                gate<QueryResult>({ type: "execute", sql, params }),
+                txSend<QueryResult>({ type: "execute", sql, params }),
               );
             },
           };
@@ -969,14 +1051,14 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
             scope.open = false;
           }
           await _txProgress(
-            gate<QueryResult>({ type: "execute", sql: "COMMIT" }),
+            txSend<QueryResult>({ type: "execute", sql: "COMMIT" }),
           );
           return result;
         } catch (e) {
           // Only ROLLBACK if BEGIN succeeded (we're actually in a transaction)
           if (begun) {
             try {
-              await gate<QueryResult>({ type: "execute", sql: "ROLLBACK" });
+              await txSend<QueryResult>({ type: "execute", sql: "ROLLBACK" });
             } catch {
               // aio-ok: SQLite already rolled back (e.g. SQLITE_FULL) — no
               // transaction is left open, and `e` is the error that matters.

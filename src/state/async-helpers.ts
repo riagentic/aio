@@ -11,6 +11,7 @@
 //   }
 
 import type { ScheduleTimers } from "./schedule.ts";
+import { armLong, MAX_TIMER_DELAY } from "./timer-ceiling.ts";
 
 /** Options for {@linkcode until}. */
 export interface UntilOptions {
@@ -40,8 +41,15 @@ export function until(
   pred: () => boolean,
   opts: UntilOptions = {},
 ): Promise<void> {
-  const timeoutMs = opts.timeoutMs ?? 30_000;
-  const intervalMs = opts.intervalMs ?? 25;
+  // NaN-safe: a NaN (`Number(env)` unset) timeout never fired — a silent hang
+  // — and a NaN / negative interval polled every ~1 ms. Either takes its
+  // default, like an omitted option. 0 stays 0 (poll as fast as timers go),
+  // as it always did. `x === +x` is "a number, not NaN": a bare `>=` let
+  // null through as 0 (`null >= 0`), and null meant the default when these
+  // read `??`.
+  const t = opts.timeoutMs, i = opts.intervalMs;
+  const timeoutMs = t === +t! ? t : 30_000;
+  const intervalMs = i === +i! && i >= 0 ? i : 25;
   return new Promise((resolve, reject) => {
     if (pred()) return resolve();
     const started = Date.now();
@@ -65,7 +73,8 @@ export function until(
         clearInterval(timer);
         reject(e);
       }
-    }, intervalMs);
+      // Past the ceiling setInterval fires every ~1 ms: a hot loop.
+    }, Math.min(intervalMs, MAX_TIMER_DELAY));
   });
 }
 
@@ -152,14 +161,14 @@ function _armSleep(fn: () => void, ms: number): () => void {
   const v = _sleepClock?.() ?? null;
   let vh: ReturnType<typeof setTimeout> | undefined;
   const clear = (): void => {
-    clearTimeout(real);
+    clearReal();
     if (v && vh !== undefined) v.clearTimeout(vh);
   };
   const fire = (): void => {
     clear();
     fn();
   };
-  const real = setTimeout(fire, ms);
+  const clearReal = armLong(fire, ms);
   if (v) vh = v.setTimeout(fire, ms);
   return clear;
 }

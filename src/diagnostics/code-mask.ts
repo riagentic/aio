@@ -60,19 +60,12 @@ export function codeMask(src: string): Uint8Array {
     // one spelling, all three delimiters; a TERMINATED template literal still
     // spans as many lines as it likes.
     if (c === '"' || c === "'" || c === "`") {
-      let j = i + 1;
-      let close = -1;
-      for (; j < src.length; j++) {
-        if (src[j] === "\\") {
-          j++; // the escaped char is body, never a delimiter
-          continue;
-        }
-        if (src[j] === c) {
-          close = j;
-          break;
-        }
-        if (c !== "`" && src[j] === "\n") break;
-      }
+      let [j, close] = literalEnd(src, i, true);
+      // An interpolation that never closes is a lexing miss, not a verdict on
+      // the template: fall back to the plain next-backtick scan (no `${…}`
+      // awareness) — never to the first-newline cut, which read the rest of
+      // a real multi-line template as code.
+      if (close === -1 && c === "`") [j, close] = literalEnd(src, i, false);
       if (close === -1) {
         // Unterminated. For `'` / `"` the scan already stopped at the first
         // unescaped newline, and `j` is exactly where the old lexer stopped —
@@ -94,20 +87,8 @@ export function codeMask(src: string): Uint8Array {
     }
     // Regex literal — `/…/flags`; contents (incl. quotes) are not code.
     if (c === "/" && regexStart(src, i)) {
-      let j = i + 1, cls = false, closed = false;
-      for (; j < src.length && src[j] !== "\n"; j++) {
-        if (src[j] === "\\") {
-          j++;
-          continue;
-        }
-        if (src[j] === "[") cls = true;
-        else if (src[j] === "]") cls = false;
-        else if (src[j] === "/" && !cls) {
-          closed = true;
-          break;
-        }
-      }
-      if (closed) {
+      const j = regexEnd(src, i);
+      if (j >= 0) {
         for (let k = i + 1; k < j; k++) mask[k] = 0;
         i = j + 1;
         continue;
@@ -116,6 +97,73 @@ export function codeMask(src: string): Uint8Array {
     i++;
   }
   return mask;
+}
+
+/** `[stop, close]` for the string / template literal opening at `i`: `close`
+ *  is its closing delimiter's offset, or -1 with `stop` where the scan gave
+ *  up (a `'`/`"` stops at an unescaped newline). `interp` skips `${…}` whole. */
+function literalEnd(
+  src: string,
+  i: number,
+  interp: boolean,
+): [number, number] {
+  const c = src[i];
+  let j = i + 1;
+  for (; j < src.length; j++) {
+    if (src[j] === "\\") {
+      j++; // the escaped char is body, never a delimiter
+      continue;
+    }
+    // `${…}` may hold its own strings and templates — a backtick in there
+    // is not this literal's close. Still all template content (above).
+    if (interp && c === "`" && src[j] === "$" && src[j + 1] === "{") {
+      j = interpolationEnd(src, j + 2);
+      if (j < 0) return [src.length, -1];
+      continue;
+    }
+    if (src[j] === c) return [j, j];
+    if (c !== "`" && src[j] === "\n") break;
+  }
+  return [j, -1];
+}
+
+/** The offset of the `}` closing a template interpolation whose body starts
+ *  at `i`, or -1 when it never closes. The body is CODE and is lexed as such:
+ *  strings, nested templates, comments and regex literals are skipped whole,
+ *  so the quote in `/'/g` or `// it's` and the brace in `"}"` do not count. */
+function interpolationEnd(src: string, i: number): number {
+  for (let depth = 1; i < src.length; i++) {
+    const c = src[i]!;
+    if (c === "{") depth++;
+    else if (c === "}" && --depth === 0) return i;
+    else if (c === "/" && src[i + 1] === "/") {
+      i = src.indexOf("\n", i);
+      if (i < 0) return -1;
+    } else if (c === "/" && src[i + 1] === "*") {
+      i = src.indexOf("*/", i + 2) + 1;
+      if (i === 0) return -1;
+    } else if (c === "/" && regexStart(src, i)) {
+      const end = regexEnd(src, i);
+      if (end >= 0) i = end;
+    } else if (c === '"' || c === "'" || c === "`") {
+      i = literalEnd(src, i, true)[1];
+      if (i < 0) return -1;
+    }
+  }
+  return -1;
+}
+
+/** The offset of the `/` closing the regex literal opening at `i` — same
+ *  line, `[…]` classes respected — or -1. */
+function regexEnd(src: string, i: number): number {
+  let cls = false;
+  for (let j = i + 1; j < src.length && src[j] !== "\n"; j++) {
+    if (src[j] === "\\") j++;
+    else if (src[j] === "[") cls = true;
+    else if (src[j] === "]") cls = false;
+    else if (src[j] === "/" && !cls) return j;
+  }
+  return -1;
 }
 
 /** Is the `/` at `i` the start of a REGEX literal rather than a division?

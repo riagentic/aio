@@ -16,20 +16,20 @@ import {
   homeRequested,
   registeredProfile,
 } from "../src/server/app-dirs.ts";
-import { resolveHome } from "../src/server/resolve-home.ts";
+import { homeWasRequested, resolveHome } from "../src/server/resolve-home.ts";
 
 const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
 /** Prints resolveHome() before aio.run(), then the dirs aio.run registered —
  *  and, with a worker cell, what resolveHome() answers in the worker. */
 const PROBE = `import { aio, cell, isCellWorker } from "${REPO}/mod.ts";
-import { resolveHome } from "${REPO}/src/server-entry.ts";
+import { homeWasRequested, resolveHome } from "${REPO}/src/server-entry.ts";
 import { appDirs, registeredProfile } from "${REPO}/src/server/app-dirs.ts";
 import { resolveAppId } from "${REPO}/src/server/single-instance-lock.ts";
 const cfg = JSON.parse(Deno.env.get("PROBE_CFG") ?? "{}");
 const ask = () => {
   try {
-    return resolveHome({ appId: cfg.appId, appDir: cfg.appDir, profiles: cfg.profiles });
+    return { ...resolveHome({ appId: cfg.appId, appDir: cfg.appDir, profiles: cfg.profiles }), requested: homeWasRequested() };
   } catch (e) {
     return { error: (e as Error).message };
   }
@@ -51,7 +51,19 @@ if (!isCellWorker()) {
 }
 `;
 
-type Home = { home?: string; profile?: string; error?: string };
+type Home = {
+  home?: string;
+  profile?: string;
+  requested?: boolean;
+  error?: string;
+};
+
+/** The probe's answer minus `requested` — what aio.run registers. */
+const dirsOf = (h?: Home): Home | undefined => {
+  if (!h) return h;
+  const { requested: _, ...rest } = h;
+  return rest;
+};
 type Result = {
   code: number;
   out: string;
@@ -125,7 +137,7 @@ async function agrees(
         home: r.post!.home,
         ...(r.post!.profile ? { profile: r.post!.profile } : {}),
       },
-      r.pre,
+      dirsOf(r.pre),
       r.out,
     );
   } finally {
@@ -136,6 +148,7 @@ async function agrees(
 Deno.test("resolveHome === aio.run: no request → the default home", async () => { // aio-ok: agrees() asserts exit 0, the expected home and aio.run's
   await agrees({ appId: "rh" }, [], {}, (root) => ({
     home: join(root, "apps", "rh"),
+    requested: false,
   }));
 });
 
@@ -143,6 +156,7 @@ Deno.test("resolveHome === aio.run: --profile=tasks", async () => { // aio-ok: a
   await agrees({ appId: "rh" }, ["--profile=tasks"], {}, (root) => ({
     home: join(root, "apps", "rh-tasks"),
     profile: "tasks",
+    requested: true,
   }));
 });
 
@@ -150,6 +164,7 @@ Deno.test("resolveHome === aio.run: AIO_PROFILE=tasks", async () => { // aio-ok:
   await agrees({ appId: "rh" }, [], { AIO_PROFILE: "tasks" }, (root) => ({
     home: join(root, "apps", "rh-tasks"),
     profile: "tasks",
+    requested: true,
   }));
 });
 
@@ -159,8 +174,48 @@ Deno.test("resolveHome === aio.run: --home=<dir>", async () => {
     const dir = join(root, "elsewhere");
     const r = await boot(root, { appId: "rh" }, [`--home=${dir}`]);
     assertEquals(r.code, 0, r.out);
-    assertEquals(r.pre, { home: dir });
+    assertEquals(r.pre, { home: dir, requested: true });
     assertEquals(r.post, { home: dir });
+  } finally {
+    await dropTempDir(root);
+  }
+});
+
+Deno.test("homeWasRequested(): every request form, incl. --home=~/.<appId>-tasks", async () => {
+  const root = await project();
+  try {
+    // HOME=root and no AIO_APPS_DIR: the default home is <root>/.rh, so
+    // `~/.rh-tasks` is the `tasks` profile spelled as a path.
+    // The deno cache stays the parent's — a fresh one would re-download.
+    const env = {
+      HOME: root,
+      USERPROFILE: root,
+      AIO_APPS_DIR: "",
+      DENO_DIR: Deno.env.get("DENO_DIR") ??
+        join(
+          Deno.env.get("XDG_CACHE_HOME") ??
+            join(Deno.env.get("HOME") ?? "", ".cache"),
+          "deno",
+        ),
+    };
+    const tasks = { home: join(root, ".rh-tasks"), profile: "tasks" };
+    const cases: [string[], Record<string, string>, Home][] = [
+      [[], {}, { home: join(root, ".rh"), requested: false }],
+      [["--profile=tasks"], {}, { ...tasks, requested: true }],
+      [[], { AIO_PROFILE: "tasks" }, { ...tasks, requested: true }],
+      [["--profile=~/.rh-tasks"], {}, { ...tasks, requested: true }],
+      [["--home=~/.rh-tasks"], {}, { ...tasks, requested: true }],
+      [["--home=~/.x-tasks"], {}, {
+        home: join(root, ".x-tasks"),
+        requested: true,
+      }],
+    ];
+    for (const [args, extra, want] of cases) {
+      const r = await boot(root, { appId: "rh" }, args, { ...env, ...extra });
+      assertEquals(r.code, 0, r.out);
+      assertEquals(r.pre, want, `${args.join(" ")} ${JSON.stringify(extra)}`);
+      assertEquals(r.post, dirsOf(r.pre), r.out);
+    }
   } finally {
     await dropTempDir(root);
   }
@@ -174,8 +229,12 @@ Deno.test("resolveHome === aio.run: explicit appDir + --profile → <appDir>-tas
       "--profile=tasks",
     ]);
     assertEquals(r.code, 0, r.out);
-    assertEquals(r.pre, { home: `${vault}-tasks`, profile: "tasks" });
-    assertEquals(r.post, r.pre);
+    assertEquals(r.pre, {
+      home: `${vault}-tasks`,
+      profile: "tasks",
+      requested: true,
+    });
+    assertEquals(r.post, dirsOf(r.pre));
   } finally {
     await dropTempDir(root);
   }
@@ -187,7 +246,7 @@ Deno.test("resolveHome === aio.run: an omitted appId derives the same identity",
     const r = await boot(root, {}, ["--profile=tasks"]);
     assertEquals(r.code, 0, r.out);
     assert(r.pre?.home?.endsWith("-tasks"), r.out);
-    assertEquals(r.post, r.pre);
+    assertEquals(r.post, dirsOf(r.pre));
   } finally {
     await dropTempDir(root);
   }
@@ -217,7 +276,7 @@ Deno.test("resolveHome in a worker cell's thread === main === aio.run (Deno.args
     assertEquals(r.code, 0, r.out);
     assert(r.worker?.inWorker, "the method must really run in the worker");
     assertEquals(r.pre?.profile, "tasks");
-    assertEquals(r.post, r.pre);
+    assertEquals(r.post, dirsOf(r.pre));
     const { inWorker: _, ...w } = r.worker!;
     assertEquals(w, r.pre);
   } finally {
@@ -295,6 +354,7 @@ Deno.test("resolveHome is a query: it records no profile and no request", () => 
   try {
     const got = resolveHome({ appId: "rh-pure" });
     assertEquals(got.profile, "tasks");
+    assertEquals(homeWasRequested(), true);
     assertEquals(homeRequested("rh-pure"), false);
     assertEquals(registeredProfile("rh-pure"), undefined);
   } finally {

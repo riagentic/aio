@@ -99,7 +99,11 @@ export function watch<T>(
     if (derived && Object.is(next, prev)) return;
     const p = prev;
     prev = next;
-    fn(next, p);
+    // Untracked, as `on()` runs its callback: only `source` is the watched
+    // dependency. A signal the callback happens to READ is not — tracked, a
+    // change to it re-ran this effect and called `fn(next, prev)` with the
+    // same value twice, a "change" that never happened.
+    untrack(() => fn(next, p));
   });
 
   return dispose;

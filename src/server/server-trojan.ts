@@ -34,6 +34,7 @@ import {
   SNAPSHOT_MAX_BODY,
 } from "./read-body.ts";
 import { enc, errorCode } from "../protocol/envelope.ts";
+import { overUtf8 } from "../protocol/utf8-size.ts";
 import { snapshotShapeError } from "./server-static.ts";
 import { findUnserializable, PersistSerializeError } from "./persist-guard.ts";
 import { UNSERIALIZABLE_BYTES } from "../diagnostics/fmt.ts";
@@ -53,6 +54,8 @@ export interface TrojanClientInfo {
   index: number;
   id: string;
   clientType: string;
+  /** Apple platform, from the client's User-Agent — see `ClientMeta.mac`. */
+  mac?: boolean;
   user?: string;
   readyState: number;
 }
@@ -465,6 +468,7 @@ function handleGet(
       id: c.meta.id,
       type: c.meta.clientType,
       transport: "ws" as const,
+      ...(c.meta.mac !== undefined ? { mac: c.meta.mac } : {}),
       user: c.meta.user,
       readyState: c.ws.readyState,
       // The build each client SAID it runs (its proto hello).
@@ -1296,7 +1300,9 @@ async function handlePost(
         );
       }
       const serialized = JSON.stringify(rows, null, 2);
-      if (serialized.length > TROJAN_SQL_MAX_RESULT_BYTES) {
+      // BYTES, not `.length`: UTF-16 code units undercount non-ASCII text up
+      // to 3× — a 12 MB CJK answer passed a 10 MB cap.
+      if (overUtf8(serialized, TROJAN_SQL_MAX_RESULT_BYTES)) {
         return err(
           `result exceeds ${TROJAN_SQL_MAX_RESULT_BYTES} bytes — add a tighter LIMIT or narrower columns`,
           413,

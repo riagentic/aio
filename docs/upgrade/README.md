@@ -26,6 +26,10 @@ app, that is a bug in aio, not a step you missed.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [1.0.12-beta → **1.0.13-beta**](from-1.0.12-beta-to-1.0.13-beta.md) — nothing
+  is removed and the surface does not move. New, opt-in: set
+  `electron.permissions` to deny child windows and guests everything but what
+  you list.
 - [1.0.11-beta → **1.0.12-beta**](from-1.0.11-beta-to-1.0.12-beta.md) — nothing
   is removed and the surface does not move. A `testUI` seed of a key the cell
   does not declare now warns, an optional one too — declare it as

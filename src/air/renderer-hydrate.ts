@@ -41,7 +41,7 @@ import {
   nullSlot,
 } from "./vdom-create.ts";
 import { _fallbackSlot } from "./vdom-render.ts";
-import { _removeDomCleanup } from "./vdom-remove.ts";
+import { _cleanupChildren, _removeDomCleanup } from "./vdom-remove.ts";
 import { _cleanupActions } from "./vdom-helpers.ts";
 import { applyChildDependentProps } from "./vdom-props.ts";
 import { _devWarn, _hasRawHtml } from "./vdom-types.ts";
@@ -52,6 +52,7 @@ import { _getGroupExitHandler } from "./transition-group.ts";
 import type { MountHandle, RootState } from "./renderer-types.ts";
 import {
   _activeRoot,
+  _boundaryStack,
   _noteDiscard,
   _registerRoot,
   _setActiveRoot,
@@ -75,6 +76,95 @@ let _doc: AnyDoc = typeof globalThis !== "undefined" && "document" in globalThis
 
 export function _setHydrateDoc(doc: AnyDoc): void {
   _doc = doc;
+}
+
+// ── a boundary's children are hydrated as an ATTEMPT ─────────────────────
+//
+// An ErrorBoundary / Suspense whose server render fell back has its FALLBACK
+// in the markup, and hydrate cannot know that until a child throws — which it
+// does in its own place, after every sibling before it has already been
+// hydrated against the fallback's nodes. Those siblings either mismatched
+// (hydrate gave up and discarded the whole server page — a dev warning, in
+// prod nothing), or matched by accident and wrote themselves into the
+// fallback: a null slot appended a stray `<!---->` beside it, a text split it,
+// an element's props were written over the fallback's element. Only a thrower
+// that was the boundary's FIRST child ever hydrated cleanly.
+//
+// So a boundary's children never write the DOM until the boundary has decided:
+//
+//  - every WRITE to a claimed node (props, listeners, signal bindings, refs,
+//    actions, a text repair, `<select value>`) is queued in `ops`, and runs
+//    only once the OUTERMOST attempt succeeds — an inner boundary that
+//    succeeded can still be discarded by an outer one that falls back;
+//  - every STRUCTURAL change (a node inserted, a text split, a split tail
+//    dropped, an implied `<tbody>` unwrapped) has to happen now, because the
+//    next sibling's claim reads the result by index — so each records its
+//    inverse in `undo`;
+//  - a MISMATCH does not end the walk (`missed`): the throw that explains it
+//    may be in a later child, or deeper in this one. From then on the rest of
+//    the attempt is built exactly as `createDom` builds it — detached, every
+//    component body run once and in the same order as on the server, a throw
+//    caught by the same boundary that would catch it on mount.
+//
+// Falling back, the boundary undoes the structural changes, forgets the nodes
+// its discarded children claimed (the sweep that retires them must not clean
+// the fallback's bindings off those same nodes) and drops the queued writes —
+// the server's fallback markup is exactly as the server wrote it, and is
+// hydrated in place. No component body runs twice. A mismatch with no throw
+// is a real mismatch: -1, and the page falls back to a client render as
+// before.
+
+interface _Attempt {
+  ops: (() => void)[];
+  undo: (() => void)[];
+  missed: boolean;
+}
+
+/** The innermost boundary whose children are being hydrated, or null. */
+let _attempt: _Attempt | null = null;
+
+/** Write to a claimed node — now, or once the enclosing attempt commits. */
+function _write(op: () => void): void {
+  if (_attempt) _attempt.ops.push(op);
+  else op();
+}
+
+/** Record the inverse of a structural change made inside an attempt. */
+function _undoable(undo: () => void): void {
+  _attempt?.undo.push(undo);
+}
+
+/** A mismatch. Outside an attempt it ends the hydration (-1); inside one the
+ *  rest of the attempt is built detached, as `createDom` would (see above). */
+function _miss(
+  parent: Node,
+  vnode: VNode | string | number,
+  ctx: RenderCtx,
+  isSvg: boolean,
+): number {
+  if (!_attempt) return -1;
+  _attempt.missed = true;
+  createDom(vnode, ctx, isSvg, parent);
+  return 0;
+}
+
+/** Forget the server nodes a discarded attempt claimed. Nodes it built
+ *  detached (after a miss) are kept — their bindings are live and the sweep
+ *  must still release them. A Portal's content lives in its target and is the
+ *  sweep's to remove. */
+function _forgetClaims(
+  nodes: readonly unknown[],
+  parent: Node,
+): void {
+  for (const n of nodes) {
+    if (!n || typeof n !== "object") continue;
+    const v = n as VNode;
+    if (v.tag === undefined || !Array.isArray(v.children) || v.tag === Portal) {
+      continue;
+    }
+    if (v._dom && parent.contains(v._dom as Node)) v._dom = undefined;
+    _forgetClaims(_cleanupChildren(v), parent);
+  }
 }
 
 /**
@@ -215,8 +305,16 @@ function _hydrateNodeInner(
   isSvg: boolean,
   childIndex: number,
 ): number {
+  // After a miss the rest of the attempt is built, not claimed (see `_Attempt`).
+  if (_attempt?.missed) {
+    createDom(vnode, ctx, isSvg, parent);
+    return 0;
+  }
+
   if (typeof vnode === "string" || typeof vnode === "number") {
-    return _hydrateText(parent, String(vnode), childIndex) ? 1 : -1;
+    return _hydrateText(parent, String(vnode), childIndex)
+      ? 1
+      : _miss(parent, vnode, ctx, isSvg);
   }
 
   // Signal child — one text node, claimed exactly like a text child (SSR
@@ -229,9 +327,9 @@ function _hydrateNodeInner(
       _sigText((vnode._sig as Signal<unknown>).peek()),
       childIndex,
     );
-    if (!text) return -1;
+    if (!text) return _miss(parent, vnode, ctx, isSvg);
     vnode._dom = text;
-    _bindSignalText(vnode, text);
+    _write(() => _bindSignalText(vnode, text));
     return 1;
   }
 
@@ -252,9 +350,10 @@ function _hydrateNodeInner(
     // right page instead of a silently wrong one.
     // The one legitimate absence is the END of the parent: `createDom` gives a
     // null child a comment even when SSR wrote nothing after it.
-    if (domNode) return -1;
+    if (domNode) return _miss(parent, vnode, ctx, isSvg);
     const comment = (parent.ownerDocument ?? document).createComment("");
     parent.appendChild(comment);
+    _undoable(() => comment.remove());
     vnode._dom = comment;
     return 1;
   }
@@ -289,7 +388,14 @@ function _hydrateNodeInner(
     // every later component without a real provider above it.
     try {
       const count = _hydrateNode(parent, rendered, ctx, isSvg, childIndex);
-      if (count >= 0) vnode._dom = getDom(rendered) ?? undefined;
+      // A component that returns a bare string has no vnode DOM of its own —
+      // its position is the text node it claimed, as on mount (alpha47).
+      // Without it the re-render appended a second text and keyed moves and
+      // removals could not find the node.
+      if (count >= 0) {
+        vnode._dom = getDom(rendered) ??
+          (count > 0 ? parent.childNodes[childIndex] : undefined) ?? undefined;
+      }
       return count;
     } finally {
       ctx.hooks?.afterSubtree?.(vnode);
@@ -313,17 +419,57 @@ function _hydrateNodeInner(
   const isSuspense = vnode.tag === Suspense;
   if (isFragment || isBoundary || isSuspense) {
     let idx = childIndex;
+    // A boundary's children are an ATTEMPT until it has decided (see
+    // `_Attempt`): nothing they write reaches the DOM, and a mismatch does not
+    // end the walk, until the boundary knows whether they threw.
+    const outer = _attempt;
+    const mine: _Attempt | null = isFragment
+      ? null
+      : { ops: [], undo: [], missed: false };
+    if (mine) _attempt = mine;
+    // A boundary is on `_boundaryStack` while its subtree hydrates, as it is
+    // on mount (`createDom`) and diff: each component records the boundary it
+    // sits in for its RE-RENDERS, and `abortComponent` keeps a thrower
+    // subscribed through it. Without the push, a hydrated boundary never
+    // recovered from a server-rendered fallback and never caught a throw that
+    // started after hydration — the subtree silently stopped updating.
+    if (isBoundary) _boundaryStack.push(vnode);
     try {
       for (const child of vnode.children) {
         const consumed = _hydrateNode(parent, child, ctx, isSvg, idx);
         if (consumed < 0) return -1;
         idx += consumed;
       }
+      if (mine) {
+        _attempt = outer;
+        if (mine.missed) {
+          // Mismatched and nothing threw: a real mismatch. An enclosing
+          // attempt carries on (a later child of ITS may still throw) and
+          // owns the undo; otherwise the page falls back to a client render.
+          if (!outer) return -1;
+          outer.missed = true;
+          outer.undo.push(...mine.undo);
+          return 0;
+        }
+        if (outer) {
+          outer.ops.push(...mine.ops);
+          outer.undo.push(...mine.undo);
+        } else for (const op of mine.ops) op();
+      }
     } catch (thrown) {
+      _attempt = outer;
       // The children hydrated before the throw are discarded — retired by the
       // region's owner (`_sweepDiscarded`), exactly as on mount and diff. A
       // throw that was not a component body's passes no `abortComponent`.
       _noteDiscard();
+      // …and what they claimed of the server's markup is given back untouched:
+      // that markup is the FALLBACK whenever the server's render threw too,
+      // and a late thrower's earlier siblings were hydrated against it (see
+      // `_Attempt`). Their queued writes are dropped with them.
+      if (mine) {
+        _forgetClaims(vnode.children, parent);
+        for (let i = mine.undo.length - 1; i >= 0; i--) mine.undo[i]!();
+      }
       // `createDom` and `renderToString` both catch here; hydrate did not, so a
       // boundary that WORKS on the server and WORKS on a client mount let the
       // error escape `hydrate()` on the one path that matters most. The server
@@ -357,7 +503,12 @@ function _hydrateNodeInner(
         if (fallback) return claimFallback(fallback(thrown as Error));
       }
       throw thrown;
+    } finally {
+      _attempt = outer;
+      if (isBoundary) _boundaryStack.pop();
     }
+    // A Fragment inside an attempt that missed has no position left to claim.
+    if (_attempt?.missed) return 0;
     if (idx === childIndex) {
       // An empty Fragment / ErrorBoundary / Suspense occupies a comment ANCHOR
       // (AIO-195) — createDom makes one and the SSR writers emit one, so
@@ -372,6 +523,7 @@ function _hydrateNodeInner(
       const comment = (parent.ownerDocument ?? document).createComment("");
       if (domNode) parent.insertBefore(comment, domNode);
       else parent.appendChild(comment);
+      _undoable(() => comment.remove());
       vnode._dom = comment;
       return 1;
     }
@@ -389,14 +541,16 @@ function _hydrateNodeInner(
   _dropSplitTail(parent, childIndex); // see `_dropSplitTail`
   _unwrapImpliedTableSection(parent, childIndex, vnode.tag as string);
   const domNode = parent.childNodes[childIndex];
-  if (!domNode || domNode.nodeType !== 1) return -1;
+  if (!domNode || domNode.nodeType !== 1) {
+    return _miss(parent, vnode, ctx, isSvg);
+  }
   const el = domNode as HTMLElement;
   if (el.tagName.toLowerCase() !== (vnode.tag as string).toLowerCase()) {
-    return -1;
+    return _miss(parent, vnode, ctx, isSvg);
   }
 
   vnode._dom = el;
-  _hydrateProps(el, vnode.props);
+  _write(() => _hydrateProps(el, vnode.props));
 
   const tagName = el.tagName.toLowerCase();
   const nowSvg = childSvgMode(tagName, isSvg || SVG_TAGS.has(tagName));
@@ -422,7 +576,7 @@ function _hydrateNodeInner(
   // options are hydrated — and SSR cannot express it in markup at all (`value`
   // is not a <select> attribute). Without this a server-rendered controlled
   // select showed its FIRST option no matter what the state said.
-  applyChildDependentProps(el, vnode.props, {});
+  _write(() => applyChildDependentProps(el, vnode.props, {}));
 
   return 1;
 }
@@ -464,8 +618,13 @@ function _unwrapImpliedTableSection(
     node.attributes.length > 0 ||
     (node.firstChild as Element | null)?.tagName?.toLowerCase() !== tag
   ) return;
+  const moved = Array.from(node.childNodes);
   while (node.firstChild) parent.insertBefore(node.firstChild, node);
   parent.removeChild(node);
+  _undoable(() => {
+    parent.insertBefore(node, moved[0] ?? null);
+    for (const m of moved) node.appendChild(m);
+  });
 }
 
 /** The remainders `_hydrateText` split off a merged text run. Each one is
@@ -490,7 +649,11 @@ const _splitTails = new WeakSet<Node>();
  *  as orphans: `<p>{msg}{cond && <></>}z</p>` hydrated as `z z`. */
 function _dropSplitTail(parent: Node, idx: number): void {
   const tail = parent.childNodes[idx];
-  if (tail && _splitTails.has(tail)) parent.removeChild(tail);
+  if (tail && _splitTails.has(tail)) {
+    const next = tail.nextSibling;
+    parent.removeChild(tail);
+    _undoable(() => parent.insertBefore(tail, next));
+  }
 }
 
 /** Claim the text node at `childIndex` for a child whose text is `want`.
@@ -525,17 +688,27 @@ function _hydrateText(
     const empty = (parent.ownerDocument ?? document).createTextNode("");
     if (domNode) parent.insertBefore(empty, domNode);
     else parent.appendChild(empty);
+    _undoable(() => empty.remove());
     return empty;
   }
-  const have = domNode.textContent ?? "";
+  const text = domNode as Text;
+  const have = text.data;
   if (have !== want) {
     if (have.length > want.length && have.startsWith(want)) {
-      _splitTails.add((domNode as Text).splitText(want.length));
+      const tail = text.splitText(want.length);
+      _splitTails.add(tail);
+      // Undone in reverse order, so whatever later claims did to the tail
+      // (split it again, drop it) is already back when it is merged.
+      _undoable(() => {
+        text.appendData(tail.data);
+        tail.remove();
+        _splitTails.delete(tail);
+      });
     } else {
-      domNode.textContent = want;
+      _write(() => text.textContent = want);
     }
   }
-  return domNode as Text;
+  return text;
 }
 
 /** One scratch element per document, reused by `_canonStyle`. Dev-only path. */

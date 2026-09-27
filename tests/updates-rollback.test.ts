@@ -22,6 +22,7 @@ import {
   updatesRuntime,
 } from "../src/state/updates-cell.ts";
 import {
+  failedUpdatePath,
   MAX_BOOT_ATTEMPTS,
   type PendingUpdate,
   readPending,
@@ -90,6 +91,9 @@ Deno.test("boot: retry, retry, then a REAL restore — and only then is the mark
       "the artifact at the stable path is the version that worked",
     );
     assertEquals(readPending(data), null, "a completed rollback clears itself");
+    // …into the FAILED record the next boot names (and never auto-installs).
+    const rec = JSON.parse(await Deno.readTextFile(failedUpdatePath(data)));
+    assertEquals(rec.attempts, MAX_BOOT_ATTEMPTS);
     assert(
       log.lines.some((l) =>
         l.startsWith("error") && l.includes("rolling back")
@@ -521,5 +525,41 @@ Deno.test("updates: an app-supplied runtime and `updates:` cannot both win", asy
   } finally {
     installUpdatesRuntime(null);
     await Deno.remove(data, { recursive: true }).catch(() => {});
+  }
+});
+
+// A directory swap (electron-zip, a macOS .app) is finished by a shell that
+// exits with the process, so the runtime's `pruneOld` never ran for it: every
+// update left one whole install behind as `<dir>.old-<v>`, forever. The
+// confirmed boot of the new build is where they are bounded now.
+Deno.test("boot: confirming a directory update keeps only the newest KEEP_OLD rollbacks", async () => {
+  const dir = await tmp();
+  const data = await tmp();
+  try {
+    const current = join(dir, "Counter.app");
+    await Deno.mkdir(join(current, "Contents"), { recursive: true });
+    const olds = ["1.0.0", "1.0.1", "1.0.2", "1.0.3", "1.0.4"];
+    for (const [i, v] of olds.entries()) {
+      const p = join(dir, `Counter.app.old-${v}`);
+      await Deno.mkdir(join(p, "Contents"), { recursive: true });
+      const t = new Date(Date.UTC(2026, 0, 1 + i));
+      await Deno.utime(p, t, t);
+    }
+    writePending(data, mark({ artifact: current, attempts: 1 }));
+    confirmPendingUpdate(data, recorder());
+    const left = async () =>
+      (await Array.fromAsync(Deno.readDir(dir))).map((e) => e.name).sort();
+    for (let i = 0; i < 100 && (await left()).length > 4; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assertEquals(await left(), [
+      "Counter.app",
+      "Counter.app.old-1.0.2",
+      "Counter.app.old-1.0.3",
+      "Counter.app.old-1.0.4",
+    ]);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+    await Deno.remove(data, { recursive: true });
   }
 });

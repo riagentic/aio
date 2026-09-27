@@ -28,3 +28,16 @@ Deno.test("startedReport: a socket-only app is named by its socket, never 'port 
     "started both (pid 7, port 8123, transport uds (/s))",
   );
 });
+
+// A field report scripted screenshots over raw CDP and hunted the port with
+// `ss` — `am shot` existed. A `--cdp` start names the verb at the moment it is
+// needed; the JSON document stays the same shape.
+Deno.test("startedReport: a --cdp start names am shot; JSON unchanged", () => {
+  const c = startedReport("desk", 7, 8123, undefined, 9333);
+  assertEquals(
+    c.line,
+    "started desk (pid 7, port 8123)\n" +
+      "cdp 127.0.0.1:9333 — screenshots: am shot (not raw CDP)",
+  );
+  assertEquals(c.doc, startedReport("desk", 7, 8123).doc);
+});

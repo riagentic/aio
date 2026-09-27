@@ -6,8 +6,10 @@ import { runCssBuild } from "./build-css.ts";
 import { analyzeBundle, formatAnalysis } from "./bundle-analyze.ts";
 import {
   APP_ICON,
+  APP_ICON_SVG,
   APP_STYLE,
   BUNDLE_MAP,
+  svgIconHint,
   UI_ENTRY,
 } from "../server/app-files.ts";
 import { DENO_JSON_NAMES } from "../server/deno-json.ts";
@@ -19,7 +21,7 @@ import type { BuildConfig } from "./build-config.ts";
 import { VERSION } from "../server/aio-cli.ts";
 import { VERSION_STAMP } from "../protocol/protocol-version.ts";
 import { bundleClient, judgeClientBundle } from "./client-bundle.ts";
-import { appIconPng, appIconSvg } from "./app-icon.ts";
+import { appIconLabel, appIconPng, appIconSvg } from "./app-icon.ts";
 import { misplacedIconHint, resolveAppIcon } from "./build-helpers.ts";
 import { explainServerOnlyImport } from "../server/server-only-specs.ts";
 import { bytes } from "../diagnostics/fmt.ts";
@@ -768,6 +770,11 @@ export async function runBundle(
     await Deno.remove(join(dist, "icon.svg")).catch(() => {});
     staged("dist/icon.png");
   } else {
+    // An icon.svg is not the icon (APP_ICON_SVG) — say so, as dev does.
+    const svg = join(appDir, APP_ICON_SVG);
+    if (await Deno.stat(svg).then((s) => s.isFile, () => false)) {
+      warn(svgIconHint(svg, join(appDir, APP_ICON)));
+    }
     // No app icon — GENERATE one rather than shipping none. `dist/icon.png` is
     // what the packaged Electron window, the AppImage and the favicon all read,
     // so this single write is why an app nobody has drawn an icon for is still
@@ -776,7 +783,7 @@ export async function runBundle(
     // appTitle → binaryName → the app dir's own name. `binaryName` is always
     // set by loadBuildConfig, but the bundle step is also driven by harnesses
     // with a hand-built config — the icon label must resolve to SOMETHING.
-    const label = appTitle ?? binaryName ?? basename(appDir);
+    const label = appIconLabel(appTitle, binaryName ?? basename(appDir));
     // The HUE keys on the appId (binaryName), as the theme does — a title
     // that is not the appId's spelling must not paint another colour.
     const id = binaryName ?? label;

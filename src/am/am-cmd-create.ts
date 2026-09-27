@@ -1140,6 +1140,34 @@ export class ScaffoldLedger {
   }
 }
 
+/** The deno.lock a new app starts with, from the framework's own lock text:
+ *  its JSR side only (`jsr:` specifiers + the `jsr` packages) — the modules
+ *  aio's tools load, pinned as aio tested them. npm stays out: Deno installs
+ *  every npm package a lock names into `node_modules`, and the framework's
+ *  lock carries packages an app never uses (react for islands); the app's own
+ *  exact npm imports resolve those. null when the text is not a lock. Pure.
+ *  @internal */
+export function seedLockText(frameworkLock: string): string | null {
+  try {
+    const l = JSON.parse(frameworkLock);
+    if (typeof l?.version !== "string" || typeof l.jsr !== "object") {
+      return null;
+    }
+    const specifiers = Object.fromEntries(
+      Object.entries((l.specifiers ?? {}) as Record<string, unknown>)
+        .filter(([k]) => k.startsWith("jsr:")),
+    );
+    return JSON.stringify(
+      { version: l.version, specifiers, jsr: l.jsr },
+      null,
+      2,
+    ) +
+      "\n";
+  } catch { // aio-ok: an unparseable framework lock seeds nothing; doctor names the gap
+    return null;
+  }
+}
+
 /** Write the scaffold into `dir` — files, the `dep/aio` link, the pin — and on
  *  ANY failure undo exactly what was written, then rethrow (the caller's error
  *  and exit 1 are unchanged). @internal */
@@ -1208,6 +1236,25 @@ export async function writeScaffold(
       // syncFrameworkDeps in am-versions.ts).
       if (aioPath) await syncFrameworkDeps(dir, aioPath);
     }
+
+    // A fresh app failed its own `deno task doctor`: the first `deno task`
+    // wrote a deno.lock holding only that run's graph, so the lock-coverage
+    // check warned "deno.lock is missing N entries for aio's tools — run
+    // `am fix`" on a scaffold nobody had touched (and `am fix` needs the
+    // network when the cache is cold). The framework's own lock already
+    // holds those entries at the versions aio was tested with — seed from it,
+    // offline. Never over an app's existing lock.
+    if (aioPath) {
+      const lock = resolve(dir, "deno.lock");
+      const seed = await Deno.readTextFile(resolve(aioPath, "deno.lock"))
+        .then(seedLockText, () => null);
+      if (
+        seed !== null && !await Deno.lstat(lock).then(() => true, () => false)
+      ) {
+        await ledger.touch(lock);
+        await Deno.writeTextFile(lock, seed);
+      }
+    }
   } catch (e) {
     const left = await ledger.undo(dir);
     if (left.length === 0) throw e;
@@ -1241,7 +1288,7 @@ export async function cmdCreate(
 
   if (!opts.name) {
     fail(
-      `usage: am create <name> [--template=counter|todo|cli] [--client=${
+      `usage: am create <name> [--template=${TEMPLATES.join("|")}] [--client=${
         TARGETS.join("|")
       }]`,
       mode,

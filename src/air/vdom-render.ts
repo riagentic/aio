@@ -14,6 +14,7 @@ import {
 } from "./vdom-create.ts";
 import { _componentName } from "./hook-error.ts";
 import { applyChildDependentProps, applyProps } from "./vdom-props.ts";
+import { _assertTagName } from "./prop-write.ts";
 import { _removeDomCleanup, getDom } from "./vdom-remove.ts";
 import { _getActiveDelegationRoot, _setDelegationRoot } from "./vdom-events.ts";
 import {
@@ -411,6 +412,9 @@ export function createDom(
 
   // Element
   const tag = vnode.tag as string;
+  // The SSR writers' rule, so a bad tag fails with the same aio error on
+  // both sides rather than an engine-specific DOMException — see prop-write.ts.
+  _assertTagName(tag);
   const nowSvg = isSvg || SVG_TAGS.has(tag);
   const childSvg = childSvgMode(tag, nowSvg);
   const el = nowSvg

@@ -14,6 +14,7 @@ import {
   createAckRegistry,
 } from "../protocol/ack-registry.ts";
 import { _ackSink } from "../state/ack-sink.ts";
+import { MAX_TIMER_DELAY } from "../state/timer-ceiling.ts";
 
 export { ackMethodKey } from "../protocol/ack-registry.ts";
 
@@ -47,7 +48,10 @@ function callCeilingMs(methodKey: string | undefined): AckCeiling {
   const perMethod = methodKey !== undefined
     ? cfg?.methods?.[methodKey]
     : undefined;
-  const withGrace = (ms: number) => ms <= 0 ? 0 : ms + _ackGraceMs;
+  // Capped: the server clamps its ceiling to MAX_TIMER_DELAY, and the grace
+  // on top of that would overflow the int32 timer — firing in ~1 ms.
+  const withGrace = (ms: number) =>
+    ms <= 0 ? 0 : Math.min(ms + _ackGraceMs, MAX_TIMER_DELAY);
   if (perMethod === "warn") {
     // The server warns at the DEFAULT ceiling and keeps waiting; so do we.
     return { warnAfterMs: withGrace(cfg?.default ?? _ackTimeoutMs) };

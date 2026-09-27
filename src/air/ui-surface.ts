@@ -219,10 +219,18 @@ function labelSubtreeText(v: VNode, depth = 0): string {
   return parts.join(" ").replace(/\s+/g, " ").trim();
 }
 
+/** A label source that says something: a non-blank string, else undefined. */
+function nonBlank(x: unknown): string | undefined {
+  return typeof x === "string" && x.trim() !== "" ? x : undefined;
+}
+
 /** PascalCase a label into a valid identifier fragment: "buy milk!" → "BuyMilk". */
 function pascal(s: string): string {
   return s
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    // `\p{M}` too: combining marks are identifier characters, and in Thai,
+    // Devanagari or Arabic they carry the vowels — splitting on them turned
+    // "ปิด" into "ปด" and made two labels differing by a vowel sign collide.
+    .replace(/[^\p{L}\p{M}\p{N}]+/gu, " ")
     .trim()
     .split(/\s+/)
     .slice(0, 5)
@@ -310,9 +318,10 @@ function elementName(
     base = explicit;
   } else {
     const role = elementRole(v, events);
-    const own = (typeof p["aria-label"] === "string"
-      ? p["aria-label"] as string
-      : undefined) ?? staticText(v);
+    // A BLANK aria-label names nothing (the accessible-name rules skip it, as
+    // `t=""` is skipped): with `??` an `aria-label=""` stopped the chain and
+    // hid the visible text and the placeholder behind a bare "Button".
+    const own = nonBlank(p["aria-label"]) ?? staticText(v);
     // A wrapping `<label>` names the first labelable thing inside it — the
     // implicit association HTML has always had, applied here so the surface
     // agrees with the accessible name a user actually hears.
@@ -326,10 +335,7 @@ function elementName(
       labelCtx.used = true;
     }
     const label = own ?? implicit ??
-      (typeof p.placeholder === "string"
-        ? p.placeholder as string
-        : undefined) ??
-      (typeof p.name === "string" ? p.name as string : undefined) ?? "";
+      nonBlank(p.placeholder) ?? nonBlank(p.name) ?? "";
     const lp = pascal(label);
     base = lp.endsWith(role) ? lp : lp + role; // "Submit Button" → SubmitButton
     if (base === role && !lp) {

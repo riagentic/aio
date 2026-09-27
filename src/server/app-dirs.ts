@@ -30,7 +30,7 @@ import {
   resolve,
 } from "@std/path";
 import { sweepStaleTmps, uuidTmpBefore } from "../diagnostics/tmp-sweep.ts";
-import { homedir } from "./paths.ts";
+import { appImageOwner, homedir } from "./paths.ts";
 
 /** Two ways to answer "where does this app live", and one rule each:
  *
@@ -166,6 +166,15 @@ export type HomeRequest = {
   /** How it was asked — for the refusal `profiles: false` prints. */
   source?: string;
 };
+
+/** Whether `req` asks for a data home at all — THE test both
+ *  {@linkcode planAppDirs} and `homeWasRequested()` apply. Pure. */
+export function asksForHome(
+  req: HomeRequest | undefined,
+): req is HomeRequest {
+  return req !== undefined &&
+    (req.home !== undefined || req.profile !== undefined);
+}
 
 /** The refusal `aio.run({ profiles: false })` makes. */
 export function profilesOffError(req: HomeRequest): string {
@@ -450,7 +459,7 @@ export function planAppDirs(
 ): { dirs: AppDirs; profile?: string; requested: boolean } {
   const { appId, appDir, libraryMode, baseDir } = opts;
   const req = libraryMode ? undefined : opts.request;
-  if (req && (req.home !== undefined || req.profile !== undefined)) {
+  if (asksForHome(req)) {
     // Precedence: --home > --profile > appDir > AIO_APPS_DIR > default.
     if (opts.profiles === false) throw new Error(profilesOffError(req));
     const home = requestedHome(appId, req, appDir);
@@ -497,6 +506,52 @@ export function planAppDirs(
     if (owner) throw new Error(owner);
   }
   return { dirs, requested: false };
+}
+
+/** `null` unless a zero-config app's INFERRED id moved away from the data it
+ *  already has — then the boot warning, naming both directories, and the dev
+ *  resolver keeps the OLD id (`legacyId`).
+ *
+ *  The dev rule used to read deno.json from the launch CWD and otherwise take
+ *  the ENTRY's directory name; for a project's DECLARED entry it is now THE
+ *  project rule the build and `am` use (`projectAppId`). For most apps the two
+ *  agree. Where they do not — an entry at `server/main.ts` (`~/.server` →
+ *  `~/.<project>`), a pinned `appId` that was dropped because `deno run`
+ *  started in `src/`, a folder name with a space (`my%20app` → `my-20app`) —
+ *  booting under the new id would start from EMPTY state while the real data
+ *  sat in the old directory, and refusing to boot would break a working app.
+ *  So the app keeps booting where its data is, loudly, until its author pins
+ *  one id or moves the directory. Pure but for three `stat`s. */
+export function legacyIdFallback(
+  projectId: string,
+  legacyId: string | null,
+): string | null {
+  if (!legacyId || legacyId === projectId) return null;
+  const oldHome = appHome(legacyId);
+  const newHome = appHome(projectId);
+  const exists = (p: string): boolean => {
+    try {
+      Deno.statSync(p);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  // Old: an aio app's data specifically (its state database or meta.json),
+  // not any folder that happens to hold a `data/`. New: any `data/` at all —
+  // every boot creates it, so its presence means this id is already in use.
+  const oldHasData = exists(join(oldHome, "data", "state.db")) ||
+    exists(join(oldHome, "data", "meta.json"));
+  if (!oldHasData || exists(join(newHome, "data"))) return null;
+  return `app identity: this project's inferred appId is now "${projectId}" ` +
+    `(its deno.json appId/title/name, else the project folder's name — the ` +
+    `id \`aio build\` and \`am\` use), but earlier runs inferred ` +
+    `"${legacyId}" and its data is in ${oldHome}. ${newHome} has no data, so ` +
+    `this run keeps "${legacyId}" — a build or \`am\` still says ` +
+    `"${projectId}". Pick one:\n` +
+    `  keep the data where it is: add "appId": "${legacyId}" to deno.json\n` +
+    `  or move it to the new id:  mv ${oldHome} ${newHome}` +
+    ` (then pin "appId": "${projectId}")`;
 }
 
 /** `null` unless an explicit `dbPath` lies OUTSIDE a requested `home` — the
@@ -871,8 +926,17 @@ export function checkUnpackLocation(dirs: AppDirs): string | null {
       parentWorldWritable = mode !== null && (mode & 0o002) !== 0;
     } catch { /* unreadable parent — cannot claim it is world-writable */ }
   }
+  const appImage = Deno.env.get("APPIMAGE");
+  let execPath: string | undefined;
+  try {
+    execPath = Deno.execPath();
+  } catch { /* aio-ok: no read permission — ownership undecidable, no claim */ }
   return unsafeUnpackWarning({
-    appImage: Deno.env.get("APPIMAGE"),
+    // A host AppImage's variables, inherited by a plain `deno run` from its
+    // terminal, describe the HOST's unpack dir, not ours.
+    appImage: appImageOwner(execPath, appImage, appDir) === "own"
+      ? appImage
+      : undefined,
     appDir,
     expected: dirs.app,
     parentWorldWritable,

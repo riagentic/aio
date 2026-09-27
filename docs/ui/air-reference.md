@@ -189,6 +189,7 @@ so `<ErrorBoundary …>` in TSX fails `deno check` with TS2604 — write them wi
 | `onCleanup`          | `onCleanup(fn): void`                     | Before re-render & on unmount  |
 | `afterRender`        | `afterRender(fn): void`                   | After DOM commit               |
 | `onWindowEvent`      | `onWindowEvent(type, fn, opts?): void`    | Window listener, auto-cleanup  |
+| `onBackButton`       | `onBackButton(fn): () => void`            | Android Back; `true` = handled |
 | `useRef`             | `useRef<T>(init): { current: T }`         | Persistent mutable ref         |
 | `useId`              | `useId(): string`                         | SSR-safe unique ID             |
 | `useOptimistic`      | `useOptimistic<T,A>(state, fn): [T, add]` | Optimistic UI overlay          |

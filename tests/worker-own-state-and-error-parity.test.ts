@@ -22,6 +22,8 @@ type Own = {
   readAfterAwait: () => Promise<unknown>;
   fail: () => Promise<void>;
   failAsync: () => Promise<void>;
+  failDetail: () => Promise<void>;
+  failString: () => Promise<void>;
 };
 const O = ownState as unknown as Own;
 
@@ -30,12 +32,15 @@ async function errorOf(p: () => Promise<unknown>) {
     await p();
     return "did not throw";
   } catch (e) {
-    const x = e as Error & { code?: unknown };
+    if (!(e instanceof Error)) return { thrown: e };
+    const x = e as Error & { code?: unknown; detail?: unknown };
     return {
-      isError: x instanceof Error,
+      isError: true,
       name: x.name,
       code: x.code,
       message: x.message,
+      ...("detail" in x ? { detail: x.detail } : {}),
+      ...("retryable" in x ? { retryable: x.retryable } : {}),
     };
   }
 }
@@ -47,6 +52,8 @@ async function ask() {
     readAfterAwait: await O.readAfterAwait(),
     fail: await errorOf(O.fail),
     failAsync: await errorOf(O.failAsync),
+    failDetail: await errorOf(O.failDetail),
+    failString: await errorOf(O.failString),
   };
 }
 
@@ -68,10 +75,21 @@ Deno.test("worker own state: a REAL worker reads its live slice and keeps error 
     code: "E_LOCKED",
     message: "wallet is locked",
   });
+  // Own fields beyond name/code, and a thrown non-Error, cross as they are.
+  assertEquals(real.failDetail, {
+    isError: true,
+    name: "Error",
+    code: undefined,
+    message: "bad input",
+    detail: { field: "amount", min: 1 },
+    retryable: false,
+  });
+  assertEquals(real.failString, { thrown: "plain refusal" });
   // A sync throw is wrapped by dispatch on EITHER side of the thread; what
   // matters is that the wrapper's identity survives the crossing.
   assert(
-    typeof real.fail === "object" && real.fail.name !== "Error" &&
+    typeof real.fail === "object" && "name" in real.fail &&
+      real.fail.name !== "Error" &&
       typeof real.fail.code === "string",
     `sync throw lost its name/code: ${JSON.stringify(real.fail)}`,
   );

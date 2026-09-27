@@ -159,14 +159,52 @@ async function reconcileTable(
       // No rows to preserve — rebuild the table in the declared shape. This is
       // the only lossless way to add a NOT NULL column without inventing a
       // value the app never asked for.
-      await db.transaction([
-        { sql: `DROP TABLE ${name}` },
-        { sql: createTableSQL(name, def, schema) },
-      ]);
+      //
+      // But "no rows" is not "nothing to preserve": DROP TABLE also drops
+      // every index and trigger ON the table, and the app's own (a
+      // `CREATE UNIQUE INDEX` run once through app.db behind a
+      // `PRAGMA user_version` marker) were gone for good — the marker said it
+      // had run, and duplicates were accepted from then on, in silence. So
+      // they are read first and replayed onto the new table in the SAME
+      // transaction. One that no longer applies (it names a column the
+      // declaration dropped) is skipped and named once with its SQL — never
+      // a boot failure: 1.0.12 booted such an app (dropping the object), and
+      // the surface is frozen. (Auto-indexes of UNIQUE / PRIMARY KEY have no
+      // `sql` — CREATE remakes those.)
+      const { rows: objects } = await db.query<
+        { type: string; name: string; sql: string }
+      >(
+        `SELECT type, name, sql FROM sqlite_master WHERE tbl_name = ? ` +
+          `AND type IN ('index', 'trigger') AND sql IS NOT NULL ORDER BY rowid`,
+        [name],
+      );
+      const kept: string[] = [];
+      await db.transaction(async (tx) => {
+        await tx.execute(`DROP TABLE ${name}`);
+        await tx.execute(createTableSQL(name, def, schema));
+        for (const o of objects) {
+          try {
+            await tx.execute(o.sql);
+            kept.push(`${o.type} "${o.name}"`);
+          } catch (e) {
+            reportOnce(
+              `recreate-skip:${name}:${o.name}`,
+              `table "${name}" was empty and its schema changed, so it was ` +
+                `rebuilt — but ${o.type} "${o.name}" on it does not apply ` +
+                `to the declared shape (${
+                  e instanceof Error ? e.message : String(e)
+                }) and was NOT re-created:\n  ${o.sql}\nRewrite the ` +
+                `${o.type} with app.db, or declare the columns it needs.`,
+            );
+          }
+        }
+      });
       reportOnce(
         `recreate:${name}`,
         `table "${name}" was empty and its schema changed — recreated with ` +
-          `column(s) ${missing.join(", ")}.`,
+          `column(s) ${missing.join(", ")}${
+            kept.length ? `; re-created on it: ${kept.join(", ")}` : ""
+          }.`,
       );
       return;
     }
@@ -980,6 +1018,59 @@ function diffDirty(
   };
 }
 
+/** UPDATEs that move a row's UNIQUE value out of the way before the real
+ *  UPDATEs run — only for a row whose OLD value another updated row wants.
+ *
+ *  Ordering UPDATEs before INSERTs is not enough on its own: two existing rows
+ *  that EXCHANGE a unique value (alice↔bob) — a final state with no duplicate
+ *  in it — are two UPDATEs, and whichever runs first meets the other's
+ *  not-yet-changed value. SQLite checks UNIQUE per statement (it cannot be
+ *  deferred), so the batch was refused on every window after: the cell held
+ *  forever, the swap gone at the next boot. No order of the two UPDATEs works.
+ *
+ *  So a holder is first parked on a BLOB derived from its own key: aio's
+ *  tables are not STRICT, a BLOB is stored as-is in any affinity and never
+ *  compares equal to a text or number, and distinct keys give distinct blobs.
+ *  After that every real UPDATE can only collide with a value that is still
+ *  there in the final state — a real duplicate, still refused.
+ *
+ *  Why not DELETE + re-INSERT the updated rows: that fires `ON DELETE`
+ *  actions and triggers (a table adopted through `CREATE TABLE IF NOT EXISTS`
+ *  or an app trigger may cascade), i.e. would destroy data a plain UPDATE never
+ *  touches. A park is an UPDATE of the same row: any `ON UPDATE` trigger sees
+ *  one extra transient value, and the transaction ends where it would have.
+ *
+ *  Matching is by `String(value)`, deliberately loose (`1` and `"1"` collide
+ *  under column affinity): parking a row that did not need it costs one
+ *  statement and changes nothing. */
+function parkUniques(
+  name: string,
+  def: TableDef,
+  pk: string,
+  idx: TableIndex,
+  toUpdate: Record<string, unknown>[],
+): TablePlan {
+  if (toUpdate.length < 2) return [];
+  const pkType = def.columns[pk]!.sqlType;
+  const out: TablePlan = [];
+  for (const [c, col] of Object.entries(def.columns)) {
+    if (c === pk || !col.unique) continue;
+    const wanted = new Set<string>();
+    for (const row of toUpdate) {
+      if (row[c] != null) wanted.add(String(row[c]));
+    }
+    for (const row of toUpdate) {
+      const old = idx.get(pkKey(row[pk], pkType))?.row[c];
+      if (old == null || old === row[c] || !wanted.has(String(old))) continue;
+      out.push({
+        sql: `UPDATE ${name} SET ${c} = CAST(? AS BLOB) WHERE ${pk} = ?`,
+        params: [`aio-park:${c}:${String(row[pk])}`, row[pk]],
+      });
+    }
+  }
+  return out;
+}
+
 /** The statements `syncTables` would run — built, not executed — plus the
  *  bookkeeping that makes the NEXT window cheap.
  *
@@ -1103,6 +1194,7 @@ export function planTablesIncremental(
           params: [...setCols.map((c) => row[c]), row[pk]],
         }));
         const inserts: TablePlan = d.toInsert.map(insertStmt);
+        stmts.push(...parkUniques(name, def, pk, idx, d.toUpdate));
         stmts.push(...updates, ...inserts);
         advances.push(() => {
           index[name] = d.nextIndex();

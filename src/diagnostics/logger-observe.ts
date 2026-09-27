@@ -27,6 +27,25 @@ export type ObserveCtx = {
   ) => void;
 };
 
+/** Must this dispatched action's payload be withheld from a log line?
+ *  Shared by debug.log and the dispatch loop's error labels. */
+export function hidesPayload(
+  redact: Redactor,
+  type: string,
+  payload: unknown,
+): boolean {
+  // A write-set commit and an error frame travel under their OWN type, so the
+  // originating `cell:method` decides too — an exact pattern would otherwise
+  // plug the call and leak the same values under a different name.
+  if (isRedactedAction(redact, type, actionOrigin(type, payload))) return true;
+  // A `worker: true` cell's patch batch names no cell in its type, and its
+  // ops ARE the values the method stored — judged by the payload's cell, as
+  // the journal and the timeline judge it.
+  const cell = (payload as { cell?: unknown } | null | undefined)?.cell;
+  return type === WORKER_PATCH_ACTION && typeof cell === "string" &&
+    redact.redactsCell(cell);
+}
+
 /** Process a dispatched action — routes to the correct log level/category */
 export function observeAction(
   ctx: ObserveCtx,
@@ -46,15 +65,7 @@ export function observeAction(
 
   const prefix = type.split(":")[0]?.toLowerCase() ?? "unknown";
   const redact = ctx.redact ?? noRedaction;
-  // A write-set commit and an error frame travel under their OWN type, so the
-  // originating `cell:method` decides too — an exact pattern would otherwise
-  // plug the call and leak the same values under a different name.
-  const hidden = isRedactedAction(redact, type, actionOrigin(type, payload)) ||
-    // A `worker: true` cell's patch batch names no cell in its type, and its
-    // ops ARE the values the method stored — judged by the payload's cell, as
-    // the journal and the timeline judge it.
-    (type === WORKER_PATCH_ACTION && typeof payload.cell === "string" &&
-      redact.redactsCell(payload.cell));
+  const hidden = hidesPayload(redact, type, payload);
 
   // ── Cell lifecycle ─────────────────────────────────────────
   if (type.endsWith(":__init")) {
@@ -68,6 +79,9 @@ export function observeAction(
 
   // ── Async method error ────────────────────────────────────────
   if (type.endsWith(":__error")) {
+    // A call the dispatch overflow rejected: counted and said once by the
+    // cell runtime (cell-methods-internals.ts), not once per stranded call.
+    if (payload._overflow === true) return;
     // NOT counted here any more: `emit` counts every error-level line, so an
     // increment here too made an async method failure worth two.
     ctx.emit(

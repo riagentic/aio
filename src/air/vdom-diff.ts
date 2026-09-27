@@ -658,6 +658,10 @@ export function _assertRegionAlignment(
 ): void {
   const p = nv.props;
   if (p.ref || p.use || p.dangerouslySetInnerHTML) return;
+  // A server-rendered `<textarea value>` carries its value as a TEXT child
+  // (that is the only way HTML can say it); the vnode has none. Every
+  // re-render of a hydrated textarea reported that node as a desync.
+  if (nv.tag === "textarea" && !nv.children.length) return;
   // NAME THE SITE, and key the dedupe by it.
   //
   // This said `<span> holds the wrong node at child 0`, keyed
@@ -761,7 +765,7 @@ function _diffElement(
   applyProps(dom, nv.props, ov.props);
 
   if (_hasSignalPropChange(nv.props, ov.props)) {
-    bindSignalProps(dom as HTMLElement, nv.props);
+    bindSignalProps(dom as HTMLElement, nv.props, ov.props);
   }
 
   if (nv.props.ref !== ov.props.ref) {

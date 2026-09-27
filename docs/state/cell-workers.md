@@ -36,10 +36,10 @@ do on the main isolate.
 | ✅ | A method that blocks 10s delays **only this cell**. Measured: with the flag, five round trips to another cell during a 1.5s burn finish in milliseconds; without it, 1403ms.                                                        |
 | ✅ | State stays authoritative on the main isolate — the worker streams its Immer patches home, so **persistence, the journal, broadcast, `visible`/`persist` filters, time-travel, `am timeline` and the wire protocol are unchanged**. |
 | ✅ | Writes before an `await` still reach clients immediately (the spinner pattern works). Without an `await` between them, the write and the burn are one commit: `"building"` is never seen.                                           |
-| ✅ | `serverUser()` / `serverRequest()` answer inside the worker — the ambient context is forwarded with every call.                                                                                                                     |
+| ✅ | `serverUser()` / `serverRequest()` answer inside the worker exactly as in-isolate: the caller's full user object rides the call (a server-origin call is anonymous), and the request context is forwarded with it.                  |
 | ✅ | Per-cell FIFO ordering is preserved; return values and thrown errors cross back to the caller — an error keeps its `message`, `name` and string `code`.                                                                             |
 | ✅ | Shutdown terminates the thread instead of waiting for it — a wedged method can't hold the app hostage.                                                                                                                              |
-| ⚠️ | Args and return values must be **structured-cloneable** (plain data).                                                                                                                                                               |
+| ⚠️ | Args, return values and the caller's user object (what `resolveUser` returns) must be **structured-cloneable** (plain data).                                                                                                        |
 | ⚠️ | Module singletons are **per worker** — a module-scope DB connection or FFI handle gets its own instance in that thread.                                                                                                             |
 | ⚠️ | A postMessage + clone per dispatch: noise next to heavy work, ~10× a direct call for a trivial one.                                                                                                                                 |
 | ❌ | It does **not** make the slow method faster. The caller waits exactly as long; everyone else stops waiting with them.                                                                                                               |
@@ -182,16 +182,20 @@ isolate keeps ticking while a worker cell burns its thread.
    through the main dispatch queue**, which is what makes the isolation real.
    The cell's `onInit` runs in the worker **once per boot**, alongside the main
    cells' `onInit`s — not again when time travel or a snapshot load re-seeds it.
-   An `onInit` that throws or rejects is an `INIT_ERROR` (to `onError`, as on
-   the main isolate); the cell keeps serving calls. A worker that CRASHES is not
-   respawned: the cell answers every later call with the crash, by name, until
-   the app restarts, and `/__aio/health` reports it degraded
-   (`cell-worker:<name>`) — and a restart (including dev's automatic one when a
-   cell file changes) is a new boot, so `onInit` runs again, once. When the
-   entry is not a local module no worker can be spawned: the cell runs on the
-   main isolate with a warning, and its `onInit` runs there. `app.cells.disable`
-   (or a `circuitBreaker` trip) runs the cell's `onDestroy` and state reset in
-   its worker, and `app.cells.enable` its `onInit` — as for a main-isolate cell
+   A call in flight when the re-seed happens behaves as if it ran just BEFORE
+   it: its promise resolves with the method's value, and what it wrote is
+   replaced by the loaded state on both sides (a streaming method's writes after
+   the re-seed land on the loaded state, on both sides). An `onInit` that throws
+   or rejects is an `INIT_ERROR` (to `onError`, as on the main isolate); the
+   cell keeps serving calls. A worker that CRASHES is not respawned: the cell
+   answers every later call with the crash, by name, until the app restarts, and
+   `/__aio/health` reports it degraded (`cell-worker:<name>`) — and a restart
+   (including dev's automatic one when a cell file changes) is a new boot, so
+   `onInit` runs again, once. When the entry is not a local module no worker can
+   be spawned: the cell runs on the main isolate with a warning, and its
+   `onInit` runs there. `app.cells.disable` (or a `circuitBreaker` trip) runs
+   the cell's `onDestroy` and state reset in its worker, and `app.cells.enable`
+   its `onInit` — as for a main-isolate cell
    ([lifecycle](lifecycle.md#runtime-control)).
 4. Each commit's patches stream home and are applied through the normal dispatch
    path, so everything downstream sees an ordinary state change. With

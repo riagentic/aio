@@ -12,8 +12,9 @@ import {
   assertRejects,
   assertStringIncludes,
 } from "@std/assert";
-import { join } from "@std/path";
+import { basename, dirname, join } from "@std/path";
 import {
+  _withRuntimeLock,
   bakedElectronVersion,
   DEFAULT_ELECTRON_VERSION,
   electronBinIn,
@@ -42,6 +43,19 @@ import {
 } from "../src/build/electron-runtime.ts";
 import type { Log } from "../src/electron/electron-shared.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import {
+  _lockTiming,
+  holderAlive,
+  keepFresh,
+  ownPidNs,
+  releasePidLock,
+  tryPidLock,
+} from "../src/server/pid-lock.ts";
+import {
+  STAGE_STALE_MS,
+  stageTag,
+} from "../src/electron/electron-runtime-fetch.ts";
+import { cacheEntryKind } from "../src/build/electron-cache.ts";
 
 const silent: Log = { info: () => {}, error: () => {} };
 
@@ -366,10 +380,19 @@ Deno.test("ensureElectronRuntime: a killed unpack's stage is removed; a LIVE one
     const bytes = await tinyElectronZip(tmp);
     const rel = await fakeRelease(bytes, "9.9.8", "linux-x64");
     const dir = electronRuntimeDir("9.9.8", "linux-x64");
-    // A pid no process has (the max pid on Linux is < 2^22) and pid 1 (alive).
-    const dead = `${dir}.incoming.4194303`;
-    const live = `${dir}.incoming.1`;
-    for (const d of [dead, live]) {
+    // A pid no process has (the max pid on Linux is < 2^22) and pid 1 (alive),
+    // both in OUR pid namespace (no start stamp: pid 1's is not ours).
+    const ns = ownPidNs();
+    const hex = (n: number) => n.toString(16).padStart(8, "0");
+    const here = ns === undefined ? "" : `d${hex(ns)}`;
+    const dead = `${dir}.incoming.4194303-0badf00d${here}`;
+    const live = `${dir}.incoming.1-0badf00d${here}`;
+    // Where pid namespaces exist, a name without one (an older aio's) or
+    // with another (a container's pid 7 under tini, heartbeating its stage)
+    // proves nothing by its pid: fresh, it is kept.
+    const unknownNs = `${dir}.incoming.4194303-cafe0123`;
+    const otherNs = `${dir}.incoming.4194303-cafe0123d${hex((ns ?? 0) + 1)}`;
+    for (const d of [dead, live, unknownNs, otherNs]) {
       await Deno.mkdir(d, { recursive: true });
       await Deno.writeTextFile(join(d, "partial"), "x");
     }
@@ -386,6 +409,15 @@ Deno.test("ensureElectronRuntime: a killed unpack's stage is removed; a LIVE one
       await Deno.stat(live).then(() => "kept", () => "removed"),
       "kept",
       "a stage whose process is alive is never touched",
+    );
+    assertEquals(
+      await Deno.stat(otherNs).then(() => "kept", () => "removed"),
+      "kept",
+      "another pid namespace's live unpack lost its stage",
+    );
+    assertEquals(
+      await Deno.stat(unknownNs).then(() => "kept", () => "removed"),
+      ns === undefined ? "removed" : "kept",
     );
   });
 });
@@ -779,4 +811,442 @@ Deno.test("isInvalidHandleError: only Windows' no-console inherit failure", () =
   );
   assertEquals(isInvalidHandleError("Invalid handle", "windows"), false);
   assertEquals(isInvalidHandleError(null, "windows"), false);
+});
+
+/** A pid that WAS a process and is not any more, and one that is alive
+ *  until `stop()`. */
+async function deadAndLivePids(): Promise<
+  { dead: number; live: number; stop: () => Promise<void> }
+> {
+  const exe = Deno.execPath();
+  const gone = new Deno.Command(exe, { args: ["eval", ""], stdout: "null" })
+    .spawn();
+  await gone.status;
+  const child = new Deno.Command(exe, {
+    args: ["eval", "setTimeout(() => {}, 60_000)"],
+    stdout: "null",
+    stderr: "null",
+  }).spawn();
+  return {
+    dead: gone.pid,
+    live: child.pid,
+    stop: async () => {
+      child.kill();
+      await child.status;
+    },
+  };
+}
+
+Deno.test("runtime lock: a waiter never deletes a lock taken after it judged the old one dead", async () => {
+  // Two launches wait on a dead download's lock. A judges it dead, removes
+  // it, takes it; B judged the SAME dead owner a moment before, and its
+  // removal used to land on A's fresh lock — two downloads unpacking into
+  // one runtime dir. Simulated: the lock changes hands right after B's read.
+  const tmp = await tempDir("electron-lock-");
+  const { dead, live, stop } = await deadAndLivePids();
+  const lock = join(tmp, "rt.lock");
+  await Deno.writeTextFile(lock, `${dead}`);
+  const sync = Deno.readTextFileSync, async_ = Deno.readTextFile;
+  let swapped = false;
+  const swap = (p: string | URL, was: string) => {
+    if (!swapped && String(p) === lock) {
+      swapped = true;
+      Deno.removeSync(lock); // A: took over the dead lock …
+      Deno.writeTextFileSync(lock, `${live}`, { createNew: true }); // … holds it
+    }
+    return was;
+  };
+  Deno.readTextFileSync = (p) => swap(p, sync(p));
+  Deno.readTextFile = async (p, o) => swap(p, await async_(p, o));
+  try {
+    const held = await _withRuntimeLock(lock, (h) => {
+      assertEquals(sync(lock), `${live}`, "the live holder's lock survives");
+      return Promise.resolve(h);
+    }, 600);
+    assertEquals(held, false, "B never believes it holds A's lock");
+    assertEquals(sync(lock), `${live}`);
+  } finally {
+    Deno.readTextFileSync = sync;
+    Deno.readTextFile = async_;
+    await stop();
+    await dropTempDir(tmp);
+  }
+});
+
+Deno.test("runtime lock: a dead holder's lock is taken over at once and released after", async () => {
+  const tmp = await tempDir("electron-lock-");
+  const { dead, stop } = await deadAndLivePids();
+  await stop();
+  const lock = join(tmp, "rt.lock");
+  await Deno.writeTextFile(lock, `${dead}`);
+  try {
+    const t0 = Date.now();
+    const held = await _withRuntimeLock(lock, (h) => {
+      assertEquals(Deno.readTextFileSync(lock), `${Deno.pid}`);
+      return Promise.resolve(h);
+    }, 60_000);
+    assertEquals(held, true);
+    assert(Date.now() - t0 < 5_000, "taken over, not waited out");
+    assertEquals(await Deno.stat(lock).then(() => true, () => false), false);
+  } finally {
+    await dropTempDir(tmp);
+  }
+});
+
+// A new container or flatpak sandbox (bwrap --unshare-pid) has a NEW pid
+// namespace: a launch killed mid-download left a lock every later launch
+// waited 15 min on, then threw. Watched untouched for `staleMs` (2 min), it
+// is taken over; one a live holder heartbeats is still waited on.
+Deno.test({
+  name:
+    "runtime lock: another namespace's lock untouched for 2 min is taken over",
+  ignore: ownPidNs() === undefined,
+  fn: async () => {
+    const tmp = await tempDir("electron-lock-");
+    const lock = join(tmp, "rt.lock");
+    const ns = ((ownPidNs()! ^ 1) >>> 0).toString(16).padStart(8, "0");
+    const was = { ..._lockTiming };
+    _lockTiming.staleMs = 1_000;
+    try {
+      await Deno.writeTextFile(lock, "1");
+      await Deno.writeTextFile(`${lock}.id`, `1-d${ns}a10`);
+      assertEquals(
+        await _withRuntimeLock(lock, (h) => Promise.resolve(h), 600),
+        false,
+      );
+      const old = new Date(Date.now() - 3 * 60_000);
+      await Deno.utime(lock, old, old);
+      const t0 = Date.now();
+      const held = await _withRuntimeLock(lock, (h) => {
+        assertEquals(Deno.readTextFileSync(lock), `${Deno.pid}`);
+        return Promise.resolve(h);
+      }, 60_000);
+      assertEquals(held, true);
+      assert(Date.now() - t0 < 5_000, "taken over, not waited out");
+      assertEquals(await Deno.stat(lock).then(() => true, () => false), false);
+    } finally {
+      Object.assign(_lockTiming, was);
+      await dropTempDir(tmp);
+    }
+  },
+});
+
+Deno.test("runtime lock: the give-up error names the lock file to delete", async () => {
+  const { live, stop } = await deadAndLivePids();
+  try {
+    await isolated(async () => {
+      const dir = electronRuntimeDir("9.9.9", "linux-x64");
+      await Deno.mkdir(join(dir, ".."), { recursive: true });
+      await Deno.writeTextFile(`${dir}.lock`, `${live}`); // a live downloader
+      const err = await assertRejects(
+        () =>
+          ensureElectronRuntime("9.9.9", "linux-x64", {
+            fetch: () => Promise.reject(new Error("never fetched")),
+            log: () => {},
+            lockWaitMs: 300,
+          }),
+        Error,
+        "is still alive",
+      );
+      assertStringIncludes(err.message, `delete ${dir}.lock`);
+    });
+  } finally {
+    await stop();
+  }
+});
+
+// A live holder in another pid namespace heartbeats its lock, so a waiter
+// there never takes it however long the hold; the heartbeat stops on release.
+Deno.test({
+  name:
+    "pid lock: a live holder's heartbeat keeps a foreign waiter off; it stops on release",
+  ignore: ownPidNs() === undefined,
+  fn: async () => {
+    const tmp = await tempDir("electron-lock-");
+    const lock = join(tmp, "rt.lock");
+    const was = { ..._lockTiming };
+    Object.assign(_lockTiming, { heartbeatMs: 50, staleMs: 300 });
+    const ns = ((ownPidNs()! ^ 1) >>> 0).toString(16).padStart(8, "0");
+    let idWas = "";
+    const warn = console.warn;
+    console.warn = () => {}; // our own heartbeat: "taken over" — by design
+    try {
+      await _withRuntimeLock(lock, async (held) => {
+        assertEquals(held, true);
+        idWas = await Deno.readTextFile(`${lock}.id`);
+        // As a waiter in another namespace sees it: pid 1 over there.
+        await Deno.writeTextFile(lock, "1");
+        await Deno.writeTextFile(`${lock}.id`, `1-d${ns}a10`);
+        const beat = keepFresh(lock); // that holder's heartbeat, not ours
+        const until = Date.now() + 1_000;
+        while (Date.now() < until) {
+          const r = tryPidLock(lock);
+          assertEquals(r.held || r.retry, false, "took a live holder's lock");
+          await new Promise((r) => setTimeout(r, 20));
+        }
+        beat();
+        assertEquals(await Deno.readTextFile(lock), "1");
+        await Deno.writeTextFile(lock, String(Deno.pid)); // ours again
+        await Deno.writeTextFile(`${lock}.id`, idWas);
+      }, 5_000);
+      console.warn = warn;
+      assertEquals(await Deno.stat(lock).then(() => true, () => false), false);
+      // Released: nothing touches a new file at that path any more.
+      await Deno.writeTextFile(lock, "x");
+      const old = new Date(Date.now() - 60_000);
+      await Deno.utime(lock, old, old);
+      await new Promise((r) => setTimeout(r, 250));
+      assertEquals((await Deno.stat(lock)).mtime!.getTime(), old.getTime());
+    } finally {
+      console.warn = warn;
+      Object.assign(_lockTiming, was);
+      await dropTempDir(tmp);
+    }
+  },
+});
+
+Deno.test("pid lock: holderAlive — dead, live, recycled, our own pid, another namespace", async () => {
+  const { dead, live, stop } = await deadAndLivePids();
+  try {
+    assertEquals(holderAlive({ pid: dead }, false), false);
+    assertEquals(holderAlive({ pid: live }, false), true);
+    // Our own pid is alive only while THIS process holds the lock.
+    assertEquals(holderAlive({ pid: Deno.pid }, true), true);
+    assertEquals(holderAlive({ pid: Deno.pid }, false), false);
+    // A live pid whose recorded start differs: recycled, so dead.
+    if (Deno.build.os === "linux") {
+      assertEquals(holderAlive({ pid: live, startToken: "1" }, false), false);
+    }
+    // Written in another pid namespace: never judged dead from here.
+    const ns = ownPidNs();
+    if (ns !== undefined) {
+      assertEquals(holderAlive({ pid: dead, ns: ns ^ 1 }, false), true);
+      assertEquals(holderAlive({ pid: dead, ns }, false), false);
+      // …until THIS process watched the file it holds sit untouched for
+      // `staleMs` — an old mtime alone (a suspend, a lagging host clock) is
+      // no evidence.
+      const tmp = await tempDir("electron-lock-");
+      const was = { ..._lockTiming };
+      _lockTiming.staleMs = 200;
+      try {
+        const f = join(tmp, "held");
+        await Deno.writeTextFile(f, "1");
+        const old = new Date(Date.now() - 3 * 60_000);
+        await Deno.utime(f, old, old);
+        assertEquals(holderAlive({ pid: dead, ns: ns ^ 1 }, false, f), true);
+        await new Promise((r) => setTimeout(r, 250));
+        assertEquals(holderAlive({ pid: dead, ns: ns ^ 1 }, false, f), false);
+      } finally {
+        Object.assign(_lockTiming, was);
+        await dropTempDir(tmp);
+      }
+    }
+  } finally {
+    await stop();
+  }
+});
+
+// Host suspend / `docker pause` / a lagging clock on a shared NFS volume: a
+// LIVE holder's lock in another namespace carries an mtime far older than
+// `staleMs` by the waiter's wall clock, and the waiter took it at once — both
+// then ran. Staleness is only what this waiter watched on its own monotonic
+// clock; a heartbeat starts the watch over.
+Deno.test({
+  name:
+    "pid lock: an old mtime is never stale to a waiter that has not watched it that long",
+  ignore: ownPidNs() === undefined,
+  fn: async () => {
+    const tmp = await tempDir("electron-lock-");
+    const lock = join(tmp, "rt.lock");
+    const was = { ..._lockTiming };
+    _lockTiming.staleMs = 400;
+    const ns = ((ownPidNs()! ^ 1) >>> 0).toString(16).padStart(8, "0");
+    const hour = new Date(Date.now() - 3_600_000);
+    const tries = async (ms: number) => {
+      const until = performance.now() + ms;
+      while (performance.now() < until) {
+        const r = tryPidLock(lock);
+        if (r.held || r.retry) return true;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      return false;
+    };
+    try {
+      await Deno.writeTextFile(lock, "1");
+      await Deno.writeTextFile(`${lock}.id`, `1-d${ns}a10`);
+      await Deno.utime(lock, hour, hour);
+      assertEquals(await tries(300), false, "took a suspended holder's lock");
+      // The holder resumes and heartbeats: the watch starts over.
+      const now = new Date();
+      await Deno.utime(lock, now, now);
+      assertEquals(await tries(300), false, "a heartbeat did not reset it");
+      // Untouched for staleMs of OUR watching: dead, taken over.
+      assertEquals(await tries(1_000), true);
+    } finally {
+      releasePidLock(lock);
+      Object.assign(_lockTiming, was);
+      await dropTempDir(tmp);
+    }
+  },
+});
+
+// A holder whose lock was taken over (it looked dead: paused, suspended)
+// deleted the NEW holder's lock on release — and a third process got in.
+Deno.test("pid lock: a release after a take-over leaves the new holder's lock", async () => {
+  const tmp = await tempDir("electron-lock-");
+  const lock = join(tmp, "rt.lock");
+  const warn = console.warn, said: string[] = [];
+  console.warn = (m: string) => said.push(m);
+  try {
+    assertEquals(tryPidLock(lock).held, true);
+    // B took it over: pid 1 in another namespace (or any other owner).
+    await Deno.writeTextFile(lock, "1");
+    await Deno.writeTextFile(`${lock}.id`, "1-d0badf00da10");
+    releasePidLock(lock);
+    assertEquals(await Deno.readTextFile(lock), "1");
+    assertEquals(await Deno.readTextFile(`${lock}.id`), "1-d0badf00da10");
+    assertStringIncludes(said.join("\n"), "taken over");
+    // Same pid, another stamp (two containers' pid 1): still not ours.
+    await Deno.remove(`${lock}.id`);
+    await Deno.remove(lock);
+    assertEquals(tryPidLock(lock).held, true);
+    await Deno.writeTextFile(`${lock}.id`, `${Deno.pid}-d0badf00da10`);
+    releasePidLock(lock);
+    assertEquals(await Deno.readTextFile(lock), String(Deno.pid));
+    // Our own lock, untouched: released.
+    await Deno.remove(`${lock}.id`);
+    await Deno.remove(lock);
+    assertEquals(tryPidLock(lock).held, true);
+    said.length = 0;
+    releasePidLock(lock);
+    assertEquals(await Deno.stat(lock).then(() => true, () => false), false);
+    assertEquals(
+      await Deno.stat(`${lock}.id`).then(() => true, () => false),
+      false,
+    );
+    assertEquals(said, []);
+  } finally {
+    console.warn = warn;
+    await dropTempDir(tmp);
+  }
+});
+
+// Two containers sharing one cache are both pid 1: `<dir>.incoming.<pid>`
+// was the SAME stage for both, so one unpack wiped the other's.
+Deno.test("electron runtime: a stage name is unique per unpack, and still a stage", () => {
+  const a = stageTag(), b = stageTag();
+  assert(a !== b, "two unpackers with one pid share a stage");
+  assert(a.startsWith(`${Deno.pid}-`));
+  assertEquals(cacheEntryKind(`44.4.1-linux-x64.incoming.${a}`), "stage");
+  assertEquals(cacheEntryKind("44.4.1-linux-x64.incoming.31337"), "stage");
+});
+
+// A holder whose lock was taken over kept heartbeating it — the NEW holder's
+// lock — so once that one died its lock looked alive for as long as the old
+// holder ran. The heartbeat stops at the first tick that finds it not ours.
+Deno.test("pid lock: the heartbeat never refreshes a lock that is no longer ours", async () => {
+  const tmp = await tempDir("electron-lock-");
+  const lock = join(tmp, "rt.lock");
+  const was = { ..._lockTiming };
+  _lockTiming.heartbeatMs = 30;
+  const warn = console.warn, said: string[] = [];
+  console.warn = (m: string) => said.push(m);
+  try {
+    assertEquals(tryPidLock(lock).held, true);
+    await Deno.writeTextFile(lock, "1");
+    await Deno.writeTextFile(`${lock}.id`, "1-d0badf00da10");
+    const old = new Date(Date.now() - 60_000);
+    await Deno.utime(lock, old, old);
+    await new Promise((r) => setTimeout(r, 200));
+    assertEquals((await Deno.stat(lock)).mtime!.getTime(), old.getTime());
+    releasePidLock(lock);
+    assertEquals(await Deno.readTextFile(lock), "1");
+    assertEquals(said.filter((m) => m.includes("taken over")).length, 1);
+  } finally {
+    console.warn = warn;
+    Object.assign(_lockTiming, was);
+    await dropTempDir(tmp);
+  }
+});
+
+// A stage whose pid proves nothing — pid 1 in another container, or our own
+// pid left by a previous run in one — lived forever (~250 MB each). Untouched
+// for STAGE_STALE_MS it is a dead unpack's; a heartbeated one is kept.
+Deno.test("ensureElectronRuntime: an old stage whose pid proves nothing is removed; a fresh one is not", async () => {
+  await isolated(async (tmp) => {
+    const bytes = await tinyElectronZip(tmp);
+    const rel = await fakeRelease(bytes, "9.9.7", "linux-x64");
+    const dir = electronRuntimeDir("9.9.7", "linux-x64");
+    const oldForeign = `${dir}.incoming.1-0badf00d`;
+    const oldOwnPid = `${dir}.incoming.${Deno.pid}-0badf00d`;
+    const fresh = `${dir}.incoming.1-cafe0123`;
+    const old = new Date(Date.now() - STAGE_STALE_MS - 60_000);
+    for (const d of [oldForeign, oldOwnPid, fresh]) {
+      await Deno.mkdir(d, { recursive: true });
+      await Deno.writeTextFile(join(d, "partial"), "x");
+    }
+    await Deno.utime(oldForeign, old, old);
+    await Deno.utime(oldOwnPid, old, old);
+    await ensureElectronRuntime("9.9.7", "linux-x64", {
+      fetch: rel.fetch,
+      log: () => {},
+    });
+    const there = (p: string) =>
+      Deno.stat(p).then(() => "kept", () => "removed");
+    assertEquals(await there(oldForeign), "removed");
+    assertEquals(await there(oldOwnPid), "removed");
+    assertEquals(await there(fresh), "kept", "a live unpack's stage");
+  });
+});
+
+// Another unpacker judges a stage whose pid proves nothing by its mtime: a
+// long unpack (a slow link, a 250 MB zip) must keep refreshing its own, or
+// after STAGE_STALE_MS it reads as a dead unpack's and is deleted under it.
+Deno.test("ensureElectronRuntime: a long unpack heartbeats its stage", async () => {
+  await isolated(async (tmp) => {
+    const bytes = await tinyElectronZip(tmp);
+    const rel = await fakeRelease(bytes, "9.9.6", "linux-x64");
+    const dir = electronRuntimeDir("9.9.6", "linux-x64");
+    const was = { ..._lockTiming };
+    _lockTiming.heartbeatMs = 30;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => release = r);
+    const slow = (async (url: string | URL | Request) => {
+      if (String(url).endsWith(".zip")) await gate; // the download stalls
+      return rel.fetch(url);
+    }) as typeof fetch;
+    try {
+      const run = ensureElectronRuntime("9.9.6", "linux-x64", {
+        fetch: slow,
+        log: () => {},
+      });
+      const prefix = `${basename(dir)}.incoming.`;
+      let stage: string | undefined;
+      for (let i = 0; i < 200 && !stage; i++) {
+        await new Promise((r) => setTimeout(r, 10));
+        const ls = await Array.fromAsync(Deno.readDir(dirname(dir))).catch(
+          () => [],
+        );
+        for (const e of ls) {
+          if (e.isDirectory && e.name.startsWith(prefix)) {
+            stage = join(dirname(dir), e.name);
+          }
+        }
+      }
+      assert(stage, "the unpack never staged");
+      const old = new Date(Date.now() - STAGE_STALE_MS - 60_000);
+      await Deno.utime(stage, old, old);
+      await new Promise((r) => setTimeout(r, 200)); // several beats
+      const m = (await Deno.stat(stage)).mtime!.getTime();
+      release();
+      await run;
+      assert(
+        Date.now() - m < STAGE_STALE_MS,
+        "a live unpack's stage went stale — the next unpacker deletes it",
+      );
+    } finally {
+      release?.();
+      Object.assign(_lockTiming, was);
+    }
+  });
 });

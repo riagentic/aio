@@ -8,7 +8,21 @@ import {
   readDenoJson,
   readDenoJsonSync,
 } from "../server/deno-json.ts";
-import { isProcessAlive } from "../server/single-instance-lock.ts";
+import {
+  _lockTiming,
+  foreignLockAlive,
+  foreignNs,
+  holderAlive,
+  keepFresh,
+  lockOwner,
+  ownIdTail,
+  type ProcId,
+  readOrNull,
+  releasePidLock,
+  touchedRecently,
+  tryPidLock,
+  withTag,
+} from "../server/pid-lock.ts";
 import { resolveEntryPath } from "../server/paths.ts";
 import {
   dirname,
@@ -264,35 +278,60 @@ export async function withDevExcluded(
   // failure is a `console.warn`, so the next `deno task dev` is the one that
   // finds out). A lock file makes the window unreachable rather than unlikely.
   const lock = join(nmDir, ".aio-build-lock");
+  //
+  // The lock and its `.id` stamp change ONLY under the lock's mutex (take,
+  // take over, release), so a compare-and-remove never acts on half of one: a
+  // new lock beside the dead holder's stamp read as "pid recycled" and a
+  // waiter deleted the LIVE lock whenever the two pids matched.
   let held = false;
-  for (let i = 0; i < 600 && !held; i++) { // ~60s, then take it over
+  let owner: ProcId | null = null;
+  // ~60 s, then build beside it. Another pid namespace's lock counts as dead
+  // only once THIS process watched it untouched for `staleMs` (pid-lock.ts),
+  // so wait that long too — else a restarted container's dead lock is never
+  // taken over and every build waits, then builds beside it.
+  const polls = () =>
+    600 + (owner && foreignNs(owner) ? _lockTiming.staleMs / 100 + 50 : 0);
+  let i = 0;
+  for (; i < polls() && !held; i++) {
     try {
       await Deno.mkdir(nmDir, { recursive: true });
-      await Deno.writeTextFile(lock, `${Deno.pid}`, { createNew: true });
-      held = true;
-    } catch {
-      // Someone else is excluding right now. Wait rather than interleave —
-      // and if the holder died without cleaning up, take the lock so a stale
-      // file cannot wedge every future build.
-      try {
-        const owner = Number(await Deno.readTextFile(lock));
-        // THE liveness decider, not a second copy of it: it knows that EPERM
-        // means the pid exists under another account (alive), which a bare
-        // try/catch around `Deno.kill` reads as dead.
-        if (
-          Number.isFinite(owner) && owner !== Deno.pid && !isProcessAlive(owner)
-        ) {
-          await Deno.remove(lock).catch(() => {}); // holder died mid-build
-          continue;
-        }
-      } catch { /* lock vanished — retry immediately */ }
-      await new Promise((r) => setTimeout(r, 100));
-    }
+    } catch { /* aio-ok: unwritable node_modules — waited out like a holder */ }
+    // Someone else is excluding right now: wait rather than interleave. A
+    // holder that died without cleaning up is taken over (see pid-lock.ts).
+    const r = tryPidLock(lock);
+    held = r.held;
+    owner = r.owner;
+    if (held || r.retry) continue;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  if (!held) {
+    const where = owner
+      ? ` (pid ${owner.pid}${
+        foreignNs(owner)
+          ? " in another pid namespace — a container sharing node_modules"
+          : ""
+      })`
+      : "";
+    console.warn(
+      `${HEY} ${lock} is still held after ${
+        Math.round(i / 10)
+      } s${where} — building beside ` +
+        `it. If no other build is running, delete ${lock}.`,
+    );
   }
   try {
     return await _withDevExcluded(nmDir, fn, graph);
   } finally {
-    if (held) await Deno.remove(lock).catch(() => {});
+    if (held) {
+      try {
+        releasePidLock(lock);
+      } catch (e) {
+        console.warn(
+          `${HEY} could not release ${lock} (${e}) — a later build takes ` +
+            `it over once this process exits.`,
+        );
+      }
+    }
   }
 }
 
@@ -301,6 +340,9 @@ async function _withDevExcluded(
   fn: (excludes: string[]) => Promise<boolean>,
   graphRoots?: { cwd: string; roots: readonly string[] },
 ): Promise<boolean> {
+  await recoverInterruptedLinks(nmDir);
+  const journal = _linkJournal(nmDir);
+
   const denoDir = join(nmDir, ".deno");
 
   // Which `.deno` entries only a dev-only package can reach. The ROOTS are the
@@ -334,10 +376,16 @@ async function _withDevExcluded(
   const excludes = [...excluded].map((e) => join(denoDir, e));
 
   const saved: SavedLink[] = [];
+  // Journal paths are node_modules-relative (a project moved after a killed
+  // build is still repaired). The file is THIS build's alone: a build that
+  // took the lock over after the wait runs beside a live holder, and a shared
+  // file's read-modify-write lost whichever entries the other wrote between.
+  const _journal = () => journal.write(saved);
   async function _rm(path: string): Promise<void> {
     try {
       const t = await Deno.readLink(path);
-      saved.push({ path, target: t, isDir: false });
+      saved.push({ path: relative(nmDir, path), target: t, isDir: false });
+      await _journal();
       await Deno.remove(path);
     } catch { /* symlink missing */ }
   }
@@ -352,7 +400,12 @@ async function _withDevExcluded(
           });
         } catch { /* not a symlink */ }
       }
-      saved.push({ path, target: JSON.stringify(inner), isDir: true });
+      saved.push({
+        path: relative(nmDir, path),
+        target: JSON.stringify(inner),
+        isDir: true,
+      });
+      await _journal();
       await Deno.remove(path, { recursive: true });
     } catch { /* dir missing */ }
   }
@@ -395,29 +448,202 @@ async function _withDevExcluded(
 
     ok = await fn(excludes);
   } finally {
-    for (const { path, target, isDir } of saved) {
-      try {
-        if (isDir) {
-          await Deno.mkdir(path, { recursive: true });
-          for (
-            const { name, target: t } of JSON.parse(target) as Array<
-              { name: string; target: string }
-            >
-          ) await Deno.symlink(t, join(path, name));
-        } else {
-          await Deno.mkdir(dirname(path), { recursive: true });
-          try {
-            await Deno.remove(path);
-          } catch { /* already gone */ }
-          await Deno.symlink(target, path);
-        }
-      } catch (e) {
-        console.warn(`${HEY} failed to restore symlink ${path}: ${e}`);
-      }
-    }
+    await restoreLinks(nmDir, saved);
+    await journal.remove();
     if (saved.length) console.log(`restored ${saved.length} symlinks`);
   }
   return ok;
+}
+
+/** The links a running build holds aside, written before each removal: ONE
+ *  file per build (`.aio-build-links.<pid>-<nonce8><tag>.json`), so two
+ *  builds never share a read-modify-write. The name is one an OLDER aio's
+ *  pattern (`.<pid>-<hex>`) still reads as its pid's journal; the owner's
+ *  start stamp rides in the hex tail. An older build's `.aio-build-links.json`
+ *  is still recovered. `<journal>.tmp` is a write killed before its rename. */
+const LINK_JOURNAL_RE =
+  /^\.aio-build-links(?:\.(\d+)-([0-9a-f]+))?\.json(?:\.tmp)?$/;
+
+/** The journal names THIS process holds right now (see pid-lock.ts: our own
+ *  pid on one is otherwise a previous run's). */
+const liveJournals = new Set<string>();
+
+/** This build's own journal file. Exported for tests. @internal */
+export function _linkJournal(nmDir: string): {
+  path: string;
+  write: (saved: readonly SavedLink[]) => Promise<void>;
+  remove: () => Promise<void>;
+} {
+  const name = `.aio-build-links.${Deno.pid}-${
+    crypto.randomUUID().slice(0, 8)
+  }${ownIdTail()}.json`;
+  const path = join(nmDir, name);
+  liveJournals.add(name);
+  // Heartbeat: another pid namespace judges this journal by its mtime.
+  let stop: (() => void) | undefined;
+  return {
+    path,
+    // temp + rename: a kill mid-write leaves the previous journal whole.
+    write: async (saved) => {
+      await Deno.writeTextFile(`${path}.tmp`, JSON.stringify(saved) + "\n");
+      await Deno.rename(`${path}.tmp`, path);
+      stop ??= keepFresh(path);
+    },
+    remove: async () => {
+      stop?.();
+      liveJournals.delete(name);
+      await Deno.remove(path).catch(() => {
+        // aio-ok: already gone — nothing left to journal either way
+      });
+    },
+  };
+}
+
+/** Put back the `node_modules` links a build that DIED left aside.
+ *
+ *  A build killed mid-compile (Ctrl-C, a CI timeout, a crash: `finally` never
+ *  ran) left the project without them — and deno never re-creates a top-level
+ *  `node_modules/<pkg>` link it believes it already wrote (`deno install`
+ *  included), so every later bundle failed `Could not resolve "<pkg>"` until
+ *  someone deleted node_modules. The journal is written BEFORE each removal;
+ *  every build runs this first, and leaves a LIVE build's journal alone (its
+ *  own `finally` restores those links): all of them while another live
+ *  process holds the lock, and any whose own pid is alive. */
+export async function recoverInterruptedLinks(nmDir: string): Promise<void> {
+  const journals: { name: string; owner: ProcId | null }[] = [];
+  try {
+    for await (const e of Deno.readDir(nmDir)) {
+      const m = LINK_JOURNAL_RE.exec(e.name);
+      if (m) {
+        journals.push({
+          name: e.name,
+          // hex after the 8-char nonce: the owner's start tag, if any
+          owner: m[1] ? withTag(Number(m[1]), m[2]!.slice(8)) : null,
+        });
+      }
+    }
+  } catch { /* aio-ok: no node_modules — nothing was held aside */ }
+  if (!journals.length) return;
+  const lock = join(nmDir, ".aio-build-lock");
+  const raw = readOrNull(lock);
+  const holder = raw === null ? null : lockOwner(raw, readOrNull(`${lock}.id`));
+  // Our own pid (same namespace): we hold it (recovery runs inside the lock)
+  // or it is stale. Anyone else live — or unjudgeable — holds the links.
+  // Another namespace's lock judged dead (see foreignLockAlive: a one-shot
+  // call from build.ts has never watched it) is a dead build's: it no longer
+  // keeps any journal (our own namespace's included) unrecovered.
+  if (
+    holder &&
+    (foreignNs(holder) ? foreignLockAlive(lock) : holderAlive(holder, false))
+  ) return;
+  // So no live build holds the lock. A foreign journal is judged by its mtime
+  // on our wall clock (a one-shot read cannot watch it): wrong only after a
+  // suspend or across skewed hosts, and even then it can only name a build
+  // that runs WITHOUT the lock (one that built beside it, or lost it while
+  // frozen) — whose own `finally` puts the same links back.
+  let restored = 0;
+  for (const { name, owner } of journals) {
+    const temp = name.endsWith(".tmp");
+    // A live build's own `finally` restores its links.
+    const journal = temp ? name.slice(0, -4) : name;
+    const path = join(nmDir, name);
+    const alive = owner &&
+      (foreignNs(owner)
+        ? touchedRecently(path)
+        : holderAlive(owner, liveJournals.has(journal)));
+    if (alive) {
+      if (foreignNs(owner) && !temp) {
+        console.warn(
+          `${HEY} build link journal ${path} belongs to a build in another ` +
+            `pid namespace (a container sharing this node_modules) that ` +
+            `touched it in the last 2 min — left alone; recovered once it ` +
+            `goes untouched that long.`,
+        );
+      }
+      continue;
+    }
+    if (temp) {
+      // Killed before its rename: the journal it would have replaced still
+      // lists every link actually removed (removal follows the rename).
+      await Deno.remove(path).catch(() => {
+        // aio-ok: a concurrent recovery removed it
+      });
+      continue;
+    }
+    const left = await readLinkJournal(path);
+    if (!left) {
+      console.warn(
+        `${HEY} build link journal ${path} is unreadable (a build was ` +
+          `killed while writing it) — kept, NOT recovered. To fix: delete ` +
+          `${path}; if a bundle then fails \`Could not resolve "<pkg>"\`, ` +
+          `a link it listed is still missing: remove ${nmDir} and run ` +
+          `\`deno install\`.`,
+      );
+      continue;
+    }
+    await restoreLinks(nmDir, left);
+    await Deno.remove(path).catch(() => {
+      // aio-ok: a concurrent recovery removed it — the links are back either way
+    });
+    restored += left.length;
+  }
+  if (restored) {
+    console.warn(
+      `${HEY} restored ${restored} node_modules link(s) an interrupted ` +
+        `build left aside`,
+    );
+  }
+}
+
+/** The journal's links: [] when it is gone (a concurrent recovery took it),
+ *  null when it cannot be read or parsed. */
+async function readLinkJournal(path: string): Promise<SavedLink[] | null> {
+  let text: string;
+  try {
+    text = await Deno.readTextFile(path);
+  } catch (e) {
+    return e instanceof Deno.errors.NotFound ? [] : null;
+  }
+  try {
+    const v = JSON.parse(text);
+    return Array.isArray(v) ? v : null;
+  } catch {
+    return null; // aio-ok: torn or foreign — the caller warns and keeps it
+  }
+}
+
+/** `path` is node_modules-relative (an absolute one, from an older journal,
+ *  is used as is). */
+async function restoreLinks(
+  nmDir: string,
+  saved: readonly SavedLink[],
+): Promise<void> {
+  for (const { path: rel, target, isDir } of saved) {
+    const path = resolve(nmDir, rel);
+    try {
+      if (isDir) {
+        await Deno.mkdir(path, { recursive: true });
+        for (
+          const { name, target: t } of JSON.parse(target) as Array<
+            { name: string; target: string }
+          >
+        ) {
+          await Deno.remove(join(path, name)).catch(() => {
+            // aio-ok: nothing there to replace — the symlink below is the point
+          });
+          await Deno.symlink(t, join(path, name));
+        }
+      } else {
+        await Deno.mkdir(dirname(path), { recursive: true });
+        try {
+          await Deno.remove(path);
+        } catch { /* already gone */ }
+        await Deno.symlink(target, path);
+      }
+    } catch (e) {
+      console.warn(`${HEY} failed to restore symlink ${path}: ${e}`);
+    }
+  }
 }
 
 /** `--include` args for the workers `deno compile` cannot trace. Each is
@@ -867,36 +1093,14 @@ export async function assetIncludes(
   //     Same containment rule as `compile.include`, and REFUSED the same way
   //     rather than dropped: a silently skipped mount ships a binary without
   //     the data it was told to carry.
-  let mounts: unknown;
+  let cfg: unknown;
   try {
-    const cfg = (await readDenoJson(root))?.config ?? {};
-    mounts = (cfg as { assets?: unknown }).assets;
+    cfg = (await readDenoJson(root))?.config;
   } catch {
     // aio-ok: the parse failure is already reported by the compile.include
     // read above, which runs first and says so once.
   }
-  if (mounts && typeof mounts === "object" && !Array.isArray(mounts)) {
-    for (const [prefix, dir] of Object.entries(mounts)) {
-      if (typeof dir !== "string" || !dir.trim()) {
-        throw new Error(
-          `${NO} deno.json assets["${prefix}"] is ${JSON.stringify(dir)} — ` +
-            `every value must be a non-empty directory path relative to the ` +
-            `project root.`,
-        );
-      }
-      const entry = dir.trim();
-      const rel = relative(root, join(root, entry));
-      if (isAbsolute(entry) || rel.startsWith("..") || isAbsolute(rel)) {
-        throw new Error(
-          `${NO} deno.json assets["${prefix}"] ("${dir}") is outside the ` +
-            `project. A binary embeds paths relative to the project root, so ` +
-            `this directory could not travel with it — move it inside the ` +
-            `project and point the mount at the copy.`,
-        );
-      }
-      add(rel);
-    }
-  }
+  for (const m of assetMounts(cfg, root)) add(m.rel);
 
   // 3) the app's config itself — its IDENTITY (version, title, client). The
   //    runtime reads it relative to the entry module, so a binary knows its own
@@ -940,6 +1144,45 @@ export async function assetIncludes(
  *  and redirected rather than left to fail cryptically at build time.
  *
  *  Returns `["--v8-flags=a,b"]`, or `[]` when nothing is declared. */
+/** deno.json `assets` — `{ "/prefix": "./dir" }` — as `{ prefix, rel }` with
+ *  `rel` relative to `root`. THE one reading, for the binary that embeds the
+ *  mounts and the standalone APK that packages them. A value that is not a
+ *  non-empty path inside the project is REFUSED, never dropped: a skipped
+ *  mount ships an artifact without the data it was told to carry. */
+export function assetMounts(
+  config: unknown,
+  root: string,
+): { prefix: string; rel: string }[] {
+  const mounts = (config as { assets?: unknown } | undefined)?.assets;
+  if (!mounts || typeof mounts !== "object" || Array.isArray(mounts)) {
+    return [];
+  }
+  return Object.entries(mounts).map(([prefix, dir]) => {
+    if (typeof dir !== "string" || !dir.trim()) {
+      throw new Error(
+        `${NO} deno.json assets["${prefix}"] is ${JSON.stringify(dir)} — ` +
+          `every value must be a non-empty directory path relative to the ` +
+          `project root.`,
+      );
+    }
+    const entry = dir.trim();
+    const rel = relative(root, join(root, entry));
+    if (isAbsolute(entry) || rel.startsWith("..") || isAbsolute(rel)) {
+      throw new Error(
+        `${NO} deno.json assets["${prefix}"] ("${dir}") is outside the ` +
+          `project. An artifact carries paths relative to the project root, ` +
+          `so this directory could not travel with it — move it inside the ` +
+          `project and point the mount at the copy.`,
+      );
+    }
+    return { prefix, rel };
+  });
+}
+
+/** The `--v8-flags=…` argument for `deno compile`: deno.json `build.v8Flags`
+ *  under `root` (validated; a `compile.v8Flags` spelling is refused by name)
+ *  plus a travelling `memory.maxHeap` ceiling, unless a flag already sets one;
+ *  `[]` when there is nothing to pass. */
 export async function v8FlagsArg(root: string): Promise<string[]> {
   let decl: unknown;
   let misplaced = false;
@@ -1227,6 +1470,7 @@ export async function runDenoCompile(
           root,
           appDir: cfg.appDir,
           name: cfg.appTitle ?? binaryName,
+          id: binaryName,
           warn: (m) => console.warn(`${HEY} ${m}`),
         },
       ),

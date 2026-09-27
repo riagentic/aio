@@ -21,6 +21,7 @@ import {
 } from "../server/graph-validator.ts";
 import {
   buildBrowserImportMap,
+  graphImportMap,
   readAppDenoImports,
 } from "../server/server-html-importmap.ts";
 import { devModuleUrl, devSrcRoot } from "../server/server-static.ts";
@@ -73,9 +74,12 @@ export async function smoke(
       `smoke: no UI entry at ${entry} — pass { baseDir, ui: { entry } } pointing at the app's client entry`,
     );
   }
-  const importMap = buildBrowserImportMap(readAppDenoImports(baseDir) ?? {}, {
-    vendorImmer: hasVendorImmer(),
-  });
+  const importMap = graphImportMap(
+    baseDir,
+    buildBrowserImportMap(readAppDenoImports(baseDir) ?? {}, {
+      vendorImmer: hasVendorImmer(),
+    }),
+  );
   const graph = await validateGraph(
     entry,
     importMap,

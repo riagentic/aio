@@ -202,3 +202,19 @@ Deno.test("danger fill: an engine without relative colour keeps the white label 
     );
   }
 });
+
+// Hovering a filled kit button must not repaint the fill under its label.
+// The ink is solved against the fill at 4.6:1 — just over AA — and the old
+// `filter: brightness(1.07)` lightened fill AND label together: a white label
+// on an app accent near the ink switch-over read ~4.0:1 while hovered.
+Deno.test("kit: hovering a filled button leaves the fill (and its contrast) alone", () => {
+  for (const kind of ["primary", "danger"]) {
+    const rule = new RegExp(`\\.aio-btn--${kind}:hover[^{]*\\{([^}]*)\\}`)
+      .exec(UI_CSS);
+    assert(rule, `no hover rule for .aio-btn--${kind}`);
+    assert(
+      !/\b(filter|background|opacity|color)\s*:/.test(rule[1]!),
+      `.aio-btn--${kind}:hover repaints the fill: ${rule[1]!.trim()}`,
+    );
+  }
+});

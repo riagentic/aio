@@ -102,6 +102,17 @@ async function db() {
 import { pk, table, text } from "aio";
 ```
 
+**Where the `import()` sits matters.** Dev and the build leave a dynamic import
+of a server-only aio entry (`aio/server`, `aio/db`, `aio/extras`, `aio/sync`, …)
+external — the server runs it. In a cell's methods, `onInit`/`onDestroy`, or a
+helper only those call (like `db()` above) that is silent and right. Where the
+PAGE runs it — a JSX event handler (`onClick={…}`, or `onClick={save}` /
+`onClick={() => save()}` with `save` declared in the same file) or any part of a
+`scope: "client"` cell — both warn with the same words: it fails at that moment
+with "Failed to resolve module specifier". Move it into a server cell's method
+and call that; if the path really never runs in the browser, say so with
+`// aio-ok: server-only — <reason>` on the line or the line above.
+
 `deno task lint:aio` flags a static server-only symbol in a cell file with the
 exact `file:line` + fix, and the dev blank-screen guard now prints a teachable
 hint for the runtime error. (For a cleaner boundary, keep DB code in a
@@ -227,7 +238,10 @@ and 404s from the binary. Declared in deno.json there is nothing to keep in sync
 — no `compile.include` entry, one fact read by both the server that serves it
 and the build that ships it. A mount pointing outside the project is refused at
 build time rather than dropped: a silently skipped mount produces a binary
-missing the data it was told to carry.
+missing the data it was told to carry. A standalone APK has no server, so its
+build packages each mount under the page instead. Fetch with a relative URL
+(`fetch("media/song.mp3")`) and the same line works on both
+([targets](targets.md#content-denojson-assets-travel-into-the-apk)).
 
 **Both paths resolve the same way** — against the process's working directory,
 exactly like `baseDir` — so write them from the same vantage point. A root that
@@ -277,13 +291,17 @@ exactly as they are.
 
 ## Quick reference
 
-| What                                  | Rule                                                          |
-| ------------------------------------- | ------------------------------------------------------------- |
-| Browser-reachable import              | Inside the project (dev) — else declare `share` / `serveDirs` |
-| Cell `index.ts`                       | Browser-safe only — shared between server and UI              |
-| Server-only code (`@std/*`, `Deno.*`) | `*.server.ts` + dynamic import (string-concat as fallback)    |
-| Files loaded via dynamic import       | Must also have static import in `app.ts` for `deno compile`   |
-| `import type`                         | Always safe — erased at compile time                          |
+| What                                    | Rule                                                                                                     |
+| --------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| Browser-reachable import                | Inside the project (dev) — else declare `share` / `serveDirs`                                            |
+| Cell `index.ts`                         | Browser-safe only — shared between server and UI                                                         |
+| Server-only code (`@std/*`, `Deno.*`)   | `*.server.ts` + dynamic import (string-concat as fallback)                                               |
+| Files loaded via dynamic import         | Must also have static import in `app.ts` for `deno compile`                                              |
+| `import type`                           | Always safe — erased at compile time                                                                     |
+| Local alias `"fmt": "./lib/fmt.ts"`     | Works in UI code, dev and build alike (exact keys only)                                                  |
+| Prefix alias `"@/": "./src/"`           | Not in UI code — refused, same words in dev and build                                                    |
+| aio entries in UI code                  | Only the browser-served ones (`aio`, `aio/air`, `aio/ui`, …) — any other is refused, dev and build alike |
+| Vendored `"immer": "./vendor/immer.js"` | THE immer for the app and the framework — dev serves it, the build bundles it                            |
 
 ## Auto-aliasing npm packages (dev mode)
 

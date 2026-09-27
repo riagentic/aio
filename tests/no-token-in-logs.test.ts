@@ -463,7 +463,15 @@ Deno.test("cli client: the 'DIFFERENT app' refusal does not print the share link
 
 Deno.test("cli client: 'cannot reach' never prints the key", async () => {
   const cap = captureLog();
-  const cli = connectCli(`http://127.0.0.1:${freePort()}/?token=${SECRET}`);
+  // The port is HELD, and every connection dropped: a bare freePort() with
+  // nothing on it could be taken by a parallel test's server, which the
+  // client then reached — and never said "cannot reach".
+  const port = freePort();
+  const listener = Deno.listen({ hostname: "127.0.0.1", port });
+  (async () => {
+    for await (const conn of listener) conn.close();
+  })().catch(() => {}); // aio-ok: ends when the listener closes
+  const cli = connectCli(`http://127.0.0.1:${port}/?token=${SECRET}`);
   cli.ready.catch(() => {}); // never connects — close() may reject it
   try {
     const hit = await waitFor(
@@ -473,6 +481,7 @@ Deno.test("cli client: 'cannot reach' never prints the key", async () => {
     assert(hit, `no 'cannot reach' line:\n${cap.lines.join("\n")}`);
   } finally {
     cli.close();
+    listener.close();
     cap.restore();
   }
   assert(

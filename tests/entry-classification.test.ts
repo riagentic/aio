@@ -27,8 +27,8 @@ import { aioModuleUrl } from "../src/server/server-static.ts";
  *  a gap nobody noticed — which is the whole difference. */
 const ACKNOWLEDGED: Record<string, string> = {
   "aio/extras":
-    "pulls parseCli/instances (server), but a bundler can tree-shake an app " +
-    "down to the part that works — refusing it would break working builds",
+    "pulls parseCli/instances (server) — a UI import is refused in dev and " +
+    "the bundle alike, with the aio-own-entry advice, not the server wording",
   "aio/sync":
     "the ENTRY pulls server-handler.ts; the browser reaches the sync engine " +
     "through browser-sync.ts instead, never through this specifier",

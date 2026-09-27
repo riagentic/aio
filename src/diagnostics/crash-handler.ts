@@ -1,6 +1,8 @@
 // src/diagnostics/crash-handler.ts — Last-words logger for unhandled errors
 // Server-runtime only: file write guarded by typeof Deno check
 
+import { describeThrown } from "./fmt.ts";
+
 /** Dependencies injected into the crash handler for logging and emergency checkpoints */
 export type CrashHandlerDeps = {
   log: { error: (msg: string, data?: Record<string, unknown>) => void };
@@ -80,7 +82,9 @@ export function installCrashHandler(deps: CrashHandlerDeps): () => void {
     if (_handling) return;
     _handling = true;
     try {
-      const msg = error instanceof Error ? error.message : String(error);
+      // Guarded: a reason `String()` cannot convert (a null-prototype object)
+      // threw HERE, before the log line and the emergency checkpoint.
+      const msg = describeThrown(error);
       const stack = error instanceof Error ? error.stack : undefined;
       let health: ReturnType<typeof getHealthData> | undefined;
       try {

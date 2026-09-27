@@ -42,6 +42,7 @@ import {
 import {
   _coreOfflineQueueFullness,
   _registerSyncTransport,
+  _syncBooting,
 } from "./browser-protocol.ts";
 import {
   type AioIPCBridge,
@@ -122,10 +123,13 @@ let _connectionDegraded = false;
  *  of accepted calls while online; a blip must not be what decides which of
  *  them fail. `_takePending` and `_dropQueue` merge it with the queues. */
 const _carry: QueuedEntry[] = [];
-function _carryPush(action: QueuedAction, seq: number): void {
+function _carryPush(action: QueuedAction, seq: number, tries?: number): void {
   let i = _carry.length;
   while (i > 0 && _carry[i - 1]!.seq > seq) i--;
-  _carry.splice(i, 0, { action, seq });
+  // `tries` rides along: the refusal count is what caps a call's re-sends, and
+  // dropping it here reset the cap on every socket close — a server that
+  // refuses and then drops the socket re-sent the same write forever.
+  _carry.splice(i, 0, tries ? { action, seq, tries } : { action, seq });
 }
 
 // ── one paced writer per WebSocket ───────────────────────────────────────────
@@ -229,7 +233,7 @@ function _requeuePaced(
   for (const e of entries) {
     const action = e.action ?? _coreAction(e.frame);
     if (action) {
-      _carryPush(action, e.seq);
+      _carryPush(action, e.seq, e.tries);
       requeued++;
     } else dropped++;
   }
@@ -324,7 +328,7 @@ function _retryRefusedCall(d: unknown): boolean {
     pacer.hold(Math.min(retryAfterMs, 10_000));
     pacer.push(again);
   } else {
-    _carryPush(again.action!, again.seq);
+    _carryPush(again.action!, again.seq, again.tries);
     _updateDegraded();
     _noteQueued();
   }
@@ -427,11 +431,30 @@ _registerSyncTransport(
   (onMsg, onOnline) => {
     setSyncMessageHandler(onMsg);
     _syncOnline = onOnline;
+    // The engine is wired AFTER it booted — usually while the socket that
+    // `ensureConnected` opened is still CONNECTING. It boots believing it is
+    // online, so its boot catch-up (and the replay of the offline queue a
+    // previous page load left) went to a transport with no channel and was
+    // dropped; the open then reported "online" to an engine already online,
+    // which is no transition, and NO sync-req ever went out on the
+    // connection. Handing it the transport's real state here makes "engine
+    // online" mean "transport up" from the first moment it can hear either:
+    // down now → it goes offline, and the open is the offline→online
+    // transition that sends the catch-up. Up now → a no-op, and the boot
+    // request already went out on the open channel (never a second one).
+    onOnline(_syncUp);
   },
 );
 // serverFn client (B3): raw sends for sfn calls.
 _registerSfnTransport((raw) => _sendRaw(raw));
 let _syncOnline: ((v: boolean) => void) | null = null;
+/** What the transport last told (or would have told) the sync engine: up from
+ *  an open (WS `onopen`, IPC `onOpen`) until the next close or teardown. */
+let _syncUp = false;
+function _setSyncUp(v: boolean): void {
+  _syncUp = v;
+  _syncOnline?.(v);
+}
 
 /** Raw frame out, no queue and no ack — sync ops, serverFn calls, log frames,
  *  `client-state` replies. Returns whether it actually left.
@@ -523,7 +546,7 @@ function _route(line: string): void {
     case "sync-err":
       if (typeof _onSyncMessage === "function") {
         _onSyncMessage(f.t, f.d);
-      } else {
+      } else if (!_syncBooting()) {
         console.warn(
           `[aio:air] sync frame "${f.t}" but no handler — discarding`,
         );
@@ -804,7 +827,7 @@ function _flushPending(
     } catch (err) {
       const rest = pending.slice(i);
       // Accepted already — back where they were, never through the cap.
-      for (const e of rest) _carryPush(e.action, e.seq);
+      for (const e of rest) _carryPush(e.action, e.seq, e.tries);
       _updateDegraded();
       console.warn(
         `[aio:air] offline flush stopped after ${
@@ -925,7 +948,7 @@ function _connectIPC() {
     const pending = _takePending();
     _coreSetTransport({ send: (d: string) => _ipc!.send(d), close: () => {} });
     _coreSetConnected(true);
-    _syncOnline?.(true);
+    _setSyncUp(true);
     _coreResendSubs();
     _flushPending(pending, (e) => {
       _ipc!.send(enc("action", e.action));
@@ -958,7 +981,7 @@ function _connectIPC() {
     _setDegradedRelay(null);
     _coreSetTransport(null);
     _coreSetConnected(false);
-    _syncOnline?.(false);
+    _setSyncUp(false);
     if (_ipcPingTimer) {
       clearInterval(_ipcPingTimer);
       _ipcPingTimer = null;
@@ -1026,7 +1049,7 @@ function _connect() {
       close: () => ws.close(),
     });
     _coreSetConnected(true);
-    _syncOnline?.(true);
+    _setSyncUp(true);
     // Announce our wire-protocol version before anything else — without this
     // hello the server's version gate never applies to AIR clients.
     pacer.push({
@@ -1047,6 +1070,7 @@ function _connect() {
         frame: enc("action", e.action),
         action: e.action,
         seq: e.seq,
+        ...(e.tries ? { tries: e.tries } : {}),
       }));
     _wireDegradedRelay();
     // Client vitals ride the WS only (envelope.ts: `vitals-ping` is refused
@@ -1111,7 +1135,7 @@ function _connect() {
     _setDegradedRelay(null);
     _coreSetTransport(null);
     _coreSetConnected(false);
-    _syncOnline?.(false);
+    _setSyncUp(false);
     if (_closed) return;
     _connecting = true;
     if (_wasConnected) _status("Reconnecting\u2026");
@@ -1280,7 +1304,7 @@ _setTeardownFn(() => {
   // to the bridge through the installed core transport.
   _coreSetTransport(null);
   _coreSetConnected(false);
-  _syncOnline?.(false);
+  _setSyncUp(false);
   _setDegradedRelay(null);
   _stopClientVitals();
   if (_ipcPingTimer) {

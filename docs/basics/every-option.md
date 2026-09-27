@@ -1,13 +1,13 @@
 # Every option, one page
 
 > Generated from the source by `deno task update:reference` — do not edit by
-> hand; `check:release` fails when it is stale. 186 entries: the signature, what
+> hand; `check:release` fails when it is stale. 188 entries: the signature, what
 > it does, an example when the source has one, and the file it lives in. The
 > guides explain; this page is for looking a name up.
 
 - [cell options](#cell-options) — 24
 - [aio.run options](#aiorun-options) — 80
-- [aio/air](#aioair) — 82
+- [aio/air](#aioair) — 84
 
 ## cell options
 
@@ -1393,6 +1393,25 @@ const App = () => h("p", null, "hello");
 mount(document.getElementById("app")!, App);
 ```
 
+### `nativeFetch`
+
+```ts
+nativeFetch(input: string | URL | Request, init?: RequestInit): Promise<Response>
+```
+
+`fetch`, sent by the app rather than the browser where the runtime can.
+<sub>src/browser/native-fetch.ts</sub>
+
+```ts
+import { nativeFetch } from "aio/air";
+const res = await nativeFetch("https://api.example.com/rpc", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ method: "getHealth" }),
+});
+console.log(res.status, await res.json());
+```
+
 ### `navigate`
 
 ```ts
@@ -1421,6 +1440,27 @@ Explicit dependency declaration for effects. <sub>src/state/watch.ts</sub>
 
 ```ts
 effect(on(count, (next, prev) => { ... }));
+```
+
+### `onBackButton`
+
+```ts
+onBackButton(handler: () => boolean): () => void
+```
+
+Handle the Android Back button. `handler` returns `true` when it handled Back
+(went up a screen, closed a dialog) — the app then stays; `false` lets the next
+handler try, and when none takes it Android does its default (WebView history,
+then leave the app). <sub>src/air/back-button.ts</sub>
+
+```tsx
+onMount(() =>
+  onBackButton(() => {
+    if (nav.screen === "home") return false; // leave the app
+    nav.up();
+    return true;
+  })
+); // onMount runs the returned disposer at unmount
 ```
 
 ### `onChange`
@@ -1924,9 +1964,9 @@ Returns the navigate function. <sub>src/air/router.ts</sub>
 useOptimistic<T, A>(passthrough: T, updateFn: (current: T, optimistic: A) => T): [T, (action: A) => void]
 ```
 
-Optimistic UI hook. Shows an immediate update while an async action runs, then
-reverts to the real state when it completes (success or failure).
-<sub>src/air/renderer-lifecycle.ts</sub>
+Optimistic UI hook. Shows an immediate update while an async action runs,
+cleared when `passthrough` changes — not when a call fails (a failed call
+changes nothing). <sub>src/air/renderer-lifecycle.ts</sub>
 
 ### `useProjection`
 
@@ -1971,6 +2011,8 @@ Persist a mutable ref across renders. Does not trigger re-render on mutation.
 
 ```ts
 useResource<T>(cfg: UseResourceConfig<T>): ResourceHandle<T>
+useResource<T, K>(cfg: UseResourceConfigOf<T, K>): ResourceHandle<T>
+useResource<T>(keyed: unknown): ResourceHandle<T>
 ```
 
 Hold a keyed resource — something with an open and a close, where the close

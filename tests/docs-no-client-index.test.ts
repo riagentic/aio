@@ -6,7 +6,7 @@
 // no UI. Every guide used to print `am surface 0` / `am trigger 0 …`, so the
 // first thing a reader copied was the one form that fails.
 import { assert, assertEquals } from "@std/assert";
-import { walk } from "https://deno.land/std@0.208.0/fs/walk.ts";
+import { walk } from "@std/fs/walk";
 
 const ROOT = new URL("../", import.meta.url).pathname;
 const BAD = /\bam (surface|trigger) 0\b/;

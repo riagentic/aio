@@ -240,6 +240,23 @@ export type JournalGap = {
 export const journalWatermarkKey = (appId: string): string =>
   `${appId}:__journal_wm`;
 
+/** The store row that holds, per cell this build does not declare, the
+ *  watermark its journal lines are HELD by (`{ [cell]: seq }`).
+ *
+ *  A stored cell a build does not declare is preserved in the store,
+ *  untouched, until a build declares it again. Its journal tail was not: a
+ *  SIGKILL left `old:inc` lines past the watermark, the next boot (without
+ *  `old`) "replayed" them as no-ops on a cell it has no reducer for, and its
+ *  first save compacted them away — re-declaring `old` brought back the value
+ *  from before them, where a clean stop brought back the value after. The
+ *  row freezes each such cell's watermark where the store's copy of it stands
+ *  (the app-wide one at the boot that first found it undeclared) and the
+ *  journal tracks the cell by it (`Journal.trackCells`), so its lines are
+ *  kept, not replayed, until a build declares it — which replays them onto
+ *  the preserved slice and drops the entry in the save that holds them. */
+export const journalHeldCellsKey = (appId: string): string =>
+  `${appId}:__journal_held`;
+
 /** The journal line a time-travel jump writes (`goto`/`undo`/`redo`).
  *
  *  A jump assigns live state directly — no action runs — so it used to reach
@@ -656,6 +673,10 @@ export type Journal = {
    *  recovers them (retired from `-Infinity`, the default, they were
    *  deleted by the first save of a boot that could not apply them). */
   retireCells(cells: Iterable<string>, fromSeq?: number): void;
+  /** Hand tracked cells back to the app-wide watermark — a cell whose lines
+   *  were held while undeclared (`journalHeldCellsKey`), once the save that
+   *  holds their replay has committed. Takes effect at the next compaction. */
+  releaseCells(cells: Iterable<string>): void;
   /** Record that `cell`'s own durable record holds its entries up to `seq`
    *  (called after the fold that wrote it committed); compacts the journal. */
   setCellWatermark(cell: string, seq: number): void;
@@ -1621,6 +1642,9 @@ export function createJournal(
     },
     retireCells(cells, fromSeq = -Infinity) {
       for (const c of cells) retired.set(c, fromSeq);
+    },
+    releaseCells(cells) {
+      for (const c of cells) cellWm.delete(c);
     },
     setCellWatermark(cell, at) {
       cellWm.set(cell, Math.max(cellWm.get(cell) ?? 0, at));

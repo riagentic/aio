@@ -40,7 +40,10 @@ export type SendMail = (msg: {
 /** Everything `auth: {...}` accepts EXCEPT the verify pair, which is split out
  *  below so the type can enforce their coupling. */
 type AuthOptionsBase = {
-  /** Open self-signup (default true; false = admin-seeded users only). */
+  /** Open self-signup (default true; false = admin-seeded users only — for
+   *  the OIDC door too: an SSO identity with no account is refused, not
+   *  created. Admit one with `am auth create "oidc:<issuer>:<sub>"`, or
+   *  set `oidc.signup: true` to keep SSO account creation open). */
   signup?: boolean;
   /** Session TTL in ms (default 30 days).
    *
@@ -134,6 +137,35 @@ export type ElectronConfig = {
    *  page's, and the page is the part an attacker gets first. Requires
    *  `childWindows: true` like every other child window. Default: false. */
   unsandboxedChildWindows?: boolean;
+  /** The app page's permission allow-list — Electron's own names, each
+   *  scoped `["app"]` (the app's own page; the only scope).
+   *
+   *  Absent, the app's own page keeps every permission it asks for, and a
+   *  `<webview>` guest or foreign frame gets only fullscreen. Set, it is the
+   *  whole list: the app page gets exactly these, guests and foreign frames
+   *  get nothing. Every denial is logged once. Unknown names or scopes refuse
+   *  the boot. Default: absent.
+   *
+   *  @example A wallet: copy buttons and desktop notifications, nothing else.
+   *  ```ts
+   *  electron: {
+   *    permissions: {
+   *      "clipboard-sanitized-write": ["app"],
+   *      notifications: ["app"],
+   *    },
+   *  }
+   *  ``` */
+  permissions?: ElectronPermissions;
+};
+
+/** One Electron permission name (Electron's own spelling). */
+export type ElectronPermission =
+  typeof import("./config.ts").ELECTRON_PERMISSIONS[number];
+/** `electron.permissions`: permission → where it is granted. `"app"` — the
+ *  app's own page (a window, asking from the origin it shows) — is the only
+ *  scope: nothing here ever reaches a `<webview>` guest or a foreign frame. */
+export type ElectronPermissions = {
+  [P in ElectronPermission]?: readonly "app"[];
 };
 
 /** Window + UI sync options — applies to both Electron and browser clients */
@@ -254,7 +286,7 @@ export type UiConfig = {
    *
    *  `layout: false` keeps everything that makes an ELEMENT look right — the
    *  canvas, typography, the form controls, tables, code, `::selection`, focus
-   *  rings, and the three environments (coarse pointer, reduced motion, print)
+   *  rings, and the environments (coarse pointer, reduced motion)
    *  — and drops everything that decides where things GO: the `<main>` page
    *  container with its header/footer alignment, and the six layout classes
    *  (`.card`/`.row`/`.stack`/`.grid`/`.muted`/`.badge`).
@@ -697,6 +729,7 @@ export type AioConfig<S, A, E> = {
       onMigrate?: (
         state: Record<string, unknown>,
         fromVersion: number,
+        stored?: Record<string, unknown>,
       ) => Record<string, unknown>;
     }
   >;

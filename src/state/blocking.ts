@@ -137,7 +137,12 @@ export function createBlockingPool(opts?: { size?: number }): BlockingPool {
     w.onerror = (e) => {
       const task = active.get(w);
       const hint = blockingWorkerMissingHint(e.message ?? "");
-      if (hint) e.preventDefault?.(); // we are reporting it, precisely
+      // ALWAYS handled here: the crash is reported — as the task's rejection,
+      // or logged below when nothing was in flight. Un-prevented, Deno
+      // re-raised any crash but the missing-module one in the PARENT isolate,
+      // so one stray throw in a blocking task took the whole server down (the
+      // worker-cell host has always prevented).
+      e.preventDefault?.();
       if (task) {
         active.delete(w);
         task.reject(
@@ -148,6 +153,10 @@ export function createBlockingPool(opts?: { size?: number }): BlockingPool {
         // task that will ever run here, so say it once rather than let a bare
         // "Module not found" reach the user with no context.
         log.error("blocking", hint);
+      } else {
+        // An IDLE worker died (a stray timer or FFI callback after its task
+        // settled): nothing to reject, and no longer re-raised — so say it.
+        log.error("blocking", `an idle blocking worker crashed: ${e.message}`);
       }
       retire(w); // don't reuse a crashed worker
       pump();

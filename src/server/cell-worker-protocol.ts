@@ -73,12 +73,15 @@ export function isCellWorker(): boolean {
   return typeof name === "string" && name.startsWith(CELL_WORKER_PREFIX);
 }
 
-/** Plain-data view of the ambient caller context (auth-context.ts), forwarded
- *  with every call so `serverUser()` / `serverRequest()` answer inside the
- *  worker exactly as they do on the main isolate. Headers travel as entries —
- *  a `Headers` instance is not structured-cloneable. */
+/** Plain-data view of the ambient REQUEST (auth-context.ts), forwarded with
+ *  every call so `serverRequest()` answers inside the worker exactly as it does
+ *  on the main isolate. Headers travel as entries — a `Headers` instance is not
+ *  structured-cloneable.
+ *
+ *  No user here: `serverUser()` inside the worker is the action's own `_user`
+ *  stamp, carried in full by the action itself — the same value in-isolate
+ *  dispatch runs a method under (cell-worker.ts `ambient`). */
 export type AmbientContext = {
-  user?: { id: string; role: string };
   request?: {
     ip?: string;
     headers: [string, string][];
@@ -124,6 +127,10 @@ export type ToWorker =
      *  with a `refused` note does not. Without it `worker: true` answered a
      *  refused write differently from the identical cell on the main isolate. */
     refusalsReject: boolean;
+    /** The slice's GENERATION: 0 at spawn, +1 on every re-seed. The worker
+     *  stamps it on each `patches` batch, and the owner drops a batch from an
+     *  older generation — see `gen` on FromWorker["patches"]. */
+    gen: number;
   }
   /** The main isolate is wired (server, broadcast, time travel) and is running
    *  its own cells' `onInit` — run THIS cell's, once per boot.
@@ -135,8 +142,16 @@ export type ToWorker =
    *  isolate at boot — REDUCE_ERROR, the write kept by the worker and lost on
    *  main — and ran AGAIN on every re-seed. */
   | { t: "start" }
-  /** Run one action. `id` correlates the reply. */
-  | { t: "call"; id: number; action: Msg; ctx?: AmbientContext }
+  /** Run one action. `id` correlates the reply. `reads`: the caller is
+   *  inside a `ttl`/`"first"` call, which must learn what caller facts this
+   *  run reads (`done`/`fail` carry them home). */
+  | {
+    t: "call";
+    id: number;
+    action: Msg;
+    ctx?: AmbientContext;
+    reads?: true;
+  }
   /** A cancelOn TRIGGER fired on the other side of the thread.
    *
    *  The cancel registry (`src/state/method-cancel.ts`) is module-scoped, so
@@ -181,7 +196,20 @@ export type FromWorker =
   /** Immer patches produced by a commit — streamed as they happen, so a method
    *  that writes `s.status = "building"` before an await updates clients
    *  immediately instead of at the end. */
-  | { t: "patches"; ops: Patch[] }
+  | {
+    t: "patches";
+    ops: Patch[];
+    /** The `init` generation these ops were committed against.
+     *
+     *  A re-seed swaps the owner's slice synchronously, but the worker hears
+     *  of it only after every message already queued ahead of it — so a call
+     *  in flight at the swap commits against the OLD slice and its batch
+     *  arrives after main already holds the new one. Applied there it put the
+     *  call's write on top of the snapshot while the worker's own re-seed
+     *  discarded it: two replicas, permanently apart. Tagged, the owner drops
+     *  it exactly as the worker does. */
+    gen: number;
+  }
   /** Effects the method returned — executed on the main isolate (schedules and
    *  cross-cell dispatches live there). */
   | { t: "effects"; list: Msg[] }
@@ -203,8 +231,9 @@ export type FromWorker =
    *  `concurrency: "first"` adopter, a `ttl` hit). Posted the moment that is
    *  decided, so the owner's `$pending` stops counting it — an adopter of a
    *  ten-second call otherwise counted as a second running call for all ten
-   *  seconds, where the same cell on the main isolate never counted it. */
-  | { t: "adopted"; id: number }
+   *  seconds, where the same cell on the main isolate never counted it.
+   *  `rerun`: an adopted call runs after all — count it again. */
+  | { t: "adopted"; id: number; rerun?: boolean }
   /** A `disable` ran: `ok` false = `onDestroy` threw and the cell rolled back
    *  (reported as a `cell-error`), so the owner rolls back too. */
   | { t: "disabled"; ok: boolean }
@@ -220,6 +249,8 @@ export type FromWorker =
     t: "done";
     id: number;
     ret?: unknown;
+    /** Caller facts the run read — see `call.reads`. */
+    reads?: string[];
     refused?: { cell: string; reason: string };
   }
   /** The call threw. `message`/`stack` are carried as plain data. */
@@ -227,14 +258,48 @@ export type FromWorker =
     t: "fail";
     id: number;
     message: string;
+    /** Caller facts the run read — see `call.reads`. */
+    reads?: string[];
     stack?: string;
     /** The error's `name` and string `code` — what a caller branches on, and
      *  what structured clone of a custom Error subclass does not carry. */
     name?: string;
     code?: string;
+    /** The error's other own enumerable fields (`e.detail`, …) that survive
+     *  structured clone — see {@linkcode thrownPayload}. */
+    fields?: Record<string, unknown>;
+    /** A thrown NON-Error value, carried as itself. */
+    thrown?: { value: unknown };
   }
   /** The host could not start (bad cell name, unsupported config). Fatal. */
   | { t: "boot-error"; message: string }
   /** Close is complete: in-flight methods were aborted and their final
    *  patches have already been posted (message order is FIFO). */
   | { t: "closed" };
+
+/** What `fail` carries beyond message/stack/name/code, so a caller sees the
+ *  worker cell's throw as it sees the same cell's throw in-process: an Error's
+ *  own enumerable fields (each kept only if it survives structured clone —
+ *  one uncloneable field must not lose the whole failure), or a thrown
+ *  non-Error value as itself when it clones. */
+export function thrownPayload(
+  e: unknown,
+): { fields?: Record<string, unknown>; thrown?: { value: unknown } } {
+  const clones = (v: unknown) => {
+    try {
+      structuredClone(v);
+      return true;
+    } catch {
+      return false; // aio-ok: an uncloneable value is simply not carried
+    }
+  };
+  if (!(e instanceof Error)) return clones(e) ? { thrown: { value: e } } : {};
+  const fields: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(e)) {
+    if (k === "message" || k === "stack" || k === "name" || k === "code") {
+      continue;
+    }
+    if (clones(v)) fields[k] = v;
+  }
+  return Object.keys(fields).length ? { fields } : {};
+}

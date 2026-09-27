@@ -190,8 +190,12 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
   ): (meta: ClientMeta) => string | undefined {
     const fullByView = new Map<string, string | undefined>();
     return (meta) => {
+      // JSON, not `join(",")`: a subscription path is any client-supplied
+      // string, so a joined key made {"a,b"} and {"a","b"} (and {"*"} and no
+      // subscriptions) one view — a wrong hit hands one client another's
+      // state. A JSON array is an unambiguous encoding of the sorted set.
       const subs = meta.subscriptions
-        ? [...meta.subscriptions].sort().join(",")
+        ? JSON.stringify([...meta.subscriptions].sort())
         : "*";
       // `userMemoKey`, not a bare `JSON.stringify(meta.user)`.
       //

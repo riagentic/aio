@@ -2,6 +2,8 @@
 //
 //   am auth users                     list accounts (role, email, 2FA, locked)
 //   am auth create <id> [--password=…] [--role=admin] [--email=…]
+//                                     (an oidc:<issuer>:<sub> id seeds an SSO
+//                                     identity — no password)
 //   am auth passwd <id> [--password=…]     (omit --password → generate + print)
 //   am auth role <id> <role>
 //   am auth unlock <id>               clear a lockout (the rescue path)
@@ -17,6 +19,8 @@
 import { resolveAmAppId } from "./am-utils.ts";
 import {
   accountLockoutOf,
+  externalCreatorOf,
+  isExternalId,
   openUserStore,
   type UserStore,
 } from "../server/auth-users.ts";
@@ -39,6 +43,8 @@ const USAGE = `am auth — manage the built-in auth (auth: true) of this app
   am auth rm <id>
 
 Omitting --password generates a strong one and prints it once.
+"am auth create oidc:<issuer>:<sub>" admits an SSO identity before its first
+login (how "auth.signup: false" apps let SSO users in) — no password.
 "am auth passwd" also clears the lockout and kills every session.`;
 
 /** Random 16-char password (a–z A–Z 0–9, ~95 bits) for --password-less flows.
@@ -214,6 +220,40 @@ export async function cmdAuth(
       }
       case "create": {
         need("");
+        // SEEDING AN SSO IDENTITY. Under `auth.signup: false` the OIDC callback
+        // creates no accounts, so the operator admits an identity ahead of its
+        // first login — by the id the refusal log names. The `oidc:` namespace
+        // is reserved from every anonymous door (a password on a pre-created
+        // SSO row was the pre-hijack); this console is the operator on the
+        // app's own auth.db, so it may take the external door the callback
+        // uses. Such an account never verifies a password, so asking for one
+        // is refused rather than printed as if it would work.
+        const createExternal = isExternalId(id!)
+          ? externalCreatorOf(users)
+          : null;
+        if (createExternal) {
+          if (flag(rest, "password") !== undefined) {
+            outError(
+              `am auth create: "${id}" is an SSO identity — it signs in ` +
+                `through its provider and never with a password; drop ` +
+                `--password`,
+              mode,
+            );
+            Deno.exit(1);
+          }
+          const rec = await createExternal(id!, generatePassword(), {
+            role: flag(rest, "role"),
+            email: flag(rest, "email"),
+          });
+          out(
+            mode === "json"
+              ? rec
+              : `created ${rec.id} (${rec.role}) — signs in through its ` +
+                `provider`,
+            mode,
+          );
+          return;
+        }
         const password = flag(rest, "password") ?? generatePassword();
         const rec = await users.create(id!, password, {
           role: flag(rest, "role"),

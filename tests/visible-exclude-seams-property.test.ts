@@ -202,6 +202,7 @@ Deno.test("visible.exclude: the sentinel is unreachable on every seam (property)
   _resetSignals();
   const kinds = new Set<string>();
   let shapes = 0;
+  let relForms = 0;
   // Partitioned, because ONE generator shape (`head-name-is-an-id`) leaks on
   // every seam by itself and would otherwise swamp every other signal.
   const leaks: string[] = [];
@@ -217,91 +218,109 @@ Deno.test("visible.exclude: the sentinel is unreachable on every seam (property)
       const mine = new Set<string>();
       const value = build(segs, rnd, mine);
       for (const k of mine) kinds.add(k);
-      const state = { root: value };
-      const path = `root.${segs.join(".")}`;
-      const where = `seed ${seed} #${i} · ${path} · ${JSON.stringify(value)}`;
-      const leak = (s: string) =>
-        (mine.has("head-name-is-an-id") ? collisionLeaks : leaks).push(s);
-      shapes++;
+      const baseState = { root: value };
+      // The frame reads a dotted exclude from the cell ROOT, where a key that
+      // is not the head is a record id and consumes nothing — so `k0.secret`
+      // strips `root.k0.secret` too. Every seam must read it that way; the
+      // client seam once handed a key only the head-matching paths, and this
+      // generator (every path starting at `root`) could not see the leak.
+      const forms = [["root", ...segs]];
+      if (segs.length >= 2) {
+        forms.push(segs);
+        relForms++;
+      }
+      for (const form of forms) {
+        const path = form.join(".");
+        // `cell()` refuses an exclude whose head is not a declared field (fail
+        // loud), so the relative form declares its head beside the container.
+        const state: Record<string, unknown> = form[0] === "root"
+          ? baseState
+          : { ...baseState, [form[0]!]: { note: "head declared" } };
+        const where = `seed ${seed} #${i} · ${path} · ${JSON.stringify(value)}`;
+        const leak = (s: string) =>
+          (mine.has("head-name-is-an-id") ? collisionLeaks : leaks).push(s);
+        shapes++;
 
-      // 1. the wire filter, full-state frame
-      const wire = applyCellFieldFilter({ exclude: [path] }, state)!;
-      const wireLeak = findSentinels(wire);
-      if (wireLeak.length) leak(`WIRE ${where} -> ${wireLeak[0]}`);
+        // 1. the wire filter, full-state frame
+        const wire = applyCellFieldFilter({ exclude: [path] }, state)!;
+        const wireLeak = findSentinels(wire);
+        if (wireLeak.length) leak(`WIRE ${where} -> ${wireLeak[0]}`);
 
-      // 2. the patch path — EVERY op path this state can produce, not just a
-      //    replace of the whole root field. The full frame and the deltas that
-      //    follow it build one projection, so an op path the matcher reads
-      //    differently from the frame filter hands the client, on the very
-      //    next keystroke, what the connect frame refused.
-      const strategies = new Map([["c", "filter" as const]]);
-      const fields = new Map([["c", {
-        mode: "exclude" as const,
-        fields: new Set<string>(),
-        deepExcludes: [["root", ...segs]],
-      }]]);
-      for (const at of opPaths(value, ["root"])) {
-        const kept = filterPatchesByStrategy(
-          [{
-            cell: "c",
-            // deno-lint-ignore no-explicit-any
-            ops: [{ op: "replace", path: at, value: pick(state, at) }] as any,
-          }],
-          strategies,
-          fields,
-        );
-        const patchLeak = findSentinels(kept);
-        if (patchLeak.length) {
-          leak(`PATCH at ${at.join(".")} · ${where} -> ${patchLeak[0]}`);
+        // 2. the patch path — EVERY op path this state can produce, not just a
+        //    replace of the whole root field. The full frame and the deltas that
+        //    follow it build one projection, so an op path the matcher reads
+        //    differently from the frame filter hands the client, on the very
+        //    next keystroke, what the connect frame refused.
+        const strategies = new Map([["c", "filter" as const]]);
+        const fields = new Map([["c", {
+          mode: "exclude" as const,
+          fields: new Set<string>(),
+          deepExcludes: [form],
+        }]]);
+        for (const at of opPaths(value, ["root"])) {
+          const kept = filterPatchesByStrategy(
+            [{
+              cell: "c",
+              // deno-lint-ignore no-explicit-any
+              ops: [{ op: "replace", path: at, value: pick(state, at) }] as any,
+            }],
+            strategies,
+            fields,
+          );
+          const patchLeak = findSentinels(kept);
+          if (patchLeak.length) {
+            leak(`PATCH at ${at.join(".")} · ${where} -> ${patchLeak[0]}`);
+          }
         }
-      }
 
-      // 3. the client read seam — the object, its JSON, Object.values, a
-      //    structuredClone of it, and a deep walk through non-enumerables.
-      const client = clientRead(state, [path], "root");
-      for (
-        const [seam, v] of [
-          ["client", client],
-          ["client/JSON", JSON.stringify(client)],
-          ["client/values", Object.values(Object(client))],
-          ["client/clone", structuredClone(json(client))],
-        ] as const
-      ) {
-        const l = findSentinels(v);
-        if (l.length) leak(`${seam.toUpperCase()} ${where} -> ${l[0]}`);
-      }
+        // 3. the client read seam — the object, its JSON, Object.values, a
+        //    structuredClone of it, and a deep walk through non-enumerables.
+        const client = clientRead(state, [path], "root");
+        for (
+          const [seam, v] of [
+            ["client", client],
+            ["client/JSON", JSON.stringify(client)],
+            ["client/values", Object.values(Object(client))],
+            ["client/clone", structuredClone(json(client))],
+          ] as const
+        ) {
+          const l = findSentinels(v);
+          if (l.length) leak(`${seam.toUpperCase()} ${where} -> ${l[0]}`);
+        }
 
-      // the DIFFERENTIAL: the client seam must answer the wire's shape
-      const a = JSON.stringify(json(client));
-      const b = JSON.stringify(json((wire as Record<string, unknown>).root));
-      if (a !== b) diffs.push(`${where}\n  client ${a}\n  wire   ${b}`);
+        // the DIFFERENTIAL: the client seam must answer the wire's shape
+        const a = JSON.stringify(json(client));
+        const b = JSON.stringify(json((wire as Record<string, unknown>).root));
+        if (a !== b) diffs.push(`${where}\n  client ${a}\n  wire   ${b}`);
 
-      // 5. the persistence read-back. `restoreExcluded` puts boot's value back
-      //    where the store's projection removed one, so with BOOT holding the
-      //    unfiltered state it is the exact inverse of the projection — which
-      //    is only true if it walks the same shape the same way. A restore
-      //    that descended differently would leave a hole (a field the store
-      //    kept out and boot never put back: silent data loss) or invent one.
-      const segsFull = path.split(".");
-      const stored = deepExcludePaths(state, [segsFull]);
-      const back = restoreExcluded(stored, state, segsFull);
-      // Key ORDER is not part of it: a field the projection removed comes
-      // back where boot's spread puts it, which is at the end.
-      const r = stable(json(back));
-      const s0 = stable(json(state));
-      if (r !== s0) {
-        diffs.push(`RESTORE ${where}\n  back ${r}\n  was  ${s0}`);
+        // 5. the persistence read-back. `restoreExcluded` puts boot's value back
+        //    where the store's projection removed one, so with BOOT holding the
+        //    unfiltered state it is the exact inverse of the projection — which
+        //    is only true if it walks the same shape the same way. A restore
+        //    that descended differently would leave a hole (a field the store
+        //    kept out and boot never put back: silent data loss) or invent one.
+        const segsFull = path.split(".");
+        const stored = deepExcludePaths(state, [segsFull]);
+        const back = restoreExcluded(stored, state, segsFull);
+        // Key ORDER is not part of it: a field the projection removed comes
+        // back where boot's spread puts it, which is at the end.
+        const r = stable(json(back));
+        const s0 = stable(json(state));
+        if (r !== s0) {
+          diffs.push(`RESTORE ${where}\n  back ${r}\n  was  ${s0}`);
+        }
+        // …and with a boot that has none of it, nothing excluded comes back.
+        const empty = restoreExcluded(stored, { root: {} }, segsFull);
+        const emptyLeak = findSentinels(empty);
+        if (emptyLeak.length) leak(`RESTORE/BOOT ${where} -> ${emptyLeak[0]}`);
       }
-      // …and with a boot that has none of it, nothing excluded comes back.
-      const empty = restoreExcluded(stored, { root: {} }, segsFull);
-      const emptyLeak = findSentinels(empty);
-      if (emptyLeak.length) leak(`RESTORE/BOOT ${where} -> ${emptyLeak[0]}`);
     }
   }
 
   // VERIFY THE INSTRUMENT: a generator that stopped producing the interesting
   // shapes would pass every assertion below while covering nothing.
-  assertEquals(shapes, 280, "the generator must produce shapes");
+  assertEquals(shapes, 280 + relForms, "the generator must produce shapes");
+  assert(relForms > 50, "…including paths whose head is not the state key");
   for (
     const k of [
       "record-map",

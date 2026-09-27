@@ -107,10 +107,11 @@ const counter = cell("counter", {
 counter.remaining(); // → 100
 ```
 
-> Bound selectors are a **server-side** surface — the browser binds state
-> getters and methods, not selectors. For derived reads in UI, declare a plain
-> accessor next to the cell; it stays auto-tracked because each call reads the
-> reactive getters: `const remaining = () => counter.limit - counter.count;`
+> Bound selectors work in the browser too — the browser cell stub binds them
+> through the same normalizer the server uses, and a component that calls one
+> re-renders when the state it reads changes. A plain accessor next to the cell
+> (`const remaining = () => counter.limit - counter.count;`) is equally
+> reactive, because each call reads the reactive getters.
 
 **Cross-cell in UI** — read from multiple cells:
 

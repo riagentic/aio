@@ -160,6 +160,7 @@ export {
   type ResourceKey,
   useResource,
   type UseResourceConfig,
+  type UseResourceConfigOf,
 } from "./browser-air.ts";
 
 // ── Signal utilities ─────────────────────────────────────────────────
@@ -193,6 +194,7 @@ export type {
 
 // ── Virtual scrolling ────────────────────────────────────────────────
 export { useVirtualList } from "./air/virtual-list.ts";
+export { onBackButton } from "./air/back-button.ts";
 export type {
   VirtualListConfig,
   VirtualListState,
@@ -223,3 +225,6 @@ export { useCallback, useEffect, useMemo, useState } from "./air/compat.ts";
 /** Ask for desktop-notification permission from a click handler — the one
  *  place a browser grants it. See `notify()` and docs/clients/notifications.md. */
 export { requestNotificationPermission } from "./browser/desktop-notify.ts";
+/** `fetch`, sent natively by a standalone Android APK (no Origin, no CORS);
+ *  plain `fetch` everywhere else. See docs/build/targets.md#native-fetch. */
+export { nativeFetch } from "./browser/native-fetch.ts";

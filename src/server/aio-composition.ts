@@ -834,7 +834,10 @@ function buildVisibilityReport(composed: ComposedCells): VisibilityRow[] {
       ui: uiResolved,
       persist: persistFilterOf(f),
       access: f.__aio.access,
-      uiDecided: f.__aio.ui !== undefined || !!f.__aio.uiForUser,
+      // Any part of a `visible` object is an answer — `{ publicFields }` alone
+      // resolves to "all" with no structural filter, yet the author wrote it.
+      uiDecided: f.__aio.ui !== undefined || !!f.__aio.uiForUser ||
+        f.__aio.uiPublicFields !== undefined,
       fields: Object.keys(
         (f.__aio.state ?? {}) as Record<string, unknown>,
       ),

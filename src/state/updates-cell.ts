@@ -160,6 +160,14 @@ export type CheckResult =
 export type UpdatesSlot = {
   runtime: UpdatesRuntime | null;
   cell: UpdatesCell | null;
+  /** The last install that failed, until one is attempted again — so the
+   *  poll's next check re-offering the SAME release does not erase why it was
+   *  refused (a tampered download read as a button that did nothing). */
+  applyFailed?: { version: string; error: string };
+  /** A release this machine rolled back, handed to `ready()` by the boot to
+   *  dismiss — whatever the poll setting, so a manual `check()` in a
+   *  `check: false` app does not offer it again. */
+  rolledBack?: string;
 };
 const _process: UpdatesSlot = { runtime: null, cell: null };
 
@@ -167,6 +175,7 @@ const _process: UpdatesSlot = { runtime: null, cell: null };
  *  app configured `updates`. */
 export function installUpdatesRuntime(r: UpdatesRuntime | null): void {
   _process.runtime = r;
+  _process.applyFailed = undefined; // a refusal belongs to the runtime that made it
   // Removing the runtime is a fact about the cell, not just about this module.
   // Publishing it needs a dispatch, and this function is called from places
   // that are not in one (boot, a test's setup), so it is best-effort — the
@@ -196,7 +205,10 @@ export function _installUpdatesRuntimeIn(
   r: UpdatesRuntime | null,
 ): void {
   if (slot === _process) installUpdatesRuntime(r);
-  else slot.runtime = r;
+  else {
+    slot.runtime = r;
+    slot.applyFailed = undefined;
+  }
 }
 
 /** A boot holds the process slot and has not bound its cell yet. */
@@ -243,10 +255,16 @@ export function _isProcessUpdatesSlot(slot: UpdatesSlot): boolean {
  *  to `updates.enabled` was blank for a network round-trip at every boot, and
  *  for an app with `check: false` — which never runs a boot check at all — it
  *  was blank forever. */
-export function readyUpdates(slot: UpdatesSlot = _process): void {
-  if (!slot.runtime) return;
-  const cell = slot.cell as unknown as { ready?: () => void } | null;
-  cell?.ready?.();
+export async function readyUpdates(
+  slot: UpdatesSlot = _process,
+  rolledBack?: string,
+): Promise<boolean> {
+  if (!slot.runtime) return false;
+  slot.rolledBack = rolledBack;
+  const cell = slot.cell as unknown as { ready?: () => unknown } | null;
+  if (!cell?.ready) return false;
+  await cell.ready();
+  return true;
 }
 
 /** The update state an app reads. Every field is a plain value on the bound
@@ -417,6 +435,14 @@ function buildUpdatesCell(slot: UpdatesSlot): UpdatesCell {
     // holds the mutex.
     transaction: { serialize: true },
 
+    // No 30 s call ceiling: an install is a download, a program run and a
+    // swap — measured on Windows 11, the antivirus scan of a fresh 265 MB exe
+    // alone took ~20 s — and a git check clones. Past the ceiling the caller
+    // was told "stopped waiting" while the install went on and restarted the
+    // app: the button showed a failure, and `auto` logged "NOT installed" and
+    // backed off. Each step inside the runtime carries its own bound.
+    long: ["check", "apply"],
+
     // Who may drive an update over the network. On a normal desktop or service
     // install aio binds 127.0.0.1, so every client is already on this machine and
     // there is nobody else to gate. Once the app is --expose'd that stops being
@@ -441,6 +467,16 @@ function buildUpdatesCell(slot: UpdatesSlot): UpdatesCell {
         s.channel = slot.runtime.channel;
         s.current = slot.runtime.current;
         s.currentUnknown = slot.runtime.currentUnknown;
+        // A rolled-back release is dismissed like "Not now": a newer one is
+        // offered as usual, and `undismiss()` offers it again.
+        if (slot.rolledBack !== undefined) {
+          s.dismissed = slot.rolledBack;
+          if (s.available?.version === slot.rolledBack) {
+            s.available = null;
+            s.status = "idle";
+          }
+          slot.rolledBack = undefined;
+        }
       },
 
       /** Ask the source what it has. Safe to call at any time. */
@@ -519,6 +555,9 @@ function buildUpdatesCell(slot: UpdatesSlot): UpdatesCell {
         s.status = "available";
         s.blocked = null;
         s.available = r.update;
+        if (slot.applyFailed?.version === r.update.version) {
+          s.error = slot.applyFailed.error;
+        }
         return r;
       },
 
@@ -576,6 +615,10 @@ function buildUpdatesCell(slot: UpdatesSlot): UpdatesCell {
         s.status = "downloading";
         s.progress = 0;
         s.error = null;
+        slot.applyFailed = undefined;
+        // Read before the await: a blocked release taken on purpose is not
+        // `available`, and the version is what the failure is kept for.
+        const version = s.available?.version ?? s.blocked?.version ?? "";
         // Publish the reset BEFORE the download starts. Buffered to the end (as
         // it was), `progress = 0` committed AFTER every `setProgress` the
         // applier had dispatched — so a failed apply visibly rewound the bar to
@@ -596,6 +639,7 @@ function buildUpdatesCell(slot: UpdatesSlot): UpdatesCell {
         } catch (e) {
           s.status = "error";
           s.error = e instanceof Error ? e.message : String(e);
+          slot.applyFailed = { version, error: s.error };
         }
       },
 

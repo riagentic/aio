@@ -30,7 +30,15 @@ import { electronFuseBinary, fuseElectronFile } from "./electron-fuses.ts";
 import { basename, dirname, join } from "@std/path";
 import { log as flog } from "../diagnostics/logger-api.ts";
 import { homedir } from "../server/paths.ts";
-import { isProcessAlive } from "../server/single-instance-lock.ts";
+import { isLockOwnerAlive } from "../server/single-instance-lock.ts";
+import {
+  keepFresh,
+  ownIdTail,
+  ownPidNs,
+  releasePidLock,
+  tryPidLock,
+  withTag,
+} from "../server/pid-lock.ts";
 import { OK } from "../diagnostics/fmt.ts";
 import { extractZip } from "../server/zip-extract.ts";
 
@@ -345,44 +353,69 @@ async function runtimeUsable(dir: string, slug: string): Promise<boolean> {
   }
 }
 
-/** Hold a lock file for the duration of `fn`. Same shape as the build lock in
- *  `build/build-compile.ts`: `createNew` is the atomic claim, and a holder that
- *  died without cleaning up is taken over rather than allowed to wedge every
- *  future launch. Returns whether the lock was actually held. */
+/** Hold a lock file for the duration of `fn` — the pid lock the build lock
+ *  uses too (`server/pid-lock.ts`, one decider): a holder that died without
+ *  cleaning up is taken over rather than allowed to wedge every future
+ *  launch, and only while the lock still names the owner judged dead, so two
+ *  waiters on one dead lock never both "take" it. Returns whether the lock
+ *  was actually held. Exported for tests. @internal */
+export { withRuntimeLock as _withRuntimeLock };
 async function withRuntimeLock<T>(
   lock: string,
   fn: (held: boolean) => Promise<T>,
+  waitMs = LOCK_WAIT_MS,
 ): Promise<T> {
-  await Deno.mkdir(join(lock, ".."), { recursive: true }).catch(() => {});
+  await Deno.mkdir(join(lock, ".."), { recursive: true }).catch(() => {
+    // aio-ok: an unwritable cache dir is a lock never held — fn says so
+  });
   let held = false;
-  const deadline = Date.now() + LOCK_WAIT_MS;
+  const deadline = Date.now() + waitMs;
   while (!held && Date.now() < deadline) {
-    try {
-      await Deno.writeTextFile(lock, `${Deno.pid}`, { createNew: true });
-      held = true;
-      break;
-    } catch { /* someone else holds it */ }
-    try {
-      const owner = Number(await Deno.readTextFile(lock));
-      if (
-        Number.isFinite(owner) && owner !== Deno.pid && !isProcessAlive(owner)
-      ) {
-        await Deno.remove(lock).catch(() => {});
-        continue; // holder died mid-download — claim it
-      }
-    } catch { /* lock vanished — retry immediately */ }
-    await new Promise((r) => setTimeout(r, 250));
+    const r = tryPidLock(lock);
+    held = r.held;
+    if (!held && !r.retry) await new Promise((r) => setTimeout(r, 250));
   }
   try {
     return await fn(held);
   } finally {
-    if (held) await Deno.remove(lock).catch(() => {});
+    if (held) {
+      try {
+        releasePidLock(lock);
+      } catch (e) {
+        flog.warn(
+          `could not release ${lock} (${e}) — the next launch takes it ` +
+            `over once this process exits.`,
+        );
+      }
+    }
   }
 }
 
-/** Remove `<dir>.incoming.<pid>` stages whose process is gone. Called while
- *  holding the runtime lock, so no live unpack is ever touched; a stage whose
- *  pid is still alive is left alone either way. */
+/** `<pid>-<nonce><ownIdTail>`: a stage's name. The pid alone collided across
+ *  pid namespaces — two containers sharing one cache are both pid 1, so a
+ *  second unpacker (one that took over a lock it believed dead) wiped the
+ *  first's stage. The tail records the pid namespace (and start stamp): a pid
+ *  says "dead" only in the namespace that wrote it. All hex after the `-`, so
+ *  an older aio still reads it as `<pid>-<nonce>`. Exported for tests.
+ *  @internal */
+export function stageTag(): string {
+  return `${Deno.pid}-${crypto.randomUUID().slice(0, 8)}${ownIdTail()}`;
+}
+
+/** How long a stage whose pid proves nothing may sit untouched before it is
+ *  a dead unpack's. A live unpack heartbeats its stage (`keepFresh`, every
+ *  20 s), so an hour is 180 missed beats. Exported for tests. @internal */
+export const STAGE_STALE_MS = 60 * 60_000;
+
+/** Remove `<dir>.incoming.<pid>[-<nonce>[<tail>]]` stages whose unpack is
+ *  gone: its pid, recorded in OUR pid namespace, is dead (or recycled), or —
+ *  when the pid proves nothing (alive; our own, a previous run's; another
+ *  namespace's, e.g. a container's pid 7 under tini; or a name that records
+ *  no namespace where one exists — an older aio's) — the stage went untouched
+ *  for {@link STAGE_STALE_MS}. Called while holding the runtime lock, and
+ *  before this unpack's own stage exists, so a live unpack's stage is one
+ *  some process heartbeats while working without the lock (it lost it while
+ *  frozen, or runs in another namespace) — an hour of silence is not that. */
 async function removeDeadStages(dir: string): Promise<void> {
   const prefix = `${basename(dir)}.incoming.`;
   let entries: Deno.DirEntry[];
@@ -393,11 +426,17 @@ async function removeDeadStages(dir: string): Promise<void> {
   }
   for (const e of entries) {
     if (!e.isDirectory || !e.name.startsWith(prefix)) continue;
-    const pid = Number(e.name.slice(prefix.length));
-    if (!Number.isInteger(pid) || pid === Deno.pid || isProcessAlive(pid)) {
-      continue;
+    const m = /^(\d+)(?:-([0-9a-f]+))?$/.exec(e.name.slice(prefix.length));
+    if (!m) continue;
+    const id = withTag(Number(m[1]), m[2]?.slice(8) ?? "");
+    const path = join(dirname(dir), e.name);
+    if (
+      id.pid === Deno.pid || id.ns !== ownPidNs() || isLockOwnerAlive(id)
+    ) {
+      const t = await Deno.stat(path).then((s) => s.mtime, () => null);
+      if (!t || Date.now() - t.getTime() < STAGE_STALE_MS) continue;
     }
-    await Deno.remove(join(dirname(dir), e.name), { recursive: true }).catch(
+    await Deno.remove(path, { recursive: true }).catch(
       () => {
         // aio-ok(silent-catch): disk space, not correctness — a stage that will
         // not delete now is retried on the next unpack.
@@ -623,7 +662,7 @@ export async function ensureElectronZip(
     mirror: opts.mirror ?? Deno.env.get("ELECTRON_MIRROR") ?? undefined,
   });
   await Deno.mkdir(join(zip, ".."), { recursive: true });
-  const tmp = `${zip}.incoming.${Deno.pid}`;
+  const tmp = `${zip}.incoming.${stageTag()}`;
   await Deno.writeFile(tmp, bytes);
   await Deno.rename(tmp, zip);
   await Deno.writeTextFile(`${zip}.sha256`, `${sha256}\n`);
@@ -662,6 +701,8 @@ export async function ensureElectronRuntime(
     warn?: (msg: string) => void;
     /** Injected in tests — the real one downloads ~100 MB. */
     fetch?: typeof fetch;
+    /** How long to wait on another downloader's lock. Injected in tests. */
+    lockWaitMs?: number;
     /** `$ELECTRON_MIRROR` override (tests). */
     mirror?: string;
     /** Install from the zip this binary CARRIES instead of the network. */
@@ -684,6 +725,7 @@ export async function ensureElectronRuntime(
     return dir;
   }
 
+  const waitMs = opts.lockWaitMs ?? LOCK_WAIT_MS;
   return await withRuntimeLock(`${dir}.lock`, async (held) => {
     // Whoever we waited for may have finished it for us.
     if (await runtimeUsable(dir, slug)) {
@@ -695,8 +737,9 @@ export async function ensureElectronRuntime(
       throw new Error(
         `another process has been downloading the Electron runtime ` +
           `${version} (${slug}) into ${dir} for over ` +
-          `${LOCK_WAIT_MS / 60_000} minutes and is still alive. Wait for it, ` +
-          `or point $ELECTRON_PATH at an Electron you already have.`,
+          `${waitMs / 60_000} minutes and is still alive. Wait for it, ` +
+          `or point $ELECTRON_PATH at an Electron you already have. If no ` +
+          `such process exists, delete ${dir}.lock.`,
       );
     }
 
@@ -704,13 +747,14 @@ export async function ensureElectronRuntime(
     const url = electronZipUrlFor(version, slug, mirror);
     // Stage beside the target, never into it: an interrupted download must not
     // be able to destroy a runtime that already works.
-    const stage = `${dir}.incoming.${Deno.pid}`;
+    const stage = `${dir}.incoming.${stageTag()}`;
     // A launch killed mid-unpack (likely: a GUI exe shows nothing while it
     // unpacks, so people kill it) left its ~250 MB stage behind, named by a
     // pid nobody will ever have again. We hold the lock, so clear them.
     await removeDeadStages(dir);
     await Deno.remove(stage, { recursive: true }).catch(() => {});
     await Deno.mkdir(stage, { recursive: true });
+    const stopFresh = keepFresh(stage);
     try {
       const { bytes, sha256: actual } = await fetchVerifiedZip(
         version,
@@ -767,7 +811,8 @@ export async function ensureElectronRuntime(
       await touchRuntimeUse(dir);
       return dir;
     } finally {
+      stopFresh();
       await Deno.remove(stage, { recursive: true }).catch(() => {});
     }
-  });
+  }, waitMs);
 }

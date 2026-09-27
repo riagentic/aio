@@ -96,6 +96,39 @@ export function _getOrCreateCellSignal(
   return sig;
 }
 
+// ── Cell-signal ownership (sync cells) ───────────────────────────────
+
+/** Who else writes a cell's signal. Set by the browser sync engine at boot. */
+let _engineOwnsCell: ((cell: string) => boolean) | null = null;
+
+/** The sync engine claims the cells whose signals it drives.
+ *
+ *  A sync cell's signal shows the engine's OPTIMISTIC view (confirmed + ops
+ *  still waiting for an ack — docs/persistence/crdt.md: "UI always reads
+ *  optimistic"). Server state frames (`$patches` and full state) used to set
+ *  that same signal to the server's slice, which does not have those ops yet,
+ *  so any unrelated write to the cell made the user's pending change vanish
+ *  from the screen until its ack. Two writers, one signal: the engine is the
+ *  one that knows about pending ops, so it is the only one. (Server-origin
+ *  writes still reach it — they are pushed to the engine as ops/patches.)
+ *
+ *  `null` (no engine: none needed, not booted yet, or its boot failed and the
+ *  cell fell back to plain actions) leaves every cell server-driven, so a sync
+ *  cell is never stranded without state.
+ *  @internal Engine wiring. */
+export function _setCellSignalOwner(
+  owns: ((cell: string) => boolean) | null,
+): void {
+  _engineOwnsCell = owns;
+}
+
+/** Does a server state frame set this cell's signal? The ONE predicate both
+ *  state paths (`$patches` in state-message.ts, full state below) consult.
+ *  The global `_stateSignal` is updated either way. */
+export function _serverDrivesCellSignal(cell: string): boolean {
+  return _engineOwnsCell === null || !_engineOwnsCell(cell);
+}
+
 export function _applyFullState(state: Record<string, any>): void {
   batch(() => {
     // Readiness is set BEFORE the state itself, inside the same batch: a
@@ -104,6 +137,7 @@ export function _applyFullState(state: Record<string, any>): void {
     _ready.set(true);
     _stateSignal.set(state);
     for (const [key, value] of Object.entries(state)) {
+      if (!_serverDrivesCellSignal(key)) continue; // the sync engine's (above)
       // AIO-4.4: freeze the value before installing in the cell signal so
       // component-side mutations throw in dev.
       _getOrCreateCellSignal(key, _maybeFreezeInDev(value)).set(value);

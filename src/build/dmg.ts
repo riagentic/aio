@@ -72,13 +72,36 @@ export function stageToDmgLines(opts: {
   volumeName: string;
   outPath: string;
   sign: boolean;
+  /** Also pack the SIGNED `.app` as the update artifact (`electron-app`). */
+  updateOut?: string;
 }): string[] {
   return [
     ...(opts.sign ? [codesignScript(opts.app, opts.binaryName)] : []),
+    ...(opts.sign && opts.updateOut
+      ? [updateTarballLine(opts.stage, opts.app, opts.updateOut)]
+      : []),
     `ln -s /Applications ${q(opts.stage)}/Applications`,
     `hdiutil create -volname ${q(opts.volumeName)} ` +
     `-srcfolder ${q(opts.stage)} -ov -format UDZO ${q(opts.outPath)}`,
   ];
+}
+
+/** Pack the sealed `.app` as `<…>.app.tar.gz`, the `electron-app` update
+ *  artifact. Run right after signing, before anything else touches the stage.
+ *
+ *  tar, not zip: Electron's `*.framework` directories are symlink trees, and a
+ *  tar keeps each link a link and every exec bit — flatten one and the seal
+ *  breaks (arm64 then kills the binary with no message). `COPYFILE_DISABLE` +
+ *  `--no-mac-metadata` keep macOS's AppleDouble/xattr side-files out, so the
+ *  archive holds exactly the files the signature covers. Pure. */
+export function updateTarballLine(
+  stage: string,
+  app: string,
+  out: string,
+): string {
+  return `COPYFILE_DISABLE=1 tar --no-mac-metadata -czf ${q(out)} -C ${
+    q(stage)
+  } ${q(app.slice(app.lastIndexOf("/") + 1))}`;
 }
 
 /** The `codesign` lines that seal an assembled `.app`, deepest component
@@ -146,6 +169,8 @@ export function remoteDmgScript(opts: {
   outFile: string;
   /** Seal the app before imaging it — required for it to RUN. */
   sign: boolean;
+  /** File name (in `workDir`) of the signed-bundle update artifact. */
+  updateFile?: string;
 }): string {
   const stage = `${opts.workDir}/stage`;
   const app = `${stage}/${opts.appName}`;
@@ -163,6 +188,7 @@ export function remoteDmgScript(opts: {
       volumeName: opts.volumeName,
       outPath: `${opts.workDir}/${opts.outFile}`,
       sign: opts.sign,
+      updateOut: opts.updateFile && `${opts.workDir}/${opts.updateFile}`,
     }),
   ].join("\n");
 }
@@ -177,6 +203,7 @@ export function localDmgScript(opts: {
   volumeName: string;
   outPath: string;
   sign: boolean;
+  updateOut?: string;
 }): string {
   const stage = `${opts.workDir}/stage`;
   const app = `${stage}/${
@@ -194,6 +221,7 @@ export function localDmgScript(opts: {
       volumeName: opts.volumeName,
       outPath: opts.outPath,
       sign: opts.sign,
+      updateOut: opts.updateOut,
     }),
   ].join("\n");
 }
@@ -302,6 +330,9 @@ export async function finalizeMacDmg(opts: {
   /** Seal the app before imaging it. Default true — an unsealed nested
    *  Electron is killed by macOS with no message. */
   sign?: boolean;
+  /** Also write the signed bundle here as `<…>.app.tar.gz` — the update
+   *  artifact (`electron-app`). Only a SIGNED bundle is packed. */
+  updateOutPath?: string;
 }): Promise<string> {
   const os = opts.os ?? Deno.build.os;
   const sign = opts.sign ?? true;
@@ -319,6 +350,7 @@ export async function finalizeMacDmg(opts: {
           volumeName: opts.volumeName,
           outPath: opts.outPath,
           sign,
+          updateOut: opts.updateOutPath,
         }),
       ]);
       if (!r.success) {
@@ -381,6 +413,7 @@ export async function finalizeMacDmg(opts: {
     // passed through `scp`'s argv (not a shell) on the way back, where a space
     // would split into two arguments.
     const remoteDmg = "app.dmg";
+    const remoteUpdate = "app.tar.gz";
     const script = remoteDmgScript({
       workDir: work,
       appName,
@@ -388,6 +421,7 @@ export async function finalizeMacDmg(opts: {
       volumeName: opts.volumeName,
       outFile: remoteDmg,
       sign,
+      updateFile: opts.updateOutPath && remoteUpdate,
     });
     const made = await seams.ssh(script);
     if (!made.success) {
@@ -400,6 +434,17 @@ export async function finalizeMacDmg(opts: {
       throw new Error(
         `${NO} could not fetch the .dmg from ${host.target}:\n${down.stderr}`,
       );
+    }
+    if (opts.updateOutPath && sign) {
+      const got = await seams.down(
+        `${work}/${remoteUpdate}`,
+        opts.updateOutPath,
+      );
+      if (!got.success) {
+        throw new Error(
+          `${NO} could not fetch the signed .app.tar.gz from ${host.target}:\n${got.stderr}`,
+        );
+      }
     }
     await seams.ssh(`rm -rf '${work}'`).catch(() => {
       // aio-ok(silent-catch): best-effort remote cleanup; leaking a temp dir

@@ -47,6 +47,13 @@ let _lastServerTs = 0;
 // reopened db) skipped its seed entirely and could stamp new ops underneath its
 // own log — undeliverable to any client already holding that cursor.
 let _seededDbs = new WeakSet<DB>();
+/** The highest position this process has HANDED OUT for each database — a
+ *  reserved cursor, a snapshot position, an inserted op's stamp. Unlike
+ *  {@linkcode highWaterTs} it never goes down (see {@linkcode issuedHighWater}). */
+let _handedOut = new WeakMap<DB, number>();
+function noteHandedOut(db: DB, ts: number): void {
+  if (ts > (_handedOut.get(db) ?? 0)) _handedOut.set(db, ts);
+}
 
 /**
  * The DURABLE high-water mark of the `server_ts` sequence: the greatest value
@@ -119,6 +126,7 @@ function nextServerTs(): number {
 export function _resetServerTsForTest(): void {
   _lastServerTs = 0;
   _seededDbs = new WeakSet<DB>();
+  _handedOut = new WeakMap<DB, number>();
 }
 
 /**
@@ -140,7 +148,28 @@ export async function reserveServerTs(db: DB): Promise<number> {
   await seedServerTs(db);
   const hw = await highWaterTs(db);
   if (hw > _lastServerTs) _lastServerTs = hw;
+  noteHandedOut(db, hw);
   return hw;
+}
+
+/**
+ * {@linkcode reserveServerTs}, raised to the highest position this process
+ * has ever handed out for `db` — the bound a client cursor from THIS server
+ * can never exceed.
+ *
+ * The durable mark alone can go DOWN: `server_ts` is one sequence across all
+ * cells, and a refused op's row is DELETEd. A catch-up for cell B reserved
+ * while cell A's soon-refused op was the log's maximum hands out that op's
+ * position; once the row is gone the durable mark sits below a cursor this
+ * server issued, and the handler's foreign-cursor check declared the client's
+ * next ordinary catch-up a "different history" — reset, snapshot, and a false
+ * "restored backup / wiped data dir" warning. Only a restart or another store
+ * can make a cursor genuinely foreign, and neither carries this in-process
+ * record over (it is per database, and a restart starts it empty).
+ */
+export async function issuedHighWater(db: DB): Promise<number> {
+  const hw = await reserveServerTs(db);
+  return Math.max(hw, _handedOut.get(db) ?? 0);
 }
 
 /**
@@ -164,7 +193,9 @@ export async function issueSnapshotTs(db: DB): Promise<number> {
   await seedServerTs(db);
   const hw = await highWaterTs(db);
   if (hw > _lastServerTs) _lastServerTs = hw;
-  return nextServerTs();
+  const ts = nextServerTs();
+  noteHandedOut(db, ts);
+  return ts;
 }
 
 /**
@@ -216,7 +247,9 @@ export async function persistOp(
       cellVersion,
     ],
   );
-  return changes > 0 ? serverTs : null;
+  if (changes === 0) return null;
+  noteHandedOut(db, serverTs);
+  return serverTs;
 }
 
 /** Does the store still KNOW this op id — a live row in `sync_ops`, or the

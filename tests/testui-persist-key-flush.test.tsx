@@ -63,3 +63,45 @@ Deno.test("testUI persist: dispose flushes the pending save, the next mount rest
     "the last change before teardown must be persisted, not cancelled",
   );
 });
+
+// Deno's localStorage is ONE on-disk store per project, shared by every test
+// file and every `--parallel` process. A plain (hermetic) mount used to
+// `clear()` it — wiping another file's data mid-test, including a concurrent
+// `{ persist: true }` flow's save. It is shadowed now, never cleared.
+Deno.test("testUI: a hermetic mount never clears the host's shared localStorage", async () => {
+  const ls = (globalThis as { localStorage?: Storage }).localStorage;
+  if (!ls) return; // no host store → nothing to protect
+  const key = `testui-foreign-${crypto.randomUUID()}`;
+  ls.setItem(key, "another file's data");
+  try {
+    {
+      await using _ui = await testUI(App);
+      const inMount = (globalThis as { localStorage: Storage }).localStorage;
+      assertEquals(inMount.getItem(key), null, "the mount is still hermetic");
+      inMount.setItem("mount-write", "x");
+    }
+    const after = (globalThis as { localStorage: Storage }).localStorage;
+    assertEquals(after, ls, "the host store is back after teardown");
+    assertEquals(ls.getItem(key), "another file's data");
+    assertEquals(
+      ls.getItem("mount-write"),
+      null,
+      "the mount's write stayed in it",
+    );
+  } finally {
+    ls.removeItem(key);
+  }
+});
+
+Deno.test("testUI persist: a hermetic mount in between still resets the flow", async () => {
+  {
+    await using ui = await testUI(App, { persist: true });
+    ui.BumpButton.click();
+    await ui.expectCell(counter, (c) => c.n >= 1);
+  }
+  {
+    await using _plain = await testUI(App);
+  }
+  await using again = await testUI(App, { persist: true });
+  assertEquals((again.fullState(counter) as { n: number }).n, 0);
+});

@@ -5,9 +5,21 @@
 // the CDN remains only as a fallback when no local copy can be found.
 
 import { fromFileUrl, join } from "@std/path";
+import { log } from "../diagnostics/logger-api.ts";
+import { readAppLocalAliases } from "./server-html-importmap.ts";
 
-/** Cached vendor module source (read + patched once per process). */
-let _immerSource: string | null | undefined;
+/** Cached vendor module source (read + patched once per source), keyed by
+ *  the app's own immer file ("" = the resolved install). */
+const _immerSource = new Map<string, string | null>();
+
+/** The app's OWN local immer (`"immer": "./vendor/immer.js"` in deno.json)
+ *  as a path, else undefined. The bundle's alias gives the app AND the
+ *  framework exactly this file, so the dev vendor route serves it too: one
+ *  immer, dev and build alike (docs/build/imports.md). */
+export function appLocalImmer(baseDir: string): string | undefined {
+  const url = readAppLocalAliases(baseDir).immer;
+  return url?.startsWith("file:") ? fromFileUrl(url) : undefined;
+}
 
 /** The candidate paths for a local immer ESM build, in order — as PLAIN
  *  FILESYSTEM PATHS, never URL strings.
@@ -57,31 +69,43 @@ function resolveImmerPath(): string | null {
 
 /** The immer ESM source ready for the browser, or null when no local copy
  *  exists. `process.env.NODE_ENV` is substituted (the standard bundler
- *  define) — kept at "development" so immer's real error messages survive. */
-export function loadVendorImmer(): string | null {
-  if (_immerSource !== undefined) return _immerSource;
-  const path = resolveImmerPath();
-  if (!path) {
-    _immerSource = null;
-    return null;
+ *  define) — kept at "development" so immer's real error messages survive.
+ *  `appImmer` (appLocalImmer) is THE source when given; one that cannot be
+ *  read is said out loud, since the build cannot bundle it either. */
+export function loadVendorImmer(appImmer?: string): string | null {
+  const key = appImmer ?? "";
+  const cached = _immerSource.get(key);
+  if (cached !== undefined) return cached;
+  const path = appImmer ?? resolveImmerPath();
+  let src: string | null = null;
+  if (path) {
+    try {
+      src = Deno.readTextFileSync(path).replaceAll(
+        "process.env.NODE_ENV",
+        '"development"',
+      );
+    } catch (e) {
+      if (appImmer) {
+        log.warn(
+          `deno.json maps "immer" to ${appImmer}, which cannot be read ` +
+            `(${
+              e instanceof Error ? e.message : e
+            }) — the page falls back to ` +
+            `the CDN copy, and the build cannot bundle it at all.`,
+        );
+      }
+    }
   }
-  try {
-    _immerSource = Deno.readTextFileSync(path).replaceAll(
-      "process.env.NODE_ENV",
-      '"development"',
-    );
-  } catch {
-    _immerSource = null;
-  }
-  return _immerSource;
+  _immerSource.set(key, src);
+  return src;
 }
 
 /** True when the dev server can serve immer itself (no CDN needed). */
-export function hasVendorImmer(): boolean {
-  return loadVendorImmer() !== null;
+export function hasVendorImmer(appImmer?: string): boolean {
+  return loadVendorImmer(appImmer) !== null;
 }
 
 /** Test hook — clear the cache so resolution runs again. */
 export function _resetVendorCache(): void {
-  _immerSource = undefined;
+  _immerSource.clear();
 }

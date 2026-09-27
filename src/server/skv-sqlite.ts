@@ -34,8 +34,9 @@ const upsert = (key: string, val: unknown): SkvStmt => ({
   params: [key, JSON.stringify(val) ?? "null"],
 });
 
-/** The statements a `setMulti` runs — see `SkvInstance.planSetMulti`. */
-function planMulti(
+/** The statements a `setMulti` runs — see `SkvInstance.planSetMulti`.
+ *  @internal exported for tests. */
+export function planMulti(
   prefix: string,
   obj: Record<string, unknown>,
   prevKeys: string[] = [],
@@ -45,7 +46,10 @@ function planMulti(
     stmts.push(upsert(`${prefix}${SEP}${k}`, v));
   }
   for (const k of prevKeys) {
-    if (!(k in obj)) {
+    // OWN keys: `in` sees Object.prototype, so a removed key named like a
+    // builtin (`toString`, `constructor`) never got its DELETE and its stale
+    // row came back on the next restore.
+    if (!Object.hasOwn(obj, k)) {
       stmts.push({
         sql: `DELETE FROM aio_kv WHERE k = ?`,
         params: [`${prefix}${SEP}${k}`],

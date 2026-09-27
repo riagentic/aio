@@ -348,6 +348,9 @@ async function git(root: string, args: string[]): Promise<string | null> {
       stdout: "piped",
       stderr: "null",
       stdin: "null",
+      // aio-git-env-inherited: a deploy hook that exports GIT_DIR +
+      // GIT_WORK_TREE for the app's checkout means THIS repo — honour it.
+      // The update rebuild strips it for its build (updates-rebuild.ts).
       env: GIT_NO_PROMPT_ENV,
     }).output();
     if (r.code !== 0) return null;

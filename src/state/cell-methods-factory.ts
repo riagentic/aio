@@ -403,6 +403,20 @@ export function createCellFromMethods<
             `policy would never do anything.`,
         );
       }
+      // `{ m: cond ? "queue" : undefined }` type-checks and means "no
+      // policy" — it did on 1.0.12, so an absent value is not a typo.
+      if (mode === undefined) continue;
+      // One of the three documented modes, checked here like `ttl` and
+      // `transaction`: the dev server does not type-check, and a typo
+      // ("Newest", "latest", "drop") meant NO policy — both overlapping calls
+      // ran to completion, in silence.
+      if (mode !== "first" && mode !== "newest" && mode !== "queue") {
+        throw new Error(
+          `[cell:${name}] concurrency: { ${mk}: ${JSON.stringify(mode)} } — ` +
+            `not a concurrency mode. Use "first" (drop a call while one runs), ` +
+            `"newest" (the newest call wins) or "queue" (run them in order).`,
+        );
+      }
       if (mode !== "newest") continue;
       if (cancelTriggers?.[mk] !== undefined) {
         throw new Error(

@@ -15,6 +15,7 @@
 import {
   EXTERNAL_ID_PREFIX,
   externalCreatorOf,
+  loginVerificationRefusal,
   type UserStore,
 } from "./auth-users.ts";
 import type { SessionStore } from "./sessions.ts";
@@ -34,6 +35,11 @@ export interface OidcConfig {
    *  holder typed, so a role granted from it is a role anyone could claim.
    *  A `role` that throws refuses the login (401) and logs why. */
   role?: (claims: Record<string, unknown>) => string;
+  /** May an SSO identity with no account get one on first login? Default:
+   *  `auth.signup`. `true` with `auth.signup: false` = password signup
+   *  closed, SSO accounts still auto-created (an SSO-only app that should not
+   *  seed every identity by hand). Only a literal `true` opens it. */
+  signup?: boolean;
 }
 
 interface Discovery {
@@ -212,6 +218,16 @@ export async function verifyIdToken(
   if (typeof claims.exp !== "number" || claims.exp * 1000 < Date.now()) {
     throw new Error("oidc_expired");
   }
+  // RFC 7519 §4.1.5: a token MUST NOT be accepted before `nbf`; one ISSUED
+  // in the future (`iat`) is the same thing said another way. A minute of
+  // skew is allowed for the IdP's clock, as the spec permits.
+  const skewMs = 60_000;
+  for (const k of ["nbf", "iat"] as const) {
+    const t = claims[k];
+    if (typeof t === "number" && t * 1000 > Date.now() + skewMs) {
+      throw new Error("oidc_not_yet_valid");
+    }
+  }
   if (typeof claims.sub !== "string" || claims.sub.length === 0) {
     throw new Error("oidc_no_sub");
   }
@@ -259,6 +275,15 @@ export interface OidcDeps {
   cookie: (token: string) => string;
   /** TLS active — mark the binder cookie Secure. */
   secure?: boolean;
+  /** `auth.oidc.signup ?? auth.signup` — false means "admin-seeded users only", and the callback
+   *  is an account-creating door like `POST /signup`: an identity with no
+   *  account is refused rather than created. Required, not optional, so a
+   *  caller cannot drop the gate by forgetting it. */
+  signup: boolean;
+  /** `auth.requireVerified` — the callback ends in a session, so it asks the
+   *  same `loginVerificationRefusal` the password login does. Required for
+   *  the same reason as `signup`. */
+  requireVerified: boolean;
 }
 
 /** GET /__aio/auth/oidc/start — redirect to the provider. */
@@ -493,13 +518,37 @@ export async function oidcCallback(
     user = { id: existing.id, role: existing.role };
     // Only ever for an account this namespace owns (never a local one — it is
     // unreachable from here now), and never silently.
-    if (email && existing.email !== email) {
+    const changed = !!email && existing.email !== email;
+    if (changed) {
       log.warn(
         `[aio] auth: oidc updated the email on id="${id}" (provider claim)`,
       );
       deps.users.setEmail(id, email);
     }
+    // The provider vouching for the address the account now holds verifies
+    // it — the rule a NEW account gets below. Without it an operator-seeded
+    // identity (`am auth create "oidc:…"`) could never pass `requireVerified`
+    // however verified its provider says it is. `changed` too: `setEmail`
+    // just cleared the flag `existing` still reports.
+    if (email && (changed || !existing.verified)) deps.users.markVerified(id);
   } else {
+    // `signup: false` IS "admin-seeded users only" — for every door. The
+    // provider vouching for an identity says who it is, not that this app
+    // admits it: with a public IdP (Google, GitHub) that is anyone with an
+    // account there. Refused with the password route's own code, BEFORE
+    // `role(claims)` runs or a row exists; the log names the exact id so the
+    // operator can admit it with `am auth create` (the external-identity door,
+    // which the reserved namespace keeps from every anonymous caller).
+    if (!deps.signup) {
+      log.warn(
+        "auth",
+        `oidc login refused for "${id}" — no such account and ` +
+          `SSO signup is off (auth.oidc.signup, else auth.signup, is false). ` +
+          `To admit this identity: am auth create "${id}" [--role=…]; to ` +
+          `let every SSO identity in: auth.oidc.signup: true`,
+      );
+      return new Response("signup_disabled", { status: 403 });
+    }
     let role: string;
     try {
       const { email: _unverified, ...rest } = claims;
@@ -535,6 +584,23 @@ export async function oidcCallback(
       );
       return new Response("invalid id_token", { status: 401 });
     }
+  }
+  // `requireVerified` — the same gate, the same code as the password login,
+  // asked at the same point: identity established, no session yet. The row
+  // stays (its email can still be proven — by the provider on a later login,
+  // or `am auth verify`); only the session is withheld.
+  const unverified = loginVerificationRefusal(
+    deps.requireVerified,
+    deps.users.get(user.id),
+  );
+  if (unverified) {
+    log.warn(
+      "auth",
+      `oidc login refused for "${user.id}" — auth.requireVerified ` +
+        `and the account's email is not verified (the provider did not send ` +
+        `email_verified: true for it). To admit it: am auth verify "${user.id}"`,
+    );
+    return new Response(unverified, { status: 403 });
   }
   // Build the redirect BEFORE minting the session: if this response could not
   // be constructed, no session row may exist that no browser will ever hold.

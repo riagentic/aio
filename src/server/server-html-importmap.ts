@@ -4,6 +4,7 @@ import { locateDenoJsonAbove, readDenoJsonSync } from "./deno-json.ts";
 import { dirname, fromFileUrl, join, resolve, toFileUrl } from "@std/path";
 import { CDN } from "./server-html-constants.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { AIO_ENTRY_PATHS } from "../entries.ts";
 
 /** How far up from a workspace member to look for the workspace root that
  *  holds the shared import map. A member two levels down is the documented
@@ -40,17 +41,143 @@ export function readAppDenoImports(
   // deep (`src/agent/app.ts`, the layout docs/build/targets.md recommends)
   // got a browser import map with none of the app's npm packages while the
   // graph check, reading the same project, found its config fine.
+  return readImportsWith(baseDir, ownImports);
+}
+
+/** THE config walk behind {@link readAppDenoImports}, with the per-config
+ *  reader as a parameter — so a second view of the same imports (the local
+ *  aliases below) cannot find a different config. */
+function readImportsWith(
+  baseDir: string,
+  pick: (config: Record<string, unknown>, dir: string) => Record<
+    string,
+    string
+  >,
+): Record<string, string> | null {
   const located = locateDenoJsonAbove(toFileUrl(join(resolve(baseDir), "/")));
   if (located) {
-    return withWorkspaceImports(
-      fromFileUrl(located.dir),
-      ownImports(located.config),
-    );
+    const dir = fromFileUrl(located.dir);
+    return withWorkspaceImports(dir, pick(located.config, dir), pick);
   }
   // Repo examples run from cwd with no config above the entry.
   const cwd = Deno.cwd();
   const found = readConfigDir(cwd);
-  return found ? withWorkspaceImports(cwd, ownImports(found.config)) : null;
+  return found
+    ? withWorkspaceImports(cwd, pick(found.config, cwd), pick)
+    : null;
+}
+
+/** Is an import-map VALUE a path into the project (`./lib/fmt.ts`)? */
+function isLocalTarget(v: unknown): v is string {
+  return typeof v === "string" && (v.startsWith("./") || v.startsWith("../"));
+}
+
+/** The app's LOCAL import-map entries (`"fmt": "./lib/fmt.ts"`, and prefix
+ *  keys like `"@/": "./src/"`), each resolved against the folder of the
+ *  deno.json that declares it — which is how Deno and the bundler read them —
+ *  as a `file:` URL. `{}` when there is no config.
+ *
+ *  The browser import map deliberately does not carry these (a page cannot
+ *  fetch a filesystem path); the dev server rewrites an exact alias to the
+ *  file's own dev url instead, and the graph check walks it. A prefix key
+ *  keeps its value as written — it is only ever reported. */
+export function readAppLocalAliases(baseDir: string): Record<string, string> {
+  return readImportsWith(baseDir, (config, dir) => {
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(ownImports(config))) {
+      if (!isLocalTarget(v)) continue;
+      // A prefix key stays as written: nothing resolves it (see
+      // prefixAliasMessage), and the message quotes it the way the build does.
+      out[k] = k.endsWith("/") ? v : toFileUrl(resolve(dir, v)).href;
+    }
+    return out;
+  }) ?? {};
+}
+
+/** Does the FRAMEWORK own `spec` — a published entry (deno.json `exports`)
+ *  or a browser-map entry? THE one answer for dev and the bundle: an app's
+ *  own import-map line for it never applies in UI code (untakenAliases), and
+ *  UI code may import it only when {@link isBrowserEntry} says so. Pure. */
+export function isFrameworkEntry(spec: string): boolean {
+  return Object.hasOwn(AIO_ENTRY_PATHS, spec) ||
+    Object.hasOwn(FRAMEWORK_BROWSER_MAP, spec);
+}
+
+/** May UI code import this framework entry? Exactly when the dev import map
+ *  serves it (FRAMEWORK_BROWSER_MAP). Every other entry is refused alike: by
+ *  the dev graph check, and by the bundle (esbuild-plugin.ts). Pure. */
+export function isBrowserEntry(spec: string): boolean {
+  return Object.hasOwn(FRAMEWORK_BROWSER_MAP, spec);
+}
+
+/** THE clash rule for the app's own import entries: a framework entry
+ *  (isFrameworkEntry) or a key `taken` already maps (the browser map, the
+ *  bundler's framework entries) wins, so `"aio": "./dep/aio/mod.ts"` — which
+ *  `am create` writes — never shadows the framework's `aio`, and
+ *  `"aio/sync": "./dep/aio/src/sync/mod.ts"` is never rewritten to a dev url
+ *  that 403s. The dev rewrite, the graph map and the bundler's alias all
+ *  apply this one rule. Pure. */
+export function untakenAliases(
+  aliases: Readonly<Record<string, string>>,
+  taken: Readonly<Record<string, string>>,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(aliases)) {
+    if (!Object.hasOwn(taken, k) && !isFrameworkEntry(k)) out[k] = v;
+  }
+  return out;
+}
+
+/** The app's local aliases the dev server REWRITES in UI code: every one the
+ *  browser map does not already map (untakenAliases). */
+export function devLocalAliases(
+  baseDir: string,
+  browserMap: Record<string, string>,
+): Record<string, string> {
+  return untakenAliases(readAppLocalAliases(baseDir), browserMap);
+}
+
+/** The map the client GRAPH is judged against: the browser map plus the
+ *  app's local aliases the dev server rewrites (devLocalAliases). */
+export function graphImportMap(
+  baseDir: string,
+  browserMap: Record<string, string>,
+): Record<string, string> {
+  return { ...devLocalAliases(baseDir, browserMap), ...browserMap };
+}
+
+/** The local PREFIX key (`"@/"`) `spec` falls under, or null. Exact keys win,
+ *  as they do in an import map. Pure. */
+export function localPrefixAlias(
+  spec: string,
+  imports: Record<string, string>,
+): { key: string; value: string } | null {
+  if (Object.hasOwn(imports, spec)) return null;
+  let best: string | null = null;
+  for (const [k, v] of Object.entries(imports)) {
+    if (!k.endsWith("/") || !spec.startsWith(k)) continue;
+    if (!isLocalTarget(v)) continue;
+    if (best === null || k.length > best.length) best = k;
+  }
+  return best === null ? null : { key: best, value: imports[best]! };
+}
+
+/** THE sentence for a UI import that goes through a local import-map PREFIX
+ *  (`"@/": "./src/"`). One wording, said by the dev server and the build
+ *  alike — neither resolves prefix keys in UI code. `value` is the deno.json
+ *  value as written. */
+export function prefixAliasMessage(
+  spec: string,
+  key: string,
+  value: string,
+): string {
+  const target = (value.endsWith("/") ? value : value + "/") +
+    spec.slice(key.length);
+  return `import "${spec}" goes through the import-map prefix "${key}" → ` +
+    `"${value}", and prefix aliases are not supported in UI code (neither ` +
+    `the dev server nor the browser bundle resolves them). Import the file ` +
+    `by a relative path, or map this exact specifier in deno.json imports: ` +
+    `"${spec}": "${target}".`;
 }
 
 /** The config in `dir` — BOTH names Deno accepts, read the way Deno reads
@@ -107,6 +234,10 @@ function workspaceMembers(config: Record<string, unknown>): string[] | null {
 function withWorkspaceImports(
   memberDir: string,
   memberImports: Record<string, string>,
+  pick: (config: Record<string, unknown>, dir: string) => Record<
+    string,
+    string
+  > = ownImports,
 ): Record<string, string> {
   let dir = resolve(memberDir);
   const member = dir;
@@ -119,7 +250,7 @@ function withWorkspaceImports(
     const members = workspaceMembers(found.config);
     if (!members) continue;
     if (!members.some((m) => resolve(dir, m) === member)) continue;
-    return { ...ownImports(found.config), ...memberImports };
+    return { ...pick(found.config, dir), ...memberImports };
   }
   return memberImports;
 }
@@ -131,6 +262,52 @@ export function _resetImportMapWarnings(): void {
   _warned.clear();
 }
 
+/** THE framework entries a page can load, and the dev url of each: the dev
+ *  import map's framework half, and the ONLY aio entries UI code may import
+ *  (isBrowserEntry) — in dev and in the bundle alike. */
+export const FRAMEWORK_BROWSER_MAP: Readonly<Record<string, string>> = {
+  "aio": "/__aio/ui.js",
+  "aio/air": "/__aio/air.js",
+  "aio/browser": "/__aio/ui.js",
+  "aio/jsx-runtime": "/__aio/jsx-runtime.ts",
+  // The built-in updates cell. A separate entry because importing it is how
+  // an app opts in — it must resolve in the browser for a UI to bind
+  // `updates.available`, and nowhere else.
+  "aio/updates": "/__aio/updates.ts",
+  "aio/feedback": "/__aio/feedback.ts",
+  // The component kit. `docs/ui/kit.md` tells every app to
+  // `import { Button, Input } from "aio/ui"` — and the specifier resolved
+  // nowhere in the browser, so the page died on an unmapped bare import
+  // (a blank screen) while fmt, check, lint, aiol, doctor and the whole test
+  // suite stayed green: a field report hit exactly this. Anything the docs
+  // tell an app to import from a PAGE has to be in this map.
+  "aio/ui": "/__aio/ui/mod.ts",
+  // React migration shims — PERMANENT surface (2026-07-06), and
+  // docs/basics/migration.md shows them imported from a COMPONENT. Missing
+  // here, that import was the `aio/ui` blank screen again: the symbols all
+  // exist, so every gate stayed green while the page died on an unmapped
+  // bare specifier. Safe to serve because these routes TRANSPILE rather than
+  // bundle — `src/air-compat.ts` reaches `./air/compat.ts` at
+  // `/__aio/air/compat.ts`, the same URL `/__aio/air.js` already loads, so
+  // the browser instantiates AIR once, not twice.
+  "aio/air/compat": "/__aio/air-compat.ts",
+  // Adapter authors: docs/ui/air-advanced.md tells them to build on this.
+  // Its module-level `enablePatches()` runs once for the same reason —
+  // src/browser/* already reaches it at exactly this URL.
+  "aio/state-core": "/__aio/state-core.ts",
+  // `import "aio/client-only"` — the marker a module uses to declare that it
+  // must not run on the server. It is imported BY browser code, so the
+  // specifier has to resolve in a page or the import that declares the rule
+  // is the thing that breaks it (the `aio/ui` blank screen, again). Three
+  // lines and a constant; the generic /__aio/*.ts route serves it in dev and
+  // the bundler inlines it in prod.
+  //
+  // `aio/server-only` is deliberately NOT here: it is in SERVER_ONLY_SPECS,
+  // so a page that reaches it is told the category. Its whole purpose is to
+  // be unreachable from a browser.
+  "aio/client-only": "/__aio/client-only.ts",
+};
+
 /** Generates browser import map from framework defaults + deno.json npm packages.
  *  npm packages → esm.sh CDN URLs. jsr/local imports are skipped (handled differently).
  *  `opts.vendorImmer` — the dev server found a local immer and serves it at
@@ -139,48 +316,7 @@ export function buildBrowserImportMap(
   denoImports: Record<string, string>,
   opts: { vendorImmer?: boolean } = {},
 ): Record<string, string> {
-  const imports: Record<string, string> = {
-    "aio": "/__aio/ui.js",
-    "aio/air": "/__aio/air.js",
-    "aio/browser": "/__aio/ui.js",
-    "aio/jsx-runtime": "/__aio/jsx-runtime.ts",
-    // The built-in updates cell. A separate entry because importing it is how
-    // an app opts in — it must resolve in the browser for a UI to bind
-    // `updates.available`, and nowhere else.
-    "aio/updates": "/__aio/updates.ts",
-    "aio/feedback": "/__aio/feedback.ts",
-    // The component kit. `docs/ui/kit.md` tells every app to
-    // `import { Button, Input } from "aio/ui"` — and the specifier resolved
-    // nowhere in the browser, so the page died on an unmapped bare import
-    // (a blank screen) while fmt, check, lint, aiol, doctor and the whole test
-    // suite stayed green: a field report hit exactly this. Anything the docs
-    // tell an app to import from a PAGE has to be in this map.
-    "aio/ui": "/__aio/ui/mod.ts",
-    // React migration shims — PERMANENT surface (2026-07-06), and
-    // docs/basics/migration.md shows them imported from a COMPONENT. Missing
-    // here, that import was the `aio/ui` blank screen again: the symbols all
-    // exist, so every gate stayed green while the page died on an unmapped
-    // bare specifier. Safe to serve because these routes TRANSPILE rather than
-    // bundle — `src/air-compat.ts` reaches `./air/compat.ts` at
-    // `/__aio/air/compat.ts`, the same URL `/__aio/air.js` already loads, so
-    // the browser instantiates AIR once, not twice.
-    "aio/air/compat": "/__aio/air-compat.ts",
-    // Adapter authors: docs/ui/air-advanced.md tells them to build on this.
-    // Its module-level `enablePatches()` runs once for the same reason —
-    // src/browser/* already reaches it at exactly this URL.
-    "aio/state-core": "/__aio/state-core.ts",
-    // `import "aio/client-only"` — the marker a module uses to declare that it
-    // must not run on the server. It is imported BY browser code, so the
-    // specifier has to resolve in a page or the import that declares the rule
-    // is the thing that breaks it (the `aio/ui` blank screen, again). Three
-    // lines and a constant; the generic /__aio/*.ts route serves it in dev and
-    // the bundler inlines it in prod.
-    //
-    // `aio/server-only` is deliberately NOT here: it is in SERVER_ONLY_SPECS,
-    // so a page that reaches it is told the category. Its whole purpose is to
-    // be unreachable from a browser.
-    "aio/client-only": "/__aio/client-only.ts",
-  };
+  const imports: Record<string, string> = { ...FRAMEWORK_BROWSER_MAP };
   for (const [name, specifier] of Object.entries(denoImports)) {
     if (!specifier.startsWith("npm:")) continue;
     if (imports[name]) continue; // don't override defaults

@@ -10,6 +10,7 @@ import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import {
   dbPathOf,
+  isolateOf,
   keepServerOf,
   persistOf,
   pick,
@@ -24,6 +25,42 @@ const SRC = new URL("../src/", import.meta.url).pathname;
 // A flag read merged with anything by `??`, in either order.
 const RAW_MERGE =
   /\b(?:cli|parseCli\([^)]*\))\.\w+\s*\?\?|\?\?\s*(?:cli|parseCli\([^)]*\))\.\w+/;
+
+// The same merge, laundered through a local: `const cliX = parseCli().x;`
+// (or `const { x: cliX } = parseCli();`) and then `config.x ?? cliX`. That is
+// how `--isolate=` lost to `aio.run({ isolate })` without a word while the
+// one-line pattern above stayed green.
+const FLAG_LOCAL =
+  /\b(?:const|let)\s+(\w+)\s*=\s*(?:cli|parseCli\([^)]*\))\.\w+\s*;/;
+const FLAG_DESTRUCTURE =
+  /\b(?:const|let)\s*\{([^}]*)\}\s*=\s*(?:cli|parseCli\([^)]*\))\s*;/;
+
+/** Names a file binds straight from a flag read. */
+function flagLocals(codeLines: readonly string[]): Set<string> {
+  const names = new Set<string>();
+  for (const code of codeLines) {
+    const one = FLAG_LOCAL.exec(code);
+    if (one?.[1]) names.add(one[1]);
+    const many = FLAG_DESTRUCTURE.exec(code);
+    if (many?.[1]) {
+      for (const part of many[1].split(",")) {
+        const name = (part.split(":").pop() ?? "").split("=")[0]?.trim() ?? "";
+        if (/^\w+$/.test(name)) names.add(name);
+      }
+    }
+  }
+  return names;
+}
+
+/** A line merging one of `locals` by `??`, in either order. */
+function mergesLocal(code: string, locals: ReadonlySet<string>): boolean {
+  for (const name of locals) {
+    if (new RegExp(`\\b${name}\\s*\\?\\?|\\?\\?\\s*${name}\\b`).test(code)) {
+      return true;
+    }
+  }
+  return false;
+}
 
 async function* serverFiles(dir: string): AsyncGenerator<string> {
   for await (const e of Deno.readDir(dir)) {
@@ -42,11 +79,15 @@ Deno.test("no flag is merged with its config twin outside config-sources.ts", as
     for await (const file of serverFiles(SRC + dir)) {
       if (file.endsWith("config-sources.ts")) continue;
       scanned++;
-      const lines = (await Deno.readTextFile(file)).split("\n");
-      lines.forEach((line, i) => {
-        const code = line.replace(/\/\/.*$/, "").trim();
-        if (code.startsWith("*") || code.startsWith("/*")) return;
-        if (RAW_MERGE.test(code)) {
+      const codeLines = (await Deno.readTextFile(file)).split("\n").map(
+        (line) => {
+          const code = line.replace(/\/\/.*$/, "").trim();
+          return code.startsWith("*") || code.startsWith("/*") ? "" : code;
+        },
+      );
+      const locals = flagLocals(codeLines);
+      codeLines.forEach((code, i) => {
+        if (RAW_MERGE.test(code) || mergesLocal(code, locals)) {
           hits.push(`${file.slice(SRC.length)}:${i + 1}  ${code}`);
         }
       });
@@ -68,6 +109,21 @@ Deno.test("the gate's pattern: what it catches and what it leaves alone", () => 
   assert(RAW_MERGE.test("const h = parseCli().host ?? config.host;"));
   assert(!RAW_MERGE.test("const h = hostOf(parseCli(), config)?.value;"));
   assert(!RAW_MERGE.test("if (cli.width !== undefined) asked.push(x);"));
+  // …and through a local, which the one-line pattern cannot see.
+  const laundered = [
+    "const cliIsolate = parseCli().isolate;",
+    "const isolate = fc.isolate ?? cliIsolate;",
+  ];
+  const locals = flagLocals(laundered);
+  assert(mergesLocal(laundered[1]!, locals));
+  assert(
+    mergesLocal(
+      "const b = cfg.budget ?? cliBudget;",
+      flagLocals(["const { logBudget: cliBudget, verbose } = parseCli();"]),
+    ),
+  );
+  assert(!mergesLocal("...(cliBudget !== undefined ? { x } : {}),", locals));
+  assert(!mergesLocal("const y = cliIsolateX ?? 1;", locals));
 });
 
 Deno.test('pick: `??` semantics — 0, false and "" are answers; null/undefined are not', () => {
@@ -95,6 +151,14 @@ Deno.test("the resolvers keep each key's documented precedence", () => {
   });
   assertEquals(persistOf({ persist: false }, { persist: true }).value, false);
   assertEquals(keepServerOf({}, true), { value: true, from: "config" });
+  assertEquals(isolateOf({ isolate: ["b"] }, { isolate: ["a"] }), {
+    value: ["b"],
+    from: "flag",
+  });
+  assertEquals(isolateOf({}, { isolate: ["a"] }), {
+    value: ["a"],
+    from: "config",
+  });
   // …except the database file, where the config always won (aio.ts warns).
   assertEquals(dbPathOf({ dbPath: "a.db" }, { dbPath: "b.db" }), {
     value: "b.db",

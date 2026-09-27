@@ -133,3 +133,25 @@ Deno.test("the trace directory is BOUNDED — a failing suite cannot fill a disk
   );
   await Deno.remove(dir, { recursive: true }).catch(() => {});
 });
+
+Deno.test("a waitFor timeout names a trace file too", async () => {
+  // docs/testing/ui-testing.md: "Every miss and every `waitFor` timeout names
+  // a file". The miss did; the timeout printed the surface and no file.
+  await using ui = await testUI(App, { cells: [counter] } as D);
+  await (counter as D).bump(2);
+  let msg = "";
+  try {
+    await ui.waitFor(() => false, { timeoutMs: 50 });
+  } catch (e) {
+    msg = e instanceof Error ? e.message : String(e);
+  }
+  assertStringIncludes(msg, "waitFor timed out");
+  const m = /trace: (\S+\.json)/.exec(msg);
+  assert(m, `the timeout must NAME the file: ${msg}`);
+  try {
+    const trace = JSON.parse(await Deno.readTextFile(m[1]!)) as D;
+    assertStringIncludes(trace.calls[0], "tracecell.bump(2)");
+  } finally {
+    await Deno.remove(m[1]!).catch(() => {});
+  }
+});

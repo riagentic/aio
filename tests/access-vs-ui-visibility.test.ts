@@ -156,16 +156,15 @@ Deno.test("an explicit visible is an answer — no warning, including visible: '
   // it means "yes, everyone may read this", and an author who has said so must
   // never be nagged again — otherwise the warning becomes noise and gets muted
   // wholesale, taking the real findings with it.
-  const shapes: [
-    string,
-    "all" | "none" | { exclude: string[] } | {
-      include: string[];
-    },
-  ][] = [
+  // `{ publicFields }` alone resolves to "all" with no structural filter and
+  // no forUser — it is still a `visible` the author wrote, so it answers too.
+  const shapes: [string, unknown][] = [
     ["all", "all"],
     ["none", "none"],
     ["exclude", { exclude: ["internalNotes"] }],
     ["include", { include: ["ledger"] }],
+    ["publicFields", { publicFields: ["ledger"] }],
+    ["forUser", { forUser: (s: Record<string, unknown>) => s }],
   ];
   for (const [label, ui] of shapes) {
     const port = freePort();
@@ -194,9 +193,7 @@ Deno.test("an explicit visible is an answer — no warning, including visible: '
     assertEquals(
       nag,
       undefined,
-      `visible: ${
-        JSON.stringify(ui)
-      } is an explicit answer and must silence the ` +
+      `visible: ${label} is an explicit answer and must silence the ` +
         `warning, got: ${nag}`,
     );
   }

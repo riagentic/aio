@@ -3,7 +3,15 @@
 // Only adds missing config, removes dead code, or normalizes formatting.
 
 import { basename, join, resolve } from "@std/path";
-import { codeMask, codeMatches, codeText, topLevelKeyOffsets } from "./scan.ts";
+import {
+  codeMask,
+  codeMatches,
+  codeText,
+  type ListEntry,
+  type ModuleStatement,
+  moduleStatements,
+  topLevelKeyOffsets,
+} from "./scan.ts";
 import { SERVER_ONLY_AIO_SYMBOLS } from "../src/entries.ts";
 
 // Derived from THE set (src/entries.ts, alpha52 one-decider) — never restated.
@@ -13,6 +21,203 @@ const SERVER_ONLY_RE = new RegExp(
 import type { DenoJsonConfig } from "./types.ts";
 
 // ── Helpers ─────────────────────────────────────────────────────────
+
+/** What to do with ONE `import {…} from "x"` statement. Every field is
+ *  optional; an edit that changes nothing leaves the statement byte-for-byte
+ *  as it was. */
+type ListEdit = {
+  /** Per existing named entry, in order: its new text, or null to drop it. */
+  readonly entries?: ReadonlyArray<string | null>;
+  /** Specifiers to append after the last kept entry. */
+  readonly add?: readonly string[];
+  /** A new module specifier for the statement. */
+  readonly spec?: string;
+  /** A second import of the SAME kind (`type` or not) to insert on the line
+   *  after this one — or, when every entry is dropped, to REPLACE it. It is
+   *  rendered here, so it carries the statement's attribute clause
+   *  (`with { … }`) exactly as the statement does. */
+  readonly after?: { readonly names: readonly string[]; readonly spec: string };
+};
+
+/** The import-attribute clause (`with { … }` / legacy `assert { … }`) right
+ *  after a statement's specifier, as written; "" when there is none. The
+ *  statement ends after it — splicing at the specifier left the clause
+ *  behind, attached to whatever was spliced in. */
+function attributeClause(src: string, specQuoteEnd: number): string {
+  const m = /^\s*\b(?:with|assert)\s*\{[^{}]*\}/.exec(
+    codeText(src).slice(specQuoteEnd),
+  );
+  return m ? src.slice(specQuoteEnd, specQuoteEnd + m[0].length) : "";
+}
+
+/** THE import-list rewriter: every `--safe-fix` that edits the `{…}` of an
+ *  import goes through here. Null when no statement changed. Pure.
+ *
+ *  Each fix used to split the list on "," and re-join the pieces on ONE line.
+ *  A `// comment` after a specifier — ordinary in the multi-line list
+ *  `deno fmt` writes — then swallowed the rest of the statement (`} from
+ *  "aio";` landed inside the comment) and the "safe" fix left a file that did
+ *  not parse. Some re-joined EVERY matching import in the file, touched or
+ *  not. Here the list is read by `moduleStatements` (comments are never
+ *  specifiers and a comma inside one never splits), an edit is spliced into
+ *  the original layout, comments are kept, and a statement the edit does not
+ *  change is not rewritten at all.
+ *
+ *  Only `import {…}` / `import type {…}` statements are offered to `edit` — a
+ *  default or namespace binding beside the list is declined, not guessed. */
+function rewriteImportLists(
+  src: string,
+  edit: (st: ModuleStatement, names: readonly string[]) => ListEdit | null,
+): string | null {
+  const splices: Array<{ from: number; to: number; text: string }> = [];
+  for (const st of moduleStatements(src)) {
+    if (st.kind !== "import" || !st.list || !st.clause.startsWith("{")) {
+      continue;
+    }
+    const named = st.list.entries.filter((e) => e.text);
+    const e = edit(st, named.map((n) => n.text));
+    if (!e) continue;
+    const next = e.entries ?? named.map((n) => n.text);
+    const add = e.add ?? [];
+    if (
+      next.every((t, i) => t === named[i]!.text) && add.length === 0 &&
+      (e.spec === undefined || e.spec === st.spec) && e.after === undefined
+    ) continue;
+    const attrs = attributeClause(src, st.end);
+    const stEnd = st.end + attrs.length;
+    const semi = src[stEnd] === ";" ? 1 : 0;
+    const end = stEnd + semi;
+    let after: string | undefined;
+    if (e.after !== undefined) {
+      const kw = st.typeOnly ? "type " : "";
+      after = `import ${kw}{ ${e.after.names.join(", ")} } from ` +
+        `"${e.after.spec}"${attrs};`;
+      // Read back like the rewritten statement below: an emitted import that
+      // does not come back as exactly these names from exactly this spec
+      // declines the whole fix.
+      const b = moduleStatements(after)[0];
+      if (
+        b?.start !== 0 || b.spec !== e.after.spec ||
+        attributeClause(after, b.end) !== attrs ||
+        JSON.stringify(b.list?.entries.map((x) => x.text)) !==
+          JSON.stringify(
+            e.after.names.map((t) => t.replace(/\s+/g, " ").trim()),
+          )
+      ) return null;
+    }
+    if (next.every((t) => t === null) && add.length === 0) {
+      if (after !== undefined) {
+        splices.push({ from: st.start, to: end, text: after });
+        continue;
+      }
+      // Nothing left to import: the statement goes, with its line when it
+      // had the line to itself.
+      const lineStart = src.lastIndexOf("\n", st.start - 1) + 1;
+      const own = /^[ \t]*$/.test(src.slice(lineStart, st.start)) &&
+        /^[ \t]*(?:\r?\n|$)/.test(src.slice(end));
+      splices.push(
+        own
+          ? {
+            from: lineStart,
+            to: end + (/^[ \t]*(?:\r?\n)?/.exec(src.slice(end))![0].length),
+            text: "",
+          }
+          : { from: st.start, to: end, text: "" },
+      );
+      continue;
+    }
+    const body = listBody(src, st.list.entries, next, add, st.list);
+    let text = src.slice(st.start, st.list.open + 1) + body +
+      src.slice(st.list.close, st.specStart) + (e.spec ?? st.spec) +
+      src.slice(st.specEnd, end);
+    // Read the result back with the same scanner. A statement that does not
+    // come back as exactly the intended list (a comment ate the brace, a
+    // layout this splice did not foresee) declines the WHOLE fix: a finding
+    // left for a human is recoverable, a file that no longer parses is not.
+    const back = moduleStatements(text)[0];
+    const want = [...next.filter((t) => t !== null), ...add]
+      .map((t) => t.replace(/\s+/g, " ").trim());
+    const got = back?.list?.entries.filter((x) => x.text).map((x) => x.text);
+    if (
+      back?.start !== 0 || back.spec !== (e.spec ?? st.spec) ||
+      JSON.stringify(got) !== JSON.stringify(want)
+    ) return null;
+    if (after !== undefined) text += `\n${after}`;
+    splices.push({ from: st.start, to: end, text });
+  }
+  if (splices.length === 0) return null;
+  let out = src;
+  for (const sp of splices.reverse()) {
+    out = out.slice(0, sp.from) + sp.text + out.slice(sp.to);
+  }
+  return out;
+}
+
+/** The new text between `{` and `}` — see {@linkcode rewriteImportLists}. */
+function listBody(
+  src: string,
+  entries: readonly ListEntry[],
+  next: ReadonlyArray<string | null>,
+  add: readonly string[],
+  list: { open: number; close: number },
+): string {
+  const interior = src.slice(list.open + 1, list.close);
+  // One line, no comment: nothing to preserve but the names themselves.
+  if (!/[\n/]/.test(interior)) {
+    return ` ${[...next.filter((t) => t !== null), ...add].join(", ")} `;
+  }
+  // Otherwise splice into the original layout, slot by slot. A kept entry
+  // keeps its comma; a dropped one loses its code and its comma but keeps any
+  // comment around it — so no comma is ever doubled and no comment can reach
+  // past the code that follows it.
+  let out = "";
+  let insertAt = -1;
+  let ni = 0;
+  entries.forEach((en, i) => {
+    if (!en.text) { // the empty slot after a trailing comma
+      out += src.slice(en.slotStart, en.slotEnd);
+      return;
+    }
+    const t = next[ni++];
+    const pre = src.slice(en.slotStart, en.start);
+    const post = src.slice(en.end, en.slotEnd);
+    if (t === null || t === undefined) {
+      const rest = pre + post;
+      out += /\S/.test(rest) ? rest.replace(/[ \t]+$/, "") : post;
+      return;
+    }
+    out += pre + t;
+    insertAt = out.length;
+    out += post;
+    if (i < entries.length - 1) out += ",";
+  });
+  // A dropped entry can leave its line empty (its comment belonged to the
+  // line above). Removing a newline that is followed only by another newline
+  // can never end a `//` comment early, so this is always safe — and it is
+  // skipped when the author had blank lines in the list on purpose.
+  if (!/\n[ \t]*\n/.test(interior)) out = out.replace(/\n[ \t]*(?=\n)/g, "");
+  if (add.length === 0) return out;
+  const added = add.join(", ");
+  return insertAt === -1
+    ? ` ${added}${/\S/.test(out) ? out : " "}`
+    : `${out.slice(0, insertAt)}, ${added}${out.slice(insertAt)}`;
+}
+
+/** Add `name` to the first value `import {…} from "<spec>"`, or prepend a new
+ *  import line when there is none. Pure. */
+function addToFirstImport(src: string, spec: string, name: string): string {
+  let done = false;
+  const out = rewriteImportLists(src, (st) => {
+    if (done || st.spec !== spec || st.typeOnly) return null;
+    done = true;
+    return { add: [name] };
+  });
+  return out ?? `import { ${name} } from "${spec}";\n${src}`;
+}
+
+/** The local binding of one list entry: `a as b` → b, `type A` → A. */
+const localName = (entry: string): string =>
+  entry.replace(/^type\s+/, "").split(/\s+as\s+/).pop()!.trim();
 
 /** Read, transform, and write deno.json — preserves formatting where possible */
 async function patchDenoJson(
@@ -554,26 +759,18 @@ export function fixServerEntryImport(
   return async () => {
     try {
       const src = await Deno.readTextFile(filePath);
-      let changed = false;
-      const out = src.replace(
-        /import\s*\{([^}]*)\}\s*from\s*["']aio["'];?/g,
-        (whole, inner: string) => {
-          const names = inner.split(",").map((s) => s.trim()).filter(Boolean);
-          const server = names.filter((n) =>
-            SERVER_ONLY.has(n.replace(/^type\s+/, "").split(/\s+as\s+/)[0]!)
-          );
-          if (server.length === 0) return whole;
-          changed = true;
-          const rest = names.filter((n) => !server.includes(n));
-          const serverLine = `import { ${
-            server.join(", ")
-          } } from "aio/server";`;
-          return rest.length > 0
-            ? `import { ${rest.join(", ")} } from "aio";\n${serverLine}`
-            : serverLine;
-        },
-      );
-      if (!changed) return false;
+      const out = rewriteImportLists(src, (st, names) => {
+        if (st.spec !== "aio" || st.typeOnly) return null;
+        const isServer = (n: string) => SERVER_ONLY.has(bareName(n));
+        const server = names.filter(isServer);
+        if (server.length === 0) return null;
+        if (server.length === names.length) return { spec: "aio/server" };
+        return {
+          entries: names.map((n) => isServer(n) ? null : n),
+          after: { names: server, spec: "aio/server" },
+        };
+      });
+      if (out === null) return false;
       await Deno.writeTextFile(filePath, out);
       return true;
     } catch {
@@ -1107,13 +1304,7 @@ function ensureServedImport(src: string): string {
   ) {
     return src;
   }
-  return src.replace(
-    /import\s*\{([^}]*)\}\s*from\s*(["'])aio\2/,
-    (_whole, inner: string, q: string) =>
-      `import { ${
-        inner.trim().replace(/,\s*$/, "")
-      }, type MethodDraftServed } from ${q}aio${q}`,
-  );
+  return addToFirstImport(src, "aio", "type MethodDraftServed");
 }
 
 /** The effect type names the rewrite can orphan. */
@@ -1134,31 +1325,18 @@ export function pruneOrphanedEffectTypeImports(src: string): string {
   let out = src;
   for (const name of EFFECT_TYPE_NAMES) {
     if (new RegExp(`\\b${name}\\b`).test(withoutImports)) continue; // still used
-    out = out.replace(
-      /(^|\n)([ \t]*)import\s*(type\s+)?\{([^}]*)\}\s*from\s*(["'])aio\5;?/g,
-      (
-        whole,
-        lead: string,
-        indent: string,
-        typeKw: string | undefined,
-        inner: string,
-        quote: string,
-      ) => {
-        const members = splitTopLevel(inner, ",").map((x) => x.trim()).filter(
-          Boolean,
-        );
-        const keep = members.filter((raw) => {
-          if (/\bas\b/.test(raw)) return true; // aliased — leave it alone
-          const bare = raw.replace(/^type\s+/, "").trim();
-          return bare !== name;
-        });
-        if (keep.length === members.length) return whole; // not imported here
-        if (keep.length === 0) return lead === "\n" ? "" : lead; // whole clause gone
-        return `${lead}${indent}import ${typeKw ?? ""}{ ${
-          keep.join(", ")
-        } } from ${quote}aio${quote};`;
-      },
-    );
+    // An aliased member (`X as Y`) is left alone; so is every statement that
+    // does not import `name` (rewriteImportLists leaves those byte-for-byte).
+    const orphan = (raw: string) =>
+      !/\bas\b/.test(raw) && raw.replace(/^type\s+/, "").trim() === name;
+    out = rewriteImportLists(out, (st, names) =>
+      st.spec === "aio" && names.some(orphan)
+        ? {
+          entries: names.map((n) =>
+            orphan(n) ? null : n
+          ),
+        }
+        : null) ?? out;
   }
   return out;
 }
@@ -1418,28 +1596,21 @@ export function fixDeadEntrySpecifiers(
     } catch {
       return false;
     }
-    let changed = false;
-    const out = src.replace(
-      /import\s*(type\s*)?\{([^}]*)\}\s*from\s*["']aio\/(?:schedule|selectors)["'];?/g,
-      (_whole, typeQual: string | undefined, inner: string) => {
-        changed = true;
-        const names = inner.split(",").map((s) => s.trim()).filter(Boolean);
-        const bare = (n: string) =>
-          n.replace(/^type\s+/, "").split(/\s+as\s+/)[0]!.trim();
-        const extras = names.filter((n) => DEAD_ENTRY_EXTRAS.has(bare(n)));
-        const core = names.filter((n) => !DEAD_ENTRY_EXTRAS.has(bare(n)));
-        const t = typeQual ? "type " : "";
-        const stmts: string[] = [];
-        if (core.length) {
-          stmts.push(`import ${t}{ ${core.join(", ")} } from "aio";`);
-        }
-        if (extras.length) {
-          stmts.push(`import ${t}{ ${extras.join(", ")} } from "aio/extras";`);
-        }
-        return stmts.join("\n");
-      },
-    );
-    if (!changed) return false;
+    const out = rewriteImportLists(src, (st, names) => {
+      if (st.spec !== "aio/schedule" && st.spec !== "aio/selectors") {
+        return null;
+      }
+      const isExtra = (n: string) => DEAD_ENTRY_EXTRAS.has(bareName(n));
+      const extras = names.filter(isExtra);
+      if (extras.length === 0) return { spec: "aio" };
+      if (extras.length === names.length) return { spec: "aio/extras" };
+      return {
+        entries: names.map((n) => isExtra(n) ? null : n),
+        spec: "aio",
+        after: { names: extras, spec: "aio/extras" },
+      };
+    });
+    if (out === null) return false;
     await Deno.writeTextFile(filePath, out);
     return true;
   };
@@ -1505,15 +1676,13 @@ export function fixUseCellStateReads(filePath: string): () => Promise<boolean> {
     let out = rewritten;
     // No remaining CODE use of useCell → drop its import binding.
     if (!/\buseCell\s*\(/.test(codeText(out))) {
-      out = out.replace(
-        /(import\s*(?:type\s*)?\{)([^}]*)(\}\s*from\s*["'][^'"]+["'];?)/g,
-        (whole, pre: string, inner: string, post: string) => {
-          const names = inner.split(",").map((s) => s.trim()).filter(Boolean);
-          if (!names.some((n) => /^(type\s+)?useCell$/.test(n))) return whole;
-          const rest = names.filter((n) => !/^(type\s+)?useCell$/.test(n));
-          return rest.length ? `${pre} ${rest.join(", ")} ${post}` : "";
-        },
-      ).replace(/^\r?\n/, "");
+      const isUseCell = (n: string) => /^(type\s+)?useCell$/.test(n);
+      out = rewriteImportLists(out, (_st, names) =>
+        names.some(isUseCell)
+          ? {
+            entries: names.map((n) => isUseCell(n) ? null : n),
+          }
+          : null) ?? out;
     }
     if (out === src) return false;
     await Deno.writeTextFile(filePath, out);
@@ -1542,30 +1711,36 @@ const bareName = (n: string): string =>
  *  line. Returns null when nothing matched — ONE decider for the rule (does
  *  this file need the fix?) and the fix (apply it), so they cannot disagree. */
 export function moveImports(src: string, mv: MovedImports): string | null {
+  const r = moveImportsIn(src, mv);
+  return r.matched ? r.out : null;
+}
+
+/** {@linkcode moveImports} with the two facts kept apart: `matched` (the
+ *  file needs the move — the RULE's question) and `declined` (a static
+ *  import matched but its rewrite did not read back — so the fix must not
+ *  claim it). Folding them made a declined rewrite either silence or a
+ *  "fixed" that changed nothing. */
+function moveImportsIn(
+  src: string,
+  mv: MovedImports,
+): { out: string; matched: boolean; declined: boolean } {
   const spec = mv.from.replace(/[/.]/g, "\\$&");
-  const re = new RegExp(
-    `import\\s*(type\\s+)?\\{([^}]*)\\}\\s*from\\s*["']${spec}["'];?`,
-    "g",
-  );
-  let changed = false;
-  const out = src.replace(
-    re,
-    (whole, typeKw: string | undefined, inner: string) => {
-      if (typeKw && mv.valuesOnly) return whole;
-      const names = inner.split(",").map((s) => s.trim()).filter(Boolean);
-      const moving = names.filter((n) =>
-        mv.names.has(bareName(n)) && !(mv.valuesOnly && /^type\s/.test(n))
-      );
-      if (moving.length === 0) return whole;
-      changed = true;
-      const rest = names.filter((n) => !moving.includes(n));
-      const kw = typeKw ? "type " : "";
-      const toLine = `import ${kw}{ ${moving.join(", ")} } from "${mv.to}";`;
-      return rest.length > 0
-        ? `import ${kw}{ ${rest.join(", ")} } from "${mv.from}";\n${toLine}`
-        : toLine;
-    },
-  );
+  let matched = false;
+  const moved = rewriteImportLists(src, (st, names) => {
+    if (st.spec !== mv.from || (st.typeOnly && mv.valuesOnly)) return null;
+    const moves = (n: string) =>
+      mv.names.has(bareName(n)) && !(mv.valuesOnly && /^type\s/.test(n));
+    const moving = names.filter(moves);
+    if (moving.length === 0) return null;
+    matched = true;
+    // Everything moves: only the specifier changes; layout and comments stay.
+    if (moving.length === names.length) return { spec: mv.to };
+    return {
+      entries: names.map((n) => moves(n) ? null : n),
+      after: { names: moving, spec: mv.to },
+    };
+  });
+  const declined = matched && moved === null;
   // The dynamic form: `const { a, b } = await import("aio")` — rewritten only
   // when EVERY destructured name moves (a split would need two awaits, which
   // is the reader's decision, not a rewriter's). A field report hit exactly
@@ -1574,7 +1749,7 @@ export function moveImports(src: string, mv: MovedImports): string | null {
     `(\\{([^}]*)\\}\\s*=\\s*await\\s+import\\(\\s*)["']${spec}["'](\\s*\\))`,
     "g",
   );
-  const out2 = out.replace(
+  const out = (moved ?? src).replace(
     dyn,
     (whole, head: string, inner: string, tail: string) => {
       const names = inner.split(",").map((s) => s.trim()).filter(Boolean);
@@ -1583,14 +1758,15 @@ export function moveImports(src: string, mv: MovedImports): string | null {
       ) {
         return whole;
       }
-      changed = true;
+      matched = true;
       return `${head}"${mv.to}"${tail}`;
     },
   );
-  return changed ? out2 : null;
+  return { out, matched, declined };
 }
 
-/** `--safe-fix` half of {@linkcode moveImports}. */
+/** `--safe-fix` half of {@linkcode moveImports}. A rewrite that declined is
+ *  NOT fixed: nothing is written and the finding stays for a human. */
 export function fixMovedImports(
   filePath: string,
   mv: MovedImports,
@@ -1602,9 +1778,9 @@ export function fixMovedImports(
     } catch {
       return false;
     }
-    const out = moveImports(src, mv);
-    if (out === null) return false;
-    await Deno.writeTextFile(filePath, out);
+    const r = moveImportsIn(src, mv);
+    if (!r.matched || r.declined) return false;
+    await Deno.writeTextFile(filePath, r.out);
     return true;
   };
 }
@@ -1619,23 +1795,14 @@ export function aliasRename(
   oldName: string,
   newName: string,
 ): string | null {
-  const s = spec.replace(/[/.]/g, "\\$&");
-  const re = new RegExp(
-    `(import\\s*(?:type\\s+)?\\{)([^}]*)(\\}\\s*from\\s*["']${s}["'])`,
-    "g",
-  );
-  let changed = false;
-  const out = src.replace(re, (whole, head: string, inner: string, tail) => {
-    const names = inner.split(",").map((x) => x.trim()).filter(Boolean);
-    const next = names.map((n) => {
-      const m = /^(type\s+)?([$\w]+)(\s+as\s+([$\w]+))?$/.exec(n);
-      if (!m || m[2] !== oldName) return n;
-      changed = true;
-      return `${m[1] ?? ""}${newName} as ${m[4] ?? oldName}`;
+  return rewriteImportLists(src, (st, names) =>
+    st.spec !== spec ? null : {
+      entries: names.map((n) => {
+        const m = /^(type\s+)?([$\w]+)(\s+as\s+([$\w]+))?$/.exec(n);
+        if (!m || m[2] !== oldName) return n;
+        return `${m[1] ?? ""}${newName} as ${m[4] ?? oldName}`;
+      }),
     });
-    return changed ? `${head} ${next.join(", ")} ${tail}` : whole;
-  });
-  return changed ? out : null;
 }
 
 /** `--safe-fix` half of {@linkcode aliasRename}. */
@@ -1667,33 +1834,67 @@ export function renameWords(
   src: string,
   renames: ReadonlyArray<readonly [from: string, to: string]>,
 ): string | null {
-  const mask = codeMask(src);
   let out = src;
   let changed = false;
   for (const [from, to] of renames) {
     const re = new RegExp(`\\b${from}\\b`, "g");
-    let shift = 0;
+    // The mask is of the text THIS pass scans. `replace` hands the callback
+    // offsets into its INPUT, never into the string being built, so no shift
+    // applies within a pass — subtracting one read the mask at the wrong place
+    // once the import had been lengthened, judged the call under a comment
+    // "inside the comment", and renamed the import while orphaning the call.
+    // Across passes the input DOES change (an earlier rename moved every later
+    // offset), so the mask is recomputed per pass; a word-for-word identifier
+    // rename never changes what is code.
+    const mask = codeMask(out);
     out = out.replace(re, (whole, at: number) => {
-      // `at` is an offset into the CURRENT string; map back to the original
-      // via the running shift so the mask is read at the right place.
-      const orig = at - shift;
-      if (mask[orig] !== 1) return whole;
+      if (mask[at] !== 1) return whole;
       changed = true;
-      shift += to.length - whole.length;
       return to;
     });
   }
   if (!changed) return null;
-  return out.replace(
-    /(import\s*(?:type\s+)?\{)([^}]*)(\}\s*from\s*["']aio(?:\/[\w-]+)?["'])/g,
-    (_w, head: string, inner: string, tail: string) => {
-      const seen = new Set<string>();
-      const names = inner.split(",").map((n) => n.trim()).filter((n) =>
-        n && !seen.has(n) && seen.add(n)
-      );
-      return `${head} ${names.join(", ")} ${tail}`;
-    },
-  );
+  return dedupeRenamedBindings(out, new Set(renames.map(([, to]) => to))) ??
+    out;
+}
+
+/** A rename can bind one name twice — `{ Access, type CellAccess }` becomes
+ *  `{ Access, type Access }`, or two `aio` statements both import `Access` —
+ *  and a duplicate import binding is a compile error, so the fix broke the
+ *  file it fixed. Keep ONE binding per renamed-to name across the `aio…`
+ *  imports (a VALUE binding when there is one: it also serves every type
+ *  position) and drop the rest. Only names the rename produced are
+ *  considered; every other statement is left as written. Null when nothing
+ *  is duplicated. Pure. */
+function dedupeRenamedBindings(
+  src: string,
+  targets: ReadonlySet<string>,
+): string | null {
+  const AIO = /^aio(?:\/[\w-]+)?$/;
+  type Ref = { at: number; i: number; value: boolean };
+  const refs = new Map<string, Ref[]>();
+  for (const st of moduleStatements(src)) {
+    if (st.kind !== "import" || !st.list || !AIO.test(st.spec)) continue;
+    st.list.entries.filter((e) => e.text).forEach((e, i) => {
+      const name = localName(e.text);
+      if (!targets.has(name)) return;
+      const value = !st.typeOnly && !/^type\s/.test(e.text);
+      refs.set(name, [...(refs.get(name) ?? []), { at: st.start, i, value }]);
+    });
+  }
+  const drop = new Set<string>(); // `${statement start}:${entry index}`
+  for (const list of refs.values()) {
+    if (list.length < 2) continue;
+    const keep = list.find((r) => r.value) ?? list[0]!;
+    for (const r of list) if (r !== keep) drop.add(`${r.at}:${r.i}`);
+  }
+  if (drop.size === 0) return null;
+  return rewriteImportLists(src, (st, names) =>
+    AIO.test(st.spec)
+      ? {
+        entries: names.map((n, i) => drop.has(`${st.start}:${i}`) ? null : n),
+      }
+      : null);
 }
 
 /** `--safe-fix` half of {@linkcode renameWords}. */
@@ -1733,24 +1934,13 @@ export function scheduleBlockingToTop(src: string): string | null {
   if (!changed) return null;
   // Imported under its OWN name? `blocking as b` binds `b`, not `blocking` —
   // counting it as present left every rewritten `blocking(` unresolved.
-  const bound = [...out.matchAll(/import\s*\{([^}]*)\}\s*from\s*["']aio["']/g)]
-    .some((m) =>
-      m[1]!.split(",").some((n) =>
-        /^(?:blocking|blocking\s+as\s+blocking)$/.test(n.trim())
-      )
-    );
-  if (!bound) {
-    const re = /import\s*\{([^}]*)\}\s*from\s*(["']aio["'])/;
-    out = re.test(out)
-      ? out.replace(
-        re,
-        (_w, inner: string, spec: string) =>
-          `import { ${
-            inner.trim().replace(/,\s*$/, "")
-          }, blocking } from ${spec}`,
-      )
-      : `import { blocking } from "aio";\n${out}`;
-  }
+  const bound = moduleStatements(out).some((st) =>
+    st.kind === "import" && st.spec === "aio" && !st.typeOnly &&
+    (st.list?.entries ?? []).some((e) =>
+      /^(?:blocking|blocking as blocking)$/.test(e.text)
+    )
+  );
+  if (!bound) out = addToFirstImport(out, "aio", "blocking");
   return out;
 }
 

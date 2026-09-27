@@ -14,11 +14,10 @@
 // produces is an application macOS refuses to launch — created by the update
 // mechanism, on the user's machine, with no way back but a fresh download.
 //
-// There is no in-place strategy for a signed bundle (the remaining work is in
-// todo.md under "macOS .app self-update"). What there is instead is an honest
-// refusal that names the remedy, which is the same answer Android already
-// gets: a target of its own, installing nothing, and a blocker that carries
-// the download link and the sentence about where the data lives.
+// A signed bundle is replaced only WHOLE, by a signed bundle: the
+// `electron-app` release (`.app.tar.gz`, see macos-app-self-update.test.ts).
+// Every other target gets an honest refusal that names the remedy: a blocker
+// that carries the download link and the sentence about where the data lives.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
   classifyTarget,
@@ -67,10 +66,10 @@ Deno.test("a macOS .app is its own target, never `binary`", () => {
   assert(!isMacAppBundle("/home/u/Counter.appimage"));
 });
 
-Deno.test("a .app can install nothing — not even a macos-app release", () => {
-  // The whole point: there is no strategy that replaces a signed bundle from
-  // inside it, so the list is empty rather than "itself".
-  assertEquals(installableTargets("macos-app"), []);
+Deno.test("a .app installs only a whole signed bundle (electron-app)", () => {
+  // Nothing replaces a file INSIDE a signed bundle; only a whole, sealed
+  // bundle replaces the bundle.
+  assertEquals(installableTargets("macos-app"), ["electron-app"]);
   // …and every other target keeps exactly what it had.
   assertEquals(installableTargets("binary"), ["binary"]);
   assertEquals(installableTargets("electron-zip"), ["electron-zip"]);
@@ -139,6 +138,18 @@ Deno.test("without the fix a .app would have taken a binary release", () => {
       `a macOS bundle was offered a "${target}" release to install`,
     );
   }
+});
+
+Deno.test("a .app IS offered a signed .app release", () => {
+  const d = decide({
+    current: "1.0.0",
+    // A ReleaseTarget the frozen `ShipManifest.target` type cannot name.
+    manifest: manifest({ target: "electron-app" as ShipManifest["target"] }),
+    local: LOCAL,
+    canInstall: installableTargets("macos-app"),
+    installedTarget: "macos-app",
+  });
+  assertEquals(d.kind, "offer");
 });
 
 Deno.test("nothing else changed: a real binary install still offers", () => {

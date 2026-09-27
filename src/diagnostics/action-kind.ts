@@ -52,8 +52,10 @@ export function isActionNoise(type: string): boolean {
 }
 
 /** The `cell:method` an internal action BELONGS to, when it names one:
- *  a write-set commit (`cell:__setFoo`, method in `payload._origin`) or an
- *  async-method error frame (`cell:__error`, method in `payload._method`).
+ *  a write-set commit (`cell:__setFoo`, method in `payload._origin`), an
+ *  async-method error frame (`cell:__error`), its scheduling marker
+ *  (`cell:__exec`) or its effects frame (`cell:__effects`) — all name the
+ *  method in `payload._method`.
  *  `undefined` for everything else.
  *
  *  Every sink that retains payloads needs this, and needs it identically: an
@@ -74,7 +76,10 @@ export function actionOrigin(
     const m = p?._origin;
     return `${cell}:${typeof m === "string" && m ? m : rest}`;
   }
-  if (rest === "__error" || rest.startsWith("__error")) {
+  // `__exec` (the "body scheduled" marker) carries the call's `_args` too —
+  // the dispatch loop's `--verbose` effect line renders it.
+  // `__effects` carries what the method handed to `$do` / returned.
+  if (rest === "__exec" || rest === "__effects" || rest.startsWith("__error")) {
     const m = p?._method;
     return typeof m === "string" && m ? `${cell}:${m}` : undefined;
   }

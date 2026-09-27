@@ -12,7 +12,7 @@
 // user's edit vanished from the tab they made it in, permanently, while the
 // server and the other tab kept it.
 import { assertEquals } from "@std/assert";
-import { createNet, type State } from "./_net.ts";
+import { createNet, type NetClient, type State } from "./_net.ts";
 import { createLocalStorageOpStorage } from "../../src/sync/browser-storage.ts";
 
 function shimLocalStorage(): void {
@@ -54,6 +54,31 @@ async function twoTabs() {
   return { net, a, b };
 }
 
+/** Deliver one client's frames to the server, or the server's to it. */
+function wire(net: Awaited<ReturnType<typeof twoTabs>>["net"]) {
+  return {
+    toServer: async (x: NetClient) => {
+      for (let f; (f = x.outbox.shift());) {
+        const { t, d } = JSON.parse(f);
+        if (t === "op") await net.handler.handleOp(d, { id: x.name }, x.socket);
+        else if (t === "sync-req") {
+          net.handler.handleSync(d, { id: x.name }, x.socket);
+        }
+      }
+      await new Promise((r) => setTimeout(r, 2));
+    },
+    fromServer: async (x: NetClient) => {
+      for (let f; (f = x.inbox.shift());) {
+        const { t, d } = JSON.parse(f);
+        if (t === "sync-ack") {
+          await x.engine.handleAck(d.cell, d.opId, d.serverHlc, d.serverTs);
+        } else if (t === "op") await x.engine.handleRemoteOp(d);
+        else if (t === "sync-res") await x.engine.handleSyncResponse(d);
+      }
+    },
+  };
+}
+
 Deno.test("twin tabs: the other tab flushing my op first does not take it off my screen", async () => {
   const { net, a, b } = await twoTabs();
   try {
@@ -64,6 +89,43 @@ Deno.test("twin tabs: the other tab flushing my op first does not take it off my
     a.outbox.push(...onTheWire); // …and A's own frame lands after it
     await net.pump();
     assertEquals(net.live(), { items: ["s0", "x"] });
+    assertEquals(a.confirmed(), net.live(), "author's confirmed state");
+    assertEquals(a.view(), net.live(), "author's screen");
+    assertEquals(b.view(), net.live());
+  } finally {
+    await net.close();
+  }
+});
+
+// …and with a peer's change landing in between. The other tab's flush put x
+// on the server FIRST; its broadcast reached me and I dropped it as "my own
+// echo", sure my ack would fold it — and my ack did come (my own frame, a
+// duplicate by then), but after z, so I folded x after z: my confirmed state
+// in an order the server never had — until a resync, which the chaos run
+// showed need not come (twin-tab chaos, 2026-09-26).
+Deno.test("twin tabs: the other tab flushing my op first keeps it in the server's order", async () => {
+  const { net, a, b } = await twoTabs();
+  const c = net.addClient("peer");
+  const { toServer, fromServer } = wire(net);
+  try {
+    await c.engine.requestSync();
+    await net.pump();
+    await a.engine.handleLocalAction("c", "add", "x");
+    const onTheWire = a.outbox.splice(0);
+    await b.engine.requestSync(); // B's catch-up flushes x…
+    await toServer(b);
+    const bHears = b.inbox.splice(0); // …and B's ack for it is still coming
+    await c.engine.handleLocalAction("c", "add", "z"); // a peer's, after x
+    await toServer(c);
+    await fromServer(a); // x's broadcast, then z's
+    a.outbox.push(...onTheWire); // my own frame lands last: a duplicate
+    await toServer(a);
+    await fromServer(a); // …acked to me
+    assertEquals(net.live(), { items: ["s0", "x", "z"] });
+    assertEquals(a.confirmed(), net.live(), "author's order, at my ack");
+    b.inbox.unshift(...bHears);
+    await net.pump();
+    assertEquals(net.live(), { items: ["s0", "x", "z"] });
     assertEquals(a.confirmed(), net.live(), "author's confirmed state");
     assertEquals(a.view(), net.live(), "author's screen");
     assertEquals(b.view(), net.live());

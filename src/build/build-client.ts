@@ -79,7 +79,7 @@ export async function buildClient(cfg: BuildConfig): Promise<void> {
   console.log("[client] \u2713 electron/ copied");
 
   // AppRun — launches electron directly (no Deno binary)
-  const appRun = `#!/bin/bash
+  const appRun = `#!/bin/bash -p
 HERE="$(dirname "$(readlink -f "$0")")"
 exec "$HERE/electron/electron" "$HERE/main.cjs" "$@"
 `;

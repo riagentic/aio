@@ -14,7 +14,7 @@ import { dirname, join } from "@std/path";
 import { IOS_TEMPLATE } from "./ios-template.ts";
 import type { BuildConfig } from "./build-config.ts";
 import { readDenoJson } from "../server/deno-json.ts";
-import { appIconPng } from "./app-icon.ts";
+import { appIconLabel, appIconPng } from "./app-icon.ts";
 import { _writeConnectPage, androidVersion } from "./build-android.ts";
 import { misplacedIconHint, resolveAppIcon } from "./build-helpers.ts";
 import { HEY, NO, NOTE, OK } from "../diagnostics/fmt.ts";
@@ -183,7 +183,11 @@ export async function buildIos(cfg: BuildConfig): Promise<void> {
     await Deno.copyFile(icon, iconDest);
     console.log(`${OK} icon from ${icon} (App Store requires 1024×1024)`);
   } else {
-    await Deno.writeFile(iconDest, await appIconPng(binaryName, 1024));
+    // The title's letter, the appId's colour — what every other target draws.
+    await Deno.writeFile(
+      iconDest,
+      await appIconPng(appIconLabel(appTitle, binaryName), 1024, binaryName),
+    );
     console.log(`${OK} icon (generated monogram, 1024×1024)`);
   }
   console.log(

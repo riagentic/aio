@@ -25,6 +25,7 @@ import {
   uiKeyVisibility,
 } from "./state-filter.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { deepFreeze } from "./immutable.ts";
 import { unregisterCancelOn } from "./method-cancel.ts";
 
 // ── Cell registry ────────────────────────────────────────────────────
@@ -239,6 +240,9 @@ type ForUser = (exposed: Slice, user?: AccessUser) => Slice;
 let _clientViewer: {
   user: AccessUser | undefined;
   forUserOf: (def: CellDef) => ForUser | undefined;
+  /** `forUserView`, reached only through here so the browser bundle (which
+   *  never sets a viewer) does not carry it. */
+  view: typeof forUserView;
 } | null = null;
 
 /** Harness-only: read every cell as a client signed in as `user` (undefined =
@@ -250,7 +254,7 @@ export function _readAsClient(
   user: AccessUser | undefined,
   forUserOf: (def: CellDef) => ForUser | undefined,
 ): () => void {
-  const viewer = { user, forUserOf };
+  const viewer = { user, forUserOf, view: forUserView };
   _clientViewer = viewer;
   return () => {
     if (_clientViewer === viewer) _clientViewer = null;
@@ -336,7 +340,7 @@ function clientSlice(def: CellDef, raw: unknown): Slice | null {
   const hit = _views.get(raw);
   if (hit && hit.viewer === viewer) return hit.view;
   const filter = clientUiFilter(def);
-  const out = forUserView(
+  const out = viewer.view(
     def.__aio.id,
     forUser,
     filterSlice(filter, raw as Slice),
@@ -404,6 +408,60 @@ function guardHidden(
       return (target as Record<string | symbol, unknown>)[prop];
     },
   });
+}
+
+// ── The full-state hook's view ──────────────────────────────────────
+//
+// `useAio().state` is a client read like `cell.field`, and it was the one that
+// skipped this seam. Over a socket the hook reads the broadcast frame, which
+// never carries a hidden field — but the standalone runtime (the APK) and the
+// testUI harness hold the SERVER's composed state in that same signal, and the
+// hook handed it out raw: `useAio().state.vault.secretKey` returned the secret
+// there while `vault.secretKey` threw. So the hook projects each slice through
+// the rules above — per-user view, `visible` include/exclude (dot paths too),
+// the hidden-read tripwire — and holds what a client of this app would hold.
+// On the wire path that is a no-op re-projection of an already-filtered frame.
+
+/** One view per (cell, committed slice) — committed state is frozen, so a
+ *  changed slice is a different object and a stale view is never served. */
+const _hookViews = new WeakMap<CellDef, WeakMap<object, Slice>>();
+
+/** `key`'s slice as the full-state hook hands it to a component, or
+ *  `undefined` when a client holds none of it: a `scope: "client"` cell (its
+ *  state lives on its own signal — the composed slice is a stale declaration no
+ *  socket ever carries), a `visible: "none"` cell, or a per-user filter that
+ *  failed closed. A key no registered cell owns passes through as-is.
+ *  @internal */
+export function clientHookSlice(key: string, raw: unknown): unknown {
+  const def = _cellRegistry.get(key);
+  if (!def) return raw;
+  if (def.__aio.scope === "client") return undefined;
+  const filter = clientUiFilter(def);
+  if (filter === "none") return undefined;
+  const slice = clientSlice(def, raw);
+  if (slice == null || typeof slice !== "object") return slice ?? undefined;
+  let views = _hookViews.get(def);
+  if (!views) _hookViews.set(def, views = new WeakMap());
+  let view = views.get(slice);
+  if (!view) {
+    view = guardHidden(def, filterSlice(filter, slice));
+    views.set(slice, view);
+  }
+  return view;
+}
+
+/** The whole state as the full-state hook hands it to a component — each key
+ *  through {@link clientHookSlice}, absent ones dropped. @internal */
+export function clientHookState(
+  full: Record<string, unknown> | null | undefined,
+): Record<string, unknown> | null {
+  if (full == null) return null;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(full)) {
+    const view = clientHookSlice(k, v);
+    if (view !== undefined) out[k] = view;
+  }
+  return out;
 }
 
 /** The replay-side twin of {@link guardHidden}: a `sync`/`localFirst` cell's
@@ -633,7 +691,19 @@ export function bindCellReactive(
   if (def.__aio.scope === "client") {
     const methods = def.__aio.clientMethods ?? {};
     for (const [key, method] of Object.entries(methods)) {
-      const fn = (...args: unknown[]) => {
+      // AIO6: every bound method returns a Promise — so a failure REJECTS it,
+      // as a server cell's does. A throw from the body (the app's method, a
+      // refused `s.$do`, a dead returned effect) escaped synchronously, so
+      // `c.m().catch(…)` never saw it and an un-awaited call threw into the
+      // event handler that made it.
+      const fn = (...args: unknown[]): Promise<unknown> => {
+        try {
+          return run(...args);
+        } catch (e) {
+          return Promise.reject(e);
+        }
+      };
+      const run = (...args: unknown[]) => {
         const cur = (sig.value ?? initialState) as Record<string, unknown>;
         const next = structuredClone(cur);
         // `s.$do` exists on every draft (alpha52) — but a client-scoped cell
@@ -653,7 +723,11 @@ export function bindCellReactive(
         });
         const returned = method(next, ...args);
         delete (next as Record<string, unknown>)["$do"];
-        sig.set(next);
+        // Frozen before it is installed, in every mode — as a server cell's
+        // committed slice is. Unfrozen, a component (or the caller holding a
+        // slice the method returned) could mutate committed state in place:
+        // the write stuck and no subscriber was told.
+        sig.set(deepFreeze(next));
         // A client cell has no effect runtime, so an effect RETURNED from a
         // method is as dead as one passed to `s.$do` — and was dropped without
         // a word. Same treatment, same words: the silent no-op is the bug.

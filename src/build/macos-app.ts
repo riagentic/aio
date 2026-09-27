@@ -291,7 +291,13 @@ export function setPlistValue(
     `(<key>\\s*${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*</key>\\s*)` +
       `(?:<string>[\\s\\S]*?</string>|<true/>|<false/>)`,
   );
-  if (re.test(plist)) return plist.replace(re, `$1${valueXml}`);
+  // A replacer FUNCTION, never a string: in a replacement string `$&`, `$$`,
+  // `$\`` and `$'` are patterns, so a title like "Cost $& Saver" pasted the
+  // matched plist back into itself (the class build-android's _fillTemplate
+  // already closed).
+  if (re.test(plist)) {
+    return plist.replace(re, (_m, pre: string) => pre + valueXml);
+  }
   // Absent: insert just before the final </dict>.
   const at = plist.lastIndexOf("</dict>");
   if (at < 0) return plist; // not a plist dict — leave it alone
@@ -347,6 +353,20 @@ export async function stripElectronBranding(
   });
 }
 
+/** The `.app` FILE name for a display title. The title is prose ("AC/DC",
+ *  "Notes: Work"), and a path segment is not: joined raw, "/" nested the
+ *  bundle in directories and a title like "../../x" put it — and the
+ *  recursive remove that clears the previous bundle — outside the build's
+ *  out dir. Separators become "-", and so does ":": the bundle is built
+ *  on any host, and on Windows "Notes: Work.app" is an NTFS alternate data
+ *  stream of a file "Notes", not a directory (Finder shows ":" as "/"
+ *  besides). A name that is only dots cannot name a bundle. The DISPLAY name inside the
+ *  bundle (CFBundleName) is untouched. */
+export function macBundleFileName(title: string): string {
+  const safe = title.replace(/[/\\:]/g, "-").trim();
+  return /^\.*$/.test(safe) ? "App" : safe;
+}
+
 /** Assemble the `.app` bundle at `appDir` from a staged Electron AppDir.
  *
  *  The inputs mirror `electronStagingDir`'s contents, so this can run on any
@@ -374,7 +394,7 @@ export async function assembleMacApp(opts: {
   keepLocales?: readonly string[];
 }): Promise<string> {
   const { stagedDir, outDir, name, binaryName, identifier, version } = opts;
-  const app = join(outDir, `${name}.app`);
+  const app = join(outDir, `${macBundleFileName(name)}.app`);
   await Deno.remove(app, { recursive: true }).catch(() => {
     // aio-ok(silent-catch): a fresh bundle is assembled from scratch; there is
     // nothing to preserve. A remove that fails will surface on the mkdir.

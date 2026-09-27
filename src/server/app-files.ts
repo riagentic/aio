@@ -40,6 +40,20 @@ export const APP_STYLE = "style.css";
  *  that disagrees with its taskbar entry. */
 export const APP_ICON = "icon.png";
 
+/** An `icon.svg` beside the app: NOT an app icon. Every icon slot a target
+ *  has (window, taskbar, AppImage, `.icns`, Android launcher) rasterizes, so
+ *  the icon is {@link APP_ICON} only — in dev too, or the tab would show art
+ *  the built app never carries. */
+export const APP_ICON_SVG = "icon.svg";
+
+/** THE sentence dev and build both say about an unread `icon.svg`. */
+export function svgIconHint(svgPath: string, pngPath: string): string {
+  return `found ${svgPath}, which is not read as the app icon — the icon is ` +
+    `${APP_ICON} (every target's icon slot needs a PNG; dev and build ` +
+    `alike show the generated monogram until it exists). Export it as ` +
+    `${pngPath}, 512×512.`;
+}
+
 /** The bundle the browser loads in prod, inside {@link DIST_DIR}. */
 export const BUNDLE_JS = "app.js";
 

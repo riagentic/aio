@@ -35,6 +35,7 @@ import {
 import { transpile } from "../server/server-transpile.ts";
 import {
   buildBrowserImportMap,
+  graphImportMap,
   readAppDenoImports,
 } from "../server/server-html-importmap.ts";
 import { hasVendorImmer } from "../server/server-vendor.ts";
@@ -128,9 +129,12 @@ export async function cmdCheck(
   try {
     graph = await validateGraph(
       entry,
-      buildBrowserImportMap(appImports ?? {}, {
-        vendorImmer: hasVendorImmer(),
-      }),
+      graphImportMap(
+        baseDir,
+        buildBrowserImportMap(appImports ?? {}, {
+          vendorImmer: hasVendorImmer(),
+        }),
+      ),
       (s, f) => transpile(s, f),
       undefined,
       // "Does the client bundle build" is answered by BUILDING it: a name

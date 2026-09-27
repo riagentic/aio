@@ -410,6 +410,60 @@ Deno.test("validateGraph detects circular imports", async () => {
   }
 });
 
+/** The circular-import warnings of a graph written from `files`. */
+async function cyclesOf(files: Record<string, string>): Promise<string[]> {
+  const dir = await tempDir("aio-graph-cycle-");
+  try {
+    for (const [name, src] of Object.entries(files)) {
+      await Deno.writeTextFile(`${dir}/${name}`, src);
+    }
+    const result = await validateGraph(`${dir}/a.ts`, {}, mockTranspile);
+    return result.errors
+      .filter((e) => e.category === "circular-dependency")
+      .map((e) => e.message.replaceAll(`${dir}/`, ""));
+  } finally {
+    await dropTempDir(dir);
+  }
+}
+
+Deno.test("validateGraph: a loop closed only by a dynamic import() is no cycle", async () => {
+  assertEquals(
+    await cyclesOf({
+      "a.ts": `import { b } from "./b.ts";\nexport const a = b;`,
+      "b.ts": `import { c } from "./c.ts";\nexport const b = c;`,
+      "c.ts":
+        `export const c = 1;\nexport async function late() {\n  return (await import("./a.ts")).a;\n}`,
+    }),
+    [],
+  );
+});
+
+Deno.test("validateGraph: the same three files all static still warn", async () => {
+  assertEquals(
+    await cyclesOf({
+      "a.ts": `import { b } from "./b.ts";\nexport const a = b;`,
+      "b.ts": `import { c } from "./c.ts";\nexport const b = c;`,
+      "c.ts": `import { a } from "./a.ts";\nexport const c = () => a;`,
+    }),
+    ["Circular import: c.ts → a.ts"],
+  );
+});
+
+Deno.test("validateGraph: a static cycle is found even when a dynamic shortcut reaches its nodes first", async () => {
+  // a → d (static, walked first) → c (dynamic) → a closes a dynamic loop;
+  // a → b → c → a is all static and must still warn.
+  assertEquals(
+    await cyclesOf({
+      "a.ts":
+        `import "./d.ts";\nimport { b } from "./b.ts";\nexport const a = b;`,
+      "d.ts": `export const d = () => import("./c.ts");`,
+      "b.ts": `import { c } from "./c.ts";\nexport const b = c;`,
+      "c.ts": `import { a } from "./a.ts";\nexport const c = () => a;`,
+    }),
+    ["Circular import: c.ts → a.ts"],
+  );
+});
+
 Deno.test("validateGraph detects server-only API as warning (non-blocking)", async () => {
   const dir = await tempDir("aio-graph-validator-");
   try {

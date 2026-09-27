@@ -91,7 +91,7 @@ Deno.test("client cell: the returned value is the RAW value, not a JSON round-tr
 // effect RETURNED from the method is exactly as dead and used to be dropped
 // without a word — the silent no-op that the $do guard exists to prevent, one
 // spelling over.
-Deno.test("client cell: returning an effect is refused, not silently dropped", () => {
+Deno.test("client cell: returning an effect is refused, not silently dropped", async () => {
   reset();
   const c = cell("cceff", {
     scope: "client" as const,
@@ -115,9 +115,11 @@ Deno.test("client cell: returning an effect is refused, not silently dropped", (
       () => c.resource(),
     ]] as const
   ) {
+    // A REJECTION, like every bound method's failure (AIO6) — it used to
+    // throw synchronously, out of reach of `.catch()`.
     let msg = "";
     try {
-      call();
+      await call();
     } catch (e) {
       msg = e instanceof Error ? e.message : String(e);
     }

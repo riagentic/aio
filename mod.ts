@@ -115,6 +115,9 @@ export type { Log, LogConfig, LogLevel } from "./src/diagnostics/logger.ts";
 export { degraded, degradedReport } from "./src/diagnostics/degraded.ts";
 /** Degraded-subsystem tracker type */
 export type { Degraded } from "./src/diagnostics/degraded.ts";
+/** `fetch`, sent by the app instead of the browser where it can: native in a
+ *  standalone Android APK (no Origin, no CORS), plain `fetch` everywhere else */
+export { nativeFetch } from "./src/browser/native-fetch.ts";
 /** Electron app metadata injected into the renderer process */
 export type { AioMeta } from "./src/electron/electron.ts";
 // slugify — internal (used by build.ts, not app code)

@@ -167,6 +167,15 @@ export function openSessionStore(
   // life of the process — a config validated only when it fires.
   expiryFor(defaultTtlMs, "open", Date.now());
   const db = new DatabaseSync(path);
+  // auth.db has TWO writer processes by design — the app and `am auth …`.
+  // SQLite's default busy timeout is ZERO, so a write that met the other
+  // process's write threw "database is locked" at once (measured: a quarter
+  // of `am auth revoke`s during a login burst). Wait for the lock instead —
+  // for about a second: DatabaseSync waits SYNCHRONOUSLY, so the whole event
+  // loop stands still for as long as it lasts. Every auth.db write is one
+  // short statement; a lock held past that throws "database is locked" to
+  // the caller (a 500 on the route, an error from `am auth`), never silently.
+  db.exec("PRAGMA busy_timeout = 1000");
   db.exec("PRAGMA journal_mode=WAL");
   db.exec(`CREATE TABLE IF NOT EXISTS sessions (
     token_hash TEXT PRIMARY KEY,

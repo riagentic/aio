@@ -80,6 +80,9 @@ const ALLOWED: Record<string, string[]> = {
     // deliberately, and narrowly: diagnostics/logger is a leaf here, never the
     // rest of diagnostics' machinery.
     "diagnostics",
+    // state/timer-ceiling (an import-free leaf): `requestTimeoutMs` is capped
+    // at setTimeout's int32 ceiling like every other app-supplied delay.
+    "state",
   ],
   // ── server may use everything except browser-only client code ──
   server: [

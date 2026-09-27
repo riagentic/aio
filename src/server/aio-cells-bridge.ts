@@ -13,7 +13,10 @@ import {
   _noteCellAction,
   _setRemoteLifecycle,
 } from "../state/cell-compose.ts";
-import { createMemoryMonitor } from "../diagnostics/memory-monitor.ts";
+import {
+  createMemoryMonitor,
+  MEMORY_INTERVAL_MS,
+} from "../diagnostics/memory-monitor.ts";
 import {
   createAioError,
   reportError as reportAioError,
@@ -23,9 +26,15 @@ import {
 import { nearestOf } from "../state/cell-helpers.ts";
 import { parseRetention } from "../sync/op-buffer.ts";
 import { resolveOptions } from "../diagnostics/types.ts";
-import { isLockOwnerAlive, lockKey, readLock } from "./single-instance-lock.ts";
+import {
+  isLockOwnerAlive,
+  isOwnLock,
+  lockKey,
+  readLock,
+} from "./single-instance-lock.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { AioLogger, log } from "../diagnostics/logger.ts";
+import { guardHookResult } from "./aio-dispatch.ts";
 import { _setStartSocket } from "../diagnostics/logger-core.ts";
 import {
   installAppLogger,
@@ -42,7 +51,7 @@ import { _setDiagScope, diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { makeRedactor } from "../diagnostics/redact.ts";
 import { parseCli } from "./aio-cli.ts";
 import { resolveAppId } from "./single-instance-lock.ts";
-import { VALID_AIO_CONFIG_KEYS } from "./config.ts";
+import { clampTimerDelays, VALID_AIO_CONFIG_KEYS } from "./config.ts";
 import { appDirs, registeredProfile } from "./app-dirs.ts";
 import type { AioApp, AioConfig, AioUser, CellsConfig } from "./aio-types.ts";
 import type { CellFieldFilter } from "../state/cell-types.ts";
@@ -229,7 +238,7 @@ export function buildLegacyConfig(
   input: BuildLegacyConfigInput,
 ): AioConfig<Record<string, unknown>, unknown, unknown> {
   const {
-    fc,
+    fc: declared,
     composed,
     beforeReduce,
     onRestore,
@@ -242,7 +251,11 @@ export function buildLegacyConfig(
     logger,
     appRef,
   } = input;
-  const scope = scopeOf(fc, logger);
+  const scope = scopeOf(declared, logger);
+  // Every timer delay, clamped ONCE here — the one place aio.run's config is
+  // normalised — so the server's timers and the ceilings bridged to the page
+  // all read in-range numbers, at no browser cost.
+  const fc = inAppScope(scope, () => clampTimerDelays(declared));
   // A `listensTo` pair across the sync line — supported, said once per boot.
   inAppScope(scope, () => {
     for (const line of syncListensMismatches(composed.cells)) log.warn(line);
@@ -704,6 +717,7 @@ export function buildLegacyConfig(
           onMigrate?: (
             state: Record<string, unknown>,
             fromVersion: number,
+            stored?: Record<string, unknown>,
           ) => Record<string, unknown>;
         }
       >();
@@ -818,7 +832,7 @@ export async function initLogger(
   if (logger) {
     const held = readLock(lockKey(appId, dirs.home, registeredProfile(appId)));
     const live = held !== null && isLockOwnerAlive(held) &&
-      held.pid !== Deno.pid;
+      !isOwnLock(held);
     await logger.init({ rotate: !live });
   }
   // Installed, not "set": another app in this process keeps its own.
@@ -868,7 +882,8 @@ export async function wrapAppWithCells(
   const _memoryCfg = typeof _memoryOpt === "object" ? _memoryOpt : undefined;
   const memoryMonitor = createMemoryMonitor({
     enabled: _memoryOpt !== false && (fc.memory?.enabled ?? true),
-    interval: fc.memory?.interval ?? _memoryCfg?.interval ?? 10_000,
+    interval: fc.memory?.interval ?? _memoryCfg?.interval ??
+      MEMORY_INTERVAL_MS,
     warnThreshold: fc.memory?.warnThreshold ?? _memoryCfg?.warnThreshold ??
       0.75,
     criticalThreshold: fc.memory?.criticalThreshold ??
@@ -892,7 +907,21 @@ export async function wrapAppWithCells(
         { cellName: topCell?.name },
       );
       reportAioError(err, _cellReportOpts);
-      fc.memory?.onMemoryPressure?.(report);
+      // Observe-only and error-guarded, like every hook. It runs on the
+      // monitor's timer, so a throw here was an uncaughtException that took
+      // the whole app down — on the one occasion it was warned about memory.
+      const failed = (e: unknown) =>
+        log.warn(
+          "memory",
+          `hook onMemoryPressure failed: ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+        );
+      try {
+        guardHookResult(fc.memory?.onMemoryPressure?.(report), failed);
+      } catch (e) {
+        failed(e);
+      }
     },
     machineWarnFraction: fc.memory?.machineWarnFraction ?? 0.5,
     growthReportRatio: fc.memory?.growthReportRatio ?? 0.15,

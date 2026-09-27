@@ -26,6 +26,7 @@ import { type GraphResult, validateGraph } from "../server/graph-validator.ts";
 import { transpile } from "../server/server-transpile.ts";
 import {
   buildBrowserImportMap,
+  graphImportMap,
   readAppDenoImports,
 } from "../server/server-html-importmap.ts";
 import { hasVendorImmer } from "../server/server-vendor.ts";
@@ -249,9 +250,12 @@ export async function cmdWhere(
     try {
       graph = await validateGraph(
         entry,
-        buildBrowserImportMap(readAppDenoImports(baseDir) ?? {}, {
-          vendorImmer: hasVendorImmer(),
-        }),
+        graphImportMap(
+          baseDir,
+          buildBrowserImportMap(readAppDenoImports(baseDir) ?? {}, {
+            vendorImmer: hasVendorImmer(),
+          }),
+        ),
         (s, f) => transpile(s, f),
       );
     } catch {

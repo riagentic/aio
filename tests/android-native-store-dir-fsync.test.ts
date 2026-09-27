@@ -1,4 +1,4 @@
-// The APK's native store (`AioNativeStore.set`, MainActivity.kt) writes
+// The APK's native store (`AioNativeStore.write`, MainActivity.kt) writes
 // temp → fsync → rename. The fsync made the BYTES durable; the rename is a
 // directory entry, and without an fsync on the directory a power cut right
 // after it can bring back the previous name (todo.md "Android: no directory
@@ -19,8 +19,8 @@ function body(name: string): string {
   return KOTLIN.slice(at, end);
 }
 
-Deno.test("android dir fsync: set() fsyncs the directory AFTER the rename", () => {
-  const set = body("set");
+Deno.test("android dir fsync: write() fsyncs the directory AFTER the rename", () => {
+  const set = body("write");
   const rename = set.indexOf("tmp.renameTo(target)");
   const sync = set.indexOf("syncDir()");
   assert(rename >= 0, "set() no longer renames");

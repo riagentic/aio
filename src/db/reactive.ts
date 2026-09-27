@@ -10,7 +10,12 @@
 // underlying DB are invisible — that's the seam).
 import type { DB, QueryResult, Tx } from "./types.ts";
 import { log } from "../diagnostics/logger-api.ts";
-import { readTablesIn, writesRows, writeTablesIn } from "./sql-shape.ts";
+import {
+  readTablesIn,
+  statementVerb,
+  writesRows,
+  writeTablesIn,
+} from "./sql-shape.ts";
 
 // Which tables a statement reads and writes — and whether it writes at all —
 // is answered by `sql-shape.ts`, the same lexer `db.query()`'s writer-lock gate
@@ -129,11 +134,127 @@ export function reactiveDB(db: DB): ReactiveDB {
     }
   }
 
+  /** What SQLite itself does beyond the statement's text: a trigger on a
+   *  table writes others, an `ON DELETE CASCADE` (or SET NULL / SET DEFAULT)
+   *  rewrites the child, and a view reads its base tables. Matching the text
+   *  alone left a live query on `mail` showing rows a cascade had deleted, a
+   *  trigger's audit row never shown, and a query over a view never refreshed
+   *  — silently. Read once from the schema, re-read after any DDL. */
+  type Graph = {
+    effects: Map<string, Set<string>>;
+    views: Map<string, Set<string>>;
+  };
+  let graph: Promise<Graph | null> | null = null;
+  const add = (m: Map<string, Set<string>>, k: string, v: string) => {
+    let s = m.get(k);
+    if (!s) m.set(k, s = new Set());
+    s.add(v);
+  };
+  async function readGraph(): Promise<Graph | null> {
+    try {
+      const effects = new Map<string, Set<string>>();
+      const views = new Map<string, Set<string>>();
+      type Row = {
+        type: string;
+        name: string;
+        tbl_name: string;
+        sql: string | null;
+      };
+      // Read on the WRITER (a callback transaction): TEMP triggers and views
+      // live in `sqlite_temp_master`, which is per CONNECTION — a reader's is
+      // empty, so with `readers > 0` a temp trigger writing a table stayed
+      // invisible and the live queries on that table stale.
+      const { rows } = await (db.transaction as (
+        fn: (tx: Tx) => Promise<QueryResult<Row>>,
+      ) => Promise<QueryResult<Row>>)((tx) =>
+        tx.query<Row>(
+          "SELECT type, name, tbl_name, sql FROM sqlite_master " +
+            "WHERE type IN ('table', 'view', 'trigger') UNION ALL " +
+            "SELECT type, name, tbl_name, sql FROM sqlite_temp_master " +
+            "WHERE type IN ('table', 'view', 'trigger')",
+        )
+      );
+      for (const r of rows) {
+        const name = r.name.toLowerCase();
+        if (r.type === "view" && r.sql) {
+          for (const t of readTablesIn(r.sql).tables) add(views, name, t);
+        } else if (r.type === "trigger" && r.sql) {
+          for (const t of writeTablesIn(r.sql)) {
+            add(effects, r.tbl_name.toLowerCase(), t);
+          }
+        } else if (r.type === "table" && !name.startsWith("sqlite_")) {
+          const fks = await db.query<
+            { table: string; on_update: string; on_delete: string }
+          >(`SELECT * FROM pragma_foreign_key_list(?)`, [r.name]);
+          for (const fk of fks.rows) {
+            const acts = [fk.on_update, fk.on_delete].map((a) =>
+              String(a).toUpperCase()
+            );
+            if (acts.some((a) => a !== "NO ACTION" && a !== "RESTRICT")) {
+              add(effects, String(fk.table).toLowerCase(), name);
+            }
+          }
+        }
+      }
+      return { effects, views };
+    } catch (err) {
+      // Without the schema, refresh everything on every write: a superset is
+      // slower, never stale. Said once, so it is not a mystery.
+      if (!_unattributed.has("graph")) {
+        _unattributed.add("graph");
+        log.warn(
+          "db",
+          `reactive: could not read the schema for triggers, cascades and ` +
+            `views (${err}) — every write now refreshes every live query`,
+        );
+      }
+      return null;
+    }
+  }
+  /** `start` plus everything reachable through `edges`. */
+  const closure = (
+    start: Iterable<string>,
+    edges: Map<string, Set<string>>,
+  ) => {
+    const out = new Set(start);
+    const todo = [...out];
+    while (todo.length) {
+      for (const n of edges.get(todo.pop()!) ?? []) {
+        if (!out.has(n)) {
+          out.add(n);
+          todo.push(n);
+        }
+      }
+    }
+    return out;
+  };
+  /** A schema change: the graph is stale. A DROP or ALTER can also change
+   *  what a live query returns (a dropped or renamed table), so those refresh
+   *  every live query; a CREATE adds a table, trigger or view no live query
+   *  has read yet, and changes no rows. `sql` absent: unknown, so refresh. */
+  async function schemaChanged(sql?: string): Promise<void> {
+    graph = null;
+    if (sql === undefined || statementVerb(sql) !== "CREATE") {
+      await invalidateAll();
+    }
+  }
+  const isDDL = (sql: string) =>
+    /^(CREATE|DROP|ALTER)$/.test(statementVerb(sql));
+
   async function invalidate(written: Set<string>): Promise<void> {
-    if (written.size === 0) return;
+    if (written.size === 0 || entries.size === 0) return;
+    const p = graph ??= readGraph();
+    const g = await p;
+    if (!g) {
+      // A failure is not cached: one transient SQLITE_BUSY must not make
+      // every later write refresh every live query until the next DDL.
+      if (graph === p) graph = null;
+      return invalidateAll();
+    }
+    const reach = closure(written, g.effects);
     for (const e of entries) {
-      for (const t of e.tables) {
-        if (written.has(t)) {
+      for (const t of closure(e.tables, g.views)) {
+        if (reach.has(t)) {
           await refreshAfterWrite(e);
           break;
         }
@@ -153,7 +274,8 @@ export function reactiveDB(db: DB): ReactiveDB {
       params?: unknown[],
     ): Promise<QueryResult<T>> {
       const r = await db.query<T>(sql, params);
-      if (writesRows(sql)) await invalidate(_written(sql));
+      if (isDDL(sql)) await schemaChanged(sql);
+      else if (writesRows(sql)) await invalidate(_written(sql));
       return r;
     },
     lastWriterError: db.lastWriterError?.bind(db),
@@ -164,7 +286,8 @@ export function reactiveDB(db: DB): ReactiveDB {
 
     async execute(sql: string, params?: unknown[]): Promise<QueryResult> {
       const r = await db.execute(sql, params);
-      await invalidate(_written(sql));
+      if (isDDL(sql)) await schemaChanged(sql);
+      else await invalidate(_written(sql));
       return r;
     },
 
@@ -177,7 +300,8 @@ export function reactiveDB(db: DB): ReactiveDB {
           fn: (tx: Tx) => Promise<unknown>,
         ) => Promise<unknown>)(arg)
           .then(async (r) => {
-            await invalidateAll();
+            // …and its SQL may have changed the schema, too.
+            await schemaChanged();
             return r;
           });
       }
@@ -186,6 +310,12 @@ export function reactiveDB(db: DB): ReactiveDB {
         stmts,
       )
         .then(async (r) => {
+          const ddl = stmts.filter((s) => isDDL(s.sql));
+          if (ddl.some((s) => statementVerb(s.sql) !== "CREATE")) {
+            await schemaChanged();
+            return r;
+          }
+          if (ddl.length) graph = null;
           const written = new Set<string>();
           for (const s of stmts) {
             for (const t of _written(s.sql)) written.add(t);
@@ -204,10 +334,23 @@ export function reactiveDB(db: DB): ReactiveDB {
       const tables = read.tables;
       const rows: T[] = [];
       const subs = new Set<(r: T[]) => void>();
+      // Re-runs overlap (two writes, two refreshes), and with reader workers
+      // they can FINISH out of order: the older result landed last and left
+      // the rows showing the state before the newer write. Each run takes a
+      // ticket; a result older than one already applied is dropped.
+      let issued = 0;
+      let applied = 0;
       const rerun = async () => {
+        const ticket = ++issued;
         const res = await db.query<T>(sql, params);
-        rows.length = 0;
-        rows.push(...res.rows);
+        if (ticket < applied) return;
+        applied = ticket;
+        // Copied in place (the array's identity is the contract), in a loop:
+        // `push(...rows)` passes every row as an argument and overflows the
+        // stack past ~150k rows.
+        const next = res.rows;
+        rows.length = next.length;
+        for (let i = 0; i < next.length; i++) rows[i] = next[i]!;
         // Subscribers are APP code, and app code has bugs. A throw here used
         // to propagate out of `rerun` → `invalidate` → `execute`/`transaction`,
         // so `db.execute()` REJECTED for a write that had already committed:
@@ -226,9 +369,19 @@ export function reactiveDB(db: DB): ReactiveDB {
           }
         }
       };
-      await rerun(); // initial fill (no subscribers yet → no spurious notify)
+      // Registered BEFORE the initial fill: a write that commits while the
+      // fill is in flight (a reader worker answering from an older snapshot)
+      // must re-run this query. Registered after, its invalidation had
+      // already passed and the query kept the pre-write rows until some
+      // unrelated write. The tickets drop the older result either way.
       const entry: Entry = { tables, rerun };
       entries.add(entry);
+      try {
+        await rerun(); // initial fill (no subscribers yet → no spurious notify)
+      } catch (e) {
+        entries.delete(entry);
+        throw e;
+      }
       return {
         get rows() {
           return rows;

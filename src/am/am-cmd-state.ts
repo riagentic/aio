@@ -3,6 +3,7 @@
  * State and dispatch commands for am — state, ui, dispatch, actions, tt, persist, snapshot.
  */
 
+import { dirname, resolve } from "@std/path";
 import { CELL_METHOD_SEP } from "../state/cell-helpers.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import {
@@ -43,6 +44,21 @@ const EXPECT_OPS = [
   "absent",
 ] as const;
 
+/** JSON with object keys sorted at every depth — one spelling per value. */
+function canonical(v: unknown): string | undefined {
+  return JSON.stringify(
+    v,
+    (_k, x) =>
+      x !== null && typeof x === "object" && !Array.isArray(x)
+        ? Object.fromEntries(
+          Object.keys(x).sort().map((
+            k,
+          ) => [k, (x as Record<string, unknown>)[k]]),
+        )
+        : x,
+  );
+}
+
 /** Compare a resolved state value against an operator + expected value — pure,
  *  so the e2e assertion is unit-testable. `found` distinguishes a missing path
  *  (for exists/absent) from a present null/undefined. */
@@ -51,8 +67,15 @@ export function compareValue(
   op: string,
   expected: unknown,
   found: boolean,
+  /** The value as TYPED, before `parseScalar`: a substring search on a string
+   *  is about the characters the user wrote — `contains 1.50` searched for
+   *  "1.5" and `contains 1e3` for "1000". */
+  raw?: string,
 ): { ok: boolean; reason: string } {
   const j = (v: unknown) => JSON.stringify(v);
+  // Equality is structural, not textual: state key order is insertion order,
+  // so `eq '{"b":2,"a":1}'` failed against `{a:1,b:2}` and `ne` passed.
+  const same = (a: unknown, b: unknown) => canonical(a) === canonical(b);
   // An ordering op on something that is not a number used to answer "false" —
   // indistinguishable from a real assertion failure, so `am expect n gt 1O`
   // (or a path holding a string) sent people to debug the app instead of the
@@ -94,12 +117,12 @@ export function compareValue(
       };
     case "eq":
       return {
-        ok: j(actual) === j(expected),
+        ok: same(actual, expected),
         reason: `${j(actual)} vs ${j(expected)}`,
       };
     case "ne":
       return {
-        ok: j(actual) !== j(expected),
+        ok: !same(actual, expected),
         reason: `${j(actual)} vs ${j(expected)}`,
       };
     case "gt":
@@ -112,14 +135,19 @@ export function compareValue(
       return order("<=", (a, b) => a <= b);
     case "contains":
       if (typeof actual === "string") {
+        const needle = raw === undefined
+          ? String(expected)
+          : typeof expected === "string"
+          ? expected // a JSON-quoted string, unwrapped
+          : raw;
         return {
-          ok: actual.includes(String(expected)),
+          ok: actual.includes(needle),
           reason: `"${actual}" ⊇ ${j(expected)}`,
         };
       }
       if (Array.isArray(actual)) {
         return {
-          ok: actual.some((x) => j(x) === j(expected)),
+          ok: actual.some((x) => same(x, expected)),
           reason: `${j(actual)} ∋ ${j(expected)}`,
         };
       }
@@ -210,7 +238,13 @@ export async function cmdExpect(
     const result = await trojanGet(port, "state", appId);
     if (!result.ok) return { ok: false, reason: result.error };
     const r = resolvePath(result.data, path);
-    return compareValue(r.found ? r.value : undefined, op, expected, r.found);
+    return compareValue(
+      r.found ? r.value : undefined,
+      op,
+      expected,
+      r.found,
+      rawValue,
+    );
   };
 
   const deadline = flags.wait !== undefined
@@ -1293,7 +1327,26 @@ export async function cmdSnapshot(
       outError(result.error, mode);
       Deno.exit(1);
     }
-    Deno.writeTextFileSync(file, result.data as string);
+    // 0600, as `am profile --out` writes its file: a snapshot is the RAW
+    // state — redacted cells and persist-excluded fields included — and the
+    // default 0644 in $HOME or /tmp handed it to every local user. The
+    // journal and checkpoint holding the same data are 0600 already.
+    // Written to a 0600 temp file beside it and renamed into place: writing
+    // over an existing 0644 file (--force) keeps ITS mode, so the raw state
+    // sat world-readable until a chmod after the write.
+    const tmp = Deno.makeTempFileSync({
+      dir: dirname(resolve(file)),
+      prefix: ".aio-snapshot-",
+    });
+    try {
+      Deno.writeTextFileSync(tmp, result.data as string);
+      Deno.renameSync(tmp, file);
+    } catch (e) {
+      try {
+        Deno.removeSync(tmp);
+      } catch { /* aio-ok: the temp file never got that far */ }
+      throw e;
+    }
     out(
       mode === "pretty" ? `saved to ${file}` : { file, status: "saved" },
       mode,

@@ -108,6 +108,14 @@ await aio.run({
 });
 ```
 
+`persist: false` (and `--no-persist`) turns off the state **snapshot**. A `db:`
+table bound to a cell's field, and a `sync: true` cell's op-log, still write
+`state.db` and are restored from it — boot warns naming them. For a run that
+leaves nothing on disk, also pass `dbPath: ":memory:"` (`--db-path=:memory:`).
+Likewise a cell's `persist: "none"` / `exclude` does not reach a field bound to
+a `db:` table: the table stores those rows, every declared column included, and
+boot warns naming the field.
+
 ## Shaping what goes out — `onPersist`
 
 `persist` FILTERS (whole fields, in or out). `onPersist` SHAPES:
@@ -184,6 +192,21 @@ kept and the copy is named in a warning (restore it and let one boot replay it,
 or delete the copy). To keep the cell's actions out entirely — the line, not
 just its payload — use `diagnostics: false` (the whole cell) or `redactActions`
 (named actions), below.
+
+A `persist: { exclude }` (or `include`) field is **not** covered by that: the
+cell's other fields are persisted, so its calls are journalled — and replayed —
+with their arguments. `login(user, token)` on a cell that excludes
+`sessionToken` writes `token` into `data/journal` (until the next save compacts
+it) and, in dev, into `logs/actions.jsonl`. Replay does not bring the field
+back, but the argument is on disk. Move the secret to its own `persist: "none"`
+cell — its calls are journalled without arguments and what they write to
+persisted cells survives as data. Naming the action in `redactActions` (below)
+also keeps the argument off disk, at a cost: a redacted journal entry cannot be
+re-run, so crash recovery **skips** it — and with it **every** write that call
+made since the last save, to the excluded field and to every other field and
+cell alike. Boot says so (`journal: … COULD NOT be replayed`), but the writes
+are gone; see
+[secrets in recorded actions](where-files-live.md#secrets-in-recorded-actions).
 
 They are different things and they now have different words:
 

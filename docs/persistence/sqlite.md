@@ -640,19 +640,17 @@ PRAGMA foreign_keys = ON          -- enforce ref() constraints
 ### Choosing your own durability
 
 `synchronous = NORMAL` is the right default for a cache and the wrong one for a
-wallet: on power loss it can lose the last committed transactions. Replace the
-list per app — the array you pass is used verbatim, so include the pragmas you
-still want:
+wallet: on power loss it can lose the last committed transactions. Override it
+per app — `dbPragmas` is merged over the defaults by pragma name, so naming one
+setting replaces exactly that one and keeps the rest (add a pragma the defaults
+lack and it is appended; turn a default off by saying so, e.g.
+`PRAGMA foreign_keys = OFF`):
 
 ```ts
 await aio.run({
   cells: [ledger],
   dbPragmas: [
-    "PRAGMA journal_mode = WAL",
     "PRAGMA synchronous = FULL", // survive power loss, pay an fsync per commit
-    "PRAGMA cache_size = -64000",
-    "PRAGMA busy_timeout = 5000",
-    "PRAGMA foreign_keys = ON",
   ],
 });
 ```

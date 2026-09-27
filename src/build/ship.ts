@@ -6,6 +6,7 @@
 // signable, verifiable artifact it would distribute.
 import { readDenoJson } from "../server/deno-json.ts";
 import { appIdFromConfig } from "../server/single-instance-lock.ts";
+import { isComparableVersion } from "../server/updates-core.ts";
 import { basename, dirname, join, resolve as resolvePath } from "@std/path";
 // Synchronous SHA-256 for `keyFingerprint`: WebCrypto's digest is async, and a
 // key fingerprint is shown from render/report paths that are not. Same import
@@ -39,12 +40,30 @@ export const UPDATE_TARGETS = [
   "source",
 ] as const;
 
-// NOT a member: `"macos-app"`. It is a shape an install can BE and never a
-// shape a release is PUBLISHED as — no strategy replaces a signed bundle, so
-// there would be nothing for a manifest carrying it to mean. It lives in
-// `server/updates-apply.ts` as `InstalledTarget`, which is that other
-// vocabulary. (It also keeps this array — public, frozen surface — exactly as
-// it was: widening a union is something a caller's exhaustive switch feels.)
+/** Every target a release may carry: {@linkcode UPDATE_TARGETS}, frozen, plus
+ *  the ones added after the surface froze. `UPDATE_TARGETS`/`UpdateTarget`
+ *  are public and never widen (an exhaustive `switch` over them keeps
+ *  compiling), so a newer target is a member HERE.
+ *
+ *  `"electron-app"` (1.0.13-beta): a signed macOS `.app`, packed as
+ *  `.app.tar.gz` by the Mac that sealed it and swapped whole, from outside the
+ *  bundle. A manifest's `target` may hold it at run time. */
+export const RELEASE_TARGETS = [...UPDATE_TARGETS, "electron-app"] as const;
+
+/** One of {@linkcode RELEASE_TARGETS}. */
+export type ReleaseTarget = typeof RELEASE_TARGETS[number];
+
+/** Pure: is `v` one of {@linkcode RELEASE_TARGETS}? The validator for a
+ *  `--target=` that may name a target added after the surface froze. */
+export function isReleaseTarget(v: unknown): v is ReleaseTarget {
+  return typeof v === "string" &&
+    (RELEASE_TARGETS as readonly string[]).includes(v);
+}
+
+// NOT a member: `"macos-app"`. It is a shape an install can BE — a `.app` —
+// and it lives in `server/updates-apply.ts` as `InstalledTarget`. What a `.app`
+// can INSTALL is `"electron-app"`: a whole signed bundle, never a file inside
+// one.
 
 /** How a published release installs itself — one of {@linkcode UPDATE_TARGETS}.
  *
@@ -331,6 +350,23 @@ export function manifestFileName(
   return `${platform.os}-${platform.arch}.json`;
 }
 
+/** The manifest ONE install kind of a platform fetches before the platform's
+ *  own: `<os>-<arch>.<target>.json`.
+ *
+ *  A platform can ship two install kinds — Windows Electron is the
+ *  self-contained `.exe` (`binary`) AND the unpacked `.zip`
+ *  (`electron-zip`) — and a manifest carries one artifact, so the plain name
+ *  serves the `.exe` and a zip install reads this one (falling back to the
+ *  plain name when a channel has none). Pinned against `kindManifestUrl`
+ *  (updates-check) by a test.
+ *  @internal */
+export function kindManifestFileName(
+  platform: { os: string; arch: string },
+  target: ReleaseTarget,
+): string {
+  return `${platform.os}-${platform.arch}.${target}.json`;
+}
+
 /** Build a ship manifest for a compiled binary. Signs the digest when a private
  *  key JWK is supplied (with its public JWK for the consumer). */
 export async function buildShipManifest(opts: {
@@ -355,6 +391,17 @@ export async function buildShipManifest(opts: {
    *  only, silently, at the moment a user most needs the update. */
   updates?: boolean;
 }): Promise<ShipManifest> {
+  return await buildReleaseManifest(opts);
+}
+
+/** {@linkcode buildShipManifest}, for any {@linkcode ReleaseTarget} — the door
+ *  a target added after the surface froze (`"electron-app"`) goes through,
+ *  since `buildShipManifest`'s own `target` stays the frozen `UpdateTarget`. */
+export async function buildReleaseManifest(
+  opts: Omit<Parameters<typeof buildShipManifest>[0], "target"> & {
+    target?: ReleaseTarget;
+  },
+): Promise<ShipManifest> {
   const sha256 = await sha256Hex(opts.binary);
   const scanned = scanCapabilities(opts.sources);
   const capabilities = opts.updates ? { ...scanned, net: true } : scanned;
@@ -371,7 +418,9 @@ export async function buildShipManifest(opts: {
     capabilities,
     runFlags: permissionFlags(capabilities),
     channel: opts.channel ?? "prod",
-    target: opts.target ?? "binary",
+    // The ONE place a newer target meets the frozen `ShipManifest.target`
+    // type: the value is signed and read back as a `ReleaseTarget`.
+    target: (opts.target ?? "binary") as UpdateTarget,
     platform: opts.platform ??
       { os: Deno.build.os, arch: Deno.build.arch },
     releasedAt: opts.releasedAt ?? new Date().toISOString(),
@@ -421,8 +470,10 @@ export type ShipExpectations = {
    *  roster has to reach the install BEFORE the old key stops signing. The
    *  manual procedure for the lost-key case is in the updates doc.
    *
-   *  A manifest signed by ANY rostered key verifies. `key` and `keys` are
-   *  unioned, so pinning still works unchanged. */
+   *  A manifest signed by ANY rostered key verifies. An explicit `key` and
+   *  `keys` are unioned; a configured roster REPLACES the first-use pin (no
+   *  key is pinned while one is set, and a pinned key off the roster is not
+   *  trusted). */
   keys?: JsonWebKey[];
   /** Allow an unsigned manifest (a private LAN build). Loud by contract. */
   allowUnsigned?: boolean;
@@ -683,8 +734,10 @@ export function declaredTargetKinds(
 export function inferTarget(
   fileName: string,
   buildCfg: Record<string, unknown>,
-): UpdateTarget {
+): ReleaseTarget {
   const electron = declaredTargetKinds(buildCfg).has("electron");
+  // A signed macOS bundle, packed by the build right after the Mac sealed it.
+  if (/\.app\.tar\.gz$/i.test(fileName)) return "electron-app";
   if (/\.AppImage$/i.test(fileName)) {
     return electron ? "electron-appimage" : "appimage";
   }
@@ -698,16 +751,12 @@ export function inferTarget(
     // replacing an app bundle with a disk image. A release that cannot be
     // installed must fail at the publisher, not on every user's machine.
     throw new Error(
-      `${NO} ${fileName} is a macOS disk image, and no aio update target ` +
-        `installs one yet.\n` +
-        `       Publish the built binary or .AppImage for an app that ` +
-        `self-updates; a .dmg is for a user to drag to /Applications by ` +
-        `hand. (The .app INSIDE the dmg is the real artifact — see ` +
-        `docs/build/targets.md.)\n` +
-        `       A macOS .app that is ALREADY installed reports itself as ` +
-        `"macos-app" and refuses every release with the same reason, ` +
-        `naming the download — it never swaps a file inside its own signed ` +
-        `bundle. See todo.md, "macOS .app self-update".`,
+      `${NO} ${fileName} is a macOS disk image — the FIRST download, which a ` +
+        `user drags to /Applications. No update target installs one.\n` +
+        `       Publish the \`<name>-mac-<arch>.app.tar.gz\` the same build ` +
+        `wrote beside it (the signed .app, target "electron-app"): an ` +
+        `installed .app swaps itself to that. \`am publish\` does this ` +
+        `for you and copies the .dmg next to it as the download.`,
     );
   }
   return "binary";
@@ -726,8 +775,20 @@ export function inferTarget(
  *  no signal on the publisher's machine. Losing the feature's headline
  *  guarantee is not a warning. The two legitimate escapes are explicit:
  *  `--data=<file>` (a contract captured on a machine that CAN run the binary)
- *  and `--no-data` (publish without one, on purpose). */
-async function probeDataContract(binaryPath: string): Promise<DataContract> {
+ *  and `--no-data` (publish without one, on purpose).
+ *  @internal exported for `am publish`, which probes an unpacked `.app`. */
+export async function probeDataContract(
+  binaryPath: string,
+): Promise<DataContract> {
+  return (await probeArtifact(binaryPath)).contract;
+}
+
+/** {@linkcode probeDataContract}, plus the id the artifact RUNS as — the
+ *  `[aio] app-id:` marker a 1.0.13+ build prints beside its contract (an older
+ *  one prints none, so `appId` is absent). @internal */
+export async function probeArtifact(
+  binaryPath: string,
+): Promise<{ contract: DataContract; appId?: string }> {
   let out: Deno.CommandOutput;
   try {
     out = await new Deno.Command(binaryPath, {
@@ -777,10 +838,9 @@ async function probeDataContract(binaryPath: string): Promise<DataContract> {
   // function just parsed, and the count the binary printed on stderr. Silent
   // when the app really persists nothing, which is the other meaning of an
   // empty contract and is not a defect.
+  const stderr = new TextDecoder().decode(out.stderr);
   const persisting = Number(
-    /^\[aio\] persisting-cells: (\d+)$/m.exec(
-      new TextDecoder().decode(out.stderr),
-    )?.[1] ?? "0",
+    /^\[aio\] persisting-cells: (\d+)$/m.exec(stderr)?.[1] ?? "0",
   );
   if (Object.keys(contract.cells).length === 0 && persisting > 0) {
     console.warn(
@@ -793,7 +853,30 @@ async function probeDataContract(binaryPath: string): Promise<DataContract> {
         `user's existing data. See docs/deploy/updates.md.`,
     );
   }
-  return contract;
+  // The id the build RUNS as (1.0.13+; an older artifact prints none).
+  const appId = /^\[aio\] app-id: (\S+)\s*$/m.exec(stderr)?.[1];
+  return appId ? { contract, appId } : { contract };
+}
+
+/** Why a release signed for `name` would be refused by every install of a
+ *  build that runs as `runsAs` — or null when the two agree. Pure.
+ *  `explicit`: the name came from `--name` / `shipApp({ name })`. */
+function identityMismatch(
+  name: string,
+  runsAs: string,
+  explicit: boolean,
+): string | null {
+  if (name === runsAs) return null;
+  return `this build runs as "${runsAs}", but the release would be signed ` +
+    `for "${name}" — every install compares the two and refuses a ` +
+    `mismatch, so no install would ever take this release.\n       Fix: ${
+      explicit
+        ? `pass --name=${runsAs} (shipApp: name: "${runsAs}")`
+        : `add "appId": "${runsAs}" to deno.json (the release is named from ` +
+          `deno.json's appId > title > name; the app runs as its ` +
+          `aio.run({ appId }) or that same chain) — or, for one \`aio ship\`, ` +
+          `pass --name=${runsAs}`
+    }.`;
 }
 
 /** Did this exit mean "the file is not a program", rather than "the program
@@ -821,7 +904,8 @@ export function notRunnableExit(code: number, stderr: string): boolean {
  *  Every shape aio can publish is one of these ({@link UPDATE_TARGETS} is a
  *  closed set): `binary` and `appimage` are ELF/PE/Mach-O, an `electron-zip`
  *  and an `android` APK are ZIP containers, a launcher script carries a
- *  shebang, and a macOS `.dmg` is a UDIF image.
+ *  shebang, an `electron-app` is a gzip'd tar of a signed `.app`, and a macOS
+ *  `.dmg` is a UDIF image.
  *
  *  The DMG is the one shape whose magic is at the END: a UDIF file is a
  *  compressed blob followed by a 512-byte trailer beginning `koly`. Testing
@@ -846,6 +930,7 @@ export function artifactFormat(bytes: Uint8Array): string | null {
   if (magic(0x4d, 0x5a)) return "PE"; // Windows .exe
   if (magic(0x50, 0x4b, 0x03, 0x04)) return "ZIP"; // .zip / .apk
   if (magic(0x23, 0x21)) return "script"; // #! launcher
+  if (magic(0x1f, 0x8b)) return "gzip"; // .app.tar.gz (electron-app)
   // A UDIF disk image (`.dmg`): `koly` starts the trailer, 512 bytes from the
   // end. Checked by its TRUE position rather than by searching, so an image
   // whose data happens to contain those bytes is not a false positive.
@@ -1104,6 +1189,26 @@ export async function shipApp(opts: {
    *  the file name (re-spelling it is what broke). */
   channelDir?: string;
 }): Promise<ShipManifest> {
+  return await shipRelease(opts);
+}
+
+/** {@linkcode shipApp}, for any {@linkcode ReleaseTarget} — the door a target
+ *  added after the surface froze (`"electron-app"`) goes through, since
+ *  `shipApp`'s own `target` stays the frozen `UpdateTarget`.
+ *
+ *  `manifestName` replaces the fetched `<os>-<arch>.json` (beside the
+ *  artifact and in `channelDir`) — how a second install kind of one platform
+ *  gets its own manifest ({@linkcode kindManifestFileName}).
+ *  @internal */
+export async function shipRelease(
+  opts: Omit<Parameters<typeof shipApp>[0], "target"> & {
+    target?: ReleaseTarget;
+    manifestName?: string;
+    /** The id the artifact runs as, when the caller probed it itself
+     *  ({@linkcode probeArtifact}) and passes `data`. */
+    runsAs?: string;
+  },
+): Promise<ShipManifest> {
   const binary = await Deno.readFile(opts.binaryPath);
   // BEFORE the hash, the capability scan and the signature: is this file an
   // artifact at all?
@@ -1130,7 +1235,7 @@ export async function shipApp(opts: {
       `${NO} ${opts.binaryPath} is not a publishable artifact — its first ` +
         `bytes are not an executable or an archive of any kind.\n` +
         `       aio publishes ELF / PE / Mach-O binaries, ZIP packages ` +
-        `(.zip, .apk) and shebang launchers; this file starts "${head}".\n` +
+        `(.zip, .apk), signed macOS bundles (.app.tar.gz) and shebang launchers; this file starts "${head}".\n` +
         `       Point --key/ship at the BUILT artifact (\`deno task build\` ` +
         `writes it into dist/), not at a source file, a manifest or a ` +
         `placeholder. A file that cannot execute is not releasable on any ` +
@@ -1239,14 +1344,45 @@ export async function shipApp(opts: {
     const bad = safeTokenReason(field, value);
     if (bad) throw new Error(`${NO} ${bad}`);
   }
-  if (opts.target !== undefined && !isUpdateTarget(opts.target)) {
+  // Safe characters are not enough: every client ORDERS version and minFrom
+  // (`decide()`), and one it cannot order is refused on every install with
+  // "re-publish with aio ship" — the command that just signed it.
+  for (
+    const [field, value] of [["version", version], ["minFrom", opts.minFrom]]
+  ) {
+    if (value !== undefined && !isComparableVersion(value)) {
+      throw new Error(
+        `${NO} ${field} "${value}" is not a version number (expected 1.2.3, ` +
+          `optionally -rc.1) — no client could compare it, so every install ` +
+          `would refuse this release.`,
+      );
+    }
+  }
+  if (opts.target !== undefined && !isReleaseTarget(opts.target)) {
     throw new Error(
       `${NO} unknown target "${opts.target}" — a manifest with a target no ` +
         `client can perform is signed, valid, and refused by every install ` +
-        `("target mismatch"). Use one of: ${UPDATE_TARGETS.join(", ")}.`,
+        `("target mismatch"). Use one of: ${RELEASE_TARGETS.join(", ")}.`,
     );
   }
-  const manifest = await buildShipManifest({
+  // The data contract — and, when it is PROBED, the identity the artifact
+  // actually runs as, which must be the name this release is signed for.
+  let data = opts.data;
+  let runsAs = opts.runsAs;
+  if (!data && opts.dataPath) {
+    data = parseDataContract(
+      await Deno.readTextFile(opts.dataPath),
+      opts.dataPath,
+    );
+  } else if (!data && !opts.noData) {
+    const probed = await probeArtifact(opts.binaryPath);
+    data = probed.contract;
+    runsAs = probed.appId;
+  }
+  const bad = runsAs &&
+    identityMismatch(name, runsAs, opts.name !== undefined);
+  if (bad) throw new Error(`${NO} ${bad}`);
+  const manifest = await buildReleaseManifest({
     platform: opts.platform,
     name,
     version,
@@ -1263,15 +1399,7 @@ export async function shipApp(opts: {
     url: opts.url ?? fileName,
     notes: opts.notes,
     minFrom: opts.minFrom,
-    data: opts.data ??
-      (opts.dataPath
-        ? parseDataContract(
-          await Deno.readTextFile(opts.dataPath),
-          opts.dataPath,
-        )
-        : opts.noData
-        ? undefined
-        : await probeDataContract(opts.binaryPath)),
+    data,
   });
   const json = JSON.stringify(manifest, null, 2);
   // Write BOTH names, always. `<binary>.ship.json` is the one a human
@@ -1285,18 +1413,13 @@ export async function shipApp(opts: {
   // no separator to strip, and the regex left the FILE name as the directory —
   // the manifest was then written to `app.bin/linux-x86_64.json` and the whole
   // command died at the last line.
-  const fetched = join(
-    dirname(opts.binaryPath),
-    manifestFileName(manifest.platform),
-  );
+  const fetchedName = opts.manifestName ?? manifestFileName(manifest.platform);
+  const fetched = join(dirname(opts.binaryPath), fetchedName);
   if (fetched !== outPath) await Deno.writeTextFile(fetched, json);
   if (opts.channelDir) {
     const chDir = join(opts.channelDir, manifest.channel);
     await Deno.mkdir(chDir, { recursive: true });
-    await Deno.writeTextFile(
-      join(chDir, manifestFileName(manifest.platform)),
-      json,
-    );
+    await Deno.writeTextFile(join(chDir, fetchedName), json);
   }
   return manifest;
 }
@@ -1630,7 +1753,7 @@ export const SHIP_USAGE: string =
   "            [--min-from=X.Y.Z] [--data=contract.json] [--no-data]\n" +
   "            [--out=ship.json] [--allow-dirty]\n" +
   "            [--channel-dir=DIR]   # also write DIR/<channel>/<os>-<arch>.json\n" +
-  `       --target: ${UPDATE_TARGETS.join(" | ")}\n` +
+  `       --target: ${RELEASE_TARGETS.join(" | ")}\n` +
   "       --key defaults to ~/.aio/keys/<name>-release-key.json when that file exists\n" +
   "       ship keygen [--out=PATH] [--stdout]   # a fresh Ed25519 " +
   "signing key, written OUTSIDE the repo\n" +
@@ -1712,10 +1835,10 @@ if (import.meta.main) {
   // refuses with "target mismatch" — a typo whose only symptom appears on
   // other people's machines, days later.
   const target = flag("target");
-  if (target !== undefined && !isUpdateTarget(target)) {
+  if (target !== undefined && !isReleaseTarget(target)) {
     console.error(
       `ship: ✗ unknown --target=${target}. One of: ${
-        UPDATE_TARGETS.join(", ")
+        RELEASE_TARGETS.join(", ")
       }.`,
     );
     Deno.exit(1);
@@ -1727,7 +1850,7 @@ if (import.meta.main) {
   // person debugging `ship` itself.
   let m: ShipManifest;
   try {
-    m = await shipApp({
+    m = await shipRelease({
       binaryPath: bin,
       sourceDir: flag("src"),
       name: flag("name"),

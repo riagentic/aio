@@ -3,6 +3,7 @@
 import type { DiagnosticEvent } from "./diagnostic-bus.ts";
 import { randomUuid } from "../rand.ts";
 import { log } from "./logger-api.ts";
+import { describeThrown } from "./fmt.ts";
 import {
   indent,
   mark,
@@ -141,6 +142,13 @@ export type ReportErrorOpts = {
   };
   countError?: () => void;
   prod?: boolean;
+  /** What the console box and the log FILES may show of `err.stateSnapshot`:
+   *  the app's `redactActions` list withholds a redacted cell's slice. The
+   *  `onError` hook still receives the error whole — it is the app's own code. */
+  redactState?: (s: Record<string, unknown>) => Record<string, unknown>;
+  /** Must this action's payload be withheld from an error message? The
+   *  app's `redactActions`, by the rule debug.log uses (`hidesPayload`). */
+  redactAction?: (type: string, payload: unknown) => boolean;
 };
 
 // ─── Code → Source mapping ───────────────────────────────────────────────────
@@ -404,7 +412,7 @@ export function createAioError(
   let original: Error | undefined;
 
   if (raw instanceof Error) {
-    message = raw.message;
+    message = describeThrown(raw); // a `message` getter may throw
     original = raw;
   } else if (typeof raw === "string") {
     message = raw;
@@ -412,7 +420,7 @@ export function createAioError(
     message =
       `[${code}] error object was null/undefined — check that the throwing code passes an Error instance`;
   } else {
-    message = String(raw);
+    message = describeThrown(raw); // never throws in place of `raw`
   }
 
   return new AioError(
@@ -752,7 +760,10 @@ export function sourceExcerpt(
  *  with `┃ Bold-Label:` — nine labelled rows for facts that are mostly absent,
  *  a fixed width that neither wrapped a long message nor used a wide terminal,
  *  and no sight of the code that failed. */
-export function formatErrorBox(err: AioError): string {
+export function formatErrorBox(
+  err: AioError,
+  snapshot: Record<string, unknown> | undefined = err.stateSnapshot,
+): string {
   const isWarn = WARN_CODES.has(err.code);
   const tone: Tone = isWarn ? "warn" : "bad";
   const cols = termWidth();
@@ -824,14 +835,14 @@ export function formatErrorBox(err: AioError): string {
   }
 
   // The footer: everything a reader needs only when they are filing a report.
-  if (err.stateSnapshot) {
+  if (snapshot) {
     // Guarded: the snapshot is the LIVE state, and a reducer that crashed on
     // unusual state (a BigInt, a cycle) is exactly when stringify dies too —
     // taking the whole report (onError hook, TT mark, error count, diag bus)
     // down with it. Same guard the action log and dispatch's tag() carry.
     let snap: string;
     try {
-      snap = JSON.stringify(err.stateSnapshot) ?? "undefined";
+      snap = JSON.stringify(snapshot) ?? "undefined";
     } catch {
       snap = "[unserializable: BigInt or circular structure]";
     }
@@ -903,7 +914,14 @@ function boundSnapshot(
 
 export function reportError(err: AioError, opts: ReportErrorOpts = {}): void {
   try {
-    const { onError, logger, tt, countError, prod } = opts;
+    const { onError, logger, tt, countError, prod, redactState } = opts;
+    // Every byte the FRAMEWORK writes (console box → app/debug/error.log, and
+    // the structured record) goes through the app's redaction list. The raw
+    // snapshot carried a redacted cell's state — a passphrase an unlock method
+    // had just stored — into three log files on the first crash after it.
+    const shown = err.stateSnapshot && redactState
+      ? redactState(err.stateSnapshot)
+      : err.stateSnapshot;
     const isWarn = WARN_CODES.has(err.code);
     // Throttle repetitive perf/vitals noise from the console + logger (counts
     // and the diagnostic bus below still see every occurrence).
@@ -928,7 +946,8 @@ export function reportError(err: AioError, opts: ReportErrorOpts = {}): void {
         if (isWarn) log.warn(compact);
         else log.error(compact);
       } else {
-        const box = formatErrorBox(err) + (suffix ? `\n${suffix.trim()}` : "");
+        const box = formatErrorBox(err, shown) +
+          (suffix ? `\n${suffix.trim()}` : "");
         if (isWarn) log.warn(box);
         else log.error(box);
       }
@@ -945,7 +964,7 @@ export function reportError(err: AioError, opts: ReportErrorOpts = {}): void {
       // rows wrote megabytes per error, and an error that repeats (a bad row
       // that throws on every dispatch, a payload a client can craft) fills the
       // disk while the console stays tidy. Nothing reports a log eating a disk.
-      payload.stateSnapshot = boundSnapshot(err.stateSnapshot);
+      payload.stateSnapshot = boundSnapshot(shown);
       const write = rejected !== undefined
         ? logger.info ?? logger.warn ?? logger.error
         : isWarn && logger.warn

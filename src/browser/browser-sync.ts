@@ -29,7 +29,11 @@ import {
 import type { SyncConfig } from "../sync/types.ts";
 import { resolveSyncCells } from "./sync-cells.ts";
 import { getRegisteredCells } from "../state/cell-reactive.ts";
-import { getCellSignal } from "../state/state-signals.ts";
+import {
+  _setCellSignalOwner,
+  getCellSignal,
+  getStateSignal,
+} from "../state/state-signals.ts";
 import type { CellDef, Msg } from "../state/cell-types.ts";
 import { produce } from "immer";
 import { degraded } from "../diagnostics/degraded.ts";
@@ -52,6 +56,66 @@ let _syncErrSaid: string | null = null;
 /** Ops whose `unsaved` ack was already said (bounded). */
 const _unsavedSaid = new Set<string>();
 let _syncCells: Map<string, CellDef> | null = null;
+/** Sync cells whose signal the engine has driven at least once. From then on,
+ *  WHILE the cell has ops awaiting an ack, server state frames leave that
+ *  signal alone (`_setCellSignalOwner`). Before it, there is no optimistic view
+ *  to protect and the engine's confirmed state is still the declared initial
+ *  one — the server's frame is the better paint. With nothing pending the
+ *  frame is too: a server write that is no sync op (async method, serverFn,
+ *  effect, cron, `am dispatch`) reaches the engine only as a push debounced up
+ *  to 500 ms, so `await notes.importAsync(); notes.items` read the old list
+ *  and a quick "building" → "done" never showed "building". */
+const _engineDriven = new Set<string>();
+/** Engine-driven cells a server frame touched (painted or skipped) since the
+ *  last `checkFrames`. */
+const _frameSeen = new Set<string>();
+let _frameCheck: ReturnType<typeof setTimeout> | null = null;
+/** The engine's confirmed state (set at init). */
+let _confirmed: Record<string, unknown> = {};
+
+/** A server write that is no sync op reaches the engine's CONFIRMED state only
+ *  by the debounced push (up to 500 ms). Until then every engine paint drops
+ *  it: after an ack (a frame skipped while the op was pending), or on the next
+ *  local call (a frame painted with nothing pending — the write vanished from
+ *  the screen). A frame cannot be folded in instead: one skipped while pending
+ *  may predate the op's commit on the server. So, once frames go quiet
+ *  (`FRAME_CHECK_MS` after the last one or the last engine frame), every
+ *  touched cell with nothing pending compares the server's slice with the
+ *  engine's confirmed state; any difference asks for a catch-up, which serves
+ *  an unfolded server write as a snapshot. Steady ops compare equal (their
+ *  commit echoes carry exactly the acked ops): no ask. A cell still pending
+ *  stays marked — its ack re-arms the check. */
+const FRAME_CHECK_MS = 150;
+function armFrameCheck(): void {
+  if (_frameSeen.size === 0) return;
+  if (_frameCheck !== null) clearTimeout(_frameCheck);
+  _frameCheck = setTimeout(checkFrames, FRAME_CHECK_MS);
+}
+function checkFrames(): void {
+  _frameCheck = null;
+  if (!_engine) return;
+  const server = getStateSignal().peek();
+  let ask = false;
+  for (const cell of _frameSeen) {
+    if (_engine.getStatus(cell).pending > 0) continue;
+    _frameSeen.delete(cell);
+    if (!same(server[cell], _confirmed[cell])) ask = true;
+  }
+  if (ask) watch("sync:request", _engine.requestSync());
+}
+
+/** Plain-data equality, key order ignored — what a JSON round trip keeps. */
+function same(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (!a || !b || typeof a !== "object" || typeof b !== "object") return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const ka = Object.keys(a), kb = Object.keys(b);
+  return ka.length === kb.length &&
+    ka.every((k) =>
+      Object.hasOwn(b, k) &&
+      same((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k])
+    );
+}
 
 /** Every sync frame the engine handles is fire-and-forget, and each one used to
  *  end in `.catch(() => {})`. Individually defensible — a dropped ack is
@@ -249,7 +313,7 @@ export function handleSyncMessage(t: string, d: unknown): void {
           a.opId,
           a.serverHlc as [number, number, string],
           a.serverTs,
-        ),
+        ).then(armFrameCheck),
       );
       return;
     }
@@ -257,7 +321,7 @@ export function handleSyncMessage(t: string, d: unknown): void {
       const r = d as { opId: string; cell: string; reason: string };
       watch(
         "sync:rejection",
-        _engine.handleRejection(r.cell, r.opId, r.reason),
+        _engine.handleRejection(r.cell, r.opId, r.reason).then(armFrameCheck),
       );
       return;
     }
@@ -266,7 +330,7 @@ export function handleSyncMessage(t: string, d: unknown): void {
         "sync:remote-op",
         _engine.handleRemoteOp(
           d as Parameters<SyncEngine["handleRemoteOp"]>[0],
-        ),
+        ).then(armFrameCheck),
       );
       return;
     case "sync-res":
@@ -275,7 +339,7 @@ export function handleSyncMessage(t: string, d: unknown): void {
         "sync:response",
         _engine.handleSyncResponse(
           d as Parameters<SyncEngine["handleSyncResponse"]>[0],
-        ),
+        ).then(armFrameCheck),
       );
       return;
     case "sync-err": {
@@ -445,9 +509,24 @@ export function initBrowserSync(
       // The optimistic view IS what the UI shows — push it into the cell
       // signal that reactive reads (counter.count) subscribe to.
       const def = cells.get(cell);
-      if (def) getCellSignal(cell, def.__aio.state).set(optimistic);
+      if (!def) return;
+      _engineDriven.add(cell);
+      getCellSignal(cell, def.__aio.state).set(optimistic);
     },
     log: { warn: (m) => console.warn(m), debug: (m) => console.debug(m) },
+  });
+
+  // Only now, with an engine that exists: a boot that threw above leaves the
+  // cells on plain actions, and their signals stay server-driven.
+  // `pending` is the unconfirmed count the optimistic view replays — set in
+  // the same tick as that view (sync-engine.ts `rebaseCell`). Every frame for
+  // an engine-driven cell, painted or skipped, is marked for `checkFrames`.
+  _confirmed = confirmed;
+  _setCellSignalOwner((cell) => {
+    if (!_engine || !_engineDriven.has(cell)) return false;
+    _frameSeen.add(cell);
+    armFrameCheck();
+    return _engine.getStatus(cell).pending > 0;
   });
 
   // Replay anything queued offline from a previous session.
@@ -469,6 +548,12 @@ export function _resetBrowserSync(): void {
   // on its own.
   _engine?.dispose();
   _engine = null;
+  _setCellSignalOwner(null);
+  _engineDriven.clear();
+  _frameSeen.clear();
+  if (_frameCheck !== null) clearTimeout(_frameCheck);
+  _frameCheck = null;
+  _confirmed = {};
   if (_syncErrTimer !== null) clearTimeout(_syncErrTimer);
   _syncErrTimer = null;
   _syncErrSaid = null;

@@ -812,6 +812,12 @@ Deno.test({
       const squash = join(outDir, "squashfs-root");
       const present = [...Deno.readDirSync(squash)].map((e) => e.name);
       assert(present.includes("AppRun"), "AppImage has no AppRun");
+      // `-p`: a non-interactive bash sources `$BASH_ENV` first, and a script
+      // there that exits ended every launch before the app ran (measured).
+      assertEquals(
+        (await Deno.readTextFile(join(squash, "AppRun"))).split("\n")[0],
+        "#!/bin/bash -p",
+      );
       assert(
         present.some((n) => n.endsWith(".desktop")),
         "AppImage has no .desktop entry",

@@ -81,25 +81,24 @@ Deno.test("M4: a clone's op is applied, not swallowed as an own-op echo", async 
   assertEquals(a.confirmed().items, ["from-b"]);
 });
 
-Deno.test("M4: a genuine own-op echo is still suppressed", async () => {
-  // The reconnect race the suppression exists for: the server excludes the
-  // socket an op arrived on, but after a reconnect this client holds a NEW
-  // socket, so its own op comes back as a broadcast. Applying it AND the ack
-  // would double it.
+Deno.test("M4: a genuine own-op echo is applied exactly once", async () => {
+  // The reconnect race: the server excludes the socket an op arrived on, but
+  // after a reconnect this client holds a NEW socket, so its own op comes back
+  // as a broadcast. It folds at its position, and the ack then only confirms
+  // it — once, not twice.
   const a = makeClone();
   await a.engine.handleLocalAction(CELL, "add", { id: "mine" });
   const own = lastOpFrame(a.sent, 12);
 
   await a.engine.handleRemoteOp(own);
+  assertEquals(a.confirmed().items, ["mine"], "folded at its broadcast");
+
+  await a.engine.handleAck(CELL, own.id, [2000, 0, "server"], 12);
   assertEquals(
     a.confirmed().items,
-    [],
-    "an own op reaches confirmed state through its ACK, never the echo",
+    ["mine"],
+    "its ack confirms it — one application, not two",
   );
-
-  // The ack lands: exactly one application.
-  await a.engine.handleAck(CELL, own.id, [2000, 0, "server"], 12);
-  assertEquals(a.confirmed().items, ["mine"]);
 });
 
 Deno.test("M4: an unconfirmed op resent from a previous session is applied exactly once", async () => {

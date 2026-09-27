@@ -1,4 +1,5 @@
 import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
+import { permissiveUmask } from "./permissive-umask.ts";
 import {
   _resetTargetGuess,
   parseGlobalFlags,
@@ -1001,31 +1002,41 @@ Deno.test("am-cli: snapshot — dumps state as JSON", async () => {
   });
 });
 
-Deno.test("am-cli: snapshot save — writes file", async () => {
-  // A path that does NOT exist yet — what a person types. `makeTempFile`
-  // CREATES the file, and `snapshot save` now refuses to write over one (the
-  // same rule `am backup` has always had); using it here tested the refusal
-  // by accident and called it a failure.
-  const dir = await tempDir("aio-am-");
-  const tmp = `${dir}/snap.json`;
-  try {
-    await withTrojanServer(async () => {
-      const r = await runAm(["snapshot", "save", tmp]);
-      assertAmCode(r, 0, "am");
-      const saved = JSON.parse(await Deno.readTextFile(tmp));
-      assertEquals(saved.count, 10);
+Deno.test("am-cli: snapshot save — writes file", () =>
+  // The mode asserted below must be the one the COMMAND set: under the
+  // runner's own umask 077 a forgotten mode would come out 0600 anyway.
+  permissiveUmask(async () => {
+    // A path that does NOT exist yet — what a person types. `makeTempFile`
+    // CREATES the file, and `snapshot save` now refuses to write over one (the
+    // same rule `am backup` has always had); using it here tested the refusal
+    // by accident and called it a failure.
+    const dir = await tempDir("aio-am-");
+    const tmp = `${dir}/snap.json`;
+    try {
+      await withTrojanServer(async () => {
+        const r = await runAm(["snapshot", "save", tmp]);
+        assertAmCode(r, 0, "am");
+        const saved = JSON.parse(await Deno.readTextFile(tmp));
+        assertEquals(saved.count, 10);
+        // RAW state (redacted cells, persist-excluded fields) — owner-only, as
+        // the journal and `am profile --out` are.
+        const modeOf = async () => (await Deno.stat(tmp)).mode! & 0o777;
+        if (Deno.build.os !== "windows") assertEquals(await modeOf(), 0o600);
 
-      // …and the second save refuses, rather than replacing it silently.
-      const again = await runAm(["snapshot", "save", tmp]);
-      assertEquals(again.code, 1, "an existing file is never clobbered");
-      // --force is the way past, said on purpose.
-      const forced = await runAm(["snapshot", "save", tmp, "--force"]);
-      assertEquals(forced.code, 0);
-    });
-  } finally {
-    await dropTempDir(dir);
-  }
-});
+        // …and the second save refuses, rather than replacing it silently.
+        const again = await runAm(["snapshot", "save", tmp]);
+        assertEquals(again.code, 1, "an existing file is never clobbered");
+        // --force is the way past, said on purpose.
+        if (Deno.build.os !== "windows") await Deno.chmod(tmp, 0o644);
+        const forced = await runAm(["snapshot", "save", tmp, "--force"]);
+        assertEquals(forced.code, 0);
+        // Over an existing file too — `mode` alone applies only on create.
+        if (Deno.build.os !== "windows") assertEquals(await modeOf(), 0o600);
+      });
+    } finally {
+      await dropTempDir(dir);
+    }
+  }));
 
 // A snapshot is `{ cellName: cellState }` — what `app.snapshot()` writes, and
 // the only shape every snapshot door now accepts (`snapshotShapeError`). This

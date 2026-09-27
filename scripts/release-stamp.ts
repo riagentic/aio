@@ -21,6 +21,8 @@ import { fromFileUrl, join } from "@std/path";
 
 const ROOT = fromFileUrl(new URL("../", import.meta.url));
 export const STAMP_PATH = ".aio/release-stamp.json";
+/** Rewritten by any `deno` run in the tree; hashed as committed. */
+export const LOCK_FILES = ["deno.lock", "amui/deno.lock"];
 
 export type ReleaseStamp = {
   /** `git write-tree` over the working tree (tracked + untracked, minus
@@ -55,6 +57,10 @@ export async function workingTreeHash(root = ROOT): Promise<string> {
   try {
     await run("read-tree", "HEAD");
     await run("add", "-A");
+    // The lock files as COMMITTED: the check's own test run rewrites them
+    // (and they are restored after), so the tree it ran on never matched the
+    // tree that gets tagged.
+    await run("reset", "-q", "HEAD", "--", ...LOCK_FILES);
     return await run("write-tree");
   } finally {
     await Deno.remove(index).catch(() => {

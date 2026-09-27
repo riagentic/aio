@@ -27,7 +27,13 @@ export type QueuedAction = { type: string; payload?: unknown; cid?: string };
  *
  *  It is deliberately NOT a field on the action: the action is the wire
  *  payload, and bookkeeping has no business travelling to the server. */
-export type QueuedEntry = { action: QueuedAction; seq: number };
+export type QueuedEntry = {
+  action: QueuedAction;
+  seq: number;
+  /** Server refusals this call was already re-sent after (a transport's
+   *  re-send cap) — kept across the queue so a reconnect cannot reset it. */
+  tries?: number;
+};
 
 /** ONE arrival clock for every offline queue in the process.
  *

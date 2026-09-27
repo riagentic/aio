@@ -124,3 +124,31 @@ Deno.test("1.3: visibilityReport — explicit cell filter wins over cellDefaults
     },
   ]);
 });
+
+Deno.test("visibilityReport — any part of a `visible` object decides the read side, per cell or app-wide", () => {
+  const pf = cell("pf", {
+    state: { key: 1 },
+    visible: { publicFields: ["key"] },
+    methods: {},
+  });
+  const fu = cell("fu", {
+    state: { key: 1 },
+    visible: { forUser: (s) => s },
+    methods: {},
+  });
+  // Fresh cells: applyCellDefaults writes into the cell, so the shared
+  // `counter` above is already decided by an earlier test's defaults.
+  const bare = () => cell("bare", { state: { key: 1 }, methods: {} });
+  const decided = (r: ReturnType<typeof reportOf>) =>
+    Object.fromEntries(r.map((row) => [row.cell, row.uiDecided]));
+  assertEquals(decided(reportOf([pf, fu, bare()])), {
+    pf: true,
+    fu: true,
+    bare: false,
+  });
+  // An app-wide `cellDefaults.visible` counts exactly as its structural form does.
+  assertEquals(
+    decided(reportOf([bare()], { visible: { publicFields: ["key"] } })),
+    { bare: true },
+  );
+});

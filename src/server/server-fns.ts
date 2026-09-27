@@ -20,6 +20,7 @@ import { cellAccessAllowed } from "./server-auth.ts";
 import type { AioUser } from "./aio-types.ts";
 import type { Access } from "../state/cell-types.ts";
 import { serializeReturn } from "../protocol/return-value.ts";
+import { errorFields } from "../protocol/envelope.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { _diagScopeNow } from "../diagnostics/diagnostic-bus.ts";
 import type { AioErrorCode } from "../diagnostics/error.ts";
@@ -263,8 +264,9 @@ export async function invokeServerFn(
     error: string;
     /** {@linkcode AioErrorCode} when this failure has a classification — it
      *  is spread straight into the `sfnr` frame, so the caller reads it with
-     *  `errorCode(err)`. Absent when the fn's own body threw: that error is
-     *  the APP's, and inventing a code for it would be a guess. */
+     *  `errorCode(err)`. When the fn's own body threw, the code is the one
+     *  that error CARRIES (an AioError it rethrew, a cell call's refusal) —
+     *  never an invented one for a plain app Error. */
     code?: string;
   }
 > {
@@ -297,7 +299,11 @@ export async function invokeServerFn(
   try {
     value = await fn(...args);
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    // The CODE travels with the message, as a cell method's ack carries it
+    // (docs/debugging/errors.md: a serverFn failing across a transport
+    // rejects with an Error carrying the code). Dropped, a serverFn that
+    // rethrew ACCESS_DENIED / ACTION_REFUSED reached its caller code-less.
+    return { ok: false, ...errorFields(e) };
   }
   // THE RESULT MUST BE WIRE-SAFE *HERE*, not at the two send sites.
   //

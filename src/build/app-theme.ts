@@ -69,40 +69,91 @@ const contrast = (a: number, b: number) =>
  *  is gone. A yellow app should look yellow, so the INK moves instead of the
  *  hue. Blues, purples and deep reds cannot carry dark ink at any lightness —
  *  those take white, and they stay saturated at the lightness white needs. */
-function accentFill(hue: number): { accent: string; onAccent: string } {
+function accentFill(
+  hue: number,
+): { accent: string; onAccent: string; fill: Hsl } {
   const ink = `hsl(${hue} 45% 11%)`;
   const inkLum = luminance(hue, 0.45, 0.11);
   for (let l = 64; l >= 50; l--) {
     if (contrast(luminance(hue, 0.82, l / 100), inkLum) >= 4.6) {
-      return { accent: `hsl(${hue} 82% ${l}%)`, onAccent: ink };
+      return {
+        accent: `hsl(${hue} 82% ${l}%)`,
+        onAccent: ink,
+        fill: [hue, 0.82, l / 100],
+      };
     }
   }
   const white = luminance(0, 0, 1);
   for (let l = 52; l >= 20; l--) {
     if (contrast(luminance(hue, 0.72, l / 100), white) >= 4.6) {
-      return { accent: `hsl(${hue} 72% ${l}%)`, onAccent: "#fff" };
+      return {
+        accent: `hsl(${hue} 72% ${l}%)`,
+        onAccent: "#fff",
+        fill: [hue, 0.72, l / 100],
+      };
     }
   }
-  return { accent: `hsl(${hue} 72% 20%)`, onAccent: "#fff" };
+  return {
+    accent: `hsl(${hue} 72% 20%)`,
+    onAccent: "#fff",
+    fill: [hue, 0.72, 0.2],
+  };
 }
 
-/** The accent as TEXT on `bgLum` — links, badge labels, active nav.
+/** The accent as TEXT on every background the theme puts it on — links on the
+ *  page and inside a `.card`/`dialog` (`--aio-surface`), `pre`/hovered rows
+ *  (`--aio-surface-2`), and the `.badge` label on `--aio-tint`.
  *
  *  A separate token from the fill, because they answer different questions: a
  *  fill is measured against its own label, text is measured against the page.
  *  Using one value for both is the standard way an accessible-looking palette
  *  ships unreadable links — a bright lime button is correct and bright lime
- *  link text on white is not. `dark` walks lightness the other way. */
-function accentInk(hue: number, bgLum: number, dark: boolean): string {
+ *  link text on white is not. `dark` walks lightness the other way. Solving it
+ *  against the page alone shipped a dark-mode `.badge` at 3.6:1 and card links
+ *  at 4.1:1 on over half the hue wheel. */
+function accentInk(hue: number, bgLums: number[], dark: boolean): string {
   const range = dark
     ? Array.from({ length: 45 }, (_, i) => 48 + i)
     : Array.from({ length: 45 }, (_, i) => 52 - i);
   for (const l of range) {
-    if (contrast(luminance(hue, 0.68, l / 100), bgLum) >= 4.6) {
+    const ink = luminance(hue, 0.68, l / 100);
+    if (bgLums.every((bg) => contrast(ink, bg) >= 4.6)) {
       return `hsl(${hue} 68% ${l}%)`;
     }
   }
   return dark ? `hsl(${hue} 68% 92%)` : `hsl(${hue} 68% 8%)`;
+}
+
+/** An HSL triple: h in degrees, s and l in 0..1. */
+type Hsl = readonly [number, number, number];
+
+/** Luminance of `color-mix(in oklab, a p, b)` — `--aio-tint` is one, and the
+ *  badge text sits on it. Oklab is a linear map of cube-rooted LMS, so the mix
+ *  is taken there and mapped straight back to linear sRGB. */
+function oklabMixLum(a: Hsl, b: Hsl, p: number): number {
+  const lms = ([h, s, l]: Hsl) => {
+    const [r, g, bl] = [0, 8, 4].map((n) => {
+      const k = (n + h / 30) % 12;
+      const v = l - s * Math.min(l, 1 - l) *
+          Math.max(-1, Math.min(k - 3, 9 - k, 1));
+      return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+    }) as [number, number, number];
+    return [
+      Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * bl),
+      Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * bl),
+      Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * bl),
+    ];
+  };
+  const A = lms(a), B = lms(b);
+  const [l, m, s] = A.map((x, i) => (x * p + B[i]! * (1 - p)) ** 3) as [
+    number,
+    number,
+    number,
+  ];
+  const c = (v: number) => Math.min(1, Math.max(0, v));
+  return 0.2126 * c(4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s) +
+    0.7152 * c(-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s) +
+    0.0722 * c(-0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s);
 }
 
 /** The default stylesheet for `name`, as one `@layer aio { … }` block. */
@@ -153,8 +204,8 @@ const TOKENS_END = "/* ── canvas ";
  *  or fighting a layout you did not ask for.
  *
  *  What "base" keeps is everything that makes an ELEMENT look right — the
- *  canvas, type, code, controls, tables, and the three environments (coarse
- *  pointer, reduced motion, print). What it drops is everything that decides
+ *  canvas, type, code, controls, tables, and the environments (coarse
+ *  pointer, reduced motion, high contrast, forced colours). What it drops is everything that decides
  *  where things GO: the `<main>` page container with its header/footer
  *  alignment, and the six layout classes. Those are the rules that move a box
  *  an app meant to place itself.
@@ -193,9 +244,23 @@ export function appThemeBaseCss(name: string): string {
 
 export function appThemeCss(name: string): string {
   const hue = appHue(name);
-  const { accent, onAccent } = accentFill(hue);
-  const inkLight = accentInk(hue, luminance(hue, 0.004, 0.99), false);
-  const inkDark = accentInk(hue, luminance(hue, 0.14, 0.09), true);
+  const { accent, onAccent, fill } = accentFill(hue);
+  // The backgrounds accent TEXT lands on, as the HSL the tokens below emit:
+  // bg, surface, surface-2, and the tint (10% fill over surface).
+  const lum3 = ([h, s, l]: Hsl) => luminance(h, s, l);
+  const surfL: Hsl = [0, 0, 1], surfD: Hsl = [hue, 0.12, 0.13];
+  const inkLight = accentInk(hue, [
+    lum3([hue, 0.4, 0.99]),
+    lum3(surfL),
+    lum3([hue, 0.3, 0.97]),
+    oklabMixLum(fill, surfL, 0.1),
+  ], false);
+  const inkDark = accentInk(hue, [
+    lum3([hue, 0.14, 0.09]),
+    lum3(surfD),
+    lum3([hue, 0.1, 0.17]),
+    oklabMixLum(fill, surfD, 0.1),
+  ], true);
   // Neutrals carry a few degrees of the accent's hue. A pure grey next to a
   // saturated accent reads as two unrelated palettes; a hue-tinted neutral
   // reads as one designed thing, and the tint is far too low to notice as
@@ -264,6 +329,17 @@ export function appThemeCss(name: string): string {
    without relative colour keeps white, as before. */
 @supports (color: color(from red srgb-linear calc(r * 0.5) g b)){:root{
   --aio-on-danger:color(from var(--aio-danger) srgb-linear calc(clamp(0, (1791 - (2126 * r + 7152 * g + 722 * b)) * 10, 1)) calc(clamp(0, (1791 - (2126 * r + 7152 * g + 722 * b)) * 10, 1)) calc(clamp(0, (1791 - (2126 * r + 7152 * g + 722 * b)) * 10, 1)));
+}}
+
+/* "prefers-contrast: more", the TOKEN half: inert custom properties, so it
+   belongs with the tokens every mode keeps — the kit and any app reading
+   var(--aio-border) get the high-contrast values in "tokens" mode too. The
+   rules that paint (focus ring, border width) stay in the visual half. */
+@media (prefers-contrast:more){:root{
+  --aio-border:var(--aio-text);
+  --aio-muted:var(--aio-text);
+  --aio-shadow-1:none;
+  --aio-shadow-2:none;
 }}
 
 /* ── canvas ─────────────────────────────────────────────────────── */
@@ -382,13 +458,24 @@ body{
   background:var(--aio-accent); color:var(--aio-on-accent);
   border-color:transparent;
 }
+/* Its hover rings it and keeps the fill, as the kit does: a mix toward a
+   fixed colour broke the label of an app that rebrands --aio-on-accent (the
+   documented recipe on a dark-ink app hovered at 3.62:1). The fill is
+   restated, not left alone: the base rule above is all :where() (0,0,0) and
+   the generic button hover is (0,2,0), so without it the grey hover wins and
+   the white label sits on near-white. Same for .danger below. */
 :where(button.primary,[type=submit]):hover:not(:disabled){
-  background:color-mix(in oklab,var(--aio-accent) 88%,#000);
+  background:var(--aio-accent);
+  box-shadow:0 0 0 2px color-mix(in oklab,var(--aio-accent) 35%,transparent);
 }
 :where(button.ghost){background:transparent; border-color:transparent; box-shadow:none}
 :where(button.ghost):hover:not(:disabled){background:var(--aio-surface-2)}
 :where(button.danger){
   background:var(--aio-danger); color:var(--aio-on-danger); border-color:transparent;
+}
+:where(button.danger):hover:not(:disabled){
+  background:var(--aio-danger);
+  box-shadow:0 0 0 2px color-mix(in oklab,var(--aio-danger) 35%,transparent);
 }
 :where(input,select,textarea):not([type=checkbox],[type=radio],[type=range],[type=file]){
   width:100%; padding:.5em .7em; background:var(--aio-surface);
@@ -488,12 +575,8 @@ body{
       Borders go to the ink colour, muted text stops being muted, and the
       focus ring gets thick enough to find. */
 @media (prefers-contrast:more){
-  :root{
-    --aio-border:var(--aio-text);
-    --aio-muted:var(--aio-text);
-    --aio-shadow-1:none;
-    --aio-shadow-2:none;
-  }
+  /* (Its token half — border/muted to ink, no shadows — sits with the other
+     tokens above the canvas banner, so "tokens" mode gets it too.) */
   :where(a,button,input,select,textarea,summary,[tabindex]):focus-visible{
     outline-width:3px; outline-offset:3px;
   }

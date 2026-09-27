@@ -392,12 +392,12 @@ sync: {
 }
 ```
 
-| Status    | Meaning                                |
-| --------- | -------------------------------------- |
-| `online`  | Connected, ops flowing                 |
-| `offline` | Disconnected, ops queued locally       |
-| `syncing` | Reconnection handshake in progress     |
-| `blocked` | Hit 500 pending cap, cannot queue more |
+| Status    | Meaning                                                                                  |
+| --------- | ---------------------------------------------------------------------------------------- |
+| `online`  | Connected, ops flowing                                                                   |
+| `offline` | Disconnected, ops queued locally                                                         |
+| `syncing` | Reconnection handshake in progress                                                       |
+| `blocked` | Hit 500 pending cap, cannot queue more — until an op leaves the queue (acked or refused) |
 
 ## Callbacks
 

@@ -29,6 +29,7 @@ import {
   send,
   trackPath,
 } from "../state-core.ts";
+import { clientHookSlice } from "../state/cell-reactive.ts";
 
 /** Subscribe to the full app state. Prefer direct cell access
  *  (`counter.count` — reactive, scoped) over the full-state proxy. */
@@ -56,26 +57,33 @@ export function useAio<
   const sig = getStateSignal();
   const readySig = getReadySignal();
 
+  // Every slice goes through the CLIENT read seam (`clientHookSlice`), as
+  // `cell.field` does. Under testUI this signal holds the SERVER's state, so
+  // the raw read handed a component every `visible`-hidden field and every
+  // `visible: "none"` cell; over a socket it is a no-op re-projection.
+  const slice = (prop: string): unknown =>
+    clientHookSlice(prop, (sig.value as Record<string, unknown>)[prop]);
   const state = new Proxy({} as S, {
     get(_target, prop: string | symbol): unknown {
       if (typeof prop === "symbol") return undefined;
-      return (sig.value as Record<string, unknown>)[prop as string];
+      return slice(prop);
     },
     ownKeys(): string[] {
-      return Object.keys(sig.value);
+      return Object.keys(sig.value).filter((k) => slice(k) !== undefined);
     },
     has(_target, prop: string | symbol): boolean {
       if (typeof prop === "symbol") return false;
-      return prop in sig.value;
+      return prop in sig.value && slice(prop) !== undefined;
     },
     getOwnPropertyDescriptor(
       _target,
       prop: string | symbol,
     ): PropertyDescriptor | undefined {
       if (typeof prop === "symbol") return undefined;
-      const s = sig.value;
-      if (!(prop in s)) return undefined;
-      return { configurable: true, enumerable: true, value: s[prop as string] };
+      if (!(prop in sig.value)) return undefined;
+      const value = slice(prop);
+      if (value === undefined) return undefined;
+      return { configurable: true, enumerable: true, value };
     },
   });
 

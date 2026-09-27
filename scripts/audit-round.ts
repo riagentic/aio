@@ -236,14 +236,31 @@ async function round1(r: () => number): Promise<void> {
     const ce = out.headers.get("Content-Encoding");
     if (method === "HEAD") {
       // Deno's HTTP layer drops a HEAD body itself (verified), so a
-      // body-bearing Response here is harmless. What matters is that a HEAD
-      // never advertises an encoding a GET would not have sent, and never
-      // advertises a length that is not the identity length.
-      if (ce) finding("1", `HEAD advertised ${ce}`);
-      const hl = out.headers.get("Content-Length");
-      if (hl !== null && Number(hl) !== enc.encode(body).length) {
-        finding("1", `HEAD Content-Length ${hl} != ${enc.encode(body).length}`);
+      // body-bearing Response here is harmless. What matters (RFC 9110 §9.3.2)
+      // is that a HEAD advertises exactly what the same GET sends: its
+      // encoding and its length — never an encoding or a size the GET would
+      // not have.
+      const get = await encodeResponse(
+        new Request("http://x/probe", {
+          headers: ae ? { "Accept-Encoding": ae } : {},
+        }),
+        new Response(body, { headers }),
+      );
+      const getLen = get.headers.get("Content-Length") ??
+        String((await get.arrayBuffer()).byteLength);
+      if (ce !== get.headers.get("Content-Encoding")) {
+        finding(
+          "1",
+          `HEAD advertised ${ce}, GET sent ${
+            get.headers.get("Content-Encoding")
+          }`,
+        );
       }
+      const hl = out.headers.get("Content-Length");
+      if (hl !== null && hl !== getLen) {
+        finding("1", `HEAD Content-Length ${hl} != GET's ${getLen}`);
+      }
+      await get.body?.cancel().catch(() => {});
       await out.body?.cancel();
       continue;
     }

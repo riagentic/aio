@@ -99,7 +99,15 @@ testUI(App, "add a todo end-to-end", async (ui) => {
     `display: none`, `visibility: hidden`, the `hidden` attribute, on the
     element or on any ancestor, and `<input type="hidden">`;
   - typing into anything that is not an `<input>`/`<textarea>` (a `<div>` has no
-    value; `contenteditable` is not driven), or past its `maxLength`.
+    value; `contenteditable` is not driven), or past its `maxLength`;
+  - pressing a key no keyboard sends — `press("hyper+k")`, `press("")`,
+    `press("a+")`. The spellings people write DO press the key they mean, the
+    same as on `am trigger`: `"enter"` → `"Enter"`, `"esc"` → `"Escape"`,
+    `"space"` → `" "`, `"up"` → `"ArrowUp"`, and chords (`"ctrl+k"`,
+    `"shift+Enter"`, `"meta+alt+x"`) set the modifiers, merged with any you
+    pass. `"mod+k"` is ⌘K when `ui.window.navigator.platform` is Apple's and
+    Ctrl+K otherwise (happy-dom reports Linux); a modifier alone (`"Shift"`)
+    presses that modifier.
 
   Assert the state instead (`.disabled`, `.readonly`). The same rules apply to
   `am trigger` — one implementation serves both tiers (`src/air/ui-trigger.ts`),
@@ -238,6 +246,29 @@ landed, and prints a warning naming any call still in flight, because the reset
 orphans that call and its outcome can no longer be seen. Await the call, or
 `await h.settle()` before teardown, when the outcome matters.
 
+### A call from a disposed mount is refused, naming what started it
+
+Cells are module singletons, so work a mount started can outlive its dispose: an
+async method still awaiting, or a real `setTimeout`/`setInterval` (an idle lock,
+a poll) that fires during a LATER test. Its cell call is refused — never
+committed into the later mount — with
+`"x:y" was dispatched into a torn-down runtime (boot #N, booted at …; K since)`,
+and the message names what started it: `inside "x:load"` for a method's own
+async body, `setTimeout armed at App.tsx:158:12` for a timer, with the method it
+was armed in when there was one. Every real timer app or test code arms while a
+mount is live runs in a mount's fence: the mount that was active when it was
+armed — rendering, running its method, or driven by its handle (its queued
+clicks/types, `settle`/`waitFor`) — and a timer armed inside an attributed timer
+inherits its mount. Only a timer the test body arms with no mount active goes to
+the outermost live mount, so one armed between calls inside a nested `testUI`
+still reaches the outer mount after the inner one closes, while one the inner
+mount's component armed is refused there. A timer that never calls a cell keeps
+running as it would in the app, and nothing is cancelled. From a timer the
+refusal is the call's rejection (`.catch` sees it); left unobserved, it fails
+the live mount's next `settle()` or teardown, so it can fail a later test: the
+named line is the one to fix — clear the timer in `onCleanup`, or await the work
+before dispose.
+
 ### Testing an authenticated app (`user`)
 
 An app that opens with `useUser()` renders `<SignIn/>` for `null` — so without
@@ -364,12 +395,28 @@ re-renders on Back exactly as it does in a browser. The same objects are on the
 handle: `ui.window` and `ui.document`. Use them for what the component's own
 code would reach — `ui.window.dispatchEvent(new ui.window.Event("resize"))`,
 `ui.document.activeElement`, a listener registered where the component's one
-lives. `localStorage` is a fresh in-memory store per mount — or, where the host
-already has one (Deno's is on disk), cleared per mount. `{ persist: true }`
-keeps it: its mounts share one key for the whole run (never a previous run's
-entry), and dispose flushes the pending save, so the next `{ persist: true }`
-mount restores what the last one ended with (a hermetic mount in between clears
-it). Nothing is installed twice: a `document` you pass in is used as-is.
+lives. `localStorage` is a fresh in-memory store per mount. Where the host
+already has one (Deno's is on disk, one per project, shared by every test file
+and `--parallel` process) the same object reads and writes the mount's store
+while the mount is live, and the host's own data once the last mount is gone —
+never cleared, so another file's data survives, and a `const ls = localStorage`
+taken at import time is isolated per mount too. Enumerating the global
+(`Object.keys`, `for…in`, `length`, `key(i)`) lists only the mount's keys; on a
+reference taken before the mount, `length` and `key(i)` do too, but
+`Object.keys` still lists the host's (Deno's native store owns that answer). To
+fake a storage failure, stub the prototype —
+`stub(Storage.prototype, "setItem", () => { throw new DOMException("full", "QuotaExceededError"); })`
+— which both references answer with. Stubbing a method on the instance
+(`stub(localStorage, "setItem", …)`) throws: in a browser it only stores an item
+named "setItem", so the test would silently run the happy path. A prototype stub
+works made before or after `testUI()`; a `spy` that calls through does not work
+if made before it — the real method it wraps can only write the host's store —
+so it throws, telling you to create the spy after mounting. `{ persist: true }`
+uses the host store: its mounts share one key for the whole run (never a
+previous run's entry), and dispose flushes the pending save, so the next
+`{ persist: true }` mount restores what the last one ended with (a hermetic
+mount in between clears it). Nothing is installed twice: a `document` you pass
+in is used as-is.
 
 There is no HTTP server under `testUI`, so a component's relative
 `fetch("/media/x.txt")` fails — with an error that says so and points to
@@ -889,6 +936,23 @@ m.clients[1].patches; // every { op, path, value } received; a full-state
 //                        resend is one `replace` at the empty path
 m.clients[1].onPatch((batch) => {/* live */});
 ```
+
+A change whose delta is over 50% of the full state's size ships as that
+full-state `replace` instead of a field patch — so on a toy cell like
+`{ count: 0 }` EVERY change does, and the `waitForPatch` above times out listing
+root replaces. Assert a field path on a realistically sized state (the pinned
+test pads it: `tests/multi-client-patches.test.ts`), or match
+`p.path.length === 0` and read `p.value`.
+
+`clients[i].dispatch` resolves on the first of: the server's ack for that
+action, a patch while it is that client's only dispatch in flight, or a 250 ms
+no-op grace that also runs only while it is alone. It never rejects, so a
+long-running method (a poller), one that waits on a peer's action, and a refused
+one all resolve. Of several concurrent dispatches, each waits for its own ack,
+never another's patch or the grace; a 5 s ceiling resolves one that is never
+acked, so concurrent peer-waiting methods cannot hang the test. For the strict
+form — resolve with the return value, reject on a throw or refusal — use
+`clients[i].call(cell, method, ...args)`.
 
 A hidden field (`visible.exclude`) is asserted the honest way — no patch carries
 it — rather than by the client's state merely lacking it.

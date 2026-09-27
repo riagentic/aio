@@ -369,6 +369,7 @@ export const BRIEF_API: readonly { entry: string; names: readonly string[] }[] =
         "afterRender",
         "onWindowEvent",
         "onGlobalKey",
+        "onBackButton",
         "Show",
         "lazy",
         "Defer",
@@ -655,7 +656,7 @@ export const BRIEF_RUN_KEYS: readonly {
       "wsLimits",
       "maxConnections",
       "childWindows",
-      "electron { requireSandbox, unsandboxedChildWindows }",
+      "electron { requireSandbox, unsandboxedChildWindows, permissions }",
     ],
   },
   { group: "ui", keys: ["ui (below)"] },
@@ -986,10 +987,13 @@ ${show(APP_TSX)}
   <form onSubmit> auto-prevents default (data-native-submit opts out) · style={{ fontSize: 14 }} ·
   key on lists · ref callback or useRef · aria-x={false} removes the attribute · t="name" = handle
   for testUI + am surface (stripped)
+- **attribute names** React's camelCase: autoComplete readOnly maxLength tabIndex htmlFor (or for)
+  onInput · NO: autocomplete= (type error) · class or className · data-x/aria-x stay hyphenated
 - **hooks (aio/air)** useLocal useSignal useRef useId createContext/useContext resource/useResource
   onChange watch computed effect batch untrack trackedMemo useHead({ title }) useDimensions useRaf
   useInterval useOptimistic useVirtualList useConnected useUser onMount onCleanup afterRender
-  onWindowEvent onGlobalKey("ctrl+k", fn) — hooks in call order, never behind an if
+  onWindowEvent onGlobalKey("ctrl+k", fn) onBackButton (Android Back; returns a disposer) — hooks in
+  call order, never behind an if
 - **components** <Show when={x} fallback={…}>{(v) => …}</Show> · lazy(() => import("./X.tsx")) ·
   <Defer trigger="viewport" load={…}> · <Transition> · ErrorBoundary/Suspense/Portal are symbols:
   NO: <ErrorBoundary> (TS2604) YES: h(ErrorBoundary, { fallback: (e: Error) => <p>{e.message}</p> }, <Kid/>)
@@ -1251,6 +1255,10 @@ const SHIP = `## SHIP — build targets, versions, releases
   cross-compile; electron/android package on their own OS (skipped with a reason)
 - **commands** deno task compile (the default "client" target) · deno task build [--targets=a,b]
   [--platforms=linux,windows] [--release] [--list] · am build electron android
+- **standalone APK** (android) = the bundle of App.tsx + the cells it imports — NO Deno, NO server:
+  nothing given to aio.run reaches it, *.server.ts is refused · content → deno.json "assets"
+  ({ "/text": "./text" }) + a RELATIVE fetch("text/a.md") (desktop: the mount; APK: packaged under
+  the page) · persistence → cells (AioNativeStore, survives a kill) · Back → onBackButton(() => bool)
 - **artifacts** dist/<name>-<M.m.build>[-dirty.<hash8>] + dist/manifest.json · <binary> --version
 - **version** deno.json "version": "M.m" ONLY; build = git commit count; uncommitted → -dirty (commit
   before a release) · AIO_BUILD_VERSION overrides
@@ -1268,6 +1276,7 @@ const SHIP_MIN = `## SHIP
 - deno task compile → dist/<name>-<M.m.build> (+ manifest.json); run it from ANOTHER cwd before
   calling it done · deno task build [--targets=…] for every target · am publish for releases
 - a binary is prod: no am state/dispatch/surface (status/health/logs work) · --expose = LAN + TLS + PIN
+- standalone APK: no Deno, no server — content = deno.json "assets" + relative fetch; state = cells
 - more: am agent --task=ship`;
 
 const PRACTICE = `## PRACTICE — how an expert writes aio
@@ -1396,8 +1405,8 @@ const AUTH = `## AUTH — who may connect, who may call, who sees what
 - **tokens** users: { "<token>": { id: "ann", role: "admin" } } · resolveUser: (token, state) => user |
   null | Promise (wins over users) · sessions: true | { ttlMs }
 - **accounts** auth: true | { signup, ttlMs, cookie, totp, oidc: { issuer, clientId, clientSecret,
-  role }, requireVerified, sendMail } → /__aio/auth/{signup,login,logout,me,totp,verify,reset,
-  password,oidc/start}; lockout 5 tries/15 min
+  role, signup }, requireVerified, sendMail } → /__aio/auth/{signup,login,logout,me,totp,verify,
+  reset,password,oidc/start}; lockout 5 tries/15 min
 - **client** <SignIn /> · useUser() (undefined = loading, null = anonymous) · signOut() (aio/air) ·
   authClient.login/signup/logout/me/changePassword/totpSetup (aio)
 - **server** serverUser() → { id, role, … } | undefined · serverRequest() → { ip, headers, cookies,

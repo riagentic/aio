@@ -17,6 +17,7 @@ import type { NotifyEffect } from "./notify.ts";
 import { _diagScopeNow, diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { markInflight } from "./dispatch.ts";
+import { armLong } from "./timer-ceiling.ts";
 
 // Internal method types — `any` at spread args/return is unavoidable when
 // mapping over heterogeneous method signatures at the type-system boundary.
@@ -286,7 +287,7 @@ function _armCallTimer(fn: () => void, ms: number): CallTimer {
   let endGrace: (() => void) | undefined;
   const clear = (): void => {
     done = true;
-    clearTimeout(real);
+    clearReal();
     if (grace !== undefined) clearTimeout(grace);
     if (v && vh !== undefined) v.clearTimeout(vh);
     // A call that settles inside its grace releases the clock at once.
@@ -297,7 +298,7 @@ function _armCallTimer(fn: () => void, ms: number): CallTimer {
     clear();
     fn();
   };
-  const real = setTimeout(fire, ms);
+  const clearReal = armLong(fire, ms);
   if (v) {
     vh = v.setTimeoutAwaited(
       () =>
@@ -849,6 +850,8 @@ export function _cloneAcrossWorkerBoundary(
   try {
     return structuredClone(value);
   } catch (e) {
+    const identity = _workerUserCloneError(value, cellId);
+    if (identity) throw identity;
     throw new Error(
       `cell "${cellId}" is a worker cell, and its ${what} cannot cross a ` +
         `worker boundary: ${e instanceof Error ? e.message : String(e)}.\n` +
@@ -856,6 +859,42 @@ export function _cloneAcrossWorkerBoundary(
         `— in production it is reached by postMessage and this throws. ` +
         `Pass plain data (no functions, class instances, or live cell ` +
         `proxies); \`{ ...obj }\` off a proxy is already materialised.`,
+    );
+  }
+}
+
+/** The refusal for an action whose CALLER IDENTITY (`_user`) cannot cross a
+ *  worker boundary, or null when `_user` is absent or clones fine.
+ *
+ *  A worker cell's method runs under the action's own `_user` — the full
+ *  object `resolveUser`/`users`/the auth flows produced, exactly what
+ *  `serverUser()` returns in-isolate — so it rides the action through
+ *  `postMessage`. When it cannot, the call is refused rather than run under a
+ *  trimmed `{ id, role }`: a silently thinner identity is an authorization
+ *  input that differs by where the cell happens to run. And the refusal names
+ *  the identity, because the generic "action payload" wording sends the reader
+ *  to the method's arguments, which are fine. Shared by the real bridge
+ *  (cell-worker.ts) and every in-isolate boundary, so both say the same.
+ *  @internal */
+export function _workerUserCloneError(
+  action: unknown,
+  cellId: string,
+): Error | null {
+  const user = (action as { _user?: unknown } | null)?._user;
+  if (user === undefined) return null;
+  try {
+    structuredClone(user);
+    return null;
+  } catch (e) {
+    return new Error(
+      `cell "${cellId}" is a worker cell, and the caller's user object ` +
+        `(\`_user\` — what resolveUser/users returned for this connection) ` +
+        `cannot cross a worker boundary: ` +
+        `${e instanceof Error ? e.message : String(e)}.\n` +
+        `The method runs in its worker under that SAME object — serverUser() ` +
+        `answers there exactly as in-isolate — so it must be plain data. ` +
+        `Return a plain object from resolveUser (no functions, class ` +
+        `instances, or handles), and look richer things up from its id.`,
     );
   }
 }
@@ -2948,6 +2987,9 @@ export function createLiveProxy<S extends Record<string, unknown>>(
               // loop rebuilt it ten thousand times.
               const childPrefix = pathKey + PATH_SEP;
               for (let i = 0; i < arr.length; i++) {
+                // A hole stays a hole: `reduce`/`forEach`/`map`/… skip it on a
+                // plain array, and assigning `undefined` here made them visit.
+                if (!Object.hasOwn(arr, i)) continue;
                 const el = arr[i];
                 if (el === null || typeof el !== "object") {
                   live[i] = el;

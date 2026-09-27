@@ -336,7 +336,12 @@ export async function runCompile(
     return { success: false };
   }
   try {
-    console.log(`build.minify: ${st.modules} server modules minified`);
+    // The trade-off, said where it is made: a server error's line:column now
+    // points into the minified text (function names are kept).
+    console.log(
+      `build.minify: ${st.modules} server modules minified — server stack ` +
+        `traces keep function names, but line:column point into minified code`,
+    );
     return await run(st.argv, st.cwd);
   } finally {
     await st.dispose();

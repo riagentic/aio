@@ -348,6 +348,10 @@ function keyEv(
     code,
     ...legacy,
     ...mods,
+    // Releasing a modifier: a browser's keyup of Shift says shiftKey:false.
+    ...(name === "keyup" && /^(Shift|Alt|Meta|Control)$/.test(key)
+      ? { [key === "Control" ? "ctrlKey" : key.toLowerCase() + "Key"]: false }
+      : {}),
   };
   const e = w.KeyboardEvent
     ? new w.KeyboardEvent(name, init)

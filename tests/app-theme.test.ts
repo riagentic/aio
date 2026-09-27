@@ -191,3 +191,103 @@ Deno.test("theme: generated numbers carry no float noise", () => {
     assertEquals(noisy, [], `${name}: unrounded float in generated CSS`);
   }
 });
+
+// ── accent TEXT on every surface the theme itself puts it on ─────────────
+//
+// `--aio-accent-ink` was solved against `--aio-bg` alone, but the theme also
+// paints it on a `.card`/`dialog` (surface), `pre`/hovered rows (surface-2)
+// and as the `.badge` label on `--aio-tint`. Dark mode shipped the badge at
+// 3.6:1 and card links at 4.1:1 on over half the wheel; light badges were
+// 4.2:1. And a hovered accent button darkened a fill that carries DARK ink,
+// dropping its label to 3.4:1 on a third of the wheel.
+
+/** `hsl()` / `#fff` / `#000` → sRGB 0..1. */
+function rgb(css: string): number[] {
+  if (css === "#fff") return [1, 1, 1];
+  if (css === "#000") return [0, 0, 0];
+  const m = /hsl\(([\d.]+) ([\d.]+)% ([\d.]+)%\)/.exec(css);
+  if (!m) throw new Error(`not a colour: ${css}`);
+  const [h, s, l] = [+m[1]!, +m[2]! / 100, +m[3]! / 100];
+  const a = s * Math.min(l, 1 - l);
+  return [0, 8, 4].map((n) => {
+    const k = (n + h / 30) % 12;
+    return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+  });
+}
+const toLin = (v: number) =>
+  v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+const rgbLum = (c: number[]) =>
+  0.2126 * toLin(c[0]!) + 0.7152 * toLin(c[1]!) + 0.0722 * toLin(c[2]!);
+/** CSS `color-mix(in oklab, a p, b)`, back to sRGB (clamped). */
+function mixOklab(a: number[], b: number[], p: number): number[] {
+  const fwd = (c: number[]) => {
+    const [r, g, bl] = c.map(toLin) as [number, number, number];
+    const l = Math.cbrt(
+      0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * bl,
+    );
+    const m = Math.cbrt(
+      0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * bl,
+    );
+    const s = Math.cbrt(
+      0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * bl,
+    );
+    return [
+      0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
+      1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
+      0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s,
+    ];
+  };
+  const A = fwd(a), B = fwd(b);
+  const [L, x, y] = A.map((v, i) => v * p + B[i]! * (1 - p)) as [
+    number,
+    number,
+    number,
+  ];
+  const l = (L + 0.3963377774 * x + 0.2158037573 * y) ** 3;
+  const m = (L - 0.1055613458 * x - 0.0638541728 * y) ** 3;
+  const s = (L - 0.0894841775 * x - 1.291485548 * y) ** 3;
+  const enc = (v: number) => {
+    v = Math.min(1, Math.max(0, v));
+    return v <= 0.0031308 ? v * 12.92 : 1.055 * v ** (1 / 2.4) - 0.055;
+  };
+  return [
+    enc(4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s),
+    enc(-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s),
+    enc(-0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s),
+  ];
+}
+const cr = (a: number[], b: number[]) => ratio(rgbLum(a), rgbLum(b));
+
+Deno.test("theme: accent text and labels clear AA on every surface", () => {
+  const seen = new Set<number>();
+  for (let i = 0; seen.size < 360 && i < 20_000; i++) {
+    const name = `surface-probe-${i}`;
+    const hue = appHue(name);
+    if (seen.has(hue)) continue;
+    seen.add(hue);
+    const css = appThemeCss(name);
+    const accent = rgb(token(css, "--aio-accent", "light"));
+    const onAccent = rgb(token(css, "--aio-on-accent", "light"));
+    // Rest, hover, active and focus all show this same fill — measured in a
+    // real cascade by tests/app-theme-hover-chromium.test.ts.
+    const lr = cr(accent, onAccent);
+    assert(lr >= 4.5, `hue ${hue}: accent label ${lr.toFixed(2)}:1`);
+    for (const block of ["light", "dark"] as const) {
+      const ink = rgb(token(css, "--aio-accent-ink", block));
+      const surface = token(css, "--aio-surface", block);
+      const bgs = {
+        surface: rgb(surface),
+        "surface-2": rgb(token(css, "--aio-surface-2", block)),
+        "tint (.badge)": mixOklab(accent, rgb(surface), 0.1),
+      };
+      for (const [what, bg] of Object.entries(bgs)) {
+        const r = cr(ink, bg);
+        assert(
+          r >= 4.5,
+          `hue ${hue} ${block}: accent text on ${what} is ${r.toFixed(2)}:1`,
+        );
+      }
+    }
+  }
+  assertEquals(seen.size, 360, "the probe covered the whole wheel");
+});

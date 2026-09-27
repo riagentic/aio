@@ -58,6 +58,22 @@ export function _appHref(to: string): string {
   return _base && to.startsWith("/") && !to.startsWith("//") ? _base + to : to;
 }
 
+/** Where `to` leads from the page at `from`: an app-absolute path under the
+ *  route base, anything else by URL rules (so `api` from `/docs/x` is
+ *  `/docs/api`). The ONE resolver `navigate` and `<Link>`'s active state
+ *  share — a Link that compared the raw `to` was never active on the page a
+ *  relative `to` navigates to. Throws on a string no URL can be made of.
+ *  @internal */
+export function _resolveTo(to: string, from: string | URL): URL {
+  return new URL(_appHref(to), from);
+}
+
+/** A same-origin URL's path as `routePath` spells it: relative to the route
+ *  base. @internal */
+export function _routePathOf(url: URL): string {
+  return _relative(url.pathname);
+}
+
 /** The current route base — "" unless a packaged shell installed one. */
 // aio-ok: test seam — read by tests/standalone-router.test.tsx (route base adoption)
 export function _getRouteBase(): string {
@@ -263,7 +279,8 @@ function _pathForMatch(path: string): string {
       const hex = tok.slice(1).toUpperCase();
       if (hex === "2F" || hex === "25") {
         flush();
-        out += tok;
+        // Kept escaped, in ONE spelling: `%2f` and `%2F` are the same octet.
+        out += "%" + hex;
       } else {
         pending += tok;
       }
@@ -349,7 +366,7 @@ export function navigate(
   let url: URL;
   try {
     // An app-absolute path is relative to the route base, never to the origin.
-    url = new URL(_appHref(to), location.href);
+    url = _resolveTo(to, location.href);
   } catch {
     console.error(`[aio:navigate] Invalid URL: ${to}`);
     return;

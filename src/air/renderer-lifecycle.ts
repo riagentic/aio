@@ -562,7 +562,11 @@ export function useId(): string {
 
 /**
  * Optimistic UI hook. Shows an immediate update while an async action runs,
- * then reverts to the real state when it completes (success or failure).
+ * cleared when `passthrough` changes — not when a call fails (a failed call
+ * changes nothing).
+ *
+ * To drop the overlay on failure, fold a refusal count into `passthrough`
+ * (see docs/ui/air-lifecycle.md).
  *  @tier Advanced */
 export function useOptimistic<T, A = T>(
   passthrough: T,
@@ -571,6 +575,11 @@ export function useOptimistic<T, A = T>(
   const pendingRef = useRef<A[]>([]);
   const version = useSignal(0);
 
+  // The ONLY clearing rule. The hook never sees the call, so it cannot know
+  // one failed — the docs once promised it clears on failure, and it never
+  // did. Taking the call (`addOptimistic(a, call)`) would reshape the frozen
+  // public signature; the documented answer is a passthrough that also
+  // changes on refusal.
   const prevRef = useRef<T>(passthrough);
   if (passthrough !== prevRef.current) {
     prevRef.current = passthrough;

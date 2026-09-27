@@ -128,13 +128,19 @@ Deno.test('ui.theme: "auto" + style.css → every visual default steps aside', (
   }
   // The inert palette remains, and so does the app's own sheet.
   assertStringIncludes(doc, "--aio-accent:");
-  assertStringIncludes(doc, '<link rel="stylesheet" href="/style.css">');
+  assertStringIncludes(
+    doc,
+    '<link rel="stylesheet" href="/style.css" data-aio-app-css>',
+  );
 });
 
 Deno.test('ui.theme: "full" keeps the look alongside the app CSS', () => {
   const doc = html({ hasCSS: true, theme: "full" });
   for (const v of VISUAL) assertStringIncludes(doc, v);
-  assertStringIncludes(doc, '<link rel="stylesheet" href="/style.css">');
+  assertStringIncludes(
+    doc,
+    '<link rel="stylesheet" href="/style.css" data-aio-app-css>',
+  );
 });
 
 Deno.test('ui.theme: "none" emits neither half, with or without app CSS', () => {

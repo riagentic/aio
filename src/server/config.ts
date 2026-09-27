@@ -12,6 +12,7 @@ import {
 import { classifySource } from "./updates-core.ts";
 import { declaredMaxHeapOf } from "./heap-policy.ts";
 import { type Removal, removalsInDenoJson } from "../state/removals.ts";
+import { MAX_TIMER_DELAY } from "../state/timer-ceiling.ts";
 
 // Runtime config validation & documentation — extracted from aio.ts (AIO-52)
 // Types are erased at runtime. These sets are the runtime source of truth.
@@ -554,7 +555,7 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
   ],
   electron: [
     "{}",
-    "the Electron process's own security decisions — { requireSandbox } refuses to launch rather than fall back to --no-sandbox, { unsandboxedChildWindows } lets openWindow ask for sandbox:false; both default to what aio has always done",
+    "the Electron process's own security decisions — { requireSandbox } refuses to launch rather than fall back to --no-sandbox, { unsandboxedChildWindows } lets openWindow ask for sandbox:false, { permissions } is the app page's exact permission allow-list (guests then get none); all default to what aio has always done",
   ],
   libraryMode: [
     "false",
@@ -1027,6 +1028,19 @@ export function validateConfig(
   // The SHAPE — see `refuseWrongShapes`, which `aio.run()` also calls before
   // the plugin merge, because by here the merge has already read these keys.
   refuseWrongShapes(obj, label, exit);
+  // A misspelled permission is an app that believes it granted (or denied)
+  // something it did not — refused like any other unknown word.
+  const badPerm = label === "electron"
+    ? electronPermissionsRefusal(obj.permissions)
+    : null;
+  if (badPerm) {
+    log.error(teachMessage(
+      badPerm,
+      'use Electron\'s permission names, each scoped ["app"]',
+      "docs/clients/webview.md",
+    ));
+    exit(1);
+  }
   // ── Couplings between keys that are each individually valid ──────────
   //
   // ── Nested objects, validated as configs in their own right ─────────
@@ -1188,6 +1202,80 @@ export const NUMERIC_VALUES: Record<string, NumericSpec> = {
   },
 };
 
+/** The config's timer delays, clamped to setTimeout's int32 ceiling.
+ *
+ *  Past `MAX_TIMER_DELAY` (≈ 24.8 days) a delay fires in ~1 ms: a 30-day
+ *  `syncIntervalMs` broadcast every millisecond, a 30-day `effectTimeoutMs`
+ *  abandoned every async method at once and the page rejected every call.
+ *  Each of these booted before, so it is clamped — "almost never" is what the
+ *  app asked for — and said, rather than refused. Called by
+ *  `buildLegacyConfig`, where aio.run's config is normalised. Pure apart from
+ *  the warning; returns a copy. */
+export function clampTimerDelays<
+  C extends {
+    effectTimeoutMs?: number;
+    syncIntervalMs?: number;
+    persistDebounceMs?: number;
+    perfBudget?: {
+      methods?: Record<string, { timeout?: number | "warn" } | undefined>;
+    };
+  },
+>(c: C): C {
+  const over: string[] = [];
+  const clamp = <T>(key: string, v: T): T => {
+    if (typeof v !== "number" || v <= MAX_TIMER_DELAY) return v;
+    over.push(`${key}: ${v}`);
+    return MAX_TIMER_DELAY as T;
+  };
+  const out = { ...c };
+  for (
+    const k of [
+      "effectTimeoutMs",
+      "syncIntervalMs",
+      "persistDebounceMs",
+    ] as const
+  ) {
+    if (c[k] !== undefined) out[k] = clamp(k, c[k]);
+  }
+  const methods = c.perfBudget?.methods;
+  if (methods) {
+    // NaN (`Number(env)` unset) is not a ceiling: the page armed it as ~1 ms
+    // and rejected every call. The top-level keys are refused by
+    // NUMERIC_VALUES; this nested one had no check, so it falls back to the
+    // default ceiling, said.
+    const notANumber = (m: string, t: number | "warn"): boolean => {
+      if (!Number.isNaN(t)) return false;
+      log.warn(
+        `perfBudget.methods["${m}"].timeout: NaN is not a number of ` +
+          `milliseconds; using the default ceiling (effectTimeoutMs)`,
+      );
+      return true;
+    };
+    out.perfBudget = {
+      ...c.perfBudget,
+      methods: Object.fromEntries(
+        Object.entries(methods).map(([m, b]) => [
+          m,
+          b?.timeout === undefined ? b : {
+            ...b,
+            timeout: notANumber(m, b.timeout)
+              ? undefined
+              : clamp(`perfBudget.methods["${m}"].timeout`, b.timeout),
+          },
+        ]),
+      ),
+    };
+  }
+  if (over.length > 0) {
+    log.warn(
+      `${over.join(", ")} — longer than a timer can wait ` +
+        `(${MAX_TIMER_DELAY}ms ≈ 24.8 days), which would fire in ~1 ms; ` +
+        `using ${MAX_TIMER_DELAY}ms`,
+    );
+  }
+  return out;
+}
+
 /** Config keys whose value is an object validated in its own right, and the
  *  key allowlist for each.
  *
@@ -1222,7 +1310,89 @@ export const NESTED_CONFIGS: Record<string, () => Set<string>> = {
 export const VALID_ELECTRON_KEYS: Set<string> = new Set([
   "requireSandbox",
   "unsandboxedChildWindows",
+  "permissions",
 ]);
+
+/** Every permission name Electron's session handlers are asked about — the
+ *  union in electron.d.ts (Electron 44), and the names `electron.permissions`
+ *  accepts. Camera and microphone are both `media`. */
+export const ELECTRON_PERMISSIONS = [
+  "ar",
+  "automatic-fullscreen",
+  "background-fetch",
+  "background-sync",
+  "captured-surface-control",
+  "clipboard-read",
+  "clipboard-sanitized-write",
+  "deprecated-sync-clipboard-read",
+  "display-capture",
+  "fileSystem",
+  "fullscreen",
+  "geolocation",
+  "geolocation-approximate",
+  "hand-tracking",
+  "hid",
+  "idle-detection",
+  "keyboardLock",
+  "local-fonts",
+  "local-network",
+  "local-network-access",
+  "loopback-network",
+  "media",
+  "mediaKeySystem",
+  "midi",
+  "midiSysex",
+  "nfc",
+  "notifications",
+  "openExternal",
+  "payment-handler",
+  "periodic-background-sync",
+  "persistent-storage",
+  "pointerLock",
+  "screen-wake-lock",
+  "sensors",
+  "serial",
+  "smart-card",
+  "speaker-selection",
+  "storage-access",
+  "system-wake-lock",
+  "top-level-storage-access",
+  "usb",
+  "vr",
+  "web-app-installation",
+  "web-printing",
+  "window-management",
+  "unknown",
+] as const;
+
+/** Why `v` is not a valid `electron.permissions` — `null` when it is, or is
+ *  absent. Pure; `validateConfig` refuses the boot on a non-null answer. */
+export function electronPermissionsRefusal(v: unknown): string | null {
+  if (v === undefined) return null;
+  if (!v || typeof v !== "object" || Array.isArray(v)) {
+    return 'electron.permissions must be an object, like { "clipboard-sanitized-write": ["app"] }';
+  }
+  const names: readonly string[] = ELECTRON_PERMISSIONS;
+  for (const [perm, scopes] of Object.entries(v)) {
+    if (!names.includes(perm)) {
+      const hint = perm === "camera" || perm === "microphone"
+        ? ' — camera and microphone are both "media"'
+        : "";
+      return `electron.permissions: "${perm}" is not an Electron permission${hint}`;
+    }
+    if (!Array.isArray(scopes)) {
+      return `electron.permissions["${perm}"] must be a list of scopes, like ["app"]`;
+    }
+    const bad = scopes.find((s) => s !== "app");
+    if (bad !== undefined) {
+      return `electron.permissions["${perm}"]: unknown scope ${
+        describeValue(bad)
+      } — the only scope is "app" (the app's own page); a <webview> guest ` +
+        `or a foreign frame is never granted a permission`;
+    }
+  }
+  return null;
+}
 
 /** Every key of `WsLimits` (aio-types.ts). */
 export const VALID_WS_LIMITS_KEYS: Set<string> = new Set([
@@ -1514,6 +1684,22 @@ export function configConflicts(
     });
   }
 
+  // ── 1a. SSO under the account gates — a behaviour to know, not an error ──
+  const oidc = obj(auth?.oidc);
+  if (auth?.signup === false && oidc && oidc.signup === undefined) {
+    out.push({
+      level: "warn",
+      keys: ["auth.signup", "auth.oidc"],
+      what: `auth.signup is false, and that closes the SSO door too: an OIDC ` +
+        `identity with no account is refused 403 signup_disabled on its ` +
+        `first login instead of getting an account`,
+      fix:
+        `admit each identity with am auth create "oidc:<issuer>:<sub>", or ` +
+        `set auth.oidc.signup: true to keep SSO account creation open ` +
+        `(false silences this)`,
+      doc: "docs/auth/auth.md",
+    });
+  }
   // ── 1b. an allowedOrigins entry no request can ever match ────────────
   const origins = cfg.allowedOrigins;
   if (Array.isArray(origins)) {

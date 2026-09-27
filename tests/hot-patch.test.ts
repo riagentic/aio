@@ -26,12 +26,20 @@ type D = any;
 
 const tick = () => new Promise<void>((r) => setTimeout(r, 0));
 
+/** The container boot mounts the entry into: `<div id="root">`. */
+const entryRoot = (doc: Document) => {
+  const el = doc.createElement("div");
+  el.id = "root";
+  doc.body.appendChild(el);
+  return el;
+};
+
 Deno.test("swapping the root renders the NEW component", async () => {
   const win = new Window({ url: "https://localhost" });
   const doc = win.document as unknown as Document;
   try {
     const Before = () => h("div", { id: "r" }, h("span", { id: "v" }, "old"));
-    const t = testComponent(Before, { document: doc });
+    const t = testComponent(Before, { document: doc, root: entryRoot(doc) });
     assertEquals((doc as D).querySelector("#v").textContent, "old");
 
     const After = () => h("div", { id: "r" }, h("span", { id: "v" }, "new"));
@@ -53,7 +61,7 @@ Deno.test("a STATEFUL node survives the swap — this is the whole point", async
   try {
     const Before = () =>
       h("div", { id: "r" }, h("video", { id: "keep" }), h("b", null, "old"));
-    const t = testComponent(Before, { document: doc });
+    const t = testComponent(Before, { document: doc, root: entryRoot(doc) });
     const node = (doc as D).querySelector("#keep");
     assert(node, "precondition");
     // Something only the live element carries — the analogue of a login.
@@ -69,6 +77,91 @@ Deno.test("a STATEFUL node survives the swap — this is the whole point", async
     assertEquals((same as D)._session, "signed-in");
     assertEquals((doc as D).querySelector("b").textContent, "new");
     t.unmount();
+  } finally {
+    await closeWindow(win);
+  }
+});
+
+Deno.test("a SECOND root on the page keeps its own component", async () => {
+  // Only the entry's root renders the entry. A page may mount another root —
+  // a widget, a toast host, an island — and swapping the entry into EVERY
+  // live root rendered the whole app inside that one on the next save.
+  const win = new Window({ url: "https://localhost" });
+  const doc = win.document as unknown as Document;
+  try {
+    const Before = () => h("div", null, h("b", { id: "v" }, "old"));
+    const Widget = () => h("i", { id: "w" }, "widget");
+    const app = testComponent(Before, { document: doc, root: entryRoot(doc) });
+    const widget = testComponent(Widget, { document: doc });
+    const After = () => h("div", null, h("b", { id: "v" }, "new"));
+    assertEquals(swapRootComponent(After), 1, "only the entry's root");
+    await tick();
+    assertEquals((doc as D).querySelector("#v").textContent, "new");
+    assertEquals((doc as D).querySelectorAll("#v").length, 1);
+    assertEquals((doc as D).querySelector("#w").textContent, "widget");
+    // And again: the root that now renders After is the one Again replaces.
+    const Again = () => h("div", null, h("b", { id: "v" }, "again"));
+    assertEquals(swapRootComponent(Again), 1);
+    await tick();
+    assertEquals((doc as D).querySelector("#v").textContent, "again");
+    assertEquals((doc as D).querySelector("#w").textContent, "widget");
+    widget.unmount();
+    app.unmount();
+  } finally {
+    await closeWindow(win);
+  }
+});
+
+Deno.test("a toast host mounted BEFORE the entry keeps its own component", async () => {
+  // Boot mounts the entry late — after `_waitForState` — so a module-level
+  // `mount(toastHost, Toaster)` is the FIRST live root. Anchoring on "the
+  // first root" put the new app inside the toast host while the real app kept
+  // the old code, silently.
+  const win = new Window({ url: "https://localhost" });
+  const doc = win.document as unknown as Document;
+  try {
+    const Toaster = () => h("i", { id: "w" }, "toast");
+    const toast = testComponent(Toaster, { document: doc });
+    const app = testComponent(() => h("b", { id: "v" }, "old"), {
+      document: doc,
+      root: entryRoot(doc),
+    });
+    assertEquals(swapRootComponent(() => h("b", { id: "v" }, "new")), 1);
+    await tick();
+    assertEquals((doc as D).querySelector("#v").textContent, "new");
+    assertEquals((doc as D).querySelectorAll("#v").length, 1);
+    assertEquals((doc as D).querySelector("#w").textContent, "toast");
+    app.unmount();
+    toast.unmount();
+  } finally {
+    await closeWindow(win);
+  }
+});
+
+Deno.test("a REMOUNTED entry is still the one swapped", async () => {
+  // Unmount + mount again puts the entry's root AFTER any other live root.
+  const win = new Window({ url: "https://localhost" });
+  const doc = win.document as unknown as Document;
+  try {
+    const root = entryRoot(doc);
+    const first = testComponent(() => h("b", { id: "v" }, "old"), {
+      document: doc,
+      root,
+    });
+    const widget = testComponent(() => h("i", { id: "w" }, "widget"), {
+      document: doc,
+    });
+    first.unmount();
+    const again = testComponent(() => h("b", { id: "v" }, "old"), {
+      document: doc,
+      root,
+    });
+    assertEquals(swapRootComponent(() => h("b", { id: "v" }, "new")), 1);
+    await tick();
+    assertEquals((doc as D).querySelector("#v").textContent, "new");
+    assertEquals((doc as D).querySelector("#w").textContent, "widget");
+    again.unmount();
+    widget.unmount();
   } finally {
     await closeWindow(win);
   }

@@ -32,7 +32,7 @@ Deno.test("cli client: after a refused full state it is out of sync — never a 
     const { socket, response } = Deno.upgradeWebSocket(req);
     socket.onopen = () => {
       peer = socket;
-      socket.send(frame("proto", { v: 2, ver: "test" }));
+      socket.send(frame("proto", { v: 3, min: 3, ver: "test" }));
       socket.send(frame("state", { big: { blob: "", n: 0 } }));
     };
     socket.onmessage = (e) => {

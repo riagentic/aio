@@ -671,3 +671,49 @@ Deno.test("updates: a ref that looks like an option is a positional, not a comma
     "and it certainly does not run",
   );
 });
+
+// Every chunk reported progress, and every report is a dispatch + persist +
+// broadcast: a 265 MB Windows update made ~4000 of them (measured: the app's
+// own pressure monitor warned about the broadcast rate mid-download). A
+// progress bar needs whole percents — at most 101 reports, the last one 1.
+Deno.test("updates: download progress is reported per whole percent, not per chunk", async () => {
+  const dir = await tmp("dl");
+  const size = 2 * 1024 * 1024;
+  const bytes = new Uint8Array(size).map((_, i) => i % 251);
+  const chunk = 1024; // 2048 chunks
+  const h = host(() => {
+    let at = 0;
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        pull(c) {
+          if (at >= size) return c.close();
+          c.enqueue(bytes.slice(at, at + chunk));
+          at += chunk;
+        },
+      }),
+    );
+  });
+  try {
+    const seen: number[] = [];
+    const got = await downloadArtifact({
+      url: `${h.base}/app`,
+      dest: join(dir, "app.new-2.0.0"),
+      expectSha256: await sha256Hex(bytes),
+      expectSize: size,
+      onProgress: (f) => void seen.push(f),
+    });
+    assert(got.ok, got.ok ? "" : got.error);
+    assert(
+      seen.length <= 101,
+      `${seen.length} progress reports for one download`,
+    );
+    assert(seen.length >= 10, `progress still moves: ${seen.length} reports`);
+    assertEquals(seen.at(-1), 1, "the last report is the whole file");
+    assert(
+      seen.every((f, i) => i === 0 || f > seen[i - 1]!),
+      "strictly rising",
+    );
+  } finally {
+    await h.stop();
+  }
+});

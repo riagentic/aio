@@ -21,6 +21,7 @@ import {
   swapStrategy,
   sweepStaleSwaps,
   unpackArchive,
+  unpackCommand,
   writePending,
 } from "../src/server/updates-apply.ts";
 
@@ -255,6 +256,49 @@ Deno.test("smoke test: a hanging artifact is killed, not waited on forever", asy
   }
 });
 
+// `Deno.Command#spawn` is synchronous, and on Windows CreateProcess waits for
+// the antivirus to scan a fresh unsigned exe: measured 16–20 s for a 265 MB
+// Electron build, with the app frozen the whole time. This thread's
+// `Deno.Command` is replaced by one whose spawn blocks the same way — the probe
+// must not use it: it runs in a worker, and this thread keeps ticking.
+Deno.test("smoke test: the probe's spawn never blocks the app's thread", async () => {
+  if (Deno.build.os === "windows") return;
+  const dir = await tmp();
+  const real = Deno.Command;
+  let gap = 0;
+  let last = performance.now();
+  const tick = setInterval(() => {
+    const now = performance.now();
+    gap = Math.max(gap, now - last);
+    last = now;
+  }, 20);
+  try {
+    const ok = join(dir, "ok");
+    await Deno.writeTextFile(ok, "#!/bin/sh\necho 2.0.0\n");
+    (Deno as { Command: unknown }).Command = class extends real {
+      override spawn(): Deno.ChildProcess {
+        const until = performance.now() + 1500; // CreateProcess + a scan
+        while (performance.now() < until) { /* the synchronous wait */ }
+        return super.spawn();
+      }
+    };
+    last = performance.now();
+    const r = await smokeTestArtifact(ok, { timeoutMs: 10_000 });
+    assertEquals(r, { ok: true });
+    assert(gap < 1000, `the app's thread stalled ${Math.round(gap)}ms`);
+  } finally {
+    (Deno as { Command: unknown }).Command = real;
+    clearInterval(tick);
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("smoke test: a program that cannot be spawned is refused, by its reason", async () => {
+  const r = await smokeTestArtifact("/nonexistent/aio-probe-missing");
+  assertEquals(r.ok, false);
+  if (!r.ok) assert(r.error.includes("cannot be executed"), r.error);
+});
+
 Deno.test("swap: pruning keeps the N newest rollback targets", async () => {
   const dir = await tmp();
   try {
@@ -413,7 +457,7 @@ Deno.test("directory swap: a path with a space and a quote survives it", async (
     });
     const spawned = call as unknown as { cmd: string; args: string[] };
     const body = (await Deno.readTextFile(spawned.args[0]!))
-      .replace(/^exec .*$/m, "true")
+      .replaceAll(`exec "$launch" "$@"`, "exit 0")
       .replace('kill -0 "$pid"', "false");
     const patched = `${spawned.args[0]}.patched`;
     await Deno.writeTextFile(patched, body);
@@ -508,7 +552,7 @@ Deno.test("directory swap: the generated script really performs the swap", async
     // that does not exist, and against a pid that is already gone so the wait
     // loop falls straight through.
     const body = (await Deno.readTextFile(script))
-      .replace(/^exec .*$/m, "true")
+      .replaceAll(`exec "$launch" "$@"`, "exit 0")
       .replace('kill -0 "$pid"', "false");
     const patched = `${script}.patched`;
     await Deno.writeTextFile(patched, body);
@@ -526,6 +570,31 @@ Deno.test("directory swap: the generated script really performs the swap", async
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
+});
+
+// The updater downloads a zip release to `<install>.zip-<version>`, and
+// PowerShell's Expand-Archive refuses any name that does not END in `.zip`: on
+// Windows every electron-zip update was downloaded, verified, then failed at
+// unpack. Measured on Windows 11 ("… is not a supported archive file format").
+Deno.test("unpack: the Windows command takes the updater's .zip-<version> name", () => {
+  const archive = "C:\\Apps\\O'Neil\\app.zip-2.0.0";
+  const dest = "C:\\Apps\\O'Neil\\app.staged-2.0.0";
+  const { cmd, args } = unpackCommand("windows", archive, dest);
+  assertEquals(cmd, "powershell");
+  const script = args.join(" ");
+  assert(!script.includes("Expand-Archive"), script);
+  // A `'` in a path closes a single-quoted PowerShell string unless doubled.
+  assert(
+    script.includes(
+      "ExtractToDirectory('C:\\Apps\\O''Neil\\app.zip-2.0.0', " +
+        "'C:\\Apps\\O''Neil\\app.staged-2.0.0')",
+    ),
+    script,
+  );
+  assertEquals(unpackCommand("linux", archive, dest), {
+    cmd: "unzip",
+    args: ["-q", "-o", archive, "-d", dest],
+  });
 });
 
 Deno.test("unpack: a missing tool is named, not swallowed", async () => {

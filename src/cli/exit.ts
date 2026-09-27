@@ -27,5 +27,9 @@ export function fail(msg: string, opts: FailOptions = {}): never {
   const io = opts.io ?? defaultIO();
   if (opts.json) io.out(JSON.stringify({ error: msg }) + "\n");
   else io.err(`error: ${msg}\n`);
-  return io.exit(opts.code ?? EXIT.error);
+  // NON-ZERO, as promised: `fail(msg, { code: 0 })` exited 0 — a failure a
+  // calling script read as success.
+  return io.exit(
+    opts.code !== undefined && opts.code > 0 ? opts.code : EXIT.error,
+  );
 }

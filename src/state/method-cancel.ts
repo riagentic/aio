@@ -242,19 +242,25 @@ export function trackCall(
  *  cell's OWNER counts every call it posts across the thread
  *  (cell-worker-pool.ts `counted`), and only the worker's executor knows which
  *  calls it adopted. The worker host watches here and says so. */
-const _adoptWatchers = new Set<(callId: string) => void>();
+const _adoptWatchers = new Set<(callId: string, rerun: boolean) => void>();
 
 /** Framework-internal: watch for adopted calls (see `_adoptWatchers`). */
-export function _onCallAdopted(fn: (callId: string) => void): () => void {
+export function _onCallAdopted(
+  fn: (callId: string, rerun: boolean) => void,
+): () => void {
   _adoptWatchers.add(fn);
   return () => void _adoptWatchers.delete(fn);
 }
 
 /** Framework-internal: the executor answered `callId` from another call
- *  instead of running it. */
-export function _noteCallAdopted(callId: string | undefined): void {
+ *  instead of running it — or, `rerun`, an adopted call runs after all (the
+ *  `"first"` run it adopted answered another caller). */
+export function _noteCallAdopted(
+  callId: string | undefined,
+  rerun = false,
+): void {
   if (callId === undefined) return;
-  for (const fn of _adoptWatchers) fn(callId);
+  for (const fn of _adoptWatchers) fn(callId, rerun);
 }
 
 /** Abort every in-flight call whose method lists this action as a trigger.

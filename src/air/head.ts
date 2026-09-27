@@ -27,7 +27,12 @@
 // drop). So the server path never touches those: it appends to a per-render
 // list that the SSR start hook clears.
 
-import { _inRender, onCleanup, useRef } from "./renderer-lifecycle.ts";
+import {
+  _inRender,
+  onCleanup,
+  onUnmount,
+  useRef,
+} from "./renderer-lifecycle.ts";
 import { _activeRoot } from "./renderer-state.ts";
 import {
   _resetSsrRenders,
@@ -85,7 +90,7 @@ type Merged = {
 const _live = new Map<HeadOwner, HeadInput>();
 /** A component instance that owns part of `<head>`, with its mount order and
  *  the document it was rendered into. */
-type HeadOwner = { seq: number; doc?: Document };
+type HeadOwner = { seq: number; doc?: Document; on?: boolean };
 let _nextSeq = 0;
 
 /** Live entries of the owners rendered into `doc`, oldest owner first. */
@@ -235,18 +240,24 @@ function _apply(doc: Document | undefined): void {
     doc.title = base;
     _baseTitles.delete(doc);
   }
-  for (const el of Array.from(doc.head.querySelectorAll(`[${ATTR}]`))) {
-    el.remove();
-  }
-  for (const t of tags) {
+  const els = tags.map((t) => {
     const el = doc.createElement(t.kind);
     for (const [k, v] of Object.entries(t.attrs)) {
       if (v === undefined || v === false) continue;
       el.setAttribute(k, v === true ? "" : String(v));
     }
     el.setAttribute(ATTR, "");
-    doc.head.appendChild(el);
-  }
+    return el;
+  });
+  // Tags that are already there, in order, STAY — the same nodes. Rebuilding
+  // them on every apply re-inserted a `<link rel="stylesheet">` (styles gone
+  // until it reloads) and the icon on each re-render of any owner, and
+  // replaced the server's own tags on hydrate.
+  const cur = Array.from(doc.head.querySelectorAll(`[${ATTR}]`));
+  const html = (l: Element[]) => l.map((e) => e.outerHTML) + "";
+  if (html(cur) === html(els)) return;
+  for (const el of cur) el.remove();
+  for (const el of els) doc.head.appendChild(el);
 }
 
 /** The document the component rendering RIGHT NOW is mounted in. */
@@ -337,7 +348,17 @@ export function useHead(input: HeadInput): void {
   const doc = _renderDoc();
   owner.doc = doc;
   _live.set(owner, input);
+  owner.on = true;
+  // A re-render that no longer calls useHead (an early `return <NotFound/>`)
+  // releases its tags once that render is done; one that does call it again
+  // has re-claimed them by then, so nothing in <head> moves.
   onCleanup(() => {
+    owner.on = false;
+    queueMicrotask(() => {
+      if (!owner.on && _live.delete(owner)) _apply(doc);
+    });
+  });
+  onUnmount(() => {
     _live.delete(owner);
     _apply(doc);
   });

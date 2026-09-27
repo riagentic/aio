@@ -290,13 +290,14 @@ await aio.run({ ui: { theme: "full", layout: false } }); // controls, never layo
 await aio.run({ ui: { theme: "auto", layout: false } }); // …until you ship CSS
 ```
 
-| Kept (how an ELEMENT looks)           | Dropped (where things GO)            |
-| ------------------------------------- | ------------------------------------ |
-| canvas, `color-scheme`, dark mode     | `<main>` as a centred page container |
-| typography, headings, lists, links    | `body>header` / `footer` alignment   |
-| every form control, focus rings       | `.card` `.row` `.stack` `.grid`      |
-| tables, `<code>`, `::selection`       | `.muted` `.badge`                    |
-| coarse pointer, reduced motion, print |                                      |
+| Kept (how an ELEMENT looks)        | Dropped (where things GO)            |
+| ---------------------------------- | ------------------------------------ |
+| canvas, `color-scheme`, dark mode  | `<main>` as a centred page container |
+| typography, headings, lists, links | `body>header` / `footer` alignment   |
+| every form control, focus rings    | `.card` `.row` `.stack` `.grid`      |
+| tables, `<code>`, `::selection`    | `.muted` `.badge`                    |
+| coarse pointer, reduced motion     |                                      |
+| high contrast, forced colours      |                                      |
 
 Setting it with `"tokens"` or `"none"` warns at boot rather than doing nothing:
 those emit no visual rules, so there is no layout to drop.

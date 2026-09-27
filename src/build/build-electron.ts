@@ -19,6 +19,7 @@ import {
 } from "./build-helpers.ts";
 import type { BuildConfig } from "./build-config.ts";
 import { isHostPlatform } from "./platforms.ts";
+import { appIconLabel } from "./app-icon.ts";
 import { assembleMacApp, icnsFromName, icnsFromPng } from "./macos-app.ts";
 import { trimLocalePaks } from "./electron-locales.ts";
 import {
@@ -293,7 +294,7 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
     // icon does before someone draws a real one.
     await writeDefaultIcon(
       join(appDir, binaryName),
-      appTitle ?? binaryName,
+      appIconLabel(appTitle, binaryName),
       binaryName,
     );
     console.log(
@@ -344,7 +345,7 @@ async function _packageLinux(
   binaryName: string,
 ): Promise<void> {
   void cfg;
-  const appRun = `#!/bin/bash
+  const appRun = `#!/bin/bash -p
 HERE="$(dirname "$(readlink -f "$0")")"
 export ELECTRON_PATH="$HERE/electron/electron"
 exec "$HERE/${binaryName}" "$@"
@@ -354,7 +355,7 @@ exec "$HERE/${binaryName}" "$@"
 
   const desktop = `[Desktop Entry]
 Type=Application
-Name=${displayName}
+Name=${desktopString(displayName)}
 Exec=${binaryName}
 Icon=${binaryName}
 Categories=Utility;
@@ -477,7 +478,7 @@ async function _packageWindows(
  *
  *  | A Mac | Artifact | Why |
  *  | ----- | -------- | --- |
- *  | reachable (native or `AIO_MACOS_SSH`) | `<bin>-mac-<arch>.dmg` | signed, drag-to-Applications |
+ *  | reachable (native or `AIO_MACOS_SSH`) | `<bin>-mac-<arch>.dmg` + `.app.tar.gz` | signed; the dmg to drag to Applications, the tarball for self-update |
  *  | none | `<bin>-mac-<arch>.zip` | the unsigned `.app`, zipped |
  *
  *  The DMG is preferred because it is what a macOS user expects and it is the
@@ -542,11 +543,15 @@ async function _packageMacos(
 
   if (canFinalizeDmg(cfg.macosHost)) {
     const dmgOut = join(outDir, `${binaryName}-mac-${archStr}.dmg`);
+    // The SIGNED bundle, packed as the update artifact: the .dmg is the first
+    // download, this is what an installed copy swaps itself to.
+    const updateName = `${binaryName}-mac-${archStr}.app.tar.gz`;
     console.log(`building the .dmg...`);
     try {
       await finalizeMacDmg({
         appPath: app,
         outPath: dmgOut,
+        updateOutPath: join(outDir, updateName),
         volumeName: displayName,
         binaryName,
         declaredHost: cfg.macosHost,
@@ -560,6 +565,10 @@ async function _packageMacos(
     const stat = await Deno.stat(dmgOut);
     console.log(
       dmgDone(`${binaryName}-mac-${archStr}.dmg`, formatMb(stat.size)),
+    );
+    const upd = await Deno.stat(join(outDir, updateName));
+    console.log(
+      dmgDone(`${updateName} (the update artifact)`, formatMb(upd.size)),
     );
     return;
   }
@@ -631,4 +640,17 @@ async function dirSize(dir: string): Promise<number> {
     else if (e.isFile) total += (await Deno.stat(p)).size;
   }
   return total;
+}
+
+/** A desktop-entry `string`/`localestring` value (freedesktop Desktop Entry
+ *  spec, "Possible value types"). Backslash is the escape character there, so
+ *  a literal one in a title ("C:" + backslash + "Tools") was read back as an
+ *  escape sequence and the launcher showed a different name; a line break
+ *  would end the key and start another. */
+export function desktopString(v: string): string {
+  return v
+    .replace(/\\/g, "\\\\")
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\t/g, "\\t");
 }

@@ -16,6 +16,7 @@ import { join } from "@std/path";
 import { cdpConnect, cdpTargets } from "../src/am/am-cdp.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { ANDROID_TEMPLATE } from "../src/build/android-template.ts";
 
 const GATED = Deno.env.get("AIO_ANDROID_E2E") === "1";
 const REPO = new URL("../", import.meta.url).pathname;
@@ -122,6 +123,14 @@ async function clearSystemDialogs(): Promise<void> {
   );
 }
 
+/** Is `pkg` the activity in front right now? */
+async function resumed(pkg: string): Promise<boolean> {
+  const out = (await adb("shell", "dumpsys", "activity", "activities")).out;
+  return out.split("\n").some((l) =>
+    /topResumedActivity|mResumedActivity/.test(l) && l.includes(`${pkg}/`)
+  );
+}
+
 async function launch(pkg: string, clear = false): Promise<void> {
   await adb("shell", "am", "force-stop", pkg);
   if (clear) await adb("shell", "pm", "clear", pkg);
@@ -178,6 +187,26 @@ async function onPage(pkg: string, expr: string): Promise<unknown> {
 
 const COUNT = "document.body.innerText.split('\\n')[1]";
 const PLUS = "document.querySelectorAll('button')[2].click(), 1";
+/** The app's saved state, read the way only its own page can: with the
+ *  per-launch key the APK hands its origin. */
+const STORED = "AioNativeStore.read(__aioNativeStoreKey, 'aio:app')";
+/** A third-party page the app embeds: it tries every way into the native
+ *  store — keyless / guessed-key calls, the 1.0.12 method names — and reports
+ *  what it saw to `/saw`. */
+const FOREIGN_FRAME_PROBE = `
+const S = typeof AioNativeStore === "object" ? AioNativeStore : {};
+const t = (f) => { try { f(); return "answered"; } catch { return "threw"; } };
+fetch("/saw?" + encodeURIComponent(JSON.stringify({
+  fetch: typeof AioNativeFetch,
+  store: typeof AioNativeStore,
+  key: typeof window.__aioNativeStoreKey,
+  read: t(() => S.read("", "aio:app")),
+  write: t(() => S.write("0".repeat(64), "aio:app", '{"count":99}')),
+  exists: t(() => S.exists("", "aio:app")),
+  where: t(() => S.where("")),
+  get: t(() => S.get("aio:app")),
+  set: t(() => S.set("aio:app", '{"count":99}')),
+})));`;
 
 /** The counter example, importing THIS checkout, plus a route that reads the
  *  server's own state (so a tap is proven to reach the server, not the DOM). */
@@ -187,6 +216,20 @@ async function counterApp(dir: string): Promise<void> {
   for (const f of ["App.tsx", "cell.ts"]) {
     await Deno.copyFile(join(src, "src", f), join(dir, "src", f));
   }
+  // Android Back as navigation: the count stands for "screens deep". Back
+  // steps down while it is above 0 (handled), and does Android's default at
+  // 0. Registered at module scope, so it is live before any tap.
+  await Deno.writeTextFile(
+    join(dir, "src", "App.tsx"),
+    (await Deno.readTextFile(join(dir, "src", "App.tsx"))) +
+      `\nimport { onBackButton } from "aio/air";
+onBackButton(() => {
+  if (counter.count <= 0) return false;
+  counter.decrement();
+  return true;
+});
+`,
+  );
   await Deno.writeTextFile(
     join(dir, "src", "app.ts"),
     `import { counter } from "./cell.ts";
@@ -202,9 +245,50 @@ await aio.run({
     if (v.startsWith("../../")) cfg.imports[k] = join(REPO, v.slice(6));
   }
   cfg.title = "aio-android-e2e";
+  // Content a standalone APK has no server to serve: packaged by the build.
+  cfg.assets = { "/text": "./text" };
+  await Deno.mkdir(join(dir, "text", "en"), { recursive: true });
+  await Deno.writeTextFile(join(dir, "text", "en", "a.md"), "# packaged");
   await Deno.writeTextFile(
     join(dir, "deno.json"),
     JSON.stringify(cfg, null, 2),
+  );
+}
+
+/** The standalone build's `android/` overlay for the native-fetch step: a
+ *  network security config allowing cleartext to 127.0.0.1 ONLY (the test
+ *  server behind `adb reverse`), so the WebView's fetch and the native one
+ *  both reach it and differ only in who sends the request. The page gets
+ *  `nativeFetch` as a global to call over DevTools. Removed before the
+ *  client build, whose own cleartext rule a config would override. */
+async function nativeFetchOverlay(dir: string): Promise<void> {
+  const main = join(dir, "android", "app", "src", "main");
+  await Deno.mkdir(join(main, "res", "xml"), { recursive: true });
+  await Deno.writeTextFile(
+    join(main, "res", "xml", "aio_e2e_nsc.xml"),
+    `<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+  <domain-config cleartextTrafficPermitted="true">
+    <domain includeSubdomains="false">127.0.0.1</domain>
+  </domain-config>
+</network-security-config>
+`,
+  );
+  const manifest = ANDROID_TEMPLATE["app/src/main/AndroidManifest.xml"]!;
+  assertStringIncludes(manifest, 'android:allowBackup="false"');
+  await Deno.writeTextFile(
+    join(main, "AndroidManifest.xml"),
+    manifest.replace(
+      'android:allowBackup="false"',
+      'android:allowBackup="false"\n    android:networkSecurityConfig="@xml/aio_e2e_nsc"',
+    ),
+  );
+  await Deno.writeTextFile(
+    join(dir, "src", "App.tsx"),
+    `import { nativeFetch } from "aio/air";
+(globalThis as Record<string, unknown>).__nativeFetch = nativeFetch;
+`,
+    { append: true },
   );
 }
 
@@ -264,6 +348,7 @@ Deno.test({
     let standalone = "";
     try {
       await counterApp(dir);
+      await nativeFetchOverlay(dir);
 
       await t.step(
         "standalone: renders, a tap dispatches, state survives a kill",
@@ -286,9 +371,10 @@ Deno.test({
           assert(!log.includes("REDUCE_ERROR"), "a tap threw in the reducer");
           // The state is in the NATIVE store — a standalone APK persists
           // through `AioNativeStore` (fsync + atomic rename), not through the
-          // WebView's localStorage, which commits to disk lazily.
+          // WebView's localStorage, which commits to disk lazily. Its every
+          // method takes the per-launch key only the app's own page is handed.
           assertStringIncludes(
-            String(await ev("AioNativeStore.get('aio:app')")),
+            String(await ev(STORED)),
             '"count":2',
           );
           await sleep(3000);
@@ -399,6 +485,203 @@ Deno.test({
       );
 
       await t.step(
+        "standalone: nativeFetch reaches an API that refuses any Origin; the page's fetch cannot",
+        async () => {
+          // Field report (a crypto wallet app): a public JSON-RPC answers 403
+          // to any request carrying an Origin, and a standalone APK's every
+          // fetch runs in its WebView. This server does the same (with a CORS
+          // header, so the page can SEE its 403 rather than a bare TypeError).
+          const origins: (string | null)[] = [];
+          let frameSaw = "";
+          const api = Deno.serve(
+            { hostname: "127.0.0.1", port: freePort(), onListen: () => {} },
+            async (req) => {
+              const path = new URL(req.url).pathname;
+              // A third-party page the app embeds: it reports what it sees.
+              if (path === "/frame") {
+                return new Response(
+                  `<script>${FOREIGN_FRAME_PROBE}</script>`,
+                  { headers: { "content-type": "text/html" } },
+                );
+              }
+              if (path === "/saw") {
+                frameSaw = decodeURIComponent(
+                  new URL(req.url).search.slice(1),
+                );
+                return new Response("");
+              }
+              origins.push(req.headers.get("origin"));
+              const cors = { "access-control-allow-origin": "*" };
+              if (req.headers.has("origin")) {
+                return new Response("origin refused", {
+                  status: 403,
+                  headers: cors,
+                });
+              }
+              return Response.json({ ok: true, got: await req.text() }, {
+                headers: { ...cors, "set-cookie": "sid=1" },
+              });
+            },
+          );
+          const port = api.addr.port;
+          const url = JSON.stringify(`http://127.0.0.1:${port}/rpc`);
+          await adb("reverse", `tcp:${port}`, `tcp:${port}`);
+          try {
+            const ev = (e: string) => onPage(standalone, e);
+            await launch(standalone);
+            await until(
+              "the page",
+              async () => (await ev(COUNT)) != null ? true : null,
+            );
+            assertEquals(
+              await ev(
+                `fetch(${url}).then((r) => "status " + r.status, (e) => "threw " + e)`,
+              ),
+              "status 403",
+              "the page's own fetch",
+            );
+            const native = await ev(
+              `__nativeFetch(${url}, { method: "POST", ` +
+                `headers: { "content-type": "application/json" }, ` +
+                `body: '{"jsonrpc":"2.0","method":"ping"}' })` +
+                `.then(async (r) => ({ status: r.status, ` +
+                `cookie: r.headers.get("set-cookie"), json: await r.json() }), ` +
+                `(e) => ({ error: String(e) }))`,
+            );
+            assertEquals(native, {
+              status: 200,
+              cookie: null,
+              json: { ok: true, got: '{"jsonrpc":"2.0","method":"ping"}' },
+            });
+            assertEquals(origins.length, 2, JSON.stringify(origins));
+            assertStringIncludes(String(origins[0]), "appassets");
+            assertEquals(origins[1], null, "nativeFetch sent an Origin");
+            // A file: URL never reaches the app's own files.
+            assertStringIncludes(
+              String(
+                await ev(
+                  `__nativeFetch("file:///data/local/tmp/x").then(() => "read", (e) => String(e))`,
+                ),
+              ),
+              "only http and https",
+            );
+            // A frame from another origin can use neither bridge. The fetch
+            // listener's origin rule keeps it out entirely; the store's
+            // addJavascriptInterface reaches every frame, so the frame SEES
+            // the store (which also proves this probe can see an injected
+            // object) — and every call it makes is refused: it never gets
+            // the per-launch key, and the 1.0.12 methods are gone.
+            const before = String(await ev(STORED));
+            assertStringIncludes(before, '"count":');
+            await adb("logcat", "-c");
+            await ev(
+              `document.body.appendChild(Object.assign(document.createElement("iframe"), ` +
+                `{ src: "http://127.0.0.1:${port}/frame" })), 1`,
+            );
+            const saw = JSON.parse(
+              await until(
+                "the frame's report",
+                () => Promise.resolve(frameSaw || null),
+              ),
+            );
+            assertEquals(saw, {
+              fetch: "undefined",
+              store: "object",
+              key: "undefined",
+              read: "threw",
+              write: "threw",
+              exists: "threw",
+              where: "threw",
+              get: "threw",
+              set: "threw",
+            }, "a foreign iframe reached the native store or fetch");
+            assertEquals(String(await ev(STORED)), before, "the frame wrote");
+            assertStringIncludes(
+              (await adb("logcat", "-d")).out,
+              "native store call REFUSED",
+              "the APK did not refuse the frame's keyless calls",
+            );
+            // …and the refusals cost the app nothing: its state still
+            // survives a kill (SIGKILL, no flush) and comes back.
+            await adb("shell", "am", "force-stop", standalone);
+            await launch(standalone);
+            assertEquals(
+              String(
+                await until(
+                  "the restored store",
+                  async () =>
+                    (await ev(COUNT)) != null ? await ev(STORED) : null,
+                ),
+              ),
+              before,
+              "the state did not survive a kill after the frame",
+            );
+          } finally {
+            await adb("reverse", "--remove", `tcp:${port}`);
+            await api.shutdown();
+            // The client APK keeps its own cleartext rule: no overlay for it.
+            await Deno.remove(join(dir, "android"), { recursive: true });
+          }
+        },
+      );
+
+      await t.step(
+        "standalone: deno.json assets are packaged; a relative fetch reads them",
+        async () => {
+          assertEquals(
+            await onPage(
+              standalone,
+              "fetch('text/en/a.md').then((r) => r.text())",
+            ),
+            "# packaged",
+          );
+        },
+      );
+
+      await t.step(
+        "standalone: Back runs onBackButton from a COLD start (no tap), then exits",
+        async () => {
+          // A WebView ignores history entries pushed before the first user
+          // gesture, so `pushState` navigation lost the first Back after a
+          // cold start. The shell asks the page through evaluateJavascript,
+          // which needs no gesture: count 2 → 1 → 0 → Android's default.
+          const pkg = standalone;
+          const ev = (e: string) => onPage(pkg, e);
+          await launch(pkg, true);
+          await until(
+            "a fresh counter",
+            async () => (await ev(COUNT)) === "0" ? true : null,
+          );
+          await ev(PLUS);
+          await ev(PLUS);
+          await until(
+            "the count to reach 2",
+            async () => (await ev(COUNT)) === "2" ? 2 : null,
+          );
+          await launch(pkg); // force-stop + launch: a cold start, no gesture
+          await until(
+            "the restored count",
+            async () => (await ev(COUNT)) === "2" ? true : null,
+          );
+          for (const want of ["1", "0"]) {
+            await clearSystemDialogs();
+            await adb("shell", "input", "keyevent", "4");
+            await until(
+              `Back to step the count to ${want}`,
+              async () => (await ev(COUNT)) === want ? true : null,
+            );
+          }
+          assert(await resumed(pkg), "the app left before its handler said so");
+          await clearSystemDialogs();
+          await adb("shell", "input", "keyevent", "4");
+          await until(
+            "the app to leave the foreground on Back at 0",
+            async () => (await resumed(pkg)) ? null : true,
+          );
+        },
+      );
+
+      await t.step(
         "client: connects by itself, a tap reaches the server, Back and a dead server reach the form",
         async () => {
           const port = freePort();
@@ -445,7 +728,16 @@ Deno.test({
             async () => (await count()) === "1" ? true : null,
           );
 
-          // Back from the server's first page: the connect form, prefilled.
+          // A server-talking APK asks the page on Back too: the app's
+          // handler takes the first one (count 1 → 0, on the SERVER).
+          await clearSystemDialogs();
+          await adb("shell", "input", "keyevent", "4");
+          await until(
+            "Back to reach the app's handler (server count 0)",
+            async () => (await count()) === "0" ? true : null,
+          );
+          // Back from the server's first page with no handler taking it: the
+          // connect form, prefilled.
           await clearSystemDialogs();
           await adb("shell", "input", "keyevent", "4");
           assertEquals(
@@ -481,7 +773,7 @@ Deno.test({
       await recordProof(
         "android",
         "emulator",
-        `API ${api}: standalone (dispatch, durable native store — survives an instant kill, rotation) + client (connect, server dispatch, Back, unreachable)`,
+        `API ${api}: standalone (dispatch, durable native store — survives an instant kill, rotation, nativeFetch past an Origin-refusing API, a foreign iframe can neither read nor write the store) + client (connect, server dispatch, Back, unreachable)`,
       );
     } finally {
       if (server) {

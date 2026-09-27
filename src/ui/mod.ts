@@ -860,8 +860,14 @@ const AVATAR_HUES = [210, 12, 145, 275, 32, 190, 330, 95];
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
   if (parts.length === 0) return "?";
-  const first = parts[0]![0] ?? "";
-  const last = parts.length > 1 ? parts[parts.length - 1]![0] ?? "" : "";
+  // First CODE POINT, not first UTF-16 unit: `[0]` split an astral
+  // character (𠮷, an emoji) and rendered half a surrogate pair as "�".
+  const lead = (w: string) =>
+    w.codePointAt(0) === undefined
+      ? ""
+      : String.fromCodePoint(w.codePointAt(0)!);
+  const first = lead(parts[0]!);
+  const last = parts.length > 1 ? lead(parts[parts.length - 1]!) : "";
   return (first + last).toUpperCase();
 }
 

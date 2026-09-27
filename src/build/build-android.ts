@@ -3,6 +3,13 @@
  * Build Android — generates Android project from template, builds APK via Gradle.
  */
 import { dirname, join } from "@std/path";
+import { assetMounts } from "./build-compile.ts";
+import {
+  isProtectedPath,
+  isServerOnlySource,
+  realPathInside,
+} from "../server/server-static.ts";
+import { readDenoJson } from "../server/deno-json.ts";
 import {
   chmodIfSupported,
   findGradle,
@@ -19,7 +26,7 @@ import { warn } from "./build-say.ts";
 import { androidLocalHTML, htmlOpen } from "../server/server-html-gen.ts";
 import type { BuildConfig } from "./build-config.ts";
 import { type BuildVersion, stripVersionToken } from "./build-version.ts";
-import { appIconPng } from "./app-icon.ts";
+import { appIconLabel, appIconPng } from "./app-icon.ts";
 import {
   APP_STYLE,
   BUILD_SCRATCH_DIR,
@@ -245,7 +252,7 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     await Deno.copyFile(iconPath, join(mipmapDir, "ic_launcher.png"));
     console.log(`${OK} icon from ${iconPath}`);
   } else {
-    const label = appTitle ?? binaryName;
+    const label = appIconLabel(appTitle, binaryName);
     await Deno.writeFile(
       join(mipmapDir, "ic_launcher.png"),
       await appIconPng(label, 192, binaryName),
@@ -508,7 +515,100 @@ export async function _writeLocalAssets(
       join(assetsDir, APP_STYLE),
     );
   }
+  await _packAssetMounts(cfg.root, assetsDir);
   console.log(`${OK} assets copied`);
+}
+
+/** deno.json `assets` — the directories the app SERVES — packaged at the same
+ *  path under the page, so ONE relative `fetch("text/a.md")` reads the mount
+ *  on desktop and the packaged copy in a standalone APK (which has no server
+ *  to serve the mount). What ships is what the PRODUCTION server would serve,
+ *  asked of the server's own deciders — `isProtectedPath` (dotfiles,
+ *  `*.server.*` in any case, all `.ts`/`.tsx`/`.jsx` source),
+ *  `isServerOnlySource` (`import "aio/server-only"`) and `realPathInside`
+ *  (a symlink stays inside its mount). Where the server would answer 403 — a
+ *  link out of the mount — the build is refused, naming it, rather than
+ *  copying the link's target into the APK. Exported for its test. */
+export async function _packAssetMounts(
+  root: string,
+  assetsDir: string,
+): Promise<void> {
+  const taken = new Set(["index.html", BUNDLE_JS, APP_STYLE]);
+  for (const m of assetMounts((await readDenoJson(root))?.config, root)) {
+    const at = m.prefix.replace(/^\/+|\/+$/g, "");
+    const segs = at.split("/");
+    if (
+      !at || taken.has(segs[0]!) ||
+      segs.some((s) => s === "" || s === "." || s === "..")
+    ) {
+      throw new Error(
+        `${NO} deno.json assets["${m.prefix}"] cannot be packaged into the ` +
+          `APK: a mount must be a sub-path like "/text", and not one of ` +
+          `${[...taken].join(", ")} — the page's own files live there.`,
+      );
+    }
+    const src = join(root, m.rel);
+    const refuse = (why: string) =>
+      new Error(
+        `${NO} deno.json assets["${m.prefix}"] cannot be ` +
+          `packaged into the APK: ${why}`,
+      );
+    if (await realPathInside(src, assetsDir)) {
+      throw refuse(
+        `it contains the build output (${assetsDir}), so packaging it would ` +
+          `copy the APK into itself. Point the mount at a directory that ` +
+          `does not hold dist/.`,
+      );
+    }
+    let n = 0;
+    // `open`: the real paths of the directories being walked — a link back
+    // to one of them is a loop the server can serve forever and a copy cannot.
+    const pack = async (dir: string, url: string, open: Set<string>) => {
+      for await (const e of Deno.readDir(dir)) {
+        const path = join(dir, e.name);
+        const href = `${url}/${e.name}`;
+        // Nothing under this name is servable (a dot segment): skip it whole.
+        if (isProtectedPath(`${href}/a`, true)) continue;
+        if (e.isSymlink) {
+          let inside: boolean;
+          try {
+            inside = await realPathInside(src, path);
+          } catch (err) {
+            throw refuse(
+              `${path} is a symlink that cannot be followed (${err}).`,
+            );
+          }
+          if (!inside) {
+            throw refuse(
+              `${path} is a symlink that leads outside the mount — the ` +
+                `server refuses to serve it (403), so it must not ship ` +
+                `either. Remove the link, or copy the file into the mount.`,
+            );
+          }
+        }
+        const st = await Deno.stat(path);
+        if (st.isDirectory) {
+          const real = await Deno.realPath(path);
+          if (open.has(real)) {
+            throw refuse(`${path} links back to a directory that holds it.`);
+          }
+          await pack(path, href, new Set([...open, real]));
+          continue;
+        }
+        if (!st.isFile) throw refuse(`${path} is not a file or a directory.`);
+        if (isProtectedPath(href, true)) continue;
+        if (isServerOnlySource(path, () => Deno.readTextFileSync(path))) {
+          continue;
+        }
+        const to = join(assetsDir, href);
+        await Deno.mkdir(dirname(to), { recursive: true });
+        await Deno.copyFile(path, to);
+        n++;
+      }
+    };
+    await pack(src, `/${at}`, new Set([await Deno.realPath(src)]));
+    console.log(`${OK} assets["${m.prefix}"] → ${count(n, "file")} packaged`);
+  }
 }
 
 /** dev:android — retarget the WebView at a live dev-server URL (10.0.2.2:PORT
@@ -713,19 +813,46 @@ export function ownActivityLosses(
   const where = "aio's android-template/app/src/main/java/aio/app/" +
     "MainActivity.kt";
   const out: string[] = [];
-  if (
-    opts.standalone &&
-    !(/addJavascriptInterface\s*\(/.test(sources) &&
-      sources.includes('"AioNativeStore"'))
-  ) {
+  const storeInstalled = /addJavascriptInterface\s*\(/.test(sources) &&
+    sources.includes('"AioNativeStore"');
+  if (opts.standalone && !storeInstalled) {
     out.push(
       `your android/…/MainActivity.kt does not install AioNativeStore, so ` +
         `this standalone APK keeps its state in the WebView's localStorage — ` +
         `a change can be LOST on a kill right after it (fsync + atomic rename ` +
         `is what the store adds). Copy class AioNativeStore from ${where} and ` +
         `add, in onCreate: addJavascriptInterface(AioNativeStore(File(` +
-        `filesDir, "aio-store")), "AioNativeStore") — see docs/build/` +
+        `filesDir, "aio-store")), "AioNativeStore") plus its ` +
+        `addDocumentStartJavaScript key line — see docs/build/` +
         `targets.md "Adding native Android code".`,
+    );
+  } else if (
+    opts.standalone &&
+    !(/addDocumentStartJavaScript\s*\(/.test(sources) &&
+      sources.includes('"__aioNativeStoreKey"'))
+  ) {
+    // The store as 1.0.12 and earlier shipped it: unkeyed, so every frame —
+    // a third-party <iframe> the app embeds — can call it.
+    out.push(
+      `your android/…/MainActivity.kt installs AioNativeStore WITHOUT its ` +
+        `per-launch key (the unkeyed store of aio 1.0.12 or earlier), so any ` +
+        `third-party <iframe> this app embeds can read and overwrite its ` +
+        `saved state. Copy class AioNativeStore and its install block ` +
+        `(addJavascriptInterface + WebViewCompat.addDocumentStartJavaScript ` +
+        `handing "__aioNativeStoreKey" to the app's origin) from ` +
+        `${where} — the file layout is unchanged, so saved state still loads.`,
+    );
+  }
+  if (
+    opts.standalone &&
+    !(/addWebMessageListener\s*\(/.test(sources) &&
+      sources.includes('"AioNativeFetch"'))
+  ) {
+    out.push(
+      `your android/…/MainActivity.kt does not install AioNativeFetch, so ` +
+        `nativeFetch() in this standalone APK REJECTS (it never falls back ` +
+        `to a fetch that carries an Origin). Copy object AioNativeFetch and ` +
+        `its install line (WebViewCompat.addWebMessageListener) from ${where}.`,
     );
   }
   if (
@@ -739,6 +866,14 @@ export function ownActivityLosses(
         `Wrap the WebView in a FrameLayout that takes the system-bar insets ` +
         `as padding — the frame at the end of onCreate in ${where} — or set ` +
         `android:fitsSystemWindows="true" on your layout's root.`,
+    );
+  }
+  if (!sources.includes("__aioBack")) {
+    out.push(
+      `your android/…/MainActivity.kt never asks the page about Back ` +
+        `(window.__aioBack), so onBackButton handlers from aio/air never run ` +
+        `and Back always does Android's default. Copy onBackPressed and ` +
+        `defaultBack from ${where}.`,
     );
   }
   return out;

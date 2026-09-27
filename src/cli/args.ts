@@ -101,8 +101,30 @@ export function args<const S extends ArgsSpec>(
   }
   const help = helpText(spec);
   const hasJson = flagSpecs.json?.type === "boolean";
-  const json = hasJson && argv.includes("--json") &&
-    !argv.slice(0, argv.indexOf("--json")).includes("--");
+  // Decided BEFORE the parse (a refusal mid-parse must already know its
+  // format) — but by reading argv the way the parse will: `-j` (the declared
+  // short) asks for JSON, `--out --json` does not (that `--json` is --out's
+  // value), and nothing after `--` counts. Searching the raw text for
+  // "--json" got both of those wrong.
+  const json = hasJson && (() => {
+    const shortOf = new Map<string, string>();
+    for (const [k, f] of Object.entries(flagSpecs)) {
+      if (f.short) shortOf.set(f.short, k);
+    }
+    for (let i = 0; i < argv.length; i++) {
+      const a = argv[i]!;
+      if (a === "--") return false;
+      if (!a.startsWith("-") || a === "-") continue;
+      const long = a.startsWith("--");
+      const eq = long ? a.indexOf("=") : -1;
+      const raw = long ? a.slice(2, eq === -1 ? undefined : eq) : a.slice(1);
+      const name = long ? raw : shortOf.get(raw);
+      if (!name || !Object.hasOwn(flagSpecs, name)) continue;
+      if (name === "json") return eq === -1;
+      if (flagSpecs[name]!.type !== "boolean" && eq === -1) i++; // its value
+    }
+    return false;
+  })();
   const refuse = (msg: string): never =>
     fail(`${msg} — run \`${spec.name} --help\``, {
       code: EXIT.usage,

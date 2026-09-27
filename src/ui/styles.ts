@@ -66,21 +66,24 @@ export const UI_CSS: string = `
   font: inherit; font-family: var(--aio-ui-font); font-weight: 550;
   border: 1px solid transparent; border-radius: var(--aio-ui-radius);
   cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
-  gap: 0.4em; line-height: 1; white-space: nowrap; transition: background .12s, border-color .12s, opacity .12s;
+  gap: 0.4em; line-height: 1; white-space: nowrap; transition: background .12s, border-color .12s, box-shadow .12s, opacity .12s;
 }
 .aio-btn:disabled { opacity: .5; cursor: not-allowed; }
 .aio-btn:focus-visible { outline: 2px solid var(--aio-ui-accent); outline-offset: 2px; }
 .aio-btn--sm { padding: .4em .7em; font-size: .82rem; }
 .aio-btn--md { padding: .55em .95em; font-size: .92rem; }
 .aio-btn--lg { padding: .7em 1.2em; font-size: 1rem; }
+/* A filled button's hover rings it and never touches the fill: the ink on it
+   is solved to just clear AA (4.6:1, app-theme.ts), and the old
+   brightness(1.07) pushed a white label on an app accent to ~4.0:1. */
 .aio-btn--primary { background: var(--aio-ui-accent); color: var(--aio-ui-on-accent); }
-.aio-btn--primary:hover:not(:disabled) { filter: brightness(1.07); }
+.aio-btn--primary:hover:not(:disabled) { box-shadow: 0 0 0 2px color-mix(in srgb, var(--aio-ui-accent) 35%, transparent); }
 .aio-btn--secondary { background: var(--aio-ui-surface); color: var(--aio-ui-ink); border-color: var(--aio-ui-line); }
 .aio-btn--secondary:hover:not(:disabled) { border-color: var(--aio-ui-accent); }
 .aio-btn--ghost { background: transparent; color: var(--aio-ui-ink); }
 .aio-btn--ghost:hover:not(:disabled) { background: var(--aio-ui-surface); }
 .aio-btn--danger { background: var(--aio-ui-danger); color: var(--aio-ui-on-danger); }
-.aio-btn--danger:hover:not(:disabled) { filter: brightness(1.07); }
+.aio-btn--danger:hover:not(:disabled) { box-shadow: 0 0 0 2px color-mix(in srgb, var(--aio-ui-danger) 35%, transparent); }
 
 .aio-input {
   font: inherit; font-family: var(--aio-ui-font); color: var(--aio-ui-ink);

@@ -152,6 +152,18 @@ export function signupPolicyRefusal(
   return null;
 }
 
+/** The `auth.requireVerified` login gate, asked as a pure QUESTION — the one
+ *  decider for every door that ends in a session. The password route asked it
+ *  inline and the OIDC callback never did, so an SSO account whose provider
+ *  had not vouched for the address — the account the option exists to keep
+ *  out — signed straight in. Same answer, same wire code, both doors. */
+export function loginVerificationRefusal(
+  requireVerified: boolean | undefined,
+  rec: Pick<AuthUserRecord, "verified"> | null,
+): "email_unverified" | null {
+  return requireVerified && rec && !rec.verified ? "email_unverified" : null;
+}
+
 async function pbkdf2(
   password: string,
   salt: Uint8Array,
@@ -407,6 +419,8 @@ export function openUserStore(
   opts?: UserStoreOptions,
 ): UserStore {
   const db = new DatabaseSync(path);
+  // Wait for the other auth.db writer (the app vs `am auth`) — see sessions.ts.
+  db.exec("PRAGMA busy_timeout = 1000");
   db.exec("PRAGMA journal_mode=WAL");
   db.exec(`CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
@@ -483,6 +497,16 @@ export function openUserStore(
 
   const updRole = db.prepare("UPDATE users SET role = ? WHERE id = ?");
   const updEmail = db.prepare("UPDATE users SET email = ? WHERE id = ?");
+  const selEmail = db.prepare("SELECT email FROM users WHERE id = ?");
+  // The address a verify/reset token was MAILED to is the address it proves.
+  // Tokens are bound to the account id, so after an email change they must
+  // not outlive the address they were sent to (see `setEmail`).
+  const updEmailUnverified = db.prepare(
+    "UPDATE users SET email = ?, verified = 0 WHERE id = ?",
+  );
+  const tokPurgeMailed = db.prepare(
+    "DELETE FROM one_shot_tokens WHERE subject = ? AND kind IN ('verify', 'reset')",
+  );
   const updVerified = db.prepare("UPDATE users SET verified = 1 WHERE id = ?");
   const updFails = db.prepare(
     "UPDATE users SET fails = ?, locked_until = ? WHERE id = ?",
@@ -662,7 +686,16 @@ export function openUserStore(
       // Confusable refusal, immediately before the insert (no `await` between,
       // so nothing can slip in): `Neighbour` cannot join `neighbour`. The
       // PRIMARY KEY still catches the exact-duplicate race either way.
-      if (selCi.get(id)) throw new Error("user_exists");
+      //
+      // LOCAL IDS ONLY. A name a person types is confusable; an external id
+      // is not typed — it is `oidc:<issuer>:<sub>`, and `sub` is CASE-
+      // SENSITIVE (OIDC Core §2): Okta's mixed-case base62 `00uAbC` and
+      // `00uabc` are two people. Folding them refused the second one's first
+      // login as `user_exists` — a 401 on every attempt, forever. Nothing is
+      // lost by skipping it here: a local id can never claim the external
+      // namespace in ANY case (`claimsExternalNamespace`), so an external id
+      // can only ever collide with another external id — exactly, by key.
+      if (!external && selCi.get(id)) throw new Error("user_exists");
       try {
         ins.run(id, pw, opts?.role ?? "user", createdAt, opts?.email ?? null);
       } catch (e) {
@@ -800,7 +833,21 @@ export function openUserStore(
     },
     setEmail(rawId, email) {
       const id = normId(rawId);
-      const ok = updEmail.run(email, id).changes > 0;
+      const prev = selEmail.get(id) as { email: string | null } | undefined;
+      // A NEW address is unproven: it is not verified, and the verify/reset
+      // tokens mailed to the OLD one are burned. Kept, a verify token sent to
+      // the old address marked the new one verified, and a reset token let
+      // whoever still reads the old mailbox set the password — an account
+      // takeover through a routine email change. (OIDC re-marks verified
+      // right after, from the provider's `email_verified`.)
+      const changed = prev !== undefined && prev.email !== email;
+      // Tokens burned FIRST: if the update below failed, the account would be
+      // left with no outstanding tokens (harmless — ask again), never with
+      // live tokens bound to an address it no longer has.
+      if (changed) tokPurgeMailed.run(id);
+      const ok = changed
+        ? updEmailUnverified.run(email, id).changes > 0
+        : updEmail.run(email, id).changes > 0;
       if (ok) _changed(id);
       return ok;
     },

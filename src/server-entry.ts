@@ -35,7 +35,7 @@ export { connectCli, connectCliUDS } from "./server/cli-client.ts";
 export { type AppDirs, appDirs, type AppMeta } from "./server/app-dirs.ts";
 // …and BEFORE `aio.run()`: the same home, `--profile`/`--home` applied — so a
 // file the app opens first lands where aio will put everything else.
-export { resolveHome } from "./server/resolve-home.ts";
+export { homeWasRequested, resolveHome } from "./server/resolve-home.ts";
 
 // "Reveal in file manager" / "open in browser" — the per-OS launcher every
 // desktop app was re-deriving (three field reports). Fail-loud: rejects when

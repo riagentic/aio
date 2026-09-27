@@ -49,6 +49,7 @@ import {
 import {
   _resetCellBindings,
   _resetCellRegistry,
+  clientHookState,
   getRegisteredCells,
 } from "./state/cell-reactive.ts";
 import {
@@ -77,6 +78,10 @@ import { showDesktopNotification } from "./browser/desktop-notify.ts";
 import { notifyPayload } from "./state/notify.ts";
 import { LARGE_STATE_DOC } from "./state/large-state-doc.ts";
 import { utf8Size } from "./protocol/utf8-size.ts";
+import {
+  NATIVE_STORE_GLOBAL,
+  NATIVE_STORE_KEY_GLOBAL,
+} from "./browser/native-fetch.ts";
 import type { AioUser } from "./protocol/protocol-types.ts";
 
 // Re-exports for user code
@@ -135,6 +140,7 @@ export {
   type ResourceKey,
   useResource,
   type UseResourceConfig,
+  type UseResourceConfigOf,
 } from "./air/use-resource.ts";
 // ── Per-page <head> ───────────────────────────────────────────────────────
 // `useHead` owns document.title and its meta/link tags while a component is
@@ -201,6 +207,8 @@ export { notify } from "./state/notify.ts";
 /** Present so an app compiles for android too; the WebView has no
  *  Notification API, so it resolves "unsupported" there and says so once. */
 export { requestNotificationPermission } from "./browser/desktop-notify.ts";
+/** `fetch` sent natively by a standalone APK (no Origin, no CORS). */
+export { nativeFetch } from "./browser/native-fetch.ts";
 export type { OwnEffect } from "./state/own.ts";
 export { self } from "./state/self.ts";
 export { call } from "./state/cell-impl.ts";
@@ -224,6 +232,8 @@ export type {
   ValidationRule,
 } from "./air/form.ts";
 export { useVirtualList } from "./air/virtual-list.ts";
+// Back is an ANDROID concern first: the standalone APK is where it matters.
+export { onBackButton } from "./air/back-button.ts";
 // React's hook spellings, first-class on `aio/air` since 1.0.6-beta (also on
 // `aio/air/compat`, unchanged). The first thing a React-trained developer or
 // agent writes is `import { useState } from "aio/air"` — it did not compile.
@@ -499,20 +509,50 @@ type BootFence = { dead: boolean; boot: number; site: string };
  *  executor of every boot run inside its fence, so an async body carries it
  *  across `await`s, and the handle send refuses a caller whose fence is dead. */
 export type BootScope = {
-  run: <T>(fence: BootFence, fn: () => T) => T;
+  /** `method`: the action whose reduce this is (the refusal names it). */
+  run: <T>(fence: BootFence, fn: () => T, method?: string) => T;
   get: () => BootFence | undefined;
+  /** What started the running code — a method, a timer and where it was
+   *  armed — for the refusal to say. */
+  origin?: () => string | undefined;
+  /** Is the running code a timer's callback (armed while a boot was live)? */
+  inTimer?: () => boolean;
 };
 let _bootScope: BootScope | null = null;
-/** @internal */
-export function _installBootScope(scope: BootScope | null): void {
+/** @internal Returns the OUTERMOST live boot's fence, for the harness to
+ *  fence a timer the test body arms (no mount active) to the boot it
+ *  outlives. Outermost, never innermost: a timer the test body arms inside a
+ *  nested mount is not that mount's, and fencing it there refused it once the
+ *  mount closed while the outer one lived. */
+export function _installBootScope(
+  scope: BootScope | null,
+): () => BootFence | undefined {
   _bootScope = scope;
+  return () => _fences.get(_liveBoots[0]?.app as object);
 }
-const _inBoot = <T>(fence: BootFence, fn: () => T): T =>
-  _bootScope ? _bootScope.run(fence, fn) : fn();
-/** Refuse a handle call made by code a retired boot started. */
-function _refuseCallFromDeadBoot(type: string): void {
+/** @internal The fence of the boot `app` is — for the harness to attribute
+ *  what its mount runs (see `_inMount`, src/testing/boot-refusals.ts). */
+export function _bootFence(app: unknown): BootFence | undefined {
+  return app && typeof app === "object" ? _fences.get(app) : undefined;
+}
+const _inBoot = <T>(fence: BootFence, fn: () => T, method?: string): T =>
+  _bootScope ? _bootScope.run(fence, fn, method) : fn();
+/** Refuse a handle call made by code a retired boot started. Thrown, so a
+ *  method's async body rejects with it — except in a timer's callback, where a
+ *  throw reaches no caller: it escaped every `.catch` and killed the test
+ *  file. There it is the call's REJECTION, as `dispatch` rejects a dropped
+ *  call. */
+function _refuseCallFromDeadBoot(type: string): Promise<never> | undefined {
   const caller = _bootScope?.get();
-  if (caller?.dead) _refuseDeadGeneration(type, caller.site, caller.boot);
+  if (!caller?.dead) return undefined;
+  if (!_bootScope?.inTimer?.()) {
+    _refuseDeadGeneration(type, caller.site, caller.boot);
+  }
+  const p = Promise.reject(_deadGeneration(type, caller.site, caller.boot));
+  p.catch(() => {
+    // aio-ok: said by console.error above; a caller's `.catch` still sees it
+  });
+  return p;
 }
 
 /** @internal A harness's dispose: THIS app is over. Explicit and per app, not
@@ -575,14 +615,22 @@ function _refuseDeadGeneration(
   bootSite: string,
   boot: number,
 ): never {
+  throw _deadGeneration(type, bootSite, boot);
+}
+function _deadGeneration(type: string, bootSite: string, boot: number): Error {
+  const origin = _bootScope?.origin?.();
+  const since = _bootCount - boot;
   const msg = `[aio] \u2717 "${type}" was dispatched into a torn-down ` +
-    `runtime (boot #${boot}, booted at ${bootSite}; ${_bootCount} since) — a ` +
+    `runtime (boot #${boot}, booted at ${bootSite}; ${
+      since || "none"
+    } since) — a ` +
     `call that outlived its test's dispose(), typically one an onInit or a ` +
-    `schedule started. REFUSED: it would have written into a later boot's ` +
+    `schedule started${origin ? ` (this one: ${origin})` : ""}. REFUSED: it ` +
+    `would have written into a later boot's ` +
     `state. Await it (or \`await h.settle()\`) before dispose, or give it an ` +
     `abort path (\`s.$signal\`).`;
   console.error(msg);
-  throw new Error(msg);
+  return new Error(msg);
 }
 
 // Owned resources (`own.set`) acquired in this runtime. Lazily created so the
@@ -780,6 +828,11 @@ type StandaloneConfig<S, A, E> = {
     /** Cells whose `onPersist` SHAPES what they store: their hooks are
      *  handed the stored shape, not only the declared fields. */
     shaped: Set<string>;
+    /** `scope: "client"` cells — never persisted (docs/state/cell-contexts.md).
+     *  A stored slice under one of their names is carried through every write
+     *  untouched, as a slice no declared cell owns is; it never comes back
+     *  into state. */
+    clientOnly?: Set<string>;
   };
   perfCheck?: PerfCheck;
   perfBudget?: PerfBudget;
@@ -792,12 +845,27 @@ type StandaloneConfig<S, A, E> = {
 
 const STORAGE_KEY = "aio_state";
 
-/** The global an aio Android APK injects (`addJavascriptInterface`, see
- *  `AioNativeStore` in android-template's MainActivity.kt). Named once, here,
- *  so the Kotlin side and this side cannot drift apart silently. */
-const NATIVE_STORE_GLOBAL = "AioNativeStore";
+// NATIVE_STORE_GLOBAL — the global an aio Android APK injects
+// (`addJavascriptInterface`, see `AioNativeStore` in android-template's
+// MainActivity.kt) — and NATIVE_STORE_KEY_GLOBAL, its per-launch key, are named
+// once, in browser/native-fetch.ts; tests/android-native-store.test.ts pins
+// both to the Kotlin side.
 
-/** The shape the Kotlin bridge exposes. `set` answers whether the bytes
+/** The bridge the template has shipped since 1.0.13: every method takes the
+ *  per-launch key first and THROWS without it. `addJavascriptInterface`
+ *  injects the object into every frame, a third-party `<iframe>` included;
+ *  the key reaches only the app's own origin, so that frame can call nothing.
+ *  Same contract as `NativeStoreBridge` otherwise. */
+type KeyedStoreBridge = {
+  read(key: string, k: string): string | null;
+  write(key: string, k: string, v: string): boolean;
+  exists(key: string, k: string): boolean;
+  where(key: string): string;
+};
+
+/** The shape the Kotlin bridge exposed up to 1.0.12, and still does in an
+ *  app's own `<app>/android/` activity copied from then — unkeyed, so every
+ *  frame can use it (`exposedToFrames`). `set` answers whether the bytes
  *  reached the disk — a native store that could not write must not look like
  *  one that did. */
 type NativeStoreBridge = {
@@ -825,6 +893,9 @@ export type _PersistStore = {
   readonly kind: "native" | "localStorage" | "none";
   /** True when `write` returning means the bytes are on disk. */
   readonly durable: boolean;
+  /** True when a frame from ANOTHER origin can call this store too — the
+   *  unkeyed bridge of an activity copied from 1.0.12 or earlier. */
+  readonly exposedToFrames: boolean;
   /** One line for the boot log — it names the store AND its durability, so a
    *  developer reading devtools/logcat can see which one this run picked. */
   readonly describe: string;
@@ -873,12 +944,52 @@ function _readVia(
  *  @decider */
 export function _pickPersistStore(g: {
   [NATIVE_STORE_GLOBAL]?: unknown;
+  [NATIVE_STORE_KEY_GLOBAL]?: unknown;
   localStorage?: {
     getItem(k: string): string | null;
     setItem(k: string, v: string): void;
   };
 }): _PersistStore {
-  const native = g[NATIVE_STORE_GLOBAL] as NativeStoreBridge | undefined;
+  const raw = g[NATIVE_STORE_GLOBAL] as
+    | Partial<KeyedStoreBridge & NativeStoreBridge>
+    | undefined;
+  const keyed = !!raw && typeof raw.read === "function" &&
+    typeof raw.write === "function";
+  const key = g[NATIVE_STORE_KEY_GLOBAL];
+  if (keyed && typeof key !== "string") {
+    // The APK's store is there and this page was not handed its key: a
+    // WebView without DOCUMENT_START_SCRIPT (logcat says so), or a page that
+    // is not the app's own. Neither localStorage (it loses changes, and it is
+    // not where this app's state is) nor a silent empty start: the restore
+    // answers "unreadable", so the app runs and writes nothing over its state.
+    const why = `the native store is present but this page was not handed ` +
+      `its key (${NATIVE_STORE_KEY_GLOBAL}) — the WebView lacks ` +
+      `DOCUMENT_START_SCRIPT (update Android System WebView; see logcat, tag ` +
+      `"aio"). Nothing is read or written.`;
+    return {
+      kind: "native",
+      durable: false,
+      exposedToFrames: false,
+      describe: `native file store, LOCKED: ${why}`,
+      read: _readVia(() => ({ unreadable: why })),
+      restore: () => ({ unreadable: why }),
+      write: () => {
+        throw new Error(why);
+      },
+    };
+  }
+  const native: NativeStoreBridge | undefined = keyed
+    ? (() => {
+      const b = raw as KeyedStoreBridge;
+      const k = key as string;
+      return {
+        get: (n) => b.read(k, n),
+        set: (n, v) => b.write(k, n, v),
+        has: (n) => b.exists(k, n),
+        describe: () => b.where(k),
+      };
+    })()
+    : raw as NativeStoreBridge | undefined;
   if (
     native && typeof native.get === "function" &&
     typeof native.set === "function"
@@ -959,6 +1070,7 @@ export function _pickPersistStore(g: {
     return {
       kind: "native",
       durable: true,
+      exposedToFrames: !keyed,
       describe: `native file store${where} (fsync + atomic rename on every ` +
         `change — a kill right after a change cannot lose it)`,
       read: _readVia(nativeRestore),
@@ -980,6 +1092,7 @@ export function _pickPersistStore(g: {
     return {
       kind: "localStorage",
       durable: false,
+      exposedToFrames: false,
       describe: "localStorage (the host commits it to disk on its own " +
         "schedule — a crash within a second of a change can lose it)",
       read: (k) => ls.getItem(k),
@@ -992,6 +1105,7 @@ export function _pickPersistStore(g: {
   return {
     kind: "none",
     durable: false,
+    exposedToFrames: false,
     describe: "NONE — no native store and no localStorage on this host",
     read: () => null,
     restore: () => ({ raw: null }),
@@ -1014,14 +1128,17 @@ type _IframeDoc = {
 };
 let _stopIframeWatch: (() => void) | null = null;
 
-/** Warn when a standalone APK's page embeds a frame from ANOTHER origin.
+/** Warn when a standalone APK's page embeds a frame from ANOTHER origin while
+ *  its store is UNKEYED.
  *
  *  `addJavascriptInterface` injects `AioNativeStore` into every frame of the
  *  WebView, and `onPageStarted` (which removes it from a foreign page) fires
- *  for the MAIN frame only — so a third-party `<iframe>` the app embeds can
- *  call `AioNativeStore.get/set` and read or overwrite the app's saved state.
- *  Closing that is native work (todo.md); until then an app that does it is
- *  told, once per origin, the moment the frame appears. Returns a stop fn.
+ *  for the MAIN frame only. The template's bridge is keyed per launch, and the
+ *  key reaches only the app's own origin — but an app's own activity copied
+ *  from 1.0.12 or earlier installs the unkeyed `get/set`, and there a
+ *  third-party `<iframe>` can read or overwrite the app's saved state. Such an
+ *  app is told, once per origin, the moment the frame appears (and the build
+ *  warns about the activity). Returns a stop fn.
  *  @internal */
 export function _watchForeignIframes(
   doc: _IframeDoc | undefined,
@@ -1047,10 +1164,12 @@ export function _watchForeignIframes(
       said.add(origin);
       say(
         `[aio] \u26a0 security: this page embeds an <iframe> from ${origin}. ` +
-          `In a standalone APK the native state store (AioNativeStore) is ` +
-          `injected into EVERY frame, so that page can read and overwrite ` +
-          `this app's saved state. Embed only content you trust, or open it ` +
-          `outside the app (a plain link) — see docs/build/targets.md.`,
+          `This APK's own MainActivity installs the UNKEYED native state ` +
+          `store (AioNativeStore, copied from aio 1.0.12 or earlier), which ` +
+          `is injected into EVERY frame, so that page can read and overwrite ` +
+          `this app's saved state. Copy the keyed store from aio's ` +
+          `android-template, or embed only content you trust — see ` +
+          `docs/build/targets.md.`,
       );
     }
   };
@@ -1200,9 +1319,11 @@ export function initStandalone<S, A, E>(
     // costs. Reaches Android logcat too (chromium relays page console lines).
     console.info(`[aio] persistence: ${store.describe}`);
   }
-  // The native bridge reaches every FRAME of the APK's WebView, not only the
-  // app's own page (see `_watchForeignIframes`). Said, never silent.
-  if (store.kind === "native") {
+  // An UNKEYED native bridge (an app's own activity copied from 1.0.12 or
+  // earlier) answers every FRAME of the APK's WebView, not only the app's own
+  // page (see `_watchForeignIframes`). Said, never silent. The template's
+  // keyed bridge answers only the app's own origin, so nothing to say there.
+  if (store.exposedToFrames) {
     _stopIframeWatch?.();
     _stopIframeWatch = _watchForeignIframes(
       (globalThis as { document?: _IframeDoc }).document,
@@ -1226,10 +1347,22 @@ export function initStandalone<S, A, E>(
   let stored: Record<string, unknown> | null = null;
   const cellsCfg = config.cells;
   const declared = initialState as Record<string, unknown>;
+  /** Stored slices under a `scope: "client"` cell's name — see below. */
+  const clientStored: Record<string, unknown> = {};
   if (shouldPersist) {
     const r = _restoreOrQuarantine(store, persistKey, (raw) => {
+      const doc = JSON.parse(raw);
+      // A client cell is declared but never restorable, so `restorableOnly`
+      // drops its slice — and the first write then deleted it from the store.
+      // The server never declares one, so there the same slice rides as an
+      // undeclared key; set it aside here to be carried the same way.
+      if (cellsCfg?.clientOnly && doc && typeof doc === "object") {
+        for (const id of cellsCfg.clientOnly) {
+          if (id in doc) clientStored[id] = doc[id];
+        }
+      }
       const persisted = restorableOnly(
-        JSON.parse(raw),
+        doc,
         config.restorable,
         cellsCfg ? declared : undefined,
       );
@@ -1257,6 +1390,14 @@ export function initStandalone<S, A, E>(
   const stamp: Record<string, number> = {};
   /** Stored slices no declared cell owns — carried into every write, verbatim. */
   const carried: Record<string, unknown> = {};
+  for (const [id, slice] of Object.entries(clientStored)) {
+    carried[id] = slice;
+    console.info(
+      `[aio] persist: stored slice "${id}" belongs to a scope: "client" ` +
+        `cell, which is never persisted — kept in the store untouched, not ` +
+        `restored (the cell starts from its declared state).`,
+    );
+  }
   const hookLog = {
     trace: () => {},
     debug: () => {},
@@ -1602,7 +1743,11 @@ export function initStandalone<S, A, E>(
           boot,
         );
       }
-      return _inBoot(fence, () => reduce(s, a));
+      return _inBoot(
+        fence,
+        () => reduce(s, a),
+        (a as { type?: string }).type,
+      );
     },
     execute: (effect) =>
       // ONE exhaustive classifier for all three effect runtimes — a new
@@ -1734,7 +1879,14 @@ export function useAio<S = unknown>(): {
    *  android alone. Same twin hazard the `useLocal` note below records. */
   ready: boolean;
 } {
-  const state = _stateSignal.value as S | null;
+  // The CLIENT read seam, as `cell.field` and the adapter hook use it. This
+  // signal holds the composed (server-side) state — there is no broadcast on
+  // this runtime to strip anything — so handing it out raw gave the APK's
+  // components every `visible`-hidden field and `visible: "none"` cell that a
+  // browser's `useAio()` never receives.
+  const state = clientHookState(
+    _stateSignal.value as Record<string, unknown> | null,
+  ) as S | null;
 
   const send = (action: { type: string; payload?: unknown }) => {
     if (_app) _app.dispatch(action);
@@ -1922,6 +2074,7 @@ function bootStandalone(
     persistKey?: string;
     onRestore?: (s: Record<string, unknown>) => Record<string, unknown>;
     circuitBreaker?: import("./state/cell-compose.ts").CircuitBreakerConfig;
+    refusalsReject?: boolean;
     /** App-level defaults, applied exactly as `aio.run` applies them. */
     cellDefaults?: import("./state/cell-defaults.ts").CellDefaults;
     localFirst?: boolean;
@@ -1953,6 +2106,7 @@ function bootStandalone(
   _standaloneAppId = opts.appId ?? "app";
   const composed = composeCells(cells, {
     ...(opts.circuitBreaker ? { circuitBreaker: opts.circuitBreaker } : {}),
+    refusalsReject: opts.refusalsReject === true,
     appId: _standaloneAppId,
   });
   // The same two passes the server boot makes (aio-composition.ts), so a
@@ -1968,6 +2122,27 @@ function bootStandalone(
   const clientCellIds = new Set(
     cells.filter((f) => f.__aio.scope === "client").map((f) => f.__aio.id),
   );
+  /** Install a state into the cell signals — every cell's but a client
+   *  cell's. At boot too: the restored/initial composed slice of a client cell
+   *  is its declaration at best, and pushing it would clobber the signal the
+   *  cell owns (a re-boot, a `_liveBoots` restore). */
+  const applyToSignals = (s: Record<string, unknown>): void => {
+    if (clientCellIds.size === 0) {
+      _applyFullState(s);
+      return;
+    }
+    const filtered: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(s)) {
+      if (!clientCellIds.has(k)) filtered[k] = v;
+    }
+    _applyFullState(filtered);
+  };
+  // `scope: "client"` cells are never persisted (docs/state/cell-contexts.md),
+  // and the server never composes one. Here they ARE composed, so every
+  // store-facing hook below is built over the server-scoped cells only:
+  // `persistingCellIds`/`buildDBStateGetter` skip them by rule, and a client
+  // cell's `version`/`onMigrate`/`onRestore` has no stored slice to act on.
+  const storedCells = composed.cells.filter((f) => f.__aio.scope !== "client");
   const app = initStandalone<Record<string, unknown>, Msg, Msg>(
     composed.initialState,
     {
@@ -1990,7 +2165,7 @@ function bootStandalone(
       // bridge collects them (`_cellMigrations` / `_cellRestores`).
       cells: {
         migrations: new Map(
-          composed.cells
+          storedCells
             .filter((f) => f.__aio.version > 0 || f.__aio.onMigrate)
             .map((f) => [f.__aio.id, {
               version: f.__aio.version,
@@ -1999,7 +2174,7 @@ function bootStandalone(
             }]),
         ),
         restores: new Map(
-          composed.cells.filter((f) => f.__aio.onRestore).map((f) => [
+          storedCells.filter((f) => f.__aio.onRestore).map((f) => [
             f.__aio.id,
             f.__aio.onRestore as (
               s: Record<string, unknown>,
@@ -2007,27 +2182,18 @@ function bootStandalone(
           ]),
         ),
         shaped: new Set(
-          composed.cells.filter((f) => f.__aio.persistTransform).map((f) =>
+          storedCells.filter((f) => f.__aio.persistTransform).map((f) =>
             f.__aio.id
           ),
         ),
+        clientOnly: clientCellIds,
       },
       onRestore: opts.onRestore,
       perfBudget: opts.perfBudget,
       // push each committed state into per-cell signals so `counter.count`
       // reads (upgraded to reactive below) re-render the AIR tree. Skip
       // client-scoped cells — they own their signal state (see note above).
-      onCommit: (s) => {
-        if (clientCellIds.size === 0) {
-          _applyFullState(s as Record<string, unknown>);
-          return;
-        }
-        const filtered: Record<string, unknown> = {};
-        for (const [k, v] of Object.entries(s as Record<string, unknown>)) {
-          if (!clientCellIds.has(k)) filtered[k] = v;
-        }
-        _applyFullState(filtered);
-      },
+      onCommit: (s) => applyToSignals(s as Record<string, unknown>),
     },
   );
   // The callable surface is bound AFTER every cell's `__init` — the server's
@@ -2055,8 +2221,8 @@ function bootStandalone(
         (action) => {
           // A call from code a RETIRED boot started (its async body, a timer
           // it set) — this handle now points at a later boot. See BootScope.
-          _refuseCallFromDeadBoot(action.type);
-          return Promise.resolve(_liveFor(app).dispatch(action));
+          return _refuseCallFromDeadBoot(action.type) ??
+            Promise.resolve(_liveFor(app).dispatch(action));
         },
         () => _liveFor(app).getState() as Record<string, unknown>,
       );
@@ -2075,7 +2241,7 @@ function bootStandalone(
     _ownManager().disposeByPrefix(prefix);
   });
   // seed the cell signals with the restored/initial state
-  _applyFullState(app.getState() as Record<string, unknown>);
+  applyToSignals(app.getState() as Record<string, unknown>);
   // Late-bind the cell names so `close()` can scope its abort + drain to this
   // runtime's own cells (see `_standaloneCells`).
   _standaloneCells = new Set(composed.cellNames);
@@ -2100,7 +2266,7 @@ function bootStandalone(
     cells,
     () =>
       fence
-        ? _inBoot(fence, () => composed.initAll(lifecycleApp))
+        ? _inBoot(fence, () => composed.initAll(lifecycleApp), "onInit")
         : composed.initAll(lifecycleApp),
   );
   bindAll();
@@ -2110,7 +2276,7 @@ function bootStandalone(
       _app = app as unknown as AioApp;
       _cellApp = app;
       _standaloneCells = new Set(composed.cellNames);
-      _applyFullState(app.getState() as Record<string, unknown>);
+      applyToSignals(app.getState() as Record<string, unknown>);
     },
   });
   let destroyed = false;
@@ -2129,6 +2295,16 @@ function bootStandalone(
   app.close = async () => {
     await innerClose();
     _destroyCells?.();
+    // …then what the cells held for their lifetime, in the server's Phase 7
+    // order (shutdown.ts): schedules cancelled, owned resources disposed.
+    // Only the harness reset did this, so on Android an `own.set` resource
+    // outlived the app and an `every` timer kept firing into a closed
+    // dispatch.
+    _sched?.cancelAll();
+    if (_own) {
+      _own.disposeAll();
+      _own = null;
+    }
   };
   return app;
 }
@@ -2180,6 +2356,10 @@ type StandaloneRunConfig = {
   persist?: boolean | string;
   onRestore?: (state: Record<string, unknown>) => Record<string, unknown>;
   circuitBreaker?: import("./state/cell-compose.ts").CircuitBreakerConfig;
+  /** `aio.run({ refusalsReject })` — honoured here as on the server. It was
+   *  never read on this runtime, so an app that opted in got a rejected
+   *  refusal from its server and a silently resolved one on Android. */
+  refusalsReject?: boolean;
   /** App-level defaults, applied exactly as the server's `aio.run` applies
    *  them — the in-process harnesses pass these through. */
   cellDefaults?: import("./state/cell-defaults.ts").CellDefaults;
@@ -2261,7 +2441,12 @@ export function _applyShellUi(
   // `"auto"` steps aside for an app that ships its own stylesheet — the same
   // rule the server shell applies, asked at the one moment this runtime can
   // see the answer.
-  const appCss = document.querySelector('link[rel="stylesheet"]');
+  // The APP's stylesheet — the one link the shell marks `data-aio-app-css`
+  // (server-html-gen.ts; a browser entry must not import src/server/). A
+  // web-font `<link>` from `ui.head` is not the app styling itself.
+  const appCss = document.querySelector(
+    "link[data-aio-app-css]",
+  );
   if (theme === "auto" && appCss) return;
   deferred.removeAttribute("media");
 }
@@ -2288,6 +2473,7 @@ function runStandalone(
         : undefined,
       onRestore: cfg.onRestore,
       circuitBreaker: cfg.circuitBreaker,
+      refusalsReject: cfg.refusalsReject,
       cellDefaults: cfg.cellDefaults,
       localFirst: cfg.localFirst,
       perfBudget: cfg.perfBudget as PerfBudget | undefined,

@@ -34,9 +34,11 @@ import type { GlobalFlags } from "./am-types.ts";
 import {
   AppLock,
   deadOwnerWarning,
+  foreignOwnerRefusal,
   type InstanceInfo,
   instances,
   isLockOwnerAlive,
+  isOwnLock,
   isPortInUse,
   isProcessAlive,
   isSocketAlive,
@@ -322,6 +324,19 @@ export async function ensureSingleton(
   // lock below and was SIGTERMed mid-copy. Wait for it; never kill it.
   if (maintenanceOp(pf)) {
     outError(maintenanceMessage(appId, pf), mode);
+    Deno.exit(1);
+  }
+
+  // A dev session WAITING for a fix: alive, nothing bound, and it will stay
+  // that way until the next save — neither booting (waiting on it can only
+  // time out) nor stuck (reclaiming it killed a live dev session). Say what
+  // broke, as a failed start of our own would.
+  const waiting = waitingOf(pf);
+  if (waiting) {
+    outError(
+      waitingMessage(appId, pf.pid, waiting, waitingSaid(appId, waiting.since)),
+      mode,
+    );
     Deno.exit(1);
   }
 
@@ -1337,7 +1352,13 @@ async function awaitStarted(o: {
     // A SOCKET-ONLY app (the desktop shape) bound no port: "port 0" named a
     // door that does not exist. Its door is the socket — named as
     // `am status` names it.
-    const done = startedReport(appId, pid, realPort, updated?.socketPath);
+    const done = startedReport(
+      appId,
+      pid,
+      realPort,
+      updated?.socketPath,
+      updated?.cdpPort,
+    );
     out(mode === "pretty" ? done.line : done.doc, mode);
   } else if (!isProcessAlive(pid)) {
     // Our own child's placeholder, under our own home — and ONLY it: by the
@@ -1360,7 +1381,13 @@ async function awaitStarted(o: {
           `restart's child (pid ${pid}) stood down, and that instance is the ` +
           `app now`,
       );
-      const done = startedReport(appId, peer.pid, peer.port, peer.socketPath);
+      const done = startedReport(
+        appId,
+        peer.pid,
+        peer.port,
+        peer.socketPath,
+        peer.cdpPort,
+      );
       out(mode === "pretty" ? done.line : done.doc, mode);
       return;
     }
@@ -1429,7 +1456,8 @@ async function racingPeer(
   do {
     const l = readPid(appId);
     if (
-      !l || l.pid === child || l.pid === stopped || maintenanceOp(l) ||
+      !l || isOwnLock(l, child) ||
+      (stopped !== undefined && isOwnLock(l, stopped)) || maintenanceOp(l) ||
       foreignCheckout(l) !== null || !isLockOwnerAlive(l)
     ) return null;
     if (l.status === "started") {
@@ -1487,12 +1515,19 @@ export function startedReport(
   pid: number,
   port: number,
   socketPath?: string,
+  /** The DevTools port of a `--cdp` launch: the pretty line then names
+   *  `am shot`, the verb for it — a field report scripted screenshots over raw
+   *  CDP and hunted the port with `ss`. The JSON shape is unchanged. */
+  cdpPort?: number,
 ): { line: string; doc: Record<string, unknown> } {
   const door = socketPath && !port
     ? `socket ${socketPath}`
     : `port ${port}${socketPath ? `, transport uds (${socketPath})` : ""}`;
+  const cdp = cdpPort
+    ? `\ncdp 127.0.0.1:${cdpPort} — screenshots: am shot (not raw CDP)`
+    : "";
   return {
-    line: `started ${appId} (pid ${pid}, ${door})`,
+    line: `started ${appId} (pid ${pid}, ${door})${cdp}`,
     doc: {
       appId,
       pid,
@@ -1553,6 +1588,49 @@ export function bootStalled(
 ): boolean {
   if (now - lockStartedAt < stuckMs) return false;
   return logMtime === null || now - logMtime >= stuckMs;
+}
+
+/** The dev session behind this lock is WAITING for a fix
+ *  (`LockData.waiting`) — or null. A malformed value is no wait. Pure. */
+export function waitingOf(
+  pf: Pick<LockData, "waiting"> | null | undefined,
+): { reason: string; since: number } | null {
+  const w = pf?.waiting as { reason?: unknown; since?: unknown } | undefined;
+  return w && typeof w.reason === "string" && typeof w.since === "number"
+    ? { reason: w.reason, since: w.since }
+    : null;
+}
+
+/** What `am start` / `am status` say about a dev session waiting for a fix:
+ *  the reason, what the failed relaunch printed (`said`), and the ways out.
+ *  Pure — the wording is pinned by a test. */
+export function waitingMessage(
+  appId: string,
+  pid: number,
+  w: { reason: string },
+  said: readonly string[],
+): string {
+  return `${appId} is waiting for a fix — ${w.reason} (dev session pid ` +
+    `${pid}).` +
+    (said.length > 0
+      ? `\n  it said:\n${said.map((l) => `      ${l}`).join("\n")}`
+      : "") +
+    `\n  fix it and save: the session relaunches the app. am stop ends the ` +
+    `session; am restart starts the app afresh.`;
+}
+
+/** What the failed relaunch printed, from `stdout.log` — only when that log
+ *  moved around the wait (a dev session in a terminal writes elsewhere, and
+ *  an old crash must not be passed off as this one). */
+function waitingSaid(appId: string, since: number): string[] {
+  const path = stdoutLogPath(appId);
+  const m = logMtime(path);
+  if (m === null || m < since - 5_000) return [];
+  // The session's own "waiting" lines follow the error — they repeat what
+  // the message already says.
+  return crashTail(readLogTail(path)).filter((l) =>
+    !/^\d{4}-\d\d-\d\d \S+\s+\w+\s+watch\s/.test(l)
+  );
 }
 
 /** A file's mtime in epoch ms, or null when it cannot be read. */
@@ -2044,7 +2122,8 @@ export async function stopOne(
   // answering. It must never fire on an identity refusal — killing our own pid
   // because someone ELSE holds the port is the same retargeting bug mirrored.
   if (
-    !result.ok && pf && (noDoor || pf.port === port) && isLockOwnerAlive(pf)
+    !result.ok && pf && (noDoor || pf.port === port) && isLockOwnerAlive(pf) &&
+    !foreignOwnerRefusal(pf)
   ) {
     try {
       Deno.kill(pf.pid, "SIGTERM");
@@ -2109,6 +2188,8 @@ export async function stopOne(
 
   // Graceful timeout expired — escalate to SIGKILL
   if (pf && isLockOwnerAlive(pf)) {
+    const foreign = foreignOwnerRefusal(pf);
+    if (foreign) return { ok: false, appId, error: foreign };
     await killProcess(pf.pid, 0, pf); // already waited gracefully
     // Reported as it IS: "stopped" for a process still alive after SIGKILL
     // is the lie a script then starts a second copy on.
@@ -2385,7 +2466,7 @@ export function writeStartPlaceholder(
   data: LockData,
 ): boolean {
   if (!seen) return replaceLockIf(null, data);
-  if (seen.pid === data.pid || isLockOwnerAlive(seen)) return false;
+  if (isOwnLock(seen, data.pid) || isLockOwnerAlive(seen)) return false;
   return replaceLockIf(seen, data);
 }
 
@@ -2920,6 +3001,26 @@ export async function cmdStatus(
     Deno.exit(2);
   }
 
+  // A dev session waiting for a fix — transitional (exit 2), `starting` on
+  // the wire (the status union is frozen), and named, with what broke.
+  const waiting = waitingOf(pf);
+  if (waiting) {
+    const said = waitingSaid(appId, waiting.since);
+    out(
+      mode === "pretty"
+        ? `${appId}: starting — ${waitingMessage(appId, pf.pid, waiting, said)}`
+        : {
+          appId,
+          status: "starting",
+          pid: pf.pid,
+          port: pf.port,
+          waiting: { ...waiting, said },
+        },
+      mode,
+    );
+    Deno.exit(2);
+  }
+
   // Process alive + stopping → report stopping (exit 2 = transitional, not error)
   if (pf.status === "stopping") {
     out(
@@ -3282,7 +3383,9 @@ export function lockedPidsEverywhere(): Map<
         dirs.add(join(base, e.name));
       }
     }
-  } catch { /* base unreadable — the default dir alone still applies */ }
+  } catch {
+    /* aio-ok: base unreadable — the default dir alone still applies */
+  }
   for (const dir of dirs) {
     try {
       for (const e of Deno.readDirSync(dir)) {
@@ -3295,9 +3398,9 @@ export function lockedPidsEverywhere(): Map<
           if (typeof d.pid === "number" && d.pid > 0) {
             found.set(d.pid, { appId: d.appId ?? "?", dir });
           }
-        } catch { /* unreadable or half-written lock — skip it */ }
+        } catch { /* aio-ok: unreadable or half-written lock — skip it */ }
       }
-    } catch { /* dir vanished */ }
+    } catch { /* aio-ok: dir vanished */ }
   }
   return found;
 }
@@ -3329,7 +3432,7 @@ function pidCommandLine(pid: number): string | null {
         ? new TextDecoder().decode(r.stdout).trim() || null
         : null;
     }
-  } catch { /* gone, or not ours to read */ }
+  } catch { /* aio-ok: gone, or not ours to read */ }
   return null;
 }
 
@@ -3413,9 +3516,14 @@ export async function cmdKill(
       );
       Deno.exit(1);
     }
+    const foreign = foreignOwnerRefusal(pf);
+    if (foreign) {
+      outError(foreign, mode);
+      Deno.exit(1);
+    }
     try {
       Deno.kill(pf.pid, "SIGTERM");
-    } catch { /* raced us to the exit */ }
+    } catch { /* aio-ok: raced us to the exit */ }
     // `am backup` / `am restore` holding the lock: the SIGTERM interrupts THE
     // OP, not an app — say so. And leave its lock alone: the op releases it
     // itself once it has cleaned up (removing it here let an app start while

@@ -150,6 +150,17 @@ export function generateReplayTest(
   // (`call`: its write-sets, what its body dispatched); a later call recorded
   // before that point started while it was still running. A sync call is over
   // when it commits.
+  // The JS name a cell goes by in the generated test. A cell NAME may hold a
+  // hyphen (`cell("flc-counter", …)` is legal), which is not an identifier:
+  // pasting it in wrote `import { flcCounter as flc-counter }` and
+  // `await flc-counter.inc(2)` — a test that does not parse. The defining
+  // export's own binding when known, else the name made identifier-safe.
+  const IDENT = /^[A-Za-z_$][\w$]*$/;
+  const local = (c: string): string => {
+    if (IDENT.test(c)) return c;
+    const b = opts.cellFiles?.[c]?.binding;
+    return b && IDENT.test(b) ? b : c.replace(/[^\w$]/g, "_");
+  };
   const runEnd = new Map<string, number>();
   actions.forEach((a, i) => {
     if (a.call !== undefined) runEnd.set(a.call, i);
@@ -228,7 +239,7 @@ export function generateReplayTest(
       calls.push(
         `  // UNREPRODUCIBLE: ${a.type} was redacted (redactActions) — its ` +
           `arguments\n  // were never recorded. Supply them to continue the ` +
-          `flow:\n  // await ${cell}.${method}(/* … */);`,
+          `flow:\n  // await ${local(cell)}.${method}(/* … */);`,
       );
       continue;
     }
@@ -242,7 +253,7 @@ export function generateReplayTest(
     if (a.threw) rejects = true;
     callCount++;
     group.push({
-      expr: `${cell}.${method}(${args.map(literal).join(", ")})`,
+      expr: `${local(cell)}.${method}(${args.map(literal).join(", ")})`,
       threw: a.threw === true,
     });
     const id = payload?._callId;
@@ -261,11 +272,13 @@ export function generateReplayTest(
   const imports = cellList.map((c) => {
     const known = opts.cellFiles?.[c];
     if (known) {
-      const what = known.binding === c ? c : `${known.binding} as ${c}`;
+      const what = known.binding === local(c)
+        ? known.binding
+        : `${known.binding} as ${local(c)}`;
       return `import { ${what} } from "${known.spec}";`;
     }
     guessed++;
-    return `import { ${c} } from "${dir}/${c}.ts"; // a GUESS — no ` +
+    return `import { ${local(c)} } from "${dir}/${c}.ts"; // a GUESS — no ` +
       `cell("${c}") found in the project; point it at the defining file`;
   });
   const name = opts.name ?? "recorded flow";
@@ -326,11 +339,11 @@ export function generateReplayTest(
     // and "Symbol(Symbol.dispose) is not a function" when run, so every test
     // this verb wrote failed on its first line. tests/am-record-generated-runs
     // checks AND runs the output.
-    `  using h = await bootCells([${cellList.join(", ")}]);`,
+    `  using h = await bootCells([${cellList.map(local).join(", ")}]);`,
     ...calls,
     `  await h.settle();`,
     `  // TODO: assert final state, e.g. assertEquals(${
-      cellList[0] ?? "cell"
+      cellList[0] === undefined ? "cell" : local(cellList[0])
     }.field, expected);`,
     `});`,
     ``,

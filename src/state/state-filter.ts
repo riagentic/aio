@@ -1,4 +1,5 @@
 // Pure state filtering — cell field filters + patch strategy filtering
+import { setOwn } from "./deep-merge.ts";
 import type { CellFieldFilter } from "./cell-types.ts";
 import type { WirePatch as Patch } from "../protocol/patch-ops.ts";
 
@@ -304,7 +305,9 @@ function pickPath(src: unknown, segs: string[]): unknown {
   }
   const [head, ...rest] = segs;
   const from = src as Record<string, unknown>;
-  if (head === undefined || !(head in from)) return MISSING;
+  // OWN keys: `in` sees Object.prototype, so an include of `toString` or
+  // `constructor` picked a native function instead of reporting it missing.
+  if (head === undefined || !Object.hasOwn(from, head)) return MISSING;
   const picked = pickPath(from[head], rest);
   return picked === MISSING ? MISSING : { [head]: picked };
 }
@@ -346,10 +349,10 @@ export function applyCellFieldFilter(
         for (
           const [k, v] of Object.entries(picked as Record<string, unknown>)
         ) {
-          result[k] = mergePicked(result[k], v);
+          setOwn(result, k, mergePicked(result[k], v));
         }
-      } else if (key in cellState) {
-        result[key] = cellState[key];
+      } else if (Object.hasOwn(cellState, key)) {
+        setOwn(result, key, cellState[key]);
       }
     }
     return result;
@@ -500,9 +503,19 @@ export function uiKeyVisibility(
     if (filter.exclude.includes(key)) {
       return { hidden: true, reason: "the field is listed in visible.exclude" };
     }
+    // EXACTLY the cursor set `deepExcludePaths` carries into `key` from the
+    // cell root (the frame's walk): a path whose head IS the key advances to
+    // its tail; every other dotted path reaches `key` whole, because a key
+    // that does not match the head is a record id and consumes nothing. Only
+    // handing out the head-matching tails left `exclude: ["a.b"]` reading
+    // `x.a.b` raw on this seam while the wire stripped it — a secret visible
+    // in standalone/Electron/APK and in testUI.
     const deepSegs = filter.exclude
-      .filter((p) => p.includes(".") && p.split(".")[0] === key)
-      .map((p) => p.split(".").slice(1));
+      .filter((p) => p.includes("."))
+      .map((p) => {
+        const segs = p.split(".");
+        return segs[0] === key ? segs.slice(1) : segs;
+      });
     if (deepSegs.length > 0) return { hidden: false, deepSegs };
   }
   return { hidden: false };
@@ -534,6 +547,34 @@ function matchDeepPath(
   for (let i = 0; i < opPath.length && j < segs.length; i++) {
     const seg = opPath[i]!;
     if (typeof seg !== "number" && seg === segs[j]) j++;
+  }
+  if (j === segs.length) return { kind: "within" };
+  return { kind: "ancestor", rest: segs.slice(j) };
+}
+
+/** Match an Immer patch path against a dotted INCLUDE path — the delta
+ *  path's reading of `pickPath`, and it has to be the same reading: the frame
+ *  projects an include LITERALLY (object keys in order; an array index
+ *  consumes nothing, since an array projects element-wise).
+ *
+ *  `matchDeepPath` is exclude's reading (a subsequence: any other key is a
+ *  record id), and include borrowed it: an op at `profile.billing.name` was
+ *  "within" `profile.name` and sent whole, and a replace of `profile.billing`
+ *  was an "ancestor" and sent projected — values the frame never contains.
+ *  Any key off the literal path is simply not included. */
+function matchIncludePath(
+  opPath: (string | number)[],
+  segs: string[],
+):
+  | { kind: "within" }
+  | { kind: "ancestor"; rest: string[] }
+  | { kind: "none" } {
+  let j = 0;
+  for (const seg of opPath) {
+    if (j === segs.length) break;
+    if (typeof seg === "number") continue;
+    if (seg !== segs[j]) return { kind: "none" };
+    j++;
   }
   if (j === segs.length) return { kind: "within" };
   return { kind: "ancestor", rest: segs.slice(j) };
@@ -590,7 +631,7 @@ export function filterPatchesByStrategy(
         let within = false;
         const ancestorRests: string[][] = [];
         for (const segs of deeps) {
-          const m = matchDeepPath(op.path, segs);
+          const m = matchIncludePath(op.path, segs);
           if (m.kind === "within") {
             within = true;
             break;

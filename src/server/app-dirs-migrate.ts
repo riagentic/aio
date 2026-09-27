@@ -26,7 +26,11 @@
 import { basename, join } from "@std/path";
 import type { AppDirs } from "./app-dirs.ts";
 import { ensureAppDirs } from "./app-dirs.ts";
-import { isLockOwnerAlive, readLock } from "./single-instance-lock.ts";
+import {
+  isLockOwnerAlive,
+  isOwnLock,
+  readLock,
+} from "./single-instance-lock.ts";
 
 export type MoveOutcome = "moved" | "skipped-exists" | "failed";
 
@@ -359,7 +363,7 @@ export function migrateLegacyLayout(opts: {
   // flag: this reads the DEFAULT-home lock, and a boot from another home
   // (appDir) holds a different one while the default-home app may be live.
   const lock = readLock(appId);
-  if (lock && lock.pid !== Deno.pid && isLockOwnerAlive(lock)) {
+  if (lock && !isOwnLock(lock) && isLockOwnerAlive(lock)) {
     return {
       moves: [],
       refused:

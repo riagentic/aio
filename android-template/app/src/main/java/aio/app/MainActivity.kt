@@ -20,10 +20,16 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.webkit.JavaScriptReplyProxy
+import androidx.webkit.WebMessageCompat
 import androidx.webkit.WebViewAssetLoader
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.security.MessageDigest
+import java.security.SecureRandom
 
 /** Filled at build time: true for a client APK and a dev build, false for a
  *  standalone APK (packaged assets only). One decider with the manifest's
@@ -42,9 +48,23 @@ private const val IS_CLIENT = {{IS_CLIENT}}
  *  below names the exact key to add. */
 private const val CAMERA_DECLARED = {{CAMERA_DECLARED}}
 /** The JS global the store below is injected as. The page names the same
- *  string in `_pickPersistStore` (src/standalone-air.ts) — the only two places
- *  it appears. */
+ *  string as NATIVE_STORE_GLOBAL (src/browser/native-fetch.ts, read by
+ *  `_pickPersistStore`) — the only two places it appears. */
 private const val STORE_GLOBAL = "AioNativeStore"
+/** The global the store's per-launch key is handed to the app's own page
+ *  under — by a document-start script restricted to the app's own origin, so
+ *  a frame from any other origin never has it. The page names the same string
+ *  as NATIVE_STORE_KEY_GLOBAL (src/browser/native-fetch.ts). */
+private const val STORE_KEY_GLOBAL = "__aioNativeStoreKey"
+/** The JS global the native fetch below is installed as. `nativeFetch()`
+ *  names the same string in src/browser/native-fetch.ts — the only two places
+ *  it appears. */
+private const val FETCH_GLOBAL = "AioNativeFetch"
+/** The native fetch's limits: the largest body carried either way, and the
+ *  connect / between-bytes timeouts. */
+private const val FETCH_MAX_BODY = 8 * 1024 * 1024
+private const val FETCH_CONNECT_TIMEOUT_MS = 15_000
+private const val FETCH_READ_TIMEOUT_MS = 30_000
 
 /**
  * The store a standalone app's state actually lives in.
@@ -62,22 +82,43 @@ private const val STORE_GLOBAL = "AioNativeStore"
  *   3. `renameTo` puts them under the real name in one atomic step,
  *   4. the directory is fsync'd, so that rename survives a power cut too.
  * A reader therefore sees the whole previous value or the whole new one,
- * never half of either: a torn state file is worse than a lost change. `set`
+ * never half of either: a torn state file is worse than a lost change. `write`
  * returns only once step 3 is done, so the page's method has already survived
  * the kill by the time it returns.
  *
  * SECURITY — `addJavascriptInterface` hands these methods to EVERY page the
- * WebView loads, for the life of the WebView. It is therefore installed only
- * when `TALKS_TO_SERVER` is false: a standalone APK, the one shape whose
- * WebView can never show anything but its own bundled assets
- * (`shouldOverrideUrlLoading` hands every other URL to an external Intent).
- * A client or dev APK — the two that open a server's pages — never gets the
- * bridge at all. `onPageStarted` removes it again if a page from any other
- * origin ever does load, so that is an enforced invariant rather than a
- * comment. The store reaches only this app's own `filesDir`, and its keys are
+ * WebView loads, and to every FRAME of it — a third-party `<iframe>` the app
+ * embeds included (`onPageStarted` sees the main frame only). So:
+ *  - it is installed only when `TALKS_TO_SERVER` is false: a standalone APK,
+ *    the one shape whose WebView can never show anything but its own bundled
+ *    assets (`shouldOverrideUrlLoading` hands every other URL to an external
+ *    Intent). A client or dev APK never gets the bridge at all, and
+ *    `onPageStarted` removes it if a page from any other origin ever loads;
+ *  - every method takes a KEY first: 32 random bytes made per launch, handed
+ *    to the page by `addDocumentStartJavaScript` whose origin rule is the
+ *    app's own asset origin — so a frame from any other origin sees an object
+ *    whose every method throws. The key is compared in constant time.
+ * The store reaches only this app's own `filesDir`, and its keys are
  * flattened to a leaf filename, so no key can walk out of that directory.
+ * The file layout is the one 1.0.12 wrote: an upgrade reads its state as is.
  */
 private class AioNativeStore(private val dir: File) {
+    /** This launch's key — see SECURITY above. Hex, so it is a JS string
+     *  literal as is. */
+    val key: String = ByteArray(32).also { SecureRandom().nextBytes(it) }
+        .joinToString("") { "%02x".format(it) }
+    private val keyBytes = key.toByteArray(Charsets.US_ASCII)
+
+    /** Throws for a caller without this launch's key: a foreign frame gets an
+     *  exception from every method, never a value and never a write. */
+    private fun admit(k: String) {
+        if (!MessageDigest.isEqual(k.toByteArray(Charsets.US_ASCII), keyBytes)) {
+            android.util.Log.e("aio", "native store call REFUSED: wrong key — " +
+                "a frame that is not the app's own page tried to use it")
+            throw SecurityException("AioNativeStore: wrong key")
+        }
+    }
+
     /** A key ("aio:myapp") → one leaf filename in `dir`. The readable part is
      *  sanitised so no separator survives, and the hash keeps two keys that
      *  sanitise alike from becoming one file. */
@@ -87,22 +128,25 @@ private class AioNativeStore(private val dir: File) {
     }
 
     @JavascriptInterface
-    fun get(key: String): String? = try {
-        val f = fileFor(key)
-        if (f.isFile) f.readText(Charsets.UTF_8) else null
-    } catch (e: Exception) {
-        // Loud: state that exists on disk and did not come back is the same
-        // loss as state that was never written. The RETURN is still null, and
-        // null also means "nothing written yet" — `has` below is what keeps
-        // the page from reading one as the other.
-        android.util.Log.e("aio", "native store READ failed for $key: $e")
-        null
+    fun read(k: String, key: String): String? {
+        admit(k)
+        return try {
+            val f = fileFor(key)
+            if (f.isFile) f.readText(Charsets.UTF_8) else null
+        } catch (e: Exception) {
+            // Loud: state that exists on disk and did not come back is the same
+            // loss as state that was never written. The RETURN is still null, and
+            // null also means "nothing written yet" — `exists` below is what keeps
+            // the page from reading one as the other.
+            android.util.Log.e("aio", "native store READ failed for $key: $e")
+            null
+        }
     }
 
     /** Is a value for this key ON DISK? — regardless of whether it could be
      *  read back.
      *
-     *  `get` answers null for BOTH "never written" and "written, and this read
+     *  `read` answers null for BOTH "never written" and "written, and this read
      *  threw" (an IO error, an OOM on a large state). The page's upgrade path
      *  adopts the previous build's `localStorage` copy on a null, and writes
      *  it in: on the second meaning that silently replaces the app's real
@@ -114,17 +158,21 @@ private class AioNativeStore(private val dir: File) {
      *  Answering TRUE is the safe side (the page then refuses to overwrite),
      *  so a throw here answers true rather than "no". */
     @JavascriptInterface
-    fun has(key: String): Boolean = try {
-        fileFor(key).isFile
-    } catch (e: Exception) {
-        android.util.Log.e("aio", "native store HAS failed for $key: $e")
-        true
+    fun exists(k: String, key: String): Boolean {
+        admit(k)
+        return try {
+            fileFor(key).isFile
+        } catch (e: Exception) {
+            android.util.Log.e("aio", "native store HAS failed for $key: $e")
+            true
+        }
     }
 
     /** True when the value is on disk. False is a REAL failure — the page
      *  turns it into a thrown error rather than a silent no-op. */
     @JavascriptInterface
-    fun set(key: String, value: String): Boolean {
+    fun write(k: String, key: String, value: String): Boolean {
+        admit(k)
         val target = fileFor(key)
         val tmp = File(dir, target.name + ".tmp")
         return try {
@@ -156,7 +204,7 @@ private class AioNativeStore(private val dir: File) {
      *
      *  A filesystem that refuses fsync on a directory (EINVAL on some FUSE /
      *  sdcardfs mounts) does not undo anything: the rename happened and the
-     *  contents are durable, only the power-cut window stays open. So `set`
+     *  contents are durable, only the power-cut window stays open. So `write`
      *  still answers true — but not in silence: one logcat warning per
      *  process, naming what is lost, rather than one per keystroke. */
     private var dirSyncRefusedSaid = false
@@ -179,7 +227,110 @@ private class AioNativeStore(private val dir: File) {
 
     /** For the page's boot line, so a developer can see where the state went. */
     @JavascriptInterface
-    fun describe(): String = dir.absolutePath
+    fun where(k: String): String {
+        admit(k)
+        return dir.absolutePath
+    }
+}
+
+/**
+ * `nativeFetch()` for a standalone APK: an HTTP request made by the app, not
+ * by the WebView — so it carries no `Origin`, no `Referer`, no WebView cookie,
+ * and no CORS check applies to its answer. Some public APIs refuse every
+ * request that carries an Origin (a JSON-RPC answering 403), and a page in a
+ * WebView can never send one without it.
+ *
+ * SECURITY — it is a network client with none of the browser's rules, so:
+ *  - installed only when TALKS_TO_SERVER is false (a standalone APK), like the
+ *    store, and removed again by `onPageStarted` on a foreign page;
+ *  - through `addWebMessageListener` with the app's own asset origin as its
+ *    only allowed origin. Unlike `addJavascriptInterface`, a frame from any
+ *    other origin (an embedded third-party iframe) never sees the object;
+ *  - http and https only: `URL.openConnection` would read a `file:` URL,
+ *    this app's own files included;
+ *  - no cookie jar: HttpURLConnection shares nothing with the WebView's
+ *    CookieManager, and this app installs no CookieHandler; `Set-Cookie` is
+ *    not handed back (a page's `fetch` never sees it either);
+ *  - bounded: FETCH_CONNECT_TIMEOUT_MS to connect, FETCH_READ_TIMEOUT_MS
+ *    between bytes, FETCH_MAX_BODY per body each way;
+ *  - cleartext stays under the manifest's rule, which for a standalone APK is
+ *    none: an `http://` URL fails exactly as it does in the WebView.
+ * The work runs on a small pool, never on the UI thread; the answer goes back
+ * on the UI thread, as JSON the page matches to its request by `id`.
+ */
+private val fetchPool by lazy { java.util.concurrent.Executors.newFixedThreadPool(4) }
+
+private object AioNativeFetch : WebViewCompat.WebMessageListener {
+    override fun onPostMessage(
+        view: WebView,
+        message: WebMessageCompat,
+        sourceOrigin: Uri,
+        isMainFrame: Boolean,
+        replyProxy: JavaScriptReplyProxy,
+    ) {
+        // The origin rule already guarantees this; a second check costs nothing.
+        if (sourceOrigin.host != ASSET_HOST) return
+        val raw = message.data ?: return
+        fetchPool.execute {
+            val reply = org.json.JSONObject()
+            try {
+                val req = org.json.JSONObject(raw)
+                reply.put("id", req.getInt("id"))
+                perform(req, reply)
+            } catch (e: Exception) {
+                reply.put("error", e.toString())
+            }
+            view.post { replyProxy.postMessage(reply.toString()) }
+        }
+    }
+
+    private fun perform(req: org.json.JSONObject, reply: org.json.JSONObject) {
+        val url = java.net.URL(req.getString("url"))
+        if (url.protocol != "https" && url.protocol != "http") {
+            throw IOException("only http and https URLs, not " + url.protocol + ":")
+        }
+        val conn = url.openConnection() as java.net.HttpURLConnection
+        try {
+            conn.connectTimeout = FETCH_CONNECT_TIMEOUT_MS
+            conn.readTimeout = FETCH_READ_TIMEOUT_MS
+            conn.useCaches = false
+            conn.requestMethod = req.getString("method")
+            val headers = req.getJSONArray("headers")
+            for (i in 0 until headers.length()) {
+                val h = headers.getJSONArray(i)
+                conn.addRequestProperty(h.getString(0), h.getString(1))
+            }
+            if (!req.isNull("body")) {
+                val body = android.util.Base64.decode(req.getString("body"), android.util.Base64.NO_WRAP)
+                if (body.size > FETCH_MAX_BODY) throw IOException("request body over $FETCH_MAX_BODY bytes")
+                conn.doOutput = true
+                conn.setFixedLengthStreamingMode(body.size)
+                conn.outputStream.use { it.write(body) }
+            }
+            val status = conn.responseCode
+            val out = java.io.ByteArrayOutputStream()
+            (if (status >= 400) conn.errorStream else conn.inputStream)?.use { s ->
+                val buf = ByteArray(16384)
+                while (true) {
+                    val n = s.read(buf)
+                    if (n < 0) break
+                    if (out.size() + n > FETCH_MAX_BODY) throw IOException("response body over $FETCH_MAX_BODY bytes")
+                    out.write(buf, 0, n)
+                }
+            }
+            val hs = org.json.JSONArray()
+            for ((k, vs) in conn.headerFields) {
+                if (k == null || k.equals("set-cookie", ignoreCase = true)) continue
+                hs.put(org.json.JSONArray().put(k).put(vs.joinToString(", ")))
+            }
+            reply.put("status", status)
+                .put("statusText", conn.responseMessage ?: "")
+                .put("headers", hs)
+                .put("body", android.util.Base64.encodeToString(out.toByteArray(), android.util.Base64.NO_WRAP))
+        } finally {
+            conn.disconnect()
+        }
+    }
 }
 
 class MainActivity : AppCompatActivity() {
@@ -209,7 +360,32 @@ class MainActivity : AppCompatActivity() {
             // APK keeps the WebView's own localStorage: it holds a server
             // address, not the app's state, and the state lives on the server.
             if (!TALKS_TO_SERVER) {
-                addJavascriptInterface(AioNativeStore(File(filesDir, "aio-store")), STORE_GLOBAL)
+                val store = AioNativeStore(File(filesDir, "aio-store"))
+                addJavascriptInterface(store, STORE_GLOBAL)
+                // The key reaches the app's own origin only (its main frame
+                // and same-origin frames), before any of the page's scripts.
+                // A WebView without the feature gets the bridge but no key:
+                // the page then refuses to use the store, saying why, rather
+                // than fall back to one that loses changes or leaks them.
+                if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                    WebViewCompat.addDocumentStartJavaScript(this,
+                        "Object.defineProperty(window, \"" + STORE_KEY_GLOBAL + "\", { value: \"" +
+                            store.key + "\" });",
+                        setOf("https://" + ASSET_HOST))
+                } else {
+                    android.util.Log.e("aio", STORE_GLOBAL + " key not handed out: this WebView " +
+                        "has no DOCUMENT_START_SCRIPT, so the app can neither read nor save its " +
+                        "state. Update Android System WebView.")
+                }
+                // `nativeFetch()` — see AioNativeFetch. A WebView too old for
+                // the listener gets none, and the page's nativeFetch() then
+                // fails saying so rather than sending an Origin after all.
+                if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
+                    WebViewCompat.addWebMessageListener(this, FETCH_GLOBAL, setOf("https://$ASSET_HOST"), AioNativeFetch)
+                } else {
+                    android.util.Log.e("aio", "$FETCH_GLOBAL not installed: this WebView has no " +
+                        "WEB_MESSAGE_LISTENER — nativeFetch() will fail. Update Android System WebView.")
+                }
             }
             webViewClient = object : WebViewClient() {
                 // The bridge belongs to the app's own bundle and to nothing
@@ -220,6 +396,9 @@ class MainActivity : AppCompatActivity() {
                     super.onPageStarted(view, url, favicon)
                     if (!TALKS_TO_SERVER && Uri.parse(url ?: "").host != ASSET_HOST) {
                         view?.removeJavascriptInterface(STORE_GLOBAL)
+                        if (view != null && WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
+                            WebViewCompat.removeWebMessageListener(view, FETCH_GLOBAL)
+                        }
                         android.util.Log.e("aio", "$STORE_GLOBAL removed: this WebView loaded " +
                             "$url, which is not the app's own bundle. The native store is " +
                             "never handed to foreign content.")
@@ -332,8 +511,20 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** Back asks the PAGE first: `window.__aioBack()` is aio/air's
+     *  `onBackButton` (src/air/back-button.ts), true when a handler took it.
+     *  `evaluateJavascript` needs no user gesture, so the first Back after a
+     *  cold start reaches the app too — `history.pushState` cannot promise
+     *  that. No handler, a page without aio, or one still loading → default. */
     @Suppress("DEPRECATION")
     override fun onBackPressed() {
+        webView.evaluateJavascript(
+            "typeof __aioBack == 'function' && __aioBack() === true"
+        ) { handled -> if (handled != "true") defaultBack() }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun defaultBack() {
         if (webView.canGoBack()) webView.goBack()
         // A client APK: the connect page sends every launch straight to the
         // server, and that redirect REPLACES it in history — so Back from the

@@ -10,6 +10,8 @@ import { join } from "@std/path";
 import { clearPairing, generatePin } from "../src/server/pairing.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { enc } from "../src/protocol/envelope.ts";
+import { protoHello } from "../src/protocol/protocol-version.ts";
 
 const TEST_PORT = freePort();
 const TEST_PORT_7 = freePort();
@@ -907,6 +909,70 @@ Deno.test("trojan: GET /clients returns connection list", async () => {
     const data = await resp.json();
     assertEquals(Array.isArray(data), true);
     assertEquals(data.length, 0); // no WS connections
+  });
+});
+
+Deno.test("trojan: GET /clients says which client is a Mac (its User-Agent)", async () => {
+  // `am trigger press "mod+k"` resolves `mod` against the PAGE's platform —
+  // the roster is where am reads it.
+  await withTrojanServer(async (url) => {
+    const ws = `ws://127.0.0.1:${TROJAN_PORT}/ws`;
+    const open = (ua: string) =>
+      new Promise<WebSocket>((resolve, reject) => {
+        // Deno's WebSocket takes `{ headers }` at runtime; lib.dom's type
+        // only knows protocols.
+        const s = new WebSocket(
+          ws,
+          { headers: { "user-agent": ua } } as unknown as string[],
+        );
+        s.onopen = () => resolve(s);
+        s.onerror = () => reject(new Error("WS failed"));
+      });
+    const mac = await open("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)");
+    const linux = await open("Mozilla/5.0 (X11; Linux x86_64)");
+    // An Electron app named "Macros" on Linux: its name is not its platform.
+    const macros = await open(
+      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Macros/1.0 Electron/37.0.0",
+    );
+    try {
+      const rows = await (await fetch(`${url}/__aio/trojan/clients`))
+        .json() as { index: number; mac?: boolean }[];
+      assertEquals(rows.map((r) => r.mac), [true, false, false]);
+    } finally {
+      const closed = (s: WebSocket) =>
+        new Promise<void>((r) => {
+          s.onclose = () => r();
+          s.close();
+        });
+      await Promise.all([closed(mac), closed(linux), closed(macros)]);
+    }
+  });
+});
+
+Deno.test("trojan: GET /clients shows the aio and app build each client announced", async () => {
+  // The route read `meta.peer`, but the server's roster mapping never passed
+  // it — `am clients` never showed `aio`/`app` for any client.
+  await withTrojanServer(async (url) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${TROJAN_PORT}/ws`);
+    await new Promise<void>((resolve, reject) => {
+      ws.onopen = () => resolve();
+      ws.onerror = () => reject(new Error("WS failed"));
+    });
+    try {
+      ws.send(enc("proto", protoHello("9.9.9-test", "1.2.3-app")));
+      let rows: { aio?: string; app?: string }[] = [];
+      for (let i = 0; i < 100 && rows[0]?.aio === undefined; i++) {
+        await new Promise((r) => setTimeout(r, 10));
+        rows = await (await fetch(`${url}/__aio/trojan/clients`)).json();
+      }
+      assertEquals(rows.length, 1);
+      assertEquals([rows[0]!.aio, rows[0]!.app], ["9.9.9-test", "1.2.3-app"]);
+    } finally {
+      await new Promise<void>((r) => {
+        ws.onclose = () => r();
+        ws.close();
+      });
+    }
   });
 });
 

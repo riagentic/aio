@@ -128,16 +128,28 @@ export function buildRootExecutor(
     if (ctx.disabledCells.has(f.__aio.id)) return;
 
     const cellName = f.__aio.id;
+    // A disable→enable while an async call awaits resets the cell; the call
+    // belongs to the incarnation that was destroyed. Its later writes landed
+    // in the FRESH state and its caller was told it succeeded.
+    const epoch = ctx.disableEpoch.get(cellName) ?? 0;
+    const restarted = () => (ctx.disableEpoch.get(cellName) ?? 0) !== epoch;
     const scopedApp: ScopedApp & {
       _isDisabled?: () => boolean;
       _onError?: (err: AioError) => void;
       _appId?: string;
     } = {
-      _isDisabled: () => ctx.disabledCells.has(cellName),
+      _isDisabled: () => ctx.disabledCells.has(cellName) || restarted(),
       _onError: reportError,
       _appId: ctx.appId ?? "",
       dispatch: (a: Msg) => {
         if (typeof a?.type !== "string") return;
+        // This cell's own writes are dropped, as the reduce refuses them WHILE
+        // disabled; the call is then rejected at settle ("cell disabled while
+        // m() was running").
+        if (
+          restarted() && !ctx.disabledCells.has(cellName) &&
+          a.type.startsWith(`${prefix}:`)
+        ) return;
         // Hand the store's promise back: an async method's batcher awaits it to
         // learn whether its write-set was accepted. Swallowing it here is what
         // let a refused write resolve as success.

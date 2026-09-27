@@ -215,7 +215,10 @@ app.cells!.enable("analytics"); // re-enables, resets state
 
 1. Actions no longer routed (own and foreign)
 2. Effects not executed
-3. Running flows cancelled
+3. Running flows cancelled — an async call still running is rejected
+   (`cell
+   disabled while m() was running`) and its later writes are dropped,
+   even when the cell is enabled again before the call resumes
 4. Scheduled effects cancelled — every schedule the cell issued, whatever its id
    (`schedule.every("poll", …)` as well as `"analytics:poll"`)
 5. Destroy hook runs, `cell:__destroy` dispatches

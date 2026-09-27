@@ -325,8 +325,8 @@ one action. Each `await` boundary starts a new batch.
 > the framework guarantees this), but grouping them keeps the intermediate UI
 > honest.
 
-**Method-tagged actions** — async writes dispatch `__SetMethodName` actions
-(e.g., `__SetCheckout`), so every batch in time-travel names the method that
+**Method-tagged actions** — async writes dispatch `__setMethodName` actions
+(e.g., `__setCheckout`), so every batch in time-travel names the method that
 produced it.
 
 **Every read = fresh state + your pending writes** (read-your-writes). Reads
@@ -1102,7 +1102,27 @@ returns the previous value without running. Two rules make it a cache rather
 than a hazard:
 
 - Keyed by the **arguments** as well as the method, so `fetchUser(1)` never
-  answers `fetchUser(2)`.
+  answers `fetchUser(2)` — and by exactly the **caller facts** the run that
+  produced the result read, anywhere during it (after an `await`, inside a call
+  it made, in a `worker: true` cell it called):
+  - `serverUser()` — keyed by the whole user object `resolveUser` returned, so a
+    field that changes per token (a role, a tenant, an expiry) makes a separate
+    entry.
+  - `serverRequest()` — keyed by each field read, by its value: a header by name
+    (`headers.get("accept-language")`), a cookie by name (`cookies.session`),
+    `ip`, `url`, `method`, `via`; iterating or spreading the headers or cookies
+    keys on all of them.
+
+  A method that reads none of these is one shared answer for everyone — a ttl
+  works as an upstream shield, and `"first"` as a global single-flight. One that
+  reads the `session` cookie is shared by every request carrying that cookie and
+  by no other; one that reads `accept-language` by every caller of that
+  language. Keying on the whole request instead would make every call miss (a
+  `referer` or trace header differs per request), and on the user alone would
+  hand a cookie-derived answer across anonymous callers. `"first"` learns what a
+  method reads when a run ends: a caller that adopted a run which turned out to
+  read a fact it does not share runs its own call, and from then on that method
+  dedups on those facts from the start.
 - **Failures are never cached.** Caching one would make a single bad minute last
   the whole ttl, which is the opposite of what a ttl is for.
 

@@ -83,6 +83,7 @@ export { on, watch } from "./state/watch.ts";
 export type { WatchOptions } from "./state/watch.ts";
 export { useFieldArray, useForm } from "./air/form.ts";
 export { useVirtualList } from "./air/virtual-list.ts";
+export { onBackButton } from "./air/back-button.ts";
 export { renderToString } from "./air/vdom.ts";
 
 // ── AIR renderer primitives (AIO-70) ────────────────────────────────
@@ -166,6 +167,7 @@ export {
   type ResourceKey,
   useResource,
   type UseResourceConfig,
+  type UseResourceConfigOf,
 } from "./air/use-resource.ts";
 // ── Per-page <head> ───────────────────────────────────────────────────────
 // `useHead` owns document.title and its meta/link tags while a component is
@@ -281,6 +283,8 @@ export const blocking: typeof ServerBlocking = /* @__PURE__ */ Object.assign(
 /** Ask for desktop-notification permission from a click handler — the one
  *  place a browser grants it. See `notify()`. */
 export { requestNotificationPermission } from "./browser/desktop-notify.ts";
+/** `fetch` — plain `fetch` in a browser page; native in a standalone APK. */
+export { nativeFetch } from "./browser/native-fetch.ts";
 
 // ── AIR hooks (signal-based) ────────────────────────────────────────
 export {

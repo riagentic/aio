@@ -58,6 +58,13 @@ Deno.test("a persisting app prints its cell count beside the contract", async ()
         `${dir}/app.ts`,
         "--aio-data-contract",
       ],
+      // The app's OWN project and data root. Inheriting the repo cwd made the
+      // zero-config identity check read the repo's deno.json ("aio") as the
+      // previous id, and with a shared apps dir it refused to boot ("app
+      // identity moved", empty stdout) whenever another test — or the
+      // developer's ~/.aio — had put data under that id first.
+      cwd: dir,
+      env: { AIO_APPS_DIR: `${dir}/apps` },
       stdout: "piped",
       stderr: "piped",
     }).output();

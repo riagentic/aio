@@ -14,7 +14,11 @@ import { hasDesktopSession } from "./open-external.ts";
 import { join } from "@std/path";
 import {
   buildBrowserImportMap,
+  graphImportMap,
+  localPrefixAlias,
+  prefixAliasMessage,
   readAppDenoImports,
+  readAppLocalAliases,
 } from "./server-html-importmap.ts";
 import { log } from "../diagnostics/logger-api.ts";
 
@@ -190,9 +194,24 @@ export async function lint(
   // browser — move this import to a server-side .ts file". Following that
   // advice breaks working code; ignoring it teaches people to ignore the whole
   // check.
+  // The app's exact LOCAL aliases resolve too (the dev server rewrites them,
+  // the bundler aliases them); a local PREFIX alias gets its own sentence —
+  // `npm:` advice for a path the app already mapped is wrong advice.
   const BROWSER_IMPORTS = new Set(
-    Object.keys(buildBrowserImportMap(readAppDenoImports(baseDir) ?? {})),
+    Object.keys(
+      graphImportMap(
+        baseDir,
+        buildBrowserImportMap(readAppDenoImports(baseDir) ?? {}),
+      ),
+    ),
   );
+  const LOCAL_ALIASES = readAppLocalAliases(baseDir);
+  const importWarning = (file: string, spec: string): string => {
+    const p = localPrefixAlias(spec, LOCAL_ALIASES);
+    return p
+      ? `${file}: ${prefixAliasMessage(spec, p.key, p.value)}`
+      : browserImportWarning(file, spec);
+  };
 
   try {
     for await (const entry of Deno.readDir(baseDir)) {
@@ -261,7 +280,7 @@ export async function lint(
             BROWSER_IMPORTS.has(spec)
           ) continue;
           r.warn.push(
-            browserImportWarning(entry.name, spec),
+            importWarning(entry.name, spec),
           );
         }
         // Named/default imports and re-exports: import { x } from 'foo', export { x } from 'foo'
@@ -282,7 +301,7 @@ export async function lint(
             /^import\s*\{[^}]*\btype\b/.test(m[0]) // AIO-276: detect inline type import
           ) continue;
           r.warn.push(
-            browserImportWarning(entry.name, spec),
+            importWarning(entry.name, spec),
           );
         }
       }

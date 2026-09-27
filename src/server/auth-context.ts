@@ -37,6 +37,59 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { AioUser } from "./aio-types.ts";
 import type { UserStore } from "./auth-users.ts";
 import { parseCookies } from "./route.ts";
+import { _installCallerScope } from "../state/method-policy.ts";
+
+/** Cache key for a user — a STABLE serialization of everything `ui.forUser`
+ *  can observe, not just the id.
+ *
+ *  Keying on `user.id` alone was a cross-user leak: `resolveUser` may return
+ *  `{id:"alice", role:"admin"}` for one token and `{id:"alice", role:"viewer"}`
+ *  for another (impersonation, a role switch, a re-issued session, two devices
+ *  with different scopes). `forUser` receives the WHOLE user object, so two
+ *  users that differ anywhere are two different views — and the admin's view
+ *  was being served to the viewer whenever no dispatch happened in between.
+ *  The `""` bucket was worse still: every user-less caller (UDS, trojan,
+ *  anonymous WS) shared one slot with any user whose id was empty.
+ *
+ *  Object keys are sorted so two structurally-equal users still share a slot,
+ *  and the key is recomputed per call so an IN-PLACE mutation of a
+ *  connection's user object (a role change on a live socket) invalidates it.
+ *
+ *  Cost: one JSON pass over a user record (a handful of small fields) per
+ *  client per broadcast, against a `forUser` call that structuredClones and
+ *  rewrites the whole cell slice — two to three orders of magnitude apart on
+ *  any state worth memoizing. The memo keeps its purpose; it just can no
+ *  longer answer a question it was not asked.
+ *
+ *  Returns null when the user cannot be serialized (cycles, exotic values) —
+ *  the caller then SKIPS the cache entirely and recomputes. A cache miss costs
+ *  time; a wrong cache hit costs someone else's data. */
+export function userMemoKey(user?: AioUser): string | null {
+  // "no user" is its OWN bucket, and cannot be spelled by any serialized user:
+  // every JSON.stringify of an object starts with "{".
+  if (user === undefined || user === null) return "no-user";
+  try {
+    const key = JSON.stringify(user, (_k, v) => {
+      // Values JSON drops or mangles become OBJECTS, never marker strings — a
+      // marker string could be forged by a user field holding that exact text,
+      // which would alias two different users into one cache slot.
+      if (v === undefined) return { __aioUndefined: true };
+      if (typeof v === "function") return { __aioFunction: true };
+      if (typeof v === "bigint") return { __aioBigInt: String(v) };
+      if (v && typeof v === "object" && !Array.isArray(v)) {
+        const sorted: Record<string, unknown> = {};
+        for (const k of Object.keys(v as Record<string, unknown>).sort()) {
+          sorted[k] = (v as Record<string, unknown>)[k];
+        }
+        return sorted;
+      }
+      return v;
+    });
+    return typeof key === "string" ? key : null;
+  } catch {
+    return null; // cyclic / unserializable → no caching, ever
+  }
+}
 
 const _als = typeof AsyncLocalStorage === "function"
   ? new AsyncLocalStorage<AioUser | undefined>()
@@ -48,10 +101,26 @@ const _als = typeof AsyncLocalStorage === "function"
 export const runWithUser = <T>(user: AioUser | undefined, fn: () => T): T =>
   _als ? _als.run(user, fn) : fn();
 
+/** The `ttl`/`"first"` calls running here, innermost first: a read of a
+ *  caller fact marks every one of them, since an outer call's result may be
+ *  built from an inner one's. */
+type ReadScope = { reads: Set<string>; up: ReadScope | undefined };
+const _readAls = typeof AsyncLocalStorage === "function"
+  ? new AsyncLocalStorage<ReadScope>()
+  : null;
+
+/** Record that the running `ttl`/`"first"` calls read caller fact `fact`. */
+function noteRead(fact: string): void {
+  for (let r = _readAls?.getStore(); r; r = r.up) r.reads.add(fact);
+}
+
 /** The authenticated caller of the current server-side execution — usable in
  *  cell methods, serverFns, and effects. `undefined` = anonymous client
  *  (public/shared-key mode) or server-origin execution. */
-export const serverUser = (): AioUser | undefined => _als?.getStore();
+export const serverUser = (): AioUser | undefined => {
+  noteRead("user");
+  return _als?.getStore();
+};
 
 /** The transport facts of the call in flight — what a caller can't forge.
  *  Read-only by design: to SET a cookie/status/header, use `route()`. */
@@ -112,8 +181,153 @@ export const runWithRequest = <T>(
  *    },
  *  }
  *  ``` */
-export const serverRequest = (): ServerRequest | undefined =>
+export const serverRequest = (): ServerRequest | undefined => {
+  const req = _reqAls?.getStore();
+  return req && tracked(req);
+};
+
+/** The ambient request WITHOUT recording a read — for the framework's own
+ *  plumbing (forwarding it to a worker), which is not the method reading it.
+ *  @internal */
+export const _ambientRequest = (): ServerRequest | undefined =>
   _reqAls?.getStore();
+
+// `ttl`/`"first"` answer per CALLER when the run read something of the
+// caller: a shared answer from a run that read `serverUser()` or a cookie is
+// another caller's data. Keyed on exactly the facts the run read, each by its
+// value: the WHOLE user (`userMemoKey`), not its id — one id may carry a
+// different role or tenant per token; a header or cookie by its value, so a
+// method reading the `session` cookie is shared by that session's requests
+// and no other's, and one reading `accept-language` by every caller of that
+// language. Keying on the whole request instead would make every call miss
+// (a request id, a timestamp, a changing `referer`), and on the user alone
+// would still hand Alice's cookie-derived answer to an anonymous Bob. A miss
+// costs a run; a wrong hit costs that caller's data.
+_installCallerScope({
+  snapshot: () => {
+    const user = _als?.getStore();
+    const req = _reqAls?.getStore();
+    return (fact) => factKey(fact, user, req);
+  },
+  track: (reads, fn) => _trackReads(reads, fn),
+  capture: () => {
+    const als = _readAls;
+    const at = als?.getStore();
+    return als && at ? (<T>(fn: () => T): T => als.run(at, fn)) : undefined;
+  },
+});
+
+/** Run `fn` recording every caller fact it reads into `reads` (and into the
+ *  running calls around it). @internal also the worker host's root scope. */
+export const _trackReads = <T>(reads: Set<string>, fn: () => T): T =>
+  _readAls ? _readAls.run({ reads, up: _readAls.getStore() }, fn) : fn();
+
+/** The running `ttl`/`"first"` calls, to hand facts read ELSEWHERE to — a
+ *  worker cell's method runs in another isolate, where no scope of the
+ *  caller's reaches. Undefined when none is running. @internal */
+export function _readsSink():
+  | ((facts: readonly string[]) => void)
+  | undefined {
+  const at = _readAls?.getStore();
+  if (!at) return undefined;
+  return (facts) => {
+    for (let r: ReadScope | undefined = at; r; r = r.up) {
+      for (const f of facts) r.reads.add(f);
+    }
+  };
+}
+
+/** One caller fact's value as a key. Every value is JSON (a user key starts
+ *  "{", "no-user" is not JSON), so "none" — no request at all — is its own. */
+function factKey(
+  fact: string,
+  user: AioUser | undefined,
+  req: ServerRequest | undefined,
+): string | null {
+  if (fact === "user") return userMemoKey(user);
+  if (!req) return "none";
+  try {
+    const name = fact.slice(2);
+    switch (fact.slice(0, 2)) {
+      case "h:":
+        return JSON.stringify(
+          name === "*" ? [...req.headers] : req.headers.get(name),
+        );
+      case "c:":
+        return JSON.stringify(
+          name === "*"
+            ? Object.entries(req.cookies).sort(([a], [b]) => a < b ? -1 : 1)
+            : Object.hasOwn(req.cookies, name)
+            ? req.cookies[name]
+            : null,
+        );
+    }
+    const v = req[fact as "ip" | "url" | "method" | "via"];
+    return JSON.stringify(v ?? null);
+  } catch {
+    return null; // aio-ok: an unkeyable fact means "share nothing"
+  }
+}
+
+/** The request as a method sees it: every field read is recorded, per header
+ *  and per cookie by name, and a whole-set read (iterating, spreading) as
+ *  `*`. One view per request, so `serverRequest() === serverRequest()`. */
+const _views = new WeakMap<ServerRequest, ServerRequest>();
+function tracked(req: ServerRequest): ServerRequest {
+  let view = _views.get(req);
+  if (view) return view;
+  const headers = new Proxy(req.headers, {
+    get(t, p) {
+      const v = Reflect.get(t, p, t);
+      if (typeof v !== "function") return v;
+      return (...a: unknown[]) => {
+        noteRead(
+          (p === "get" || p === "has") && typeof a[0] === "string"
+            ? `h:${a[0].toLowerCase()}`
+            : p === "getSetCookie"
+            ? "h:set-cookie"
+            : "h:*",
+        );
+        return (v as (...x: unknown[]) => unknown).apply(t, a);
+      };
+    },
+  });
+  const cookies = new Proxy(req.cookies, {
+    get(t, p) {
+      if (typeof p === "string") noteRead(`c:${p}`);
+      return Reflect.get(t, p);
+    },
+    has(t, p) {
+      if (typeof p === "string") noteRead(`c:${p}`);
+      return Reflect.has(t, p);
+    },
+    ownKeys(t) {
+      noteRead("c:*");
+      return Reflect.ownKeys(t);
+    },
+    getOwnPropertyDescriptor(t, p) {
+      if (typeof p === "string") noteRead(`c:${p}`);
+      return Reflect.getOwnPropertyDescriptor(t, p);
+    },
+  });
+  const field = <K extends "ip" | "url" | "method" | "via">(k: K) => ({
+    enumerable: true,
+    get: () => {
+      noteRead(k);
+      return req[k];
+    },
+  });
+  view = Object.defineProperties({} as ServerRequest, {
+    ip: field("ip"),
+    url: field("url"),
+    method: field("method"),
+    via: field("via"),
+    headers: { enumerable: true, value: headers },
+    cookies: { enumerable: true, value: cookies },
+  });
+  _views.set(req, view);
+  return view;
+}
 
 // ── serverAuth(): the running app's user store, ambient ─────────────────────
 // `app.auth` was reachable only from `onStart(app)`, so every app with an

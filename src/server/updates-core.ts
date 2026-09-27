@@ -12,11 +12,12 @@
 import type {
   CellContract,
   DataContract,
+  ReleaseTarget,
   ShipManifest,
-  UpdateTarget,
 } from "../build/ship.ts";
 import type { InstalledTarget } from "./updates-apply.ts";
 import { versionStage } from "./app-version.ts";
+import { MAX_TIMER_DELAY } from "../state/timer-ceiling.ts";
 
 // ── config ──────────────────────────────────────────────────────────────────
 
@@ -67,7 +68,10 @@ export type UpdatesConfig = {
   key?: JsonWebKey;
   /** Additional keys this install accepts, for a rotation: publish the next
    *  release signed by the NEW key while the old one is still listed, then drop
-   *  the old one. Without a roster, losing a key bricks every install forever. */
+   *  the old one. Without a roster, losing a key bricks every install forever.
+   *  A roster replaces the first-use pin: while it is set, no key is pinned,
+   *  and a key pinned earlier is trusted only if the roster (or `key`) lists
+   *  it. */
   keys?: JsonWebKey[];
   /** May an update be applied RIGHT NOW? Consulted before every apply — the
    *  manual one and the `auto` one — and a `false` refuses the install and says
@@ -227,7 +231,10 @@ function resolveInterval(check: boolean | number, channel: string): number {
         `only), or a number of milliseconds >= 1000.`,
     );
   }
-  return check;
+  // setTimeout truncates a delay past 2^31-1 ms to ~1 ms: a 30-day poll became
+  // a tight loop against the release host. Clamped (not refused — it booted
+  // before); `startUpdates` says so in the log.
+  return Math.min(check, MAX_TIMER_DELAY);
 }
 
 /** Apply defaults to whatever the app declared. */
@@ -741,7 +748,7 @@ export function decide(opts: {
   manifest: ShipManifest;
   local: LocalData;
   /** Install targets this client can actually perform. */
-  canInstall: UpdateTarget[];
+  canInstall: ReleaseTarget[];
   /** Follow prerelease versions within the channel (`updates.prerelease`). */
   prerelease?: boolean;
   /** The version the user already said no to. */
@@ -851,9 +858,10 @@ export function decide(opts: {
         version: m.version,
         blockers: [
           `${m.version} is available, and a macOS app cannot install it ` +
-          `over itself: every file inside a .app is covered by the bundle's ` +
-          `code signature, so replacing one leaves an app macOS will not ` +
-          `open. ` +
+          `over itself: this release is a "${m.target}", not a signed .app ` +
+          `(.app.tar.gz, "electron-app"), and every file inside a .app is ` +
+          `covered by the bundle's code signature, so replacing one leaves an ` +
+          `app macOS will not open. ` +
           (where
             ? `Download ${where}, then drag the new app into /Applications, ` +
               `replacing this one. Your data is kept — it lives in ` +

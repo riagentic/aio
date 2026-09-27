@@ -35,6 +35,7 @@ import {
   SETTLES_CALLS,
 } from "../protocol/ack-registry.ts";
 import { ACK_TIMEOUT_MS } from "../protocol/protocol-types.ts";
+import { capDelay } from "../state/timer-ceiling.ts";
 import {
   createSendPacer,
   type PacedFrame,
@@ -147,6 +148,18 @@ export type CliApp<S> = {
   readonly ready: Promise<S>;
 };
 
+/** One call's ceiling, decided once per client: past the timer ceiling it
+ *  would reject in ~1 ms, and NaN (`Number(env)` unset) did exactly that to
+ *  every call — `0` or less still means "wait for ever". */
+function _ackCeiling(ms: number | undefined): number {
+  return capDelay(
+    "ackTimeoutMs",
+    ms ?? ACK_TIMEOUT_MS,
+    (m) => log.warn("cli", m),
+    ACK_TIMEOUT_MS,
+  );
+}
+
 /** Connect to an aio server. URL can be http:// or ws:// — protocol is auto-detected. */
 /** Wire the first-connect deadline onto a `ready` promise.
  *
@@ -162,6 +175,10 @@ function _readyDeadline<S>(
 ): { settle: (s: S) => void; abandon: () => void } {
   let done = false;
   let timer: number | undefined;
+  // NaN is not "no deadline" by accident: it is said (and then is none).
+  if (ms !== undefined) {
+    ms = capDelay("readyTimeoutMs", ms, (m) => log.warn("cli", m), 0);
+  }
   if (ms && ms > 0) {
     timer = setTimeout(() => {
       if (done) return;
@@ -403,8 +420,9 @@ export function connectCli<S>(
   // One registry PER CONNECTION (not the browser's module-level singleton):
   // `connectCli` can be called more than once in a process, and one client's
   // disconnect must never settle another's pending calls (D2).
+  const _ack = _ackCeiling(opts?.ackTimeoutMs);
   const _pending = createAckRegistry(
-    () => opts?.ackTimeoutMs ?? ACK_TIMEOUT_MS,
+    () => _ack,
     (m) => log.warn(m),
   );
   // Cells bound through THIS client — released on close() so the same defs can
@@ -487,6 +505,7 @@ export function connectCli<S>(
    *  the queue's one cap policy; other frames are dropped. None was written,
    *  so no caller is in flight and none is rejected for it here. Returns how
    *  many actions went back. */
+  const _triesOf = new WeakMap<object, number>();
   function _requeuePaced(entries: CliOutFrame[]): number {
     const actions = entries.flatMap((e) => e.action ? [e.action] : []);
     if (actions.length === 0) return 0;
@@ -494,6 +513,12 @@ export function connectCli<S>(
     // already accepted (see `_pushDroppingOldest`'s `accepted`), and pushing
     // them back through the cap evicted the oldest of them.
     for (const a of actions) _accepted.add(a);
+    // The refusal count survives the queue: a reconnect must not reset the
+    // re-send cap (a server that refuses, then drops the socket, would see
+    // the same write forever).
+    for (const e of entries) {
+      if (e.action && e.tries) _triesOf.set(e.action, e.tries);
+    }
     queue.unshift(...actions);
     _noteQueued();
     return actions.length;
@@ -737,7 +762,7 @@ export function connectCli<S>(
     // headers; only a runtime that cannot set one falls back to `?token=`.
     const inHeader = !!token && typeof Deno !== "undefined";
     const wsUrl = `${proto}//${parsed.host}/ws${
-      token && !inHeader ? `?token=${token}` : ""
+      token && !inHeader ? `?token=${encodeURIComponent(token)}` : ""
     }`;
     const shownUrl = redactUrlToken(wsUrl);
 
@@ -825,7 +850,13 @@ export function connectCli<S>(
           continue;
         }
         try {
-          paced.push({ frame, action: a, seq: _seq++ });
+          const tries = _triesOf.get(a);
+          paced.push({
+            frame,
+            action: a,
+            seq: _seq++,
+            ...(tries ? { tries } : {}),
+          });
         } catch (err) {
           queue.unshift(...q.slice(i));
           log.warn(
@@ -944,11 +975,21 @@ export function connectCli<S>(
         // A3: wire-protocol version handshake — terminal on mismatch.
         case "proto": {
           const theirs = parseProtoHello(frame.d);
-          if (theirs) rememberPeerHello(theirs);
-          if (!theirs) return;
-          // The budget this socket's writes are paced to.
-          peerRate = theirs.rate;
-          const result = negotiateProtocol(protoHello(VERSION), theirs);
+          if (theirs) {
+            rememberPeerHello(theirs);
+            // The budget this socket's writes are paced to.
+            peerRate = theirs.rate;
+          }
+          // Unreadable is not "no check" — the gate would fail open; it stops
+          // loudly, as a mismatch does (the browser client's rule).
+          const result = theirs
+            ? negotiateProtocol(protoHello(VERSION), theirs)
+            : {
+              ok: false as const,
+              reason: `unreadable server hello: ${
+                JSON.stringify(frame.d)?.slice(0, 120)
+              }`,
+            };
           if (!result.ok) {
             log.error("cli", `protocol version mismatch: ${result.reason}`);
             closed = true; // stop the reconnect loop — retrying can't fix it
@@ -1267,8 +1308,9 @@ export function connectCliUDS<S>(
   opts?: { ackTimeoutMs?: number; readyTimeoutMs?: number },
 ): CliApp<S> {
   // Same per-connection registry as the WS client — see connectCli.
+  const _ack = _ackCeiling(opts?.ackTimeoutMs);
   const _udsPending = createAckRegistry(
-    () => opts?.ackTimeoutMs ?? ACK_TIMEOUT_MS,
+    () => _ack,
     (m) => log.warn(m),
   );
   const _bound: CellDef[] = [];
@@ -1444,16 +1486,20 @@ export function connectCliUDS<S>(
                   // A3: version handshake — terminal on mismatch.
                   case "proto": {
                     const theirs = parseProtoHello(frame.d);
-                    if (!theirs) continue;
                     // Which build this connection talks to — `peerHello()`.
                     // The WS client and the TCP CLI client both recorded it;
                     // this one negotiated and threw it away, so on the socket
                     // path nothing could answer the question.
-                    rememberPeerHello(theirs);
-                    const result = negotiateProtocol(
-                      protoHello(VERSION),
-                      theirs,
-                    );
+                    if (theirs) rememberPeerHello(theirs);
+                    // Unreadable stops loudly, as the WS twin above does.
+                    const result = theirs
+                      ? negotiateProtocol(protoHello(VERSION), theirs)
+                      : {
+                        ok: false as const,
+                        reason: `unreadable server hello: ${
+                          JSON.stringify(frame.d)?.slice(0, 120)
+                        }`,
+                      };
                     if (!result.ok) {
                       log.error(
                         "cli",

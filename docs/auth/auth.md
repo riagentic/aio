@@ -486,7 +486,13 @@ cell("login", {
 
 Over WS the facts are the **connection's** (the upgrade request), not the
 individual frame's. `undefined` means nothing requested this execution —
-schedules, boot, internal dispatch.
+schedules, boot, internal dispatch, and a call over the local control socket
+(`am`, the CLI), which has no client address.
+
+`ip` is the value `route()` hands a handler as `ctx.ip`, over HTTP and WS alike.
+Behind a reverse proxy set `trustProxyHeader` (e.g. `"x-forwarded-for"`): `ip`
+is then that header's **rightmost** hop, the address the proxy saw. Without the
+option the header is ignored — a client cannot pick its own `ip`.
 
 It is deliberately **read-only**. To _set_ a cookie, status or header, use
 [`route()`](../examples/05-integrations.md) — one write path, not two.
@@ -504,6 +510,35 @@ export const api = serverFns("api", {
 
 The predicate form receives the invoked function name and its args too —
 `(user, fn, ...args) => boolean` — for per-function or row-level checks.
+
+The fn body and the predicate both run inside the call's
+[`serverRequest()`](#where-from-serverrequest), so a password door can throttle
+**per client address** — one guesser is slowed down, everyone else still gets
+in:
+
+```ts
+import { serverFns, serverRequest } from "aio";
+
+declare function checkPassword(password: string): Promise<boolean>; // yours
+
+const WINDOW_MS = 15 * 60_000, MAX_FAILS = 10;
+const fails = new Map<string, number[]>(); // ip → failure times
+
+export const accessFns = serverFns("access", {
+  login: async (password: string) => {
+    const ip = serverRequest()?.ip ?? "local"; // undefined: the control socket
+    const now = Date.now();
+    const recent = (fails.get(ip) ?? []).filter((t) => now - t < WINDOW_MS);
+    if (recent.length >= MAX_FAILS) throw new Error("slow_down");
+    if (!(await checkPassword(password))) {
+      fails.set(ip, [...recent, now]);
+      return false;
+    }
+    fails.delete(ip);
+    return true;
+  },
+});
+```
 
 **Several apps in one process** (library mode, `testApps`): a namespace
 registered at a module's top level belongs to no app, so **every** app in the
@@ -584,8 +619,16 @@ const app = await aio.run({ cells: [/* … */], auth: true });
   - **a separate app without `auth`** for senders that can only sign their
     payload (an HMAC header, not a Bearer token): receive there, verify the
     signature in the handler, and hand the result on.
-- `auth: { signup: false }` disables open registration — seed accounts with
-  `app.auth.create("root", password, "admin")`.
+- `auth: { signup: false }` disables open registration on **every** door —
+  `POST /signup` answers `403 signup_disabled`, and so does an OIDC login for an
+  identity that has no account yet (nothing is created; the server logs the
+  exact id). Seed password accounts with
+  `app.auth.create("root", password, "admin")` or `am auth create`; admit an SSO
+  user ahead of their first login with
+  `am auth create "oidc:<issuer-without-scheme>:<sub>" [--role=…]` (no password
+  — it signs in through the provider), or set `auth.oidc.signup: true` to keep
+  SSO account creation open while password signup stays closed. With OIDC
+  configured and `oidc.signup` unset, boot warns once.
 - **Admin screens: `serverAuth()`.** The same store, ambient — usable inside any
   serverFn or cell method like `serverUser()`, so an account-management panel
   needs no `onStart(app)` plumbing:
@@ -675,9 +718,19 @@ await aio.run({
 - Signup (with `requireVerified`) mails a 24h one-shot verification token and
   issues **no session** until `POST /__aio/auth/verify { token }` proves the
   mailbox.
+- Login refuses an unverified account with `403 email_unverified` — on every
+  door: the password login and the OIDC callback alike. An SSO account is
+  verified when its provider vouches for its address (`email_verified: true`, on
+  any login); one whose provider never does gets `403 email_unverified` from the
+  callback until the operator runs `am auth verify <id>`. With OIDC configured,
+  boot warns once that this applies to SSO accounts.
 - `POST /__aio/auth/reset/request { id }` **always returns 200** (no account
   enumeration) and mails a 15-minute one-shot reset token when the account has
   an email. `POST /__aio/auth/reset { token, password }` sets the new password.
+- Both mail triggers have their own budget, never the failed-login one: 10 mails
+  per 5 minutes per account for `verify/request` (then `429`), per client key
+  and id and per client key for `reset/request` (then a silent `200`, nothing
+  mailed).
 - `POST /__aio/auth/password { old, new }` (authenticated) rotates the password.
 - Tokens are stored hashed and are strictly one-shot.
 
@@ -805,6 +858,10 @@ with a one-time warning.
   **became** that user — walking past a second factor the owner had enrolled,
   and rewriting the local account's email (the password-reset channel) to the
   IdP-supplied one.
+- `sub` is case-sensitive (OIDC Core), so two subjects that differ only by case
+  (`00uAbC`, `00uabc`) are two accounts. Local ids are the opposite: they are
+  unique case-insensitively (`Neighbour` cannot join `neighbour`), and no local
+  id can claim the `oidc:` prefix in any case.
 - An OIDC login therefore can never land on, create, or modify a local account.
   A local account that merely shares the `sub` is left alone, and the server
   logs that it did.
@@ -814,6 +871,13 @@ with a one-time warning.
 - Linking an SSO identity to an existing local account is **not** automatic;
   there is no verified link step yet. Grant an external identity privileges the
   same way as any other: `am auth role "oidc:idp.example:1234" admin`.
+- With `signup: false`, the first login of an unknown identity is refused
+  (`403 signup_disabled`) instead of creating an account. The operator admits it
+  by the id the refusal logs: `am auth create "oidc:idp.example:1234"`
+  (optionally `--role=admin`) — or `oidc: { signup: true, … }` lets every SSO
+  identity create its account (default: `auth.signup`; only a literal `true`
+  opens it). `app.auth.create` keeps refusing `oidc:` ids — the namespace is
+  reserved from every door but the operator console and the callback itself.
 - Existing users keep their stored role, so server-side promotions survive
   re-login. Upgrading from a build that keyed accounts on the bare `sub`: SSO
   users get new, namespaced accounts and the old rows stay behind (the boot log

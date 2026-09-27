@@ -28,7 +28,7 @@
  * `tests/one-fact-one-spelling.test.ts`.
  */
 import { parse as parseJsonc } from "@std/jsonc";
-import { join } from "@std/path";
+import { join, resolve, toFileUrl } from "@std/path";
 import { log } from "../diagnostics/logger-api.ts";
 
 /** Both filenames Deno accepts, in the order it prefers them. */
@@ -230,6 +230,13 @@ export function locateDenoJsonAbove(
     }
   }
   return undefined;
+}
+
+/** The `title` the app's deno.json (THE walk above, from the app dir `dir`)
+ *  declares — raw, possibly absent. The build names the app by it. */
+export function appConfigTitle(dir: string): unknown {
+  return locateDenoJsonAbove(toFileUrl(join(resolve(dir), "/")))?.config
+    .title;
 }
 
 /** {@linkcode readDenoJson}, synchronously — for the boot paths that run

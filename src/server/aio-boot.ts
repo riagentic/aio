@@ -10,12 +10,14 @@ import {
   createJournal,
   type Journal,
   type JournalEntry,
+  journalHeldCellsKey,
   journalWatermarkKey,
   REACTIONS_FORMAT_ROW,
   scrubUnstoredLines,
   SYNC_REACTION_TYPE,
   syncJournalWatermarkKey,
   type SyncReaction,
+  TT_RESTORE_TYPE,
 } from "./journal.ts";
 import type { SkvInstance } from "./skv.ts";
 import { migrateLegacyKv, SKV_SCHEMA, sqliteKv } from "./skv-sqlite.ts";
@@ -1325,6 +1327,10 @@ export interface BootResult<S> {
    *  recorded it (store-gen.ts) — the journal's tail is older than the
    *  store. */
   storeSavedElsewhere: boolean;
+  /** Undeclared cells whose journal lines are held, not replayed (see
+   *  `journalHeldCellsKey`) — the orchestrator leaves them out of replay and
+   *  names them. */
+  journalHeld: ReadonlySet<string>;
   /** Boot migration + shape-drift picture — undefined when nothing
    *  was restored. Surfaced live via `am migrations`. */
   migrations: MigrationSummary | undefined;
@@ -1767,7 +1773,9 @@ function restorableSlices(
 ): Record<string, unknown> {
   const keep = new Set(persisting);
   return Object.fromEntries(
-    Object.entries(stored).filter(([k]) => !(k in declared) || keep.has(k)),
+    Object.entries(stored).filter(([k]) =>
+      !Object.hasOwn(declared, k) || keep.has(k)
+    ),
   );
 }
 
@@ -1817,6 +1825,71 @@ function fieldsAsRestart(
     out[id] = next;
   }
   return out ?? state;
+}
+
+/** What reaches `state.db` although a `persist` setting says it does not.
+ *
+ *  A `db:` binding and a sync cell's op-log write the file — and are restored
+ *  from it — whatever `persist` says: `persist: false` / `--no-persist` turns
+ *  off the state SNAPSHOT only, and a cell's `persist: "none"` / `exclude`
+ *  does not reach its bound table. Both used to be silent, so a
+ *  `--no-persist` session's deletes landed in the real tables, and a field an
+ *  app excluded as secret was on disk in a table row. */
+export function persistOffButStored(
+  cfg: Pick<
+    BootConfig<unknown>,
+    "shouldPersist" | "dbPath" | "syncCellIds" | "cellPersist"
+  >,
+  bindings: readonly DbBinding[],
+): string[] {
+  const out: string[] = [];
+  const bound = bindings.filter((b) => b.path.length > 0);
+  const inMemory = cfg.dbPath !== undefined &&
+    (cfg.dbPath.startsWith(":memory:") ||
+      cfg.dbPath.startsWith("file::memory:"));
+  if (!cfg.shouldPersist && !inMemory) {
+    const what = [
+      ...bound.map((b) => `db: table "${b.table}"`),
+      ...cfg.syncCellIds.map((c) => `sync cell "${c}"`),
+    ];
+    if (what.length) {
+      out.push(
+        `persist: persistence is off (persist: false / --no-persist), but ` +
+          `${what.join(", ")} still write${what.length === 1 ? "s" : ""} ` +
+          `${cfg.dbPath ?? "the app's state.db"} and ${
+            what.length === 1 ? "is" : "are"
+          } restored from it — persist: false turns off the state snapshot ` +
+          `only. For a throwaway run, pass dbPath: ":memory:" ` +
+          `(--db-path=:memory:).`,
+      );
+    }
+  }
+  for (const b of bound) {
+    const [cell, ...inner] = b.path;
+    const f = cfg.cellPersist?.[cell!];
+    if (!f || f === "all") continue;
+    const field = inner.join(".");
+    const under = (p: string) =>
+      p === field || p.startsWith(field + ".") || field.startsWith(p + ".");
+    const kept = f !== "none" &&
+      ("exclude" in f
+        ? !f.exclude.some(under)
+        : f.include.some((p) => p === field || field.startsWith(p + ".")));
+    if (kept) continue;
+    const off = f !== "none" && "exclude" in f
+      ? f.exclude.filter(under).join(", ")
+      : field;
+    out.push(
+      `persist: cell "${cell}"'s persist filter (${
+        JSON.stringify(f)
+      }) keeps "${off}" off disk, but db: table "${b.table}" is bound to ` +
+        `"${field}" — the table writes those rows, with every declared ` +
+        `column, and restores them at boot, whatever persist says. To keep ` +
+        `them off disk, remove the binding (or the column); otherwise take ` +
+        `"${off}" out of the filter.`,
+    );
+  }
+  return out;
 }
 
 /** Runs the full storage boot sequence — SQLite, CRDT sync, KV restore,
@@ -1945,6 +2018,7 @@ export async function bootStorage<S>(
     if (b.path.length > 0) syncSchema[b.table] = sqlSchema[b.table]!;
   }
   const syncKeys = Object.keys(syncSchema);
+  for (const m of persistOffButStored(cfg, dbBindings)) log.warn(m);
 
   let asyncDb: DB | null = null;
 
@@ -2340,7 +2414,7 @@ export async function bootStorage<S>(
           cfg.persistingCellIds,
           initialState as Record<string, unknown>,
         );
-        stale = Object.keys(migrated).filter((k) => !(k in kept));
+        stale = Object.keys(migrated).filter((k) => !Object.hasOwn(kept, k));
         if (stale.length > 0) {
           await scrubStaleSlices(asyncDb, kvDb, persistKey, persistMode, stale)
             .then(() =>
@@ -2391,7 +2465,7 @@ export async function bootStorage<S>(
               cfg.persistingCellIds!,
               initialState as Record<string, unknown>,
             );
-            return Object.keys(stored).filter((k) => !(k in keep));
+            return Object.keys(stored).filter((k) => !Object.hasOwn(keep, k));
           },
           log,
           {
@@ -2509,7 +2583,7 @@ export async function bootStorage<S>(
     const declared = initialState as Record<string, unknown>;
     const schema: Record<string, unknown> = { ...declared };
     for (const cell of shapedCells) {
-      if (!(cell in declared)) continue;
+      if (!Object.hasOwn(declared, cell)) continue;
       // The declared state first (its shape IS the schema); the restored
       // state when the hook cannot take the defaults (`s.list.at(-1).id`).
       const sources = [
@@ -2688,7 +2762,15 @@ export async function bootStorage<S>(
     const added = detectNewFields(
       boundPaths.length ? omitPaths(schema, boundPaths) : schema,
       persistedSnapshot,
-      { skip: new Set(report.map((r) => r.cell)) },
+      {
+        skip: new Set(report.map((r) => r.cell)),
+        // A shaped cell's schema is already what its `onPersist` writes.
+        persist: Object.fromEntries(
+          Object.entries(cfg.cellPersist ?? {}).filter(([c]) =>
+            !shapedCells.has(c)
+          ),
+        ),
+      },
     );
     if (added.length > 0) log.info(newFieldsSummary(added));
     const declared: Record<string, number> = {};
@@ -2958,6 +3040,49 @@ export async function bootStorage<S>(
       },
     )
     : null;
+  // Journal lines of cells this build does not declare: HELD by the watermark
+  // the store's copy of each stands at, not replayed and not compacted, until
+  // a build declares the cell again (see `journalHeldCellsKey`) — as its
+  // stored slice is preserved (5b above). A re-declared cell is tracked by
+  // its held mark for this one boot, so replay takes its lines onto the
+  // preserved slice; the entry goes in the save that holds them.
+  const journalHeld = new Set<string>();
+  let heldRelease: string[] = [];
+  /** The held map a save must write to drop the released entries. */
+  let heldAfterRelease: Record<string, number> = {};
+  /** The seq whose save carried the release — see `planPersisted`. */
+  let heldReleasePlannedAt: number | undefined;
+  if (journal && journalWmStored) {
+    const declaredCells = initialState as Record<string, unknown>;
+    const stored = await kvDb!.get<Record<string, number>>(
+      journalHeldCellsKey(appId),
+    ) ?? {};
+    const held: Record<string, number> = { ...stored };
+    for (const e of journal.readTail()) {
+      if (e.unstored === true || e.type === TT_RESTORE_TYPE) continue;
+      const i = e.type.indexOf(":");
+      const cells = e.only?.length ? e.only : i > 0 ? [e.type.slice(0, i)] : [];
+      for (const c of cells) {
+        if (!(c in declaredCells) && !(c in held)) {
+          held[c] = journal.watermark();
+        }
+      }
+    }
+    if (Object.keys(held).length > 0) {
+      if (Object.keys(held).some((c) => stored[c] !== held[c])) {
+        // Before the first save compacts anything this boot.
+        await kvDb!.set(journalHeldCellsKey(appId), held);
+      }
+      journal.trackCells(held);
+      heldRelease = Object.keys(held).filter((c) => c in declaredCells);
+      for (const c of Object.keys(held)) {
+        if (!(c in declaredCells)) journalHeld.add(c);
+      }
+      heldAfterRelease = Object.fromEntries(
+        Object.entries(held).filter(([c]) => !heldRelease.includes(c)),
+      );
+    }
+  }
   const strayJournal = !journalOn && dbPathOverride !== ":memory:" &&
       (shouldPersist || asyncDb !== null)
     ? await openStrayJournal(
@@ -3056,11 +3181,29 @@ export async function bootStorage<S>(
     ),
     appId,
     getJournalSeq: journal ? () => journal.capture() : undefined,
-    onPersisted: journal ? (seq) => journal.setWatermark(seq) : undefined,
+    onPersisted: journal
+      ? (seq) => {
+        // The save that held the re-declared cells' replay committed their
+        // release with it: from here they go by the app-wide watermark.
+        if (heldReleasePlannedAt === seq) {
+          journal.releaseCells(heldRelease);
+          heldRelease = [];
+          heldReleasePlannedAt = undefined;
+        }
+        journal.setWatermark(seq);
+      }
+      : undefined,
     ...(journal && journalWmStored
       ? {
-        planPersisted: (seq: number) =>
-          kvDb!.planSet!(journalWatermarkKey(appId), seq),
+        planPersisted: (seq: number) => {
+          const wm = kvDb!.planSet!(journalWatermarkKey(appId), seq);
+          if (heldRelease.length === 0) return wm;
+          heldReleasePlannedAt = seq;
+          return [
+            ...wm,
+            ...kvDb!.planSet!(journalHeldCellsKey(appId), heldAfterRelease),
+          ];
+        },
         // Every journalled save ends by making the store its own again
         // (store-gen.ts).
         planSaveAfter: () =>
@@ -3106,6 +3249,7 @@ export async function bootStorage<S>(
     storeHeldState: hadPersistedState,
     strayJournal,
     storeSavedElsewhere,
+    journalHeld,
   };
 }
 
@@ -3283,7 +3427,14 @@ export type ShapeAdditionEntry = {
 export function detectNewFields(
   initial: Record<string, unknown>,
   stored: Record<string, unknown>,
-  opts: { skip?: Set<string> } = {},
+  opts: {
+    skip?: Set<string>;
+    /** Cell id → its `persist` filter. A field the cell never persists is
+     *  never in the stored data, so it is not news: without this every boot of
+     *  an app with updates said the built-in `updates` cell's twelve
+     *  unpersisted fields were "new, or a method deleted it". */
+    persist?: Record<string, CellFieldFilter>;
+  } = {},
 ): ShapeAdditionEntry[] {
   const out: ShapeAdditionEntry[] = [];
   const skip = opts.skip ?? new Set<string>();
@@ -3328,7 +3479,12 @@ export function detectNewFields(
     // one of its keys as an addition would bury a real one on the first boot
     // after `am create`.
     if (storedCell === undefined) continue;
-    walk(cellId, declState, storedCell, "", 0);
+    const filter = opts.persist?.[cellId];
+    const persisted = filter && isPlainObj(declState)
+      ? applyCellFieldFilter(filter, declState)
+      : declState;
+    if (persisted === undefined) continue; // persist: "none" stores nothing
+    walk(cellId, persisted, storedCell, "", 0);
   }
   return out;
 }

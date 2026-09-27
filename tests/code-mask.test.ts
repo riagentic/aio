@@ -128,3 +128,94 @@ Deno.test("code-mask: offsets and newlines are preserved, 1:1", () => {
     if (text[i] !== " ") assertEquals(text[i], src[i], `kept char at ${i}`);
   }
 });
+
+// A template nested in an interpolation: the inner backtick is not the outer
+// literal's close. It was, so the inner body (`}` here) read as CODE — and
+// every brace-counting scanner closed its block one `}` early.
+Deno.test("code-mask: a template nested in `${…}` is one literal", () => {
+  assertMasks(
+    "a(`${o ? `}` : '{'}`); b {",
+    "a(`________________`); b {",
+  );
+  // Strings, and deeper templates, inside the interpolation don't close it.
+  assertMasks(
+    "x = `${'`'}${`${`}`}`}`; y",
+    "x = `_________________`; y",
+  );
+  // A lone `${` with no close stays the old bail: blank to end of line.
+  assertMasks("t = `${a\nb()", "t = `___\nb()");
+});
+
+/** `pre` + `body` + `post` where the whole `body` (a template's contents) is
+ *  masked and everything around it stays code. */
+function assertBody(pre: string, body: string, post: string): void {
+  assertMasks(pre + body + post, pre + body.replace(/[^\n]/g, "_") + post);
+}
+
+// The interpolation body is CODE: a quote inside a regex or a comment there is
+// not a string. Read as one, the interpolation "never closed", the template
+// was cut at its first newline, and the rest of the file desynced — template
+// text read as code, real code masked. Each shape is one this repo has.
+Deno.test("code-mask: a regex or comment inside `${…}` holds no string", () => {
+  // src/server/sql.ts — the SQL-escape idiom.
+  assertBody("p(`", `DEFAULT '\${d.replace(/'/g, "''")}'`, "`);\nb { c(x) }");
+  // src/server/server-html-gen.ts — a `"` in the regex.
+  assertBody("x(`", `<script nonce="\${n.replace(/"/g, "")}"`, "`);\nb(y);");
+  // tests/am-detached-spawn.test.ts — a multi-line interpolation.
+  assertBody(
+    "[`",
+    `\${c} \${\n  a.map((a) => "'" + a.replace(/'/g, "'\\\\''")).join(" ")\n}; sleep 20`,
+    "`];\nb(z);",
+  );
+  // src/electron/electron-scripts.ts — an apostrophe in a `//` comment; and a
+  // block comment holding a brace and a backtick.
+  assertBody(
+    "t = `",
+    `f(\${\n  // it's the route\n  u /* } \` */\n})`,
+    "`;\nb(w);",
+  );
+});
+
+Deno.test("code-mask: an unclosable `${` falls back to the next backtick", () => {
+  // Never the first-newline cut: the template's second line stays masked.
+  assertBody("t = `", "${'\n}x", "`;\nb(v);");
+});
+
+// The property that makes the desync class unshippable: in real source every
+// bracket that is CODE has its partner in code. A mask that reads template or
+// comment text as code — or blanks real code — breaks that balance, so every
+// .ts/.tsx file in the repo must balance under `codeText`. No allowlist: a file
+// that trips this is a masking bug, or a shape worth a fixture above.
+Deno.test("code-mask: every repo source file balances its code brackets", async () => {
+  const root = new URL("../", import.meta.url);
+  const pair: Record<string, string> = { ")": "(", "]": "[", "}": "{" };
+  const bad: string[] = [];
+  const walk = async (dir: URL): Promise<void> => {
+    for await (const e of Deno.readDir(dir)) {
+      if (e.isDirectory) {
+        if (e.name !== "node_modules" && e.name !== "dist") {
+          await walk(new URL(`${e.name}/`, dir));
+        }
+        continue;
+      }
+      if (!/\.tsx?$/.test(e.name)) continue;
+      const file = new URL(e.name, dir);
+      const text = codeText(await Deno.readTextFile(file));
+      const stack: string[] = [];
+      let at = -1;
+      for (let i = 0; i < text.length && at < 0; i++) {
+        const c = text[i]!;
+        if (c === "(" || c === "[" || c === "{") stack.push(c);
+        else if (c in pair && stack.pop() !== pair[c]) at = i;
+      }
+      if (at >= 0 || stack.length > 0) {
+        const line = at < 0 ? "EOF" : text.slice(0, at).split("\n").length;
+        bad.push(`${file.pathname.slice(root.pathname.length)}:${line}`);
+      }
+    }
+  };
+  for (const d of ["src", "tests", "examples", "amui", "aiol", "scripts"]) {
+    await walk(new URL(`${d}/`, root));
+  }
+  assertEquals(bad, []);
+});

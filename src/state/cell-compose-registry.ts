@@ -73,6 +73,7 @@ function makeScopedApp(
 export function buildRegistry(
   cells: CellDef[],
   disabledCells: Set<string>,
+  disableEpoch: Map<string, number>,
   cellLastAction: Map<string, { type: string; at: number }>,
   circuitBreaker: CircuitBreakerConfig | undefined,
   reportError: ((err: AioError) => void) | undefined,
@@ -181,12 +182,14 @@ export function buildRegistry(
   ): void {
     const f = cells.find((f) => f.__aio.id === name);
     disabledCells.add(name);
+    disableEpoch.set(name, (disableEpoch.get(name) ?? 0) + 1);
     if (f && remote?.owns(name)) {
       const destroyType = f.__aio.destroyType;
       remote.disable(name, (ok) => {
         if (!ok) {
           // Rolled back over there — roll back here, as the local path does.
           disabledCells.delete(name);
+          disableEpoch.set(name, (disableEpoch.get(name) ?? 1) - 1);
           settled?.(false);
           return;
         }
@@ -205,7 +208,20 @@ export function buildRegistry(
       if (f) {
         if (f.__aio.onDestroy) {
           const scopedApp = makeScopedApp(f, app, reportError);
-          f.__aio.onDestroy(scopedApp);
+          // A synchronous throw rolls the disable back (below); a rejection
+          // arrives after the disable has happened, so it is reported and
+          // counted, not rolled back.
+          onHookRejection(f.__aio.onDestroy(scopedApp), (e) => {
+            countCellError(f.__aio.id);
+            const msg = `disable("${name}"): onDestroy rejected: ${e}`;
+            if (reportError) {
+              reportError(
+                createAioError("DESTROY_ERROR", msg, { cellName: f.__aio.id }),
+              );
+            } else {
+              log.error("cell", msg);
+            }
+          });
         }
         app.dispatch(
           tagSource({ type: f.__aio.destroyType, payload: {} }, "System"),
@@ -213,6 +229,7 @@ export function buildRegistry(
       }
     } catch (e) {
       disabledCells.delete(name);
+      disableEpoch.set(name, (disableEpoch.get(name) ?? 1) - 1);
       countCellError(f?.__aio.id ?? name);
       const msg = `disable("${name}") failed, rolled back: ${e}`;
       if (reportError) {
@@ -261,11 +278,7 @@ export function buildRegistry(
         }
         if (f.__aio.onInit) {
           const scopedApp = makeScopedApp(f, app, reportError);
-          try {
-            // `onInit` is server code (it runs at boot, before any client
-            // exists) — see call-origin.ts.
-            inServerOrigin(() => f.__aio.onInit!(scopedApp, f.__aio.state));
-          } catch (e) {
+          const failed = (e: unknown) => {
             if (reportError) {
               reportError(
                 createAioError("INIT_ERROR", e, { cellName: f.__aio.id }),
@@ -274,6 +287,16 @@ export function buildRegistry(
               log.error("cell", `${f.__aio.id} init: ${e}`);
             }
             countCellError(f.__aio.id);
+          };
+          try {
+            // `onInit` is server code (it runs at boot, before any client
+            // exists) — see call-origin.ts.
+            onHookRejection(
+              inServerOrigin(() => f.__aio.onInit!(scopedApp, f.__aio.state)),
+              failed,
+            );
+          } catch (e) {
+            failed(e);
           }
         }
       }
@@ -367,15 +390,22 @@ export function initAll(
         // INIT_ERROR, no `onError`, no fix — and inside a `worker: true`
         // cell's worker it killed the thread, leaving the cell unreachable for
         // the life of the process while every harness kept serving it.
-        const then = (r as { then?: unknown } | null)?.then;
-        if (typeof then === "function") {
-          then.call(r, undefined, failed);
-        }
+        onHookRejection(r, failed);
       } catch (e) {
         failed(e);
       }
     }
   }
+}
+
+/** Route an `async` lifecycle hook's REJECTION to the same handler its
+ *  synchronous throw reaches. A plain `try` catches only the throw: a rejecting
+ *  `async onInit`/`onDestroy` became an unhandled rejection — no INIT_ERROR /
+ *  DESTROY_ERROR, no `onError`, no breaker count, and inside a `worker: true`
+ *  cell a dead thread. Every hook call site goes through this one rule. */
+function onHookRejection(r: unknown, failed: (e: unknown) => void): void {
+  const then = (r as { then?: unknown } | null)?.then;
+  if (typeof then === "function") then.call(r, undefined, failed);
 }
 
 /** Destroy all cells in reverse dependency order */
@@ -399,9 +429,7 @@ export function destroyAll(
           (app.getState() as Record<string, unknown>)[f.__aio.id] as unknown,
         getFullState: () => app.getState() as Record<string, unknown>,
       };
-      try {
-        f.__aio.onDestroy(scopedApp);
-      } catch (e) {
+      const failed = (e: unknown) => {
         if (reportError) {
           reportError(
             createAioError("DESTROY_ERROR", e, { cellName: f.__aio.id }),
@@ -410,6 +438,11 @@ export function destroyAll(
           log.error("cell", `${f.__aio.id} destroy: ${e}`);
         }
         countCellError(f.__aio.id);
+      };
+      try {
+        onHookRejection(f.__aio.onDestroy(scopedApp), failed);
+      } catch (e) {
+        failed(e);
       }
     }
     app.dispatch(

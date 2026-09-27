@@ -30,8 +30,13 @@ export function electronMainScript(url: string, meta?: AioMeta): string {
   const trayIcon =
     `(async () => { const { net, nativeImage } = require('electron'); ` +
     `const r = await net.fetch(${
-      JSON.stringify(url.replace(/\/$/, "") + "/icon.png")
-    }); if (!r.ok) return null; ` +
+      // The icon ROUTE with the query kept — see electron-client-script's
+      // connectTo: '/icon.png' appended to '?token=K' landed in the query.
+      JSON.stringify((() => {
+        const u = new URL(url);
+        u.pathname = "/__aio/icon";
+        return u.href;
+      })())}); if (!r.ok) return null; ` +
     `return nativeImage.createFromBuffer(Buffer.from(await r.arrayBuffer())); })()`;
   return `
 const { app, BrowserWindow, Menu, ipcMain } = require('electron');
@@ -43,7 +48,7 @@ Menu.setApplicationMenu(null);
 ${tmplPreloadWrite(JSON.stringify(shellBridgePreload({ standalone: true })))}
 app.name = ${JSON.stringify(slug)};
 ${tmplCrashGuard()}
-${tmplPermissionGuard()}
+${tmplPermissionGuard(meta?.permissions)}
 ${tmplParentWatch()}
 
 // ── Window state persistence ──

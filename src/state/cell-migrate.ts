@@ -22,6 +22,7 @@ export interface CellMigrationInfo {
   onMigrate?: (
     state: Record<string, unknown>,
     fromVersion: number,
+    stored?: Record<string, unknown>,
   ) => Record<string, unknown>;
 }
 
@@ -136,7 +137,9 @@ export function detectShapeDrift(
       for (const key of Object.keys(stor)) {
         if (out.length >= MAX_DRIFT) return;
         const child = path ? `${path}.${key}` : key;
-        if (!(key in decl)) {
+        // OWN keys: `in` also sees Object.prototype, so a stored
+        // `toString`/`constructor` key was diffed against a native function.
+        if (!Object.hasOwn(decl, key)) {
           out.push({
             cell,
             path: child,
@@ -316,8 +319,13 @@ export function reattachUndeclared(
   if (depth >= 32) return merged;
   let out = merged;
   for (const k of Object.keys(stored)) {
-    if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
-    if (!(k in out)) {
+    // Only `__proto__` is special, and the literal below would even write it
+    // as data. `constructor`/`prototype`/`toString` are ordinary stored
+    // keys: skipping them — or testing with `in`, which sees
+    // Object.prototype — hid them from onMigrate/onRestore and lost them
+    // (the same class deep-merge.ts closed with Object.hasOwn).
+    if (k === "__proto__") continue;
+    if (!Object.hasOwn(out, k)) {
       out = { ...out, [k]: stored[k] };
     } else if (_isObj(out[k]) && _isObj(stored[k])) {
       const child = reattachUndeclared(
@@ -335,6 +343,38 @@ export function reattachUndeclared(
     }
   }
   return out;
+}
+
+/** The top-level field a drift path (`a.b.c`) is in. */
+const topKey = (path: string): string => path.split(".", 1)[0] ?? path;
+
+/** `onMigrate`'s third argument:a private copy of the slice as stored. Each
+ *  top-level field holding a `retyped` path notes into `read` when the hook
+ *  reads it, so a type change the hook never looked at can be named. */
+function storedArg(
+  stored: unknown,
+  retyped: string[],
+  read: Set<string>,
+): Record<string, unknown> {
+  if (!_isObj(stored)) return {};
+  let copy: Record<string, unknown>;
+  try {
+    copy = structuredClone(stored);
+  } catch {
+    // aio-ok: a slice structuredClone refuses (restored data is JSON, so
+    // only a shaped cell's exotic value) is handed as a shallow copy.
+    copy = { ...stored };
+  }
+  for (const k of new Set(retyped.map(topKey))) {
+    let v = copy[k];
+    Object.defineProperty(copy, k, {
+      enumerable: true,
+      configurable: true,
+      get: () => (read.add(k), v),
+      set: (nv) => void (v = nv),
+    });
+  }
+  return copy;
 }
 
 /** Key a downgrade boot parks the pre-downgrade slice under. Framework-owned
@@ -387,7 +427,7 @@ export function applyCellMigrations(
       let kept: string[] = [];
       if (_isObj(cellState) && _isObj(stored)) {
         const widened = reattachUndeclared(cellState, stored);
-        kept = Object.keys(stored).filter((k) => !(k in cellState));
+        kept = Object.keys(stored).filter((k) => !Object.hasOwn(cellState, k));
         stateObj[cellId] = widened;
       }
       log.warn(
@@ -435,7 +475,37 @@ export function applyCellMigrations(
           const input = _isObj(stored)
             ? reattachUndeclared(cellState, stored, 0, shape !== undefined)
             : cellState;
-          const migrated = info.onMigrate(input, persisted);
+          // A TYPE change is the other thing a version bump exists for (the
+          // dev drift refusal says so: "bump version and add onMigrate"), and
+          // the merge had already put the declared default where the stored
+          // value of the old type was — `label: "hello"` → `label: {t: ""}`.
+          // The first argument keeps its documented contract (merged with
+          // defaults: a hook written to it must not see different data), and
+          // the THIRD is the slice as stored, where the old-typed value is
+          // read and converted. A retyped field the hook never read from there
+          // is named: its stored value is lost at the first write.
+          const retyped = shape === undefined && _isObj(stored)
+            ? detectShapeDrift({ [cellId]: cellState }, { [cellId]: stored })
+              .filter((d) => d.issue === "type-changed").map((d) => d.path)
+            : [];
+          const read = new Set<string>();
+          const migrated = info.onMigrate(
+            input,
+            persisted,
+            storedArg(stored, retyped, read),
+          );
+          const lost = retyped.filter((p) => !read.has(topKey(p)));
+          if (lost.length) {
+            log.warn(
+              `migrate: ${cellId} onMigrate (v${persisted} → ` +
+                `v${info.version}) never read the stored value(s) of ` +
+                `${lost.join(", ")}, whose type differs from the declaration ` +
+                `— its first argument has the declared default there, so ` +
+                `those stored values are DROPPED at the first write. To keep ` +
+                `them, convert them from onMigrate's third argument (the ` +
+                `slice as stored): \`(s, from, stored) => …\`.`,
+            );
+          }
           // The hook was HANDED the undeclared stored keys (so a rename can
           // read the old field) — whatever it leaves behind is not this
           // build's shape. Kept, it rode into the next write and the FOLLOWING

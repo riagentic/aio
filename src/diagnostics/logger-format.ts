@@ -2,7 +2,7 @@
 
 import type { LogEntry } from "./logger-types.ts";
 import { colorEnabled as USE_COLOR, paint } from "./color.ts";
-import { kv, style } from "./fmt.ts";
+import { describeThrown, kv, style } from "./fmt.ts";
 
 // ── Untrusted text: ONE decider for every sink ────────────────────────
 //
@@ -93,18 +93,25 @@ export function _safeMsg(s: string): string {
 
 /** A log FIELD value, made safe: exactly one line, always. */
 export function _safeValue(v: unknown): string {
-  const s = typeof v === "object" && v !== null ? safeStringify(v) : String(v);
+  const s = typeof v === "object" && v !== null
+    ? safeStringify(v)
+    : describeThrown(v);
   return escapeControls(cap(s).replace(/\r\n?|\n/g, "\\n"));
 }
 
 // ── Plain text formatter ──────────────────────────────────────────────
 
+/** JSON, or — for a cycle, a BigInt, or a `toJSON` that answers undefined —
+ *  the guarded text `describeThrown` gives. A log call must not throw at its
+ *  call site over the data it was handed. */
 function safeStringify(v: unknown): string {
   try {
-    return JSON.stringify(v);
+    const j = JSON.stringify(v);
+    if (j !== undefined) return j;
   } catch {
-    return String(v);
+    // aio-ok: not JSON-serialisable; the guarded text below answers instead.
   }
+  return describeThrown(v);
 }
 
 export function formatText(e: LogEntry): string {

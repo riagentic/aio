@@ -318,11 +318,14 @@ const KOTLIN = ANDROID_TEMPLATE["app/src/main/java/aio/app/MainActivity.kt"] ??
 
 Deno.test("native store: the page and the APK name the same global", () => {
   const src = Deno.readTextFileSync(
-    fromFileUrl(new URL("../src/standalone-air.ts", import.meta.url)),
+    fromFileUrl(new URL("../src/browser/native-fetch.ts", import.meta.url)),
   );
   const page = src.match(/NATIVE_STORE_GLOBAL = "([^"]+)"/)?.[1];
   const kotlin = KOTLIN.match(/STORE_GLOBAL = "([^"]+)"/)?.[1];
-  assert(page, "src/standalone-air.ts no longer names NATIVE_STORE_GLOBAL");
+  assert(
+    page,
+    "src/browser/native-fetch.ts no longer names NATIVE_STORE_GLOBAL",
+  );
   assert(kotlin, "MainActivity.kt no longer names STORE_GLOBAL");
   assertEquals(
     page,
@@ -337,12 +340,12 @@ Deno.test("native store: the bridge is a standalone-only surface", () => {
   // so it may exist only in the APK shape that can never leave its own
   // bundle. A client or dev APK opens a server's pages — it gets no bridge.
   const add = KOTLIN.split("\n").find((l) =>
-    l.includes("addJavascriptInterface(AioNativeStore")
+    l.includes("addJavascriptInterface(store, STORE_GLOBAL)")
   );
   assert(add, "MainActivity.kt no longer installs the native store");
   assertStringIncludes(
     KOTLIN,
-    "if (!TALKS_TO_SERVER) {\n                addJavascriptInterface(AioNativeStore",
+    "if (!TALKS_TO_SERVER) {\n                val store = AioNativeStore(",
     "the native store bridge is no longer guarded by !TALKS_TO_SERVER — a " +
       "client/dev APK would hand a file-writing bridge to a remote page",
   );
@@ -487,6 +490,6 @@ Deno.test("native store: the APK half of has() exists and does not read the file
   // persists — but the page's guard is inert unless the method is there at
   // all, and `isFile` (a stat) is what makes it able to answer when the read
   // could not.
-  assertStringIncludes(KOTLIN, "fun has(key: String): Boolean");
+  assertStringIncludes(KOTLIN, "fun exists(k: String, key: String): Boolean");
   assertStringIncludes(KOTLIN, "fileFor(key).isFile");
 });

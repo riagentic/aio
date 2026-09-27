@@ -29,19 +29,26 @@
 // component an unbound twin of every cell — the failure that makes naive HMR
 // "sometimes works".
 
-import { _liveRoots } from "./renderer-state.ts";
-import { _rerenderRoot } from "./renderer-flush.ts";
+// Imports no renderer module (see `_rootHooks`): browser-shared imports this
+// file statically, and the renderer is on the page whenever a root is live.
+import { _liveRoots, _rootHooks } from "./renderer-state.ts";
 import type { ComponentFn } from "./vdom.ts";
 
-/** Swap the component every live root renders, and re-render.
+/** Swap the component the entry's root (`#root`) renders, and re-render.
  *
  *  Returns how many roots were swapped. ZERO is a real answer — a page with no
  *  mounted root cannot be patched — and the caller is expected to fall back to
  *  a reload rather than treat it as success. */
 export function swapRootComponent(next: ComponentFn): number {
   let swapped = 0;
+  // Only the ENTRY's root: boot mounts it into `#root` (dev HTML and the
+  // client bundle alike). Another `mount()` on the page (a widget, a toast
+  // host, an island) renders its own component, and swapping the entry into
+  // it rendered the app in there. "The first live root" was no anchor: boot
+  // mounts AFTER the state arrives, so a module-level `mount()` — or a
+  // remount of the entry — came first.
   for (const root of _liveRoots) {
-    if (root.disposed) continue;
+    if (root.disposed || root.root?.id !== "root") continue;
     // RETAG THE OLD TREE FIRST, and this is the line that makes it a patch
     // rather than a remount. `_rerenderRoot` diffs `h(state.App)` against the
     // previous root vnode, and a vnode whose `tag` is a DIFFERENT function is
@@ -63,7 +70,7 @@ export function swapRootComponent(next: ComponentFn): number {
       if (v._instance?.vnode) v._instance.vnode.tag = next;
     }
     root.App = next;
-    _rerenderRoot(root);
+    _rootHooks.rerender!(root);
     swapped++;
   }
   return swapped;

@@ -24,20 +24,25 @@ class MainActivity : AppCompatActivity() {
         }
         setContentView(webView)
     }
+    override fun onBackPressed() = webView.evaluateJavascript("__aioBack()") {}
 }`;
 
-Deno.test("own MainActivity.kt: a standalone overlay without the store or insets frame warns for both, naming the fix", () => {
+Deno.test("own MainActivity.kt: a standalone overlay without the store, fetch bridge or insets frame warns for each, naming the fix", () => {
   const w = ownActivityLosses(BARE_OVERLAY, { standalone: true });
-  assertEquals(w.length, 2);
+  assertEquals(w.length, 3);
   assertStringIncludes(w[0]!, "AioNativeStore");
   assertStringIncludes(w[0]!, "localStorage");
   assertStringIncludes(
     w[0]!,
     'addJavascriptInterface(AioNativeStore(File(filesDir, "aio-store")), "AioNativeStore")',
   );
-  assertStringIncludes(w[1]!, "insets");
+  // nativeFetch() — a standalone app's way past origin-refusing APIs.
+  assertStringIncludes(w[1]!, "AioNativeFetch");
+  assertStringIncludes(w[1]!, "nativeFetch() in this standalone APK REJECTS");
+  assertStringIncludes(w[1]!, "addWebMessageListener");
+  assertStringIncludes(w[2]!, "insets");
   assertStringIncludes(
-    w[1]!,
+    w[2]!,
     "android-template/app/src/main/java/aio/app/MainActivity.kt",
   );
 });
@@ -55,7 +60,11 @@ Deno.test("own MainActivity.kt: an overlay carrying the template's store and fra
 Deno.test("own MainActivity.kt: the store installed from another overlaid file counts", () => {
   const helper = `package aio.app
 fun installStore(w: WebView, dir: File) =
-    w.addJavascriptInterface(Store(dir), "AioNativeStore")`;
+    w.addJavascriptInterface(Store(dir), "AioNativeStore")
+fun handKey(w: WebView, key: String) =
+    WebViewCompat.addDocumentStartJavaScript(w, "window[\"__aioNativeStoreKey\"]=" + key, setOf("https://appassets.androidplatform.net"))
+fun installFetch(w: WebView) =
+    WebViewCompat.addWebMessageListener(w, "AioNativeFetch", setOf("https://appassets.androidplatform.net"), Fetch)`;
   const framed = BARE_OVERLAY.replace(
     "setContentView(webView)",
     "ViewCompat.setOnApplyWindowInsetsListener(root) { v, i -> i }",
@@ -64,6 +73,21 @@ fun installStore(w: WebView, dir: File) =
     ownActivityLosses(`${framed}\n${helper}`, { standalone: true }),
     [],
   );
+});
+
+// An activity copied from 1.0.12 installs the UNKEYED store: every frame of
+// the WebView — a third-party <iframe> — can read and overwrite the state.
+Deno.test("own MainActivity.kt: a standalone overlay with the UNKEYED store (copied from 1.0.12) warns that frames can reach it", () => {
+  const unkeyed = TEMPLATE_ACTIVITY.split("\n").filter((l) =>
+    !l.includes("addDocumentStartJavaScript(")
+  ).join("\n");
+  const w = ownActivityLosses(unkeyed, { standalone: true });
+  assertEquals(w.length, 1, JSON.stringify(w));
+  assertStringIncludes(w[0]!, "WITHOUT its per-launch key");
+  assertStringIncludes(w[0]!, "<iframe>");
+  assertStringIncludes(w[0]!, "addDocumentStartJavaScript");
+  // A client/dev APK has no store at all — nothing to key.
+  assertEquals(ownActivityLosses(unkeyed, { standalone: false }), []);
 });
 
 // v1.0.11 hunt: an activity that inflates a layout whose root sets
@@ -86,6 +110,7 @@ Deno.test('own MainActivity.kt: fitsSystemWindows="true" in the overlay res/ XML
       `${dir}/${kt}`,
       `class MainActivity : AppCompatActivity() {
   override fun onCreate(b: Bundle?) { super.onCreate(b); setContentView(R.layout.main) }
+  // Back: window.__aioBack
 }`,
     );
     const xml = (fits: string) =>
@@ -108,7 +133,7 @@ Deno.test('own MainActivity.kt: fitsSystemWindows="true" in the overlay res/ XML
     assertStringIncludes(w[0]!, "insets");
     // A theme item turning it on counts too.
     assertEquals(
-      ownActivityLosses("class A", {
+      ownActivityLosses("class A // __aioBack", {
         standalone: false,
         resXml: '<item name="android:fitsSystemWindows">true</item>',
       }),
@@ -117,4 +142,18 @@ Deno.test('own MainActivity.kt: fitsSystemWindows="true" in the overlay res/ XML
   } finally {
     await dropTempDir(dir);
   }
+});
+
+// A field report forked MainActivity.kt to reach the page on Back. A fork that
+// does not call `window.__aioBack` makes every `onBackButton` handler dead
+// code — said at build time, not discovered on the phone.
+Deno.test("own MainActivity.kt: an overlay that never asks the page about Back warns", () => {
+  const noBack = BARE_OVERLAY.replace(
+    /\n *override fun onBackPressed.*\n/,
+    "\n",
+  );
+  const w = ownActivityLosses(noBack, { standalone: false });
+  assertEquals(w.length, 2);
+  assertStringIncludes(w[1]!, "onBackButton");
+  assertStringIncludes(w[1]!, "__aioBack");
 });

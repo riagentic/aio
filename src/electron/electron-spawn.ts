@@ -694,10 +694,11 @@ export async function electronStderrTail(
 
 /** Route the Electron child's stderr: renderer lines the shell tagged go to
  *  the framework logger at their level (so a page that throws lands in the
- *  app log and `am logs`, not only on a terminal nobody is watching); GPU
+ *  app log and `am logs`, not only on a terminal nobody is watching), and so
+ *  do the main process's own tagged warnings/errors (category `electron`); GPU
  *  device-probe noise is dropped and counted; everything else passes through
  *  untouched. The sorting is `classifyElectronLine` — pure, unit-tested. */
-function forwardStderr(proc: Deno.ChildProcess): void {
+export function forwardStderr(proc: Deno.ChildProcess): void {
   let dropped = 0;
   let reported = false;
   const tail: string[] = [];
@@ -728,13 +729,13 @@ function forwardStderr(proc: Deno.ChildProcess): void {
           }
           return;
         case "error":
-          log.error("renderer", r.text);
+          log.error(r.from, r.text);
           return;
         case "warn":
-          log.warn("renderer", r.text);
+          log.warn(r.from, r.text);
           return;
         case "info":
-          log.info("renderer", r.text);
+          log.info(r.from, r.text);
           return;
         case "raw":
           await Deno.stderr.write(enc.encode(r.text + "\n")).catch(() => {});

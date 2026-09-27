@@ -273,8 +273,11 @@ export function auditClientGraph(opts: {
   const declared = new Set<string>();
   for (const key of Object.keys(inputs)) {
     for (const imp of inputs[key]?.imports ?? []) {
+      // The declaration is the static `import "aio/server-only"`; an
+      // `import()` of the marker declares nothing (and dev ignores it).
       if (
-        isServerOnlyMarker(imp.original ?? "") || isServerOnlyMarker(imp.path)
+        imp.kind !== "dynamic-import" &&
+        (isServerOnlyMarker(imp.original ?? "") || isServerOnlyMarker(imp.path))
       ) {
         declared.add(key);
         break;

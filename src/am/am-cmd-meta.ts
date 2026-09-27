@@ -345,6 +345,36 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
+/** Words a generated `export const <symbol>` can never bind (reserved in an
+ *  ES module, which is strict). */
+const RESERVED = new Set(
+  ("await break case catch class const continue debugger default delete do " +
+    "else enum export extends false finally for function if implements " +
+    "import in instanceof interface let new null package private protected " +
+    "public return static super switch this throw true try typeof var void " +
+    "while with yield arguments eval").split(" "),
+);
+
+/** The identifier `am add` binds a scaffolded cell / serverFns namespace to:
+ *  `foo-bar` → `fooBar`. Only a hyphen followed by a letter/digit used to be
+ *  folded, so `foo--bar` / `foo-` left a `-` in the identifier, and `export`,
+ *  `import`, `cell` (the file's own import) were bound verbatim — each a file
+ *  that does not parse or type-check, which `am add server` then imports from
+ *  the app entry, so the app stopped booting. A name that cannot be a binding
+ *  gets a suffix (`exportCell`, `importFns`); the cell / namespace NAME stays
+ *  exactly as typed. Pure. @internal test seam */
+export function scaffoldSymbol(
+  name: string,
+  binding: "cell" | "serverFns",
+): string {
+  const [head = "", ...rest] = name.split("-").filter(Boolean);
+  const sym = head +
+    rest.map((w) => w[0]!.toUpperCase() + w.slice(1)).join("");
+  return RESERVED.has(sym) || sym === binding
+    ? sym + (binding === "cell" ? "Cell" : "Fns")
+    : sym;
+}
+
 export async function cmdAdd(
   args: string[],
   flags: GlobalFlags,
@@ -382,7 +412,7 @@ export async function cmdAdd(
     // catch-all around it would swallow the very thing it is trying to do.
     if (await exists(file)) fail(`${file} already exists`, mode);
     await Deno.mkdir(dir, { recursive: true });
-    const symbol = name.replace(/-([a-z0-9])/gi, (_m, c) => c.toUpperCase());
+    const symbol = scaffoldSymbol(name, "cell");
     const content =
       `// Cell — pure state + methods; UI and server both import from here.
 import { cell } from "aio";
@@ -406,7 +436,7 @@ export const ${symbol} = cell("${name}", {
     const dir = "src/server";
     const file = `${dir}/${name}.server.ts`;
     if (await exists(file)) fail(`${file} already exists`, mode);
-    const symbol = name.replace(/-([a-z0-9])/gi, (_m, c) => c.toUpperCase());
+    const symbol = scaffoldSymbol(name, "serverFns");
     await Deno.mkdir(dir, { recursive: true });
     // `serverFns` comes from "aio", NOT "aio/server": the server entry holds
     // only what would poison a browser graph (SQLite, CLI transport), and

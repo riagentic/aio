@@ -1,6 +1,6 @@
 // aiol — all lint checks organized by area
 
-import type { CellInfo, Checker } from "./types.ts";
+import type { CellInfo, Checker, SourceFile } from "./types.ts";
 import { justifiedLoose } from "../src/diagnostics/ok-marker.ts";
 import { dirname, join, resolve } from "@std/path";
 import * as fix from "./fixes.ts";
@@ -30,7 +30,12 @@ import {
   pinDisagreementHint,
 } from "../src/server/framework-pin.ts";
 import { readFrameworkPinSync } from "../src/server/deno-json.ts";
-import { codeMatches, codeText, topLevelKeyOffsets } from "./scan.ts";
+import {
+  codeMatches,
+  codeText,
+  moduleStatements,
+  topLevelKeyOffsets,
+} from "./scan.ts";
 import {
   unknownBuildKeys,
   VALID_BUILD_KEYS,
@@ -125,8 +130,15 @@ export function isSuppressed(lines: string[], idx: number): boolean {
   }
   // …and the line ABOVE a formatter-wrapped continuation: `const x =` on its
   // own line, with the offending expression on the next one.
+  //
+  // Only a real OPENER counts — `=`, `(`, `[` — the line that starts the
+  // statement the flagged line continues. A trailing `,` ends a COMPLETE
+  // sibling (an array element, an argument, an entry), and treating it as an
+  // opener let a marker written for one element also silence the next one,
+  // with a whole code line between them: the "stray marker covers unrelated
+  // code" hole the blank-line rule above exists to close.
   const above = lines[idx - 1]?.trim() ?? "";
-  if (/[=(,[]$/.test(above)) {
+  if (/[=([]$/.test(above)) {
     for (let i = idx - 2; i >= 0; i--) {
       const t = lines[i]?.trim() ?? "";
       if (t === "") break;
@@ -1346,7 +1358,12 @@ export const checkUI: Checker = (ctx) => {
   // Half of this was already found once: the `Deno.*` scan was moved OUT of
   // the cell-file loop "precisely because this `continue` was silently
   // exempting components from it". The import scan kept the defect.
-  const SERVER_ONLY_PREFIXES = ["@std/", "node:", "aio/server"];
+  //
+  // …and ONE predicate for every server-only rule in this checker (the direct
+  // loops, the chain rule, the dynamic-import rule): the chain rule had its
+  // own shorter list without `aio/server` or the `jsr:` spelling.
+  const isServerOnlySpec = (spec: string) =>
+    /^(?:jsr:)?(?:@std\/|node:|aio\/server)/.test(spec);
 
   const cellFiles = ctx.cells.map((f) => f.file).filter((f, i, arr) =>
     arr.indexOf(f) === i
@@ -1369,25 +1386,24 @@ export const checkUI: Checker = (ctx) => {
     // guard its neighbours use (alpha69 closed this gap once for the OTHER
     // loop; a field report found 51 false ERRORs from this one on alpha70).
     if (isToolingPath(file.relative) || isTestPath(file.relative)) continue;
-    // Named/default imports
-    for (
-      const m of codeMatches(
-        file.content,
-        /(?:import|export)\s+.*?\s+from\s+['"]([^'"]+)['"]/g,
-      )
-    ) {
-      const spec = m[1]!;
+    // Named/default imports — `moduleStatements`, not a one-line regex: the
+    // multi-line form `deno fmt` writes for a long list was invisible here.
+    for (const st of moduleStatements(file.content)) {
+      if (!st.clause) continue; // side-effect imports: the loop below
+      const spec = st.spec;
       if (spec.startsWith(".") || spec.startsWith("/")) continue;
-      if (
-        m[0]!.startsWith("import type ") || m[0]!.startsWith("import type{")
-      ) continue;
-      const lineIdx = file.content.slice(0, m.index).split("\n").length;
+      // `import type` AND `export type … from` — both are erased before
+      // esbuild runs, so neither can put the module in the bundle. Only the
+      // import spelling was exempt, which made `export type { WalkEntry } from
+      // "@std/fs"` a gate-failing ERROR on a file that cannot leak anything.
+      if (st.typeOnly) continue;
+      const lineIdx = file.content.slice(0, st.start).split("\n").length;
       // A `.tsx` reaches the browser bundle, and no other loop sees it: the
       // cell-file loop below skips `.tsx` by design. Non-`.tsx` files ARE in
       // that loop, so they defer to it and are not reported twice.
       if (
         file.ext === ".tsx" &&
-        SERVER_ONLY_PREFIXES.some((p) => spec.startsWith(p))
+        isServerOnlySpec(spec)
       ) {
         report(
           "error",
@@ -1404,7 +1420,7 @@ export const checkUI: Checker = (ctx) => {
       }
       if (BROWSER_IMPORTS.has(spec) || isAioEntry(spec)) continue;
       if (denoImports.has(spec)) continue; // in deno.json → auto-aliased
-      if (SERVER_ONLY_PREFIXES.some((p) => spec.startsWith(p))) continue; // the cell-file loop owns non-.tsx
+      if (isServerOnlySpec(spec)) continue; // the cell-file loop owns non-.tsx
       report(
         "error",
         "ui",
@@ -1428,7 +1444,7 @@ export const checkUI: Checker = (ctx) => {
       if (spec.startsWith(".") || spec.startsWith("/")) continue;
       if (
         file.ext === ".tsx" &&
-        SERVER_ONLY_PREFIXES.some((p) => spec.startsWith(p))
+        isServerOnlySpec(spec)
       ) {
         report(
           "error",
@@ -1445,7 +1461,7 @@ export const checkUI: Checker = (ctx) => {
       if (
         BROWSER_IMPORTS.has(spec) || isAioEntry(spec) || denoImports.has(spec)
       ) continue;
-      if (SERVER_ONLY_PREFIXES.some((p) => spec.startsWith(p))) continue;
+      if (isServerOnlySpec(spec)) continue;
       report(
         "error",
         "ui",
@@ -1485,7 +1501,7 @@ export const checkUI: Checker = (ctx) => {
   // "aio/server" is the explicit server-only entry: the whole module
   // is server-only, so a STATIC import into a cell-shared file is the boundary
   // violation — flag it like @std/ / node:.
-  // (SERVER_ONLY_PREFIXES is declared once, above both loops.)
+  // (isServerOnlySpec is declared once, above both loops.)
   // AIO-424: server-only SYMBOLS that live in the isomorphic "aio"/"aio/db"
   // entries — the browser build omits them, so a STATIC import into a
   // cell (shared with the browser bundle) link-fails at boot with an anonymous
@@ -1499,21 +1515,15 @@ export const checkUI: Checker = (ctx) => {
     // because this `continue` was silently exempting components from it.
     if (file.ext === ".tsx") continue;
 
-    // Named/default imports
-    for (
-      const m of codeMatches(
-        file.content,
-        /(?:import|export)\s+.*?\s+from\s+['"]([^'"]+)['"]/g,
-      )
-    ) {
-      const spec = m[1]!;
-      if (
-        m[0]!.startsWith("import type ") || m[0]!.startsWith("import type{")
-      ) continue;
-      const lineIdx = file.content.slice(0, m.index).split("\n").length;
+    // Named/default imports (multi-line safe — see `moduleStatements`)
+    for (const st of moduleStatements(file.content)) {
+      if (!st.clause) continue; // a side-effect import binds no symbol
+      const spec = st.spec;
+      if (st.typeOnly) continue; // import type / export type: erased (above)
+      const lineIdx = file.content.slice(0, st.start).split("\n").length;
 
       // (a) server-only module prefix
-      if (SERVER_ONLY_PREFIXES.some((p) => spec.startsWith(p))) {
+      if (isServerOnlySpec(spec)) {
         report(
           "error",
           "ui",
@@ -1530,10 +1540,9 @@ export const checkUI: Checker = (ctx) => {
 
       // (b) server-only SYMBOL from the isomorphic "aio"/"aio/db" entry (AIO-424)
       if (spec === "aio" || spec === "aio/db") {
-        const braces = m[0]!.match(/\{([^}]*)\}/);
-        if (!braces) continue;
-        for (const raw of braces[1]!.split(",")) {
-          const sym = raw.trim().split(/\s+as\s+/)[0]!.trim();
+        // Entries come comment-free: `createDB, // why` is `createDB`.
+        for (const { text } of st.list?.entries ?? []) {
+          const sym = text.split(/\s+as\s+/)[0]!.trim();
           if (!SERVER_ONLY_AIO_SYMBOLS.has(sym)) continue;
           report(
             "error",
@@ -1602,69 +1611,94 @@ export const checkUI: Checker = (ctx) => {
     }
   }
 
-  // Check 3: Transitive server-only import detection (2 levels from App.tsx)
-  if (appTsx) {
-    const SERVER_ONLY_IMPORT_RE =
-      /(?:import|export)\s+(?!type\s).*?\s+from\s+['"]((?:@std\/|node:)[^'"]+)['"]/g;
-    // `(?!type\s)` — a TYPE-only hop is not an edge in the runtime graph.
-    // `import type { Format } from "./x.server.ts"` is erased before esbuild
-    // ever sees it, so it cannot drag anything into the browser bundle; without
-    // this the chain rule reported an ERROR (gate-failing) on a file that was
-    // correct, and the suggested cure did not apply either. A field report lost
-    // time to exactly that and worked around it by moving its shared types.
-    // The server-only probe below has always had this guard; the hop regex
-    // simply never got it.
-    const LOCAL_IMPORT_RE =
-      /(?:import|export)\s+(?!type\s).*?\s+from\s+['"](\.[^'"]+)['"]/g;
+  // The browser graph: every checked file (components and cell modules),
+  // closed over STATIC, non-type, local imports — one walk, read by the chain
+  // rule (Check 3) and the dynamic-import rule (Check 4). `parent` records the
+  // first hop that reached a file, which is the chain a finding prints.
+  //
+  // Check 3 used to walk its own two fixed levels from App.tsx, and it had
+  // three holes: the level-1 file was never probed (a helper App.tsx imports
+  // DIRECTLY was reported by nothing — it is neither a .tsx nor a cell file);
+  // its resolver did `relPath.replace("./", "")`, which turns `../lib/x.ts`
+  // into `.lib/x.ts`, so every parent-relative hop was dropped; and it knew
+  // `@std/`/`node:` but not the `jsr:` spelling or `aio/server`. esbuild
+  // follows every hop, so the walk does too, at any depth, through the same
+  // `resolve` Check 4 always used.
+  //
+  // A TYPE-only hop is not an edge: `import type { Format } from
+  // "./x.server.ts"` is erased before esbuild ever sees it (a field report
+  // lost time to an ERROR on exactly that — tests/aiol-rule-signal.test.ts).
+  const STATIC_DYN_RE = /\bimport\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)/g;
+  const resolveLocal = (from: { path: string }, spec: string) => {
+    const t = resolve(dirname(from.path), spec);
+    return ctx.sourceFiles.find((f) =>
+      f.path === t || f.path === t + ".ts" || f.path === t + ".tsx"
+    );
+  };
+  type GraphNode = {
+    readonly file: SourceFile;
+    readonly parent: GraphNode | null;
+    /** Reached only through a static `*.server.ts` hop. The build refuses
+     *  that hop itself (esbuild-plugin), and Check 4 has always stopped
+     *  there; the chain rule looks past it. */
+    readonly viaServerFile: boolean;
+  };
+  const graph = new Map<SourceFile, GraphNode>();
+  for (const f of browserCheckedFiles) {
+    if (isToolingPath(f.relative) || isTestPath(f.relative)) continue;
+    if (!graph.has(f)) {
+      graph.set(f, { file: f, parent: null, viaServerFile: false });
+    }
+  }
+  for (const node of graph.values()) { // a Map iterates entries added mid-walk
+    for (const st of moduleStatements(node.file.content)) {
+      if (st.typeOnly || !/^\.{1,2}\//.test(st.spec)) continue;
+      const hop = resolveLocal(node.file, st.spec);
+      if (!hop || graph.has(hop)) continue;
+      graph.set(hop, {
+        file: hop,
+        parent: node,
+        viaServerFile: node.viaServerFile || isServerOnlyFile(st.spec),
+      });
+    }
+  }
+  /** The server-only specifiers `file` imports statically (types erased). */
+  const serverSpecs = (file: SourceFile) =>
+    moduleStatements(file.content).filter((st) =>
+      !st.typeOnly && isServerOnlySpec(st.spec)
+    );
 
-    // Helper: resolve a relative import path to a source file
-    const resolveFile = (fromFile: { relative: string }, relPath: string) => {
-      const fromDir = fromFile.relative.replace(/[^/]+$/, "");
-      const target = fromDir + relPath.replace("./", "");
-      return ctx.sourceFiles.find((f) =>
-        f.relative === target || f.relative === target + ".ts" ||
-        f.relative === target + ".tsx"
+  // Check 3: a server-only import anywhere down a static import chain. A
+  // root (a component or cell file) is reported by its own rule above.
+  for (const node of graph.values()) {
+    if (!node.parent) continue;
+    const chain: string[] = [];
+    for (let n: GraphNode | null = node; n; n = n.parent) {
+      chain.unshift(n.file.relative);
+    }
+    const file = node.file;
+    for (const st of serverSpecs(file)) {
+      const lineIdx = file.content.slice(0, st.start).split("\n").length;
+      report(
+        "error",
+        "ui",
+        `${
+          chain.join(" → ")
+        }:${lineIdx} — transitive server-only import "${st.spec}" reaches browser bundle via import chain`,
+        {
+          file: file.relative,
+          line: lineIdx,
+          // Naming the DYNAMIC part matters: renaming the target to
+          // *.server.ts alone does nothing here — the build marks those
+          // external only for `import(...)`, not for a static import — and
+          // a reader who has seen that advice elsewhere will try it first.
+          fix: `Import it dynamically from the method that needs it ` +
+            `(\`const x = await import("./thing.server.ts")\`). Renaming ` +
+            `to *.server.ts only excludes DYNAMIC imports; a static one ` +
+            `still enters the bundle. If you only need its types, ` +
+            `\`import type\` is already erased and is not reported.`,
+        },
       );
-    };
-
-    // Level 1: App.tsx → local imports
-    for (const m1 of codeMatches(appTsx.content, LOCAL_IMPORT_RE)) {
-      const resolved1 = resolveFile(appTsx, m1[1]!);
-      if (!resolved1) continue;
-
-      // Level 2: imported file → its local imports
-      for (const m2 of codeMatches(resolved1.content, LOCAL_IMPORT_RE)) {
-        const resolved2 = resolveFile(resolved1, m2[1]!);
-        if (!resolved2) continue;
-
-        // Check level 2 file for server-only imports
-        for (
-          const sm of codeMatches(resolved2.content, SERVER_ONLY_IMPORT_RE)
-        ) {
-          const lineIdx =
-            resolved2.content.slice(0, sm.index).split("\n").length;
-          report(
-            "error",
-            "ui",
-            `${appTsx.relative} → ${resolved1.relative} → ${resolved2.relative}:${lineIdx} — transitive server-only import "${
-              sm[1]
-            }" reaches browser bundle via import chain`,
-            {
-              file: resolved2.relative,
-              line: lineIdx,
-              // Naming the DYNAMIC part matters: renaming the target to
-              // *.server.ts alone does nothing here — the build marks those
-              // external only for `import(...)`, not for a static import — and
-              // a reader who has seen that advice elsewhere will try it first.
-              fix: `Import it dynamically from the method that needs it ` +
-                `(\`const x = await import("./thing.server.ts")\`). Renaming ` +
-                `to *.server.ts only excludes DYNAMIC imports; a static one ` +
-                `still enters the bundle. If you only need its types, ` +
-                `\`import type\` is already erased and is not reported.`,
-            },
-          );
-        }
-      }
     }
   }
 
@@ -1684,32 +1718,8 @@ export const checkUI: Checker = (ctx) => {
   // specifier. A target that is server-only only through ITS imports, a
   // non-literal `import(x)`, and an import-map alias are not followed here;
   // the build's own graph check (graph-validator) still refuses those.
-  const SERVER_SPEC_RE =
-    /(?:import|export)\s+(?!type\s)[^'";]*?\s+from\s+['"]((?:jsr:)?(?:@std\/|node:|aio\/server)[^'"]*)['"]|(?:^|\n)\s*import\s+['"]((?:jsr:)?(?:@std\/|node:|aio\/server)[^'"]*)['"]/g;
-  const STATIC_LOCAL_RE =
-    /(?:import|export)\s+(?!type\s)(?:[^'";]*?\s+from\s+)?['"](\.{1,2}\/[^'"]+)['"]/g;
-  const STATIC_DYN_RE = /\bimport\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)/g;
-  const resolveLocal = (from: { path: string }, spec: string) => {
-    const t = resolve(dirname(from.path), spec);
-    return ctx.sourceFiles.find((f) =>
-      f.path === t || f.path === t + ".ts" || f.path === t + ".tsx"
-    );
-  };
-  // The browser graph: the checked files, closed over static local imports.
-  // A `*.server.ts` hop is not followed — a static import of one is refused
-  // by its own rule, and a dynamic one is external.
-  const browserGraph = browserCheckedFiles.filter((f) =>
-    !isToolingPath(f.relative) && !isTestPath(f.relative)
-  );
-  for (let i = 0; i < browserGraph.length; i++) {
-    const from = browserGraph[i]!;
-    for (const m of codeMatches(from.content, STATIC_LOCAL_RE)) {
-      if (isServerOnlyFile(m[1]!)) continue;
-      const hop = resolveLocal(from, m[1]!);
-      if (hop && !browserGraph.includes(hop)) browserGraph.push(hop);
-    }
-  }
-
+  const browserGraph = [...graph.values()].filter((n) => !n.viaServerFile)
+    .map((n) => n.file);
   for (const file of browserGraph) {
     for (const m of codeMatches(file.content, STATIC_DYN_RE)) {
       const target = m[1]!;
@@ -1720,10 +1730,7 @@ export const checkUI: Checker = (ctx) => {
       if (!resolved) continue;
 
       // Is the target server-only on its face?
-      const serverImports: string[] = [];
-      for (const sm of codeMatches(resolved.content, SERVER_SPEC_RE)) {
-        serverImports.push((sm[1] ?? sm[2])!);
-      }
+      const serverImports = serverSpecs(resolved).map((st) => st.spec);
       if (/\bDeno\.\w+/.test(codeText(resolved.content))) {
         serverImports.push("Deno.*");
       }

@@ -18,7 +18,10 @@ import {
   verifyManifestClaims,
 } from "../build/ship.ts";
 import type { GitHead } from "./updates-core.ts";
-import { GIT_NO_PROMPT_ENV } from "./git-noninteractive.ts";
+import type { InstalledTarget } from "./updates-apply.ts";
+import { gitOwnRepoEnv } from "./git-noninteractive.ts";
+import { outlivingParent } from "./no-console.ts";
+import { DOWNLOAD_STALL_MS } from "../electron/electron-runtime-fetch.ts";
 
 /** What an install remembers between runs. Lives beside the app's data,
  *  inside the backup unit, because losing it silently downgrades security. */
@@ -51,7 +54,7 @@ export type TrustStore = {
    *  it was the latest while a newer release sat in the manifest. A cached
    *  tag is sent only when both still match; one without this (written
    *  before it existed) is not sent at all, so the next check refetches. */
-  etagCurrentFor?: { version: string; url: string };
+  etagCurrentFor?: { version: string; url: string; prerelease?: boolean };
   /** The commit this build was made from — a git source's "current version". */
   commit?: string;
   /** The SHA-256 of the artifact this install is RUNNING, as verified at the
@@ -181,7 +184,10 @@ export function transportAuthenticatesHost(url: string): boolean {
   if (u.protocol === "https:" || u.protocol === "file:") return true;
   if (u.protocol !== "http:") return false;
   const h = u.hostname.replace(/^\[|\]$/g, "");
-  return h === "localhost" || h === "::1" || /^127\./.test(h);
+  // A LITERAL loopback address only: `127.attacker.example` is a DNS name that
+  // resolves wherever its owner says, so a `127.` prefix proves nothing.
+  return h === "localhost" || h === "::1" ||
+    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
 }
 
 /** Pin the trusted signing key on first use.
@@ -267,6 +273,32 @@ const MANIFEST_MAX_BYTES = 1_000_000;
 
 /** Redirect hops a manifest fetch follows — fetch's own `follow` limit. */
 const MAX_REDIRECTS = 20;
+
+/** A whole manifest fetch — every hop plus the body — must answer within this.
+ *  `fetch` has no timeout of its own: a release host that accepted the
+ *  connection and then said nothing (a stalled proxy, a captive portal, a
+ *  half-open link) hung the check FOREVER — the cell sat on "checking", and
+ *  the poll, which re-arms only after a check returns, never ran again. */
+const MANIFEST_TIMEOUT_MS = 30_000;
+
+/** An artifact download may be slow, never silent: no byte for this long
+ *  aborts it. A total cap would refuse a large build on a slow link; an idle
+ *  cap only refuses a download that stopped. Without one a stalled download
+ *  held the cell on "downloading" for the life of the process — and every
+ *  later check refuses while an install is in flight. The same idle cap the
+ *  Electron runtime download uses — one fact, one home. */
+
+/** `git ls-remote` is one round trip; a minute of silence is a stalled remote. */
+const GIT_LS_REMOTE_TIMEOUT_MS = 60_000;
+
+/** "no answer in Ns" for a timeout abort, the message otherwise. */
+function fetchFailure(e: unknown, url: string, ms: number): string {
+  if (e instanceof DOMException && e.name === "TimeoutError") {
+    return `${url} did not answer within ${ms / 1000}s — the release host ` +
+      `is unreachable or stalled; the next check tries again`;
+  }
+  return e instanceof Error ? e.message : String(e);
+}
 
 /** Is this actually a ship manifest, or just an object that reached us?
  *
@@ -455,6 +487,64 @@ function missingManifestError(url: string, detail: string): string {
     `that has a release.`;
 }
 
+/** The kind-specific manifest beside a platform's `<os>-<arch>.json`:
+ *  `<os>-<arch>.<kind>.json` (`kindManifestFileName` in ship.ts, pinned by a
+ *  test). Pure. */
+export function kindManifestUrl(platformUrl: string, kind: string): string {
+  return platformUrl.replace(/\.json$/, () => `.${kind}.json`);
+}
+
+/** How long a channel's "no kind manifest" answer is believed — a day, so a
+ *  channel that starts publishing one is read by a running install too. */
+const KIND_ABSENT_MS = 24 * 60 * 60 * 1000;
+const kindAbsentUntil = new Map<string, number>();
+
+/** The manifest THIS install reads.
+ *
+ *  A platform can publish two install kinds — Windows Electron's
+ *  self-contained `.exe` (`binary`, the platform's own manifest) and the
+ *  `.zip` (`electron-zip`). An install unpacked from the zip refuses the
+ *  `.exe`'s release, so it reads `<os>-<arch>.electron-zip.json` when the
+ *  channel serves one (2xx), and the platform's manifest otherwise — exactly
+ *  what it read before the kind manifest existed, so a channel without one,
+ *  or one this probe cannot reach, behaves as it always did. Every other
+ *  install kind reads the platform's manifest, unprobed.
+ *
+ *  The probe waits as long as the manifest fetch itself: a slow channel's
+ *  answer is its answer. A probe that TIMES OUT throws — the channel said
+ *  nothing, which is not "absent", and reading the platform's manifest on it
+ *  offered a zip install the `.exe` it refuses; it also spares an unreachable
+ *  host a second full wait. Only a 404 or 410 — the channel saying "no such
+ *  file" — is believed for `KIND_ABSENT_MS`; any other status (a 403 of a
+ *  private bucket, a 429, a 5xx) reads the platform's manifest this time and
+ *  asks again next check. */
+export async function installManifestUrl(
+  platformUrl: string,
+  installed: InstalledTarget,
+  timeoutMs: number = MANIFEST_TIMEOUT_MS,
+): Promise<string> {
+  if (installed !== "electron-zip") return platformUrl;
+  const kind = kindManifestUrl(platformUrl, installed);
+  if ((kindAbsentUntil.get(kind) ?? 0) > Date.now()) return platformUrl;
+  try {
+    const res = await fetch(kind, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    await res.body?.cancel();
+    if (res.ok) return kind;
+    if (res.status === 404 || res.status === 410) {
+      kindAbsentUntil.set(kind, Date.now() + KIND_ABSENT_MS);
+    }
+    return platformUrl;
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "TimeoutError") {
+      throw new Error(fetchFailure(e, kind, timeoutMs));
+    }
+    // aio-ok: unreachable or absent → the platform manifest, whose own fetch reports any transport failure
+    return platformUrl;
+  }
+}
+
 /** Fetch and parse a manifest. `file:` URLs skip conditional requests — there
  *  is no ETag on a filesystem, and re-reading a local file costs nothing. */
 export async function fetchManifest(
@@ -473,9 +563,16 @@ export async function fetchManifest(
      *  real config key first — a security opt-in, and a decision, not a
      *  wording change. */
     allowCrossOrigin?: boolean;
+    /** Test seam: the whole-fetch deadline (default `MANIFEST_TIMEOUT_MS`). */
+    timeoutMs?: number;
   },
 ): Promise<ManifestFetch> {
   const isFile = url.startsWith("file:");
+  const timeoutMs = opts?.timeoutMs ?? MANIFEST_TIMEOUT_MS;
+  // ONE deadline for every hop and the body: it rides into `readCapped`
+  // through the response, so a host that sends headers and then stalls the
+  // body is cut off too.
+  const signal = AbortSignal.timeout(timeoutMs);
   try {
     // Redirects are followed BY HAND, so every hop's transport is seen: a key
     // may be pinned only if EACH leg authenticated its host. Judging the
@@ -488,6 +585,7 @@ export async function fetchManifest(
       res = await fetch(at, {
         headers: !isFile && etag ? { "if-none-match": etag } : undefined,
         redirect: "manual",
+        signal,
       });
       const next = res.headers.get("location");
       if (res.status < 300 || res.status > 399 || res.status === 304 || !next) {
@@ -554,7 +652,7 @@ export async function fetchManifest(
       pinFrom,
     };
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = fetchFailure(e, url, timeoutMs);
     // Same rule as unpackArchive / gitLsRemote: a raw ENOENT is the least
     // obvious form of "this path does not exist". A file:// channel that was
     // never published used to surface Deno's fetch wording and nothing else.
@@ -566,7 +664,7 @@ export async function fetchManifest(
     }
     return {
       kind: "error",
-      error: `${url}: ${msg}`,
+      error: msg.startsWith(url) ? msg : `${url}: ${msg}`,
     };
   }
 }
@@ -666,6 +764,8 @@ export async function downloadArtifact(opts: {
   keepStaged?: boolean;
   onProgress?: (fraction: number) => void;
   signal?: AbortSignal;
+  /** Test seam: the no-bytes deadline (default `DOWNLOAD_STALL_MS`). */
+  stallMs?: number;
 }): Promise<{ ok: true; path: string } | { ok: false; error: string }> {
   if (
     !Number.isInteger(opts.expectSize) || opts.expectSize <= 0
@@ -714,10 +814,24 @@ export async function downloadArtifact(opts: {
   await Deno.mkdir(stage, { recursive: false, mode: 0o700 });
   const staged = join(stage, "artifact");
   let done = false;
+  // Re-armed on every chunk: fires only when the host stops sending.
+  const stallMs = opts.stallMs ?? DOWNLOAD_STALL_MS;
+  const stall = new AbortController();
+  let stallTimer: ReturnType<typeof setTimeout> | undefined;
+  const arm = () => {
+    clearTimeout(stallTimer);
+    stallTimer = setTimeout(
+      () => stall.abort(new DOMException("stalled", "TimeoutError")),
+      stallMs,
+    );
+  };
   try {
+    arm();
     const res = await fetch(opts.url, {
       redirect: "follow",
-      signal: opts.signal,
+      signal: opts.signal
+        ? AbortSignal.any([opts.signal, stall.signal])
+        : stall.signal,
     });
     if (!res.ok || !res.body) {
       await res.body?.cancel();
@@ -728,6 +842,9 @@ export async function downloadArtifact(opts: {
     }
     const hash = createHash("sha256");
     let seen = 0;
+    // Whole percents only: each report is a dispatch, a persist and a
+    // broadcast, and per chunk that was ~4000 of them for one desktop update.
+    let reported = -1;
     const file = await Deno.open(staged, { createNew: true, write: true });
     try {
       for await (const chunk of res.body) {
@@ -736,15 +853,23 @@ export async function downloadArtifact(opts: {
           // Returning cancels the stream; see readCapped.
           return {
             ok: false,
-            error: `${opts.url} is sending more than the ${
-              MB(opts.expectSize)
-            } the manifest promised (${MB(seen)} and counting) — aborted`,
+            error:
+              `${opts.url} is sending more than the ${
+                MB(opts.expectSize)
+              } (${opts.expectSize} bytes) the manifest promised (${seen} ` +
+              `bytes and counting) — aborted`,
           };
         }
+        arm();
         hash.update(chunk);
         await writeAll(file, chunk);
-        opts.onProgress?.(Math.min(1, seen / opts.expectSize));
+        const pct = Math.min(100, Math.floor((seen / opts.expectSize) * 100));
+        if (pct > reported) {
+          reported = pct;
+          opts.onProgress?.(pct / 100);
+        }
       }
+      clearTimeout(stallTimer); // the body is in; a slow fsync is not a stall
       // The rename below publishes a NAME. Without this, a power cut between
       // the two can leave that name pointing at a file whose contents were
       // never written — and the digest that proved it good was checked
@@ -758,9 +883,11 @@ export async function downloadArtifact(opts: {
       return {
         ok: false,
         error:
-          `${opts.url} sent ${MB(seen)}, but the manifest promises ${
-            MB(opts.expectSize)
-          } — it does not match the manifest, and a truncated artifact is ` +
+          // Exact bytes beside the rounded size: an off-by-a-few download
+          // read "sent 186.7 MB, but the manifest promises 186.7 MB".
+          `${opts.url} sent ${MB(seen)} (${seen} bytes), but the manifest ` +
+          `promises ${MB(opts.expectSize)} (${opts.expectSize} bytes) — it ` +
+          `does not match the manifest, and a truncated artifact is ` +
           `never installed`,
       };
     }
@@ -787,8 +914,17 @@ export async function downloadArtifact(opts: {
     await Deno.rename(staged, opts.dest);
     return { ok: true, path: opts.dest };
   } catch (e) {
-    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    return {
+      ok: false,
+      error: stall.signal.aborted
+        ? `${opts.url} sent nothing for ${stallMs / 1000}s — the download ` +
+          `stalled and was aborted; the next check tries again`
+        : e instanceof Error
+        ? e.message
+        : String(e),
+    };
   } finally {
+    clearTimeout(stallTimer);
     if (!done) await Deno.remove(stage, { recursive: true }).catch(() => {});
   }
 }
@@ -830,6 +966,199 @@ export async function fileSha256(path: string): Promise<string> {
 
 // ── git sources ─────────────────────────────────────────────────────────────
 
+/** End a git AND every helper it spawned: its process group on POSIX
+ *  (spawned `detached`, it leads one), `taskkill /T` on Windows, where ending
+ *  a process never ends its children. Never blocks: taskkill is spawned, not
+ *  awaited — `outputSync` froze the event loop for as long as it ran, and a
+ *  spawned taskkill still finishes when this is called on the way out. */
+function killGitTree(pid: number): void {
+  const killGit = () => {
+    try {
+      Deno.kill(pid, "SIGKILL");
+    } catch { /* aio-ok: already exited — nothing to kill */ }
+  };
+  try {
+    if (Deno.build.os !== "windows") return Deno.kill(-pid, "SIGKILL");
+    new Deno.Command("taskkill", {
+      args: ["/T", "/F", "/PID", String(pid)],
+      stdin: "null",
+      stdout: "null",
+      stderr: "null",
+      // It is often called on the way OUT; a plain child dies with us there.
+      ...outlivingParent(),
+    }).spawn().status.then((s) => s.success || killGit(), killGit);
+  } catch {
+    // aio-ok: already exited, or no taskkill — end git itself at least
+    killGit();
+  }
+}
+
+/** Every `git ls-remote` still running. `detached` takes git out of the
+ *  terminal's process group, so Ctrl-C, a closed terminal or `am stop` no
+ *  longer reach it: an app stopped during a check against a stalled host left
+ *  git (and ssh / git-remote-http) waiting on it forever. Every exit path —
+ *  SIGINT/SIGTERM/SIGHUP and `aio.stop()` all end in `Deno.exit` — fires
+ *  `unload`, which ends each tree here. */
+const liveGit = new Set<number>();
+addEventListener("unload", () => {
+  for (const pid of liveGit) killGitTree(pid);
+});
+
+/** What ssh is told for a background git, or nothing when the user chose
+ *  their own ssh. `GIT_SSH_COMMAND` outranks `core.sshCommand` and `GIT_SSH`,
+ *  so setting it over theirs would drop their key or proxy — theirs is left
+ *  alone. Otherwise: `BatchMode=yes` (never ask — a passphrase or an unknown
+ *  host fails), a connect deadline, and keepalives, so an ssh whose app was
+ *  SIGKILLed (no `unload`, no group kill) gives up on a stalled host by itself
+ *  — the ssh twin of `GIT_HTTP_LOW_SPEED_*`. Pure: the caller reads the
+ *  inputs. */
+export function gitSshEnv(
+  env: { GIT_SSH_COMMAND?: string; GIT_SSH?: string },
+  /** `git config --get core.sshCommand`, "" when unset. */
+  configured: string,
+  stallSec: number,
+): Record<string, string> {
+  if (env.GIT_SSH_COMMAND || env.GIT_SSH || configured.trim()) return {};
+  const every = Math.max(1, Math.ceil(stallSec / 3));
+  return {
+    GIT_SSH_COMMAND: `ssh -o BatchMode=yes -o ConnectTimeout=${stallSec} ` +
+      `-o ServerAliveInterval=${every} -o ServerAliveCountMax=3`,
+  };
+}
+
+/** The user's `core.sshCommand` as git sees it from `cwd` ("" if none).
+ *  Config only — no remote, nothing to prompt for. */
+async function configuredSshCommand(cwd?: string): Promise<string> {
+  try {
+    const o = await new Deno.Command("git", {
+      args: ["config", "--get", "core.sshCommand"],
+      cwd,
+      stdout: "piped",
+      stderr: "null",
+      stdin: "null",
+      // An inherited GIT_DIR (a hook) would name ANOTHER repo's config.
+      ...gitOwnRepoEnv(),
+    }).output();
+    return o.success ? new TextDecoder().decode(o.stdout).trim() : "";
+  } catch {
+    return ""; // aio-ok: no git — the spawn that follows reports it
+  }
+}
+
+/** Run a git that may talk to a remote, in the background: it never prompts,
+ *  has a deadline, and leaves nothing behind — at the deadline, on exit, and
+ *  (via the stall env) when aio is SIGKILLed. It addresses only the repo its
+ *  cwd/args name: an inherited `GIT_DIR` & co. (an app started from a git
+ *  hook) is stripped (`gitOwnRepoEnv`). Every git the update path spawns
+ *  goes through here. Throws only when git cannot be spawned at all. */
+export async function runBackgroundGit(
+  args: string[],
+  opts: {
+    cwd?: string;
+    timeoutMs: number;
+    /** Silence (seconds) after which the transport gives up by itself. */
+    stallSec: number;
+    /** `timeoutMs` is an IDLE deadline: every byte git writes restarts it.
+     *  For a long transfer that reports progress (`clone --progress`), so a
+     *  slow-but-moving one is never killed while a silent one still is. */
+    idle?: boolean;
+  },
+): Promise<{ ok: boolean; timedOut: boolean; out: string; err: string }> {
+  const { timeoutMs, stallSec } = opts;
+  // Same reason as `MANIFEST_TIMEOUT_MS`: git has no deadline of its own, so a
+  // remote that accepted the connection and went silent held the caller
+  // forever. At the deadline git is killed AND the pipes are let go: its
+  // transport helper (`git-remote-http`) is a grandchild that inherits them,
+  // so waiting for EOF after the kill would hang just the same.
+  let timedOut = false;
+  const cancels: (() => void)[] = [];
+  const drain = async (s: ReadableStream<Uint8Array>): Promise<Uint8Array> => {
+    const r = s.getReader();
+    cancels.push(() =>
+      void r.cancel().catch(() => {
+        // aio-ok: releasing a pipe after the kill; the timeout is reported
+      })
+    );
+    const parts: Uint8Array[] = [];
+    for (;;) {
+      const { done, value } = await r.read();
+      if (done) break;
+      parts.push(value);
+      if (opts.idle && !timedOut) arm();
+    }
+    const all = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    let at = 0;
+    for (const p of parts) all.set(p, at), at += p.length;
+    return all;
+  };
+  const ssh = gitSshEnv(
+    {
+      GIT_SSH_COMMAND: Deno.env.get("GIT_SSH_COMMAND"),
+      GIT_SSH: Deno.env.get("GIT_SSH"),
+    },
+    await configuredSshCommand(opts.cwd),
+    stallSec,
+  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let pid = 0;
+  const arm = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      timedOut = true;
+      killGitTree(pid);
+      for (const c of cancels) c();
+    }, timeoutMs);
+  };
+  try {
+    const child = new Deno.Command("git", {
+      args,
+      cwd: opts.cwd,
+      stdout: "piped",
+      stderr: "piped",
+      stdin: "null",
+      ...gitOwnRepoEnv({
+        // A background git never asks anyone anything. Detached, git and ssh
+        // have no terminal, so both fall back to an askpass program — a GUI
+        // dialog (VS Code's, ssh-askpass under $DISPLAY) on every poll. Empty
+        // GIT_ASKPASS turns git's off, and ssh's off on any OpenSSH version;
+        // with no terminal, ssh then fails (a passphrase, an unknown host)
+        // exactly as `BatchMode=yes` would — even under the user's own
+        // `core.sshCommand`, which `gitSshEnv` leaves alone.
+        GIT_ASKPASS: "",
+        SSH_ASKPASS: "",
+        SSH_ASKPASS_REQUIRE: "never",
+        // Backstop for an app that dies without its exit path (SIGKILL):
+        // the HTTP helper then gives up on a silent host by itself.
+        GIT_HTTP_LOW_SPEED_LIMIT: "1",
+        GIT_HTTP_LOW_SPEED_TIME: String(stallSec),
+        ...ssh,
+      }),
+      // Its own process group on POSIX, so the deadline ends the whole TREE:
+      // killing git alone orphaned `git-remote-http`, which then waited on the
+      // silent host for good (2 processes left per timed-out check). Leaving
+      // the terminal's group is paid for by `liveGit` (killed on exit).
+      detached: Deno.build.os !== "windows",
+    }).spawn();
+    pid = child.pid;
+    liveGit.add(pid);
+    void child.status.finally(() => liveGit.delete(pid));
+    arm();
+    const [stdout, stderr, status] = await Promise.all([
+      drain(child.stdout),
+      drain(child.stderr),
+      child.status,
+    ]);
+    return {
+      ok: status.success && !timedOut,
+      timedOut,
+      out: new TextDecoder().decode(stdout).trim(),
+      err: new TextDecoder().decode(stderr).trim(),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** Ask a remote where a ref points, without cloning anything.
  *
  *  `git ls-remote` is one round trip and works identically for GitHub, GitLab,
@@ -838,9 +1167,11 @@ export async function fileSha256(path: string): Promise<string> {
 export async function gitLsRemote(
   source: string,
   ref: string,
+  /** Test seam: the deadline (default `GIT_LS_REMOTE_TIMEOUT_MS`). */
+  timeoutMs = GIT_LS_REMOTE_TIMEOUT_MS,
 ): Promise<{ ok: true; head: GitHead } | { ok: false; error: string }> {
   try {
-    const cmd = new Deno.Command("git", {
+    const out = await runBackgroundGit(
       // `--` first: both the source and the ref come from config or a
       // manifest, and `git` would otherwise read a ref named
       // `--upload-pack=…` as an option and run it.
@@ -849,23 +1180,26 @@ export async function gitLsRemote(
       // points at a tag object, not a commit, while the rebuild records
       // `rev-parse HEAD` (the commit) — so without this the two never agree
       // and the same tag is offered as "new" forever.
-      args: ["ls-remote", "--exit-code", "--", source, ref, `${ref}^{}`],
-      stdout: "piped",
-      stderr: "piped",
-      stdin: "null",
-      env: GIT_NO_PROMPT_ENV,
-    });
-    const out = await cmd.output();
-    if (!out.success) {
-      const err = new TextDecoder().decode(out.stderr).trim();
+      ["ls-remote", "--exit-code", "--", source, ref, `${ref}^{}`],
+      { timeoutMs, stallSec: Math.max(1, Math.ceil(timeoutMs / 1000)) },
+    );
+    if (out.timedOut) {
       return {
         ok: false,
-        error: err ||
+        error: `git ls-remote ${source} did not answer within ${
+          timeoutMs / 1000
+        }s — the remote is unreachable or stalled; the next check tries again`,
+      };
+    }
+    if (!out.ok) {
+      return {
+        ok: false,
+        error: out.err ||
           `git ls-remote found no ref "${ref}" in ${source} — check the ` +
             `branch or tag name`,
       };
     }
-    const lines = new TextDecoder().decode(out.stdout).trim().split("\n")
+    const lines = out.out.split("\n")
       .filter(Boolean)
       .map((l) => {
         const [sha = "", name = ""] = l.split(/\s+/);

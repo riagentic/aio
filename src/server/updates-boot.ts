@@ -25,7 +25,8 @@ import {
   readyUpdates,
   updatesRuntime,
 } from "../state/updates-cell.ts";
-import { createUpdatesRuntime } from "./updates-runtime.ts";
+import { createUpdatesRuntime, unattendedInstall } from "./updates-runtime.ts";
+import { MAX_TIMER_DELAY } from "../state/timer-ceiling.ts";
 
 /** The runtime THIS module installed, so a re-boot can tell its own work from
  *  an app's. Not exported: nothing outside needs the distinction, and a getter
@@ -39,12 +40,23 @@ import {
 import { readTrust, writeTrust } from "./updates-check.ts";
 import {
   artifactPath,
+  claimFirstBoot,
   clearPending,
+  exeIdentity,
+  failedUpdatePath,
+  FIRST_BOOT_WAIT_S,
+  firstBootPath,
   judgePending,
+  KEEP_OLD,
+  parseUpdateRecord,
+  pruneOld,
   readPending,
   restoreArtifact,
+  setAsideRecord,
+  swapDirectoryDetached,
   sweepStaleSwaps,
   writePending,
+  writeRecordAtomic,
 } from "./updates-apply.ts";
 import type { PendingUpdate } from "./updates-apply.ts";
 // NOTE: updates-runtime.ts and updates-cell.ts are imported DYNAMICALLY below,
@@ -60,18 +72,127 @@ import type { PendingUpdate } from "./updates-apply.ts";
  *  Runs in the NEW build. If it never reaches `confirmPendingUpdate`, the next
  *  boot counts another failed attempt, and when those run out this puts the
  *  previous artifact back and exits so a supervisor starts a version that
- *  works. Returns true when the caller should stop booting. */
+ *  works. Returns true when the caller should stop booting.
+ *
+ *  A marker whose update never replaced THIS executable is not evidence about
+ *  the new build (`PendingUpdate.fromExe`). `appVersion` is this process's
+ *  version: in the messages, and for a marker confirmed at exit, where a
+ *  build reporting another version than the update's (a kept `.old-*` copy
+ *  started by hand — a copy, with its own identity) only clears it. Never
+ *  more: two builds can report the same version.
+ *  `deps` are test seams. */
 export async function judgePendingUpdate(
   dataDir: string,
   log: Log,
+  appVersion?: string,
+  deps: {
+    os?: typeof Deno.build.os;
+    swapDirectory?: typeof swapDirectoryDetached;
+    /** `exeIdentity()` of this process's executable. */
+    exe?: string;
+  } = {},
 ): Promise<boolean> {
   const pending = readPending(dataDir);
+  if (!pending) return false;
+  // The very file the update was meant to REPLACE is running. A marker
+  // without the old file's identity (staged by an older build) is never
+  // judged so.
+  const oldFile = pending.fromExe !== undefined &&
+    pending.fromExe === (deps.exe ?? exeIdentity());
+  // Its build already proved itself and ended cleanly before its own confirm
+  // could run (see `pendingConfirmer`): confirmed now, with the prune and the
+  // log line that could not happen at exit. Before the "did not take effect"
+  // test: the old file started by hand after that (a versioned AppImage, a
+  // rename back) is not a failed update — the marker simply goes, and nothing
+  // is pruned from under the build that is running.
+  if (pending.confirmedAt) {
+    if (
+      oldFile || (appVersion !== undefined && appVersion !== pending.to)
+    ) {
+      log.info(
+        "updates",
+        `update ${pending.from} → ${pending.to} confirmed healthy (this is ` +
+          `${appVersion ?? pending.from}, started by hand after it)`,
+      );
+      clearPending(dataDir);
+    } else confirmPendingUpdate(dataDir, log);
+    return false;
+  }
+  // The old file is running: the swap never happened (or was undone).
+  // Counting this boot as the new build's would confirm it "healthy" on the
+  // next start of the old one.
+  if (oldFile) {
+    log.error(
+      "updates",
+      `update ${pending.from} → ${pending.to} did not take effect — this is ` +
+        `still ${appVersion ?? pending.from}, the build it was to replace. ` +
+        `Recorded as failed; it is not installed again automatically.`,
+    );
+    // The swap helper's own record of THIS update (a rollback, a failed swap)
+    // is the truthful one: it is kept, and only the marker it could not
+    // remove goes.
+    const helper = readFailed(dataDir, log);
+    if (helper?.startedAt === pending.startedAt && helper.to === pending.to) {
+      clearPending(dataDir);
+    } else {
+      keepFailed(dataDir, {
+        ...pending,
+        swapFailed: `it never replaced ${pending.from}`,
+      }, log);
+    }
+    try {
+      Deno.removeSync(firstBootPath(dataDir));
+    } catch (e) {
+      // Absent: no helper was watching. Anything else is said.
+      if (!(e instanceof Deno.errors.NotFound)) {
+        log.warn("updates", `could not remove ${firstBootPath(dataDir)}: ${e}`);
+      }
+    }
+    return false;
+  }
+  // A directory swap's helper waits for this boot to take the first-boot
+  // token, and when it gives up it takes the token itself. Whoever took it
+  // decides: having lost, this build was rolled back — it exits before it
+  // writes a byte, and the helper is putting the old version back.
+  let claim: ReturnType<typeof claimFirstBoot> | undefined;
+  let claimError: unknown;
+  for (let i = 0; i < 20 && claim === undefined; i++) {
+    try {
+      claim = claimFirstBoot(dataDir, pending, log);
+    } catch (e) {
+      claimError = e; // a scanner holding the file: retried, ~2 s
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+  if (claim === undefined || claim === "lost") {
+    log.error(
+      "updates",
+      claim === "lost"
+        ? `update ${pending.from} → ${pending.to} was rolled back by the ` +
+          `update helper before this boot started (no first boot within ` +
+          `${FIRST_BOOT_WAIT_S} s) — exiting; ${pending.from} is starting`
+        : `could not take the first-boot token of update ${pending.from} → ` +
+          `${pending.to} (${claimError}) — exiting; the update helper puts ` +
+          `${pending.from} back`,
+    );
+    return true;
+  }
   const verdict = judgePending(pending, false);
   if (verdict.action === "none") return false;
 
   if (verdict.action !== "rollback") {
     if (verdict.action !== "retry") return false;
-    writePending(dataDir, { ...pending!, attempts: verdict.attempt });
+    try {
+      writePending(dataDir, { ...pending, attempts: verdict.attempt });
+    } catch (e) {
+      // Never a reason to kill a boot: a dead boot is what a rollback counts.
+      log.error(
+        "updates",
+        `could not record boot attempt ${verdict.attempt} of update ` +
+          `${pending.from} → ${pending.to} (${e}) — booting anyway, uncounted`,
+      );
+      return false;
+    }
     log.info(
       "updates",
       `verifying update ${pending!.from} → ${pending!.to} ` +
@@ -94,6 +215,37 @@ export async function judgePendingUpdate(
       `${pending!.attempts} attempts — rolling back to ${verdict.to}`,
   );
   const current = stableArtifactPath(pending!, log);
+  // A Windows directory install is running from `current`: it cannot move
+  // its own folder (every in-app attempt failed). The swap helper does it
+  // once this process has exited, and starts the old version.
+  if ((deps.os ?? Deno.build.os) === "windows" && isDir(current)) {
+    try {
+      (deps.swapDirectory ?? swapDirectoryDetached)({
+        current,
+        staged: verdict.previous,
+        fromVersion: pending.to,
+        args: Deno.args,
+      });
+    } catch (e) {
+      log.error(
+        "updates",
+        `ROLLBACK FAILED of update ${pending.from} → ${pending.to}: the ` +
+          `update helper could not start (${e}). Put ${verdict.previous} ` +
+          `back at ${current} by hand.`,
+      );
+      return false;
+    }
+    log.error(`the update helper puts ${verdict.to} back once this exits`);
+    writeTrust(dataDir, { installedSha256: undefined });
+    // The helper's moves happen after this process is gone, and when they
+    // fail it starts THIS build again. The record carries this executable's
+    // identity, so that boot learns the rollback did not happen (startUpdates).
+    keepFailed(dataDir, {
+      ...pending,
+      failedExe: deps.exe ?? exeIdentity(),
+    }, log);
+    return true;
+  }
   try {
     await restoreArtifact(current, verdict.previous);
     log.error(`rolled back the artifact → ${verdict.to} (${current})`);
@@ -107,7 +259,13 @@ export async function judgePendingUpdate(
           `  cp ${verdict.backup} <data>/state.db   (stop the app first)`,
       );
     }
-    clearPending(dataDir);
+    // The recorded digest names the build that just failed; the artifact at
+    // `current` is the old one again. Forget it so the next check re-measures
+    // instead of offering this install its own bytes as a "new build".
+    writeTrust(dataDir, { installedSha256: undefined });
+    // Kept as the FAILED record, not deleted: the next boot names it and does
+    // not auto-install this version again (see `startUpdates`).
+    keepFailed(dataDir, pending, log);
     // Exit so the supervisor (or the user) starts the version that works. The
     // artifact at `current` is the old one now; this process is still the new
     // build and must not keep running.
@@ -138,6 +296,41 @@ export async function judgePendingUpdate(
     // up; bricking the app on top of a failed rollback helps nobody.
     return false;
   }
+}
+
+/** Replace the pending marker with the FAILED record `p`. */
+function keepFailed(dataDir: string, p: PendingUpdate, log: Log): void {
+  try {
+    writeRecordAtomic(failedUpdatePath(dataDir), p);
+  } catch (e) {
+    log.warn("updates", `could not keep the failed-update record: ${e}`);
+  }
+  clearPending(dataDir);
+}
+
+function isDir(path: string): boolean {
+  try {
+    return Deno.statSync(path).isDirectory;
+  } catch {
+    return false;
+  }
+}
+
+/** The record of an update that was put back, or null. Unreadable is said,
+ *  never guessed. */
+function readFailed(dataDir: string, log: Log): PendingUpdate | null {
+  const path = failedUpdatePath(dataDir);
+  let why: string;
+  try {
+    const p = parseUpdateRecord(Deno.readTextFileSync(path));
+    if (typeof p !== "string") return p;
+    why = p;
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) return null;
+    why = `is unreadable (${e})`;
+  }
+  setAsideRecord(path, why, log);
+  return null;
 }
 
 /** The path a rollback has to write to: the STABLE name the user launches.
@@ -172,11 +365,25 @@ function stableArtifactPath(p: PendingUpdate, log: Log): string {
 
 /** The app is up. Whatever was pending has now proven itself.
  *
- *  Called after the app is SERVING, not merely after a socket is bound: a build
- *  that throws in `onStart`, or never opens its window, used to be confirmed
- *  healthy and lose its rollback. */
-export function confirmPendingUpdate(dataDir: string, log: Log): void {
+ *  Called after the app is SERVING and the app's own `onStart` came through,
+ *  not merely after a socket is bound: a build that dies in `onStart`, or never
+ *  opens its window, used to be confirmed healthy and lose its rollback. */
+export function confirmPendingUpdate(
+  dataDir: string,
+  log: Log,
+  /** The marker this boot judged. Given, only THAT one is confirmed: a
+   *  confirm that fires late (an async `onStart` settling, the backstop) can
+   *  find the NEXT update's marker — written by an install this build ran —
+   *  and would have confirmed a build that never booted, dropping its
+   *  rollback. `null`: nothing was pending at boot, so nothing is confirmed. */
+  judged?: PendingUpdate | null,
+): void {
   const pending = readPending(dataDir);
+  if (
+    judged !== undefined &&
+    (!judged || pending?.startedAt !== judged.startedAt ||
+      pending?.to !== judged.to)
+  ) return;
   if (judgePending(pending, true).action !== "confirm") return;
   log.info(
     "updates",
@@ -186,6 +393,12 @@ export function confirmPendingUpdate(dataDir: string, log: Log): void {
   // A confirmed update is the moment nothing is in flight, so it is the only
   // safe moment to remove what an interrupted swap left behind. Bounded, aged,
   // and best-effort — never a reason a boot fails.
+  // …and the kept-aside copies past KEEP_OLD. A DIRECTORY swap (electron-zip,
+  // a macOS .app) is handed to a shell that exits with the process, so
+  // nothing pruned them: one whole ~300 MB install leaked per update.
+  void pruneOld(pending!.artifact ?? artifactPath(), KEEP_OLD).catch((e) =>
+    log.warn("updates", `could not prune old installs: ${e}`)
+  );
   void sweepStaleSwaps(pending!.artifact ?? artifactPath())
     .then((removed) => {
       if (removed.length > 0) {
@@ -198,6 +411,38 @@ export function confirmPendingUpdate(dataDir: string, log: Log): void {
       }
     })
     .catch(() => {});
+}
+
+/** The confirm for THIS boot's pending marker, read now — before any check
+ *  or install of this process can write the next one. `atExit`: the process
+ *  is ending cleanly, so the marker is only stamped `confirmedAt` (one sync
+ *  write) and the next boot confirms it, with its prune and its log line. */
+export function pendingConfirmer(
+  dataDir: string,
+  log: Log,
+): (atExit?: boolean) => void {
+  const judged = readPending(dataDir);
+  return (atExit = false) => {
+    if (!atExit) return confirmPendingUpdate(dataDir, log, judged);
+    const pending = readPending(dataDir);
+    if (
+      !judged || !pending || pending.startedAt !== judged.startedAt ||
+      pending.to !== judged.to || pending.confirmedAt
+    ) return;
+    try {
+      writePending(dataDir, {
+        ...pending,
+        confirmedAt: new Date().toISOString(),
+      });
+    } catch (e) {
+      // aio-ok: the process is exiting and the logger has flushed — stderr is
+      // the one channel left. Unrecorded, the next boot counts an attempt.
+      console.error(
+        `[aio] updates: could not record update ${pending.from} → ` +
+          `${pending.to} as confirmed at exit: ${e}`,
+      );
+    }
+  };
 }
 
 export type StartUpdatesDeps = {
@@ -229,6 +474,8 @@ export type StartUpdatesDeps = {
   /** Which app's `updates` cell and runtime this is (`_updatesForApp`).
    *  Absent ⇒ the process slot `aio/updates` exports. */
   slot?: UpdatesSlot;
+  /** Test seam: `exeIdentity()` of this process's executable. */
+  exe?: string;
 };
 
 /** What the boot report needs to describe the update configuration. */
@@ -265,6 +512,21 @@ export function beginUpdates(slot?: UpdatesSlot): void {
 // Synchronous, and says so — same story as `startFeedback`: the dynamic import
 // that made it async became static, and only the keyword was left. Callers
 // already `await` it, which is unchanged either way.
+/** The wait before the next poll after `failures` consecutive failures.
+ *
+ *  Doubles per failure up to a cap of 4× the interval, bounded to [1 h, 24 h]
+ *  — and NEVER below the configured interval. A flat one-hour cap bounded the
+ *  result itself, so on the prod cadence (6 h) one failed check cut the next
+ *  wait to 1 h: a release host that was down got polled six times as often by
+ *  every install; and at any cadence of 1 h or more it never backed off. */
+export function updateBackoffMs(intervalMs: number, failures: number): number {
+  if (failures === 0) return intervalMs;
+  const HOUR = 60 * 60 * 1000;
+  const cap = Math.min(Math.max(4 * intervalMs, HOUR), 24 * HOUR);
+  const factor = Math.min(2 ** failures, 64);
+  return Math.max(intervalMs, Math.min(intervalMs * factor, cap));
+}
+
 export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
   const trust = readTrust(deps.dataDir);
   const envChannel = Deno.env.get("AIO_UPDATE_CHANNEL") ?? undefined;
@@ -344,21 +606,85 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
     );
   }
 
+  const declared = config.declared?.check;
+  if (typeof declared === "number" && declared > MAX_TIMER_DELAY) {
+    deps.log.warn(
+      "updates",
+      `check: ${declared}ms is longer than a timer can wait (${MAX_TIMER_DELAY}ms ≈ 24.8 days) — polling every ${MAX_TIMER_DELAY}ms instead`,
+    );
+  }
+
   let timer: ReturnType<typeof setTimeout> | undefined;
   let stopped = false;
   // Consecutive failures back the polling off. Without it a source that is
   // down — or an auto-apply that fails at the same step every time — retried at
   // the configured cadence forever, re-downloading the whole artifact on each
-  // pass. Capped at an hour, reset on the first success.
+  // pass. Capped per `updateBackoffMs`, reset on the first success.
   let failures = 0;
-  const MAX_BACKOFF_MS = 60 * 60 * 1000;
-  const backoffMs = (): number => {
-    if (failures === 0) return config.intervalMs;
-    const factor = Math.min(2 ** failures, 64);
-    return Math.min(config.intervalMs * factor, MAX_BACKOFF_MS);
-  };
+  const backoffMs = (): number => updateBackoffMs(config.intervalMs, failures);
+
+  // An update that was PUT BACK — by the two-boot judge, or by the swap
+  // helper when the new version never started. Said on every boot until a
+  // check answers, and that version is never auto-installed again: the same
+  // release fails the same way, and each pass restarts the app.
+  let failed = readFailed(deps.dataDir, deps.log);
+  // A rollback handed to the Windows swap helper that is still running the
+  // build it was to put back: the helper's move failed, and it restarted this
+  // one. The record is rewritten to say so — never "rolled back".
+  if (
+    failed?.failedExe !== undefined && !failed.rollbackFailed &&
+    failed.failedExe === (deps.exe ?? exeIdentity())
+  ) {
+    failed = {
+      ...failed,
+      rollbackFailed: `the update helper could not move ${failed.previous} ` +
+        `back to ${failed.artifact ?? "the install directory"}`,
+    };
+    try {
+      writeRecordAtomic(failedUpdatePath(deps.dataDir), failed);
+    } catch (e) {
+      deps.log.warn("updates", `could not keep the failed-update record: ${e}`);
+    }
+  }
+  if (failed) {
+    deps.log.error(
+      "updates",
+      failed.rollbackFailed
+        ? `ROLLBACK FAILED of update ${failed.from} → ${failed.to}: ` +
+          `${failed.rollbackFailed} — this is ${
+            // Neither copy could be moved back: the helper started the old
+            // one from where it was set aside.
+            failed.fromExe !== undefined &&
+              failed.fromExe === (deps.exe ?? exeIdentity())
+              ? `${failed.from}, started from where it was set aside`
+              : `still ${failed.to}`}. Put ` +
+          `${failed.previous} back at ${
+            failed.artifact ?? "the install directory"
+          } by hand (stop the app first).`
+        : failed.swapFailed
+        ? `update ${failed.from} → ${failed.to} could not be installed: ` +
+          `${failed.swapFailed}, so the update helper started ` +
+          `${failed.from} again`
+        : `update ${failed.from} → ${failed.to} was rolled back: ${
+          failed.attempts === 0
+            ? `it never started (no first boot within ${FIRST_BOOT_WAIT_S} ` +
+              `s of the swap — ${
+                Deno.build.os === "darwin"
+                  ? "macOS refused to open it, or it exited or hung"
+                  : "it exited or hung"
+              } before booting), so the update helper put ${failed.from} back`
+            : `it failed to come up after ${failed.attempts} boots`
+        }`,
+    );
+    // The digest recorded at swap time names the build that was put back.
+    writeTrust(deps.dataDir, { installedSha256: undefined });
+  }
 
   /** One check, plus whatever the policy says to do about the answer. */
+  // The release this machine rolled back, for this process's life: never
+  // AUTO-installed again even if its dismissal did not land (the cell's
+  // `dismissed` is what the UI and a manual `check()` go by).
+  let rolledBackTo: string | undefined;
   const runCheck = async (): Promise<void> => {
     if (stopped) return;
     const fail = (what: string, why: unknown) => {
@@ -378,23 +704,54 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
       fail("update check failed", result.error);
       return;
     }
-    failures = 0;
-    if (result?.kind !== "offer") return;
+    // A reachable source is not yet a success when there is something to
+    // install: an auto-install refused at the same step every pass (a broken
+    // seal, a translocated app) must back off too, so the counter is reset
+    // only once nothing is left to do or the install went through.
+    if (result?.kind !== "offer") {
+      failures = 0;
+      return;
+    }
     const available = result.update;
+    // The cell's `apply()` never throws — a failure lands in `status`/`error`
+    // for the UI. Read it back, or an unattended install that was REFUSED (a
+    // bad seal, a translocated app) left no line in any log and re-downloaded
+    // the whole artifact at full cadence.
+    // ONE line per refusal: the runtime logs a refused install for every
+    // other caller (the button), and keeps quiet for this one, whose line
+    // also says when it retries.
+    const refused =
+      `${available.version} was NOT installed (${deps.appVersion} keeps running)`;
+    const install = async (): Promise<void> => {
+      try {
+        await unattendedInstall(runtime, () => updatesCell().apply());
+      } catch (e) {
+        fail(refused, e);
+        return;
+      }
+      const c = updatesCell();
+      if (c.status === "error") fail(refused, c.error);
+      else failures = 0;
+    };
 
+    if (config.auto && available.version === rolledBackTo) {
+      failures = 0;
+      deps.log.warn(
+        "updates",
+        `${available.version} is available but was rolled back on this ` +
+          `machine — not installing it (auto)`,
+      );
+      return;
+    }
     if (config.auto) {
       deps.log.info(
         "updates",
         `${available.version} is available — installing it (auto)`,
       );
-      try {
-        await updatesCell().apply();
-      } catch (e) {
-        // An auto-apply that fails at the same step every interval used to
-        // re-download the entire artifact each time. Count it like any other
-        // consecutive failure.
-        fail(`installing ${available.version} failed`, e);
-      }
+      // An auto-apply that fails at the same step every interval used to
+      // re-download the entire artifact each time. Count it like any other
+      // consecutive failure.
+      await install();
       return;
     }
     // Not auto. A UI, if there is one, is already showing this through the
@@ -412,9 +769,10 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
       const yes = await deps.prompt(
         `Update to ${available.version}? The app will restart. [y/N] `,
       );
-      if (yes) await updatesCell().apply();
-      else await updatesCell().dismiss();
+      if (yes) return await install();
+      await updatesCell().dismiss();
     }
+    failures = 0;
   };
 
   const schedule = () => {
@@ -429,7 +787,7 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
         deps.log.warn("updates", String(e));
       });
       schedule();
-    }, wait + jitter);
+    }, Math.min(wait + jitter, MAX_TIMER_DELAY));
     // Never hold the process open just to poll for updates.
     if (timer !== undefined) Deno.unrefTimer(timer);
   };
@@ -445,7 +803,42 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
     // `check: false` never runs a boot check, so without this an app that opted
     // out of polling would report `enabled: false` — "updates are not
     // configured" — for its entire life.
-    readyUpdates(slot);
+    // The rolled-back release is dismissed HERE, before any check — the poll
+    // may be off (`check: false`), and a manual `check()` then offered it
+    // again: one click reinstalled the build that had just failed.
+    if (failed) {
+      deps.log.warn(
+        "updates",
+        `not installing ${failed.to} again — it was rolled back on this ` +
+          `machine. Dismissed; \`undismiss()\` offers it again, and a newer ` +
+          `release is offered as usual.`,
+      );
+    }
+    // The record goes only once the dismissal is COMMITTED: removed first, a
+    // dispatch that failed (or a process that died before it landed) offered
+    // the rolled-back release again, with nothing left to say why.
+    const rolledBack = failed;
+    failed = null;
+    rolledBackTo = rolledBack?.to;
+    void readyUpdates(slot, rolledBack?.to).then((done) => {
+      if (!rolledBack || !done) return;
+      try {
+        Deno.removeSync(failedUpdatePath(deps.dataDir));
+      } catch (e) {
+        if (!(e instanceof Deno.errors.NotFound)) {
+          deps.log.warn(
+            "updates",
+            `could not remove the failed-update record: ${e}`,
+          );
+        }
+      }
+    }, (e) =>
+      deps.log.warn(
+        "updates",
+        `could not publish the update state${
+          rolledBack ? ` or dismiss the rolled-back ${rolledBack.to}` : ""
+        }: ${e}`,
+      ));
     // `check: false` is documented as "manual `check()` only" and was not:
     // the BOOT check fired anyway, so an app that opted out of polling still
     // contacted the release host on every single launch. `intervalMs === 0` is
@@ -457,11 +850,14 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
       );
       return;
     }
+    // The poll is armed once the boot check has ANSWERED, exactly as every
+    // later pass re-arms. Armed beside it, its wait was always the plain
+    // interval: a failed boot check logged "next attempt in 2s" and the next
+    // attempt came after 1s regardless.
     void runCheck().catch((e) => {
       failures++;
       deps.log.warn("updates", String(e));
-    });
-    schedule();
+    }).finally(schedule);
   });
 
   return {

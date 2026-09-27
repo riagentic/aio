@@ -7,6 +7,7 @@ import {
   _advance,
   _firstLive,
   _isExiting,
+  _liveFirstDom,
   _nextLive,
   _removeDomCleanup,
   getDom,
@@ -58,7 +59,7 @@ function _regionStart(
   ov: VNode,
   startAnchor: Node | null,
 ): Node | null {
-  const d = getDom(ov);
+  const d = _liveFirstDom(ov);
   if (d && isChildOf(d, parent) && !_isExiting(d)) return d;
   return startAnchor && isChildOf(startAnchor, parent)
     ? _nextLive(startAnchor)
@@ -302,7 +303,7 @@ export function _diffErrorBoundary(
   // where the boundary lives.
   const oldFirst = _regionStart(parent, ov, startAnchor);
   const at = _regionAnchor(parent, ov, oldFirst);
-  const known = isChildOf(getDom(ov), parent); // before, see _retireRegion
+  const known = isChildOf(_liveFirstDom(ov), parent); // before, see _retireRegion
 
   // On the boundary stack for the CHILDREN only (popped before the fallback
   // work in either exit), exactly as the mount branch does: a component that
@@ -432,7 +433,7 @@ export function _diffSuspense(
   // Measured before any removal — see the same comment in _diffErrorBoundary.
   const oldFirst = _regionStart(parent, ov, startAnchor);
   const at = _regionAnchor(parent, ov, oldFirst);
-  const known = isChildOf(getDom(ov), parent); // before, see _retireRegion
+  const known = isChildOf(_liveFirstDom(ov), parent); // before, see _retireRegion
   // AIO-201: the children a retry finished building, retired if the failure
   // leaves this boundary (see the catch).
   const created: (VNode | string | number)[] = [];

@@ -49,6 +49,7 @@ type Flags = {
   cert?: string;
   key?: string;
   noTls?: boolean;
+  isolate?: string[];
 };
 
 /** `--profile` > `AIO_PROFILE` — a profile NAME or a folder PATH (see
@@ -113,6 +114,16 @@ export const windowSizeOf = (
   width: pick(["flag", cli.width], ["config", ui.width]),
   height: pick(["flag", cli.height], ["config", ui.height]),
 });
+
+/** `--isolate=a,b` > `aio.run({ isolate })`; unset runs every cell. The
+ *  flag is the dev convenience for narrowing one run — it was read into a
+ *  local and merged as `config ?? flag`, so an app that declared `isolate`
+ *  silently ignored the flag (a typo in it was not even refused). */
+export const isolateOf = (
+  cli: Pick<Flags, "isolate">,
+  config: { isolate?: string[] },
+): Sourced<string[]> | undefined =>
+  pick(["flag", cli.isolate], ["config", config.isolate]);
 
 /** TLS material: each flag > its `tls: { … }` twin. */
 export const tlsOf = (

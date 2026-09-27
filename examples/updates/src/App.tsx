@@ -100,11 +100,15 @@ export default function App() {
         </div>
       )}
 
-      {/* "Not now" is not "never". */}
+      {
+        /* "Not now" is not "never" — and a rolled-back release is hidden the
+        same way (the next boot dismisses it), so it can be retried here. */
+      }
       {updates.dismissed && !updates.available && (
         <div style={{ ...bar, background: "#f8f9fa" }}>
           <span style={{ flex: "1" }}>
-            You said no to {updates.dismissed}.
+            Not offering {updates.dismissed}{" "}
+            — you said no, or it was rolled back on this machine.
           </span>
           {
             /* `undismiss()` forgets the "no"; the NEXT check offers it again.

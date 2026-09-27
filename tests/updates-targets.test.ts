@@ -10,14 +10,18 @@
 // measured.
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import {
   artifactPath,
   classifyTarget,
   detectTarget,
+  exeIdentity,
   installableTargets,
   installDir,
+  ownAppImage,
+  replacedExeIdentity,
 } from "../src/server/updates-apply.ts";
-import type { UpdateTarget } from "../src/build/ship.ts";
+import type { ReleaseTarget, UpdateTarget } from "../src/build/ship.ts";
 
 Deno.test("detect: a plain compiled binary", () => {
   assertEquals(
@@ -77,9 +81,9 @@ Deno.test("detect: the real process answers something coherent", () => {
   const live = detectTarget();
   const expected = classifyTarget({
     execPath: Deno.execPath(),
-    appImage: Deno.env.get("APPIMAGE") ?? null,
+    appImage: ownAppImage(),
     electronPath: Deno.env.get("ELECTRON_PATH") ?? null,
-    installDir: Deno.env.get("APPIMAGE") ? null : installDir(Deno.execPath()),
+    installDir: ownAppImage() ? null : installDir(Deno.execPath()),
   });
   assertEquals(live, expected);
 });
@@ -110,9 +114,10 @@ Deno.test("installable: from SOURCE, detection is universal — apply is where i
   // must not take a different code path from prod. `apply` refuses, loudly,
   // because swapping an artifact is the one step a source tree genuinely
   // cannot perform.
-  const all: UpdateTarget[] = [
+  const all: ReleaseTarget[] = [
     "appimage",
     "binary",
+    "electron-app",
     "electron-appimage",
     "electron-zip",
   ];
@@ -171,4 +176,52 @@ Deno.test("artifactPath: answers an absolute path that exists", () => {
     `absolute: ${p}`,
   );
   assert(Deno.statSync(p).isFile, `exists and is a file: ${p}`);
+});
+
+// `$APPIMAGE` / `$APPDIR` are INHERITED: a plain binary started from a
+// terminal that is itself an AppImage sees its host's. Trusted blindly, that
+// binary called itself an `appimage`, aimed an update at the host's file, and
+// its `fromExe` named the host — so the old build was never recognised. Only a
+// process whose executable is under `$APPDIR` runs from `$APPIMAGE`.
+Deno.test("appimage: $APPIMAGE counts only for a process running inside $APPDIR", async () => {
+  if (Deno.build.os === "windows") return; // an AppImage is Linux-only
+  const root = await tempDir("aio-own-appimage-");
+  const mount = join(root, ".mount_notes");
+  const inside = join(mount, "usr", "bin", "notes");
+  const plain = join(root, "bin", "notes");
+  const host = join(root, "Host.AppImage");
+  const saved = ["APPIMAGE", "APPDIR"].map((k) => [k, Deno.env.get(k)]);
+  try {
+    for (const f of [inside, plain]) {
+      await Deno.mkdir(join(f, ".."), { recursive: true });
+      await Deno.writeTextFile(f, "#!/bin/sh\n");
+    }
+    await Deno.writeTextFile(host, "the host terminal's AppImage");
+    Deno.env.set("APPIMAGE", host);
+    Deno.env.set("APPDIR", mount);
+    // The real AppImage launch: exactly as before.
+    assertEquals(ownAppImage(inside), host);
+    assertEquals(detectTarget(inside), "appimage");
+    // A plain binary that inherited both.
+    assertEquals(ownAppImage(plain), null);
+    assertEquals(detectTarget(plain), "binary");
+    // This process (deno, outside the mount) is not the host AppImage either.
+    assertEquals(ownAppImage(), null);
+    assertEquals(artifactPath(), Deno.realPathSync(Deno.execPath()));
+    assertEquals(exeIdentity(), exeIdentity(Deno.execPath()));
+    assertEquals(
+      replacedExeIdentity(host),
+      undefined,
+      "the host's file is not this process's",
+    );
+    // No $APPDIR (never an AppImage runtime): not trusted.
+    Deno.env.delete("APPDIR");
+    assertEquals(ownAppImage(inside), null);
+  } finally {
+    for (const [k, v] of saved) {
+      if (v === undefined) Deno.env.delete(k!);
+      else Deno.env.set(k!, v);
+    }
+    await dropTempDir(root);
+  }
 });

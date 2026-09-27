@@ -50,6 +50,11 @@ async function withStub(
     if (url.pathname === "/__aio/health") {
       return Response.json({ appId: resolveAmAppId(APP) });
     }
+    // `am trigger` reads the roster first (the client it names must be a UI
+    // client); a stub that answered it with a JSON parse error was a 500.
+    if (url.pathname === "/__aio/trojan/clients") {
+      return Response.json([{ index: 0, type: "browser" }]);
+    }
     const body = await req.json() as Record<string, unknown>;
     seen.push({ path: url.pathname, body });
     return Response.json({

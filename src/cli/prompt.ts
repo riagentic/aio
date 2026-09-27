@@ -5,7 +5,13 @@
 // So every asker here checks `io.tty` first and throws a `NoTerminalError`
 // naming the question and the way out (a flag). It never waits.
 
-import { type CliIO, defaultIO, readLine, takePending } from "./io.ts";
+import {
+  type CliIO,
+  defaultIO,
+  putBackPending,
+  readLine,
+  takePending,
+} from "./io.ts";
 import { EXIT } from "./exit.ts";
 
 /** Thrown when a prompt runs without a terminal. `code` is `EXIT.usage`. */
@@ -129,16 +135,31 @@ export async function password(
         if (n === null) throw new InputClosedError(question);
         chunk = buf.subarray(0, n);
       }
-      const text = dec.decode(chunk);
+      // Byte-wise to the line end, so what follows it can be handed back
+      // UNDECODED to the next reader (`readLine` keeps its tail the same
+      // way) — and decoded with `stream: true`, so a character split across
+      // two reads is one character, not two U+FFFD. Both used to be lost:
+      // "chunk boundaries are invisible" did not hold for a password.
+      const end = chunk.findIndex((b) => b === 0x0d || b === 0x0a);
+      const text = dec.decode(
+        end === -1 ? chunk : chunk.subarray(0, end),
+        { stream: end === -1 },
+      );
+      let tail = end === -1 ? new Uint8Array(0) : chunk.subarray(end + 1);
+      // A CRLF is one line end: its LF is not the next answer's first line.
+      if (end !== -1 && chunk[end] === 0x0d && tail[0] === 0x0a) {
+        tail = tail.subarray(1);
+      }
       chunk = new Uint8Array(0);
       for (const ch of text) {
-        if (ch === "\r" || ch === "\n") {
-          io.out("\n");
-          return value;
-        }
         if (ch === "\x03") throw new InputClosedError(question); // ^C
         if (ch === "\x7f" || ch === "\b") value = value.slice(0, -1);
         else value += ch;
+      }
+      if (end !== -1) {
+        if (tail.length > 0) putBackPending(io, tail.slice());
+        io.out("\n");
+        return value;
       }
     }
   } finally {

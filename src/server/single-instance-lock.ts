@@ -3,13 +3,22 @@
 // Cross-platform: works on Linux, macOS, Windows
 // Prevents multiple instances from corrupting shared resources
 
-import { basename, dirname, join, resolve } from "@std/path";
+import {
+  basename,
+  dirname,
+  fromFileUrl,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+} from "@std/path";
 import { privateDirRefusal, selfUid } from "./dir-permissions.ts";
 import { connectLocal, isPipePath } from "./local-listen.ts";
 import {
   appDirs,
   appHome,
   appsDirEnv,
+  legacyIdFallback,
   profileNameError,
   profileOfHome,
 } from "./app-dirs.ts";
@@ -17,6 +26,7 @@ import { log } from "../diagnostics/logger-api.ts";
 import { EXIT_WAIT_MS } from "./shutdown-budget.ts";
 import { locateDenoJsonAbove, readDenoJsonSync } from "./deno-json.ts";
 import { inheritedWorkerAppId } from "./cell-worker-protocol.ts";
+import { DEFAULT_ENTRY } from "./app-files.ts";
 
 /** How long a lock may sit at `status:"starting"` before anyone — the next
  *  launch's zombie probe, `am start` — may treat "its listener does not answer"
@@ -140,6 +150,17 @@ export type LockData = {
      *  named by whoever finds the dead holder ({@linkcode deadOwnerWarning}). */
     partial?: string;
   };
+  /** Present when the holder is a DEV SESSION waiting for a fix: its
+   *  relaunch died on a file that does not load, and it relaunches on the
+   *  next save. Written with `status: "starting"` under the supervisor's own
+   *  pid, so every reader sees the session (and `am stop` ends it); `am`
+   *  names it instead of waiting on it or reclaiming it as stuck. */
+  waiting?: {
+    /** What went wrong, one line (e.g. "the app exited with code 1 …"). */
+    reason: string;
+    /** When the wait began (epoch ms). */
+    since: number;
+  };
   cwd: string; // working directory (for am/instances display)
   /** The resolved data home this instance runs from. Part of the lock's
    *  IDENTITY (see {@linkcode lockKey}): two boots of one appId from two homes
@@ -207,6 +228,20 @@ export type LockData = {
    *  without one it falls back to pid liveness, its own baseline. A legacy
    *  text `startToken` is read as "unknown" (pid liveness), never as dead. */
   startEpoch?: number;
+  /** The owner's pid namespace (Linux; see {@linkcode ownPidNs}). A pid
+   *  means something only in the namespace that wrote it: a container
+   *  sharing this lock dir runs as pid 7 (under tini), which is dead — or a
+   *  stranger — HERE. Absent on locks written before 1.0.13-beta and where
+   *  there are no namespaces; then the pid decides, as it always did. */
+  ns?: number;
+  /** The owner's HOLD file beside the lock (its name; resolved against the
+   *  directory the lock was read from): the owner keeps an OS lock
+   *  (`flock`) on it for its lifetime, and the KERNEL drops that lock when
+   *  the owner dies — in any pid namespace sharing the file system. How a
+   *  reader in another namespace judges the owner (see
+   *  {@linkcode isLockOwnerAlive}). Absent where the file system cannot lock,
+   *  and on locks written before 1.0.13-beta. */
+  hold?: string;
   /** Every setting with more than one home (flag, config, env, deno.json),
    *  as `name → "value (source)"` — what `am doctor` shows. Decided by
    *  config-sources.ts; absent on locks written before 1.0.6. */
@@ -312,6 +347,173 @@ export function appIdFromConfig(
   return raw ? slugify(raw) : null;
 }
 
+/** THE zero-config identity of a project: its deno.json's identity fields
+ *  ({@link appIdFromConfig}), else the project directory's name.
+ *
+ *  One rule, three askers — the dev runtime (`resolveAppId`, with the project
+ *  found by walking up from the ENTRY), the build (it names the binary with
+ *  it, and a compiled app with no declared id takes its identity from that
+ *  name) and `am` (from `projectRoot()`). They used to be three rules: dev read
+ *  deno.json from the launch CWD only and otherwise took the ENTRY's directory
+ *  name, so a pinned `appId` was dropped when `deno run` started from `src/`,
+ *  and an entry at `server/main.ts` was `~/.server` in dev but `~/.<project>`
+ *  once compiled and to `am`. */
+export function projectAppId(
+  root: string,
+  cfg: { appId?: string; title?: string; name?: string } | null | undefined,
+): string {
+  return appIdFromConfig(cfg) ?? slugify(basename(root));
+}
+
+/** The entry module's `file:` URL, or null (REPL, eval, a remote entry, a
+ *  worker — where `Deno.mainModule` is undefined). */
+function _fileEntry(): URL | null {
+  try {
+    const main = new URL(Deno.mainModule);
+    return main.protocol === "file:" ? main : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The entry's directory name — its parent when the entry sits in `src/`.
+ *  The last rung when no deno.json is anywhere near the entry. */
+function _entryDirAppId(main: URL): string | null {
+  const parts = main.pathname.split("/").filter(Boolean);
+  parts.pop(); // the entry file itself
+  const dir = parts.pop();
+  const name = dir === "src" ? parts.pop() : dir;
+  // Undecoded, as it always was: this rung's answer for an existing app must
+  // not change under it.
+  return name ? slugify(name) : null;
+}
+
+/** The launch CWD's deno.json identity — only the previous dev rule and a
+ *  non-`file:` entry (which has no project of its own to walk from) use it. */
+function _cwdConfigAppId(): string | null {
+  try {
+    // JSONC-aware: `JSON.parse` threw on a deno.json with a comment in it and
+    // the id silently fell through to the directory name.
+    return appIdFromConfig(
+      readDenoJsonSync(Deno.cwd())?.config as
+        | { appId?: string; title?: string; name?: string }
+        | undefined,
+    );
+  } catch {
+    return null; // unreadable / malformed — fall through
+  }
+}
+
+/** The PREVIOUS dev rule: the launch CWD's deno.json identity, else the
+ *  entry's directory name. Still THE rule for an entry its project does not
+ *  declare (see {@link _projectRuleAppId}).
+ *
+ *  The CWD's deno.json counts only for an entry INSIDE the CWD: from `~/appA`
+ *  (`appId: "a"`), `deno run ../appB/src/app.ts` took the id "a" — and
+ *  opened appA's `state.db`. */
+function _legacyAppId(main: URL): string | null {
+  let inside = false;
+  try {
+    // Real paths on both sides: a symlinked launch path is still inside, and
+    // `relative` needs no separator suffix (a cwd of `/` or `C:\` works).
+    const real = (p: string) => {
+      try {
+        return Deno.realPathSync(p);
+      } catch {
+        return resolve(p);
+      }
+    };
+    const rel = relative(real(Deno.cwd()), real(fromFileUrl(main)));
+    inside = rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+  } catch {
+    // aio-ok: cwd gone — no cwd project to name the entry; the entry-dir rule answers
+  }
+  return (inside ? _cwdConfigAppId() : null) ?? _entryDirAppId(main);
+}
+
+/** The project rule's id ({@link projectAppId}) — or null unless the entry IS
+ *  a declared entry of the project found by walking up from it (THE
+ *  app-config walk, `locateDenoJsonAbove`, the one `appDenoJson()` uses):
+ *  deno.json `entry` (else `DEFAULT_ENTRY`) or a `build.targets` entry —
+ *  what `aio build` compiles, so dev == build for every buildable app.
+ *
+ *  An entry the project does not declare is not "that project's app": a
+ *  monorepo root deno.json with no identity above `apps/a/main.ts` and
+ *  `apps/b/main.ts` would make both ONE app (one lock, one `state.db`), and an
+ *  unrelated `~/deno.json` would name every entry a few levels below it. */
+function _projectRuleAppId(main: URL): string | null {
+  const located = locateDenoJsonAbove(main);
+  if (!located) return null;
+  const root = fromFileUrl(located.dir);
+  const { entry, targets } = _declaredEntries(located.config);
+  const self = fromFileUrl(main);
+  if (![entry, ...targets].some((e) => resolve(root, e) === self)) return null;
+  const cfg = located.config as {
+    appId?: string;
+    title?: string;
+    name?: string;
+  };
+  // A project that declares COMPONENTS (several entries in `build.targets`)
+  // and names no identity has no single "this app": each entry keeps its own
+  // directory's name, which is what `am` computes per component
+  // (`componentAppId`). The project folder's name here would make every
+  // component ONE app — one lock, one data directory — and the second refused.
+  // (Two shells of one entry are one component.)
+  if (!appIdFromConfig(cfg) && new Set(targets.map((t) => join(t))).size > 1) {
+    return _entryDirAppId(main);
+  }
+  return projectAppId(root, cfg);
+}
+
+/** A deno.json's declared entries: its `entry` (else `DEFAULT_ENTRY`) — what
+ *  `aio build` compiles with no target — and each object-form `build.targets`
+ *  entry (a target with none compiles `entry`; the array form is one app). */
+function _declaredEntries(
+  cfg: Record<string, unknown>,
+): { entry: string; targets: string[] } {
+  const entry = typeof cfg.entry === "string" && cfg.entry
+    ? cfg.entry
+    : DEFAULT_ENTRY;
+  const raw = (cfg.build as { targets?: unknown } | undefined)?.targets;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { entry, targets: [] };
+  }
+  const targets = Object.values(
+    raw as Record<string, { entry?: unknown } | null>,
+  ).map((t) =>
+    typeof t?.entry === "string" && t.entry.trim() ? t.entry.trim() : entry
+  );
+  return { entry, targets };
+}
+
+/** Dev inference: the project rule for a declared entry, else the previous
+ *  rule — and the previous rule's id even for a declared entry while ITS home
+ *  holds this app's data and the project rule's home holds none
+ *  ({@link legacyIdFallback}), with the warning the boot logs. */
+function _devResolution(): { id: string | null; warning: string | null } {
+  const main = _fileEntry();
+  if (!main) return { id: _cwdConfigAppId(), warning: null };
+  const legacy = _legacyAppId(main);
+  const project = _projectRuleAppId(main);
+  if (!project) return { id: legacy, warning: null };
+  const warning = legacyIdFallback(project, legacy);
+  return { id: warning ? legacy : project, warning };
+}
+
+/** The boot warning when this dev launch's zero-config id fell back to the
+ *  previous rule's ({@link legacyIdFallback}), else null. Null too for every
+ *  launch that never used that rule (a compiled binary, a worker thread; an
+ *  explicit `appId` is the caller's check). */
+export function inferredIdFallbackWarning(): string | null {
+  if (inheritedWorkerAppId()) return null;
+  const main = _fileEntry();
+  if (!main) return null;
+  if (main.pathname.split("/").some((p) => p.startsWith("deno-compile-"))) {
+    return null;
+  }
+  return _devResolution().warning;
+}
+
 /** The deno.json that travels INSIDE a compiled binary, next to its entry.
  *  Read relative to `Deno.mainModule` (the VFS), never the launch directory —
  *  through THE app-config walk (`locateDenoJsonAbove`), the same one
@@ -373,30 +575,10 @@ export function resolveAppId(appId?: string): string {
       return slugify(compiledSeg.slice("deno-compile-".length));
     }
   } catch { /* no main module — fall through */ }
-  // Zero-config inference (dev): deno.json appId > title > name (unscoped) —
-  // then the main module's directory name (its parent when the entry sits in
-  // src/). Deterministic per project, so locks/KV/socket identity is stable.
-  try {
-    // THE reader — JSONC-aware. `JSON.parse` here threw on a deno.json with a
-    // comment in it, and the catch below inferred the app id from the
-    // directory name instead: a different id, a different data dir, an
-    // app that "lost" its data by adding a comment to its config.
-    const cfg = readDenoJsonSync(Deno.cwd())?.config as
-      | { appId?: string; title?: string; name?: string }
-      | undefined;
-    const fromCfg = cfg ? appIdFromConfig(cfg) : undefined;
-    if (fromCfg) return fromCfg;
-  } catch { /* no deno.json — fall through */ }
-  try {
-    const main = new URL(Deno.mainModule);
-    if (main.protocol === "file:") {
-      const parts = main.pathname.split("/").filter(Boolean);
-      parts.pop(); // the entry file itself
-      const dir = parts.pop();
-      const name = dir === "src" ? parts.pop() : dir;
-      if (name) return slugify(name);
-    }
-  } catch { /* unusual entry */ }
+  // Zero-config inference (dev): THE project rule — the project the ENTRY
+  // belongs to, not the directory it was launched from.
+  const inferred = _devResolution().id;
+  if (inferred) return inferred;
   throw new Error(
     '[aio] cannot infer an appId — add appId: "my-app" to aio.run() or ' +
       'an "appId"/"title" field to deno.json',
@@ -554,7 +736,8 @@ export function pruneDeadLockDirsTagged(tag: string): number {
     return 0; // aio-ok: no runtime base — nothing was created in it
   }
   for (const name of names) {
-    if (name.includes(tag) && pruneDeadLockDirAt(join(base, name))) n++;
+    // The temp dir is gone before this runs: its root is gone.
+    if (name.includes(tag) && pruneDeadLockDirAt(join(base, name), true)) n++;
   }
   return n;
 }
@@ -593,25 +776,31 @@ export function pruneDeadLockDirAt(dir: string, rootGone = false): boolean {
         raw = Deno.readTextFileSync(path);
       } catch { /* aio-ok: gone meanwhile, or not a file — rmdir decides */ }
       if (raw === null) continue; // gone, or not a file — rmdir decides
-      const own = parseLock(raw);
+      const own = parseLock(raw, path);
       if (!own) {
         if (unknownLockDead(path, raw, rootGone)) removeLockFileIf(path, raw);
         continue;
       }
       // Naming THIS process but held by no lock of it: a hand-written record
       // (a test fixture) — as dead as its writer is about to be.
-      const planted = own.pid === Deno.pid &&
+      const planted = isOwnLock(own) &&
         !AppLock.live().some((l) => lockPath(l.key) === path);
       if (planted || !isLockOwnerAlive(own)) removeLockFileIf(path, raw);
-    } else if (n.endsWith(".lock.mx")) {
+    } else if (n.endsWith(".lock.mx") || n.endsWith(".hold")) {
       dropIdleMutex(path);
     } else if (/\.sock$/.test(n)) {
       if (bound === undefined) bound = boundUnixSockets();
       if (bound && !bound.has(path)) removeIfSocket(path);
     } else {
-      const m = /^watch-(\d+)\.tmp$/.exec(n) ??
-        /\.lock\.(\d+)\.[0-9a-f]{8}\.tmp$/.exec(n);
-      if (m && !isProcessAlive(Number(m[1]))) {
+      const m = new RegExp(`^watch-${PID_TAG}\\.tmp$`).exec(n) ??
+        new RegExp(`\\.lock\\.${PID_TAG}\\.[0-9a-f]{8}\\.tmp$`).exec(n);
+      // With the apps root gone, an untagged file (an older build, or no
+      // `/proc` access) goes once its pid is dead — the 10-minute age wait
+      // is for a root something may still live under.
+      if (
+        m && (taggedOwnerGone(path, Number(m[1]), m[2]) ||
+          (rootGone && !isProcessAlive(Number(m[1]))))
+      ) {
         try {
           Deno.removeSync(path);
         } catch { /* aio-ok: a sibling removed it first */ }
@@ -802,7 +991,7 @@ function dropOwnPlants(dir: string): void {
   // This process's live-reload sentinel (`server-watcher.ts`): its watcher is
   // gone with the process, and left behind it keeps the dir from pruning.
   try {
-    const sentinel = join(dir, `watch-${Deno.pid}.tmp`);
+    const sentinel = join(dir, `watch-${ownPidTag()}.tmp`);
     if (Deno.lstatSync(sentinel).isFile) Deno.removeSync(sentinel);
   } catch { /* aio-ok: no sentinel — this process never watched here */ }
   let names: string[];
@@ -818,7 +1007,8 @@ function dropOwnPlants(dir: string): void {
     try {
       const raw = Deno.readTextFileSync(path);
       // Compare-and-delete: only the record read, never one written since.
-      if (parseLock(raw)?.pid === Deno.pid) removeLockFileIf(path, raw);
+      const l = parseLock(raw);
+      if (l && isOwnLock(l)) removeLockFileIf(path, raw);
     } catch { /* aio-ok: unreadable or gone — not ours to judge */ }
   }
 }
@@ -1128,6 +1318,60 @@ export function removeLaunchInfo(appId: string): void {
 
 // ── Process Liveness ─────────────────────────────────────────
 
+/** This process's pid namespace (the inode of Linux's `/proc/self/ns/pid`),
+ *  or undefined where there is none to read. Two containers sharing one
+ *  bind-mounted directory can both be pid 1: a pid means something only
+ *  inside the namespace that wrote it. */
+let _ownNs: number | undefined | null = null;
+export function ownPidNs(): number | undefined {
+  if (_ownNs === null) {
+    _ownNs = undefined;
+    try {
+      const m = /\[(\d+)\]/.exec(Deno.readLinkSync("/proc/self/ns/pid"));
+      const n = m ? Number(m[1]) : NaN;
+      if (n > 0 && n <= 0xffffffff) _ownNs = n;
+    } catch { /* aio-ok: no /proc (macOS, Windows) — no namespace to record */ }
+  }
+  return _ownNs;
+}
+
+/** How a file names the process it belongs to: `<pid>`, plus `d<ns, 8 hex>`
+ *  where Linux has pid namespaces (see {@linkcode taggedOwnerGone}). */
+export function ownPidTag(): string {
+  const ns = ownPidNs();
+  return `${Deno.pid}${
+    ns === undefined ? "" : `d${ns.toString(16).padStart(8, "0")}`
+  }`;
+}
+
+/** The `<pid>[d<ns>]` of {@linkcode ownPidTag}, as a regex source: groups
+ *  pid, namespace hex. */
+const PID_TAG = String.raw`(\d+)(?:d([0-9a-f]{8}))?`;
+
+/** Is the process a file's name tags (`pid`, namespace hex `ns`) gone? A pid
+ *  means something only in the namespace that wrote it: ours (or none on
+ *  either side — macOS, Windows), its death decides. Another namespace (a
+ *  container sharing this dir, where pid 7 is not ours), or no namespace
+ *  recorded where one exists (an older aio's name): only once the file went
+ *  untouched for {@linkcode TORN_LOCK_AGE_MS} — its owner finishes such a
+ *  file in microseconds or refreshes it (the watch sentinel, every 30 s). A
+ *  future mtime (a skewed clock) counts as fresh. @internal */
+export function taggedOwnerGone(
+  path: string,
+  pid: number,
+  ns: string | undefined,
+): boolean {
+  if ((ns === undefined ? undefined : parseInt(ns, 16)) === ownPidNs()) {
+    return pid <= 0 || !isProcessAlive(pid);
+  }
+  try {
+    const m = Deno.statSync(path).mtime;
+    return m !== null && Date.now() - m.getTime() > TORN_LOCK_AGE_MS;
+  } catch {
+    return false; // aio-ok: gone meanwhile — nothing to judge
+  }
+}
+
 /** Check if a process is alive via signal 0 */
 export function isProcessAlive(pid: number): boolean {
   try {
@@ -1258,11 +1502,14 @@ export function processStartEpoch(
  *  nothing where neither is available. */
 export function ownerIdentity(
   pid: number,
-): Pick<LockData, "startToken" | "startEpoch"> {
+): Pick<LockData, "startToken" | "startEpoch" | "ns"> {
+  // `pid` is this process or a child it spawned: our namespace either way.
+  const ns = ownPidNs();
+  const where = ns === undefined ? {} : { ns };
   const token = processStartToken(pid);
-  if (token !== null) return { startToken: token };
+  if (token !== null) return { startToken: token, ...where };
   const epoch = processStartEpoch(pid);
-  return epoch !== null ? { startEpoch: epoch } : {};
+  return epoch !== null ? { startEpoch: epoch, ...where } : where;
 }
 
 /** Is the process this lock names still THE process the lock was written for?
@@ -1278,8 +1525,27 @@ export function ownerIdentity(
  *  known and they DIFFER, the pid was recycled and the answer is no.
  *  @decider */
 export function isLockOwnerAlive(
-  lock: { pid: number; startToken?: string; startEpoch?: number },
+  lock: {
+    pid: number;
+    startToken?: string;
+    startEpoch?: number;
+    ns?: number;
+    hold?: string;
+    startedAt?: number;
+  },
 ): boolean {
+  // Written in another pid namespace: its pid says nothing here. Its hold
+  // file does — the kernel released it if the owner died. Without one (a
+  // placeholder `am start` or a dev supervisor filed for a child that has
+  // not booted yet): alive until a boot that long would be reclaimed as
+  // stuck anyway (`STUCK_STARTING_MS`, `am`'s rule for a booting app).
+  if (lock.ns !== undefined && lock.ns !== ownPidNs()) {
+    const held = lock.hold && isAbsolute(lock.hold)
+      ? holdIsHeld(lock.hold)
+      : null;
+    return held ?? (typeof lock.startedAt === "number" &&
+      ageSince(lock.startedAt) < STUCK_STARTING_MS);
+  }
   if (!isProcessAlive(lock.pid)) return false;
   return ownerMatches(lock, {
     token: lock.startToken ? processStartToken(lock.pid) : null,
@@ -1306,6 +1572,97 @@ export function ownerMatches(
     now.epoch !== lock.startEpoch
   ) return false;
   return true;
+}
+
+/** Does `lock` name THIS process (or `pid`, a child of ours)? The pid AND
+ *  the namespace: a container sharing the lock dir is pid 7 too, and treating
+ *  its live lock as ours deleted it (take-over of "our" placeholder, exit
+ *  cleanup, release) or overwrote it (update). A lock with no namespace
+ *  recorded (older, or no namespaces here): the pid, as before. */
+export function isOwnLock(
+  lock: { pid: number; ns?: number },
+  pid: number = Deno.pid,
+): boolean {
+  return lock.pid === pid &&
+    (lock.ns === undefined || lock.ns === ownPidNs());
+}
+
+/** Why the owner `lock` names cannot be SIGNALLED from here — it runs in
+ *  another pid namespace (a container sharing this lock dir), where its pid
+ *  is not the one this process would hit — or null when it can. Every kill
+ *  site asks this first: signalling "pid 7" here reaches a stranger or
+ *  nothing. */
+export function foreignOwnerRefusal(
+  lock: { pid: number; ns?: number },
+): string | null {
+  if (lock.ns === undefined || lock.ns === ownPidNs()) return null;
+  return `refusing to signal pid ${lock.pid}: it runs in another pid ` +
+    `namespace (a container sharing this lock dir), so that pid means a ` +
+    `different process here.\n  fix: stop it where it runs (inside that ` +
+    `container), or with \`am stop\` there.`;
+}
+
+/** Is the hold file at `path` OS-locked by a live process? False when it is
+ *  gone (its owner released it, or it was swept as a dead owner's) or
+ *  lockable (the kernel dropped a dead owner's lock). A lock another reader
+ *  holds for the microseconds of this same check looks held, so a failed try
+ *  is retried briefly; an owner holds it for its whole life. Null: this file
+ *  system cannot say. */
+function holdIsHeld(path: string): boolean | null {
+  let f: Deno.FsFile;
+  try {
+    f = Deno.openSync(path, { read: true });
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) return false;
+    return null; // aio-ok: unreadable here — the caller's fallback judges
+  }
+  try {
+    for (let i = 0; i < 3; i++) {
+      if (f.tryLockSync(true)) return false;
+      pauseSync(2);
+    }
+    return true;
+  } catch {
+    return null; // aio-ok: no OS locks on this file system — fallback judges
+  } finally {
+    f.close();
+  }
+}
+
+/** Create and OS-lock this process's hold file for the lock at `lockFile`
+ *  (see {@linkcode LockData} `hold`). Null where there are no pid namespaces
+ *  (the pid decides there) or the file system cannot lock. The file is
+ *  locked BEFORE any record names it, and a sweep that unlinked it before our
+ *  lock landed is caught by `sameFile` — retried. */
+function takeHold(lockFile: string): { f: Deno.FsFile; path: string } | null {
+  if (ownPidNs() === undefined) return null;
+  for (let i = 0; i < 3; i++) {
+    const path = `${lockFile}.${ownPidTag()}.${_nonce()}.hold`;
+    const open = () =>
+      Deno.openSync(path, { write: true, createNew: true, mode: 0o600 });
+    let f: Deno.FsFile;
+    try {
+      f = open();
+    } catch (e) {
+      if (!(e instanceof Deno.errors.NotFound)) return null; // aio-ok: unwritable — the pid rule stays
+      try {
+        remakeLockDir(dirname(path));
+        f = open();
+      } catch {
+        return null; // aio-ok: unwritable lock dir — the pid rule stays
+      }
+    }
+    let ok = false;
+    try {
+      ok = f.tryLockSync(true) && sameFile(f, path);
+    } catch { /* aio-ok: no OS locks here — no hold, the pid rule stays */ }
+    if (ok) return { f, path };
+    f.close();
+    try {
+      Deno.removeSync(path);
+    } catch { /* aio-ok: swept already */ }
+  }
+  return null;
 }
 
 /** Check if a TCP port has something listening */
@@ -1339,7 +1696,7 @@ export async function isSocketAlive(socketPath: string): Promise<boolean> {
 /** Read a lock by its key — the plain appId for a default-home app, or the
  *  `<appId>@<hash8(home)>` key {@linkcode lockKey} builds for any other home. */
 export function readLock(key: string): LockData | null {
-  return parseLock(readLockRaw(key));
+  return parseLock(readLockRaw(key), lockPath(key));
 }
 
 /** The lock file's exact bytes (as text), or null when there is no file.
@@ -1352,7 +1709,8 @@ function readLockRaw(key: string): string | null {
   }
 }
 
-function parseLock(raw: string | null): LockData | null {
+/** `path`: where `raw` was read — a `hold` name resolves beside it. */
+function parseLock(raw: string | null, path?: string): LockData | null {
   if (raw === null) return null;
   try {
     const data = JSON.parse(raw) as LockData;
@@ -1376,6 +1734,11 @@ function parseLock(raw: string | null): LockData | null {
     if (typeof data.appId !== "string" || data.appId === "") return null;
     if (typeof data.pid !== "number" || !(data.pid > 0)) return null;
     if (typeof data.port !== "number" || data.port < 0) return null;
+    // Only a file beside the lock, whatever path the writer saw it at (a
+    // container may mount this dir elsewhere).
+    if (typeof data.hold === "string") {
+      data.hold = path ? join(dirname(path), basename(data.hold)) : undefined;
+    }
     return data;
   } catch {
     return null;
@@ -1418,7 +1781,7 @@ const _nonce = (): string => crypto.randomUUID().slice(0, 8);
 /** Publish `text` at `path` only if nothing is there — never a half-written
  *  file. True on success, false if the name is taken. */
 function publishExclusive(path: string, text: string): boolean {
-  const tmp = `${path}.${Deno.pid}.${_nonce()}.tmp`;
+  const tmp = `${path}.${ownPidTag()}.${_nonce()}.tmp`;
   const writeTmp = () => Deno.writeTextFileSync(tmp, text, { mode: 0o600 });
   try {
     writeTmp();
@@ -1458,7 +1821,7 @@ function publishExclusive(path: string, text: string): boolean {
 
 /** Replace `path` with `text` in one step (tmp → rename). */
 function replaceAtomic(path: string, text: string): void {
-  const tmp = `${path}.${Deno.pid}.${_nonce()}.tmp`;
+  const tmp = `${path}.${ownPidTag()}.${_nonce()}.tmp`;
   try {
     Deno.writeTextFileSync(tmp, text, { mode: 0o600 });
   } catch (e) {
@@ -1508,8 +1871,8 @@ export function withLockMutex<T>(key: string, fn: () => T): T {
 /** {@linkcode withLockMutex} for the lock FILE at `lockFile`, in any lock dir.
  *  `recreate` false: a lock dir that is gone is NOT made again — the result
  *  is `undefined` (nothing there to judge) — for cleanups of a dir that may
- *  be being pruned. */
-function withLockMutexAt<T>(
+ *  be being pruned. Also the build lock's mutex (build-compile.ts). */
+export function withLockMutexAt<T>(
   lockFile: string,
   fn: () => T,
   recreate: boolean,
@@ -1606,7 +1969,7 @@ function dropIdleMutex(path: string): void {
  *  temp ONLY when the pid in its name is gone (a live process's file is part
  *  of an operation it is still running), the mutex only when nobody holds
  *  it (`dropIdleMutex`). */
-const ORPHAN_TEMP = /^\.(\d+)\.[0-9a-f]{8}\.tmp$/;
+const ORPHAN_TEMP = new RegExp(`^\\.${PID_TAG}\\.[0-9a-f]{8}\\.tmp$`);
 export function sweepOrphanLockTemps(key: string): void {
   const base = `${key}.lock`;
   let names: string[];
@@ -1619,14 +1982,19 @@ export function sweepOrphanLockTemps(key: string): void {
   }
   for (const name of names) {
     const rest = name.slice(base.length);
-    if (rest === ".mx") {
+    if (rest === ".mx" || rest.endsWith(".hold")) {
+      // An unheld hold file is a dead owner's: same protocol as the mutex.
       dropIdleMutex(join(lockDir(), name));
       continue;
     }
     const m = ORPHAN_TEMP.exec(rest);
     if (!m) continue;
     const pid = Number(m[1]);
-    if (pid === Deno.pid || isProcessAlive(pid)) continue;
+    if (
+      pid === Deno.pid || !taggedOwnerGone(join(lockDir(), name), pid, m[2])
+    ) {
+      continue;
+    }
     try {
       Deno.removeSync(join(lockDir(), name));
     } catch { /* aio-ok: a sibling swept it first */ }
@@ -1747,6 +2115,10 @@ export function replaceLockIf(
  *  applied to that current record. */
 function sameRecord(was: LockData, now: LockData): boolean {
   if (now.pid !== was.pid) return false;
+  // Pid 7 in two containers sharing the lock dir is two owners.
+  if (was.ns !== undefined && now.ns !== undefined && was.ns !== now.ns) {
+    return false;
+  }
   if (was.startToken && now.startToken && was.startToken !== now.startToken) {
     return false;
   }
@@ -2119,6 +2491,7 @@ export class AppLock {
       home: this.home,
       // Recorded WITH the pid, because the pid alone is not an identity.
       ...ownerIdentity(Deno.pid),
+      ...(this._hold ? { hold: basename(this._hold.path) } : {}),
       ...(meta.aioVersion !== undefined ? { aioVersion: meta.aioVersion } : {}),
       ...((this.profile ?? meta.profile) !== undefined
         ? { profile: this.profile ?? meta.profile }
@@ -2130,11 +2503,37 @@ export class AppLock {
     });
 
     sweepOrphanLockTemps(this.key);
+    this._hold ??= takeHold(lockPath(this.key));
+    const r = await this._acquire(killExisting, fresh, maxRetries);
+    if (!r.ok) this._dropHold();
+    return r;
+  }
+
+  /** This lock's hold file, OS-locked while the lock is ours. */
+  private _hold: { f: Deno.FsFile; path: string } | null = null;
+
+  /** Let the hold file go: unlinked while still locked (a reader that opens
+   *  it afterwards finds nothing — dead), then unlocked. */
+  private _dropHold(): void {
+    const h = this._hold;
+    this._hold = null;
+    if (!h) return;
+    try {
+      Deno.removeSync(h.path);
+    } catch { /* aio-ok: swept already — the lock goes with the close */ }
+    h.f.close();
+  }
+
+  private async _acquire(
+    killExisting: boolean,
+    fresh: () => LockData,
+    maxRetries: number,
+  ): Promise<{ ok: true } | { ok: false; existing: LockData }> {
     for (let i = 0; i < maxRetries; i++) {
       // The BYTES, kept: every removal below is compare-and-delete against
       // exactly the record judged here, never "whatever is at the path now".
       const raw = readLockRaw(this.key);
-      const existing = parseLock(raw);
+      const existing = parseLock(raw, lockPath(this.key));
 
       if (!existing) {
         // No lock — try atomic create
@@ -2179,7 +2578,7 @@ export class AppLock {
       }
 
       // Lock exists but owner is us (am pre-registered) — take over
-      if (existing.pid === Deno.pid) {
+      if (isOwnLock(existing)) {
         removeLockIf(this.key, raw!);
         await delay(100);
         continue;
@@ -2202,7 +2601,17 @@ export class AppLock {
         // logged. The two sibling reclaim paths in this same function — an
         // unreadable lock above, a zombie listener below — both speak; this
         // one, the commonest of the three, was the only mute one.
-        log.warn("lock", deadOwnerWarning(this.appId, existing));
+        // A dev session that was WAITING for a fix held the slot while the
+        // app itself was down (its relaunch had died): killed there, it lost
+        // no state, and "did not shut down cleanly" would be a false alarm.
+        if (existing.waiting) {
+          log.info(
+            "lock",
+            `${printable(this.appId)}: a dev session waiting for a fix ` +
+              `(pid ${existing.pid}) is gone — the app was not running, so ` +
+              `no state was lost`,
+          );
+        } else log.warn("lock", deadOwnerWarning(this.appId, existing));
         removeLockIf(this.key, raw!);
         await delay(100);
         continue;
@@ -2220,6 +2629,29 @@ export class AppLock {
       // lives, and `killExisting` must not SIGTERM a copy half-way through:
       // refuse, and let the caller name the op.
       if (isHold(existing)) return { ok: false, existing };
+      // Alive in ANOTHER pid namespace (its hold file says so): its port or
+      // socket may not be reachable from here — no zombie probe — and its pid
+      // cannot be signalled from here — no kill. Refused, and said why.
+      const foreign = foreignOwnerRefusal(existing);
+      if (foreign) {
+        if (killExisting) log.warn("lock", foreign);
+        return { ok: false, existing };
+      }
+      // A dev session WAITING for a fix serves nothing until the next save;
+      // a new start takes the slot and the session steps aside on its own
+      // (its rival poll — dev-restart.ts), exactly as before it named itself
+      // here. Never probed as a zombie, never killed.
+      if (existing.waiting) {
+        log.info(
+          "lock",
+          `${this.appId}: a dev session waiting for a fix holds the slot ` +
+            `(pid ${existing.pid}) — this start takes it; that session ` +
+            `steps aside`,
+        );
+        removeLockIf(this.key, raw!);
+        await delay(100);
+        continue;
+      }
       const pastStartup = existing.status !== "starting" ||
         ageSince(existing.startedAt) > STARTUP_GRACE_MS;
       let listenerDead = false;
@@ -2294,7 +2726,7 @@ export class AppLock {
     // could pass and then overwrite a lock another process took meanwhile.
     withLockMutex(this.key, () => {
       const existing = readLock(this.key);
-      if (!existing || existing.pid !== Deno.pid) return; // not ours
+      if (!existing || !isOwnLock(existing)) return; // not ours
       replaceAtomic(
         lockPath(this.key),
         JSON.stringify({ ...existing, ...partial }),
@@ -2321,7 +2753,9 @@ export class AppLock {
     if (!this.acquired) return;
     // Only remove if it's still ours (PID matches)
     const raw = readLockRaw(this.key);
-    if (parseLock(raw)?.pid === Deno.pid) removeLockIf(this.key, raw!);
+    const now = parseLock(raw);
+    if (now && isOwnLock(now)) removeLockIf(this.key, raw!);
+    this._dropHold(); // after the record: never a record naming a gone hold
     this.acquired = false;
     this._unregisterCleanupHandlers();
   }
@@ -2427,7 +2861,7 @@ export function instances(appId?: string): InstanceInfo[] {
       // The BYTES, kept: the stale-lock cleanup below deletes only exactly
       // the record judged here, never whatever a new instance put there since.
       const raw = readLockRaw(key);
-      const lock = parseLock(raw);
+      const lock = parseLock(raw, lockPath(key));
       if (!lock || (appId && lock.appId !== appId)) continue;
 
       // By OWNER, not by pid: a lock that survived a reboot (the base is
@@ -2504,8 +2938,10 @@ export async function descendantPids(pid: number): Promise<number[]> {
 export async function killProcess(
   pid: number,
   grace = KILL_GRACE_MS,
-  expect?: { startToken?: string; startEpoch?: number },
+  expect?: { startToken?: string; startEpoch?: number; ns?: number },
 ): Promise<void> {
+  const foreign = expect && foreignOwnerRefusal({ pid, ns: expect.ns });
+  if (foreign) throw new Error(foreign);
   if (!isProcessAlive(pid)) return;
   // `expect` is the lock that named this pid. If it recorded a start token and
   // the live process's does not match, the pid was RECYCLED: signalling it

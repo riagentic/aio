@@ -1,7 +1,14 @@
 // Path resolution utilities — extracted from aio.ts (AIO-52)
 // Pure functions for resolving KV, SQLite, UDS, and data directory paths.
 
-import { dirname, fromFileUrl, isAbsolute, join, resolve } from "@std/path";
+import {
+  dirname,
+  fromFileUrl,
+  isAbsolute,
+  join,
+  resolve,
+  SEPARATOR,
+} from "@std/path";
 import {
   _chooseLockDir,
   hash8,
@@ -13,6 +20,29 @@ import { isPipePath, PIPE_PREFIX } from "./local-listen.ts";
 
 export { isPipePath };
 
+/** Does `$APPIMAGE` name the AppImage THIS process runs from? Its executable
+ *  lies under the mount the AppImage runtime exported as `$APPDIR`. Both
+ *  variables are inherited by every child: a plain `deno run` or binary started
+ *  from a terminal that is itself an AppImage sees its host's `$APPIMAGE`,
+ *  which is not the file it runs — "foreign". "unknown" when that cannot be
+ *  decided (a variable missing, a path unresolvable): each caller keeps its
+ *  own safe reading of that. Pure over its args. */
+export function appImageOwner(
+  execPath: string | undefined,
+  appImage: string | undefined,
+  appDir: string | undefined,
+): "own" | "foreign" | "unknown" {
+  if (!appImage) return "foreign";
+  if (!appDir || execPath === undefined) return "unknown";
+  try {
+    const exe = Deno.realPathSync(execPath);
+    const dir = Deno.realPathSync(appDir);
+    return exe.startsWith(dir + SEPARATOR) ? "own" : "foreign";
+  } catch {
+    return "unknown"; // aio-ok: unresolvable — the caller decides what that means
+  }
+}
+
 /** True when running inside a compiled binary (AppImage, deno compile) */
 export function isCompiled(): boolean {
   let execPath: string | undefined;
@@ -21,11 +51,16 @@ export function isCompiled(): boolean {
   } catch {
     // aio-ok: no read permission — the segment rung falls back to generic
   }
+  const appImage = Deno.env.get("APPIMAGE");
   return _compiledFrom(
     import.meta.url,
     // Undefined inside a Worker (a worker cell): there is no main module.
     (Deno.mainModule as string | undefined) ?? "",
-    Deno.env.get("APPIMAGE"),
+    // An inherited `$APPIMAGE` ran a dev checkout as prod. Undecidable keeps
+    // the old reading: a real AppImage must never boot as dev.
+    appImageOwner(execPath, appImage, Deno.env.get("APPDIR")) === "foreign"
+      ? undefined
+      : appImage,
     execPath,
   );
 }

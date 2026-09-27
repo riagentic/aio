@@ -2,6 +2,8 @@
 import { teachableError } from "./error.ts";
 import { removalFor, removalMessage } from "../state/removals-core.ts";
 import { nearestOf } from "../state/cell-helpers.ts";
+import { capDelay, MIN_INTERVAL_MS } from "../state/timer-ceiling.ts";
+import { log } from "./logger-api.ts";
 
 /** Heap usage report — per-cell breakdown, trend, and WHY it fired. */
 export type MemoryReport = {
@@ -107,6 +109,9 @@ type MemoryUsage = {
 };
 type CellEntry = { name: string; state: unknown };
 
+/** The memory monitor's default sampling period. */
+export const MEMORY_INTERVAL_MS = 10_000;
+
 type MonitorDeps = {
   enabled: boolean;
   interval: number;
@@ -207,6 +212,15 @@ export function createMemoryMonitor(deps: MonitorDeps): { stop: () => void } {
   const samples: number[] = []; // sliding window of heapPct samples
   const usedSamples: number[] = []; // …and of absolute bytes, for growth
 
+  // NaN (`Number(env)` unset), 0 or a negative period was a ~1 ms loop, each
+  // tick a recursive sizeof over every cell's state.
+  const period = capDelay(
+    "memory.interval",
+    deps.interval,
+    (m) => log.warn("memory", m),
+    MEMORY_INTERVAL_MS,
+    MIN_INTERVAL_MS,
+  );
   const id = setInterval(() => {
     const mem = deps.getMemoryUsage();
     const heapLimit = deps.getHeapLimit();
@@ -283,7 +297,7 @@ export function createMemoryMonitor(deps: MonitorDeps): { stop: () => void } {
       cellStates,
       trend,
     });
-  }, deps.interval);
+  }, period);
 
   return {
     stop: () => clearInterval(id),
