@@ -2,14 +2,14 @@
   {
     "target": "android",
     "env": "emulator",
-    "commit": "9b428ee2",
+    "commit": "a107e768",
     "date": "2026-09-22",
     "detail": "API 35: standalone (dispatch, durable native store — survives an instant kill, rotation) + client (connect, server dispatch, Back, unreachable)"
   },
   {
     "target": "cli",
     "env": "binary",
-    "commit": "7a9ccda4",
+    "commit": "9a1636ce",
     "date": "2026-09-25",
     "detail": "compiled cli-client ↔ compiled server, state printed"
   },
@@ -23,7 +23,7 @@
   {
     "target": "web",
     "env": "real-browser",
-    "commit": "7a9ccda4",
+    "commit": "9a1636ce",
     "date": "2026-09-25",
     "detail": "chromium: surface → trigger → server state converged"
   },
