@@ -8,7 +8,7 @@
 // and each screen kept its own ids for good with nothing said anywhere.
 //
 // The engine cannot make the method deterministic without the value travelling
-// with the op (future/v2.md). It must SEE it — a pure reducer run twice on one
+// with the op (untracked/v2.md). It must SEE it — a pure reducer run twice on one
 // input disagreeing with itself is proof — say so, and converge on the server.
 import { assert, assertEquals } from "@std/assert";
 import { createNet, type State } from "./_net.ts";

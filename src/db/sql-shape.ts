@@ -223,6 +223,13 @@ export function readTablesIn(sql: string): ReadTables {
   };
   const alias = new RegExp(String.raw`^\s*(?:as\s+)?(${NAME})`, "i");
   for (const kw of m.matchAll(/\b(?:from|join)\b/gi)) {
+    // A `from`/`join` INSIDE a string literal is text, not a keyword. `m` keeps
+    // literals (so `FROM 'mail'` still names the table `mail`), and `bare` is
+    // the same string with each literal's BODY blanked — same length, same
+    // offsets — so a match that starts in that blank region is inside a
+    // literal. Without this, `WHERE note = 'from secret'` invented the table
+    // `secret` and refreshed a live query for it on every write.
+    if (bare[kw.index!] === " ") continue;
     sources++;
     let at = kw.index! + kw[0].length;
     for (;;) {
@@ -265,7 +272,16 @@ const WRITE_TARGET = new RegExp(
  *  (`INSERT OR IGNORE INTO`, `UPDATE OR ROLLBACK`) allowed. */
 export function writeTablesIn(sql: string): Set<string> {
   const out = new Set<string>();
-  for (const w of mask(sql, false).matchAll(WRITE_TARGET)) {
+  const m = mask(sql, false);
+  const bare = mask(sql, true);
+  for (const w of m.matchAll(WRITE_TARGET)) {
+    // A `delete from x` INSIDE a string literal is text, not a statement: the
+    // match text comes from `m` (literals kept, so a quoted target
+    // `INSERT INTO 'log'` still names `log`), but `bare` shows whether the
+    // keyword itself is real. `INSERT INTO log VALUES ('delete from users')`
+    // used to report a phantom `users`, so a live query on it refreshed on
+    // every insert into `log`.
+    if (bare[w.index!] === " ") continue;
     out.add(unquote(w[2] ?? w[1]!));
   }
   return out;

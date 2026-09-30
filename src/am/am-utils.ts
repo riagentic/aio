@@ -1148,7 +1148,7 @@ export function parseGlobalFlags(
             "spelling still works, but collides with the app runtime's " +
             "--client=<kind>",
         );
-        flags.client = num(a.slice(9), "--client");
+        flags.client = num(a.slice(9), "--client", { min: 0, integer: true });
       } else {
         // Forwarded to the app (that is what this spelling is for) AND
         // remembered, so a command that asks "did the user mean the client?"
@@ -1161,7 +1161,10 @@ export function parseGlobalFlags(
       // isNaN test and fall through to the POSITIONAL args, where it became a
       // command argument — the same NaN class, silent one step further along.
       sayErr("am: warning: -cN is now -i N (client index)");
-      flags.client = num(a.slice(2), "-c (client index)");
+      flags.client = num(a.slice(2), "-c (client index)", {
+        min: 0,
+        integer: true,
+      });
     } else if (a === "--client") flags.client = 0;
     else if (a === "--ui") flags.ui = true;
     else if (a === "--all") flags.all = true;
@@ -1404,6 +1407,21 @@ export function reservedAppNameError(
         ? "aio itself (the machine CA and release keys)"
         : "another program"
     }.\n  fix: pick another name`;
+}
+
+/** The `type` for a DIRECTORY symlink: `junction` on Windows, `dir` elsewhere.
+ *
+ *  A plain directory symlink needs `SeCreateSymbolicLinkPrivilege` on Windows
+ *  and fails with `PermissionDenied` on a stock box (no Developer Mode, no
+ *  admin) — so `am create` could not make `dep/aio`, `am pin` could not retarget
+ *  it and `am link` could not repair it, even though the README's quickstart is
+ *  a Windows PowerShell line. A junction needs no privilege. Windows-only:
+ *  elsewhere the type is ignored (`dir`).
+ *  @internal */
+export function dirLinkType(
+  os: typeof Deno.build.os = Deno.build.os,
+): "junction" | "dir" {
+  return os === "windows" ? "junction" : "dir";
 }
 
 /** Refuse to write over a file that is already there, unless `--force`.

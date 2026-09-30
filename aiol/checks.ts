@@ -1305,6 +1305,16 @@ export const checkUI: Checker = (ctx) => {
       // cannot see. Treated as named — a false NEGATIVE is cheap here and a
       // false positive is not.
       if (tag === "input" && /\bid\s*=/.test(attrs)) continue;
+      // A HIDDEN input is not interactive and needs no accessible name — the
+      // claim ("has no accessible name") is meaningless for it, and every form
+      // with a CSRF field would carry a warning it can only suppress. Read the
+      // RAW attribute text: `codeText` blanks string BODIES, so `hidden` is
+      // spaces on the scanned line and only survives in the raw one.
+      const at = m.index! + m[0].indexOf(attrs);
+      const rawAttrs = (lines[i] ?? "").slice(at, at + attrs.length);
+      if (tag === "input" && /\btype\s*=\s*["']hidden["']/.test(rawAttrs)) {
+        continue;
+      }
       if (isSuppressed(lines, i)) continue;
       report(
         "warn",
@@ -3989,16 +3999,16 @@ export const checkAlpha52: Checker = (ctx) => {
       );
     }
 
-    // poll's `backoff` option key → `factor`. Scoped to the OPTS literal (the
-    // one carrying `every:`) — an action payload may have a `backoff` field of
-    // its own, and that one is data, not the deprecated key.
-    for (
-      const m of codeMatches(
-        file.content,
-        /\bschedule\.poll\s*\([^;]*?\{[^{}]*\bevery\s*:[^{}]*\bbackoff\s*:|\bschedule\.poll\s*\([^;]*?\{[^{}]*\bbackoff\s*:[^{}]*\bevery\s*:/g,
-      )
-    ) {
-      const line = lineOf(m.index!);
+    // poll's `backoff` option key → `factor`. Scoped to the OPTS object — the
+    // FOURTH argument of `schedule.poll(id, attempt, action, opts)`, located by
+    // the same decider the fix uses. The old scope was "a flat `{…}` holding
+    // `every:` and `backoff:`", which an action payload matches: the rule
+    // reported data as the option, and `--safe-fix` renamed it.
+    const backoffLines = new Set<number>();
+    for (const at of fix.pollBackoffSites(file.content)) {
+      const line = lineOf(at);
+      if (backoffLines.has(line)) continue;
+      backoffLines.add(line);
       if (isSuppressed(file.lines, line - 1)) continue;
       found++;
       report(
@@ -4753,8 +4763,15 @@ function _members(
   // end). These used to be invisible to every rule that reads `_members`, so
   // a selector written the short way read a hidden field unflagged while the
   // same selector with braces was an error (a field report).
-  const arrow =
-    /[,{]\s*([$\w]+)\s*:\s*(async\s*)?(?:\(([^)]*)\)|([$\w]+))\s*=>(?!\s*\{)/g;
+  // EXPRESSION-BODIED arrows: the SAME comment-tolerant lead-in as the block
+  // form above. `[,{]\s*` could not cross a `//`/`/*` delimiter that `codeText`
+  // leaves standing, so ONE comment above an expression-bodied member made it
+  // invisible — and `_members` is the only reader for four ERROR rules.
+  const arrow = new RegExp(
+    LEAD +
+      "([$\\w]+)\\s*:\\s*(async\\s*)?(?:\\(([^)]*)\\)|([$\\w]+))\\s*=>(?!\\s*\\{)",
+    "g",
+  );
   for (const m of body.matchAll(arrow)) {
     let depth = 0;
     for (let i = 0; i <= m.index!; i++) {
@@ -4982,8 +4999,12 @@ export const checkTimerDispatch: Checker = (ctx) => {
     // `setTimeout(() => x.y(...)` / `setTimeout(function () { x.y(...)`.
     // Deliberately narrow: a timer that calls a PLAIN function is ordinary
     // code, and only a cell method escapes the log by this route.
+    // Also the BLOCK-bodied arrow (`() => { counter.inc(); }`) and the async
+    // forms: the block arrow is the canonical spelling the rule's own doc uses
+    // in its counter-example, and it fell between the `() => expr` and
+    // `function () { }` shapes, so it escaped the gate entirely.
     const RE =
-      /\bset(?:Timeout|Interval)\s*\(\s*(?:\(\s*\)\s*=>|function\s*\(\s*\)\s*\{)\s*(?:void\s+)?(\w+)\s*\.\s*(\w+)\s*\(/g;
+      /\bset(?:Timeout|Interval)\s*\(\s*(?:async\s+)?(?:\(\s*\)\s*=>\s*\{?|function\s*\(\s*\)\s*\{)\s*(?:(?:void|await)\s+)?(\w+)\s*\.\s*(\w+)\s*\(/g;
     for (const m of codeMatches(file.content, RE)) {
       const obj = m[1]!, method = m[2]!;
       if (!bindings.has(obj)) continue;
@@ -5105,15 +5126,40 @@ export const checkTsxHiddenReads: Checker = (ctx) => {
     if (/\.test\.tsx?$/.test(file.name)) continue;
     checked++;
     const code = codeText(file.content);
-    for (const [bind, { cell, top }] of hidden) {
+    for (const [bind, { cell, top, leaves }] of hidden) {
+      // `top` first, then the DEEP leaves. `visible: { exclude:
+      // ["accounts.encSecKey"] }` hides a NESTED field, and `bindCellReactive`
+      // installs a deep excluder whose read throws on first render exactly like
+      // a top-level one — but `leaves` was computed here and never read, so a
+      // `.tsx` read of the hidden leaf passed while the sibling sync-method
+      // rule caught it.
+      const targets: { re: RegExp; key: string; path: string }[] = [];
       for (const key of top) {
         // `(?<![.\w$])` for the same reason rule 20 needs it: a STATE FIELD
         // that happens to share the binding's name (`s.vault.x`) is not a read
         // of the cell.
-        const re = new RegExp(
-          `(?<![.\\w$])${bind}\\s*\\.\\s*${key}\\b`,
-          "g",
-        );
+        targets.push({
+          re: new RegExp(`(?<![.\\w$])${bind}\\s*\\.\\s*${key}\\b`, "g"),
+          key,
+          path: key,
+        });
+      }
+      // Between path segments: dots and index access, in either order
+      // (`vault.accounts[0].encSecKey`, `vault.accounts.encSecKey`).
+      const sep = String
+        .raw`(?:\s*\[[^\]]*\]\s*)*(?:\.\s*(?:\s*\[[^\]]*\]\s*)*)`;
+      for (const [leaf, path] of leaves) {
+        const segs = path.split(".").map((s) => s.replace(/[$]/g, "\\$"));
+        targets.push({
+          re: new RegExp(
+            `(?<![.\\w$])${bind}${sep}${segs.join(sep)}\\b`,
+            "g",
+          ),
+          key: leaf,
+          path,
+        });
+      }
+      for (const { re, key, path } of targets) {
         const hit = re.exec(code);
         if (!hit) continue;
         const line = code.slice(0, hit.index).split("\n").length;
@@ -5123,18 +5169,18 @@ export const checkTsxHiddenReads: Checker = (ctx) => {
         report(
           "error",
           "cells",
-          `${file.relative}:${line} — \`${bind}.${key}\` reads a field cell ` +
+          `${file.relative}:${line} — \`${bind}.${path}\` reads a field cell ` +
             `"${cell}" hides (\`visible\`), from a .tsx file. That is CLIENT ` +
             `context, where the field is not present: the read THROWS when the ` +
             `component renders, in dev and in prod. ` +
             `Publish the non-secret FACT beside the secret ` +
-            `(\`${fact}: boolean\`) and read that, or read \`${key}\` in a ` +
+            `(\`${fact}: boolean\`) and read that, or read \`${path}\` in a ` +
             `server-side/async method.`,
           {
             file: file.relative,
             line,
             fix:
-              `state: { ${fact}: false, … } — set it where ${key} is written; read ${bind}.${fact} here`,
+              `state: { ${fact}: false, … } — set it where ${path} is written; read ${bind}.${fact} here`,
           },
         );
         break; // one finding per (file, binding, field) — not one per read

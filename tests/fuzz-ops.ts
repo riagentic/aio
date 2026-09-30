@@ -400,10 +400,14 @@ export function applyOp(s: { data: Data }, op: Op, log: unknown[]): void {
       break;
     }
     // Every own-key question a guard might ask, answered for a reserved name.
+    // Not `w in d.obj`: `in` walks the prototype chain on an Immer draft and
+    // answers OWN keys only on the live proxy (tests/live-proxy.test.ts) — an
+    // intentional safety split, not a method-body parity bug. Own-key probes
+    // (hasOwn / hasOwnProperty / keys / entries / descriptor) must still agree.
     case "reserved_own_reads": {
       const w = RESERVED_WORDS[op.i % 4]!;
       log.push(
-        w in d.obj,
+        Object.hasOwn(d.obj, w),
         Object.prototype.hasOwnProperty.call(d.obj, w),
         Object.prototype.propertyIsEnumerable.call(d.obj, w),
         JSON.stringify(Object.getOwnPropertyDescriptor(d.obj, w)?.value),

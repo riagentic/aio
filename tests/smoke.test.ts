@@ -22,7 +22,12 @@ const APP = `import { h } from "aio/air";
 import { label } from "./lib/label.ts";
 export default function App() { return h("div", null, label); }`;
 
-Deno.test("smoke: a healthy app — every eager module answers 200", async () => {
+Deno.test("smoke: a healthy app — every eager module answers 200", {
+  // esbuild transpiles through a native child that `stopEsbuild()` kills;
+  // esbuild owns the handle, so its exit cannot be awaited from here.
+  sanitizeOps: false, // aio-ok: esbuild's service child — exit not awaitable
+  sanitizeResources: false, // aio-ok: same esbuild child
+}, async () => {
   const dir = await fixture({
     "App.tsx": APP,
     "lib/label.ts": `export const label = "ok";`,

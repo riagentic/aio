@@ -905,7 +905,13 @@ export function testCell(
             | Record<string, unknown>
             | undefined;
           const known = own ?? {};
-          const unknown = Object.keys(seed).filter((k) => !(k in known));
+          // OWN keys: `k in known` is true for `toString`/`valueOf`/… inherited
+          // from Object.prototype, so a seed key named like a builtin passed
+          // this guard and was then injected by `_deepMergeSeed` — exactly the
+          // "lands nowhere, pins nothing" fixture the guard exists to refuse.
+          const unknown = Object.keys(seed).filter((k) =>
+            !Object.hasOwn(known, k)
+          );
           if (unknown.length > 0) {
             throw new Error(
               `[${f.__aio.id}] t.init(): unknown state key(s) ${

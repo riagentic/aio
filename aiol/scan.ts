@@ -227,3 +227,39 @@ export function topLevelKeyOffsets(
   }
   return out;
 }
+
+/** The source span `[start, end)` of the `index`-th (0-based) argument of the
+ *  call whose `(` sits at `paren`, or null when the call has fewer arguments.
+ *  Nesting, strings, templates and comments are respected through
+ *  `codeMask`. Pure — the locator a rule/fix uses to name an ARGUMENT instead
+ *  of guessing one from a bare regex over the whole call. */
+export function argumentSpan(
+  src: string,
+  paren: number,
+  index: number,
+): [number, number] | null {
+  if (src[paren] !== "(") return null;
+  const mask = codeMask(src);
+  let depth = 0;
+  let arg = 0;
+  let start = paren + 1;
+  for (let i = paren; i < src.length; i++) {
+    if (mask[i] !== 1) continue; // string / comment / regex body
+    const ch = src[i]!;
+    if (ch === "(" || ch === "{" || ch === "[") {
+      depth++;
+      continue;
+    }
+    if (ch === ")" || ch === "}" || ch === "]") {
+      depth--;
+      if (depth === 0) return arg === index ? [start, i] : null;
+      continue;
+    }
+    if (ch === "," && depth === 1) {
+      if (arg === index) return [start, i];
+      arg++;
+      start = i + 1;
+    }
+  }
+  return null;
+}

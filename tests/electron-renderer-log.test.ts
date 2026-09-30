@@ -333,8 +333,21 @@ setTimeout(() => {
         stderr: "piped",
       }).spawn();
       await child.stderr.cancel(); // the reader dies before the first line
-      await child.status;
-      const r = JSON.parse(await Deno.readTextFile(out));
+      const status = await child.status;
+      // Consequence, not presence: without the stream error listeners (and
+      // with console.error writing through stderr.write), the dead pipe
+      // turns every tick into uncaughtException → app.quit() and the
+      // process never reaches the 1.5s report. A missing report IS the
+      // loop; a present one must show near-zero uncaught/quits.
+      let r: { quits: number; uncaught: number };
+      try {
+        r = JSON.parse(await Deno.readTextFile(out));
+      } catch (e) {
+        throw new Error(
+          `EPIPE loop: process exited ${status.code} before writing the ` +
+            `report (the dead-pipe loop prevented a clean finish): ${e}`,
+        );
+      }
       assert(r.uncaught < 5, `EPIPE loop: ${JSON.stringify(r)}`);
       assert(r.quits <= 1, `quit more than once: ${JSON.stringify(r)}`);
     } finally {

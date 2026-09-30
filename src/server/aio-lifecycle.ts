@@ -182,6 +182,24 @@ export function electronLaunchFailurePlan(
   };
 }
 
+/** Parse `AIO_PARENT_PID`: decimal digits, integer > 0, else absent.
+ *
+ *  Same vocabulary as `--port` / `AIO_PORT` (`intArg` / `envPort`): `Number()`
+ *  also accepts `0x1A2B`, `1e3`, `+42` and `0b101`, four spellings nobody types
+ *  on purpose. A non-decimal value used to arm the parent watch against a
+ *  surprising pid (or, on the Electron window, a *different* one from the
+ *  server) — now both sides treat it as unset. Pure so a test can pin the
+ *  refuse list without reloading the module.
+ *
+ *  @decider */
+export function parentPidOf(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const s = raw.trim();
+  const n = Number(s);
+  if (!/^\d+$/.test(s) || !Number.isInteger(n) || n <= 0) return undefined;
+  return n;
+}
+
 /** One parent watch per process — see `AIO_PARENT_PID` in startLifecycle. */
 let _parentWatched = false;
 
@@ -195,9 +213,15 @@ let _parentWatched = false;
 // a share link no other device could open. The comment beside the derivation
 // even said the opposite. These are pure so each shape is a unit test.
 
-/** Is this bind address reachable from THIS machine only? */
+/** Is this bind address reachable from THIS machine only?
+ *
+ *  Trimmed and lower-cased like {@linkcode _hostIsExposed} (aio.ts): a host
+ *  name is case-insensitive, so `--host=LOCALHOST` must get the SAME answer
+ *  from both deciders — it used to read "interface only" here and "not
+ *  exposed" there, and `--expose --host=LOCALHOST` warned about a network
+ *  reachable bind for a loopback-only address. */
 export function isLoopbackBind(host: string): boolean {
-  const h = host.replace(/^\[|\]$/g, "");
+  const h = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
   return h.startsWith("127.") || h === "::1" || h === "localhost";
 }
 
@@ -572,8 +596,8 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
   // itself — gracefully, every phase — when that pid is gone. Opt-in, same in
   // dev and prod, observe-only until the parent actually disappears.
   if (!libraryMode && !_parentWatched) {
-    const parentPid = Number(Deno.env.get("AIO_PARENT_PID") ?? "");
-    if (Number.isInteger(parentPid) && parentPid > 0) {
+    const parentPid = parentPidOf(Deno.env.get("AIO_PARENT_PID") ?? undefined);
+    if (parentPid !== undefined) {
       _parentWatched = true;
       const timer = setInterval(() => {
         if (isProcessAlive(parentPid)) return;
@@ -1130,14 +1154,19 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     if (!cli.open) {
       log.info(`open ${localUrl} in your browser (or pass --open)`);
     } else {
-      // Wait briefly for existing browser tabs to reconnect via WS
-      setTimeout(() => {
+      // Wait briefly for existing browser tabs to reconnect via WS. UNREF'd:
+      // this is a convenience, not work — an app that stops inside the 1.5 s
+      // (a test, a crash, an immediate SIGINT) must not be held open by it, and
+      // a process that exits drops it before it can open a tab for a server
+      // that is already gone.
+      const openTimer = setTimeout(() => {
         if (server.clientCount() > 0) {
           log.debug("browser: existing client connected — skipping open");
           return;
         }
         openExternalBestEffort(localUrl);
       }, 1500);
+      Deno.unrefTimer(openTimer);
     }
   }
 }

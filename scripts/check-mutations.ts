@@ -5963,9 +5963,8 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "a stored cell the standalone build no longer declares is dropped at restore and deleted from the store by the first write",
     file: "src/standalone-air.ts",
-    find:
-      "if (restorable.has(k) || (declared !== undefined && !(k in declared))) {",
-    replace: "if (restorable.has(k)) {",
+    find: "(declared !== undefined && !Object.hasOwn(declared, k))",
+    replace: "false",
     test: "tests/standalone-migrate-restore.test.ts",
     filter:
       "standalone restore: a stored cell this build does not declare is preserved",
@@ -8695,8 +8694,10 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "doctor calls an incomplete deno.lock complete, so clones silently resolve different aio build and test tooling",
     file: "src/server/lock-coverage.ts",
-    find: "    for (const k of Object.keys(a)) if (!(k in b)) out.push(k);",
-    replace: "    for (const k of Object.keys(a)) if (!(k in a)) out.push(k);",
+    find:
+      "    for (const k of Object.keys(a)) if (!Object.hasOwn(b, k)) out.push(k);",
+    replace:
+      "    for (const k of Object.keys(a)) if (!Object.hasOwn(a, k)) out.push(k);",
     test: "tests/doctor-lock-coverage.test.ts",
     filter:
       "doctor lock coverage: a lock missing aio's tool entries is a WARN naming am fix, and is never written",
@@ -9058,9 +9059,10 @@ export const LEDGER: readonly Mutation[] = [
     find: "    cb(ok);",
     replace: "    cb(true);",
     test: "tests/electron-permission-guard.test.ts",
+    // The e2e twin needs Electron + a display; the fakeMain unit test runs the
+    // same tmplPermissionGuard fragment and refuses a guest's clipboard ask.
     filter:
-      "permissions e2e: default — a real foreign <webview> guest and a foreign iframe in the app window are denied everything but fullscreen; the app window keeps all",
-    env: { ELECTRON_E2E: "1" },
+      "permissions: a <webview> guest is denied clipboard-read and friends, and it is said once",
   },
   {
     what:
@@ -10459,6 +10461,11 @@ export const LEDGER: readonly Mutation[] = [
     replace:
       "  void __aioS;\n}\nfor (const __aioLv of ['warn', 'error']) {\n  const __aioOut = (x) => process.stderr.write(x + '\\\\n');",
     test: "tests/electron-renderer-log.test.ts",
+    // Needs node_modules/electron (ELECTRON_RUN_AS_NODE). Asserts the
+    // CONSEQUENCE of the dead-pipe handlers: with them removed the process
+    // spins uncaughtException → app.quit() and never writes its report.
+    // The tagging unit test alone still passes under this mutant (tags are
+    // applied before __aioOut), so it cannot guard this invariant.
     filter:
       "shells: a dead stderr pipe never loops EPIPE → uncaughtException → console.error",
   },
@@ -10907,8 +10914,10 @@ export const LEDGER: readonly Mutation[] = [
     find: '    : sh.name === "busybox"',
     replace: '    : sh.name === "never"',
     test: "tests/relaunch-closes-inherited-fds.test.ts",
+    // The via-busybox runtime twin needs /usr/bin/busybox; this unit asserts
+    // relaunchCommand picks CLOSE_FDS_EXEC_ALL when the shell name is busybox.
     filter:
-      "relaunch: the successor does not inherit the predecessor's descriptors (an AppImage keep-alive pipe) — via busybox",
+      "relaunch: bash first, then /bin/sh; started directly off Linux or with no shell",
   },
   {
     what:

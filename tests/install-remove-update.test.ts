@@ -24,6 +24,7 @@ import {
   restoreArtifact,
   swapArtifact,
   versionedInstall,
+  versionedTargetMatches,
 } from "../src/server/updates-apply.ts";
 import { installedAppPaths, installRoot } from "../src/server/app-dirs.ts";
 import { cmdInstalled, installedFootprint } from "../src/am/am-cmd-remove.ts";
@@ -70,6 +71,42 @@ Deno.test("install layout: the stable name is recognised as a versioned install"
   } finally {
     await Deno.remove(root, { recursive: true });
   }
+});
+
+Deno.test("install layout: the SAME containment holds with the Windows separator", () => {
+  // `target` comes from `Deno.realPath` and `versions` from `dirname`/`join`,
+  // so both use `\` on Windows. A hardcoded `/` made the check false there:
+  // `versionedInstall` answered null, `swapFlat` replaced the stable-name
+  // symlink with a file on the first update, and the version store was gone.
+  const versions = "C:\\Users\\me\\app\\myapp\\versions";
+  const link = "myapp.exe";
+  const target = `${versions}\\1.2.345\\${link}`;
+  assert(
+    versionedTargetMatches(target, versions, link, "\\"),
+    "the Windows-shaped versioned install must be recognised",
+  );
+  assert(
+    !versionedTargetMatches(target, versions, link, "/"),
+    "the old hardcoded separator is the bug this pins",
+  );
+  // A sibling file that is NOT inside versions/ is not this layout.
+  assert(
+    !versionedTargetMatches(
+      "C:\\Users\\me\\app\\myapp\\other\\myapp.exe",
+      versions,
+      link,
+      "\\",
+    ),
+  );
+  // …and the POSIX shape still holds.
+  assert(
+    versionedTargetMatches(
+      "/home/me/app/myapp/versions/1.2.345/myapp.AppImage",
+      "/home/me/app/myapp/versions",
+      "myapp.AppImage",
+      "/",
+    ),
+  );
 });
 
 Deno.test("update: adds a version and re-points the link — never flattens it", async () => {

@@ -5,6 +5,7 @@
 
 import { readDenoJson } from "../server/deno-json.ts";
 import { KILL_POLL_MS } from "../server/single-instance-lock.ts";
+import { windowsCommandLine } from "../server/no-console.ts";
 import { basename, dirname, join, resolve } from "@std/path";
 import { cwdIsProject, isUnder, projectRoot } from "./am-project.ts";
 import {
@@ -492,9 +493,18 @@ export function detachedSpawnSpec(
 ): { cmd: string; args: string[] } {
   if (os === "windows") {
     const q = (v: string) => "'" + v.replace(/'/g, "''") + "'";
-    const ps = `$p = Start-Process -FilePath ${q(denoBin)} -ArgumentList @(${
-      denoArgs.map(q).join(",")
-    }) -RedirectStandardOutput ${q(logFile)} -RedirectStandardError ${
+    // ONE pre-quoted command line, not an ARRAY of values. `Start-Process`
+    // joins `-ArgumentList` elements into a single string with spaces and does
+    // NOT quote them (the single quotes above are PowerShell syntax and are
+    // gone by then), so an argument containing a space — the entry under
+    // `C:\Users\John Doe\…`, a `--title=My App` — was split into several by
+    // the child: the app never booted, and the pid am recorded belonged to a
+    // process that exec'd nothing. `windowsCommandLine` is the same MSVC
+    // quoting the update swap already uses.
+    const argLine = windowsCommandLine(denoArgs);
+    const ps = `$p = Start-Process -FilePath ${q(denoBin)} -ArgumentList ${
+      q(argLine)
+    } -RedirectStandardOutput ${q(logFile)} -RedirectStandardError ${
       q(logFile + ".err")
     } -PassThru -WindowStyle Hidden; Write-Output $p.Id`;
     return {
@@ -1364,6 +1374,7 @@ async function awaitStarted(o: {
       realPort,
       updated?.socketPath,
       updated?.cdpPort,
+      servesTls(updated),
     );
     out(mode === "pretty" ? done.line : done.doc, mode);
   } else if (!isProcessAlive(pid)) {
@@ -1393,6 +1404,7 @@ async function awaitStarted(o: {
         peer.port,
         peer.socketPath,
         peer.cdpPort,
+        servesTls(peer),
       );
       out(mode === "pretty" ? done.line : done.doc, mode);
       return;
@@ -1512,10 +1524,29 @@ async function doorAnswers(port: number): Promise<boolean> {
 /** How long {@linkcode racingPeer} waits at least for the winner to serve. */
 const PEER_GRACE_MS = 5_000;
 
+/** The URL this machine opens for an app that bound `port`, or undefined when
+ *  it bound none (a socket-only desktop app has no URL, its door is the
+ *  socket). `tls` picks the scheme: an app serving TLS answers only on https.
+ *  `localhost`, never the advertise host — this is the link for the person at
+ *  THIS console to click. Pure. */
+export function localAppUrl(port: number, tls = false): string | undefined {
+  return port > 0 ? `${tls ? "https" : "http"}://localhost:${port}` : undefined;
+}
+
+/** Does this instance serve TLS? A `trojanPort` is the plain-HTTP control
+ *  port TLS leaves beside the listener; `discovery.tls` is set on an exposed
+ *  boot. Either says https. Pure. */
+export function servesTls(
+  lock?: { trojanPort?: number; discovery?: { tls: boolean } } | null,
+): boolean {
+  return lock?.trojanPort !== undefined || lock?.discovery?.tls === true;
+}
+
 /** `am start`'s verdict for a child that is up — the pretty line and the
  *  JSON document. A SOCKET-ONLY app (the desktop shape) bound no port, and
  *  "port 0" named a door that does not exist: its door is the socket, named
- *  as `am status` names it (`transport uds (<path>)`). Pure. */
+ *  as `am status` names it (`transport uds (<path>)`). A TCP app also names
+ *  the URL to click — the port alone left the reader typing it by hand. Pure. */
 export function startedReport(
   appId: string,
   pid: number,
@@ -1523,22 +1554,28 @@ export function startedReport(
   socketPath?: string,
   /** The DevTools port of a `--cdp` launch: the pretty line then names
    *  `am shot`, the verb for it — a field report scripted screenshots over raw
-   *  CDP and hunted the port with `ss`. The JSON shape is unchanged. */
+   *  CDP and hunted the port with `ss`. */
   cdpPort?: number,
+  /** Whether the app serves TLS — the URL's scheme. */
+  tls = false,
 ): { line: string; doc: Record<string, unknown> } {
   const door = socketPath && !port
     ? `socket ${socketPath}`
     : `port ${port}${socketPath ? `, transport uds (${socketPath})` : ""}`;
+  const url = localAppUrl(port, tls);
   const cdp = cdpPort
     ? `\ncdp 127.0.0.1:${cdpPort} — screenshots: am shot (not raw CDP)`
     : "";
   return {
-    line: `started ${appId} (pid ${pid}, ${door})${cdp}`,
+    line: `started ${appId} (pid ${pid}, ${door}${
+      url ? `, ${url}` : ""
+    })${cdp}`,
     doc: {
       appId,
       pid,
       port,
       status: "started",
+      ...(url ? { url } : {}),
       ...(socketPath ? { transport: "uds", socketPath } : {}),
     },
   };
@@ -3077,6 +3114,7 @@ export async function cmdStatus(
       };
       if (mode === "pretty") {
         const uds = pf.socketPath ? `, transport uds (${pf.socketPath})` : "";
+        const url = localAppUrl(port, servesTls(pf));
         // A cell JSON refuses is a cell that is NOT reaching disk, on every
         // window, forever. `am status` used to carry it as `cells: {todo: -1}`
         // — a number read as a size, next to the one that matters.
@@ -3086,18 +3124,22 @@ export async function cmdStatus(
           }: state cannot be serialized — NOT being persisted. See \`am logs error\`.`
           : "";
         out(
-          `${appId}: started (pid ${pf.pid}, port ${port}, uptime ${
+          `${appId}: started (pid ${pf.pid}, port ${port}${
+            url ? `, ${url}` : ""
+          }, uptime ${
             formatUptime(m.uptime)
           }, ${m.connections} connections${uds})${bad}\n${STATUS_TIP}`,
           mode,
         );
       } else {
+        const url = localAppUrl(port, servesTls(pf));
         out({
           appId,
           status: "started",
           pid: pf.pid,
           port,
           transport,
+          ...(url ? { url } : {}),
           ...(pf.socketPath ? { socketPath: pf.socketPath } : {}),
           ...m,
         }, mode);
@@ -3105,17 +3147,22 @@ export async function cmdStatus(
     } else {
       if (mode === "pretty") {
         const uds = pf.socketPath ? `, transport uds (${pf.socketPath})` : "";
+        const url = localAppUrl(port, servesTls(pf));
         out(
-          `${appId}: started (pid ${pf.pid}, port ${port}${uds})\n${STATUS_TIP}`,
+          `${appId}: started (pid ${pf.pid}, port ${port}${
+            url ? `, ${url}` : ""
+          }${uds})\n${STATUS_TIP}`,
           mode,
         );
       } else {
+        const url = localAppUrl(port, servesTls(pf));
         out({
           appId,
           status: "started",
           pid: pf.pid,
           port,
           transport,
+          ...(url ? { url } : {}),
           ...(pf.socketPath ? { socketPath: pf.socketPath } : {}),
         }, mode);
       }

@@ -170,7 +170,11 @@ export const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
   feedback: ["--create"],
   // Meta
   add: [],
-  pin: ["--latest", "--major", "--aio"],
+  // `--no-download` skips the Electron runtime fetch when offline; it is
+  // documented (docs/clients/electron.md, the 1.0.4→1.0.5 guide) and read by
+  // `cmdPin`, but was missing here — so the central flag gate refused the one
+  // command that uses it, before it ran.
+  pin: ["--latest", "--major", "--aio", "--no-download"],
   theme: [],
   link: ["--aio"],
   // The shared Electron runtime cache. `--yes` is the ONLY flag that

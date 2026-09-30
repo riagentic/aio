@@ -720,7 +720,7 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
   // forked for good with nothing said anywhere.
   //
   // The engine cannot make such a method deterministic (the value would have to
-  // travel with the op, which is a wire change — future/v2.md). What it can do
+  // travel with the op, which is a wire change — untracked/v2.md). What it can do
   // is SEE it: a pure reducer run twice on one input must return one answer,
   // so a second run that disagrees is proof. Then it says so, once per method,
   // at error level with the fix, and asks the server for the cell's real state
@@ -1535,7 +1535,7 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       }));
     };
     for (const [cell, patch] of Object.entries(response.patch ?? {})) {
-      if (!(cell in deps.cells)) continue;
+      if (!Object.hasOwn(deps.cells, cell)) continue;
       if (
         !patch || typeof patch !== "object" || typeof patch.ts !== "number" ||
         !Number.isFinite(patch.ts) || !Array.isArray(patch.set) ||
@@ -1552,7 +1552,7 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       fold(cell, { patch }, patch.ts);
     }
     for (const [cell, state] of Object.entries(response.snapshot ?? {})) {
-      if (!(cell in deps.cells)) continue;
+      if (!Object.hasOwn(deps.cells, cell)) continue;
       const ts = response.lastServerTs?.[cell];
       if (
         typeof ts !== "number" || !Number.isFinite(ts) || !state ||
@@ -2332,7 +2332,10 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     },
 
     isSyncCell(cellName) {
-      return cellName in deps.cells;
+      // OWN keys: `cellName in deps.cells` is true for `toString`/`valueOf`/…
+      // with no such sync cell declared, which would fold a remote op for a
+      // cell this engine does not own.
+      return Object.hasOwn(deps.cells, cellName);
     },
     dispose() {
       _clearCatchupTimer();

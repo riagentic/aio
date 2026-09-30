@@ -110,7 +110,10 @@ export function _checkStateIntegrity(
   }
   const missing: string[] = [];
   for (const k of _initialShapeKeys) {
-    if (!(k in obj)) {
+    // OWN keys: `k in obj` is true for `toString`/`valueOf`/… inherited from
+    // Object.prototype, so a top-level key of that name was never reported
+    // missing and the drift tripwire was blind for it.
+    if (!Object.hasOwn(obj, k)) {
       missing.push(k);
       _diagEmit({
         type: "state-shape-drift",

@@ -953,13 +953,16 @@ export async function assetIncludes(
   // 1) auto-discover every .wasm (bounded walk, skipping deps/build/VCS dirs).
   const walk = async (dir: string, depth: number): Promise<void> => {
     if (depth > 10) return;
-    let entries: AsyncIterable<Deno.DirEntry>;
+    // The guard wraps the ITERATION: `Deno.readDir` is lazy, so an unreadable
+    // directory surfaced from the first `for await`, not the assignment, and
+    // the `catch` below was dead — a vanished subdir crashed the walk.
+    let entries: Deno.DirEntry[];
     try {
-      entries = Deno.readDir(dir);
+      entries = await Array.fromAsync(Deno.readDir(dir));
     } catch {
       return;
     }
-    for await (const e of entries) {
+    for (const e of entries) {
       if (e.isDirectory) {
         if (ASSET_SKIP_DIRS.has(e.name) || e.name.startsWith(".")) continue;
         await walk(join(dir, e.name), depth + 1);

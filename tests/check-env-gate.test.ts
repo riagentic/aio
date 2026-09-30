@@ -63,6 +63,33 @@ Deno.test("check:env does not invent a read out of prose", () => {
   assertEquals(envNamesIn(`return Deno.env.get(name);`), []);
 });
 
+Deno.test("check:env sees an identifier read through a WRAPPER", () => {
+  // `env(CHILD_ENV)` is as much a read as `Deno.env.get(CHILD_ENV)`, but only
+  // the accessor form used to be resolved — so `AIO_DEV_SUPERVISED` and
+  // `AIO_NO_DEV_RESTART` were read by src/ while the page that promises "every
+  // AIO_* variable" omitted them and the gate reported "all named".
+  const consts = envConstants(
+    new Map([
+      [
+        "dev.ts",
+        `const CHILD_ENV = "AIO_DEV_SUPERVISED";\nconst OPT_OUT_ENV = "AIO_NO_DEV_RESTART";`,
+      ],
+    ]),
+  );
+  assertEquals(
+    envNamesIn(
+      `function env(n: string) { return Deno.env.get(n); }\n` +
+        `export const isChild = () => env(CHILD_ENV) === "1";\n` +
+        `if (env(OPT_OUT_ENV) === "1") return;`,
+      consts,
+    ),
+    ["AIO_DEV_SUPERVISED", "AIO_NO_DEV_RESTART"],
+  );
+  // An identifier that resolves to NOTHING stays invisible — it is a dynamic
+  // read whose callers pass literals, which rule (a) catches.
+  assertEquals(envNamesIn("env(someName)", consts), []);
+});
+
 Deno.test("check:env requires THE page, not any page", () => {
   const vars = new Map([["AIO_DISCOVERY_PORT", ["src/server/discovery.ts"]]]);
   assertEquals(

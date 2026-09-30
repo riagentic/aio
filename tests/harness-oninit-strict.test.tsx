@@ -212,7 +212,12 @@ Deno.test("bootCells: an async onInit that rejects after the boot still fails th
 // for un-awaited CALLS, and an `onInit` is not a call: `await using h` tore the
 // boot down while it was still awaiting, it rejected into a ledger nobody read
 // again, and the test passed beside the INIT_ERROR line.
-const lateInit = (id: string): Any =>
+//
+// A fixed `setTimeout` raced testUI's own pre-return `settle()` under load —
+// the timer fired mid-settle, `raise()` threw inside `testUI()`, and the
+// mutation baseline saw ALREADY RED. A deferred the test releases only after
+// dispose/teardown has started waiting keeps onInit genuinely pending.
+const lateInit = (id: string, hold: Promise<void>): Any =>
   cell(id, {
     state: { n: 0 },
     methods: {
@@ -221,18 +226,27 @@ const lateInit = (id: string): Any =>
       },
     },
     async onInit() {
-      await new Promise((r) => setTimeout(r, 40));
+      await hold;
       throw new Error("setup failed after the test body");
     },
   });
 
 Deno.test("bootCells: an async onInit still pending at `await using` teardown fails the test", async () => {
-  const c = lateInit("init_boot_teardown_reject");
+  let release!: () => void;
+  const hold = new Promise<void>((r) => {
+    release = r;
+  });
+  const c = lateInit("init_boot_teardown_reject", hold);
   const e = await assertRejects(
     () =>
       quiet(async () => {
         await using h = await bootCells([c]);
         await c.warm();
+        // Release only after teardown has had time to either wait on the
+        // tracked onInit (with the invariant) or finish without it. A
+        // microtask release still landed while the ledger was live, so
+        // disabling `track` still looked red.
+        setTimeout(release, 30);
         void h;
       }),
     Error,
@@ -244,9 +258,20 @@ Deno.test("bootCells: an async onInit still pending at `await using` teardown fa
 });
 
 Deno.test("testUI: an async onInit still pending at dispose() fails the test", async () => {
-  const c = lateInit("init_ui_teardown_reject");
+  let release!: () => void;
+  const hold = new Promise<void>((r) => {
+    release = r;
+  });
+  const c = lateInit("init_ui_teardown_reject", hold);
   const App = () => <div>{String(c.n)}</div>;
+  // onInit is parked on `hold` for the whole mount, so the pre-return
+  // settle cannot raise a mid-settle rejection (the setTimeout flake).
   const ui = await quiet(() => testUI(App as never, { cells: [c] }));
-  const e = await assertRejects(() => quiet(() => ui.dispose()), Error);
+  const disposeP = quiet(() => ui.dispose());
+  // With `track`, dispose is still draining at 30ms and sees the rejection.
+  // Without it, dispose already finished and assertRejects fails the mutant.
+  await new Promise((r) => setTimeout(r, 30));
+  release();
+  const e = await assertRejects(() => disposeP, Error);
   assert(e.message.includes("init_ui_teardown_reject onInit threw"), e.message);
 });

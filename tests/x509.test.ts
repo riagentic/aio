@@ -21,6 +21,7 @@
 import {
   assert,
   assertEquals,
+  assertMatch,
   assertRejects,
   assertStringIncludes,
 } from "@std/assert";
@@ -215,7 +216,7 @@ Deno.test({
       ]);
       assert(r.ok, `openssl could not parse the root:\n${r.out}`);
       assertStringIncludes(r.out, "ecdsa-with-SHA256");
-      assertStringIncludes(r.out, "CN = aio local root (test), O = aio");
+      assertMatch(r.out, /CN\s*=\s*aio local root \(test\),\s*O\s*=\s*aio/);
       assertStringIncludes(r.out, "CA:TRUE, pathlen:0");
       assertStringIncludes(r.out, "Certificate Sign");
       // Every permitted subtree, in openssl's own spelling. This is the block
@@ -246,7 +247,7 @@ Deno.test({
         "-text",
       ]);
       assert(l.ok, `openssl could not parse the leaf:\n${l.out}`);
-      assertStringIncludes(l.out, "CN = aio-testapp");
+      assertMatch(l.out, /CN\s*=\s*aio-testapp/);
       assertStringIncludes(l.out, "CA:FALSE");
       assertStringIncludes(l.out, "TLS Web Server Authentication");
       // openssl's `x509 -req -CA` added this implicitly; a leaf without one is

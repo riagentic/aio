@@ -24,7 +24,7 @@
 //   deno task clean:tmp              also SIGTERM them, remove ownerless
 //                                    /tmp/aio-* dirs, stale lock dirs and
 //                                    stale watcher sentinels
-import { basename, join } from "@std/path";
+import { basename, join, SEPARATOR } from "@std/path";
 import {
   foreignOwnerRefusal,
   isLockOwnerAlive,
@@ -119,7 +119,9 @@ function tempRoots(): string[] {
   const out = ["/tmp", "/var/tmp"];
   for (const v of ["TMPDIR", "TEMP", "TMP"]) {
     const p = Deno.env.get(v);
-    if (p) out.push(p.replace(/\/+$/, ""));
+    // Strip EITHER separator: a Windows `%TEMP%` may end in `\`, and the
+    // containment test below appends the platform separator.
+    if (p) out.push(p.replace(/[/\\]+$/, ""));
   }
   const override = Deno.env.get("AIO_TEST_ROOT")?.trim();
   const home = (Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE") ?? "")
@@ -141,7 +143,16 @@ const PARENT_GRACE_MS = 4 * 60 * 60_000;
 function tempRooted(lock: { cwd?: string; home?: string } | null): boolean {
   for (const p of [lock?.cwd, lock?.home]) {
     if (typeof p !== "string" || p === "") continue;
-    if (TEMP_ROOTS.some((r) => p === r || p.startsWith(`${r}/`))) return true;
+    // SEPARATOR, not "/": a Windows temp root is `C:\…\Temp`, so a hardcoded
+    // `/` prefix never matched and shared-`%TEMP%` orphans were invisible to
+    // the clean-up gate. Same rule as `paths.ts` / `app-dirs.ts`.
+    if (
+      TEMP_ROOTS.some((r) =>
+        p === r || p.startsWith(r.endsWith(SEPARATOR) ? r : r + SEPARATOR)
+      )
+    ) {
+      return true;
+    }
   }
   return false;
 }

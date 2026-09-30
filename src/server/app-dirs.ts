@@ -28,6 +28,7 @@ import {
   join,
   relative,
   resolve,
+  SEPARATOR,
 } from "@std/path";
 import { sweepStaleTmps, uuidTmpBefore } from "../diagnostics/tmp-sweep.ts";
 import { appImageOwner, homedir } from "./paths.ts";
@@ -1083,7 +1084,11 @@ export function resolveShare(
   });
   const realPath = probe.realPath ?? ((p: string) => Deno.realPathSync(p));
   const repo = realPath(probe.repoRoot ?? repoRootOf(root));
-  const repoPfx = repo.endsWith("/") ? repo : repo + "/";
+  // SEPARATOR, not "/": `resolve`/`realPathSync` answer with `\` on Windows,
+  // and a `/`-suffixed prefix made `C:\repo\shared`.startsWith(`C:\repo/`)
+  // false — every sub-directory share was refused on Windows. Same rule as
+  // paths.ts.
+  const repoPfx = repo.endsWith(SEPARATOR) ? repo : repo + SEPARATOR;
   const out: ShareRoot[] = [];
   for (const declared of raw as string[]) {
     const abs = resolve(root, declared);

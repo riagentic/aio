@@ -1123,7 +1123,7 @@ export function placeLoadedTables(
 ): Record<string, unknown> {
   let next = state;
   for (const b of bindings) {
-    if (b.path.length === 0 || !(b.table in loaded)) continue;
+    if (b.path.length === 0 || !Object.hasOwn(loaded, b.table)) continue;
     const rows = loaded[b.table]!;
     if (rows.length === 0 && !synced?.has(b.table)) {
       const current = readPath(next, b.path);
@@ -1198,7 +1198,7 @@ export function omitPaths(
   for (const path of paths) {
     if (path.length === 0) continue;
     const [head, ...rest] = path as [string, ...string[]];
-    if (!(head in out)) continue;
+    if (!Object.hasOwn(out, head)) continue;
     if (rest.length === 0) {
       out = { ...out };
       delete out[head];
@@ -2522,7 +2522,7 @@ export async function bootStorage<S>(
         // schema-drop semantics inside declared cells are unchanged.
         for (const k of Object.keys(migrated)) {
           if (
-            !(k in (initialState as Record<string, unknown>)) &&
+            !Object.hasOwn(initialState as Record<string, unknown>, k) &&
             !k.startsWith("__")
           ) {
             (state as Record<string, unknown>)[k] = migrated[k];
@@ -2665,7 +2665,7 @@ export async function bootStorage<S>(
           shapedCells.size
             ? {
               schema: Object.fromEntries(
-                [...shapedCells].filter((c) => c in schema).map((
+                [...shapedCells].filter((c) => Object.hasOwn(schema, c)).map((
                   c,
                 ) => [c, schema[c]]),
               ),
@@ -2698,7 +2698,7 @@ export async function bootStorage<S>(
     for (const r of report) {
       if (r.outcome !== "downgrade") continue;
       const key = downgradeParkKey(r.cell);
-      if (key in persistedSnapshot) continue;
+      if (Object.hasOwn(persistedSnapshot, key)) continue;
       const slice = persistedSnapshot[r.cell];
       if (slice === undefined) continue;
       parkedSlices[key] = slice;
@@ -2744,7 +2744,7 @@ export async function bootStorage<S>(
         ? await readStoredShapes(kvDb, appId, log)
         : {};
       const selfWritten = allStructural.filter((d) =>
-        d.cell in schema &&
+        Object.hasOwn(schema, d.cell) &&
         storedShapes[d.cell] === shapeFingerprint(schema[d.cell])
       );
       const structural = allStructural.filter((d) => !selfWritten.includes(d));
@@ -2896,7 +2896,10 @@ export async function bootStorage<S>(
         continue;
       }
       if (declared.has(k)) continue;
-      if (k in s) {
+      // OWN keys: `k in s` is true for every Object.prototype name, so an
+      // undeclared stored cell named `toString` would park the native
+      // function and warn about "preserving" it. See scripts/check-proto-in.ts.
+      if (Object.hasOwn(s, k)) {
         orphanCells[k] = s[k];
         delete s[k];
         log.warn(
@@ -3073,7 +3076,7 @@ export async function bootStorage<S>(
       const i = e.type.indexOf(":");
       const cells = e.only?.length ? e.only : i > 0 ? [e.type.slice(0, i)] : [];
       for (const c of cells) {
-        if (!(c in declaredCells) && !(c in held)) {
+        if (!Object.hasOwn(declaredCells, c) && !Object.hasOwn(held, c)) {
           held[c] = journal.watermark();
         }
       }
@@ -3084,9 +3087,11 @@ export async function bootStorage<S>(
         await kvDb!.set(journalHeldCellsKey(appId), held);
       }
       journal.trackCells(held);
-      heldRelease = Object.keys(held).filter((c) => c in declaredCells);
+      heldRelease = Object.keys(held).filter((c) =>
+        Object.hasOwn(declaredCells, c)
+      );
       for (const c of Object.keys(held)) {
-        if (!(c in declaredCells)) journalHeld.add(c);
+        if (!Object.hasOwn(declaredCells, c)) journalHeld.add(c);
       }
       heldAfterRelease = Object.fromEntries(
         Object.entries(held).filter(([c]) => !heldRelease.includes(c)),
@@ -3479,7 +3484,7 @@ export function detectNewFields(
       // exactly the unbounded report the cap exists to prevent.
       if (out.length >= MAX_DRIFT) return;
       const p = path ? `${path}.${k}` : k;
-      if (!(k in stor)) {
+      if (!Object.hasOwn(stor, k)) {
         out.push({ cell, path: p, declaredType: kindOf(dv) });
         // Do not descend into a field that is wholly new: "cfg.retry arrived"
         // is the fact, and listing its five sub-keys as five more arrivals is
@@ -3579,7 +3584,7 @@ export function restoreDropWatcher(
     if (!_isObj(doc)) return;
     const changed: Record<string, unknown> = {};
     for (const [cell, slice] of Object.entries(doc)) {
-      if (skip.has(cell) || !(cell in initial)) continue;
+      if (skip.has(cell) || !Object.hasOwn(initial, cell)) continue;
       if (lastSlice.get(cell) === slice) continue;
       lastSlice.set(cell, slice);
       changed[cell] = slice;

@@ -429,15 +429,26 @@ export function findCellDefinitions(
 }
 
 /** `const timer = cell(…)` … `export { timer }` — the local name bound at
- *  `at`, when it is exported by a later `export { … }`. */
-function exportedBindingFor(text: string, at: number): string | undefined {
+ *  `at`, when it is exported by a later `export { … }`. Exported for tests
+ *  (`@internal` — not public surface). */
+export function exportedBindingFor(
+  text: string,
+  at: number,
+): string | undefined {
   const before = text.slice(Math.max(0, at - 200), at);
   const m = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*$/.exec(
     before,
   );
   if (!m) return undefined;
   const local = m[1]!;
-  return new RegExp(`export\\s*\\{[^}]*\\b${local}\\b`).test(text)
+  // A JS identifier may contain `$`, which `\b` does not treat as a word
+  // character (so `\bcells$\b` never matches `{ cells$ }`) and which is regex
+  // end-anchor unescaped. Lookarounds for the identifier boundary, and escape
+  // the identifier's one regex-special character — otherwise `am record` fell
+  // back to the cell name as the import binding and generated a test that
+  // cannot compile.
+  const esc = local.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`export\\s*\\{[^}]*?(?<![\\w$])${esc}(?![\\w$])`).test(text)
     ? local
     : undefined;
 }

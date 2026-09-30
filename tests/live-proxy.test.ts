@@ -89,6 +89,24 @@ Deno.test("liveProxy: 'in' operator returns false for missing key", () => {
   assertEquals("missing" in proxy, false);
 });
 
+Deno.test("liveProxy: 'in' does not answer for Object.prototype names", () => {
+  // `prop in fresh` is true for every Object.prototype name, so
+  // `"toString" in s` was true on a cell with no such field — the same class
+  // the useAio state-proxy pin closed.
+  const { proxy } = makeProxy({ name: "test" });
+  assertEquals("toString" in proxy, false);
+  assertEquals("constructor" in proxy, false);
+  assertEquals("valueOf" in proxy, false);
+  assertEquals("hasOwnProperty" in proxy, false);
+  assertEquals("name" in proxy, true);
+  // An OWN prototype-named field still answers true.
+  const { proxy: owned } = makeProxy(
+    { toString: "USER" } as Record<string, unknown>,
+  );
+  assertEquals("toString" in owned, true);
+  assertEquals(Object.keys(owned), ["toString"]);
+});
+
 // ── getOwnPropertyDescriptor ──────────────────────────────────────
 
 Deno.test("liveProxy: Object.entries works", () => {

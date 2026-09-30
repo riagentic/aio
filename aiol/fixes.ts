@@ -4,6 +4,7 @@
 
 import { basename, join, resolve } from "@std/path";
 import {
+  argumentSpan,
   codeMask,
   codeMatches,
   codeText,
@@ -21,6 +22,36 @@ const SERVER_ONLY_RE = new RegExp(
 import type { DenoJsonConfig } from "./types.ts";
 
 // ── Helpers ─────────────────────────────────────────────────────────
+
+/** `src.replace(re, …)` for matches that START in CODE. A match inside a
+ *  string body, a template body, a regex body or a comment is left
+ *  byte-for-byte — a `--safe-fix` must never edit a program's own text or
+ *  prose. `re` must be global; `repl` receives the match and returns its
+ *  replacement. Pure.
+ *
+ *  The project's standing rule is that a source rewrite consults `codeMask`;
+ *  four fixes did not, so a `useCell(...).state.x` inside a string, a
+ *  `backoff:` inside a comment, a `deps: […], fn: …` inside a doc string, or a
+ *  dynamic-`import("aio")` inside a template was rewritten. This is the shared
+ *  guard. */
+export function replaceCode(
+  src: string,
+  re: RegExp,
+  repl: (m: RegExpMatchArray) => string,
+): string {
+  const mask = codeMask(src);
+  let out = "";
+  let cursor = 0;
+  let hit = false;
+  for (const m of src.matchAll(re)) {
+    const at = m.index!;
+    if (mask[at] !== 1) continue; // string / template / regex / comment
+    out += src.slice(cursor, at) + repl(m);
+    cursor = at + m[0].length;
+    hit = true;
+  }
+  return hit ? out + src.slice(cursor) : src;
+}
 
 /** What to do with ONE `import {…} from "x"` statement. Every field is
  *  optional; an edit that changes nothing leaves the statement byte-for-byte
@@ -357,27 +388,22 @@ async function insertAppIdIntoRun(
 export async function fixRenameTargetToClient(
   projectDir: string,
 ): Promise<boolean> {
-  const path = join(projectDir, "deno.json");
-  let text: string;
-  try {
-    text = await Deno.readTextFile(path);
-  } catch {
-    return false;
+  // The file the PROJECT uses — `deno.json` OR `deno.jsonc` (`readConfig`), the
+  // same reader the rule uses. Reading only `deno.json` made the reported
+  // `[fixable]` a lie on a jsonc project: `--safe-fix` reported 0 applied and
+  // the finding returned on every run.
+  const found = await readConfig(projectDir);
+  if (!found) return false;
+  const { path, config: cfg } = found;
+  if (typeof cfg.target !== "string") return false;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(cfg)) {
+    if (k === "target") {
+      if (!("client" in cfg)) out.client = v; // rename in place
+    } else out[k] = v;
   }
-  try {
-    const cfg = JSON.parse(text) as DenoJsonConfig;
-    if (typeof cfg.target !== "string") return false;
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(cfg)) {
-      if (k === "target") {
-        if (!("client" in cfg)) out.client = v; // rename in place
-      } else out[k] = v;
-    }
-    await Deno.writeTextFile(path, JSON.stringify(out, null, 2) + "\n");
-    return true;
-  } catch {
-    return false;
-  }
+  await Deno.writeTextFile(path, JSON.stringify(out, null, 2) + "\n");
+  return true;
 }
 
 /** Add nodeModulesDir: "auto" */
@@ -566,6 +592,33 @@ export function fixRemoveCreateRootImport(
  *  `call({ retry: { timeout: 30 } })` the user's own data matched, and the fix
  *  rewrote it — a silent meaning change inside a function whose contract is
  *  "no behaviour change". Pure. */
+/** Is the `call` whose parameter list opens at `paren` a METHOD DEFINITION
+ *  (`call(…) { … }`) rather than an invocation? A shorthand method in an
+ *  object/class is a property, never aio's bare (imported) `call` — and
+ *  rewriting the option key inside its destructured parameters renames a
+ *  binding the body still reads (`call({ timeout: 1 }) { return timeout; }`
+ *  became `timeoutMs` while the body kept `timeout`, a ReferenceError). */
+function _isCallMethodDefinition(src: string, paren: number): boolean {
+  const mask = codeMask(src);
+  let depth = 0;
+  for (let i = paren; i < src.length; i++) {
+    if (mask[i] !== 1) continue;
+    const ch = src[i]!;
+    if (ch === "(" || ch === "{" || ch === "[") depth++;
+    else if (ch === ")" || ch === "}" || ch === "]") {
+      if (--depth === 0) {
+        for (let j = i + 1; j < src.length; j++) {
+          if (mask[j] !== 1) continue; // comment / string / regex body
+          if (/\s/.test(src[j]!)) continue; // layout
+          return src[j] === "{"; // `) {` is a body, not a call
+        }
+        return false;
+      }
+    }
+  }
+  return false;
+}
+
 export function callTimeoutSites(src: string): number[] {
   const out: number[] = [];
   // A MEMBER call is not aio's `call`: `fn.call({ timeout: 5 })` is
@@ -574,6 +627,11 @@ export function callTimeoutSites(src: string): number[] {
   // (error severity) and rewritten to `timeoutMs` by --safe-fix, changing what
   // the code passes. aio's `call` is a bare import, never a property.
   for (const m of codeMatches(src, /(?<!\.\s*)\bcall\s*\(\s*\{/g)) {
+    const paren = src.indexOf("(", m.index!);
+    // A METHOD named `call` (`{ call({ timeout: 1 }) {…} }`, `class C { call… }`,
+    // `function call(…)`) is the same false positive by a different spelling:
+    // the lookbehind only excludes `.call`, and this one is preceded by `{`/`,`.
+    if (paren !== -1 && _isCallMethodDefinition(src, paren)) continue;
     const open = m.index! + m[0].length - 1;
     out.push(...topLevelKeyOffsets(src, open, "timeout"));
   }
@@ -1341,41 +1399,59 @@ export function pruneOrphanedEffectTypeImports(src: string): string {
   return out;
 }
 
+/** Offsets of every `backoff` key that is a TOP-LEVEL option of a
+ *  `schedule.poll(id, attempt, action, opts)` call's opts object — the FOURTH
+ *  argument, located by `argumentSpan`. THE decider for the deprecated-key
+ *  rule and its fix alike.
+ *
+ *  Scoping used to be "a flat `{…}` holding `every:` and `backoff:`", picked by
+ *  regex. An ACTION PAYLOAD carrying both fields matched it, so the rule
+ *  reported code that is not the option and `--safe-fix` renamed the payload's
+ *  own field — a silent behaviour change from a "no behaviour change" fix.
+ *  Pure. */
+export function pollBackoffSites(src: string): number[] {
+  const out: number[] = [];
+  for (const m of codeMatches(src, /\bschedule\.poll\s*\(/g)) {
+    const open = src.indexOf("(", m.index!);
+    if (open === -1) continue;
+    // The opts literal is argument 2 or 3 (0-based) — the arg-order migration
+    // moved it from THIRD to FOURTH — and it is an object literal, never a call
+    // that merely contains one. The ACTION is the object carrying a top-level
+    // `type:` key, so an action payload is never taken for the opts.
+    for (const index of [2, 3]) {
+      const span = argumentSpan(src, open, index);
+      if (!span) continue;
+      const text = src.slice(span[0], span[1]);
+      const brace = span[0] + (text.length - text.trimStart().length);
+      if (src[brace] !== "{") continue;
+      if (
+        ["type", '"type"', "'type'"].some((k) =>
+          topLevelKeyOffsets(src, brace, k).length > 0
+        )
+      ) {
+        continue; // the action, not the options
+      }
+      out.push(...topLevelKeyOffsets(src, brace, "backoff"));
+    }
+  }
+  return out;
+}
+
 /** `schedule.poll(... { backoff: n ... })` → `factor: n` (alpha52 key rename;
- *  the old key keeps working with a hint). Scoped to the opts object of a
- *  `schedule.poll(` call. */
+ *  the old key keeps working with a hint). Scoped to the OPTS object of a
+ *  `schedule.poll(` call — its fourth argument, never an action payload. */
 export function fixPollBackoffKey(filePath: string): () => Promise<boolean> {
   return async () => {
     try {
       const src = await Deno.readTextFile(filePath);
-      let changed = false;
-      let out = "";
-      let cursor = 0;
-      const re = /\bschedule\.poll\s*\(/g;
-      let m: RegExpExecArray | null;
-      while ((m = re.exec(src)) !== null) {
-        const open = m.index + m[0].length - 1;
-        const end = balancedEnd(src, open);
-        if (end === -1) continue;
-        const call = src.slice(m.index, end + 1);
-        // Rename EVERY `backoff:` key, but only inside the OPTS literal — the
-        // one carrying `every:` (an action payload may legitimately have a
-        // `backoff` field of its own).
-        const patched = call.replace(
-          /\{[^{}]*\}/g,
-          (lit) =>
-            /\bevery\s*:/.test(lit)
-              ? lit.replace(/\bbackoff(\s*:)/g, "factor$1")
-              : lit,
-        );
-        if (patched !== call) {
-          out += src.slice(cursor, m.index) + patched;
-          cursor = end + 1;
-          changed = true;
-        }
+      const sites = pollBackoffSites(src);
+      if (sites.length === 0) return false;
+      let out = src;
+      // Right to left, so earlier offsets stay valid.
+      for (const at of [...sites].sort((a, b) => b - a)) {
+        out = out.slice(0, at) + "factor" + out.slice(at + "backoff".length);
       }
-      if (!changed) return false;
-      out += src.slice(cursor);
+      if (out === src) return false;
       await Deno.writeTextFile(filePath, out);
       return true;
     } catch {
@@ -1399,31 +1475,28 @@ export function fixSelectorDepsTuple(
       const src = await Deno.readTextFile(filePath);
       const re =
         /(deps\s*:\s*\[([^\]]*)\]\s*,\s*fn\s*:\s*(?:async\s*)?)\(([^)]*)\)(\s*(?::[^=]+)?=>)/g;
-      const out = src.replace(
-        re,
-        (
-          whole,
-          pre: string,
-          depsBody: string,
-          params: string,
-          arrow: string,
-        ) => {
-          const depCount = depsBody.split(",").map((s) =>
-            s.trim()
-          ).filter(Boolean).length;
-          const ps = params.split(",").map((s) => s.trim()).filter(Boolean);
-          if (ps.length !== depCount + 1) return whole; // not the legacy shape
-          if (depCount === 0) return whole;
-          if (ps[1]!.startsWith("[")) return whole; // already the tuple form
-          const [first, ...deps] = ps;
-          // Typed or defaulted dep params can't be folded into a destructured
-          // tuple without changing their types — decline (report stays).
-          if (deps.some((p) => p.includes(":") || p.includes("="))) {
-            return whole;
-          }
-          return `${pre}(${first}, [${deps.join(", ")}])${arrow}`;
-        },
-      );
+      // CODE matches only — a doc string or comment spelling the same shape is
+      // not a selector object.
+      const out = replaceCode(src, re, (m) => {
+        const whole = m[0],
+          pre = m[1]!,
+          depsBody = m[2]!,
+          params = m[3]!,
+          arrow = m[4]!;
+        const depCount = depsBody.split(",").map((s) => s.trim())
+          .filter(Boolean).length;
+        const ps = params.split(",").map((s) => s.trim()).filter(Boolean);
+        if (ps.length !== depCount + 1) return whole; // not the legacy shape
+        if (depCount === 0) return whole;
+        if (ps[1]!.startsWith("[")) return whole; // already the tuple form
+        const [first, ...deps] = ps;
+        // Typed or defaulted dep params can't be folded into a destructured
+        // tuple without changing their types — decline (report stays).
+        if (deps.some((p) => p.includes(":") || p.includes("="))) {
+          return whole;
+        }
+        return `${pre}(${first}, [${deps.join(", ")}])${arrow}`;
+      });
       if (out === src) return false;
       await Deno.writeTextFile(filePath, out);
       return true;
@@ -1668,9 +1741,12 @@ export function fixUseCellStateReads(filePath: string): () => Promise<boolean> {
     } catch {
       return false;
     }
-    const rewritten = src.replace(
+    // CODE matches only: the same spelling inside a string or comment is a
+    // program's own text (a migration hint, a doc string), not a call.
+    const rewritten = replaceCode(
+      src,
       /\buseCell\s*\(\s*([$\w]+)\s*\)\s*\.\s*state\s*\.(?=[$\w])/g,
-      "$1.",
+      (m) => `${m[1]}.`,
     );
     if (rewritten === src) return false;
     let out = rewritten;
@@ -1749,19 +1825,19 @@ function moveImportsIn(
     `(\\{([^}]*)\\}\\s*=\\s*await\\s+import\\(\\s*)["']${spec}["'](\\s*\\))`,
     "g",
   );
-  const out = (moved ?? src).replace(
-    dyn,
-    (whole, head: string, inner: string, tail: string) => {
-      const names = inner.split(",").map((s) => s.trim()).filter(Boolean);
-      if (
-        names.length === 0 || !names.every((n) => mv.names.has(bareName(n)))
-      ) {
-        return whole;
-      }
-      matched = true;
-      return `${head}"${mv.to}"${tail}`;
-    },
-  );
+  // CODE matches only: a dynamic import inside a string or template (a doc
+  // string, a code sample) is not a statement to rewrite.
+  const out = replaceCode(moved ?? src, dyn, (m) => {
+    const whole = m[0], head = m[1]!, inner = m[2]!, tail = m[3]!;
+    const names = inner.split(",").map((s) => s.trim()).filter(Boolean);
+    if (
+      names.length === 0 || !names.every((n) => mv.names.has(bareName(n)))
+    ) {
+      return whole;
+    }
+    matched = true;
+    return `${head}"${mv.to}"${tail}`;
+  });
   return { out, matched, declined };
 }
 

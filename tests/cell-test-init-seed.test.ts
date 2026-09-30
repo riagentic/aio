@@ -52,6 +52,31 @@ testCell(scan, "an unknown key throws and lists the real ones", (t) => {
   assert(msg.includes("scanning"), `lists the real keys: ${msg}`);
 });
 
+testCell(
+  scan,
+  "an unknown key named like a prototype member is refused too",
+  (t) => {
+    // `"toString" in known` is true for ANY plain object, so this guard used to
+    // let the key through and `_deepMergeSeed` injected it: the fixture pinned
+    // nothing, silently. Same for `constructor`, `valueOf`, `hasOwnProperty`, …
+    for (
+      const key of ["toString", "constructor", "valueOf", "hasOwnProperty"]
+    ) {
+      let threw = false;
+      try {
+        t.init({ [key]: 123 } as never);
+      } catch {
+        threw = true;
+      }
+      assert(threw, `t.init({ ${key}: 123 }) must throw`);
+      assert(
+        !Object.hasOwn(t.getState(), key),
+        `the undeclared ${key} key must not land in state`,
+      );
+    }
+  },
+);
+
 // Committed state is frozen in dev AND prod — including the declared initial
 // (deep-frozen at compose) and `testUI`'s `seed`. `t.init(seed)` built a fresh
 // UNFROZEN slice, so a selector sorting its state in place (`s.items.sort()`)

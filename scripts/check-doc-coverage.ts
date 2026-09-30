@@ -64,6 +64,18 @@ for (const [entry, path] of Object.entries(denoJson.exports)) {
   }
 }
 
+// A gate that checked NOTHING must fail, like `check-coverage.ts` on an empty
+// profile: a typo'd exports map, or a `deno doc --json` whose `nodes` shape
+// changed, otherwise prints a green light and exits 0 — the worst answer for a
+// completeness gate.
+if (total === 0) {
+  console.error(
+    `✗ no public symbols found in any deno.json export — the gate checked ` +
+      `nothing (an empty exports map, or ` +
+      `deno doc answering a shape this gate cannot read).`,
+  );
+  Deno.exit(1);
+}
 if (missing) {
   console.error(
     `\n${missing} of ${total} public symbols lack JSDoc. Document them (a one-line /** ... */ is enough).`,

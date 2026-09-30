@@ -151,9 +151,16 @@ export function unpersistedFromBase(
   const was = base;
   let slice = now;
   const revert = (key: string) => {
-    if (slice[key] === was[key] && (key in slice) === (key in was)) return;
+    // OWN keys: `key in was` is true for every Object.prototype name, so an
+    // excluded `toString`/`valueOf`/… field that `now` held and `base` did
+    // not was replaced by the native function instead of deleted — a journal
+    // or checkpoint restore then disagreed with a restart. See
+    // scripts/check-proto-in.ts.
+    const ownNow = Object.hasOwn(slice, key);
+    const ownWas = Object.hasOwn(was, key);
+    if (ownNow === ownWas && slice[key] === was[key]) return;
     if (slice === now) slice = { ...now };
-    if (key in was) slice[key] = was[key];
+    if (ownWas) slice[key] = was[key];
     else delete slice[key];
   };
   if ("include" in filter) {

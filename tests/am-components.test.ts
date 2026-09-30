@@ -192,6 +192,34 @@ Deno.test("plan: no argument means the whole project", async () => {
   }
 });
 
+Deno.test("plan: resolves the project from a SUBDIRECTORY, like every other verb", async () => {
+  // `processPlan` defaulted its root to `Deno.cwd()`, so from a subdirectory it
+  // saw no deno.json and refused with "this project declares no components" —
+  // a false fact, while `am status` resolved the project and saw them.
+  const dir = await project({
+    build: {
+      targets: {
+        relay: { entry: "src/relay/app.ts" },
+        agent: { entry: "src/agent/app.ts" },
+      },
+    },
+  }, {
+    "src/relay/app.ts": entry("relay"),
+    "src/agent/app.ts": entry("agent"),
+  });
+  const orig = Deno.cwd();
+  const sub = `${dir}/src/agent`;
+  try {
+    Deno.chdir(sub);
+    const plan = processPlan(["agent"], {});
+    assertEquals(plan.kind, "one", JSON.stringify(plan));
+    if (plan.kind === "one") assertEquals(plan.component.appId, "agent");
+  } finally {
+    Deno.chdir(orig);
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
 Deno.test("plan: --app=<component> is that component — its id AND its entry", async () => {
   // `am start --app=pro` ran the project's DEFAULT entry under PRO's id: the
   // free app, registered as PRO, "starting" forever (field report, a

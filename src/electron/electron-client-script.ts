@@ -122,7 +122,15 @@ function parseMeta(html) {
 
 // ── LAN discovery (Node dgram — the aio server answers UDP broadcasts) ──
 const dgram = require('dgram');
-const DISCOVERY_PORT = Number(process.env.AIO_DISCOVERY_PORT) || 8099;
+const DISCOVERY_PORT = (() => {
+  const raw = process.env.AIO_DISCOVERY_PORT;
+  if (raw === undefined || String(raw).trim() === "") return 8099;
+  const s = String(raw).trim();
+  const n = Number(s);
+  // Decimal digits only — same rule as the server's discoveryPortOf / AIO_PORT.
+  if (!/^\d+$/.test(s) || n < 1 || n > 65535) return 8099;
+  return n;
+})();
 
 function discoverApps(timeoutMs, cb) {
   let sock;
@@ -244,7 +252,7 @@ async function pairWith(win, info) {
     }
     pr.host = info.host; // the server doesn't know its own LAN address — we do
     const rec = profileToRecent(pr);
-    pinCert(rec.host, rec.cert);
+    pinCert(new URL(rec.url).host, rec.cert);
     saveRecent(rec);
     connectTo(win, rec.url);
   } catch (e) {
@@ -345,7 +353,18 @@ app.on('ready', () => {
   // Pre-pin certs from stored recents/profiles so click-to-reconnect trusts
   // them without a fresh fetch.
   try {
-    for (const r of loadRecents()) if (r.host && r.cert) pinCert(r.host, r.cert);
+    // Key by the URL host (host:port), the SAME key the certificate-error
+    // lookup uses (new URL(url).host) — a bare hostname never matched an app
+    // on a non-default port, so strict pinning never fired and every profile
+    // install silently fell through to the looser TOFU host list.
+    // PER ITEM: this whole loop is inside one try, so a single stored recent
+    // with an unparsable url threw out of the loop and left every LATER recent
+    // unpinned — the strict pin silently downgraded to the looser TOFU list for
+    // all of them. One bad entry skips only itself.
+    for (const r of loadRecents()) {
+      if (!r.url || !r.cert) continue;
+      try { pinCert(new URL(r.url).host, r.cert); } catch { /* unusable url: skip it */ }
+    }
   } catch {}
 
   let directUrl = null;
@@ -368,7 +387,7 @@ app.on('ready', () => {
     const pr = loadProfileFile(profileFile);
     if (!pr) { console.error('invalid .aioapp profile: ' + profileFile); process.exit(1); }
     const rec = profileToRecent(pr);
-    pinCert(rec.host, rec.cert);
+    pinCert(new URL(rec.url).host, rec.cert);
     saveRecent(rec);
     connectTo(win, rec.url);
     return;

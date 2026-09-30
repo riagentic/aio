@@ -33,6 +33,7 @@
  */
 
 import { sayErr } from "./am-output.ts";
+import { dirLinkType } from "./am-utils.ts";
 import { electronSpec, testedElectronOf } from "./am-electron.ts";
 import {
   LOCAL_PIN_FILE,
@@ -941,7 +942,7 @@ export async function linkTo(appDir: string, target: string): Promise<void> {
       if (e instanceof Error && e.message.includes("not a symlink")) throw e;
     }
   }
-  await Deno.symlink(target, link);
+  await Deno.symlink(target, link, { type: dirLinkType() });
 }
 
 // ── The other half of the pin ───────────────────────────────

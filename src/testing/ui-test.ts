@@ -2120,6 +2120,11 @@ async function _buildTestUI(
       // localStorage (see _persistRunKey).
       // Under the harness-only symbol: the runtime ignores an app's
       // `persistKey` (a server option) by design.
+      // Keep the lazy-store debounce window open for the whole mount: the
+      // default 100 ms fires under a loaded suite before dispose reaches
+      // `_flushPendingPersist`, so removing that flush looked green. Continuity
+      // across mounts is the dispose flush (below), not a race with the timer.
+      persistDebounceMs: opts.persist ? 60_000 : undefined,
       // The declared-type write guard a dev server runs, dev-strict.
       [standalone._HARNESS_SHAPE_GUARD]: true,
       [standalone._HARNESS_PERSIST_KEY]: opts.persist
@@ -2165,7 +2170,10 @@ async function _buildTestUI(
       for (const [cellName, slice] of Object.entries(p)) {
         const known = now[cellName];
         if (!known || typeof known !== "object" || !slice) continue;
-        const bad = Object.keys(slice).filter((k) => !(k in known));
+        // OWN keys: `k in known` is true for `toString`/`valueOf`/… inherited
+        // from Object.prototype, so a seed key named like a builtin was never
+        // warned about — the no-op the warning exists to name.
+        const bad = Object.keys(slice).filter((k) => !Object.hasOwn(known, k));
         if (bad.length > 0) {
           console.warn(
             `[aio] seed: cell "${cellName}" has no ${

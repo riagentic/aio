@@ -312,10 +312,17 @@ export function deepFreeze<T>(
   //
   // Reading through `getOwnPropertyDescriptors` rather than `Object.values`:
   // asking for the VALUE would invoke the getter, which is the side effect
-  // being reported.
-  for (
-    const [k, d] of Object.entries(Object.getOwnPropertyDescriptors(obj))
-  ) {
+  // being reported — and the RECURSION below must not invoke it either. The
+  // descriptors are gathered ONCE and used for both the report and the walk;
+  // `Object.values(obj)` on the next line used to call every getter the report
+  // had just refused to call. One that threw made `freezeInitial` catch and
+  // return the WHOLE slice UNFROZEN, silently — dev going soft in the one
+  // place it must be strict.
+  const descriptors = Object.getOwnPropertyDescriptors(obj) as Record<
+    string,
+    PropertyDescriptor
+  >;
+  for (const [k, d] of Object.entries(descriptors)) {
     if (d.get || d.set) {
       noteUnfreezable(
         `accessor:${k}`,
@@ -326,7 +333,9 @@ export function deepFreeze<T>(
     }
   }
   Object.freeze(obj);
-  for (const v of Object.values(obj as Record<string, unknown>)) {
+  for (const d of Object.values(descriptors)) {
+    if (d.get || d.set) continue; // never invoke an accessor
+    const v = d.value;
     if (v !== null && typeof v === "object" && !Object.isFrozen(v)) {
       deepFreeze(v, seen);
     }

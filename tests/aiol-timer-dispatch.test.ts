@@ -73,6 +73,24 @@ Deno.test("aiol: `void` and setInterval are the same mistake", async () => {
   }
 });
 
+Deno.test("aiol: a BLOCK-bodied arrow timer callback is caught too", async () => {
+  // `() => { counter.inc(); }` is the canonical spelling the rule's own doc
+  // uses — and it fell between the accepted `() => expr` and
+  // `function () { … }` shapes, so the whole gate was off for it.
+  for (
+    const call of [
+      `setTimeout(() => { projects.scan(); }, 0);`,
+      `setTimeout(async () => { await projects.scan(); }, 0);`,
+      `setInterval(() => { void projects.scan(); }, 5000);`,
+    ]
+  ) {
+    const found = await issues({
+      "src/cell.ts": CELL + `export function boot() { ${call} }\n`,
+    });
+    assertEquals(found.length, 1, `${call} → ${JSON.stringify(found)}`);
+  }
+});
+
 Deno.test("aiol: a timer calling a PLAIN function is ordinary code", async () => {
   // Narrow on purpose. Only a CELL METHOD escapes the log by this route, and a
   // rule that flagged every `setTimeout` would be turned off within a day.

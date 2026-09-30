@@ -54,8 +54,23 @@ import { udsRequest } from "../src/am/am-uds.ts";
 import { keepTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { testDisplayEnv } from "../src/testing/test-display.ts";
 
-const ELECTRON = Deno.env.get("AIO_BUILD_E2E") === "1" &&
+const ELECTRON_GATE = Deno.env.get("AIO_BUILD_E2E") === "1" &&
   Deno.env.get("AIO_BUILD_ELECTRON") === "1";
+// appimagetool shells out to `file(1)`. Without it the electron row's prepare
+// fails the build and the unmutated suite is red — the mutation gate then
+// cannot trust hosts.test.ts. Ignore accurately when file is absent.
+const HAS_FILE = (() => {
+  try {
+    return new Deno.Command("sh", {
+      args: ["-c", "command -v file"],
+      stdout: "null",
+      stderr: "null",
+    }).outputSync().success;
+  } catch {
+    return false;
+  }
+})();
+const ELECTRON = ELECTRON_GATE && HAS_FILE;
 const APP_ID = "hostsfx";
 const dec = new TextDecoder();
 
@@ -521,6 +536,8 @@ const HOSTS: Host[] = [
   {
     name: "electron (packaged AppImage)",
     holdsOnBoot: true,
+    // Gate off, or `file` missing (appimagetool requires it) — never a red
+    // baseline under mutation when the box cannot build an AppImage.
     ignore: !ELECTRON,
     prepare: async (fx) => {
       const r = await buildFlags(fx, "--compile", "--electron");
@@ -674,9 +691,15 @@ async function runStep(
       status,
       `${host.name}: ${step} never exited after stopping\n${run.log()}`,
     );
-    assertEquals(
-      status.code,
-      0,
+    // AppImage's outer runtime often reports the inner Deno's clean
+    // SIGTERM→Deno.exit(0) shutdown as 143 (128+SIGTERM) without forwarding
+    // the real code. A report already landed (until() above), so 143 here is
+    // a clean stop of the wrapper — not a crash mid-step. Any other non-zero
+    // (Electron dying on a missing display, a fuse refuse, …) stays a fail.
+    const okExit = status.code === 0 ||
+      (host.name.startsWith("electron") && status.code === 143);
+    assert(
+      okExit,
       `${host.name}: ${step} exited ${status.code}\n${run.log().slice(-6000)}`,
     );
     await run.done;

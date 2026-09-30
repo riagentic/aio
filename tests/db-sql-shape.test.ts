@@ -118,6 +118,17 @@ Deno.test("sql-shape: write tables — qualifiers, quoting, conflict clauses, CT
   assertEquals(writes("SELECT 1 /* DELETE FROM mail */"), []);
 });
 
+Deno.test("sql-shape: a keyword-shaped phrase inside a string literal names no table", () => {
+  // `mask(sql, false)` keeps literal BODIES so `FROM 'mail'` can name a table,
+  // so a `from`/`delete from` inside a value looked like a keyword: the live
+  // query then refreshed on a table that does not exist.
+  assertEquals(writes("INSERT INTO log VALUES ('delete from users')"), ["log"]);
+  assertEquals(reads("SELECT * FROM t WHERE note = 'from secret'"), ["t"]);
+  assertEquals(reads("SELECT * FROM t WHERE note = 'join other'"), ["t"]);
+  // …while a literal used AS a table name is still a table.
+  assertEquals(reads("SELECT * FROM 'mail' WHERE x = 'from y'"), ["mail"]);
+});
+
 Deno.test("sql-shape: END — SQLite's spelling of COMMIT — is a write", () => {
   assertEquals(looksLikeWrite("END"), true);
   assertEquals(looksLikeWrite("END TRANSACTION"), true);

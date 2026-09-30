@@ -65,7 +65,12 @@ function pinAppsDir(): { dir: string; restore: () => void } {
   };
 }
 
-Deno.test("serveDirs reaches the server: an ABSOLUTE root serves over HTTP", async () => {
+Deno.test("serveDirs reaches the server: an ABSOLUTE root serves over HTTP", {
+  // esbuild transpiles through a native child that `stopEsbuild()` kills;
+  // esbuild owns the handle, so its exit cannot be awaited from here.
+  sanitizeOps: false, // aio-ok: esbuild's service child — exit not awaitable
+  sanitizeResources: false, // aio-ok: same esbuild child
+}, async () => {
   const f = await fixture();
   const apps = pinAppsDir();
   try {
@@ -97,7 +102,12 @@ Deno.test("serveDirs reaches the server: an ABSOLUTE root serves over HTTP", asy
   }
 });
 
-Deno.test("serveDirs reaches the server: a RELATIVE root serves over HTTP", async () => {
+Deno.test("serveDirs reaches the server: a RELATIVE root serves over HTTP", {
+  // esbuild transpiles through a native child that `stopEsbuild()` kills;
+  // esbuild owns the handle, so its exit cannot be awaited from here.
+  sanitizeOps: false, // aio-ok: esbuild's service child — exit not awaitable
+  sanitizeResources: false, // aio-ok: same esbuild child
+}, async () => {
   const f = await fixture();
   const apps = pinAppsDir();
   try {
@@ -127,7 +137,12 @@ Deno.test("serveDirs reaches the server: a RELATIVE root serves over HTTP", asyn
   }
 });
 
-Deno.test("serveDirs through a real boot is not a weaker root", async () => {
+Deno.test("serveDirs through a real boot is not a weaker root", {
+  // esbuild transpiles through a native child that `stopEsbuild()` kills;
+  // esbuild owns the handle, so its exit cannot be awaited from here.
+  sanitizeOps: false, // aio-ok: esbuild's service child — exit not awaitable
+  sanitizeResources: false, // aio-ok: same esbuild child
+}, async () => {
   const f = await fixture();
   const apps = pinAppsDir();
   try {

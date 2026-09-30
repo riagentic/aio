@@ -212,11 +212,13 @@ import { DEFAULT_HEARTBEAT_INTERVAL } from "../vitals/types.ts";
 // CLI + path resolution
 import {
   cdpPort,
+  cdpRequest,
   declareAppFlags,
   electronOnlyFlagRefusal,
   envDefaultPort,
   homeRequest,
   parseCli,
+  portWasRequested,
   printHelp,
   VERSION,
   versionLine,
@@ -1839,8 +1841,11 @@ async function _runPhases<S, A, E>(
   // port would), and neither does `--port=0` / `port: 0` ("pick one") — the
   // exact predicate this had when the source was derived by truthiness, kept
   // now that the source label is honest about a 0.
-  const _portRequested = !!cli.port || _envPort !== undefined ||
-    !!config.port;
+  // `AIO_PORT=0` means "pick a free one", exactly like `--port=0` and
+  // `port: 0` — so the env spelling no longer counts as "named a port". (The
+  // predicate reads a 0 as "not said"; the value still travels through
+  // `pick`, which treats 0 as an answer.)
+  const _portRequested = portWasRequested(cli.port, _envPort, config.port);
   // "default" = picked by findFreePort — worth saying, since a port that
   // changes between runs is otherwise a mystery.
   const portFrom: Provenance = _portPick?.from ?? "default";
@@ -1925,10 +1930,22 @@ async function _runPhases<S, A, E>(
   // `--keep-server` was refused only after the banner. The client is resolved
   // by the same rule as below (flag > config > deno.json > electron); one
   // pure decider (aio-cli.ts) names what was typed and the client it needs.
+  // `AIO_CDP` is the env spelling of `--cdp` (see `--help`), so an env request
+  // must be refused exactly like the flag — otherwise a browser app advertises
+  // a debugger port nothing listens on. Resolve it WITHOUT the invalid-value
+  // warning: `cdpPort()` is the warn site, and it runs later.
+  const _cdpEnv = (() => {
+    try {
+      return Deno.env.get("AIO_CDP") ?? undefined;
+    } catch {
+      return undefined; // no --allow-env: no env request
+    }
+  })();
   const _electronOnly = electronOnlyFlagRefusal(
     cli,
     clientOf(cli, config).value,
     config,
+    cdpRequest(cli.cdp, _cdpEnv),
   );
   if (_electronOnly) {
     appLock?.release();

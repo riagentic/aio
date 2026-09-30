@@ -431,10 +431,15 @@ export function envPort(): number | undefined {
     return undefined; // no --allow-env here: the environment is not readable
   }
   if (raw === undefined || raw.trim() === "") return undefined;
-  const n = Number(raw.trim());
-  if (!Number.isInteger(n) || n < 0 || n > 65535) {
+  // DECIMAL DIGITS, the same rule `--port` uses (`intArg`): `Number()` also
+  // accepts `0x1F90`, `1e3`, `+3000` and `0b101`, four spellings nobody types
+  // on purpose and each of which the flag REFUSES — one port vocabulary, both
+  // rungs. A non-decimal value is refused, never coerced.
+  const s = raw.trim();
+  const n = Number(s);
+  if (!/^\d+$/.test(s) || n > 65535) {
     throw new Error(
-      `AIO_PORT=${raw} is not a port (want an integer 0-65535; 0 means ` +
+      `AIO_PORT=${raw} is not a port (want decimal digits 0-65535; 0 means ` +
         `"pick a free one"). Fix or unset it — it will not be ignored.`,
     );
   }

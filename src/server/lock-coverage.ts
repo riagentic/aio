@@ -71,7 +71,9 @@ export function missingLockEntries(
   for (const sec of GRAPH_SECTIONS) {
     const b = (before[sec] ?? {}) as Record<string, unknown>;
     const a = (after[sec] ?? {}) as Record<string, unknown>;
-    for (const k of Object.keys(a)) if (!(k in b)) out.push(k);
+    // OWN keys: lock section maps are plain records — `k in b` would hide a
+    // newly added entry named after an Object.prototype member.
+    for (const k of Object.keys(a)) if (!Object.hasOwn(b, k)) out.push(k);
   }
   return out;
 }

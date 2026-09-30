@@ -27,13 +27,32 @@
 import dgram from "node:dgram";
 import { Buffer } from "node:buffer";
 
+/** Default UDP port apps answer discovery probes on. */
+export const DEFAULT_DISCOVERY_PORT = 8099;
+
+/** Parse `AIO_DISCOVERY_PORT`: decimal digits 1–65535, else the default.
+ *
+ *  Same vocabulary as `--port` / `AIO_PORT` (`intArg` / `envPort`): `Number()`
+ *  also accepts `0x1F90`, `1e3`, `+8099` and `0b111`, four spellings nobody
+ *  types on purpose. A non-decimal value used to bind a surprising port (or,
+ *  on the Electron client, a *different* one from the server) — now both
+ *  sides fall back to the default. Pure so a test can pin the refuse list
+ *  without reloading the module.
+ *
+ *  @decider */
+export function discoveryPortOf(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === "") return DEFAULT_DISCOVERY_PORT;
+  const s = raw.trim();
+  const n = Number(s);
+  if (!/^\d+$/.test(s) || n < 1 || n > 65535) return DEFAULT_DISCOVERY_PORT;
+  return n;
+}
+
 /** Fixed UDP port apps answer discovery probes on. Override with the
  *  `AIO_DISCOVERY_PORT` env var (must match between server and client). */
-export const AIO_DISCOVERY_PORT = (() => {
-  const raw = safeEnv("AIO_DISCOVERY_PORT");
-  const n = raw ? Number(raw) : NaN;
-  return Number.isInteger(n) && n > 0 && n < 65536 ? n : 8099;
-})();
+export const AIO_DISCOVERY_PORT = discoveryPortOf(
+  safeEnv("AIO_DISCOVERY_PORT"),
+);
 
 const PROBE = "AIO_DISCOVER? v1";
 const REPLY_PREFIX = "AIO1 ";
@@ -244,9 +263,14 @@ export function discoverAioApps(
       return resolve([]);
     }
     let settled = false;
+    // The completion timer is cleared by `done`, so an EARLY answer (a
+    // nonce-matched reply, or every socket erroring) settles at once instead
+    // of holding `am discover` for the full 1.2 s window.
+    const timer: { id?: ReturnType<typeof setTimeout> } = {};
     const done = () => {
       if (settled) return;
       settled = true;
+      if (timer.id !== undefined) clearTimeout(timer.id);
       try {
         socket.close();
       } catch { /* already closed */ }
@@ -284,6 +308,6 @@ export function discoverAioApps(
         socket.send(Buffer.from(probe), port, "255.255.255.255");
       } catch { /* broadcast blocked */ }
     });
-    setTimeout(done, timeoutMs);
+    timer.id = setTimeout(done, timeoutMs);
   });
 }

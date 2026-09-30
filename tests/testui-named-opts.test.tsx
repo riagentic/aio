@@ -71,6 +71,23 @@ Deno.test("seed: an unknown key is warned, at mount and mid-test", async () => {
   }
 });
 
+Deno.test("seed: an unknown key named like a prototype member is warned too", async () => {
+  // `"toString" in known` is true for ANY plain object, so the warning was
+  // silent for a seed key named like a builtin — the no-op it exists to name.
+  const said: string[] = [];
+  const orig = console.warn;
+  console.warn = (...a: unknown[]) => void said.push(a.map(String).join(" "));
+  try {
+    await using _ui = await testUI(App, {
+      seed: { "named-opts-hw": { toString: "x" } },
+    });
+    assertEquals(said.length, 1, said.join(" | "));
+    assert(said[0]!.includes('"toString"'), said[0]);
+  } finally {
+    console.warn = orig;
+  }
+});
+
 Deno.test("waitFor timeout: names what's there without dumping the whole tree", async () => {
   await using ui = await testUI(App);
   let msg = "";

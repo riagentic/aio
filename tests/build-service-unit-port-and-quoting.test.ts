@@ -78,12 +78,23 @@ Deno.test("servicePort: only an EXPLICIT port pins one", () => {
 
 Deno.test("service unit: HOME, the title and the user are quoted/escaped for systemd", async () => {
   const prev = { HOME: Deno.env.get("HOME"), USER: Deno.env.get("USER") };
+  // tempDir() reads HOME for aioTestRoot — mutate HOME only AFTER the dir exists,
+  // and only for writeServiceFile's Environment=/User= reading.
+  const dir = await tempDir("aio-unit-port-");
   Deno.env.set("HOME", '/home/my user/100%/q"x\\y');
   Deno.env.set("USER", "svc%user");
-  let dir = "";
   try {
-    const r = await unit({ appTitle: "Svc 100% done" });
-    dir = r.dir;
+    await writeServiceFile(
+      {
+        binaryName: "svc",
+        appTitle: "Svc 100% done",
+        outDir: dir,
+        root: dir,
+        doRemote: true,
+        doHeadless: true,
+      } as unknown as Parameters<typeof writeServiceFile>[0],
+    );
+    const r = { dir, text: await Deno.readTextFile(join(dir, "svc.service")) };
     // Verified against systemd 255 by loading the unit and reading the
     // environment the started process saw: `/home/my user/100%/q"x\y`.
     assertStringIncludes(

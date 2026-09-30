@@ -342,14 +342,17 @@ const fewRetries = (s: string) => {
 };
 
 /** Every `mv` the helper runs goes through a function that refuses the moves
- *  `cond` (sh, over `$src` and `$dst`) names — the rest reach the real one. */
+ *  `cond` (sh, over `$src` and `$dst`) names — the rest reach the real one.
+ *  `mv -T --exchange A B` relocates BOTH names, so `cond` is tried as (A→B)
+ *  and as (B→A): a refuse of "src is the install" must catch the exchange that
+ *  moves the install out, not only the non-exchange `mv "$cur" …` path. */
 const refuseMv = (cond: string) => (s: string) => {
   const head = "swap_in() {";
   assert(s.includes(head), "swap_in moved");
   return fewRetries(s.replace(
     head,
     () =>
-      `mv() {\n  for dst; do :; done\n  for src; do case "$src" in -*) ;; *) break ;; esac; done\n  ${cond} && return 1\n  command mv "$@"\n}\n${head}`,
+      `mv() {\n  for dst; do :; done\n  for src; do case "$src" in -*) ;; *) break ;; esac; done\n  if [ "$1" = "-T" ] && [ "$2" = "--exchange" ]; then\n    ${cond} && return 1\n    t="$src"; src="$dst"; dst="$t"\n    ${cond} && return 1\n  else\n    ${cond} && return 1\n  fi\n  command mv "$@"\n}\n${head}`,
   ));
 };
 
@@ -437,7 +440,11 @@ for (
   const [step, refuse, why] of [
     [
       "the new version cannot be moved out",
-      '[ "$src" = "$cur" ]',
+      // GNU mv --exchange (coreutils >= 9.5) moves cur via
+      // `mv -T --exchange "$prev" "$cur"` — src is prev, dst is cur. The
+      // classic path is `mv "$cur" "$new"`. Refuse either so the seam still
+      // names "moved out" on boxes that have --exchange.
+      '{ [ "$src" = "$cur" ] || [ "$dst" = "$cur" ]; }',
       "the new version could not be moved out of the way",
     ],
     [

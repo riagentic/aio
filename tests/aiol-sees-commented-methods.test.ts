@@ -92,6 +92,29 @@ Deno.test("aiol: a comment above a method does not hide it from the rules", asyn
   }
 });
 
+Deno.test("aiol: a comment above an EXPRESSION-BODIED member does not hide it", async () => {
+  // The arrow reader had its own lead-in (`[,{]\s*`) that the block form's
+  // comment-tolerant `LEAD` never reached, so a single `//` above a
+  // `name: (s) => …` member switched the same four ERROR rules off again.
+  const out = await lint(`import { cell } from "aio";
+export const probe = cell("probe", {
+  state: { seed: "s3cret", out: 0 },
+  visible: { exclude: ["seed"] },
+  selectors: {
+    other: (s: { out: number }) => s.out,
+    // compute the length
+    reader: (s: { seed: string; out: number }) => s.seed.length,
+  },
+});
+`);
+  assert(
+    /reads `s\.seed`/.test(out),
+    `an expression-bodied member behind a comment was invisible:\n${
+      out.slice(0, 500)
+    }`,
+  );
+});
+
 Deno.test("aiol: a method that does NOT read a hidden field is still clean", async () => {
   // The control — a lead-in loose enough to match anything would report the
   // error for every method and make the rule noise.

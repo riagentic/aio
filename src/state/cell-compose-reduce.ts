@@ -312,7 +312,10 @@ export function reduceCell(
     const lookupKey = ownKey ?? action.type;
     const transitions = stateConfig;
 
-    if (!(lookupKey in transitions)) {
+    // OWN keys: a transition named `toString`/`valueOf`/… must not match the
+    // inherited Object.prototype member and silently "succeed" as a no-op
+    // edge that was never declared.
+    if (!Object.hasOwn(transitions, lookupKey)) {
       const allowed = Object.keys(transitions).join(", ");
       // The auto-injected async self-loops (__setMethod, __error) are only
       // allowed in the method's own state. If the machine moved on before the
@@ -582,36 +585,57 @@ export function reduceCell(
  *  copy-on-change (an all-plain return keeps its identity), memoised by object
  *  so a cycle terminates and one object reached twice stays one object. */
 function snapshotReturn(r: unknown): unknown {
-  const seen = new Set<object>();
+  // MEMOISED by object (`done`), not merely visited (`seen`): a value reached
+  // TWICE without a cycle is a DAG — `const w = { row: s.items[0] }; return
+  // { a: w, b: w }` — and returning the ORIGINAL on the second reference left
+  // the draft `s.items[0]` inside it, revoked the moment the recipe closed. A
+  // visited-set cannot tell a DAG from a cycle; a memo can, and the second
+  // reference then shares the ONE converted object (identity preserved).
+  // `inProgress` is the real cycle guard.
+  const done = new Map<object, unknown>();
+  const inProgress = new Set<object>();
   const walk = (x: unknown): unknown => {
-    if (isDraft(x)) return current(x as Draft<unknown>);
     if (x === null || typeof x !== "object") return x;
-    if (seen.has(x)) return x; // cycle — leave it as the author built it
+    if (done.has(x)) return done.get(x);
+    if (isDraft(x)) {
+      const c = current(x as Draft<unknown>);
+      done.set(x, c);
+      return c;
+    }
+    if (inProgress.has(x)) return x; // a real cycle — leave it as built
     // A Date/class instance/Map holds no drafts to unwrap and copying its own
     // keys onto a bare object would destroy it (see immutable.ts).
     if (!Array.isArray(x) && Object.getPrototypeOf(x) !== Object.prototype) {
       return x;
     }
-    seen.add(x);
-    if (Array.isArray(x)) {
-      let out: unknown[] | null = null;
-      for (let i = 0; i < x.length; i++) {
-        const m = walk(x[i]);
-        if (m !== x[i] && out === null) out = x.slice();
-        if (out !== null) out[i] = m;
+    inProgress.add(x);
+    try {
+      if (Array.isArray(x)) {
+        let out: unknown[] | null = null;
+        for (let i = 0; i < x.length; i++) {
+          const m = walk(x[i]);
+          if (m !== x[i] && out === null) out = x.slice();
+          if (out !== null) out[i] = m;
+        }
+        const res = out ?? x;
+        done.set(x, res);
+        return res;
       }
-      return out ?? x;
-    }
-    let outObj: Record<string, unknown> | null = null;
-    for (const k of Object.keys(x as Record<string, unknown>)) {
-      const cur = (x as Record<string, unknown>)[k];
-      const m = walk(cur);
-      if (m !== cur && outObj === null) {
-        outObj = { ...(x as Record<string, unknown>) };
+      let outObj: Record<string, unknown> | null = null;
+      for (const k of Object.keys(x as Record<string, unknown>)) {
+        const cur = (x as Record<string, unknown>)[k];
+        const m = walk(cur);
+        if (m !== cur && outObj === null) {
+          outObj = { ...(x as Record<string, unknown>) };
+        }
+        if (outObj !== null) outObj[k] = m;
       }
-      if (outObj !== null) outObj[k] = m;
+      const res = outObj ?? x;
+      done.set(x, res);
+      return res;
+    } finally {
+      inProgress.delete(x);
     }
-    return outObj ?? x;
   };
   return walk(r);
 }
@@ -765,7 +789,11 @@ export function buildRootReducer(
               draft[key] = targetSlice[key];
             }
             for (const key of Object.keys(draft)) {
-              if (!(key in targetSlice)) delete draft[key];
+              // OWN keys: `key in targetSlice` is true for every
+              // Object.prototype name, so a live field named `toString`/
+              // `valueOf`/… survived Destroy (and Init reset) instead of
+              // being wiped back to the declared shape.
+              if (!Object.hasOwn(targetSlice, key)) delete draft[key];
             }
           },
         );
@@ -792,7 +820,11 @@ export function buildRootReducer(
               draft[key] = targetSlice[key];
             }
             for (const key of Object.keys(draft)) {
-              if (!(key in targetSlice)) delete draft[key];
+              // OWN keys: `key in targetSlice` is true for every
+              // Object.prototype name, so a live field named `toString`/
+              // `valueOf`/… survived Destroy (and Init reset) instead of
+              // being wiped back to the declared shape.
+              if (!Object.hasOwn(targetSlice, key)) delete draft[key];
             }
           },
         );

@@ -61,8 +61,10 @@ async function assertChildSuitePasses(
       stdout: "piped",
       stderr: "piped",
     }).output();
-    const text = new TextDecoder().decode(out.stdout) +
-      new TextDecoder().decode(out.stderr);
+    // Deno's test reporter may still paint "ok" even under NO_COLOR when
+    // colors are forced elsewhere; strip CSI so the pass line matches.
+    const text = (new TextDecoder().decode(out.stdout) +
+      new TextDecoder().decode(out.stderr)).replace(/\x1b\[[0-9;]*m/g, "");
     assert(
       out.success &&
         new RegExp(`ok \\| ${passed} passed \\| 0 failed`).test(text),

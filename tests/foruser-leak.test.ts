@@ -430,6 +430,134 @@ Deno.test("forUser memo: same id, different role — no view is ever reused", ()
   assertEquals(calls, before + 1);
 });
 
+Deno.test("forUser memo: a Map/Set/class field is never collapsed into one key", () => {
+  // `userMemoKey` serialized every non-array object as its enumerable own
+  // keys, and a `Map`/`Set`/`RegExp`/class instance has none that carry its
+  // state — so two users differing only inside one produced ONE key and the
+  // second was served the first's view. Same class already fixed in
+  // `argsKey`; `userMemoKey` is the reader that still guessed.
+  const raw = (s: { secrets: string[] }, user?: AioUser) => ({
+    secrets: (user as { scope?: Set<string> })?.scope?.has("all")
+      ? s.secrets
+      : [],
+  });
+  const memo = createMemoizedUIState(raw);
+  const state = { secrets: ["TOP-SECRET"] };
+  const withAll = memo(
+    state,
+    { scope: new Set(["all"]) } as unknown as AioUser,
+  ) as { secrets: string[] };
+  const without = memo(
+    state,
+    { scope: new Set(["none"]) } as unknown as AioUser,
+  ) as { secrets: string[] };
+  assertEquals(withAll.secrets, ["TOP-SECRET"]);
+  assertEquals(
+    without.secrets,
+    [],
+    "a different Set field reused another caller's cached view",
+  );
+
+  // A Map field, same story (and the motivating tenant/impersonation shape:
+  // same id and role, different scopes).
+  const rawMap = (s: { secrets: string[] }, user?: AioUser) => ({
+    secrets:
+      (user as { scope?: Map<string, string> })?.scope?.get("tenant") === "a"
+        ? s.secrets
+        : [],
+  });
+  const memoMap = createMemoizedUIState(rawMap);
+  const a = memoMap(
+    state,
+    {
+      id: "u",
+      role: "admin",
+      scope: new Map([["tenant", "a"]]),
+    } as unknown as AioUser,
+  ) as { secrets: string[] };
+  const b = memoMap(
+    state,
+    {
+      id: "u",
+      role: "admin",
+      scope: new Map([["tenant", "b"]]),
+    } as unknown as AioUser,
+  ) as { secrets: string[] };
+  assertEquals(a.secrets, ["TOP-SECRET"]);
+  assertEquals(b.secrets, [], "a different Map field reused another view");
+
+  // A `Date` field must stay KEYED — JSON replaces it via `toJSON`, so it is a
+  // faithful key and a common user record must not pay a recompute (or draw
+  // the "exotic value" warning) for one.
+  let dateCalls = 0;
+  const memoDate = createMemoizedUIState(
+    (s: { n: number }, user?: AioUser) => {
+      dateCalls++;
+      return { n: (user as { when?: Date })?.when ? s.n : -1 };
+    },
+  );
+  const byDate = { n: 7 };
+  const when = new Date(0);
+  memoDate(byDate, { id: "u", role: "user", when } as unknown as AioUser);
+  memoDate(byDate, { id: "u", role: "user", when } as unknown as AioUser);
+  assertEquals(dateCalls, 1, "a Date-bearing user must still hit the cache");
+});
+
+Deno.test("forUser memo: a class whose toJSON is NOT JSON-faithful gets no key", () => {
+  // `isJsonKeyable` had widened the key domain to "has a toJSON" — but a
+  // method returning a `Map`/`Set`/`RegExp`/typed array (or `undefined`) is not
+  // JSON-faithful: JSON writes `{}` for it, so two DIFFERENT records collided
+  // on one key and the second caller was served the first's view. The
+  // replacement must itself be faithfully keyable.
+  class Sneaky {
+    constructor(readonly scope: Map<string, string>) {}
+    toJSON() {
+      return this.scope; // JSON.stringify(Map) is always "{}"
+    }
+  }
+  const memo = createMemoizedUIState(
+    (s: { secrets: string[] }, user?: AioUser) => ({
+      secrets: (user as unknown as Sneaky)?.toJSON().get("tenant") === "a"
+        ? s.secrets
+        : [],
+    }),
+  );
+  const state = { secrets: ["TOP-SECRET"] };
+  const a = memo(
+    state,
+    new Sneaky(new Map([["tenant", "a"]])) as unknown as AioUser,
+  ) as { secrets: string[] };
+  const b = memo(
+    state,
+    new Sneaky(new Map([["tenant", "b"]])) as unknown as AioUser,
+  ) as { secrets: string[] };
+  assertEquals(a.secrets, ["TOP-SECRET"]);
+  assertEquals(
+    b.secrets,
+    [],
+    "an unfaithful toJSON reused another caller's cached view",
+  );
+
+  // …while a FAITHFUL toJSON still keys (no needless recompute).
+  class Faithful {
+    constructor(readonly tenant: string) {}
+    toJSON() {
+      return { tenant: this.tenant };
+    }
+  }
+  let calls = 0;
+  const memo2 = createMemoizedUIState(
+    (s: { n: number }, user?: AioUser) => {
+      calls++;
+      return { n: (user as unknown as Faithful)?.tenant ? s.n : -1 };
+    },
+  );
+  const st = { n: 7 };
+  memo2(st, new Faithful("a") as unknown as AioUser);
+  memo2(st, new Faithful("a") as unknown as AioUser);
+  assertEquals(calls, 1, "a faithful toJSON stays keyed");
+});
+
 // ── Channel 4: CRDT sync ──────────────────────────────────────────────────
 //
 // `sync: true` broadcasts ONE op frame to every other socket, payload verbatim,

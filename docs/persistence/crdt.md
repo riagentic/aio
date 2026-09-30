@@ -212,8 +212,8 @@ offline edits meet), and the engine warns once per field that the merge
 `cannot keep both`. The peer whose edit was replaced gets no callback — its own
 change had already been confirmed, and nothing on the wire says the later op was
 written without seeing it (that needs the op to carry its causal base —
-future/v2.md). For a counter use `s.n += delta`; for a set, push and filter; for
-text, a method that patches the value it finds.
+untracked/v2.md). For a counter use `s.n += delta`; for a set, push and filter;
+for text, a method that patches the value it finds.
 
 Granularity follows the text: **lines** when there are lines (a paragraph is the
 unit people edit), **characters** when there are not — so a one-line title still

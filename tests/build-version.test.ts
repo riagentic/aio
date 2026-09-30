@@ -254,6 +254,29 @@ Deno.test("build-version: readTreeFacts — commits count, edits dirty, the buil
     const { bv, fromFleet } = await buildVersionFor(dir, "1.2");
     assertEquals(fromFleet, false);
     assertEquals(bv.version, "1.2.3");
+
+    // A `--out=<dir>` release is a build OUTPUT too, and its own name/manifest
+    // embed the version — left untracked, every later build became
+    // `-dirty.<hash>` and churned forever (`8fc69dac → 0ea3247e → …`), which
+    // blocked publish with no source change. The RESOLVED out dir is excluded.
+    await Deno.mkdir(join(dir, "out"), { recursive: true });
+    await Deno.writeTextFile(join(dir, "out", "app-1.2.3"), "bin");
+    await Deno.writeTextFile(join(dir, "out", "manifest.json"), "{}");
+    await Deno.mkdir(join(dir, "out", "app-1.2.3-web"));
+    await Deno.writeTextFile(
+      join(dir, "out", "app-1.2.3-web", "index.html"),
+      "x",
+    );
+    // …and the bundle's integrity ledger (written to the project root when the
+    // framework is resolved remotely) is a build output too: untracked, it
+    // dirtied the next build.
+    await Deno.writeTextFile(join(dir, ".aio-integrity.json"), "{}");
+    assertEquals(
+      (await buildVersionFor(dir, "1.2", { out: join(dir, "out") })).bv
+        .version,
+      "1.2.3",
+      "an --out release and .aio-integrity.json must not dirty the next build",
+    );
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

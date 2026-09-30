@@ -30,6 +30,11 @@ const rv = cell("docsreturns", {
     bump(s) {
       s.items[0]!.n++;
     },
+    // The same PLAIN wrapper handed back on two branches — a DAG, not a cycle.
+    wrapped(s): { a: { row: Row }; b: { row: Row } } {
+      const w = { row: s.items[0]! };
+      return { a: w, b: w };
+    },
   },
 });
 

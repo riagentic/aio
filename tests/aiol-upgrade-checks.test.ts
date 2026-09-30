@@ -101,6 +101,40 @@ export const c = cell("c", {
   );
 });
 
+Deno.test("aiol upgrade: an object method named `call` is not aio's call()", async () => {
+  // `{ call({ timeout: 1 }) { return timeout; } }` is a shorthand METHOD, not
+  // aio's bare imported `call`. The member lookbehind (`(?<!\.\s*)`) does not
+  // exclude it, so it was flagged as a removed aio option (error) and
+  // --safe-fix renamed the destructured binding while the body kept `timeout`
+  // — a ReferenceError inside a function whose contract is "no change".
+  await withProject(
+    {
+      "src/app.ts": APP,
+      "src/cell.ts": `
+import { cell } from "aio";
+const helpers = {
+  call({ timeout: 1 }) { return timeout; },
+};
+export const c = cell("c", {
+  state: {},
+  methods: { run() { return helpers.call({ timeout: 5 }); } },
+});
+`,
+    },
+    {},
+    async (dir) => {
+      assertEquals(
+        await upgradeIssues(dir),
+        [],
+        "a method named `call` is the user's own, not aio's call()",
+      );
+      const src = await Deno.readTextFile(join(dir, "src", "cell.ts"));
+      assert(src.includes("call({ timeout: 1 })"), src);
+      assert(!src.includes("timeoutMs"), "the binding was not rewritten");
+    },
+  );
+});
+
 Deno.test("aiol upgrade: renamed TLS flags in a task are flagged and rewritten", async () => {
   await withProject(
     { "src/app.ts": APP },

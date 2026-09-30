@@ -447,7 +447,10 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
       root,
       mainConfig.version,
       {
-        out: (mainConfig.build as { out?: string } | undefined)?.out,
+        // `--out=` first: a single-target build with `--out=<dir>` writes its
+        // release there, and the previous one must not count as dirty — the
+        // same bug the fleet had (`build-all.ts` now passes its resolved dir).
+        out: outArg ?? (mainConfig.build as { out?: string } | undefined)?.out,
         // A previous build's artifact left in the project root (the
         // single-target build writes there) is an OUTPUT, not a change: the
         // onboarding lab built the same scaffold twice and got two dirty

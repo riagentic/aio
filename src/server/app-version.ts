@@ -336,6 +336,10 @@ export async function contentHash8(
 /** Paths never counted as dirty: the build's own outputs. */
 export const TREE_EXCLUDES: readonly string[] = [
   ".aio/",
+  // The bundle's own integrity ledger (written to the project root when the
+  // framework is resolved remotely). Untracked, so without this it turned the
+  // NEXT build `-dirty` — the build's output dirtying the build.
+  ".aio-integrity.json",
   "node_modules/",
   "dep/",
   ".git/",
@@ -455,24 +459,26 @@ async function projectTreeHash(
 ): Promise<string> {
   const entries: { path: string; bytes: Uint8Array | null }[] = [];
   const walk = async (dir: string): Promise<void> => {
-    let it: AsyncIterable<Deno.DirEntry>;
+    // The guard wraps the ITERATION, not the call: `Deno.readDir` is a lazy
+    // async iterator, so it does not throw at assignment — a directory that
+    // vanished or cannot be read surfaced from the first `for await` and
+    // aborted the whole walk with a raw error instead of being skipped.
     try {
-      it = Deno.readDir(dir);
-    } catch {
-      return;
-    }
-    for await (const e of it) {
-      const abs = join(dir, e.name);
-      const rel = relative(root, abs).replaceAll("\\", "/");
-      if (excluded(rel, excludes, isOutput)) continue;
-      if (e.isDirectory) await walk(abs);
-      else if (e.isFile) {
-        try {
-          entries.push({ path: rel, bytes: await Deno.readFile(abs) });
-        } catch {
-          /* aio-ok: an unreadable file is not part of the tree identity — the build refuses it elsewhere */
+      for await (const e of Deno.readDir(dir)) {
+        const abs = join(dir, e.name);
+        const rel = relative(root, abs).replaceAll("\\", "/");
+        if (excluded(rel, excludes, isOutput)) continue;
+        if (e.isDirectory) await walk(abs);
+        else if (e.isFile) {
+          try {
+            entries.push({ path: rel, bytes: await Deno.readFile(abs) });
+          } catch {
+            /* aio-ok: an unreadable file is not part of the tree identity — the build refuses it elsewhere */
+          }
         }
       }
+    } catch {
+      return; // a directory that vanished or cannot be read is not tree identity
     }
   };
   await walk(root);

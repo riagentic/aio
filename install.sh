@@ -169,8 +169,13 @@ MIN_DENO=$(sed -n 's/.*MIN_DENO = "\([^"]*\)".*/\1/p' \
   "$AIO_HOME/src/server/deno-version.ts" 2>/dev/null | head -1)
 [ -n "$MIN_DENO" ] || MIN_DENO="2.9.0"   # clone unreadable: still refuse to guess low
 
-export DENO_INSTALL="${DENO_INSTALL:-$HOME/.deno}"
-export PATH="$DENO_INSTALL/bin:$HOME/.deno/bin:$PATH"
+# DENO_INSTALL: where a private deno binary may be fetched.
+# DENO_INSTALL_ROOT: where `deno install -g` writes shims (am). Deno's own
+# default is $HOME/.deno; tests sandbox via DENO_INSTALL_ROOT alone. Keep both
+# aligned so the post-install "am exists" check looks where the shim landed.
+export DENO_INSTALL="${DENO_INSTALL:-${DENO_INSTALL_ROOT:-$HOME/.deno}}"
+export DENO_INSTALL_ROOT="${DENO_INSTALL_ROOT:-$DENO_INSTALL}"
+export PATH="$DENO_INSTALL/bin:$DENO_INSTALL_ROOT/bin:$HOME/.deno/bin:$PATH"
 
 deno_version() { deno --version 2>/dev/null | head -1 | awk '{print $2}'; }
 
@@ -259,7 +264,7 @@ install_deno_no_unzip() {
   ' "$_tmp/deno.zip" "$DENO_INSTALL/bin/deno" || { rm -rf "$_tmp"; return 1; }
   chmod +x "$DENO_INSTALL/bin/deno" || { rm -rf "$_tmp"; return 1; }
   rm -rf "$_tmp"
-  export PATH="$DENO_INSTALL/bin:$PATH"
+  export PATH="$DENO_INSTALL/bin:$DENO_INSTALL_ROOT/bin:$PATH"
   hash -r 2>/dev/null || :
   deno_ok
 }
@@ -271,7 +276,7 @@ install_deno() {
      || command -v 7zz >/dev/null 2>&1; then
     curl -fsSL https://deno.land/install.sh | sh -s -- -y >/dev/null 2>&1 || \
       curl -fsSL https://deno.land/install.sh | sh -s -- -y || return 1
-    export PATH="$DENO_INSTALL/bin:$PATH"
+    export PATH="$DENO_INSTALL/bin:$DENO_INSTALL_ROOT/bin:$PATH"
     hash -r 2>/dev/null || :
     deno_ok && return 0
     return 1
@@ -324,11 +329,11 @@ info "installing am..."
 deno install -gAf --config "$AIO_HOME/deno.json" -n am "$AIO_HOME/src/am.ts" \
   || fail "installing am failed — the output above says why"
 
-export PATH="$DENO_INSTALL/bin:$PATH"
+export PATH="$DENO_INSTALL/bin:$DENO_INSTALL_ROOT/bin:$PATH"
 hash -r 2>/dev/null || :
 
-AM_BIN="$DENO_INSTALL/bin/am"
-[ -x "$AM_BIN" ] || AM_BIN=$(command -v am 2>/dev/null || echo "$DENO_INSTALL/bin/am")
+AM_BIN="$DENO_INSTALL_ROOT/bin/am"
+[ -x "$AM_BIN" ] || AM_BIN=$(command -v am 2>/dev/null || echo "$DENO_INSTALL_ROOT/bin/am")
 
 # `deno install` writes a shim whose body is `exec deno run …` — deno BY NAME.
 # So `am` works only where `deno` is already on PATH, and when it isn't the
@@ -373,23 +378,38 @@ persist_path() {
   # or we are on Darwin, where it is the default even if $SHELL is unset in
   # this process — `~/.zprofile` is created too. Files that already exist are
   # always updated, whatever the shell.
+  # NEWLINE-separated, read back with IFS set to a newline. The list used to be
+  # space-separated and iterated unquoted, so a `$HOME` containing a space was
+  # split into several paths: `/home/John Doe/.profile` became `/home/John` and
+  # `Doe/.profile`, the real profile was never written, and the PATH line landed
+  # in stray files in the current directory. Space is the one separator a path
+  # may contain.
+  _nl='
+'
   _targets="$HOME/.profile"
   case "${SHELL:-}" in *zsh) _zsh=1 ;; *) _zsh=0 ;; esac
   # if/else, not `[ … ] && x=1`: under `set -e` an AND-list whose test fails IS
   # a failing command, and this one sits one edit away from being last.
   if [ "$(uname -s 2>/dev/null || echo other)" = "Darwin" ]; then _zsh=1; fi
-  if [ "$_zsh" = 1 ]; then _targets="$_targets $HOME/.zprofile"; fi
+  if [ "$_zsh" = 1 ]; then _targets="$_targets$_nl$HOME/.zprofile"; fi
   for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.zprofile"; do
     [ -f "$rc" ] || continue
-    case " $_targets " in *" $rc "*) continue ;; esac
-    _targets="$_targets $rc"
+    case "$_nl$_targets$_nl" in *"$_nl$rc$_nl"*) continue ;; esac
+    _targets="$_targets$_nl$rc"
   done
 
+  _oldifs=$IFS
+  IFS=$_nl
+  # noglob, so a `$HOME` containing `*`/`?`/`[` stays one literal path.
+  case $- in *f*) _noglob=0 ;; *) _noglob=1; set -f ;; esac
   for rc in $_targets; do
+    IFS=$_oldifs
     if [ -f "$rc" ] && grep -qF '.deno/bin' "$rc" 2>/dev/null; then continue; fi
     printf '\n%s\n' "$_line" >> "$rc" 2>/dev/null || :
     _persisted="${_persisted:-}$rc "
   done
+  IFS=$_oldifs
+  if [ "$_noglob" = 1 ]; then set +f; fi
 }
 persist_path
 

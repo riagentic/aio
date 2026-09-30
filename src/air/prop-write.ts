@@ -556,7 +556,14 @@ export function _controlDrifted(
 const _ECHO = Symbol.for("aio.air.inputEcho");
 const _ECHO_RING = 256;
 type Echo = { vals: string[]; live: boolean };
-type EchoEl = HTMLElement & { [_ECHO]?: Echo };
+// PER PROPERTY, not one ring per element. A `<input type="checkbox">` carries
+// both `value` and `checked`, and one shared ring keyed by whichever property
+// asked first collided their fingerprints: `_echoKey("checked", true)` is the
+// same string as `_echoKey("value", "true")` (Boolean lookup vs String), so a
+// `value` write of "true"/"false" after a toggle was read as a stale keystroke
+// echo and SKIPPED — the DOM kept the old value while the model had the new
+// one. The `value` and `checked` histories never describe the same keystroke.
+type EchoEl = HTMLElement & { [_ECHO]?: Map<string, Echo> };
 
 function _isEchoable(el: HTMLElement, k: string): boolean {
   return (k === "value" || k === "checked") &&
@@ -576,10 +583,15 @@ function _echoKey(k: string, v: unknown): string {
 }
 
 function _echoRing(el: EchoEl, k: string): Echo {
-  const had = el[_ECHO];
+  let rings = el[_ECHO];
+  if (!rings) {
+    rings = new Map();
+    el[_ECHO] = rings;
+  }
+  const had = rings.get(k);
   if (had) return had;
   const r: Echo = { vals: [], live: false };
-  el[_ECHO] = r;
+  rings.set(k, r);
   el.addEventListener("input", () => {
     r.vals.push(_echoKey(k, (el as unknown as Record<string, unknown>)[k]));
     if (r.vals.length > _ECHO_RING) r.vals.shift();
@@ -614,7 +626,7 @@ function _staleEcho(el: EchoEl, k: string, v: unknown): boolean {
 
 /** The element already shows `want`: every keystroke up to it is answered. */
 function _echoArrived(el: EchoEl, want: string): void {
-  const r = el[_ECHO];
+  const r = el[_ECHO]?.get("value");
   if (!r) return;
   const i = r.vals.indexOf(_echoKey("value", want));
   if (i >= 0) r.vals.splice(0, i + 1);

@@ -371,6 +371,12 @@ export async function preflight(
       });
     }
   }
+  // Stable order: real refusals first, then fixture warnings, then by path.
+  // Readdir order is filesystem-dependent; the CLI and the gate must not
+  // flicker between runs.
+  blocking.sort((a, b) =>
+    Number(a.fixture) - Number(b.fixture) || a.where.localeCompare(b.where)
+  );
   return blocking;
 }
 

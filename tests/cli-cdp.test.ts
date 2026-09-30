@@ -116,3 +116,12 @@ Deno.test({
     }
   },
 });
+
+Deno.test("parseCdp / cdpRequest: hexadecimal/exponent/signed spellings are absent, like --cdp", () => {
+  // Number() accepts these; --cdp=N / AIO_PORT refuse them. One vocabulary.
+  for (const bad of ["0x1F90", "1e3", "+9333", "0b111", "9333.0", "09333x"]) {
+    assertEquals(parseCdp(undefined, bad), undefined, bad);
+  }
+  // Trimmed decimal digits still work (same as AIO_PORT / discovery).
+  assertEquals(parseCdp(undefined, " 9333 "), 9333);
+});

@@ -23,7 +23,10 @@ async function compiledUnder(env: Record<string, string>): Promise<boolean> {
     stdout: "piped",
     stderr: "inherit",
   }).output();
-  return new TextDecoder().decode(out.stdout).trim() === "true";
+  // Deno paints booleans when colors are on; a stripped child env still
+  // inherits a TTY on stderr:"inherit" and colors stdout. Strip CSI.
+  return new TextDecoder().decode(out.stdout).replace(/\x1b\[[0-9;]*m/g, "")
+    .trim() === "true";
 }
 
 Deno.test("appImageOwner: own only when the executable is under $APPDIR", async () => {
@@ -48,7 +51,11 @@ Deno.test("appImageOwner: own only when the executable is under $APPDIR", async 
 Deno.test("isCompiled: an inherited $APPIMAGE does not make a dev checkout a binary", async () => {
   const dir = await tempDir("aio-appimage-inherited-");
   try {
-    const base = { PATH: Deno.env.get("PATH") ?? "", HOME: dir };
+    const base = {
+      PATH: Deno.env.get("PATH") ?? "",
+      HOME: dir,
+      NO_COLOR: "1",
+    };
     const exeDir = dirname(Deno.realPathSync(Deno.execPath()));
     assertEquals(await compiledUnder(base), false);
     // A host AppImage's variables, inherited: not ours.

@@ -75,6 +75,18 @@ Deno.test("totp: re-enrolling a new secret inside the last code's step is not re
     // Re-staging the SAME secret keeps its record (no replay reopened).
     users.setTotpSecret("alice", b.body.secret);
     assertEquals(totpReplayOf(users)!.accept("alice", step), false);
+    // …and the SAME secret in another SPELLING is the same secret. base32 is
+    // decoded case-insensitively and tolerates `=` padding, so a lower-cased
+    // (or padded) re-stage maps to the identical HMAC key — but the guard is
+    // textual (`totp IS ?1`, and `_lastStep` is keyed by the raw string), so
+    // it used to be judged a NEW secret: `totp_step` was zeroed and the spent
+    // code was accepted again.
+    users.setTotpSecret("alice", b.body.secret.toLowerCase() + "=");
+    assertEquals(
+      totpReplayOf(users)!.accept("alice", step),
+      false,
+      "a differently-spelled re-stage of the same secret reopened a spent code",
+    );
   } finally {
     sessions.close();
     users.close();

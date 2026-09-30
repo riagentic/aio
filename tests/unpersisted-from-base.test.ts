@@ -38,3 +38,23 @@ Deno.test("unpersistedFromBase: nothing to revert keeps identity", () => {
     now,
   );
 });
+
+Deno.test("unpersistedFromBase: an excluded field named after a prototype member is removed, not replaced by the native", () => {
+  // `key in was` is true for `toString` on every plain object, so revert used
+  // to assign `Object.prototype.toString` instead of deleting the key — a
+  // journal/checkpoint restore then held a native function where the restart
+  // would hold nothing. Same class as the persist-exclude / state-diff pins.
+  const base = { a: 1 };
+  const now = { a: 2, toString: "USER" };
+  const out = unpersistedFromBase({ exclude: ["toString"] }, base, now);
+  assertEquals(Object.hasOwn(out, "toString"), false, String(out.toString));
+  assertEquals(out, { a: 2 });
+});
+
+Deno.test("unpersistedFromBase: include drops a prototype-named field base lacks", () => {
+  const base = { a: 1 };
+  const now = { a: 2, valueOf: 99 };
+  const out = unpersistedFromBase({ include: ["a"] }, base, now);
+  assertEquals(Object.hasOwn(out, "valueOf"), false, String(out.valueOf));
+  assertEquals(out, { a: 2 });
+});

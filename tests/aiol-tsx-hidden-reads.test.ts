@@ -116,6 +116,49 @@ export function App() {
   );
 });
 
+const DEEP = `import { cell } from "aio";
+export const wallet = cell("wallet", {
+  state: { accounts: { encSecKey: "", label: "" }, hasWallet: false },
+  visible: { exclude: ["accounts.encSecKey"] },
+  methods: { open(s: { hasWallet: boolean }) { s.hasWallet = true; } },
+});
+`;
+
+Deno.test("aiol: a component reading a DEEP-hidden leaf is an error too", async () => {
+  // `visible: { exclude: ["accounts.encSecKey"] }` hides a NESTED field: the
+  // runtime installs a deep excluder whose read throws on first render. The
+  // check computed `leaves` and never read them, so a `.tsx` read of the leaf
+  // passed — while the sibling sync-method rule caught the same shape.
+  const found = await issues({
+    "src/wallet.ts": DEEP,
+    "src/App.tsx": `import { wallet } from "./wallet.ts";
+export function App() {
+  return <div>{wallet.accounts[0].encSecKey}</div>;
+}
+`,
+  });
+  assertEquals(found.length, 1, JSON.stringify(found));
+  assert(
+    found[0]!.message.includes("wallet.accounts.encSecKey"),
+    found[0]!.message,
+  );
+  assert(found[0]!.message.includes("hasEncSecKey"), found[0]!.message);
+});
+
+Deno.test("aiol: reading a VISIBLE nested field is not the deep rule", async () => {
+  assertEquals(
+    await issues({
+      "src/wallet.ts": DEEP,
+      "src/App.tsx": `import { wallet } from "./wallet.ts";
+export function App() {
+  return <div>{wallet.accounts[0].label}</div>;
+}
+`,
+    }),
+    [],
+  );
+});
+
 Deno.test("aiol: one finding per field, not one per read", async () => {
   // Three reads of one mistake is one mistake. A rule that reports it three
   // times is a rule people scroll past.

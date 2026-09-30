@@ -123,8 +123,28 @@ Deno.test("electron: clientScript — PIN pairing flow wired", () => {
   assertStringIncludes(s, "/__aio/pair");
   assertStringIncludes(s, "async function pairWith");
   assertStringIncludes(s, "aio-pair:");
-  // A paired app's cert is pinned before the page loads.
-  assertStringIncludes(s, "pinCert(rec.host, rec.cert)");
+  // A paired app's cert is pinned before the page loads — keyed by the URL
+  // host (host:port), the same key the certificate-error handler looks up.
+  // A bare hostname never matched an app on a non-default port, so the strict
+  // pin never fired.
+  assertStringIncludes(s, "pinCert(new URL(rec.url).host, rec.cert)");
+  assertStringIncludes(s, "const host = new URL(url).host;");
+  assertStringIncludes(s, "_pinnedCerts.get(host)");
+  assert(
+    !s.includes("pinCert(rec.host"),
+    "a pin keyed by bare hostname can never match the host:port lookup",
+  );
+  // One stored recent with an unparsable url must not abandon the REST: the
+  // pre-pin loop runs inside one try, so an unguarded `new URL` there skipped
+  // every later recent and silently downgraded them to the looser TOFU list.
+  assertStringIncludes(
+    s,
+    "try { pinCert(new URL(r.url).host, r.cert); } catch",
+  );
+  assert(
+    !s.includes("loadRecents()) if (r.url && r.cert) pinCert("),
+    "a single bad recent must not abort the pre-pin loop",
+  );
   // Connect page: auth apps prompt for a PIN instead of connecting blind.
   assertStringIncludes(s, "promptPair");
   assertStringIncludes(s, "onAppClick");

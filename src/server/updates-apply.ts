@@ -712,13 +712,34 @@ export async function versionedInstall(
   // directory) from its own file name, so versioning the file would rename the
   // app on every update.
   const versions = join(dir, "versions");
-  if (!target.startsWith(versions + "/")) return null;
   const linkName = path.slice(dir.length + 1);
   const dot = linkName.indexOf(".");
   const base = dot === -1 ? linkName : linkName.slice(0, dot);
   const ext = dot === -1 ? "" : linkName.slice(dot);
-  if (target.slice(target.lastIndexOf("/") + 1) !== linkName) return null;
+  if (!versionedTargetMatches(target, versions, linkName, SEPARATOR)) {
+    return null;
+  }
   return { dir, link: path, target, base, ext };
+}
+
+/** Does `target` name `<versions><sep><version><sep><linkName>`? Pure over
+ *  `sep` so BOTH separators are testable from any host.
+ *
+ *  The separator must be the host's: `target` comes from `Deno.realPath` and
+ *  `versions` from `dirname`/`join`, so on Windows both use `\`. A hardcoded
+ *  `/` prefix made the check false there, `versionedInstall` answered null, and
+ *  `swapFlat` replaced the stable-name symlink with a plain file on the first
+ *  self-update — the version store (and rollback) gone, exactly what this
+ *  function exists to prevent. Same rule as `app-dirs.ts`.
+ *  @internal exported for tests. */
+export function versionedTargetMatches(
+  target: string,
+  versions: string,
+  linkName: string,
+  sep: string,
+): boolean {
+  if (!target.startsWith(versions + sep)) return false;
+  return target.slice(target.lastIndexOf(sep) + 1) === linkName;
 }
 
 /** How the replacement gets into place.

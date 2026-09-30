@@ -78,9 +78,23 @@ Deno.test("journal on → killed → journal OFF, clean → journal on: the off 
         .test(r2.log),
       r2.log,
     );
-    const aside = [...Deno.readDirSync(join(dir, "data"))]
+    const data = join(dir, "data");
+    const aside = [...Deno.readDirSync(data)]
       .filter((e) => e.name.startsWith("journal.unreplayed-"));
     assert(aside.length >= 1, "the journal is kept aside, for a person");
+    // Consequence of quarantine (rename), not a mere copy: a leftover live
+    // journal is replayed over the off run's saves on the next journal-on boot.
+    let liveJournal = false;
+    try {
+      Deno.statSync(join(data, "journal"));
+      liveJournal = true;
+    } catch (e) {
+      if (!(e instanceof Deno.errors.NotFound)) throw e;
+    }
+    assert(
+      !liveJournal,
+      "the live journal must be moved aside — a copy leaves it in place for the next journal-on boot to replay",
+    );
     assertEquals(r2.live!.s.length, 13, r2.log);
     const r3 = await run(dir, "read", { J: "1" });
     // Nothing of the off run rolled back: sync cell and store cell alike.

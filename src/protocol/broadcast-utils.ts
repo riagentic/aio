@@ -46,7 +46,13 @@ export function filterStateBySubs(
   const src = state as Record<string, unknown>;
   for (const sub of subs) {
     const feat = sub.includes(".") ? sub.slice(0, sub.indexOf(".")) : sub;
-    if (feat in src && !(feat in filtered)) filtered[feat] = src[feat];
+    // OWN keys: `feat in filtered` is true for `valueOf`/`toString`/… on the
+    // fresh `{}`, and `feat in src` is true for a non-existent cell of that
+    // name. A legal cell named `valueOf` was silently dropped from every
+    // full-state frame. See scripts/check-proto-in.ts.
+    if (Object.hasOwn(src, feat) && !Object.hasOwn(filtered, feat)) {
+      filtered[feat] = src[feat];
+    }
   }
   return filtered;
 }

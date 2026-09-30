@@ -249,12 +249,12 @@ Like every `/__aio/*` endpoint it sits behind auth when `token`, `users`, or
 A spawned app is a plain child: when whatever started it is killed, times out or
 crashes, the app is reparented to `init` and keeps running — holding its port
 and its singleton lock, and (exposed) answering LAN discovery. A launcher that
-wants the app to go when it goes sets `AIO_PARENT_PID=<its pid>`; the app then
-watches that pid and runs its normal graceful shutdown (every phase, final
-persist included) once it is gone. Opt-in, same in dev and prod. The test
-harness sets it for every app it spawns (`childEnv()` in
-`tests/e2e-app-harness.ts`), and `deno task check:orphans` is the gate that
-nothing outlived the suite.
+wants the app to go when it goes sets `AIO_PARENT_PID=<its pid>` (decimal digits
+only — a hex/exponent/signed spelling is treated as unset); the app then watches
+that pid and runs its normal graceful shutdown (every phase, final persist
+included) once it is gone. Opt-in, same in dev and prod. The test harness sets
+it for every app it spawns (`childEnv()` in `tests/e2e-app-harness.ts`), and
+`deno task check:orphans` is the gate that nothing outlived the suite.
 
 ---
 

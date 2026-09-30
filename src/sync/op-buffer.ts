@@ -274,9 +274,9 @@ export function dropReport(
           "was refused before it was ever sent — it never reached the server " +
           "and is gone.",
         hint:
-          "The offline queue holds SYNC_DEFAULTS.pendingCap unconfirmed ops " +
-          "per cell and is full: offline too long, or calls made faster " +
-          "than acks return, even online (a burst — make it one call).",
+          `The offline queue holds ${SYNC_DEFAULTS.pendingCap} unconfirmed ` +
+          `ops per cell and is full: offline too long, or calls made faster ` +
+          `than acks return, even online (a burst — make it one call).`,
       };
     case "stale-evicted":
       return {

@@ -38,6 +38,8 @@ import {
   type UpdatesInput,
 } from "./updates-core.ts";
 import { readTrust, writeTrust } from "./updates-check.ts";
+import { reconcileInstalledVersion } from "./install-record.ts";
+import { basename, dirname } from "@std/path";
 import {
   artifactPath,
   claimFirstBoot,
@@ -260,6 +262,15 @@ export async function judgePendingUpdate(
   try {
     await restoreArtifact(current, verdict.previous);
     log.error(`rolled back the artifact → ${verdict.to} (${current})`);
+    // The record must follow the ARTIFACT, exactly as the forward swap's
+    // reconcile makes it. Left alone, `installed.json` kept naming the failed
+    // version while the app ran the old one — `am installed` and `am upgrade`
+    // (its from/to report and its prune) then acted on a version that is not
+    // running. Best-effort and non-fatal, like the swap's own reconcile.
+    await reconcileInstalledVersion(dirname(current), {
+      version: verdict.to,
+      artifact: basename(current),
+    });
     if (verdict.backup) {
       // The binary going back cannot un-migrate the store, so the backup taken
       // before the migration is the other half of the rollback. It is NOT

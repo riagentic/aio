@@ -165,8 +165,15 @@ export function initDiagnostics(
    *  sink below follows the ONE persist decider rather than restating it.
    *  `logs/actions.jsonl` wrote such a cell's arguments (the token its
    *  `setToken(t)` was called with) in cleartext, in 1.0.11, on every call. */
+  // `Object.hasOwn`, not `cell in …`: the view's answer is a fresh PLAIN
+  // object, so `"toString" in it` is true even when the view dropped the cell
+  // — a `persist: "none"` cell named after an Object.prototype member would
+  // have `unkept` answer false and its arguments written in cleartext. Same
+  // rule as `restorableSlices` (aio-boot.ts), which builds the view with
+  // `Object.entries`.
   const unkept = (cell: string | undefined): boolean =>
-    cell !== undefined && cpView !== null && !(cell in cpView({ [cell]: 0 }));
+    cell !== undefined && cpView !== null &&
+    !Object.hasOwn(cpView({ [cell]: 0 }), cell);
   /** What the view leaves of one key's value inside a KEPT cell — a field a
    *  `persist: { exclude | include }` keeps off disk comes back REDACTED, a
    *  dot-path exclude below the key is projected out. The same view, asked
@@ -176,7 +183,11 @@ export function initDiagnostics(
   const keptValue = (cell: string, key: string, v: unknown): unknown => {
     if (cpView === null || key === "_root") return v;
     const slice = cpView({ [cell]: { [key]: v } })[cell];
-    return slice !== null && typeof slice === "object" && key in slice
+    // OWN key: `key in slice` is true for a field named `toString`/`valueOf`/…
+    // even when the view dropped it, so the check answered "the view kept it"
+    // and returned the inherited native function instead of REDACTED.
+    return slice !== null && typeof slice === "object" &&
+        Object.hasOwn(slice, key)
       ? (slice as Record<string, unknown>)[key]
       : REDACTED;
   };

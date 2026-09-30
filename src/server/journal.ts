@@ -837,7 +837,10 @@ export function replayJournal<S, A>(
     for (const k of new Set([...Object.keys(p), ...Object.keys(n)])) {
       if (p[k] === n[k] || seq > keyWatermark(k)) continue;
       out ??= { ...n };
-      if (k in p) out[k] = p[k];
+      // OWN keys: `k in p` is true for every Object.prototype name, so a
+      // watermark-blocked top-level key named `toString`/`valueOf`/… that
+      // prev lacked was put back as the native function instead of deleted.
+      if (Object.hasOwn(p, k)) out[k] = p[k];
       else delete out[k];
     }
     return (out ?? next) as S;

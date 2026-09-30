@@ -19,7 +19,7 @@
 // correct.
 import { assert, assertEquals, assertMatch } from "@std/assert";
 import { join } from "@std/path";
-import { APP_NAME_RE, appNameError } from "../src/am/am-utils.ts";
+import { APP_NAME_RE, appNameError, dirLinkType } from "../src/am/am-utils.ts";
 import { dataRemovalGate } from "../src/am/am-cmd-remove.ts";
 import { appHome, installedAppPaths } from "../src/server/app-dirs.ts";
 import { DENO_DIR } from "./deno-dir-helper.ts";
@@ -227,4 +227,13 @@ Deno.test("am remove --data in a script refuses, and names the flag", async () =
   } finally {
     await Deno.remove(home, { recursive: true }).catch(() => {});
   }
+});
+
+Deno.test("dep/aio is linked as a junction on Windows (no privilege needed)", () => {
+  // A plain directory symlink needs SeCreateSymbolicLinkPrivilege on a stock
+  // Windows box, so `am create` / `am pin` / `am link` failed there; a junction
+  // needs none. Elsewhere the kind is ignored.
+  assertEquals(dirLinkType("windows"), "junction");
+  assertEquals(dirLinkType("linux"), "dir");
+  assertEquals(dirLinkType("darwin"), "dir");
 });

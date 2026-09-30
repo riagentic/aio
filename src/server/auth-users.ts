@@ -941,7 +941,14 @@ export function openUserStore(
             `and then fail every login for this account.`,
         );
       }
-      return updTotp.run(secretB32, normId(rawId)).changes > 0;
+      // `clean`, NOT the raw `secretB32`. Every code is derived by
+      // `base32Decode`, which upper-cases and strips padding, so a re-stage of
+      // the SAME secret in another spelling decodes to the identical HMAC key
+      // but was a different STRING here — the `totp IS ?1` guard judged it a
+      // new secret, zeroed `totp_step`, and the in-memory `_lastStep` (keyed
+      // by the raw string) missed it too. A code already spent in the current
+      // 90-second window was then accepted again (RFC 6238 §5.2).
+      return updTotp.run(clean, normId(rawId)).changes > 0;
     },
     enableTotp(rawId) {
       return updTotpOn.run(1, normId(rawId)).changes > 0;

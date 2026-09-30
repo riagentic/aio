@@ -1262,7 +1262,14 @@ function restorableOnly(
     // NOT declare (a renamed cell, a parked `__` slice) is not a `persist:
     // "none"` cell: it rides along, for boot to preserve (see initStandalone)
     // — dropped here, the first write deleted it from the store.
-    if (restorable.has(k) || (declared !== undefined && !(k in declared))) {
+    // OWN keys: `k in declared` is true for every Object.prototype name, so a
+    // stored undeclared cell named `toString`/`valueOf`/… was treated as a
+    // declared `persist: "none"` cell and DROPPED — the rename/orphan carry
+    // the server keeps. See scripts/check-proto-in.ts.
+    if (
+      restorable.has(k) ||
+      (declared !== undefined && !Object.hasOwn(declared, k))
+    ) {
       out[k] = v;
     }
   }
@@ -1417,7 +1424,7 @@ export function initStandalone<S, A, E>(
       // undeclared key; set it aside here to be carried the same way.
       if (cellsCfg?.clientOnly && doc && typeof doc === "object") {
         for (const id of cellsCfg.clientOnly) {
-          if (id in doc) clientStored[id] = doc[id];
+          if (Object.hasOwn(doc, id)) clientStored[id] = doc[id];
         }
       }
       const persisted = restorableOnly(
@@ -1488,7 +1495,7 @@ export function initStandalone<S, A, E>(
       // Undeclared slices ride into state so the app's `onRestore` can
       // migrate them (a rename is one hook), exactly as on the server.
       for (const k of Object.keys(raw)) {
-        if (!(k in declared) && !k.startsWith("__")) s[k] = raw[k];
+        if (!Object.hasOwn(declared, k) && !k.startsWith("__")) s[k] = raw[k];
       }
       // A shaped cell's stored slice is read against what this build's
       // `onPersist` writes for its declared state (the server's
@@ -1523,11 +1530,15 @@ export function initStandalone<S, A, E>(
       // way its renamed fields survive the merge.
       if (!("__versions" in raw)) {
         for (const [c, info] of cellsCfg.migrations) {
-          if (info.version <= 0 || !(c in raw) || c in storedVersions) {
+          if (
+            info.version <= 0 ||
+            !Object.hasOwn(raw, c) ||
+            Object.hasOwn(storedVersions, c)
+          ) {
             continue;
           }
           const drift = detectShapeDrift(
-            { [c]: c in schema ? schema[c] : declared[c] },
+            { [c]: Object.hasOwn(schema, c) ? schema[c] : declared[c] },
             { [c]: raw[c] },
           ).filter((d) =>
             d.issue === "unknown-field" || d.issue === "type-changed"
@@ -1572,7 +1583,7 @@ export function initStandalone<S, A, E>(
       for (const r of report) {
         if (r.outcome !== "downgrade") continue;
         const key = downgradeParkKey(r.cell);
-        if (key in raw || raw[r.cell] === undefined) continue;
+        if (Object.hasOwn(raw, key) || raw[r.cell] === undefined) continue;
         carried[key] = raw[r.cell];
       }
       for (const [id, hook] of cellsCfg.restores) {
@@ -1637,8 +1648,8 @@ export function initStandalone<S, A, E>(
         carried[k] = raw![k];
         continue;
       }
-      if (k in declared) continue;
-      if (k in s) {
+      if (Object.hasOwn(declared, k)) continue;
+      if (Object.hasOwn(s, k)) {
         carried[k] = s[k];
         delete s[k];
         console.warn(
@@ -2173,6 +2184,10 @@ function bootStandalone(
      *  passes its own (via `_HARNESS_PERSIST_KEY`), so a test never reads or
      *  writes an app's real key; an app's `persistKey` never reaches here. */
     persistKey?: string;
+    /** Lazy-store write debounce. The harness passes a long window for
+     *  `{ persist: true }` so continuity across mounts is the dispose flush,
+     *  not a race with the default 100 ms timer. */
+    persistDebounceMs?: number;
     onRestore?: (s: Record<string, unknown>) => Record<string, unknown>;
     /** See `_HARNESS_SHAPE_GUARD`. */
     shapeGuard?: boolean;
@@ -2262,6 +2277,7 @@ function bootStandalone(
       execute: composed.execute,
       persist: opts.persist !== false && opts.persist !== "none",
       persistKey: opts.persistKey ?? `aio:${opts.appId ?? "app"}`,
+      persistDebounceMs: opts.persistDebounceMs,
       // WHAT is written, and what may come back — the SAME rule the server's
       // persistence runs (state/cell-persist-filter.ts). Without it this
       // runtime wrote the whole composed state: a cell that said
@@ -2491,6 +2507,8 @@ type StandaloneRunConfig = {
   appVersion?: string;
   cells?: CellDef[];
   persist?: boolean | string;
+  /** Forwarded to the lazy store — see `bootStandalone`. */
+  persistDebounceMs?: number;
   onRestore?: (state: Record<string, unknown>) => Record<string, unknown>;
   circuitBreaker?: import("./state/cell-compose.ts").CircuitBreakerConfig;
   /** `aio.run({ refusalsReject })` — honoured here as on the server. It was
@@ -2607,6 +2625,9 @@ function runStandalone(
       // NEVER `cfg.persistKey` (a server option) — see _HARNESS_PERSIST_KEY.
       persistKey: typeof cfg[_HARNESS_PERSIST_KEY] === "string"
         ? cfg[_HARNESS_PERSIST_KEY]
+        : undefined,
+      persistDebounceMs: typeof cfg.persistDebounceMs === "number"
+        ? cfg.persistDebounceMs
         : undefined,
       onRestore: cfg.onRestore,
       shapeGuard: cfg[_HARNESS_SHAPE_GUARD] === true,

@@ -463,7 +463,7 @@ function _checkEveryMs(id: string, ms: unknown): void {
  *  `<input type="datetime-local">` yields. `new Date()` reads that shape in
  *  the MACHINE's zone (a bare date is UTC, a `Z`/`±hh:mm` one is explicit),
  *  and `at` keeps that reading: v1.0.11 armed it so, and existing apps rely
- *  on it. Reading it as UTC is a breaking fix, parked in `future/v2.md`. */
+ *  on it. Reading it as UTC is a breaking fix, parked in `untracked/v2.md`. */
 const ISO_NO_OFFSET = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/;
 
 /** Is `time` an offset-less date-time — read in this machine's zone? */

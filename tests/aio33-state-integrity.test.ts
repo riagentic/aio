@@ -56,6 +56,16 @@ Deno.test("state integrity: names the key that went missing", () => {
   ]);
 });
 
+Deno.test("state integrity: a top-level key named after an Object.prototype member is seen", () => {
+  _reset();
+  // The first frame defines the shape: its `valueOf` key is an OWN property.
+  assertEquals(_checkStateIntegrity({ valueOf: 1, counter: { n: 0 } }), []);
+  // A later frame that dropped it. `"valueOf" in obj` is TRUE on any plain
+  // object (inherited), so the detector used to report nothing.
+  assertEquals(_checkStateIntegrity({ counter: { n: 0 } }), ["valueOf"]);
+  _reset();
+});
+
 Deno.test("state integrity: skips non-object states", () => {
   _reset();
   // No shape captured yet — and none of these may capture one either, or the

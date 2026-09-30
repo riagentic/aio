@@ -73,14 +73,14 @@ export function useAio<
     },
     has(_target, prop: string | symbol): boolean {
       if (typeof prop === "symbol") return false;
-      return prop in sig.value && slice(prop) !== undefined;
+      return Object.hasOwn(sig.value, prop) && slice(prop) !== undefined;
     },
     getOwnPropertyDescriptor(
       _target,
       prop: string | symbol,
     ): PropertyDescriptor | undefined {
       if (typeof prop === "symbol") return undefined;
-      if (!(prop in sig.value)) return undefined;
+      if (!Object.hasOwn(sig.value, prop)) return undefined;
       const value = slice(prop);
       if (value === undefined) return undefined;
       return { configurable: true, enumerable: true, value };

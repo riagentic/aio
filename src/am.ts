@@ -22,7 +22,7 @@
 
 // ── Command imports ────────────────────────────────────────
 
-import { join, resolve } from "@std/path";
+import { fromFileUrl, join, resolve } from "@std/path";
 import { homedir } from "./server/paths.ts";
 import {
   cmdInstances,
@@ -257,7 +257,13 @@ async function delegateToPathPin(): Promise<boolean> {
   // dep/aio is a symlink to the pinned checkout — the same file under two
   // spellings. Comparing the spellings re-exec'd the identical am on every
   // invocation, with the hand-off note (and the pin line) printed each time.
-  if (sameFile(new URL(import.meta.url).pathname, entry)) return false;
+  //
+  // `fromFileUrl`, not `.pathname`: pathname keeps percent-encoding, so a
+  // checkout under a path with a space (routine on macOS) compared
+  // `…/My%20App/…` against `…/My App/…`, never matched, and re-exec'd itself
+  // on every command; on Windows it also keeps the `/C:/…` shape. The same
+  // rule as build-compile.ts.
+  if (sameFile(fromFileUrl(import.meta.url), entry)) return false;
   // A checkout from before the per-machine override (`.aio/pin.local`)
   // cannot read the pin that just selected it — its am would see an unpinned
   // app and re-seal it. Stay on the installed am and say so, rather than

@@ -49,6 +49,29 @@ Deno.test("filterStateBySubs: duplicate top-level from multiple dotted subs", ()
   assertEquals(result, { counter: { count: 1, total: 5 } });
 });
 
+Deno.test("filterStateBySubs: a cell named after an Object.prototype member is kept", () => {
+  // `"valueOf" in filtered` is TRUE on the fresh `{}` (inherited from
+  // Object.prototype), so the `!(feat in filtered)` guard skipped every cell
+  // whose legal name happens to be a builtin — the client's subscription to
+  // its own cell produced `{}` and no delta could repair a base that never
+  // had the cell.
+  for (const name of ["valueOf", "toString", "hasOwnProperty"]) {
+    const state = { [name]: { n: 42 }, other: 1 };
+    assertEquals(
+      filterStateBySubs(state, new Set([name])),
+      { [name]: { n: 42 } },
+      `${name} was dropped from the filtered state`,
+    );
+  }
+});
+
+Deno.test("filterStateBySubs: a subscription to a prototype name with no such cell is skipped", () => {
+  // The other half: `"valueOf" in src` is true even when the state has no
+  // such cell, so the inherited native function was copied into the frame.
+  const state = { counter: { count: 1 } };
+  assertEquals(filterStateBySubs(state, new Set(["valueOf"])), {});
+});
+
 // ── filterPatchesBySubs ────────────────────────────────────────────
 
 Deno.test("filterPatchesBySubs: null subs returns all patches", () => {

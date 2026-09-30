@@ -67,3 +67,13 @@ Deno.test("restoreDropWatcher: a real undeclared value is still reported with th
   assert(warned[0]!.includes("jn.meta.b (number)"), warned[0]);
   assert(warned[0]!.includes("the next boot will NOT restore it"), warned[0]);
 });
+
+Deno.test("restoreDropWatcher: an undeclared cell named after a prototype member is not treated as declared", () => {
+  // `cell in initial` is true for every Object.prototype name, so a write that
+  // carried an orphan `toString` cell was walked as if it were declared —
+  // comparing the native function to the stored object.
+  const warned: string[] = [];
+  const watch = restoreDropWatcher(INITIAL, new Set(), (m) => warned.push(m));
+  watch({ jn: { meta: { a: 1 }, n: 0 }, toString: { score: 1 } });
+  assertEquals(warned, [], warned.join("\n"));
+});

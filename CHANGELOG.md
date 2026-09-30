@@ -1,5 +1,152 @@
 # Changelog
 
+## v1.0.15-beta — the audit round: one cross-caller key, one fail-open gate, and four smaller repairs (2026-09-30)
+
+> **Additive only — nothing is removed and nothing changes shape, and no app
+> needs a code change.** What an app may notice (see
+> [the upgrade guide](docs/upgrade/from-1.0.14-beta-to-1.0.15-beta.md)): a
+> `Map`/`Set`/class field in a `resolveUser` record no longer shares a per-user
+> view cache slot with a different one; a legal cell whose name is an
+> `Object.prototype` member (`valueOf`, `toString`, …) receives its full state
+> again; `am shot --check` refuses an unreadable `--threshold` instead of
+> reporting "matches"; a re-staged TOTP secret in another spelling no longer
+> reopens a spent code.
+
+### New
+
+- **`am start` and `am status` name the URL to open, not just the port.** A
+  running TCP app now prints `http://localhost:8123` beside the port (or
+  `https://…` for a TLS/`--expose` app), and the `--json` document gains a `url`
+  field — the port alone left the reader typing the address by hand. A
+  socket-only desktop app still names its socket.
+  `tests/am-start-names-socket.test.ts`.
+
+### Fixed
+
+- **Cross-caller view leak.** `userMemoKey` serialized every non-array object as
+  its enumerable own keys, so a `Map`, `Set`, `RegExp`, typed array or class
+  instance collapsed to `{}`: two users differing only inside such a field
+  produced one cache key, and the second caller could be served the first's
+  `forUser` view (broadcast) or a `ttl`/`first` result computed for another
+  caller. The key now comes from the same "is this value's JSON its identity"
+  decider the method-argument cache uses; outside it there is no key and the
+  view is recomputed. A `Date` field stays keyed (JSON replaces it via
+  `toJSON`). `tests/foruser-leak.test.ts`.
+- **Prototype-named cells lost their state.** `filterStateBySubs` used `in` on
+  plain objects, so a legal cell named `valueOf`/`toString`/… was dropped from
+  every full-state frame (`"valueOf" in {}` is true). Own-key tests now, and the
+  same `in`-on-data fix at `_checkStateIntegrity`'s missing-key detector,
+  `detectShapeDrift`'s unknown-cell test, and the sync engine's declared-cell
+  lookups. `tests/broadcast-utils.test.ts`,
+  `tests/aio33-state-integrity.test.ts`, `tests/shape-drift-deep.test.ts`.
+- **`am shot --check` failed open.** `--threshold=abc` became `NaN`, and
+  `worst > NaN` is always false, so a visual-regression check reported "matches"
+  and exited 0. Both tolerance flags are validated (`parseNumArg`); an
+  unreadable one is refused. `tests/am-shot.test.ts`.
+- **A path-pinned `am` re-executed itself under a path with a space (or on
+  Windows).** Delegation compared `new URL(import.meta.url).pathname` (which
+  keeps `%20` and `/C:/…`) against a real path; it now uses `fromFileUrl`.
+  `tests/am-path-pin-once.test.ts`.
+- **A re-staged TOTP secret in another spelling reopened a spent code.**
+  `setTotpSecret` validated a normalized secret but stored the raw string; the
+  replay guard is textual, so `ABC…` and `abc…=` were "different secrets" and
+  `totp_step` was zeroed. It stores the normalized secret.
+  `tests/totp-reenrol-fresh-replay.test.ts`.
+- **`deepFreeze` invoked the accessor getters it had just refused to invoke.**
+  The recursion used `Object.values(obj)`; a throwing getter escaped and
+  `freezeInitial` then returned the whole slice UNFROZEN, silently. It recurses
+  from the descriptors it already holds. `tests/freeze.test.ts`.
+- **Smaller truths.** `dropReport("prune-failed")` names the pending cap as a
+  number, not the identifier `SYNC_DEFAULTS.pendingCap`; the console sink masks
+  a credential that reaches a log line through `data`, not only through `msg`,
+  when `am start` points stdout at a log file.
+  `tests/sync/drop-report-honesty.test.ts`,
+  `tests/log-files-mask-credentials.test.ts`.
+
+### Fixed — round 2, the follow-up hunt (2026-09-29)
+
+- **`AIO_CDP`** (the env spelling of `--cdp`) is now refused on a non-electron
+  client exactly like the flag, instead of booting, printing a `cdp` line and
+  recording a dead debugger port. `AIO_PORT=0` no longer opts a local Electron
+  app out of zero-port mode; `AIO_PORT`/`AIO_DEFAULT_PORT` refuse the
+  hex/exponent/signed spellings `--port` refuses.
+  `tests/audit-round2-deciders.test.ts`.
+- **`--host=LOCALHOST`** is loopback in any case — `isLoopbackBind` and
+  `_hostIsExposed` now agree, so the boot report no longer warns about a
+  network-reachable bind for a loopback-only address.
+- **`deno.json` `share` of a sub-directory works on Windows** (the containment
+  prefix used `/`, not `SEPARATOR`).
+- **The aio-client certificate PIN matches again**: pins are keyed by the URL
+  host (`host:port`) the certificate-error lookup uses, so the strict
+  pinned-cert path fires for apps on a non-default port instead of falling
+  through to the looser TOFU host list. `tests/electron.test.ts`.
+- **A successful in-app rollback updates `installed.json`**, so `am installed`
+  and `am upgrade` no longer report the version that failed while the old one
+  runs. `tests/updates-rollback.test.ts`.
+- **Two browser-transport write guards**: a refused re-send no longer escapes
+  the message handler (the caller's `await` used to hang), and `_sendRaw`'s IPC
+  branch returns `false` on a throwing bridge like its WS sibling. The
+  test-server teardown always runs its temp-dir/logger cleanup even when
+  `app.close()` throws.
+- **`am`'s deprecated `-cN` / `--client=N`** enforce the same
+  `{ min: 0,
+  integer: true }` bounds as `-i` / `--client-index`;
+  **`am record`** finds an exported binding whose name contains `$`.
+
+### Fixed — rounds 3–4, the follow-up hunts (2026-09-29)
+
+- **A `persist: "none"` cell whose name is an `Object.prototype` member**
+  (`toString`, `valueOf`, …) had its action payload written in cleartext to
+  `logs/actions.jsonl` — the "is it unkept?" test used `in`, which answers for
+  the prototype too. `debug.log` printed the inherited native function instead
+  of `[redacted]` for an excluded field of the same name. Both use
+  `Object.hasOwn`. `tests/state-diff-persist-exclude.test.ts`.
+- **The aio-client certificate pre-pin loop** aborted on one malformed stored
+  recent and left every LATER recent unpinned (silently downgraded to the looser
+  TOFU list); each entry is handled on its own now. `tests/electron.test.ts`.
+- **A controlled `<input type="checkbox">`'s `value` write of `"true"`/`"false"`
+  was mistaken for a stale keystroke echo and skipped**, so the DOM diverged
+  from the model. The echo ring is per property now.
+  `tests/air-input-echo-rings.test.ts`.
+- **A versioned install on Windows is recognised again**: `versionedInstall`
+  hardcoded `/` while the paths use `\`, so the first self-update flattened the
+  version store (rollback gone). `tests/install-remove-update.test.ts`.
+- **`am start` on Windows passes ONE pre-quoted command line** to
+  `Start-Process` — an argument with a space (a `C:\Users\John Doe\…` entry) was
+  split by the child and the app never booted.
+  `tests/am-detached-spawn.test.ts`.
+- **`am create` / `am pin` / `am link` link `dep/aio` as a junction on Windows**
+  (a directory symlink needs Developer Mode or admin there), and **`am fix` no
+  longer chmods `*.sh` on Windows** (no POSIX mode bits — every script was a
+  false "manual repair"). `tests/am-name-traversal.test.ts`.
+- **`install.sh` persists PATH correctly when `$HOME` contains a space** (the
+  profile target list was word-split, so the real profile was never written and
+  the PATH line landed in stray files). `tests/install-deno-version.test.ts`.
+- **`t.init()` / `ui.seed` refuse (or warn about) a seed key named after a
+  prototype member** instead of silently injecting it —
+  `tests/cell-test-init-seed.test.ts`, `tests/testui-named-opts.test.tsx`.
+- **`am`'s `--out=<dir>` releases are no longer counted dirty**: the version
+  churned `-dirty.<hash>` forever and blocked publish with no source change.
+  `am pin --no-download` (the documented offline path) is accepted again, and
+  `am start <label>` works from a SUBDIRECTORY of a multi-component project
+  instead of refusing with "this project declares no components".
+  `tests/build-fleet-placement-identity.test.ts`,
+  `tests/am-unknown-flags.test.ts`, `tests/am-components.test.ts`.
+- **The `aiol` linter sees what it documents again**: a relative project dir no
+  longer disables the browser-graph and cross-file rules; a comment above an
+  expression-bodied member no longer hides it from four ERROR rules;
+  block-bodied timer callbacks, deep-excluded reads in `.tsx`, and
+  `<input type="hidden">` are handled; and `--safe-fix` no longer rewrites a
+  user's own method named `call` (which broke the method's body).
+- **A directory build artifact (`web`, `ios-client`) moves across filesystems**;
+  `.aio-integrity.json` and `--out` outputs no longer dirty the next build;
+  `--out=DIST` is refused like `--out=dist/x` on a case-insensitive host.
+- **`check:env` resolves a variable read through a wrapper** (`env(CHILD_ENV)`),
+  so `AIO_DEV_SUPERVISED` and `AIO_NO_DEV_RESTART` are documented on the page
+  that promises every `AIO_*` variable; **`check-doc-coverage`** fails when it
+  checked nothing. `tests/check-env-gate.test.ts`,
+  `tests/doc-coverage-gate.test.ts`.
+
 ## v1.0.14-beta — the web target, a strict harness, and three hunt rounds (2026-09-27)
 
 > **Additive only — nothing is removed and nothing changes shape.** What an app

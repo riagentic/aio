@@ -3235,7 +3235,12 @@ export function createLiveProxy<S extends Record<string, unknown>>(
       );
       const fresh = effectiveAt();
       if (fresh === null || fresh === undefined) return false; // AIO-232
-      return prop in (fresh as object);
+      // OWN keys: `prop in fresh` is true for every Object.prototype name, so
+      // `"toString" in s` / `"constructor" in s` answered true on a cell with
+      // no such field — the same class the useAio state-proxy pin closed.
+      return typeof prop === "string"
+        ? Object.hasOwn(fresh as object, prop)
+        : prop in (fresh as object);
     },
 
     ownKeys() {
@@ -3258,7 +3263,11 @@ export function createLiveProxy<S extends Record<string, unknown>>(
       }
       // ADD missing keys so getOwnPropertyDescriptor can satisfy the invariant.
       for (const k of freshKeySet) {
-        if (!(k in target)) {
+        // OWN keys: `k in target` is true for Object.prototype names, so a
+        // fresh own `toString`/`valueOf`/… key never got defineProperty'd onto
+        // the proxy target — breaking the ownKeys/getOwnPropertyDescriptor
+        // invariant for that key.
+        if (!Object.hasOwn(target, k)) {
           Object.defineProperty(target, k, {
             configurable: true,
             enumerable: true,

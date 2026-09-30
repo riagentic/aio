@@ -534,7 +534,11 @@ export function createPersistenceManager(
       return;
     }
     for (const c of cells) {
-      const has = stored !== null && typeof stored === "object" && c in stored;
+      // OWN keys: `c in stored` is true for every Object.prototype name, so a
+      // cell named `toString`/`valueOf`/… with no stored row was treated as
+      // having one — `_lastGood` held the native function.
+      const has = stored !== null && typeof stored === "object" &&
+        Object.hasOwn(stored, c);
       _lastGood.set(
         c,
         has ? (stored as Record<string, unknown>)[c] : NO_STORED,
@@ -845,7 +849,11 @@ export function createPersistenceManager(
       // this path used to pay for ONE changed row. An unfrozen value (an
       // engine-level caller feeding mutable objects) is still cloned, because
       // only a clone can tell a later in-place mutation from the baseline.
-      stateSnapshot[name] = v === prevLiveTables[name] && name in prevDbState
+      // OWN keys: `name in prevDbState` walks Object.prototype, so a table
+      // named after a prototype member with no prior snapshot falsely reused
+      // the native as its baseline.
+      stateSnapshot[name] = v === prevLiveTables[name] &&
+          Object.hasOwn(prevDbState, name)
         ? prevDbState[name]
         : Object.isFrozen(v)
         ? v
@@ -876,7 +884,8 @@ export function createPersistenceManager(
       prevDbState = nextPrev;
       prevLiveTables = nextLiveRefs;
     };
-    advance(Object.keys(live).filter((n) => !(n in dbSchema)));
+    // OWN keys: same prototype-lookup class as the other persistence sites.
+    advance(Object.keys(live).filter((n) => !Object.hasOwn(dbSchema, n)));
 
     const byCell = new Map<string, string[]>();
     for (const name of Object.keys(dbSchema)) {
@@ -1087,7 +1096,11 @@ export function createPersistenceManager(
       // planSetMulti deletes every prev key absent from its object, so the
       // full prev list next to the narrowed object would delete every
       // unchanged cell's row.
-      const removedKeys = prevPersistedKeys.filter((k) => !(k in doc));
+      // OWN keys: a dropped cell named after a prototype member must leave
+      // the document, not look "still present" via Object.prototype.
+      const removedKeys = prevPersistedKeys.filter((k) =>
+        !Object.hasOwn(doc, k)
+      );
       // A held cell is simply not rewritten: its row keeps the bytes of its
       // last committed write, which is exactly the hold.
       let toWrite = perCell ? scan.changed : doc;
@@ -1148,7 +1161,9 @@ export function createPersistenceManager(
     // and that omits nothing.
     let toStore = dbState;
     const keep = perCell
-      ? [...new Set([...scan.refused, ...held])].filter((c) => c in doc)
+      ? [...new Set([...scan.refused, ...held])].filter((c) =>
+        Object.hasOwn(doc, c)
+      )
       : [];
     if (keep.length) {
       const need = keep.filter((c) => !_lastGood.has(c));

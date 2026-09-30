@@ -12,8 +12,13 @@
 // worst available behaviour". `am lab` and `am log` have refused unknown flags
 // for releases; this is the same rule in the verb people run first.
 // Found by the randomized audit's "be a user" round.
-import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
-import { parseCreateArgs } from "../src/am/am-cmd-create.ts";
+import {
+  assert,
+  assertEquals,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
+import { parseCreateArgs, tailwindRefusal } from "../src/am/am-cmd-create.ts";
 
 Deno.test("am create: an unknown flag is refused, naming the accepted ones", () => {
   for (const flag of ["--dir=/tmp/x", "--dir", "--name=x", "-d", "--Force"]) {
@@ -34,6 +39,18 @@ Deno.test("am create: the refusal says where the app IS created", () => {
   ) as Error;
   assertStringIncludes(e.message, "./<name>");
   assertStringIncludes(e.message, "there is no --dir");
+});
+
+Deno.test("am create: --css=tailwind is refused for a template with no Twin", () => {
+  // Only `counter` ships a Tailwind UI. The others use aio's theme classes,
+  // which the Tailwind stylesheet does not define, and the theme steps aside
+  // while `src/style.css` exists — so `--template=todo --css=tailwind` used to
+  // scaffold a completely unstyled app, exit 0.
+  assert(tailwindRefusal("todo"), "todo has no Tailwind twin");
+  assert(tailwindRefusal("canvas"), "canvas has no Tailwind twin");
+  assert(tailwindRefusal("assets"), "assets has no Tailwind twin");
+  assert(tailwindRefusal("cli"), "the CLI template has no UI at all");
+  assertEquals(tailwindRefusal("counter"), null, "counter is the twin");
 });
 
 Deno.test("am create: every real flag still parses", () => {

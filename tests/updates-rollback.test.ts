@@ -122,6 +122,17 @@ Deno.test("boot: the VERSIONED layout restores the SYMLINK — it does not renam
     await Deno.writeTextFile(v2, "v2-broken");
     const link = join(dir, "notes");
     await Deno.symlink(v2, link);
+    // The record the forward swap wrote: it names the version we are about to
+    // roll back FROM.
+    await Deno.writeTextFile(
+      join(dir, "installed.json"),
+      JSON.stringify({
+        name: "notes",
+        version: "2.0.0",
+        artifact: "notes",
+        source: "example",
+      }),
+    );
 
     writePending(
       data,
@@ -137,6 +148,14 @@ Deno.test("boot: the VERSIONED layout restores the SYMLINK — it does not renam
     );
     assertEquals(await Deno.realPath(link), v1);
     assertEquals(await Deno.readTextFile(link), "v1-works");
+    // The record follows the ARTIFACT, exactly as the forward swap makes it —
+    // otherwise `am installed` reports the failed version while the old one
+    // runs.
+    assertEquals(
+      JSON.parse(await Deno.readTextFile(join(dir, "installed.json"))).version,
+      "1.0.0",
+      "installed.json still names the version that was rolled back from",
+    );
     assertEquals(
       (await Deno.stat(v2)).isFile,
       true,

@@ -456,7 +456,15 @@ const ipcMain = (() => {
  *  Expects `app` and `__aioQuitting` (tmplCrashGuard) in scope. */
 export function tmplParentWatch(): string {
   return `
-const __aioParent = Number(process.env.AIO_PARENT_PID || 0);
+// Decimal digits only — same rule as the server's parentPidOf / AIO_PORT.
+const __aioParent = (() => {
+  const raw = process.env.AIO_PARENT_PID;
+  if (raw === undefined || String(raw).trim() === "") return 0;
+  const s = String(raw).trim();
+  const n = Number(s);
+  // [0-9] not \d — this string is a template literal; \d would emit /^d+$/.
+  return /^[0-9]+$/.test(s) && Number.isInteger(n) && n > 0 ? n : 0;
+})();
 if (__aioParent > 0) {
   const __aioParentTimer = setInterval(() => {
     let alive = true;
@@ -1135,6 +1143,30 @@ export const CONNECT_HTML = `<!DOCTYPE html>
 
 // ── UDS-mode template helpers ──
 
+/** Default for `AIO_SOCKET_TIMEOUT_MS` — first-byte wait in the Electron
+ *  main's socketFetch. Documented in docs/build/environment.md. */
+export const DEFAULT_SOCKET_TIMEOUT_MS = 30_000;
+
+/** Parse `AIO_SOCKET_TIMEOUT_MS`: decimal digits, finite > 0, else the default.
+ *
+ *  Same vocabulary as `--port` / `AIO_PORT` / `discoveryPortOf`: `Number()`
+ *  also accepts `0x7530`, `3e4`, `+30000` and `0b111`, four spellings nobody
+ *  types on purpose. A non-decimal value used to arm a surprising timeout —
+ *  now it falls back to the documented 30s. Pure so a test can pin the refuse
+ *  list without evaluating the generated main.
+ *
+ *  @decider */
+// aio-ok: test-only twin of the inlined Electron-main AIO_SOCKET_TIMEOUT_MS parse
+export function socketTimeoutMsOf(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === "") return DEFAULT_SOCKET_TIMEOUT_MS;
+  const s = raw.trim();
+  const n = Number(s);
+  if (!/^\d+$/.test(s) || !Number.isFinite(n) || n <= 0) {
+    return DEFAULT_SOCKET_TIMEOUT_MS;
+  }
+  return n;
+}
+
 /** The Electron main process's ONE door to the app: a request to the app's
  *  HTTP handler over its local socket — a Unix socket, or a named pipe
  *  (`\\.\pipe\…`) on Windows. Node's `http.request` speaks both natively (the
@@ -1174,10 +1206,16 @@ const AIO_SMALL_BODY = 64 * 1024;
 // only — a long-lived stream (SSE, a large download) is never touched once
 // its headers are here.
 const AIO_REQ_TIMEOUT_MS = (() => {
+  // Decimal digits only — same rule as AIO_PORT / discoveryPortOf. Number()
+  // accepts 0x7530 / 3e4 / +30000; those are surprises, not timeouts.
   const raw = typeof process !== 'undefined' && process.env
-    ? Number(process.env.AIO_SOCKET_TIMEOUT_MS)
-    : NaN;
-  return Number.isFinite(raw) && raw > 0 ? raw : 30000;
+    ? process.env.AIO_SOCKET_TIMEOUT_MS
+    : undefined;
+  if (raw === undefined || String(raw).trim() === "") return 30000;
+  const s = String(raw).trim();
+  const n = Number(s);
+  // [0-9] not \d — this string is a template literal; \d would emit /^d+$/.
+  return /^[0-9]+$/.test(s) && Number.isFinite(n) && n > 0 ? n : 30000;
 })();
 const __aioAgents = new Map();
 function __aioAgent(mod, key) {

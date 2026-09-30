@@ -21,7 +21,7 @@ import {
 } from "../entries.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, fail, out, sayErr } from "./am-output.ts";
-import { reservedAppNameError } from "./am-utils.ts";
+import { dirLinkType, reservedAppNameError } from "./am-utils.ts";
 import { resolve } from "@std/path";
 import { colorEnabled } from "../diagnostics/color.ts";
 import { styleWith } from "../diagnostics/fmt.ts";
@@ -624,6 +624,7 @@ const TAILWIND_SOURCE = `@import "tailwindcss";
 `;
 
 const GITIGNORE = `.aio/
+.aio-integrity.json
 dist/
 node_modules/
 dep/
@@ -932,6 +933,20 @@ function templateSources(
   }
 }
 
+/** Why `--css=tailwind` has no UI for `template`, or null when it is allowed.
+ *  Only `counter` ships a Tailwind twin (markup built from Tailwind
+ *  utilities); every other template's UI uses aio's theme classes, which the
+ *  Tailwind stylesheet does not define — and the theme steps aside while
+ *  `src/style.css` exists, so it would render unstyled under a green create.
+ *  Pure. */
+export function tailwindRefusal(template: Template): string | null {
+  if (template === "counter") return null;
+  return `am create: --css=tailwind has no "${template}" UI yet — only ` +
+    `--template=counter ships the Tailwind twin (its markup uses Tailwind ` +
+    `utilities). Use --template=counter, drop --css=tailwind, or write ` +
+    `src/App.tsx in Tailwind utilities yourself.`;
+}
+
 export function scaffold(
   name: string,
   template: Template,
@@ -980,7 +995,9 @@ export function scaffold(
     // `COUNTER_UI_TAILWIND`: with `--css=tailwind` the generated theme steps
     // aside, so the default markup's theme classes stop existing and the
     // scaffold's first `deno task dev` renders as unstyled HTML. Only the
-    // counter has a Tailwind twin — the others do not lean on theme classes.
+    // counter HAS a Tailwind twin — every other template's UI leans on the
+    // theme's own classes (`card`, `row`, `primary`, …), which is why `create`
+    // refuses `--css=tailwind` for them rather than shipping unstyled markup.
     "src/App.tsx": template === "counter" && css === "tailwind"
       ? COUNTER_UI_TAILWIND
       : src.ui,
@@ -1198,28 +1215,30 @@ export async function writeScaffold(
       const link = resolve(dir, "dep/aio");
       await ledger.mkdirp(resolve(dir, "dep"));
       await ledger.touch(link);
-      await Deno.symlink(aioPath, link).catch(async (e) => {
-        if (!(e instanceof Deno.errors.AlreadyExists)) throw e;
-        // A LINK already there (a --force re-run) is replaced — recorded by
-        // `touch` above, so undo restores it. An EMPTY real directory is
-        // replaced too (it always was; it holds nothing) and recorded so undo
-        // recreates it. Anything else at dep/aio — a vendored copy, a file —
-        // is the user's: `am link` calls that state "blocked"; so does create.
-        const st = await Deno.lstat(link);
-        if (!st.isSymlink) {
-          const empty = st.isDirectory &&
-            (await Array.fromAsync(Deno.readDir(link))).length === 0;
-          if (!empty) {
-            throw new Error(
-              `${link} exists and is not a symlink — it is not create's to ` +
-                `replace. Move it aside (or drop --force) and re-run.`,
-            );
+      await Deno.symlink(aioPath, link, { type: dirLinkType() }).catch(
+        async (e) => {
+          if (!(e instanceof Deno.errors.AlreadyExists)) throw e;
+          // A LINK already there (a --force re-run) is replaced — recorded by
+          // `touch` above, so undo restores it. An EMPTY real directory is
+          // replaced too (it always was; it holds nothing) and recorded so undo
+          // recreates it. Anything else at dep/aio — a vendored copy, a file —
+          // is the user's: `am link` calls that state "blocked"; so does create.
+          const st = await Deno.lstat(link);
+          if (!st.isSymlink) {
+            const empty = st.isDirectory &&
+              (await Array.fromAsync(Deno.readDir(link))).length === 0;
+            if (!empty) {
+              throw new Error(
+                `${link} exists and is not a symlink — it is not create's to ` +
+                  `replace. Move it aside (or drop --force) and re-run.`,
+              );
+            }
+            ledger.emptyDirs.push(link);
           }
-          ledger.emptyDirs.push(link);
-        }
-        await Deno.remove(link);
-        await Deno.symlink(aioPath, link);
-      });
+          await Deno.remove(link);
+          await Deno.symlink(aioPath, link, { type: dirLinkType() });
+        },
+      );
     }
 
     // Record the pin IN the app, committed with the code — the whole point.
@@ -1406,6 +1425,16 @@ export async function cmdCreate(
       `⚠ --jsr pins jsr:${PKG}@${VERSION} — make sure that version is published, ` +
         `or the app's deno task dev won't resolve.`,
     );
+  }
+
+  // `--css=tailwind` writes a Tailwind stylesheet, and aio's generated theme
+  // steps aside while `src/style.css` exists — so only a UI built from Tailwind
+  // UTILITIES renders. Only `counter` ships such a twin; refused, by name,
+  // rather than silently shipping unstyled HTML (the CLI template has no UI at
+  // all, and is covered here).
+  if (opts.css === "tailwind") {
+    const why = tailwindRefusal(opts.template);
+    if (why) fail(why, mode);
   }
 
   // opts.target was parsed, validated and echoed — but never passed, so every

@@ -24,3 +24,17 @@ Deno.test("air: useConnected reads connection status", () => {
   assertEquals(useConnected(), false);
   _reset();
 });
+
+Deno.test("air: useAio state proxy does not answer for Object.prototype names", () => {
+  // `prop in sig.value` is true for every Object.prototype name, so
+  // `"toString" in state` was true even when no cell held that key — the
+  // proxy's `has` / `getOwnPropertyDescriptor` traps walked the prototype.
+  _reset();
+  _injectState({ counter: { count: 1 } });
+  const { state } = useAio();
+  assertEquals("toString" in state, false);
+  assertEquals("constructor" in state, false);
+  assertEquals("valueOf" in state, false);
+  assertEquals("counter" in state, true);
+  _reset();
+});

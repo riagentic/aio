@@ -4,9 +4,10 @@
 //  1. the standalone boot ignored the `persistKey` the harness passed and used
 //     `aio:testui` — a key in Deno's ON-DISK localStorage, so a persist mount
 //     restored whatever a PREVIOUS `deno test` run left there;
-//  2. dispose CANCELLED the 100 ms debounced save instead of flushing it, so
+//  2. dispose CANCELLED the pending debounced save instead of flushing it, so
 //     the last change before teardown never reached the store and the next
-//     mount restored a stale value.
+//     mount restored a stale value. (The harness keeps that debounce open so
+//     the flush cannot be skipped by a timer race under a loaded suite.)
 import { assertEquals } from "@std/assert";
 import { cell } from "../mod.ts";
 import { testUI } from "../src/testing/ui-test.ts";
@@ -49,17 +50,23 @@ Deno.test("testUI persist: a previous run's aio:testui entry is never restored",
 });
 
 Deno.test("testUI persist: dispose flushes the pending save, the next mount restores it", async () => {
+  // The harness holds the lazy-store debounce open (60s) for `{ persist: true }`
+  // so this cannot go green via the timer racing dispose under load — only the
+  // dispose `_flushPendingPersist` path can land the last change.
   {
     await using ui = await testUI(App, { persist: true });
     ui.BumpButton.click();
     ui.BumpButton.click();
     await ui.expectCell(counter, (c) => c.n === 2);
-    // Disposed well inside the 100 ms debounce window.
+    // One more change AFTER settle, still inside the open debounce window —
+    // dispose must flush THIS value, not a stale earlier snapshot.
+    ui.BumpButton.click();
+    await ui.expectCell(counter, (c) => c.n === 3);
   }
   await using again = await testUI(App, { persist: true });
   assertEquals(
     (again.fullState(counter) as { n: number }).n,
-    2,
+    3,
     "the last change before teardown must be persisted, not cancelled",
   );
 });

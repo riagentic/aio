@@ -1463,13 +1463,17 @@ Deno.test("am lab --tunnel: the process HOLDS the port open", async () => {
   // Regression: --tunnel printed "started" and then exited, leaving the
   // operator with a URL that answers nothing. The tunnel IS the process, so
   // "did it stay alive and bind the port" is the whole contract.
+  //
+  // Lab already UP: start's preflight probes THIS host's /dev/kvm, which a CI
+  // box without the kvm group fails even under a fake docker. The android
+  // install tests use the same "already running" shape for that reason. The
+  // tunnel path after an existing container is the one that must hold the port.
   const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
   const dir = await fakeDocker(`
 case "$1" in
   info) echo "29.1.3";;
   images) echo "sha256:abc";;
-  inspect) if [ -f ${home}/ran ]; then echo "true|2026-08-27T00:00:00Z|running"; else exit 1; fi;;
-  run) touch ${home}/ran; echo "cid";;
+  inspect) echo "true|2026-08-27T00:00:00Z|running";;
   exec) echo -n "200";;
   logs) echo "booting";;
   *) exit 0;;

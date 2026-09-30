@@ -216,8 +216,11 @@ const INLINE_FIELDS = 4;
 
 export function printConsole(e: LogEntry): void {
   // Same rule as every log file (logger-core `_capLine`): the share link's
-  // token and the pair code never reach disk.
-  if (stdoutIsLog()) e = { ...e, msg: redactLogCredentials(e.msg) };
+  // token and the pair code never reach disk. Applied to the WHOLE rendered
+  // line below, not just `msg` — a token reaching the line through `data`/the
+  // bulk block used to be written through in cleartext, the one sink that
+  // disagreed with the others.
+  const toFile = stdoutIsLog();
   const lvlStr = (typeof e.lvl === "string" ? e.lvl : "debug").toUpperCase()
     .padEnd(5);
   const color = LEVEL_COLOR[e.lvl] ?? C.gray;
@@ -261,7 +264,8 @@ export function printConsole(e: LogEntry): void {
         },
       )
     : "";
-  const line = `${ts}  ${lvl}  ${cat}  ${msg}${data}${dur}${bulk}`;
+  const raw = `${ts}  ${lvl}  ${cat}  ${msg}${data}${dur}${bulk}`;
+  const line = toFile ? redactLogCredentials(raw) : raw;
   // The level decides the STREAM, not just the word. A warning printed on
   // stdout cannot be separated by `2>`, a wrapper cannot tell it from output,
   // and anything watching console.warn/console.error — a test, a host app, the

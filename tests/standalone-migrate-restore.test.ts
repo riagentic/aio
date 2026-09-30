@@ -398,3 +398,41 @@ Deno.test("standalone restore: a stamped store with no versioned cell still migr
   assertEquals(calls, [0]);
   assertEquals(price, 1200);
 });
+
+Deno.test("standalone restore: an undeclared cell named after a prototype member is preserved", async () => {
+  // Sibling of the rename/orphan pin above. `k in declared` is true for every
+  // Object.prototype name, so a stored `toString` cell was treated as a
+  // declared `persist: "none"` cell by `restorableOnly` and dropped — the
+  // bytes a rename migration must keep. Same class as the filterStateBySubs /
+  // detectShapeDrift / persist-exclude pins.
+  storage.clear();
+  storage.set(
+    "aio:smr7proto",
+    JSON.stringify({ toString: { score: 99 }, smrkeepproto: { n: 1 } }),
+  );
+  const c = cell("smrkeepproto", {
+    state: { n: 0 },
+    methods: {
+      bump(s: { n: number }) {
+        s.n += 1;
+      },
+    },
+  });
+  const [state] = await quiet(() =>
+    withApp("smr7proto", [c], async (app) => {
+      await (c as unknown as { bump(): Promise<void> }).bump();
+      return app.getState() as Record<string, unknown>;
+    })
+  );
+  assert(
+    !Object.hasOwn(state, "toString"),
+    "an undeclared slice entered runtime state",
+  );
+  const written = JSON.parse(storage.get("aio:smr7proto") ?? "{}");
+  assertEquals(written.smrkeepproto, { n: 2 });
+  assertEquals(
+    written.toString,
+    { score: 99 },
+    "the undeclared prototype-named cell's data was deleted from the store",
+  );
+});

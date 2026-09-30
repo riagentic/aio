@@ -272,7 +272,11 @@ export function buildAppObject<S, A>(refs: {
         // "nothing" to its clients (reported as a ui-hidden cell).
         const init = refs.initialState as Record<string, unknown>;
         for (const k of Object.keys(init)) {
-          if (!(k in (parsed as Record<string, unknown>))) {
+          // OWN keys: same class as the drop side below (`Object.hasOwn`).
+          // `k in parsed` is true for every Object.prototype name, so a
+          // declared cell named `toString`/`valueOf`/… the snapshot lacked
+          // was never force-filled — force left a hole a restart would not.
+          if (!Object.hasOwn(parsed as Record<string, unknown>, k)) {
             (parsed as Record<string, unknown>)[k] = init[k];
           }
         }

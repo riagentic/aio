@@ -41,3 +41,18 @@ Deno.test("wire-value: an Array subclass is reported like any class instance", (
   assert(r.lossy.length > 0, "an Array subclass was reported as exact");
   assertEquals(r.lossy[0], { path: "value", from: "Rows", to: "Array" });
 });
+
+Deno.test("wire-value: a dropped own key named after a prototype member is reported absent", async () => {
+  // `k in r` is true for every Object.prototype name, so a `toString` function
+  // field JSON erased was walked against the inherited native instead of
+  // reported `absent`.
+  const { findLossy } = await import("../src/protocol/wire-value.ts");
+  const orig = { a: 1, toString: () => "x" };
+  const round = JSON.parse(JSON.stringify(orig));
+  const out: { path: string; from: string; to: string }[] = [];
+  findLossy(orig, round, "value", out, { n: 0 });
+  assert(
+    out.some((l) => l.path === "value.toString" && l.to === "absent"),
+    JSON.stringify(out),
+  );
+});

@@ -55,6 +55,19 @@ Deno.test("detectShapeDrift: reaches exactly as deep as deepMerge prunes, no dee
   );
 });
 
+Deno.test("detectShapeDrift: a stored key named after an Object.prototype member is unknown-cell", () => {
+  // `"valueOf" in initial` is true on any plain object, so the genuine "a cell
+  // this build does not declare" finding was replaced by a misleading
+  // `type-changed` (declaredType "function" — the inherited native).
+  const d = detectShapeDrift(
+    { counter: { n: 1 } },
+    { counter: { n: 1 }, valueOf: 2 },
+  );
+  const hit = d.find((x) => x.cell === "valueOf");
+  assertEquals(hit?.issue, "unknown-cell");
+  assertEquals(hit?.path, "");
+});
+
 const _argsDesc = Object.getOwnPropertyDescriptor(Deno, "args")!;
 function setMode(mode: "dev" | "prod"): void {
   Object.defineProperty(Deno, "args", {

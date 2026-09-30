@@ -27,7 +27,7 @@ import { BUILD_BOOL_FLAGS, BUILD_VALUE_FLAGS } from "../build/build-flags.ts";
  *  annotation is a WIDENING for every consumer — with the literal type,
  *  `VERSION === "1.0.0-alpha76"` was a compile error for having no overlap;
  *  now it is an ordinary comparison. */
-export const VERSION: string = "1.0.14-beta";
+export const VERSION: string = "1.0.15-beta";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *
@@ -281,6 +281,27 @@ export function _resetParsedCli(): void {
   _cdpPort = undefined;
 }
 
+/** `--cdp` / `AIO_CDP` resolved to a value, WITHOUT the invalid-value warning
+ *  — for the pre-boot refusal, which only asks "was CDP asked for" and must
+ *  not warn before `cdpPort` (the one warn site) does. The flag beats the env;
+ *  an unparsable value is absent, never a silent default port. Pure. */
+export function cdpRequest(
+  flag: number | true | undefined,
+  env: string | undefined,
+): number | true | undefined {
+  if (flag !== undefined) return flag;
+  if (env === undefined || env === "" || env === "0") return undefined;
+  if (env === "1" || env === "true") return true;
+  // Decimal digits only — the same rule `--cdp=N` / `--port` / `AIO_PORT`
+  // use (`intArg` / `envPort`). `Number()` also accepts `0x1F90`, `1e3`,
+  // `+9333` and `0b111`; four spellings nobody types on purpose, each of
+  // which the flag refuses. One port vocabulary, both rungs.
+  const s = env.trim();
+  const n = Number(s);
+  if (/^\d+$/.test(s) && Number.isInteger(n) && n > 0 && n < 65536) return n;
+  return undefined;
+}
+
 /** `--cdp` / `AIO_CDP` as one value: a port, `true` (pick one), or nothing.
  *  Pure — the flag beats the env, and an unparsable value is reported and
  *  treated as absent (never a silent default port). */
@@ -288,13 +309,14 @@ export function parseCdp(
   flag: number | true | undefined,
   env: string | undefined,
 ): number | true | undefined {
-  if (flag !== undefined) return flag;
-  if (env === undefined || env === "" || env === "0") return undefined;
-  if (env === "1" || env === "true") return true;
-  const n = Number(env);
-  if (Number.isInteger(n) && n > 0 && n < 65536) return n;
-  log.warn(`invalid AIO_CDP value: ${env} (1, or a port 1-65535) — ignored`);
-  return undefined;
+  const value = cdpRequest(flag, env);
+  if (
+    value === undefined && flag === undefined && env !== undefined &&
+    env !== "" && env !== "0"
+  ) {
+    log.warn(`invalid AIO_CDP value: ${env} (1, or a port 1-65535) — ignored`);
+  }
+  return value;
 }
 
 let _cdpPort: number | undefined | null;
@@ -327,6 +349,19 @@ export const DEFAULT_PORT_ENV = "AIO_DEFAULT_PORT";
  *  and a malformed value is REFUSED exactly as `AIO_PORT` is (see `envPort`) —
  *  a typo that quietly fell back to a random port is the bug this rung fixes.
  *  `0` means "pick a free one", the same as saying nothing. */
+/** Did anyone NAME a port — `--port`, `AIO_PORT`, or `aio.run({ port })`?
+ *  `0` means "pick a free one", exactly as if no port were named, so it does
+ *  NOT count: a local Electron app keeps its zero-TCP-port default. The env
+ *  rung used to be read as `!== undefined`, so `AIO_PORT=0` alone opted out.
+ *  Pure. */
+export function portWasRequested(
+  flag: number | undefined,
+  env: number | undefined,
+  config: number | undefined,
+): boolean {
+  return !!flag || !!env || !!config;
+}
+
 export function envDefaultPort(): number | undefined {
   let raw: string | undefined;
   try {
@@ -335,11 +370,13 @@ export function envDefaultPort(): number | undefined {
     return undefined; // no --allow-env here: the environment is not readable
   }
   if (raw === undefined || raw.trim() === "") return undefined;
-  const n = Number(raw.trim());
-  if (!Number.isInteger(n) || n < 0 || n > 65535) {
+  // Decimal digits only — the same rule as `AIO_PORT` (`envPort`) and `--port`.
+  const s = raw.trim();
+  const n = Number(s);
+  if (!/^\d+$/.test(s) || n > 65535) {
     throw new Error(
-      `${DEFAULT_PORT_ENV}=${raw} is not a port (want an integer 0-65535; 0 ` +
-        `means "pick a free one"). Fix or unset it — it will not be ignored.`,
+      `${DEFAULT_PORT_ENV}=${raw} is not a port (want decimal digits 0-65535; ` +
+        `0 means "pick a free one"). Fix or unset it — it will not be ignored.`,
     );
   }
   return n;
@@ -818,6 +855,9 @@ export function electronOnlyFlagRefusal(
   >,
   client: string,
   config: { serverUrl?: string; keepServer?: boolean } = {},
+  /** The RESOLVED cdp request — `cdpRequest(cli.cdp, AIO_CDP)` — so the env
+   *  spelling is refused exactly like the flag. Defaults to the flag alone. */
+  cdp: number | true | undefined = cli.cdp,
 ): Error | null {
   if (client === "electron") return null;
   /** [what was typed, how to undo it] — first match wins. */
@@ -834,7 +874,9 @@ export function electronOnlyFlagRefusal(
   else if (config.keepServer) {
     asked.push(["keepServer: true (aio.run())", "remove keepServer"]);
   }
-  if (cli.cdp !== undefined) asked.push(["--cdp", "drop it"]);
+  if (cdp !== undefined) {
+    asked.push([cli.cdp !== undefined ? "--cdp" : "AIO_CDP", "drop it"]);
+  }
   if (cli.width !== undefined) asked.push(["--width", "drop it"]);
   if (cli.height !== undefined) asked.push(["--height", "drop it"]);
   const first = asked[0];

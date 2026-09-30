@@ -1002,12 +1002,19 @@ export async function cmdFix(
     }
   }
   const notExec: string[] = [];
-  for (const s of scripts) {
-    const p = join(dir, s);
-    try {
-      const st = await Deno.stat(p);
-      if (st.isFile && !((st.mode ?? 0) & 0o111)) notExec.push(s);
-    } catch { /* referenced but absent — leave it */ }
+  // No POSIX mode bits on Windows: `st.mode` carries no 0o111, so every
+  // referenced `.sh` read as "not executable", and `Deno.chmod` then THROWS
+  // NotSupported — `am fix` (which `run.ps1` runs on every Windows run)
+  // reported each perfectly fine script as needing manual repair. The step
+  // does not exist there; the chmod calls below are unreachable.
+  if (Deno.build.os !== "windows") {
+    for (const s of scripts) {
+      const p = join(dir, s);
+      try {
+        const st = await Deno.stat(p);
+        if (st.isFile && !((st.mode ?? 0) & 0o111)) notExec.push(s);
+      } catch { /* referenced but absent — leave it */ }
+    }
   }
   if (scripts.size > 0) {
     await repair(

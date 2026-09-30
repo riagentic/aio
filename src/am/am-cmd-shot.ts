@@ -10,6 +10,7 @@ import {
   liveLock,
   lockHasNoDoor,
   noDoorMessage,
+  parseNumArg,
   resolveAmAppId,
 } from "./am-utils.ts";
 import { appPageTargets, cdpConnect, cdpTargets } from "./am-cdp.ts";
@@ -30,6 +31,35 @@ export function shotOutPath(
 export function shotStamp(now: Date): string {
   return now.toISOString().replace(/[-:]/g, "").replace(/\..+$/, "")
     .replace("T", "-");
+}
+
+/** Pure: the tolerance options for `am shot --check`, or the refusal naming the
+ *  flag that could not be read. `Number("abc")` is NaN and `worst > NaN` is
+ *  always false, so an unvalidated `--threshold` made the visual-regression
+ *  gate report "matches" for a frame that had changed — a check that failed
+ *  OPEN. Every other numeric `am` flag goes through `parseNumArg`; this pair
+ *  now does too. @internal exported for tests. */
+export function shotDiffOptions(
+  args: readonly string[],
+): { ok: true; opts: PngDiffOptions } | { ok: false; error: string } {
+  const opts: { threshold?: number; maxRatio?: number } = {};
+  const th = args.find((a) => a.startsWith("--threshold="))?.slice(12);
+  if (th !== undefined) {
+    const n = parseNumArg(th, "--threshold", {
+      min: 0,
+      max: 255,
+      integer: true,
+    });
+    if (!n.ok) return n;
+    opts.threshold = n.value;
+  }
+  const mr = args.find((a) => a.startsWith("--max-diff="))?.slice(11);
+  if (mr !== undefined) {
+    const n = parseNumArg(mr, "--max-diff", { min: 0, max: 1 });
+    if (!n.ok) return n;
+    opts.maxRatio = n.value;
+  }
+  return { ok: true, opts };
 }
 
 /** Clients with a desktop window. Everything else has nothing to screenshot,
@@ -298,13 +328,12 @@ export async function cmdShot(
         );
         Deno.exit(1);
       }
-      const th = args.find((a) => a.startsWith("--threshold="))?.slice(12);
-      const mr = args.find((a) => a.startsWith("--max-diff="))?.slice(11);
-      const opts: PngDiffOptions = {
-        ...(th !== undefined ? { threshold: Number(th) } : {}),
-        ...(mr !== undefined ? { maxRatio: Number(mr) } : {}),
-      };
-      const diff = await comparePng(png, prior, opts);
+      const parsedOpts = shotDiffOptions(args);
+      if (!parsedOpts.ok) {
+        outError(parsedOpts.error, mode);
+        Deno.exit(1);
+      }
+      const diff = await comparePng(png, prior, parsedOpts.opts);
       if (diff.same) {
         out(
           mode === "pretty"

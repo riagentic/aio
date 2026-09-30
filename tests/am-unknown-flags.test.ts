@@ -237,6 +237,18 @@ Deno.test("am flags: nothing is both offered and refused", () => {
   assertEquals(checked, 1, "one flag is recognised-but-not-offered today");
 });
 
+// `am pin --no-download` is the documented OFFLINE path (docs/clients/
+// electron.md; the 1.0.4→1.0.5 guide): move the electron line and skip the
+// ~100 MB download. `cmdPin` reads it, but VERB_FLAGS.pin omitted it, so the
+// gate killed the command before it ran and the offline path was unreachable.
+Deno.test("am flags: `am pin --no-download` reaches the command", () => {
+  assertEquals(unknownFlags("pin", ["--no-download"]), []);
+  assert(
+    VERB_FLAGS.pin!.includes("--no-download"),
+    "the offline pin path must be offered by the gate",
+  );
+});
+
 Deno.test("am flags: `am shot --pose` reaches the command, not the gate", () => {
   assertEquals(unknownFlags("shot", ["--pose"]), []);
   const msg = unknownFlagError("shot", ["--zzz"])!;

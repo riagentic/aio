@@ -75,6 +75,16 @@ Deno.test("am trigger: a client of unknown platform takes am's own OS", async ()
   // OS on every host. Injected both ways so the test holds on any machine.
   const real = Object.getOwnPropertyDescriptor(Deno, "build")!;
   const onOs = async (os: string) => {
+    // With os stubbed to `windows`, the lock-dir base comes from TEMP/TMP —
+    // and with neither set it is the literal `C:\Temp`, which this test then
+    // created in the repo root on Linux (it reappeared on every suite run).
+    // Point them at a managed temp dir for the length of the stub.
+    const winTemp = os === "windows" ? await tempDir("am-trigger-win-") : null;
+    const prev = { TEMP: Deno.env.get("TEMP"), TMP: Deno.env.get("TMP") };
+    if (winTemp) {
+      Deno.env.set("TEMP", winTemp);
+      Deno.env.set("TMP", winTemp);
+    }
     Object.defineProperty(Deno, "build", {
       ...real,
       value: { ...Deno.build, os },
@@ -83,6 +93,11 @@ Deno.test("am trigger: a client of unknown platform takes am's own OS", async ()
       return (await pressed(undefined, "mod+k"))[0]!.mods;
     } finally {
       Object.defineProperty(Deno, "build", real);
+      for (const [k, v] of Object.entries(prev)) {
+        if (v === undefined) Deno.env.delete(k);
+        else Deno.env.set(k, v);
+      }
+      if (winTemp) await dropTempDir(winTemp);
     }
   };
   assertEquals(await onOs("darwin"), { metaKey: true });

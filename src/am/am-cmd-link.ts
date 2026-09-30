@@ -6,6 +6,7 @@
 // checkout `am` runs from (installed by install.sh at ~/.local/lib/aio), so the
 // app builds without needing `am create` or a manual JSR switch.
 import { join, resolve } from "@std/path";
+import { dirLinkType } from "./am-utils.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
 import { repoRoot } from "./am-cmd-create.ts";
@@ -157,7 +158,7 @@ export async function linkDepAio(
     await Deno.remove(link);
   }
   await Deno.mkdir(join(dir, "dep"), { recursive: true });
-  await Deno.symlink(root, link);
+  await Deno.symlink(root, link, { type: dirLinkType() });
   return "linked";
 }
 

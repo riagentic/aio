@@ -365,8 +365,15 @@ export async function testServer<S = unknown>(
     : _isolateWorkerCellsInProcess(config.cells ?? []);
   const url = `http://127.0.0.1:${port}`;
   const close = async () => {
+    // A throw from `app.close()` must not skip the temp-dir/logger cleanup
+    // below: the logger is a process-wide singleton pointed at THIS app's
+    // baseDir, so leaving it attached after the dir is gone makes every later
+    // test log into a hole. Capture the failure, always clean up, rethrow.
+    let closeErr: unknown;
     try {
       await app.close();
+    } catch (e) {
+      closeErr = e;
     } finally {
       unisolate();
     }
@@ -395,6 +402,7 @@ export async function testServer<S = unknown>(
       }
       await dropTempDir(baseDir);
     }
+    if (closeErr !== undefined) throw closeErr;
   };
   return {
     url,

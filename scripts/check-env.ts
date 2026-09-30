@@ -93,15 +93,24 @@ export function envNamesIn(
   for (
     const m of text.matchAll(/process\.env(?:\.|\[\s*["'`])([A-Z][A-Z0-9_]*)/g)
   ) hit(m[1]!);
-  // (c) An identifier handed to an env accessor, resolved through the
-  //     constants above. An identifier that resolves to nothing is a genuinely
-  //     dynamic read (`Deno.env.get(name)` inside a wrapper) — its callers pass
-  //     literals, which rule (a) already caught, so it is not an error here.
-  for (
-    const m of text.matchAll(
-      /(?:Deno\.env\.(?:get|has|set)\(|process\.env\[)\s*([A-Za-z_$][\w$]*)/g,
-    )
-  ) {
+  // (c) An identifier in a BRACKET access, resolved through the constants
+  //     above (`process.env[IDENT]`). An identifier that resolves to nothing is
+  //     a genuinely dynamic read (`Deno.env.get(name)` inside a wrapper) — its
+  //     callers pass literals, which rule (a) already caught, so it is not an
+  //     error here. Call/accessor forms are rule (d)'s business.
+  for (const m of text.matchAll(/process\.env\[\s*([A-Za-z_$][\w$]*)/g)) {
+    const resolved = consts.get(m[1]!);
+    if (resolved) hit(resolved);
+  }
+  // (d) An identifier passed to ANY call, resolved through the constants. A
+  //     wrapper is as much a read as an accessor: `env(CHILD_ENV)` where
+  //     `CHILD_ENV = "AIO_DEV_SUPERVISED"` was invisible, so the page that
+  //     promises "every AIO_* variable" omitted it while the gate said "all
+  //     named" — the motivating case for this file, one spelling further out.
+  //     The identifier must RESOLVE; `env(name)` (a parameter) resolves to
+  //     nothing and stays invisible, and its callers pass literals, which rule
+  //     (a) catches.
+  for (const m of text.matchAll(/\(\s*([A-Za-z_$][\w$]*)\s*[,)]/g)) {
     const resolved = consts.get(m[1]!);
     if (resolved) hit(resolved);
   }

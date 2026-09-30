@@ -7,7 +7,7 @@
 // process, which read it again (line 2), plus a hand-off note every time.
 import { assert, assertEquals } from "@std/assert";
 import { tempDir } from "../src/testing/temp-dir.ts";
-import { join } from "@std/path";
+import { fromFileUrl, join, toFileUrl } from "@std/path";
 import { readPinQuiet, sameFile } from "../src/am.ts";
 
 const ROOT = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
@@ -50,6 +50,27 @@ Deno.test("sameFile sees through the dep/aio symlink", async () => {
   try {
     assert(sameFile(join(dir, "dep/aio/src/am.ts"), join(ROOT, "src/am.ts")));
     assert(!sameFile(join(dir, "deno.json"), join(ROOT, "deno.json")));
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("delegation compares a real path, not a URL pathname (a space in the path)", async () => {
+  // `new URL(import.meta.url).pathname` keeps percent-encoding, so a checkout
+  // under `…/My App/…` compared `…/My%20App/…` against `…/My App/…`, never
+  // matched, and re-exec'd itself on every command. `fromFileUrl` is the path.
+  const dir = await tempDir("aio-pin-space-");
+  try {
+    const spaced = join(dir, "my app");
+    await Deno.mkdir(spaced);
+    const entry = join(spaced, "am.ts");
+    await Deno.writeTextFile(entry, "// x\n");
+    const url = toFileUrl(entry).href;
+    assert(
+      !sameFile(new URL(url).pathname, entry),
+      "precondition: pathname keeps %20",
+    );
+    assert(sameFile(fromFileUrl(url), entry), "fromFileUrl is the real path");
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

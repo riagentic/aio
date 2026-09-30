@@ -30,7 +30,7 @@ import {
   resolve,
   SEPARATOR,
 } from "@std/path";
-import { slugify } from "./build/build-helpers.ts";
+import { copyDir, slugify } from "./build/build-helpers.ts";
 import {
   emptyDir,
   foreignDistRefusal,
@@ -802,14 +802,17 @@ export function unsafeOutDir(
   // the nested case fatal. The single-target builder refused `--out=dist/x`
   // for the same reason; since alpha73 routes every build through the fleet,
   // the rule has to live where the decision now is.
-  const distDir = trimSep(join(rootDir, DIST_DIR));
-  if (out !== distDir && within(out, distDir)) return true;
   // Both directions: `out` may not sit inside a protected dir, and may not
   // swallow one. Compared CASE-FOLDED: on a case-insensitive filesystem (the
   // macOS and Windows defaults) `--out=Src` IS `src/`, passed a byte-exact
   // check, and the out-dir wipe deleted the app's source. Folding everywhere
   // costs a Linux user only the name `SRC` for a build folder.
   const lo = (p: string) => p.toLowerCase();
+  // dist/ is per-target scratch, folded like everything else: `--out=DIST` is
+  // dist/ on macOS/Windows, and the byte-exact check let it (and `Dist/x`)
+  // through while `--out=Src` was rightly refused.
+  const distDir = trimSep(join(rootDir, DIST_DIR));
+  if (lo(out) !== lo(distDir) && within(lo(out), lo(distDir))) return true;
   return protectedDirs.some((d) =>
     within(lo(out), lo(d)) || within(lo(d), lo(out))
   );
@@ -834,8 +837,18 @@ async function moveFile(from: string, to: string): Promise<void> {
   } catch (e) {
     if (e instanceof Deno.errors.NotFound) throw e;
     // EXDEV (cross-device) or any rename failure → copy then remove.
-    await Deno.copyFile(from, to);
-    await Deno.remove(from);
+    // A DIRECTORY artifact (`web`, `ios-client`) is moved too, and
+    // `Deno.copyFile` cannot copy one — it threw a raw TypeError, killed the
+    // fleet after the target had "built", and left the artifact in the root
+    // with no manifest. `copyDir` is the same recursive copy the rest of the
+    // build uses.
+    if ((await Deno.lstat(from)).isDirectory) {
+      await copyDir(from, to);
+      await Deno.remove(from, { recursive: true });
+    } else {
+      await Deno.copyFile(from, to);
+      await Deno.remove(from);
+    }
   }
 }
 
@@ -1225,7 +1238,13 @@ export async function buildAll(): Promise<number> {
     version = (await buildVersionFor(
       root,
       (denoJson as { version?: unknown }).version,
-      { out: block.out },
+      // The RESOLVED out dir, not `block.out`: with `--out=<dir>` (the
+      // documented way to collect artifacts elsewhere) `block.out` is
+      // undefined, so the previous release under `--out` was counted as dirty
+      // — every later build was `-dirty.<hash>`, churning forever and blocking
+      // publish, with no source change. `outDir` is the same value the rest of
+      // the fleet writes to and the guard checks.
+      { out: outDir },
     )).bv;
   } catch (e) {
     console.error(`${C.red}${e instanceof Error ? e.message : e}${C.r}`);

@@ -19,6 +19,9 @@ import {
 
 const KEY = "Zk3y-THE-APP-KEY-9f2a";
 const PIN = "482913";
+/** A credential reaching the line through `data`, not `msg`. The console sink
+ *  redacted `msg` only, so this one was written through in cleartext. */
+const DATA_KEY = "DATA-KEY-7q2x";
 
 Deno.test("log files: the share-link token and the pair code are masked on disk", async () => {
   const dir = await tempDir("aio-log-mask-");
@@ -55,7 +58,8 @@ Deno.test("console: masked only when am says stdout is a log file", async () => 
       .href;
   const code = `import { printConsole } from "${printer}";
 printConsole({ ts: "t", lvl: "info", cat: "aio", msg: "share: https://h:1?token=${KEY}" });
-printConsole({ ts: "t", lvl: "info", cat: "aio", msg: "pair code: ${PIN}" });`;
+printConsole({ ts: "t", lvl: "info", cat: "aio", msg: "pair code: ${PIN}" });
+printConsole({ ts: "t", lvl: "info", cat: "aio", msg: "detail", data: { url: "share: https://h:2?token=${DATA_KEY}" } });`;
   const run = async (env: Record<string, string>) =>
     new TextDecoder().decode(
       (await new Deno.Command(Deno.execPath(), {
@@ -67,10 +71,16 @@ printConsole({ ts: "t", lvl: "info", cat: "aio", msg: "pair code: ${PIN}" });`;
     );
   const captured = await run({ AIO_STDOUT_IS_LOG: "1" });
   assert(!captured.includes(KEY) && !captured.includes(PIN), captured);
+  assert(
+    !captured.includes(DATA_KEY),
+    `a token in \`data\` reached the log file in cleartext:\n${captured}`,
+  );
   assertStringIncludes(captured, "?token=…");
   const terminal = await run({});
   assertStringIncludes(terminal, `?token=${KEY}`);
   assertStringIncludes(terminal, `pair code: ${PIN}`);
+  // The terminal is the one place the link stays whole — including via data.
+  assertStringIncludes(terminal, DATA_KEY);
   const am = await Deno.readTextFile(
     new URL("../src/am/am-cmd-process.ts", import.meta.url),
   );

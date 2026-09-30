@@ -27,10 +27,14 @@ function socketFetchOn(sock: string): (
   headers?: Record<string, string>,
 ) => Promise<Response> {
   const src = tmplSocketFetch();
+  // Bare `process` in the generated IIFE is a free var. In Electron main it
+  // resolves on the Node global; under `new Function` in Deno it does not —
+  // inject node:process so AIO_SOCKET_TIMEOUT_MS (and Deno.env.set) is seen.
   const make = new Function(
     "HTTP_SOCK",
     "HTTP_URL",
     "require",
+    "process",
     `${src}\nreturn socketFetch;`,
   );
   const require = (m: string) => {
@@ -39,11 +43,12 @@ function socketFetchOn(sock: string): (
     if (m === "stream") return nodeStream;
     throw new Error(`unexpected require(${m})`);
   };
-  return make(sock, "", require);
+  return make(sock, "", require, nodeProcess.default ?? nodeProcess);
 }
 
 const nodeHttp = await import("node:http");
 const nodeStream = await import("node:stream");
+const nodeProcess = await import("node:process");
 
 Deno.test({
   name:

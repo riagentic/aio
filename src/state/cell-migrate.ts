@@ -168,7 +168,11 @@ export function detectShapeDrift(
     if (skip.has(cell)) continue;
     // `__…` keys are framework-parked data, not app shape.
     if (cell.startsWith("__")) continue;
-    if (!(cell in initial)) {
+    // OWN keys: `cell in initial` is true for `toString`/`valueOf`/… inherited
+    // from Object.prototype, so a stray persisted key of that name was never
+    // reported `unknown-cell` — instead `initial[cell]` was the inherited
+    // native function and `walk` emitted a misleading `type-changed`.
+    if (!Object.hasOwn(initial, cell)) {
       out.push({
         cell,
         path: "",
@@ -479,7 +483,10 @@ export function applyCellMigrations(
           // the declaration (a record stored as a list): the merge kept the
           // declared `{}` there, so hand the stored value back — the data the
           // migration exists to carry over.
-          const shape = shaped && cellId in shaped.schema
+          // OWN keys: `cellId in shaped.schema` is true for every
+          // Object.prototype name, so a cell named `toString` with no schema
+          // entry was treated as shaped.
+          const shape = shaped && Object.hasOwn(shaped.schema, cellId)
             ? shaped.schema[cellId]
             : undefined;
           const input = _isObj(stored)

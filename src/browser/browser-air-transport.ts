@@ -346,7 +346,19 @@ function _retryRefusedCall(d: unknown): boolean {
   if (pacer) {
     // Nothing this socket sends can be taken before the window reopens.
     pacer.hold(Math.min(retryAfterMs, 10_000));
-    pacer.push(again);
+    try {
+      pacer.push(again);
+    } catch {
+      // The socket reports OPEN and refused the write (the case the pacer
+      // exists for). Unguarded, the throw escaped the message handler AFTER
+      // the call was removed from `_written` and unwritten from the ack
+      // ledger — so on disconnect nothing rejected it and the caller's `await`
+      // hung forever. Same handling as the no-pacer branch, so a refused
+      // re-send is queued, not lost.
+      _carryPush(again.action!, again.seq, again.tries);
+      _updateDegraded();
+      _noteQueued();
+    }
   } else {
     _carryPush(again.action!, again.seq, again.tries);
     _updateDegraded();
@@ -525,8 +537,26 @@ function _sendRaw(msg: string): boolean {
     }
   }
   if (_ipc && _ipcOpen) {
-    _ipc.send(msg);
-    return true;
+    // The SAME rule as the WS branch above and as `_send`'s IPC branch: a
+    // bridge that refuses the write while reporting open must return `false`,
+    // not throw into every raw caller (sync engine, serverFn, log forwarding,
+    // route replies).
+    try {
+      _ipc.send(msg);
+      return true;
+    } catch (e) {
+      if (!_rawDropWarned) {
+        _rawDropWarned = true;
+        console.error(
+          `[aio:air] the IPC bridge refused a write while reporting open (${
+            e instanceof Error ? e.message : String(e)
+          }) — that frame was DROPPED. Unqueued frames go this way: sync ops, ` +
+            `serverFn calls, forwarded console lines. Further drops are not ` +
+            `repeated.`,
+        );
+      }
+      return false;
+    }
   }
   return false;
 }

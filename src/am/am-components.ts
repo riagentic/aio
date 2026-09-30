@@ -27,6 +27,7 @@
  * writes), and it must keep behaving exactly as it does today.
  */
 import { join, resolve, toFileUrl } from "@std/path";
+import { projectRoot } from "./am-project.ts";
 import { normalizeTargets } from "../build-all.ts";
 import { readDenoJsonSync } from "../server/deno-json.ts";
 import {
@@ -244,10 +245,13 @@ export function componentByLabel(
 }
 
 /** THE project root for component resolution — the directory holding the
- *  deno.json `am` was invoked against. Re-exported here so callers do not
- *  each re-derive it. */
+ *  deno.json `am` was invoked against, resolved from the cwd by the SAME rule
+ *  every other `am` verb uses (`projectRoot`). `Deno.cwd()` here was a second
+ *  decider: from a subdirectory it saw no deno.json, so `am start <label>`
+ *  refused with "this project declares no components" — a false fact — while
+ *  `am status` resolved the project and saw them. */
 export function componentsRoot(): string {
-  return Deno.cwd();
+  return projectRoot();
 }
 
 /** What a process command (`start`/`stop`/`restart`/`status`) should act on.
@@ -270,7 +274,7 @@ export type ProcessPlan =
 export function processPlan(
   args: string[],
   opts: { app?: string; port?: number; entry?: string },
-  root = Deno.cwd(),
+  root = projectRoot(),
 ): ProcessPlan {
   const label = args.find((a) => !a.startsWith("-"));
   // An explicit identity is an explicit target. Asking for both a component and

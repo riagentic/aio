@@ -109,6 +109,46 @@ Deno.test("failures: a shard where nothing ran reports deno's error line", () =>
   ]);
 });
 
+Deno.test("failures: intentional worker-crash Uncaught is not a failure after ok", () => {
+  const log = [
+    "worker crash: enable() keeps the cell's last committed state ... ok (50ms)",
+    "ok | 4 passed | 0 failed (2s)",
+    'error: Uncaught (in worker "aio-cell:wcr@test-abc") Error: worker loop died',
+    'error: Uncaught (in worker "aio-cell:wdiff@test-def") Error: worker loop died',
+    'error: Uncaught (in worker "aio-cell:boomcell") (in promise) Error: worker died on load',
+    "error: Import 'file:///x/tests/nope.test.ts' failed, not found.",
+  ].join("\n");
+  assertEquals(failures(log), [
+    "error: Import 'file:///x/tests/nope.test.ts' failed, not found.",
+  ]);
+});
+
+Deno.test("failures: worker-crash Uncaught still counts when the suite did not pass", () => {
+  const log =
+    'error: Uncaught (in worker "aio-cell:wcr@test-abc") Error: worker loop died\n';
+  assertEquals(failures(log), [
+    'error: Uncaught (in worker "aio-cell:wcr@test-abc") Error: worker loop died',
+  ]);
+});
+
+Deno.test("failures: intentional minify typecheck error is not a failure after ok", () => {
+  const log = [
+    "minify: a type error in the ORIGINAL still fails the build, and no stage is left ... ok (2s)",
+    "ok | 2 passed | 0 failed (3s)",
+    "error: Type checking failed.",
+    "error: Import 'file:///x/tests/nope.test.ts' failed, not found.",
+  ].join("\n");
+  assertEquals(failures(log), [
+    "error: Import 'file:///x/tests/nope.test.ts' failed, not found.",
+  ]);
+});
+
+Deno.test("failures: Type checking failed still counts when the suite did not pass", () => {
+  assertEquals(failures("error: Type checking failed.\n"), [
+    "error: Type checking failed.",
+  ]);
+});
+
 Deno.test("relativeImports: static, re-export, dynamic, side-effect", () => {
   const src = [
     `import { a } from "./a.ts";`,

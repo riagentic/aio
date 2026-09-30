@@ -83,6 +83,15 @@ Deno.test("aiol: anything that HAS a name is silent", async (t) => {
     // is what makes a lint ignorable.
     quiet(`const A = () => <input id="email" />;`, "id + label htmlFor");
   });
+  await t.step("a hidden input needs no accessible name", () => {
+    // Not interactive, not visible — the claim is meaningless for it, and
+    // every form with a CSRF field carried a warning it could only suppress.
+    quiet(
+      `const A = () => <input type="hidden" name="csrf" value={t} />;`,
+      "type=hidden",
+    );
+    quiet(`const A = () => <input type='hidden' />;`, "single-quoted hidden");
+  });
   await t.step("a multi-line body is not judged", () => {
     quiet(
       `const A = () => (\n  <button type="button">\n    {label}\n  </button>\n);`,

@@ -2,12 +2,65 @@
 
 > **The desk is triaged, not clear.** Every reported finding is fixed with a
 > test, refused in writing in `feedback/refused.md`, recorded as major-version
-> material in `untracked/aio-v2.md`, or listed below as accepted-and-not-yet-
-> built. The nine-report round of 2026-09-08 added the fourth pile: ~50 asks
-> that are additive, agreed, and real work. Nothing is left unrouted.
+> material in `untracked/v2.md`, or listed below as accepted-and-not-yet- built.
+> The nine-report round of 2026-09-08 added the fourth pile: ~50 asks that are
+> additive, agreed, and real work. Nothing is left unrouted.
 >
 > Shipped work lives in `CHANGELOG.md`; what was fixed or refused from field
 > reports lives in `feedback/resolved.md` and `feedback/refused.md`.
+
+## Next: 1.0.15-beta — close the external review list as far as v1 allows
+
+Agreed with the external reviewer 2026-09-27. Pins and additive options only; no
+new targets. Rule: a Must item whose planted bug a test already catches needs
+nothing — build only where a mutation stays green.
+
+- [x] **Mutation audit of 4 likely-missing rows** — planted each bug; every
+      mutant went red. No new test/ledger row (already caught):
+  - [x] two views sharing a snapshot cache key →
+        `tests/broadcast-view-key-subs-unambiguous.test.ts`
+        (`broadcast: subs {'a,b'} and {'a','b'} are different views`) and
+        `tests/foruser-leak.test.ts` (`forUser memo: same id, different role`)
+  - [x] a deleted `auth.db` cannot commit → `tests/auth-db-gone.test.ts`
+        (`auth.db deleted under a running app: writes throw, reads still answer`)
+  - [x] home lock by `/etc/machine-id` → `tests/profile-home-identity.test.ts`
+        (`claimHome: the same lock PATH on another host (or pid namespace) is
+        another process`)
+  - [x] declared-type write guard → `tests/declared-type-write-guard.test.ts`
+        (`dev: a write that changes a declared field's type is refused`) —
+        emptying `shapeDriftDeciders.typeChanges` turns both the refuse and the
+        prod warn red
+- [x] **One copies test** → `tests/persist-none-scrub-once.test.ts` (live db,
+      snapshot, backup, logs/actions+checkpoint, every-file scan after boot; a
+      new `persist:"none"` value reaches no file). Journal + `data.replaced-*`
+      scrub of the same one filter:
+      `tests/persist-none-scrub-journal-copies.test.ts`,
+      `tests/persist-none-scrub-replaced.test.ts`.
+- [x] **Log token gate** → `tests/no-token-in-logs.test.ts` (source gate;
+      exactly two `aio-ok(token-log)` share-link lines) and
+      `tests/log-files-mask-credentials.test.ts` (token + pair code masked on
+      every log-file sink; terminal share/pair lines stay whole).
+- [x] **Every persist path inside the resolved home** — `dbPath` is the only
+      configurable persist path; under `--profile`/`--home` it is refused by
+      `dbPathOutsideHomeError` (`tests/resolve-home.test.ts`). Journal /
+      snapshot / WAL are sidecars of that path (same check); `auth.db`,
+      `app.key`, logs are `appDirs()`-derived under the home by construction.
+- [ ] Optional, additive (defaults unchanged): `electron.permissions: "strict"`;
+      `build.android.strict: true` — **left unchecked this pass** (not
+      quick-and-correct: permissions is an object map today; activity losses are
+      warn-only). Breaking defaults parked in `untracked/v2.md` §26–§27.
+- [ ] Then the next weekly hunt, and move `air/control-drift.ts` into the dev
+      chunk (bundle ceiling back to 82/85 — see below). **STILL OPEN:**
+      `_recordControlled` must run on every render before the async dev chunk
+      lands (unlike observe-only audits that de-dupe on the committed tree); a
+      straight move races early keystrokes. Needs a thin always-bundled record
+      stub or an eager sync install — not this pass. Ceiling stays 83/86.
+
+Not v1 (recorded in `untracked/v2.md` §26–§33, do not "fix"): global
+`routePath`, `cell()` registry, unkeyed `collectHead()` return, intermediate CA,
+default-deny Electron permissions, fail-closed old `MainActivity`, mixed sync +
+`listensTo` as an error, device CI. The review list has no 1→100 map; say
+"closed as far as v1 allows", never "all 100 fixed" or "bug-free".
 
 **Core principle:** all breaking changes died in alpha70; from here the surface
 is frozen — additive only, bugfix-only through beta; 1.0.0 = boring.
@@ -494,7 +547,7 @@ that tears down what the body did not create.
   half of auth can only be proven e2e. The cookbook ships the client half and
   says so.
 - **`useForm().bind()` types `value` as `unknown`**, so every bound input must
-  repeat `value={form.fields.x.value}`. Frozen surface → `future/v2.md`.
+  repeat `value={form.fields.x.value}`. Frozen surface → `untracked/v2.md`.
 
 **Known and NOT fixed, stated rather than buried.**
 
@@ -1160,7 +1213,7 @@ Verify the instrument, then verify the thing that verifies it.
 Both reproduced; neither is a correctness bug in shipped behaviour, which is why
 they are here rather than in the round's commits. The round's fixes are in
 `git log v1.0.0-beta..`, and what would need a major version is in
-`future/v2.md`.
+`untracked/v2.md`.
 
 - ~~**`uiNames(ui)` and the miss listing are two producers of one fact**~~ —
   **DONE (1.0.2-beta).** `collectElementPaths` is the one walker; miss
@@ -1192,8 +1245,8 @@ primitive, and it is small:
 
 Nine field reports against alpha74–77. What was FIXED is in
 `feedback/resolved.md`; what was refused, with reasons, is in
-`feedback/refused.md`; what needs a major version is in `untracked/aio-v2.md`.
-What follows is the rest: additive, agreed, not built yet. Ordered by what the
+`feedback/refused.md`; what needs a major version is in `untracked/v2.md`. What
+follows is the rest: additive, agreed, not built yet. Ordered by what the
 reports themselves said it cost them.
 
 **The meta-finding, which several of these serve.** Three reports independently

@@ -5,7 +5,11 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { freePort } from "../src/testing/server-test.ts";
 import { writeLock } from "../src/server/single-instance-lock.ts";
 import { appPageTargets, type CdpTarget } from "../src/am/am-cdp.ts";
-import { noCdpMessage, shotOutPath } from "../src/am/am-cmd-shot.ts";
+import {
+  noCdpMessage,
+  shotDiffOptions,
+  shotOutPath,
+} from "../src/am/am-cmd-shot.ts";
 
 // 1×1 transparent PNG.
 const PNG_B64 =
@@ -261,6 +265,36 @@ Deno.test("am shot: a windowless client is refused up front, not sent to --cdp",
     if (prev === undefined) Deno.env.delete("AIO_APPS_DIR");
     else Deno.env.set("AIO_APPS_DIR", prev);
     await Deno.remove(appsDir, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("am shot: an unreadable --threshold is refused, never read as NaN (fail-open)", () => {
+  // `Number("abc")` is NaN, and `worst > NaN` is always false — so an
+  // unvalidated `--threshold` made the visual-regression gate report
+  // "matches" for a frame that had changed. Every other numeric `am` flag is
+  // refused by `parseNumArg`; this pair now is too.
+  assertEquals(shotDiffOptions(["--threshold=3", "--max-diff=0.1"]), {
+    ok: true,
+    opts: { threshold: 3, maxRatio: 0.1 },
+  });
+  assertEquals(shotDiffOptions([]), { ok: true, opts: {} });
+  for (
+    const bad of [
+      "--threshold=abc",
+      "--threshold=",
+      "--threshold=1%",
+      "--threshold=-1",
+      "--threshold=256",
+      "--max-diff=abc",
+      "--max-diff=2",
+    ]
+  ) {
+    const r = shotDiffOptions([bad]);
+    assertEquals(r.ok, false, `${bad} must be refused, not read as NaN`);
+    assert(
+      r.ok === false && r.error.includes(bad.slice(0, bad.indexOf("="))),
+      `the refusal must name the flag: ${bad}`,
+    );
   }
 });
 

@@ -52,10 +52,10 @@ Deno.test({
              home: ${JSON.stringify(home)} });
            const l = new m.AppLock("deadmnt", ${JSON.stringify(home)});
            const got = await l.acquire(0);
-           console.log("GOT", got.ok);
+           console.log("GOT " + String(got.ok));
            l.release();`,
         ],
-        env: { AIO_APPS_DIR: join(dir, "apps") },
+        env: { AIO_APPS_DIR: join(dir, "apps"), NO_COLOR: "1" },
         stdout: "piped",
         stderr: "piped",
       }).output();
@@ -200,7 +200,7 @@ Deno.test({
              try { Deno.statSync(cwd + "/data.db"); } catch { left = false; }
              console.log(JSON.stringify({ refused: !!r.refused, left }));`,
           ],
-          env: { AIO_APPS_DIR: join(dir, "apps") },
+          env: { AIO_APPS_DIR: join(dir, "apps"), NO_COLOR: "1" },
           stdout: "piped",
           stderr: "piped",
         }).output();
@@ -258,9 +258,9 @@ Deno.test({
              maintenance: { op: "am restore", partial: "/x/data.restoring-1" } };
            L.writeLock(pf);
            U.removePid("rmp", pf);
-           console.log("LEFT", L.readLock(L.lockKey("rmp", pf.home)) !== null);`,
+           console.log("LEFT " + String(L.readLock(L.lockKey("rmp", pf.home)) !== null));`,
         ],
-        env: { AIO_APPS_DIR: join(dir, "apps") },
+        env: { AIO_APPS_DIR: join(dir, "apps"), NO_COLOR: "1" },
         stdout: "piped",
         stderr: "piped",
       }).output();
@@ -311,7 +311,7 @@ Deno.test({
              U.removePid("shp", pf);
              console.log("OP", JSON.stringify(U.maintenanceOp(pf)));`,
           ],
-          env: { AIO_APPS_DIR: join(dir, "apps") },
+          env: { AIO_APPS_DIR: join(dir, "apps"), NO_COLOR: "1" },
           stdout: "piped",
           stderr: "piped",
         }).output();

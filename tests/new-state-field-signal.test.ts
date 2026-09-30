@@ -114,3 +114,14 @@ Deno.test("the report is capped — a huge new shape is still one line", () => {
   assertEquals(line.split("\n").length, 1, "one line, however much arrived");
   assertEquals(line.includes("more"), true, "…and it says there was more");
 });
+
+Deno.test("a new field named after a prototype member is reported", () => {
+  // `k in stor` is true for every Object.prototype name, so a declared
+  // `toString` field the store lacked was never announced as new.
+  const added = detectNewFields(
+    { cfg: { a: 1, toString: "" } },
+    { cfg: { a: 1 } },
+  );
+  assertEquals(names(added), ["cfg.toString"]);
+  assertEquals(added[0]!.declaredType, "string");
+});

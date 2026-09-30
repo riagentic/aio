@@ -27,6 +27,26 @@ Deno.test("deepFreeze: freezes arrays", () => {
   assertEquals((obj.items[0] as { id: number }).id, 1);
 });
 
+Deno.test("deepFreeze: never invokes an accessor getter (and still freezes the rest)", () => {
+  let reads = 0;
+  const obj = {
+    a: 1,
+    get live() {
+      reads++;
+      throw new Error("the getter must not run");
+    },
+  };
+  // `Object.values(obj)` called the getter the descriptor pass had just
+  // refused to call; a throwing one escaped `deepFreeze`, and `freezeInitial`
+  // then swallowed it and returned the WHOLE slice UNFROZEN — silently.
+  deepFreeze(obj);
+  assertEquals(reads, 0, "deepFreeze invoked an accessor getter");
+  assertEquals(Object.isFrozen(obj), true);
+  assertThrows(() => {
+    (obj as { a: number }).a = 2;
+  }, TypeError);
+});
+
 Deno.test("deepFreeze: skips null and primitives", () => {
   const obj = { a: null, b: "string", c: 123, d: undefined };
   deepFreeze(obj);

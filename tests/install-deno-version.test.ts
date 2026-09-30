@@ -19,6 +19,7 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { MIN_DENO } from "../src/server/deno-version.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
@@ -371,6 +372,48 @@ Deno.test({
     } finally {
       await Deno.remove(mac, { recursive: true }).catch(() => {});
       await Deno.remove(linux, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "install.sh: a HOME with a space gets its profile written, with no stray files",
+  ignore: Deno.build.os === "windows",
+  fn: async () => {
+    // The target list was space-separated and iterated unquoted, so
+    // `/tmp/x/John Doe/.profile` split into `/tmp/x/John`, `Doe/.profile`: the
+    // real profile was never written and the PATH line landed in a stray file
+    // beside it. Space is the one separator a path may contain, so the list is
+    // newline-separated now.
+    const sh = await Deno.readTextFile(join(REPO, "install.sh"));
+    const fn = sh.match(/^persist_path\(\) \{[\s\S]*?^\}/m)?.[0];
+    assert(fn, "persist_path() not found — did it move?");
+    const home = await tempDir("persist-space-");
+    try {
+      const spaced = join(home, "John Doe");
+      await Deno.mkdir(spaced, { recursive: true });
+      const p = await new Deno.Command("sh", {
+        args: ["-c", `${fn}\npersist_path`],
+        env: { SHELL: "/bin/bash", HOME: spaced, PATH: "/usr/bin:/bin" },
+        clearEnv: true,
+        stdout: "null",
+        stderr: "piped",
+      }).output();
+      assertEquals(
+        p.code,
+        0,
+        new TextDecoder().decode(p.stderr) || "persist_path failed",
+      );
+      assertStringIncludes(
+        await Deno.readTextFile(join(spaced, ".profile")).catch(() => ""),
+        ".deno/bin",
+        "the profile under a HOME with a space must be the one written",
+      );
+      const names = [...Deno.readDirSync(home)].map((e) => e.name).sort();
+      assertEquals(names, ["John Doe"], "a split target left a stray file");
+    } finally {
+      await dropTempDir(home);
     }
   },
 });

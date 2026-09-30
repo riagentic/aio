@@ -37,7 +37,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { AioUser } from "./aio-types.ts";
 import type { UserStore } from "./auth-users.ts";
 import { parseCookies } from "./route.ts";
-import { _installCallerScope } from "../state/method-policy.ts";
+import { _installCallerScope, isJsonKeyable } from "../state/method-policy.ts";
 
 /** Cache key for a user — a STABLE serialization of everything `ui.forUser`
  *  can observe, not just the id.
@@ -68,7 +68,21 @@ export function userMemoKey(user?: AioUser): string | null {
   // "no user" is its OWN bucket, and cannot be spelled by any serialized user:
   // every JSON.stringify of an object starts with "{".
   if (user === undefined || user === null) return "no-user";
+  // Key ONLY the JSON-faithful domain. The replacer below turns every
+  // non-array object into its enumerable own keys, so a `Map`, `Set`,
+  // `RegExp`, typed array or class instance collapsed to `{}` (or dropped its
+  // private state) and two DIFFERENT users produced one key — the second was
+  // served the first's `forUser` view, and a `ttl`/`"first"` result computed
+  // for one caller was reused for another. `isJsonKeyable` is the decider for
+  // "this value's JSON is its identity"; outside it there is NO key, and the
+  // caller recomputes (a miss costs time, a wrong hit costs data). A `Date`
+  // field stays keyable — JSON replaces it via `toJSON`.
+  //
+  // INSIDE the try: the walk (and `JSON.stringify` below) read the user's own
+  // values, so a getter that throws must land on "no key", not escape into the
+  // broadcast.
   try {
+    if (!isJsonKeyable(user)) return null;
     const key = JSON.stringify(user, (_k, v) => {
       // Values JSON drops or mangles become OBJECTS, never marker strings — a
       // marker string could be forged by a user field holding that exact text,

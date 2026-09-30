@@ -186,7 +186,9 @@ export function findLossy(
   const r = round as Record<string, unknown>;
   for (const [k, v] of Object.entries(orig as Record<string, unknown>)) {
     const p = `${path}.${k}`;
-    if (!(k in r)) {
+    // OWN keys: `k in r` is true for every Object.prototype name, so a
+    // `toString` field JSON dropped was reported as surviving.
+    if (!Object.hasOwn(r, k)) {
       // undefined / function / symbol members are erased by JSON, key and all.
       out.push({ path: p, from: typeName(v), to: "absent" });
     } else {

@@ -24,6 +24,7 @@
 import { assert, assertEquals, assertMatch } from "@std/assert";
 import { join } from "@std/path";
 import { buildAll } from "../src/build-all.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const STUB = `
 const root = Deno.cwd();
@@ -252,5 +253,83 @@ Deno.test("--print-app-tmpdir: a --name renames the binary, not the directory th
     assertEquals(await ask(["--name=relay"]), plain);
   } finally {
     await Deno.remove(dir, { recursive: true }).catch(() => {});
+  }
+});
+
+// `--out=<dir>` is the documented way to collect artifacts outside dist/, and
+// the fleet resolves it into `outDir`. The version resolver was handed
+// `deno.json build.out` instead (undefined when `--out` was used), so the
+// PREVIOUS release under `--out` — its name and manifest embed the version —
+// was counted as dirty: every later build was `-dirty.<hash>`, churning
+// forever (`8fc69dac → 0ea3247e → …`) and blocking publish with no source
+// change. A git repo, so the `-dirty.` mark is the observable.
+Deno.test("fleet: --out=<dir> does not dirty the NEXT build", async () => {
+  const dir = await tempDir("aio-fleet-out-");
+  const outside = await tempDir("aio-fleet-outstub-");
+  try {
+    const stub = join(outside, "stub-build.ts");
+    await Deno.writeTextFile(stub, STUB);
+    await Deno.writeTextFile(
+      join(dir, "deno.json"),
+      JSON.stringify({
+        title: "outguard",
+        version: "1.2",
+        build: { targets: ["server"] },
+      }),
+    );
+    await Deno.mkdir(join(dir, "src"), { recursive: true });
+    await Deno.writeTextFile(join(dir, "src", "app.ts"), "export {};\n");
+    const git = async (...a: string[]) => {
+      const r = await new Deno.Command("git", {
+        args: ["-C", dir, ...a],
+        stdout: "null",
+        stderr: "piped",
+      }).output();
+      assertEquals(r.code, 0, new TextDecoder().decode(r.stderr));
+    };
+    await git("init", "-q");
+    await git("config", "user.email", "t@example.com");
+    await git("config", "user.name", "t");
+    await git("config", "commit.gpgsign", "false");
+    await git("add", "-A");
+    await git("commit", "-q", "-m", "one");
+
+    const origArgs = Deno.args;
+    const origCwd = Deno.cwd();
+    const orig = { log: console.log, warn: console.warn, error: console.error };
+    Deno.chdir(dir);
+    const lines: string[] = [];
+    const push = (...a: unknown[]) => lines.push(a.map(String).join(" "));
+    try {
+      const run = async (): Promise<string> => {
+        lines.length = 0;
+        Object.defineProperty(Deno, "args", {
+          value: [`--build-spec=${stub}`, "--out=out"],
+          configurable: true,
+        });
+        console.log = console.warn = console.error = push;
+        const code = await buildAll();
+        assertEquals(code, 0, lines.join("\n"));
+        // deno-lint-ignore no-control-regex
+        return lines.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
+      };
+      const one = await run();
+      const two = await run();
+      assert(!one.includes("-dirty."), `the first build was dirty:\n${one}`);
+      assert(
+        !two.includes("-dirty."),
+        `the second --out build went dirty (the previous release counted):\n${two}`,
+      );
+    } finally {
+      Object.assign(console, orig);
+      Deno.chdir(origCwd);
+      Object.defineProperty(Deno, "args", {
+        value: origArgs,
+        configurable: true,
+      });
+    }
+  } finally {
+    await dropTempDir(dir);
+    await dropTempDir(outside);
   }
 });

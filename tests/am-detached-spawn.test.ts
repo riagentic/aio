@@ -8,7 +8,7 @@ import { join } from "@std/path";
 import { detachedSpawnSpec } from "../src/am/am-cmd-process.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-Deno.test("windows spec: PowerShell Start-Process, no sh/nohup, PID out", () => {
+Deno.test("windows spec: PowerShell Start-Process, one pre-quoted command line", () => {
   const spec = detachedSpawnSpec(
     "windows",
     ["run", "-A", "src/app.ts", "--port=8123"],
@@ -19,7 +19,23 @@ Deno.test("windows spec: PowerShell Start-Process, no sh/nohup, PID out", () => 
   assert(!ps.includes("nohup"), "no POSIX-isms");
   assertStringIncludes(ps, "Start-Process");
   assertStringIncludes(ps, "-PassThru"); // the PID comes back on stdout
-  assertStringIncludes(ps, "'src/app.ts'");
+  // ONE string, already MSVC-quoted. `-ArgumentList @(…)` joins the elements
+  // with spaces and does not quote them, so a value with a space was split by
+  // the child — the app never booted.
+  assertStringIncludes(
+    ps,
+    "-ArgumentList 'run -A src/app.ts --port=8123'",
+  );
+  const spaced = detachedSpawnSpec(
+    "windows",
+    ["run", "-A", "C:\\Users\\John Doe\\app.ts"],
+    "l.log",
+  );
+  assertStringIncludes(
+    spaced.args.join(" "),
+    "-ArgumentList 'run -A \"C:\\Users\\John Doe\\app.ts\"'",
+    "a space-bearing argument must be quoted once, before Start-Process",
+  );
   assertStringIncludes(ps, "-RedirectStandardOutput 'C:\\logs\\out.log'");
   assertStringIncludes(ps, "-RedirectStandardError 'C:\\logs\\out.log.err'");
   assertStringIncludes(ps, "Write-Output $p.Id");

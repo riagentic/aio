@@ -1,7 +1,9 @@
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { buildContext } from "../aiol/context.ts";
 import { checkUI } from "../aiol/checks.ts";
 import { join } from "@std/path";
+
+const AIOL = new URL("../aiol/mod.ts", import.meta.url).pathname;
 
 async function withTmpDir(fn: (dir: string) => Promise<void>): Promise<void> {
   const dir = await Deno.makeTempDir();
@@ -359,6 +361,48 @@ export const nfts = cell('nfts', { state: { items: [] }, methods: {} })
       ),
       true,
       "createDB from aio in a cell file must be flagged",
+    );
+  });
+});
+
+Deno.test("aiol: the documented `aiol .` relative invocation finds the same issues", async () => {
+  // `aiol .` (the invocation `fixes.ts` calls documented, and the one a reader
+  // runs) left `projectDir` relative while every file path was
+  // `join(projectDir, …)` — relative too — and the helpers that compare a path
+  // against `resolve(…)` then matched NOTHING: the browser-graph checks
+  // resolved zero hops and reported [] for a server-only import reaching the
+  // bundle. `buildContext` resolves the directory once now.
+  await withTmpDir(async (dir) => {
+    await Deno.mkdir(join(dir, "src"), { recursive: true });
+    await Deno.writeTextFile(
+      join(dir, "deno.json"),
+      JSON.stringify({ imports: { "aio": "jsr:@riagentic/aio@1.0.0" } }),
+    );
+    await Deno.writeTextFile(
+      join(dir, "src", "App.tsx"),
+      "import { counter } from './counter.ts';\nexport default function App() { return <div/> }\n",
+    );
+    await Deno.writeTextFile(
+      join(dir, "src", "counter.ts"),
+      "import { cell } from 'aio';\nimport { load } from './helper.ts';\nexport const counter = cell('counter', { state: { n: 0 }, methods: { inc: (s) => { s.n++; load(); } } });\n",
+    );
+    await Deno.writeTextFile(
+      join(dir, "src", "helper.ts"),
+      "import { join } from '@std/path';\nexport function load() { return join('a', 'b'); }\n",
+    );
+    const out = await new Deno.Command(Deno.execPath(), {
+      args: ["run", "-A", AIOL, "."],
+      cwd: dir,
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    const text = new TextDecoder().decode(out.stdout) +
+      new TextDecoder().decode(out.stderr);
+    assert(
+      text.includes("@std/path") && text.includes("transitive"),
+      `the relative invocation lost the browser-graph finding:\n${
+        text.slice(0, 600)
+      }`,
     );
   });
 });

@@ -94,6 +94,13 @@ Deno.test("sync drop report: an evicted op is not claimed to have never arrived"
   // The two reasons that DO know the change never landed still say so.
   const refused = dropReport("prune-failed");
   assertStringIncludes(refused.what, "never reached the server");
+  // …and the hint names the CAP as a number, not the identifier it used to
+  // print verbatim ("…holds SYNC_DEFAULTS.pendingCap unconfirmed ops…").
+  assertStringIncludes(refused.hint, String(SYNC_DEFAULTS.pendingCap));
+  assert(
+    !refused.hint.includes("SYNC_DEFAULTS."),
+    `the hint leaks an internal identifier: ${refused.hint}`,
+  );
   const stale = dropReport("stale-beyond-retention");
   assert(
     /the server refused it|was NOT applied/i.test(stale.what),

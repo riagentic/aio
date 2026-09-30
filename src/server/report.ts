@@ -272,10 +272,15 @@ function _applyDeclaredVisibility(
     // Name what went, by the app's own spelling: a key that is gone, and every
     // dot path the filter removed from INSIDE a key that stayed (the report
     // must not read as if the row it shows were whole).
-    for (const key of keys) if (!(key in kept)) dropped.push(`${cell}.${key}`);
+    // OWN keys: `key in kept` / `key0 in kept` walk Object.prototype, so a
+    // filtered-out field named `toString`/`valueOf`/… was never listed as
+    // dropped (and a dotted exclude under one looked like it had stayed).
+    for (const key of keys) {
+      if (!Object.hasOwn(kept, key)) dropped.push(`${cell}.${key}`);
+    }
     if (typeof filter === "object" && "exclude" in filter) {
       for (const path of filter.exclude) {
-        if (path.includes(".") && key0(path) in kept) {
+        if (path.includes(".") && Object.hasOwn(kept, key0(path))) {
           dropped.push(`${cell}.${path}`);
         }
       }
@@ -737,7 +742,15 @@ export async function listReports(dataDir: string): Promise<Report[]> {
       } catch { /* a half-written file is not a reason to lose the rest */ }
     }
   } catch { /* no reports yet */ }
-  return out.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+  // Newest first. Equal timestamps used to always return -1 (sort contract
+  // broken), so same-ms writes flipped order under Deno's TimSort. Tie-break
+  // on id — ids are `YYYY-MM-DD-…` so lexical order matches chronology.
+  return out.sort((a, b) => {
+    if (a.createdAt !== b.createdAt) {
+      return a.createdAt < b.createdAt ? 1 : -1;
+    }
+    return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
+  });
 }
 
 /** A short human summary — what `am report list` prints, and what an app can
