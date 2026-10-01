@@ -24,6 +24,7 @@ import {
 } from "../protocol/broadcast-utils.ts";
 import { degraded } from "../diagnostics/degraded.ts";
 import { WS_BUFFER_HIGH_WATER, wsWriteBacklog } from "./write-backlog.ts";
+import { registerGauge } from "../diagnostics/memory-ledger.ts";
 import type { ClientMeta } from "./server-ws.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
 import type { AioUser } from "./aio.ts";
@@ -128,6 +129,28 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
    *  right now", which is a different question and a different endpoint. */
   const _lifetime = { bytes: 0, count: 0 };
   const _broadcastRound = degraded("broadcast:round");
+
+  // A live LEVEL series: bytes the runtime is holding for peers that are not
+  // draining — the number the r3 chaos hunt measured at 111.9 MB while
+  // /__aio/health stayed green, and a native-memory source the heap watcher
+  // could not see at all. `registerGauge` is first-wins per PROCESS (RSS and
+  // the heap are process-wide anyway), so a process hosting several apps
+  // reports the first broadcaster's connections; the ledger's cap and this
+  // note are what keep that from being a silent surprise.
+  registerGauge({
+    name: "broadcast.bufferedBytes",
+    owner: "broadcast",
+    unit: "bytes",
+    kind: "level",
+    read: () => {
+      let bytes = 0;
+      for (const [ws] of connections) {
+        const n = ws.bufferedAmount;
+        if (typeof n === "number" && Number.isFinite(n) && n > 0) bytes += n;
+      }
+      return bytes;
+    },
+  });
 
   /** The snapshot verdict of ONE round — settled after the client loop, not
    *  inside it. `degraded()` counts CONSECUTIVE failures and `ok()` ends the

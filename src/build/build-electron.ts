@@ -23,6 +23,10 @@ import { appIconLabel } from "./app-icon.ts";
 import { assembleMacApp, icnsFromName, icnsFromPng } from "./macos-app.ts";
 import { trimLocalePaks } from "./electron-locales.ts";
 import {
+  chromiumExtrasStripped,
+  stripOptionalChromiumExtras,
+} from "./electron-strip.ts";
+import {
   canFinalizeDmg,
   dmgDone,
   finalizeMacDmg,
@@ -238,6 +242,14 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
   }
   console.log(`copying Electron runtime ${version}...`);
   await copyDir(electronSrc, electronDst);
+  // aio's own cache bookkeeping rides in the extracted runtime dir; it means
+  // nothing beside a package and does not belong in the shipped tree.
+  for (const stamp of [".aio-complete", ".aio-last-used"]) {
+    await Deno.remove(join(electronDst, stamp)).catch(() => {
+      // aio-ok: the stamp is optional input to the runtime cache, never to the
+      // packaged app; its absence here is the outcome this wants.
+    });
+  }
   console.log(`${OK} electron/ copied`);
 
   // Fuses: the shipped runtime cannot be started around aio as plain Node,
@@ -270,6 +282,20 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
     : trimLocalePaks(join(electronDst, "locales"));
   if (trimmed > 0) {
     console.log(`${OK} trimmed ${trimmed} unused locale(s) from the runtime`);
+  }
+
+  // Optional graphics extras (DXIL compiler, software Vulkan) — OFF by default
+  // because every one of them is used by SOME app (see electron-strip.ts). An
+  // owner who knows the app renders no GPU content opts in.
+  if (os !== "darwin" && await chromiumExtrasStripped(root)) {
+    const removed = stripOptionalChromiumExtras(electronDst);
+    console.log(
+      removed.length
+        ? `${OK} stripped ${removed.length} optional Chromium extra(s): ${
+          removed.join(", ")
+        } (build.chromiumExtras: "strip")`
+        : `${OK} build.chromiumExtras: "strip" — nothing optional was present`,
+    );
   }
 
   // Icon \u2014 from THE app-dir decider (cfg.appDir), same place dev reads it

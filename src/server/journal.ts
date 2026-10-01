@@ -27,6 +27,23 @@ import { stringifyWithIssues } from "./persist-guard.ts";
 import { applyStatePatch, type StatePatchOp } from "../sync/state-patch.ts";
 import type { PersistIssue } from "./persist-guard.ts";
 import { WORKER_PATCH_ACTION } from "../state/cell-compose-reduce.ts";
+import { budget } from "../diagnostics/memory-ledger.ts";
+
+/** A ceiling on how many journal entries ONE PROCESS may replay, across every
+ *  replay it performs. The loop inside `replayJournal` is bounded by the array
+ *  it is handed — this catches the case where the ARRAY is not: a recovery
+ *  path that re-enters replay and feeds it the tail again, which is a
+ *  boot that never returns and (in native memory) never stops growing. A large
+ *  honest journal is 10^5 lines, so 2×10^6 is room to be wrong once, not twice.
+ *
+ *  Worth stating plainly: this is a COUNTER, not a heap size. It exists to stop
+ *  a loop by NAME, not to be raised when it trips — raising it only moves the
+ *  silence. `budget()` throws `MEMORY_UNBOUNDED` at the ceiling.
+ *
+ *  Resolved per call (not captured in a module const) so it re-registers after
+ *  a runtime reset — which is what keeps the gauge visible to a test that
+ *  boots an app cold. */
+const REPLAY_ENTRY_CEILING = 2_000_000;
 
 /** The cell a `worker: true` cell's patch batch belongs to, when `type` is one.
  *
@@ -821,6 +838,14 @@ export function replayJournal<S, A>(
     live: Record<string, unknown>,
   ) => Record<string, unknown>,
 ): ReplayResult<S> {
+  // Every entry this call is asked to fold is spent against the process-wide
+  // replay ceiling. A recovery that re-enters replay trips it — by name, with
+  // a stack — instead of folding forever while native memory climbs. Resolved
+  // per call so a reset re-registers the series (see REPLAY_ENTRY_CEILING).
+  budget("journal.replay.entries", REPLAY_ENTRY_CEILING, {
+    unit: "count",
+    owner: "journal",
+  }).spend(entries.length);
   let s = state;
   let replayed = 0;
   const skipped: SkippedEntry[] = [];

@@ -214,7 +214,7 @@ export async function build(cfg?: BuildConfig): Promise<void> {
   // ── Step 3: Package with bundled Electron ────────────────────────────────
   await buildElectron(cfg);
 
-  // ── Step 4: Windows — the one-file exe that carries Electron ────────────
+  // ── Step 4: Windows — SFX over the zip (offline double-click, zip-sized) ─
   if (cfg.os === "windows") await buildSelfContainedWindowsExe(cfg);
 }
 

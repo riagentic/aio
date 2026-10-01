@@ -49,6 +49,7 @@
 import { join, relative, resolve } from "@std/path";
 import { GIT_NO_PROMPT_ENV } from "./git-noninteractive.ts";
 import { DENO_JSON_NAMES } from "./deno-json.ts";
+import { teachableError } from "../diagnostics/error.ts";
 
 /** The `major.minor` an app has before it writes one. */
 export const DEFAULT_BASE = "0.1";
@@ -374,13 +375,37 @@ function excluded(
   return excludes.some((x) => p === x.replace(/\/$/, "") || p.startsWith(x));
 }
 
+/** Refuse to hash a tree past the cap — BY NAME, never a partial/wrong hash.
+ *  A version identity must not cost an unbounded read (see
+ *  {@linkcode TREE_WALK_MAX_FILES}). */
+function refuseUnboundedWalk(
+  root: string,
+  maxFiles: number,
+  maxBytes: number,
+): never {
+  throw teachableError(
+    `[version] refusing to hash ${root}: it holds more than ${maxFiles} ` +
+      `files or ${maxBytes} bytes and is not the app's own small project. A ` +
+      `version identity must not cost an unbounded read.`,
+    `This directory is not the app's project. Point the app at its own ` +
+      `deno.json (or make the project a git repository) so the tree hash ` +
+      `stays small — a stray deno.json in an ancestor directory (such as ` +
+      `$HOME) is not the app's project.`,
+    "docs/build/versioning.md",
+  );
+}
+
 /** Read what the resolver needs from `root`'s repository. `excludes` are
  *  root-relative dir prefixes (with trailing `/`) never counted as dirty —
  *  the build's `out` dir joins {@link TREE_EXCLUDES}. */
 export async function readTreeFacts(
   root: string,
-  opts: { excludes?: readonly string[]; isOutput?: (rel: string) => boolean } =
-    {},
+  opts: {
+    excludes?: readonly string[];
+    isOutput?: (rel: string) => boolean;
+    /** Override the non-repo walk cap (tests; production uses the consts). */
+    limits?: { files?: number; bytes?: number };
+  } = {},
 ): Promise<TreeFacts> {
   const excludes = [...TREE_EXCLUDES, ...(opts.excludes ?? [])];
   const top = (await git(root, ["rev-parse", "--show-toplevel"]))?.trim();
@@ -389,7 +414,7 @@ export async function readTreeFacts(
       repo: false,
       count: 0,
       commit: null,
-      hash: await projectTreeHash(root, excludes, opts.isOutput),
+      hash: await projectTreeHash(root, excludes, opts.isOutput, opts.limits),
     };
   }
   const countRaw = (await git(root, ["rev-list", "--count", "HEAD"]))?.trim();
@@ -426,7 +451,10 @@ export async function readTreeFacts(
     paths.push(path);
   }
   const rootRel = relative(top, resolve(root)).replaceAll("\\", "/");
+  const maxFiles = opts.limits?.files ?? TREE_WALK_MAX_FILES;
+  const maxBytes = opts.limits?.bytes ?? TREE_WALK_MAX_BYTES;
   const entries: { path: string; bytes: Uint8Array | null }[] = [];
+  let readBytes = 0;
   for (const p of new Set(paths)) {
     const rel = rootRel && p.startsWith(rootRel + "/")
       ? p.slice(rootRel.length + 1)
@@ -440,7 +468,13 @@ export async function readTreeFacts(
     } catch {
       bytes = null; // deleted
     }
+    if (bytes) readBytes += bytes.length;
     entries.push({ path: rel, bytes });
+    // A repo whose work tree is enormous (`--untracked-files=all` lists every
+    // one) is the same unbounded read as a non-repo walk — capped the same way.
+    if (entries.length > maxFiles || readBytes > maxBytes) {
+      refuseUnboundedWalk(root, maxFiles, maxBytes);
+    }
   }
   return {
     repo: true,
@@ -450,14 +484,36 @@ export async function readTreeFacts(
   };
 }
 
+/** A cap on the NON-repository tree walk ({@linkcode projectTreeHash}).
+ *
+ *  A version string must never cost an unbounded read. The walk runs when the
+ *  project root is not a git work tree; the root comes from the nearest
+ *  `deno.json` ancestor of the app's main module, so a STRAY one makes an
+ *  unrelated, enormous directory look like the project. Measured: the test
+ *  suite runs apps under `~/tmp/aio`, a leftover `~/deno.json` made `$HOME`
+ *  the "project", and this walk then read and hashed an 896 GB home — ~0.5 GB
+ *  of RSS per 5 s, four busy GC threads, a boot that never returned, and (with
+ *  sharding) the whole-machine freezes. Past the cap the identity is REFUSED by
+ *  name, never guessed: a wrong `nogit.<hash>` is the same class of confident
+ *  wrong number this module already refuses elsewhere. */
+export const TREE_WALK_MAX_FILES = 20_000;
+export const TREE_WALK_MAX_BYTES = 128 * 1024 * 1024;
+
 /** Hash of every file under `root` (minus excludes) — the identity of a
- *  project that has no repository to be identified by. */
+ *  project that has no repository to be identified by. Bounded: past
+ *  {@linkcode TREE_WALK_MAX_FILES}/`…_BYTES` it throws rather than reading on. */
 async function projectTreeHash(
   root: string,
   excludes: readonly string[],
   isOutput?: (rel: string) => boolean,
+  limits?: { files?: number; bytes?: number },
 ): Promise<string> {
+  const maxFiles = limits?.files ?? TREE_WALK_MAX_FILES;
+  const maxBytes = limits?.bytes ?? TREE_WALK_MAX_BYTES;
   const entries: { path: string; bytes: Uint8Array | null }[] = [];
+  let files = 0;
+  let bytes = 0;
+  let capped = false;
   const walk = async (dir: string): Promise<void> => {
     // The guard wraps the ITERATION, not the call: `Deno.readDir` is a lazy
     // async iterator, so it does not throw at assignment — a directory that
@@ -465,13 +521,21 @@ async function projectTreeHash(
     // aborted the whole walk with a raw error instead of being skipped.
     try {
       for await (const e of Deno.readDir(dir)) {
+        if (capped) return;
         const abs = join(dir, e.name);
         const rel = relative(root, abs).replaceAll("\\", "/");
         if (excluded(rel, excludes, isOutput)) continue;
         if (e.isDirectory) await walk(abs);
         else if (e.isFile) {
           try {
-            entries.push({ path: rel, bytes: await Deno.readFile(abs) });
+            const b = await Deno.readFile(abs);
+            files++;
+            bytes += b.length;
+            entries.push({ path: rel, bytes: b });
+            if (files > maxFiles || bytes > maxBytes) {
+              capped = true;
+              return;
+            }
           } catch {
             /* aio-ok: an unreadable file is not part of the tree identity — the build refuses it elsewhere */
           }
@@ -482,6 +546,7 @@ async function projectTreeHash(
     }
   };
   await walk(root);
+  if (capped) refuseUnboundedWalk(root, maxFiles, maxBytes);
   return contentHash8(entries);
 }
 

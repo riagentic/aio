@@ -188,4 +188,13 @@ Deno.test("cpuFence: a run leaves the first cores free and runs niced", () => {
     usable: 1,
     prefix: ["nice", "-n", "10"],
   });
+  // Never EVERY core, whatever is asked: reserving zero still leaves one for
+  // the OS/desktop (system stability), a negative request clamps, and a
+  // non-finite one does too. This is the setting that used to pin 0-(n-1).
+  assertEquals(cpuFence(32, 0, "linux", all), {
+    usable: 31,
+    prefix: ["taskset", "-c", "1-31", "nice", "-n", "10"],
+  });
+  assertEquals(cpuFence(32, -4, "linux", all).usable, 31);
+  assertEquals(cpuFence(32, NaN, "linux", all).usable, 31);
 });

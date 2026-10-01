@@ -31,6 +31,7 @@ const OWNERS: Record<string, [Owner, string]> = {
   // ── the one call ────────────────────────────────────────────────
   _resetAioRuntime: ["RUNTIME", "the entry point itself"],
   _resetCellBindings: ["RUNTIME", "cell→signal bindings"],
+  _resetMemoryLedger: ["RUNTIME", "the named memory-gauge registry"],
   _resetClientSourceMap: [
     "MANUAL",
     "the seam a test uses to install a fake map. `_resetAioRuntime` already " +

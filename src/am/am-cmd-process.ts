@@ -27,6 +27,7 @@ import {
 } from "../diagnostics/logger-rotate.ts";
 import {
   declaredMaxHeapOf,
+  envHeapCapMB,
   maxHeapFlagArgs,
   physicalMemoryBytes,
   resolveMaxHeapMB,
@@ -213,7 +214,11 @@ export function buildDenoArgs(
   const heap = denoFlags.some((f) => f.startsWith("--v8-flags"))
     ? []
     : maxHeapFlagArgs(
-      resolveMaxHeapMB(physicalMemoryBytes(), declaredMaxHeap),
+      resolveMaxHeapMB(
+        physicalMemoryBytes(),
+        declaredMaxHeap,
+        envHeapCapMB(),
+      ),
     );
   return [
     "run",

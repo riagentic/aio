@@ -9,6 +9,7 @@ import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import {
   compiledMaxHeapMB,
   describeHeapPolicy,
+  envHeapCapMB,
   HEAP_FLOOR_MB,
   maxHeapFlagArgs,
   overAdvisedShare,
@@ -49,6 +50,36 @@ Deno.test("heap: an explicit ask is honoured — including above the 25% share",
     "the floor still wins — nothing may be worse than V8's default",
   );
   assertEquals(resolveMaxHeapMB(192 * GB, "10%"), 19660);
+});
+
+Deno.test("heap: a controlled environment's cap clamps share AND a declared ask", () => {
+  // The release suite spawns MANY apps on a big host; each would otherwise
+  // inherit 25% of RAM (~46 GB at 186 GB) and the sum froze the box
+  // (2026-10-01). The cap is what bounds that, and it applies to a declared ask
+  // too so no fixture can opt out of the test machine's memory budget.
+  assertEquals(
+    resolveMaxHeapMB(186 * GB, undefined, HEAP_FLOOR_MB),
+    HEAP_FLOOR_MB,
+  );
+  assertEquals(resolveMaxHeapMB(64 * GB, "48GB", HEAP_FLOOR_MB), HEAP_FLOOR_MB);
+  assertEquals(resolveMaxHeapMB(32 * GB, "12GB", 8192), 8192);
+  // A cap below the floor cannot be WORSE than V8's own default.
+  assertEquals(resolveMaxHeapMB(64 * GB, undefined, 1), HEAP_FLOOR_MB);
+  // No cap → exactly the old answer.
+  assertEquals(resolveMaxHeapMB(64 * GB), 16384);
+});
+
+Deno.test("envHeapCapMB: reads AIO_MAX_HEAP_MB, floors it, ignores nonsense", () => {
+  assertEquals(envHeapCapMB(null), null);
+  assertEquals(envHeapCapMB(""), null);
+  assertEquals(envHeapCapMB("   "), null);
+  assertEquals(envHeapCapMB("nonsense"), null);
+  assertEquals(envHeapCapMB("0"), null);
+  assertEquals(envHeapCapMB("-4"), null);
+  assertEquals(envHeapCapMB("4096"), 4096);
+  assertEquals(envHeapCapMB("8192"), 8192);
+  // Never below the floor: a 512 MB request is still 4 GB.
+  assertEquals(envHeapCapMB("512"), HEAP_FLOOR_MB);
 });
 
 Deno.test("heap: asking for more than the share is REPORTED, not refused", () => {

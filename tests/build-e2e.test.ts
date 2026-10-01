@@ -39,6 +39,7 @@ import {
 import { versionStamp } from "../src/build/build-bundle.ts";
 import { VERSION } from "../src/server/aio-cli.ts";
 import { MOUNT_LINE } from "../src/electron/electron-renderer-log.ts";
+import { scanArtifactForBuildTools } from "../src/build/artifact-audit.ts";
 
 const GATE = Deno.env.get("AIO_BUILD_E2E") === "1";
 const ELECTRON = Deno.env.get("AIO_BUILD_ELECTRON") === "1";
@@ -1711,6 +1712,61 @@ Deno.test({
         `the build must refuse:\n${built.out}${built.err}`,
       );
       assertStringIncludes(built.out + built.err, "unknown utility class");
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+// ── Task2 Step A: the TypeScript compiler is NOT in the shipped binary ──────
+//
+// A real host desktop build carried the whole compiler (~152 MB of `tsc`,
+// `typescript.js` and `lib.*.d.ts`) inside its Deno PE, because the app's graph
+// reached `typescript`. aio now leaves the build-only package out of the
+// artifact — and, because dropping something the binary can reach is a real
+// (if rare) behavior change, SAYS SO and names the `build.keepPackages` opt-in.
+// This test makes `typescript` reachable through a literal dynamic import, then
+// asserts both halves on the artifact: no compiler files, and a warning.
+Deno.test({
+  name: "artifact: the TypeScript compiler is left out, and the drop is said",
+  ignore: !GATE,
+  fn: async () => {
+    const dir = await makeApp("counter", "build-e2e-typescript-");
+    try {
+      const cfgPath = join(dir, "deno.json");
+      const cfg = JSON.parse(await Deno.readTextFile(cfgPath));
+      cfg.imports = {
+        ...(cfg.imports ?? {}),
+        typescript: "npm:typescript@5.6.3",
+      };
+      await Deno.writeTextFile(cfgPath, JSON.stringify(cfg, null, 2));
+      // A literal specifier inside an arrow that is never called: enough for
+      // deno's graph to reach the package (exactly the host's situation), with
+      // no runtime import on the boot path.
+      const entry = join(dir, "src", "app.ts");
+      await Deno.writeTextFile(
+        entry,
+        (await Deno.readTextFile(entry)) +
+          `\nconst _fixtureTs = () => import("typescript");\nvoid _fixtureTs;\n`,
+      );
+
+      const built = await task(dir, "build", "--targets=browser");
+      assert(built.code === 0, `build failed:\n${built.out}${built.err}`);
+      const noise = built.out + built.err;
+      assertStringIncludes(noise, "typescript");
+      assertStringIncludes(noise, "keepPackages");
+      // …and NOT for the framework's own esbuild reach: a warning nobody can
+      // act on (every scaffold declares esbuild) would bury this one.
+      assertEquals(
+        noise.includes('keepPackages": ["esbuild"]'),
+        false,
+        "the build must not warn about aio's own build-tool reachability",
+      );
+      assertEquals(
+        await scanArtifactForBuildTools(findBinary(dir)),
+        [],
+        "the TypeScript compiler must not be in the artifact",
+      );
     } finally {
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }

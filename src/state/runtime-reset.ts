@@ -7,6 +7,7 @@ import { _resetCellBindings } from "./cell-reactive.ts";
 import { clearClientSourceMap } from "../diagnostics/stack-remap.ts";
 import { _resetCallTimeouts, resetPending } from "./cell-impl.ts";
 import { _resetDegraded } from "../diagnostics/degraded.ts";
+import { _resetMemoryLedger } from "../diagnostics/memory-ledger.ts";
 import { _resetMethodCancel } from "./method-cancel.ts";
 import { _resetSubs } from "./state-subs.ts";
 import { _resetBudgetMisses } from "./dispatch.ts";
@@ -72,6 +73,10 @@ export function _resetAioRuntime(): void {
   // The degraded registry is process-global; without this a test's escalation
   // bleeds into every later test's /__aio/health.
   _resetDegraded();
+  // The memory ledger is the same shape: gauges and their counters are
+  // process-global, so a test's series — or a SPENT budget — would bleed into
+  // every later test's report and `am heap`.
+  _resetMemoryLedger();
   // Per-cell budget-violation counts: three misses promote a cell to "repeat
   // offender" and change the tip it gets, so carrying them between tests
   // rewrites a later test's message.

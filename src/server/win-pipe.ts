@@ -48,6 +48,7 @@
  */
 
 import type { LocalConn, LocalListener } from "./local-listen.ts";
+import type { PeerIdentity } from "./local-peer.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { type HandleSlot, HandleTable } from "./handle-table.ts";
 
@@ -277,6 +278,12 @@ const K32_SYMBOLS = {
     parameters: ["buffer", "u32"],
     result: "i32",
     nonblocking: true,
+  },
+  // The peer's pid, for the local-peer gate. Windows has no uid to compare —
+  // the pipe DACL already keeps other users out — so pid is the whole check.
+  GetNamedPipeClientProcessId: {
+    parameters: ["pointer", "buffer"],
+    result: "i32",
   },
   GetLastError: { parameters: [], result: "u32" },
   LocalFree: { parameters: ["pointer"], result: "pointer" },
@@ -538,6 +545,9 @@ class PipeConn implements LocalConn {
   readonly readable: ReadableStream<Uint8Array>;
   readonly writable: WritableStream<Uint8Array>;
   readonly remoteAddr: Deno.Addr;
+  /** The client process's pid, read from the connected instance — present on
+   *  server-side connections only. See local-peer.ts. */
+  readonly peerIdentity?: () => PeerIdentity;
   /** The handle AND the claim on its value. Never the bare value: see
    *  {@linkcode handles}. */
   #o: Owned;
@@ -554,6 +564,15 @@ class PipeConn implements LocalConn {
   constructor(o: Owned, readonly path: string, readonly server: boolean) {
     this.#o = o;
     this.remoteAddr = { transport: "unix", path };
+    if (server) {
+      // Read ONCE, at accept: the instance's client cannot change, and a
+      // failed query is `null`, which the gate refuses.
+      const pidBuf = new Uint8Array(4);
+      const pid = k32().GetNamedPipeClientProcessId(o.h, pidBuf)
+        ? readU32(pidBuf)
+        : null;
+      this.peerIdentity = () => ({ pid, uid: null, gid: null });
+    }
     this.readable = new ReadableStream<Uint8Array>({
       pull: async (ctrl) => {
         const chunk = await this.#read();

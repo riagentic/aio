@@ -18,6 +18,8 @@
     "jsr:@std/path@1.1.3": "1.1.3",
     "jsr:@std/path@^1.1.4": "1.1.5",
     "jsr:@std/path@^1.1.5": "1.1.5",
+    "jsr:@std/streams@^1.0.17": "1.2.0",
+    "jsr:@std/tar@0.1.10": "0.1.10",
     "jsr:@std/testing@1.0.17": "1.0.17",
     "jsr:@std/yaml@1": "1.1.2",
     "jsr:@std/yaml@1.0.9": "1.0.9",
@@ -75,6 +77,15 @@
       "integrity": "ccea00982ea28c36becaf6e62f855406c76a8c32d462f66f415bbb7d83a271bc",
       "dependencies": [
         "jsr:@std/internal@^1.0.14"
+      ]
+    },
+    "@std/streams@1.2.0": {
+      "integrity": "256b934254778f2bf45f5713b934209ff29e9b4b7fd4ec095219966813758c5f"
+    },
+    "@std/tar@0.1.10": {
+      "integrity": "6bf907f3a4bc8bfef42973ba132d946756a6161ef6b914a9e1c06debe664db17",
+      "dependencies": [
+        "jsr:@std/streams"
       ]
     },
     "@std/testing@1.0.17": {
@@ -438,6 +449,7 @@
       "jsr:@std/fs@1.0.24",
       "jsr:@std/jsonc@1.0.2",
       "jsr:@std/path@1.1.3",
+      "jsr:@std/tar@0.1.10",
       "jsr:@std/testing@1.0.17",
       "jsr:@std/yaml@1.0.9",
       "npm:esbuild@0.24.2",

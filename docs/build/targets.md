@@ -753,25 +753,63 @@ deno compile -A --node-modules-dir=none --exclude-unused-npm \
   vendored install, `node_modules/.deno/@riagentic+aio@<version>/src` for a JSR
   one. Print it with `dbWorkerInclude()` rather than typing it.
 
-`deno task build` already excludes the dev-only packages (electron, esbuild) for
-every target, which is why its binaries are small without either flag.
+`deno task build` already excludes the dev-only packages (electron, esbuild,
+happy-dom, `typescript`) and every npm package the binary's graph cannot reach,
+for every target — which is why its binaries are small without either flag.
 
-### Hide the server source: `build.minify`
+### Keep a build-only package: `build.keepPackages`
 
-`deno compile` puts every server module into the binary as readable source —
-comments and all. `strings myapp` prints your design notes back. The browser
-bundle is already minified; turn the server side on too:
+aio leaves the dev-only packages out of a compiled binary because the shipped
+app does not run them — the client bundle is built ahead of time, the desktop
+runtime is fetched at install, and TypeScript is transpiled at build time. An
+app that genuinely **loads one at runtime** (a code playground that `import`s
+`typescript`, say) asks for it back by name:
 
 ```jsonc
 // deno.json
-"build": { "minify": true }
+"build": { "keepPackages": ["typescript"] }
+```
+
+The build otherwise warns when a package it is about to drop is still reachable
+from the binary's graph, so the surprise arrives at build time, with the exact
+line above, not as a `Module not found` on a user's machine.
+
+### Optional Chromium extras: `build.chromiumExtras`
+
+Electron ships a DXIL shader compiler (`dxcompiler.dll`/`dxil.dll`, ~27 MB on
+Windows) and a software Vulkan fallback (`vk_swiftshader*`, `vulkan-1.dll`; ~9
+MB on Linux) because _some_ app uses each. aio keeps them by default: a 3D app
+must keep hardware acceleration, and a GPU-less VM must keep its software
+fallback. An owner who knows the app renders no GPU content can opt in:
+
+```jsonc
+// deno.json
+"build": { "chromiumExtras": "strip" }
+```
+
+Only those files are removed — WebGL (`d3dcompiler_47.dll`), media (`ffmpeg`),
+ICU data and every license file are never touched. `"keep"` (the default) does
+nothing.
+
+### Hide the server source: `build.minify` (on by default)
+
+`deno compile` puts every server module into the binary as readable source —
+comments and all. `strings myapp` prints your design notes back. The browser
+bundle is already minified, and since 1.0.16-beta the **server side is minified
+by default** too, so the normal build already removes that free gift.
+
+To opt out (for a build you want to debug at the source-line level), set:
+
+```jsonc
+// deno.json
+"build": { "minify": false }
 ```
 
 Every compiled target (app, `server`, Electron, the Windows exe, `cli`) then
-ships each server module minified: no comments, short local names. The build
-says `build.minify: N server modules minified`, and that stack traces change.
-The Android APK has no server binary: it ships only the client bundle, which is
-always minified, and never its map.
+ships each server module minified: no comments, short local names — unless you
+set `false`. The build says `build.minify: N server modules minified`, and that
+stack traces change. The Android APK has no server binary: it ships only the
+client bundle, which is always minified, and never its map.
 
 - **Type check first.** Your ORIGINAL code is type-checked, then the minified
   copy is compiled with `--no-check`. A type error still fails the build.
@@ -784,7 +822,7 @@ always minified, and never its map.
 - **Stack traces** from the server keep function names, but their `line:column`
   point into the minified code, not your source. There is no server source map
   (it would ship the names back). To debug a trace, reproduce it with
-  `build.minify` off.
+  `build.minify: false`.
 - **Not a lock.** Minified JS is still readable by someone who tries hard. It
   removes the free gift: the comments and names that explain the design.
 - `true` or `false` only — `"true"` (a string) fails the build.
@@ -801,22 +839,37 @@ Does everything `compile` does, plus packages the binary with Electron:
 | -------- | ---------------------------------------------------------- | -------------------------------------- |
 | Linux    | `<name>-x86_64.AppImage` or `<name>-aarch64.AppImage`      | self-contained, double-click           |
 | macOS    | `<name>-mac-x64.dmg` / `…-mac-arm64.dmg` (a `.app` inside) | drag to Applications, double-click     |
-| Windows  | `<name>-win-x64.exe` (self-contained)                      | double-click                           |
+| Windows  | `<name>-win-x64.exe` (SFX, zstd payload)                   | double-click (extract once, then run)  |
 | Windows  | `<name>-win-x64.zip`                                       | extract, run `run.bat` or `<name>.exe` |
 
 Build steps: bundle dist/app.js -> compile deno binary (which embeds it) -> copy
 Electron -> generate launcher + icon -> package (AppImage on Linux, a signed
-`.app` + `.dmg` on macOS — see below, a zip on Windows). The intermediate
-`dist/app.js` does not survive into the finished `dist/`.
+`.app` + `.dmg` on macOS — see below, a zip on Windows). On Windows the
+one-click `<name>-win-x64.exe` is then built as a **thin SFX**: the staged
+package is packed into a **zstd-compressed tar** and appended to a small stub
+(~3.5 MB), so the download is smaller than the zip (zstd beats deflate by ~15%
+and decompresses faster), and it is not a second `deno compile` with
+`electron-runtime.zip` inside the PE. First double-click extracts to
+`%LOCALAPPDATA%\aio-sfx\…`; later launches skip extract when the payload stamp
+matches. The `.zip` stays a plain zip (Windows Explorer can open it).
+
+Building that one-click `.exe` needs **no Go toolchain**: the extractor stub is
+a committed **prebuilt PE** (`src/build/windows-sfx-stub/prebuilt/`, rebuilt
+only when its source changes — see that directory's README), and the zstd
+payload is packed by aio itself, in Deno (`@std/tar` through `node:zlib`). If
+packing ever fails, the payload falls back to the same zip (`format: "zip"`) —
+larger, still one-click. `AIO_WINDOWS_FAT_EXE=1` restores the legacy
+`deno compile` PE instead. The intermediate `dist/app.js` does not survive into
+the finished `dist/`.
 
 On Linux and Windows the launcher sets `$ELECTRON_PATH` before starting the Deno
 binary; on macOS the `.app` bundles the runtime where the binary looks for it
 directly, so there is no launcher to run by hand. State is persisted to the OS
 user data directory.
 
-**Fuses.** The Electron inside every desktop package (and the one a
-self-contained Windows exe unpacks) has three of Electron's fuses turned off, so
-it cannot be started around your app:
+**Fuses.** The Electron inside every desktop package (and the tree a Windows SFX
+extracts on first launch) has three of Electron's fuses turned off, so it cannot
+be started around your app:
 
 - as plain Node (`ELECTRON_RUN_AS_NODE`),
 - with code injected through `NODE_OPTIONS`,

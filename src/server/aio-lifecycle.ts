@@ -1099,6 +1099,15 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
           return;
         }
         setElectronProc(proc);
+        // THE local-peer gate: only THIS window may talk to a production UDS.
+        // Armed the instant the window exists; a window that connected during
+        // the spawn→arm gap was refused and reconnects (the client's own
+        // backoff covers it, and an unarmed gate refuses rather than admits).
+        udsHandle?.armPeerPid?.(proc.pid);
+        log.debug(
+          `local-peer: window pid ${proc.pid} may connect` +
+            (udsHandle ? ` to ${udsHandle.socketPath}` : ""),
+        );
         proc.status
           .then(async (s) => {
             setElectronProc(null);

@@ -6,6 +6,7 @@ import { assert, assertEquals } from "@std/assert";
 import { buildDenoArgs } from "../src/am/am-cmd-process.ts";
 import {
   declaredMaxHeapOf,
+  envHeapCapMB,
   physicalMemoryBytes,
   resolveMaxHeapMB,
 } from "../src/server/heap-policy.ts";
@@ -41,7 +42,11 @@ Deno.test("buildDenoArgs: no flags → the entry, plus this machine's heap ceili
   // The ceiling is not optional garnish: V8's default is ~4 GB whatever the
   // machine, it is fixed at isolate creation, and a launcher is the only thing
   // that can set it in time. `am start` is the managed launch, so it does.
-  const want = resolveMaxHeapMB(physicalMemoryBytes());
+  const want = resolveMaxHeapMB(
+    physicalMemoryBytes(),
+    undefined,
+    envHeapCapMB(),
+  );
   assertEquals(buildDenoArgs("src/app.ts", []), [
     "run",
     "-A",
@@ -69,13 +74,21 @@ Deno.test("buildDenoArgs: a declared memory.maxHeap is what am start launches wi
   // the config line did nothing. The launcher is the only place that can apply
   // it — V8 freezes the ceiling at isolate creation — so this is where it has
   // to land.
+  // Cap-aware: the launch value is the declared ceiling clamped by whatever a
+  // controlled environment allows (`AIO_MAX_HEAP_MB`), exactly as the launcher
+  // computes it. Production has no cap, so this is the declared number.
+  const declared = resolveMaxHeapMB(
+    physicalMemoryBytes(),
+    "12GB",
+    envHeapCapMB(),
+  );
   assertEquals(
     buildDenoArgs("src/app.ts", [], "12GB"),
     [
       "run",
       "-A",
       "--unstable-kv",
-      "--v8-flags=--max-old-space-size=12288",
+      `--v8-flags=--max-old-space-size=${declared}`,
       "src/app.ts",
     ],
   );

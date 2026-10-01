@@ -53,6 +53,14 @@ Deno.test("am heap: the trojan reports heap, the ceiling, and per-cell size", as
       heapLimit: number | null;
       heapPct: number | null;
       cells: { name: string; bytes: number }[];
+      gauges: {
+        name: string;
+        owner: string;
+        unit: string;
+        kind: string;
+        value: number;
+        bound?: number;
+      }[];
     };
     assertEquals(h.pid, Deno.pid);
     assert(h.heapUsed > 0, "heapUsed must be a real reading");
@@ -74,6 +82,13 @@ Deno.test("am heap: the trojan reports heap, the ceiling, and per-cell size", as
     const c = h.cells.find((x) => x.name === "counter");
     assert(c, `the counter cell was not measured: ${JSON.stringify(h.cells)}`);
     assert(c!.bytes > 0, "a cell with state measured zero bytes");
+    // The ledger rides the same read: named series with an owner, so a reading
+    // says WHICH subsystem — the half `rss` alone cannot. (Its content is
+    // covered by tests/memory-ledger.test.ts; here it only has to be wired.)
+    assert(
+      Array.isArray(h.gauges),
+      `the heap route must emit a gauges array, got ${typeof h.gauges}`,
+    );
   } finally {
     await app.close();
     await dropTempDir(dir);

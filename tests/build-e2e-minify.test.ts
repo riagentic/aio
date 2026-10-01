@@ -61,7 +61,14 @@ Deno.test({
         { append: true },
       );
 
-      // Control: without minify the marker IS in the binary.
+      // Control: with minify explicitly OFF the marker IS in the binary.
+      // (The default is ON now, so the control states its intent.)
+      const cfgPath = join(dir, "deno.json");
+      {
+        const cfg = JSON.parse(await Deno.readTextFile(cfgPath));
+        cfg.build = { ...cfg.build, minify: false };
+        await Deno.writeTextFile(cfgPath, JSON.stringify(cfg, null, 2));
+      }
       const plain = await build(dir);
       assert(
         contains(plain.bin, COMMENT),
@@ -81,7 +88,6 @@ Deno.test({
       await Deno.copyFile(plain.path, plainBin);
       await Deno.chmod(plainBin, 0o755);
 
-      const cfgPath = join(dir, "deno.json");
       const cfg = JSON.parse(await Deno.readTextFile(cfgPath));
       cfg.build = { ...cfg.build, minify: true };
       await Deno.writeTextFile(cfgPath, JSON.stringify(cfg, null, 2));

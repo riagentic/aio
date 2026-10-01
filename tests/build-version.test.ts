@@ -37,6 +37,7 @@ import {
 import { androidVersion } from "../src/build/build-android.ts";
 import { compileArgs } from "../src/build/build-compile.ts";
 import { isArtifactName, placedName } from "../src/testing/internal.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { compareVersions, decide } from "../src/server/updates-core.ts";
 import { buildShipManifest } from "../src/build/ship.ts";
 import { PLATFORMS } from "../src/build/platforms.ts";
@@ -297,6 +298,33 @@ Deno.test("build-version: readTreeFacts without a repository hashes the project 
     assertEquals(bv.version, `0.1.0-nogit.${(await readTreeFacts(dir)).hash}`);
   } finally {
     await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("build-version: readTreeFacts REFUSES an unbounded non-repo walk — a stray ancestor deno.json must not hash $HOME", async () => {
+  // The measured freeze: a leftover `~/deno.json` made the boot of an app
+  // under `~/tmp/aio` resolve its project root to `$HOME`, and this walk then
+  // read and hashed an 896 GB home — ~0.5 GB of RSS per 5 s, four busy GC
+  // threads, a boot that never returned. The cap refuses by name instead.
+  const dir = await tempDir("aio-version-cap-");
+  try {
+    for (let i = 0; i < 5; i++) {
+      await Deno.writeTextFile(join(dir, `f${i}.ts`), "x");
+    }
+    // A small tree still hashes (the cap must not break the normal case)…
+    assertMatch((await readTreeFacts(dir)).hash ?? "", /^[0-9a-f]{8}$/);
+    // …and past the cap it refuses, loudly, rather than reading on.
+    let err: Error | undefined;
+    try {
+      await readTreeFacts(dir, { limits: { files: 3 } });
+    } catch (e) {
+      err = e as Error;
+    }
+    assert(err, "the walk must refuse past its cap");
+    assertStringIncludes(err!.message, "refusing to hash");
+    assertStringIncludes(err!.message, "unbounded read");
+  } finally {
+    await dropTempDir(dir);
   }
 });
 

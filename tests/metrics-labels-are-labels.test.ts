@@ -47,3 +47,39 @@ Deno.test("metrics: a label that IS a dimension is still emitted", () => {
   });
   assertMatch(text, /^aio_cell_errors_total\{cell="cart"\} 2$/m);
 });
+
+Deno.test("metrics: native memory and the named ledger series are scraped", () => {
+  // The native half (`external`) and the ledger gauges are what let a scrape
+  // say WHICH subsystem grew — the two numbers a heap-only endpoint never had.
+  const text = formatPrometheus({
+    uptimeSeconds: 1,
+    memory: { rss: 500, heapTotal: 400, heapUsed: 300, external: 42 },
+    gauges: [
+      {
+        name: "broadcast.bufferedBytes",
+        owner: "broadcast",
+        unit: "bytes",
+        kind: "level",
+        value: 111_940_000,
+      },
+      {
+        name: "journal.replay.entries",
+        owner: "journal",
+        unit: "count",
+        kind: "counter",
+        value: 7,
+        bound: 2_000_000,
+      },
+    ],
+  });
+  assertMatch(text, /^aio_memory_external_bytes 42$/m);
+  assertMatch(
+    text,
+    /^aio_memory_gauge\{name="broadcast\.bufferedBytes",owner="broadcast",unit="bytes",kind="level"\} 111940000$/m,
+  );
+  // The counter carries its ceiling, so a scrape shows how close it is.
+  assertMatch(
+    text,
+    /^aio_memory_gauge_limit\{name="journal\.replay\.entries"\} 2000000$/m,
+  );
+});

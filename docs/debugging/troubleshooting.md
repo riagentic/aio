@@ -201,6 +201,34 @@ unless the app declares `"memory": { "maxHeap":
 "12GB" }`. See
 [production](./production.md#v8-heap-limits).
 
+### Native memory (the heap is flat but the process still grows)
+
+Not every leak is on the JS heap. The runtime's socket buffers, SQLite's page
+cache, and a replay that never returns all live in **native** memory (`rss` /
+`external`), where the heap percentage cannot see them: the app reports a calm
+`heap at 3%` while the process climbs to tens of gigabytes.
+
+The memory monitor reports this shape separately — the heap is **flat** while
+RSS climbs — as a native leak, naming the fastest-moving series:
+
+```
+MEMORY_PRESSURE -- native memory rising — RSS 9216 MB (+3072 MB this window)
+while the JS heap stayed flat at 210 MB; fastest series: broadcast.bufferedBytes
+(broadcast) +2891 MB
+```
+
+`am heap` shows the same picture on demand: `rss`, `external`, and a `gauges`
+list of every named series with its **owner** — the answer to "which subsystem",
+not just "memory grew". A `level` gauge is a current size that should return to
+its baseline; a `counter` only rises and carries the ceiling that fails loud
+(`MEMORY_UNBOUNDED`) if a loop would run it forever.
+
+Supervised deployments can scrape the same numbers from `/__aio/metrics`:
+`aio_memory_rss_bytes`, `aio_memory_external_bytes`, and one
+`aio_memory_gauge{name,owner,unit,kind}` per series (with
+`aio_memory_gauge_limit` for the bounded ones). See
+[performance](./performance.md).
+
 ---
 
 ## S6 -- Connection issues

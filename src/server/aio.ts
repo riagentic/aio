@@ -108,6 +108,7 @@ import {
   currentHeapLimitBytes,
   declaredMaxHeapOf,
   describeHeapPolicy,
+  envHeapCapMB,
   physicalMemoryBytes,
   reportHeapCeiling,
 } from "./heap-policy.ts";
@@ -592,14 +593,23 @@ export function _appVersion(): Promise<string> {
     let tree = null;
     if (!compiled && located && located.dir.protocol === "file:") {
       const root = fromFileUrl(located.dir);
-      tree = await readTreeFacts(root, {
-        excludes: [
-          outDirExclude(
-            root,
-            (located.config.build as { out?: string } | undefined)?.out,
-          ),
-        ],
-      });
+      try {
+        tree = await readTreeFacts(root, {
+          excludes: [
+            outDirExclude(
+              root,
+              (located.config.build as { out?: string } | undefined)?.out,
+            ),
+          ],
+        });
+      } catch (e) {
+        // `readTreeFacts` REFUSES a non-repo tree past its read cap (a stray
+        // deno.json made an ancestor — `$HOME`, in one measured case — look
+        // like the project, and hashing it was an unbounded read). The version
+        // is then UNKNOWN with the refusal's own words, never a wrong hash.
+        const why = e instanceof Error ? e.message : String(e);
+        return `unknown (${why.replace(/^\[version\] . /, "")})`;
+      }
     }
     return resolveRuntimeVersion({
       declared: located?.config.version,
@@ -1791,6 +1801,10 @@ async function _runPhases<S, A, E>(
         // is capped at the automatic share while the config file says 12 GB;
         // this is the surface that tells the author so (see reportHeapCeiling).
         declaredMaxHeap: declaredMaxHeapOf(appDenoJson()),
+        // The launcher may have clamped the ceiling for a controlled
+        // environment (see envHeapCapMB); the report must use the same cap or
+        // every app the release suite spawns warns "under policy" at boot.
+        capMB: envHeapCapMB(),
       });
       if (!cli.noDataMigrate) {
         const _m = migrateLegacyLayout({

@@ -12,6 +12,7 @@ import type { ServerHandle } from "./server-types.ts";
 import type { UiTheme } from "./aio-types.ts";
 import { _getCallTimeouts, dispatchTracked } from "../state/cell-impl.ts";
 import { createUDSListener, type UDSHandle } from "./uds.ts";
+import { hardenLocalPeer } from "./local-peer.ts";
 import { flushAllUrgent } from "./broadcast-coalescer.ts";
 import { appDirs } from "./app-dirs.ts";
 import type {
@@ -1040,6 +1041,26 @@ export async function setupTransport<S, A>(
   if (!config.libraryMode) installProcessSignals();
 
   // UDS listener
+  // Production, Electron, zero-port: the app's window is the only legitimate
+  // local client, so the transport may serve no one else. Dev keeps the door
+  // open for `am`/`amui`, and an app that opened a port is out of scope here.
+  // See local-peer.ts.
+  const localPeerLockdown = localElectronUds && prod;
+  if (localPeerLockdown) {
+    const hardened = hardenLocalPeer();
+    log.info(
+      `local-peer lockdown: only this app's own window may connect` +
+        (hardened ? " (this process is non-dumpable)" : ""),
+    );
+    if (!hardened) {
+      log.warn(
+        "local-peer: could not make this process non-dumpable — the pid gate " +
+          "still applies, but a same-user process may be able to read this " +
+          "process's memory (Linux needs `--allow-ffi`; macOS uses Hardened " +
+          "Runtime, Windows a restricted process DACL).",
+      );
+    }
+  }
   let uds: UDSHandle | null = null;
   if (transport === "uds") {
     const socketPath = resolveSocketPath(appId);
@@ -1075,6 +1096,10 @@ export async function setupTransport<S, A>(
       // start; this one was never wired, so every desktop app's wire totals
       // read zero.
       costMeter,
+      // Armed later, from the Electron spawn (`armPeerPid`). Until then a
+      // required gate refuses everyone, and the client's reconnect loop covers
+      // the gap.
+      localPeerLockdown ? { required: true } : undefined,
     );
     udsRef.current = uds;
     const u = uds;

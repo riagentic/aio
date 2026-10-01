@@ -9214,12 +9214,11 @@ export const LEDGER: readonly Mutation[] = [
     what:
       'build.minify: "true" (a string) is taken as on, so a typo is never reported',
     file: "src/build/minify-server.ts",
-    find: '  if (v === undefined || typeof v === "boolean") return v === true;',
-    replace:
-      '  if (v === undefined || typeof v === "boolean" || v === "true") return v === true;',
+    find: "  if (v === undefined) return true;",
+    replace: '  if (v === undefined || v === "true") return true;',
     test: "tests/build-minify.test.ts",
     filter:
-      "minify: build.minify is off by default, on only for a real true, and a string is refused",
+      "minify: build.minify is ON by default, off only for a real false, and a string is refused",
   },
   {
     what: "build.minify is read but the compile runs the readable tree anyway",

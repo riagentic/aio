@@ -27,6 +27,7 @@ import {
 } from "@std/path";
 import { appConfigTitle, locateDenoJsonAbove } from "./deno-json.ts";
 import { formatPrometheus, healthCells } from "./server-metrics.ts";
+import { readGauges } from "../diagnostics/memory-ledger.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import type { RenderBudget } from "../vitals/types.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
@@ -1815,6 +1816,7 @@ export function createStaticHandler(deps: StaticDeps): {
         cells,
         payloads: extra.payloadStats,
         broadcastTotals: extra.broadcastTotals,
+        gauges: readGauges(),
       });
       return new Response(body, {
         headers: { "Content-Type": "text/plain; version=0.0.4" },

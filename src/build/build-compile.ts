@@ -25,6 +25,7 @@ import {
 } from "../server/pid-lock.ts";
 import { resolveEntryPath } from "../server/paths.ts";
 import {
+  basename,
   dirname,
   fromFileUrl,
   isAbsolute,
@@ -48,14 +49,24 @@ import { electronStagingDir, freshElectronStaging } from "./build-electron.ts";
 import { writeWindowsIcon } from "./build-helpers.ts";
 import { warnMachineBoundImports } from "./machine-bound-imports.ts";
 import { minifyDeclared, runCompile } from "./minify-server.ts";
+import { needlePackage, scanArtifactForBuildTools } from "./artifact-audit.ts";
 
 /** npm packages the FRAMEWORK only ever needs at BUILD / DEV / TEST time.
  *  None of them is reachable from a compiled binary:
- *   - `esbuild`   — the dev transpiler and the bundler; prod serves `dist/app.js`.
- *   - `electron`  — the npm package is the INSTALLER. A compiled desktop app
- *                   fetches its own Electron runtime (`build/electron-runtime.ts`).
- *   - `happy-dom` — `testUI` and the headless `am surface` route, and
- *                   `server.ts` only wires that route up when `!prod`.
+ *   - `esbuild`    — the dev transpiler and the bundler; prod serves `dist/app.js`.
+ *   - `electron`   — the npm package is the INSTALLER. A compiled desktop app
+ *                    fetches its own Electron runtime (`build/electron-runtime.ts`).
+ *   - `happy-dom`  — `testUI` and the headless `am surface` route, and
+ *                    `server.ts` only wires that route up when `!prod`.
+ *   - `typescript` — the compiler. An aio app is AUTHORED in TypeScript and the
+ *                    build transpiles it ahead of time (esbuild + Deno); the
+ *                    shipped binary never runs `tsc`. Left in, the whole
+ *                    compiler rides along: `tsc`/`tsc.exe` copies (~23 MB each),
+ *                    `typescript.js` and hundreds of `lib.*.d.ts` — ~152 MB of
+ *                    VFS on a real desktop host (feedback/optimal-builds.md
+ *                    Task2 Step A). An app that genuinely `import`s typescript
+ *                    at RUNTIME is the rare exception and opts back in with
+ *                    `build.keepPackages` (see {@link keepPackagesDeclared}).
  *
  *  Their TRANSITIVE closure goes too, and that closure is where the weight is:
  *  happy-dom 13 MB, @electron-internal/extract-zip 7 MB, @types/node 2.4 MB,
@@ -63,7 +74,7 @@ import { minifyDeclared, runCompile } from "./minify-server.ts";
  *  never have caught them (`@electron-internal+…` does not start with
  *  `@electron+`, and `undici` looks like nobody's dependency), which is why
  *  this is a graph walk over the layout deno already wrote. */
-const DEV_ONLY_PACKAGES = ["electron", "esbuild", "happy-dom"];
+const DEV_ONLY_PACKAGES = ["electron", "esbuild", "happy-dom", "typescript"];
 
 type SavedLink = { path: string; target: string; isDir: boolean };
 
@@ -168,9 +179,77 @@ export async function readDenoNmGraph(
 
 /** The slice of `deno info --json` this build reads. */
 export type DenoInfoGraph = {
-  modules?: Array<{ kind?: string; npmPackage?: string }>;
+  modules?: Array<{
+    kind?: string;
+    npmPackage?: string;
+    specifier?: string;
+    dependencies?: Array<{
+      specifier?: string;
+      type?: string;
+      /** The specifier as written, before import-map resolution — a bare
+       *  `typescript` here while `specifier` is the resolved URL. */
+      code?: { specifier?: string };
+    }>;
+  }>;
   npmPackages?: Record<string, { dependencies?: string[] }>;
 };
+
+/** True when `pkgName` is imported by a module that is NOT part of aio's own
+ *  build tooling (`buildDirHref`). aio's build modules are themselves embedded
+ *  in the app graph and dynamically import esbuild, so without this filter the
+ *  "build-only package is reachable" warning fires on every app that merely
+ *  DECLARES esbuild (every scaffold) — a warning nobody can act on is noise
+ *  that trains people to ignore the one that matters. The app's own code
+ *  importing the package is the signal that a runtime load is real. Pure. */
+export function reachedOutsideBuildTooling(
+  graphs: readonly DenoInfoGraph[],
+  pkgName: string,
+  buildDirHref: string,
+): boolean {
+  const want = `npm:${pkgName}`;
+  const wantSlash = `npm:/${pkgName}`;
+  const isPkg = (s: string) =>
+    s === want || s.startsWith(`${want}@`) || s.startsWith(`${want}/`) ||
+    s === wantSlash || s.startsWith(`${wantSlash}@`) ||
+    s.startsWith(`${wantSlash}/`);
+  for (const g of graphs) {
+    for (const m of g.modules ?? []) {
+      if ((m.specifier ?? "").startsWith(buildDirHref)) continue;
+      for (const d of m.dependencies ?? []) {
+        if (isPkg(d.code?.specifier ?? "") || isPkg(d.specifier ?? "")) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+/** The npm package ids (`pkg@version`) the graphs reach — the union over every
+ *  root, closed over their declared dependencies. Pure. */
+export function reachedNpmPackages(
+  graphs: readonly DenoInfoGraph[],
+): Set<string> {
+  const all = new Map<string, string[]>();
+  for (const g of graphs) {
+    for (const [id, p] of Object.entries(g.npmPackages ?? {})) {
+      all.set(id, p.dependencies ?? []);
+    }
+  }
+  const reached = new Set<string>();
+  const queue = graphs.flatMap((g) =>
+    (g.modules ?? []).flatMap((m) =>
+      m.kind === "npm" && m.npmPackage ? [m.npmPackage] : []
+    )
+  );
+  while (queue.length) {
+    const id = queue.pop()!;
+    if (reached.has(id)) continue;
+    reached.add(id);
+    queue.push(...(all.get(id) ?? []));
+  }
+  return reached;
+}
 
 /** The `.deno` entry names (`@scope+pkg@1.2.3`) that NO module of the
  *  binary's graph can reach — safe to leave out, measured rather than listed.
@@ -199,18 +278,7 @@ export function unreachableNpmEntries(
       all.set(id, p.dependencies ?? []);
     }
   }
-  const reached = new Set<string>();
-  const queue = graphs.flatMap((g) =>
-    (g.modules ?? []).flatMap((m) =>
-      m.kind === "npm" && m.npmPackage ? [m.npmPackage] : []
-    )
-  );
-  while (queue.length) {
-    const id = queue.pop()!;
-    if (reached.has(id)) continue;
-    reached.add(id);
-    queue.push(...(all.get(id) ?? []));
-  }
+  const reached = reachedNpmPackages(graphs);
   const entryOf = (id: string) => id.replaceAll("/", "+");
   for (const id of reached) {
     if (!id.startsWith("@types/") && !denoEntries.has(entryOf(id))) return null;
@@ -259,6 +327,50 @@ export function compileModuleRoots(
   return roots;
 }
 
+/** `build.keepPackages` — npm package names the app needs at RUNTIME even
+ *  though aio classifies them dev-only ({@link DEV_ONLY_PACKAGES}). The escape
+ *  hatch for the rare app that really does `import "typescript"` (or esbuild)
+ *  while running. A name here is never excluded by the dev-closure walk, and
+ *  never dropped as "unreachable" — the app asked for it by name.
+ *
+ *  Validated like every other option: an array of non-empty strings, refused
+ *  by name otherwise (a typo'd `"typescript"` string instead of an array would
+ *  otherwise silently keep excluding it). Missing `build` block → `[]`. */
+export async function keepPackagesDeclared(root: string): Promise<string[]> {
+  let cfg: { build?: { keepPackages?: unknown } } | undefined;
+  try {
+    cfg = (await readDenoJson(root))?.config as
+      | { build?: { keepPackages?: unknown } }
+      | undefined;
+  } catch (e) {
+    console.warn(
+      `${HEY} deno.json could not be read (${
+        e instanceof Error ? e.message : e
+      }) — no build.keepPackages applied`,
+    );
+    return [];
+  }
+  const v = cfg?.build?.keepPackages;
+  if (v === undefined) return [];
+  if (!Array.isArray(v)) {
+    throw new Error(
+      `${NO} deno.json build.keepPackages is ${
+        JSON.stringify(v)
+      } — it must be an array of npm package names (e.g. ["typescript"]).`,
+    );
+  }
+  return v.map((p, i) => {
+    if (typeof p !== "string" || p.trim() === "") {
+      throw new Error(
+        `${NO} deno.json build.keepPackages[${i}] is ${
+          JSON.stringify(p)
+        } — expected a non-empty package name.`,
+      );
+    }
+    return p.trim();
+  });
+}
+
 /** Temporarily remove dev symlinks, run compile callback, restore symlinks. Returns callback result. */
 export async function withDevExcluded(
   nmDir: string,
@@ -266,6 +378,10 @@ export async function withDevExcluded(
   /** The binary's module roots (see {@link compileModuleRoots}); when given,
    *  every npm package none of them reaches is left out too. */
   graph?: { cwd: string; roots: readonly string[] },
+  /** Package names to KEEP even when {@link DEV_ONLY_PACKAGES} lists them
+   *  (deno.json `build.keepPackages`). `keepRoots` still wins for everything
+   *  reachable from a non-dev root. */
+  keepPackages: readonly string[] = [],
 ): Promise<boolean> {
   // ONE build at a time may hold the project's dev symlinks aside.
   //
@@ -320,7 +436,7 @@ export async function withDevExcluded(
     );
   }
   try {
-    return await _withDevExcluded(nmDir, fn, graph);
+    return await _withDevExcluded(nmDir, fn, graph, keepPackages);
   } finally {
     if (held) {
       try {
@@ -339,6 +455,7 @@ async function _withDevExcluded(
   nmDir: string,
   fn: (excludes: string[]) => Promise<boolean>,
   graphRoots?: { cwd: string; roots: readonly string[] },
+  keepPackages: readonly string[] = [],
 ): Promise<boolean> {
   await recoverInterruptedLinks(nmDir);
   const journal = _linkJournal(nmDir);
@@ -352,25 +469,54 @@ async function _withDevExcluded(
   // the whole story) is what makes the walk safe for an app whose own deps
   // happen to share a package with electron or happy-dom.
   const graph = await readDenoNmGraph(denoDir);
+  const keep = new Set(keepPackages);
   const devRoots: string[] = [];
   const keepRoots: string[] = [];
   for (const link of await _linksIn(nmDir)) {
     const entry = await _denoEntryOf(denoDir, link);
     if (!entry) continue;
     const pkg = denoNmPackageName(entry)!;
-    (DEV_ONLY_PACKAGES.includes(pkg) ? devRoots : keepRoots).push(entry);
+    (DEV_ONLY_PACKAGES.includes(pkg) && !keep.has(pkg) ? devRoots : keepRoots)
+      .push(entry);
   }
   const excluded = new Set(devOnlyClosure(graph, devRoots, keepRoots));
   if (graphRoots) {
     const graphs = await denoInfoGraphs(graphRoots.cwd, graphRoots.roots);
     const unreached = graphs &&
       unreachableNpmEntries(graphs, new Set(graph.keys()));
-    if (unreached) { for (const e of unreached) excluded.add(e); }
-    else {
+    if (unreached) {
+      for (const e of unreached) {
+        // A package the app named in build.keepPackages is never dropped as
+        // unreachable: the app asked for it by name, and the graph may not show
+        // a runtime-only load (`import(path)`, a subprocess, a `.d.ts` read).
+        const pkg = denoNmPackageName(e);
+        if (pkg && keep.has(pkg)) continue;
+        excluded.add(e);
+      }
+    } else {
       console.warn(
         `${HEY} could not map the binary's npm graph onto node_modules — ` +
           `embedding every package (the binary is larger, not broken)`,
       );
+    }
+    // A dev-only package the binary DOES reach is about to be dropped anyway
+    // (that is the size win), and an import of it at runtime would then fail
+    // inside the shipped binary. Say so — with the fix — instead of letting it
+    // surface as a confusing crash on a user's machine.
+    if (graphs) {
+      const reached = reachedNpmPackages(graphs);
+      const buildDirHref = new URL("./", import.meta.url).href;
+      for (const entry of devRoots) {
+        const pkg = denoNmPackageName(entry);
+        if (!pkg || keep.has(pkg) || !reached.has(entry)) continue;
+        if (!reachedOutsideBuildTooling(graphs, pkg, buildDirHref)) continue;
+        console.warn(
+          `${HEY} ${pkg} is reachable from the binary's graph but aio leaves ` +
+            `it out of the artifact (it is build-only by default) — if the ` +
+            `app loads it at runtime, add it to deno.json "build": ` +
+            `{ "keepPackages": ["${pkg}"] } and rebuild.`,
+        );
+      }
     }
   }
   const excludes = [...excluded].map((e) => join(denoDir, e));
@@ -1516,48 +1662,83 @@ export async function runDenoCompile(
     roots: compileModuleRoots(configEntry, [...workerInclude, ...assets]),
   };
   const minify = await minifyDeclared(root);
-  const ok = await withDevExcluded(nmDir, async (excludes) => {
-    const result = await runCompile(
-      root,
-      _compileArgv({
-        hasDist,
-        workerInclude,
-        assets,
-        v8Flags,
-        excludes,
-        stamp: BUILD_STAMP_FILE,
-        out: compileTarget,
-        entry: configEntry,
-        target: cfg.targetTriple,
-        runtimeArgs: bakedClientArgs(cfg),
-        windowsGui,
-      }),
-      minify,
-    );
-    if (!result.success) return false;
-    // …and then RUN IT. `deno compile` exiting 0 is not the same claim as "the
-    // artifact boots", and the gap is reachable: a project path containing a
-    // SPACE (or any non-ASCII) makes the embedded npm module paths
-    // percent-encoded TWICE (`%2520` where the importer says `%20`), so
-    // nothing resolves and every flag — `--version` included — dies with
-    // ERR_MODULE_NOT_FOUND. 100% dud, never intermittent, and `deno task dev`
-    // in the same directory works fine, so only the shipped binary is dead.
-    // The build said ✓ and `deno task doctor` said "15 checks passed".
-    //
-    // `ship.ts` already has this rule (`notRunnable`, via
-    // `--aio-data-contract`) — it just ran one step too late, after a green
-    // build had been handed to a human. Same carve-out as ship's: a
-    // cross-compiled artifact is not runnable HERE, and that is not a defect.
-    const smoke = await smokeRunArtifact(compileTarget, cfg.targetTriple);
-    if (smoke) {
-      console.error(smoke);
-      return false;
-    }
-    compiled(compileTarget, root);
-    return true;
-  }, graphRoots);
+  const keepPackages = await keepPackagesDeclared(root);
+  const ok = await withDevExcluded(
+    nmDir,
+    async (excludes) => {
+      const result = await runCompile(
+        root,
+        _compileArgv({
+          hasDist,
+          workerInclude,
+          assets,
+          v8Flags,
+          excludes,
+          stamp: BUILD_STAMP_FILE,
+          out: compileTarget,
+          entry: configEntry,
+          target: cfg.targetTriple,
+          runtimeArgs: bakedClientArgs(cfg),
+          windowsGui,
+        }),
+        minify,
+      );
+      if (!result.success) return false;
+      // …and then RUN IT. `deno compile` exiting 0 is not the same claim as "the
+      // artifact boots", and the gap is reachable: a project path containing a
+      // SPACE (or any non-ASCII) makes the embedded npm module paths
+      // percent-encoded TWICE (`%2520` where the importer says `%20`), so
+      // nothing resolves and every flag — `--version` included — dies with
+      // ERR_MODULE_NOT_FOUND. 100% dud, never intermittent, and `deno task dev`
+      // in the same directory works fine, so only the shipped binary is dead.
+      // The build said ✓ and `deno task doctor` said "15 checks passed".
+      //
+      // `ship.ts` already has this rule (`notRunnable`, via
+      // `--aio-data-contract`) — it just ran one step too late, after a green
+      // build had been handed to a human. Same carve-out as ship's: a
+      // cross-compiled artifact is not runnable HERE, and that is not a defect.
+      const smoke = await smokeRunArtifact(compileTarget, cfg.targetTriple);
+      if (smoke) {
+        console.error(smoke);
+        return false;
+      }
+      await warnBuildToolsIn(compileTarget, keepPackages);
+      compiled(compileTarget, root);
+      return true;
+    },
+    graphRoots,
+    keepPackages,
+  );
 
   return ok;
+}
+
+/** Warn when a compiled artifact still carries a build tool's files (the
+ *  audit in `artifact-audit.ts`). Dead weight in the binary, and the fix is
+ *  usually already applied ({@link DEV_ONLY_PACKAGES}) — so a hit means the
+ *  exclusion silently stopped working, which is exactly the failure a release
+ *  gate must not have to guess at. An app that named the package in
+ *  `build.keepPackages` asked for it, and is not warned. */
+async function warnBuildToolsIn(
+  bin: string,
+  keepPackages: readonly string[],
+): Promise<void> {
+  let leaks: string[];
+  try {
+    leaks = (await scanArtifactForBuildTools(bin)).filter((h) =>
+      !keepPackages.includes(needlePackage(h))
+    );
+  } catch {
+    return; // aio-ok: audit is advisory; a read failure is not the build's
+  }
+  if (!leaks.length) return;
+  console.warn(
+    `${HEY} ${basename(bin)} still embeds build-tool files (${
+      leaks.join(", ")
+    }) — the binary is larger than it needs to be. If the app does not load ` +
+      `the tool at runtime, this is a packaging bug; if it does, name the ` +
+      `package in deno.json "build": { "keepPackages": ["…"] }.`,
+  );
 }
 
 /** Why the freshly compiled `bin` is not a runnable program, or null when it

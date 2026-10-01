@@ -8,6 +8,9 @@ _build_entry.tsx
 *.apk
 *.zip
 *.exe
+# …except the prebuilt Windows SFX stub: a committed native binary so building
+# the one-click .exe needs no Go toolchain (see src/build/windows-sfx-stub/).
+!src/build/windows-sfx-stub/prebuilt/*.exe
 *.service
 aio-counter
 .vscode/

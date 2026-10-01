@@ -164,18 +164,51 @@ export function parseMaxHeap(
 export function resolveMaxHeapMB(
   totalBytes: number | null,
   declared?: string | number | null,
+  /** An explicit ceiling to CLAMP the result to — see {@link envHeapCapMB}.
+   *  `null` is "no cap": one app on its owner's machine gets the whole share. */
+  capMB: number | null = null,
 ): number | null {
-  if (totalBytes === null) {
-    // A machine we cannot measure: only an ABSOLUTE declaration is actionable.
-    const abs = parseMaxHeap(declared, null);
-    return abs === null ? null : Math.max(HEAP_FLOOR_MB, abs);
-  }
-  const capMB = Math.floor((totalBytes * HEAP_FRACTION) / (1024 * 1024));
-  const declaredMB = parseMaxHeap(declared, totalBytes);
-  // Declared: the author's number, floored. Automatic: the 25% share.
-  return declaredMB === null
-    ? Math.max(HEAP_FLOOR_MB, capMB)
-    : Math.max(HEAP_FLOOR_MB, declaredMB);
+  const resolved = (() => {
+    if (totalBytes === null) {
+      // A machine we cannot measure: only an ABSOLUTE declaration is actionable.
+      const abs = parseMaxHeap(declared, null);
+      return abs === null ? null : Math.max(HEAP_FLOOR_MB, abs);
+    }
+    const autoMB = Math.floor((totalBytes * HEAP_FRACTION) / (1024 * 1024));
+    const declaredMB = parseMaxHeap(declared, totalBytes);
+    // Declared: the author's number, floored. Automatic: the 25% share.
+    return declaredMB === null
+      ? Math.max(HEAP_FLOOR_MB, autoMB)
+      : Math.max(HEAP_FLOOR_MB, declaredMB);
+  })();
+  return resolved === null || capMB === null
+    ? resolved
+    // The cap is floored too: a cap can never be WORSE than V8's own default,
+    // which every smaller machine already runs at ({@link HEAP_FLOOR_MB}).
+    : Math.min(resolved, Math.max(HEAP_FLOOR_MB, capMB));
+}
+
+/** A ceiling for EVERY app a controlled environment spawns, from
+ *  `AIO_MAX_HEAP_MB`. Unset (production) → `null`, no cap.
+ *
+ *  Why this exists. {@link resolveMaxHeapMB} sizes ONE app to 25% of the
+ *  machine — right for a person running one app, wrong for a runner that spawns
+ *  many. Measured 2026-10-01: the release suite on a 186 GB host let each
+ *  spawned app grow toward ~46 GB, and the SUM (~125 GB) froze the box and
+ *  tripped its stability watchdog. Sharding did not help — the demand is
+ *  per-app, not per-worker; six shards and two both landed near 125 GB. The
+ *  release suite therefore sets `AIO_MAX_HEAP_MB` to {@link HEAP_FLOOR_MB} (the
+ *  4 GB a 16 GB machine already gives every app), so its memory is bounded and
+ *  predictable instead of scaling with the host. Never below the floor: a cap
+ *  cannot undercut what a smaller machine already tolerates. */
+export function envHeapCapMB(env?: string | null): number | null {
+  // `undefined` = read the real environment (the production default); `null` =
+  // "pretend it is unset", so a unit test can pin both paths deterministically.
+  const raw = env === undefined ? Deno.env.get("AIO_MAX_HEAP_MB") : env;
+  if (raw === null || raw === undefined || raw.trim() === "") return null;
+  const mb = Number(raw);
+  if (!Number.isFinite(mb) || mb <= 0) return null;
+  return Math.max(HEAP_FLOOR_MB, Math.floor(mb));
 }
 
 /** The share of the machine a resolved ceiling represents, when it exceeds the
@@ -381,11 +414,16 @@ export async function reportHeapCeiling(
     stampPath?: string;
     /** `--verbose` — say it every time, regardless of the stamp. */
     always?: boolean;
+    /** A ceiling clamped onto the resolved share, for a controlled environment
+     *  (see {@link envHeapCapMB}). The launcher applied the same cap, so the
+     *  report must use it too — otherwise every capped app warns "under policy"
+     *  at boot. Defaults to NO cap: the production case; capping callers pass it. */
+    capMB?: number | null;
   } = {},
 ): Promise<void> {
   const limit = await (deps.limitBytes ?? currentHeapLimitBytes)();
   const total = (deps.totalBytes ?? physicalMemoryBytes)();
-  const auto = resolveMaxHeapMB(total);
+  const auto = resolveMaxHeapMB(total, undefined, deps.capMB ?? null);
   // The DECLARED ceiling — `parseMaxHeap`, not `resolveMaxHeapMB`, because the
   // question here is "did the author state one?" and only the parser answers
   // it: `resolveMaxHeapMB` returns the AUTOMATIC share for `"default"`, `""`

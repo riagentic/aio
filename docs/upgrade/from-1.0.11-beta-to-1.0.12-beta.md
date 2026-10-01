@@ -88,7 +88,7 @@ am pin --latest
 - **New, opt-in: `"build": { "minify": true }`.** The compiled binary ships the
   server code minified — no comments, short local names — instead of readable
   source. Off by default; nothing changes unless you set it. See
-  [Hide the server source](../build/targets.md#hide-the-server-source-buildminify).
+  [Hide the server source](../build/targets.md#hide-the-server-source-buildminify-on-by-default).
 
 - **Electron fuses are off in every desktop package.** The shipped Electron
   ignores `ELECTRON_RUN_AS_NODE`, `NODE_OPTIONS` and `--inspect`. Nothing

@@ -17,6 +17,7 @@ import {
   createMemoryMonitor,
   MEMORY_INTERVAL_MS,
 } from "../diagnostics/memory-monitor.ts";
+import { readGauges } from "../diagnostics/memory-ledger.ts";
 import {
   createAioError,
   reportError as reportAioError,
@@ -920,17 +921,36 @@ export async function wrapAppWithCells(
         ? "MEMORY_CRITICAL"
         : "MEMORY_PRESSURE";
       const topCell = report.cellStates[0];
-      const err = createAioError(
-        code as import("../diagnostics/error.ts").AioErrorCode,
-        // A pressure alarm whose one number reads "0%" says nothing — the
-        // same defect as the "unreachable for 0.0s" already fixed in vitals.
-        `heap at ${
+      const grower = report.topGrower;
+      // A pressure alarm whose one number reads "0%" says nothing — the same
+      // defect as the "unreachable for 0.0s" already fixed in vitals. And the
+      // heap percentage says nothing at all about a NATIVE leak, so that
+      // reason reports RSS and names the fastest-moving series instead.
+      const fmt = (n: number, unit: "bytes" | "count") =>
+        unit === "bytes" ? `${(n / 1e6).toFixed(0)} MB` : String(n);
+      const named = grower
+        ? `; fastest series: ${grower.name} (${grower.owner}) +${
+          fmt(grower.delta, grower.unit)
+        }`
+        : "";
+      const detail = (report.nativeLeak && report.native)
+        ? `native memory rising — RSS ${
+          (report.native.rss / 1e6).toFixed(0)
+        } MB (+${
+          (report.native.rssGrowth / 1e6).toFixed(0)
+        } MB this window) while the JS heap stayed flat at ${
+          (report.heapUsed / 1e6).toFixed(0)
+        } MB`
+        : `heap at ${
           report.heapPct < 0.01
             ? (report.heapPct * 100).toFixed(2)
             : (report.heapPct * 100).toFixed(0)
         }% (${(report.heapUsed / 1e6).toFixed(0)} MB / ${
           (report.heapLimit / 1e6).toFixed(0)
-        } MB)`,
+        } MB)`;
+      const err = createAioError(
+        code as import("../diagnostics/error.ts").AioErrorCode,
+        detail + named,
         { cellName: topCell?.name },
       );
       reportAioError(err, _cellReportOpts);
@@ -967,6 +987,9 @@ export async function wrapAppWithCells(
         state: fullState[f.__aio.id],
       }));
     },
+    // The ledger: every named series aio watches, so a report can name WHICH
+    // one moved. O(#gauges), read on the monitor's own timer.
+    getGauges: () => readGauges(),
   });
 
   // Wrap close to also stop memory monitor

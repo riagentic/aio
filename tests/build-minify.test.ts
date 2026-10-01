@@ -19,13 +19,13 @@ const write = async (p: string, s: string) => {
   await Deno.writeTextFile(p, s);
 };
 
-Deno.test("minify: build.minify is off by default, on only for a real true, and a string is refused", async () => {
+Deno.test("minify: build.minify is ON by default, off only for a real false, and a string is refused", async () => {
   const dir = await tempDir("minify-cfg-");
   try {
     const cfg = (build: unknown) =>
       Deno.writeTextFile(join(dir, "deno.json"), JSON.stringify({ build }));
     await cfg({});
-    assertEquals(await minifyDeclared(dir), false);
+    assertEquals(await minifyDeclared(dir), true);
     await cfg({ minify: true });
     assertEquals(await minifyDeclared(dir), true);
     await cfg({ minify: false });

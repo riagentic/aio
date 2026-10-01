@@ -10,6 +10,7 @@ import {
   assetIncludes,
   bakedClientArgs,
   dbWorkerInclude,
+  keepPackagesDeclared,
   smokeRunArtifact,
   v8FlagsArg,
   withDevExcluded,
@@ -152,45 +153,51 @@ export async function buildCli(cfg: BuildConfig): Promise<void> {
   const declaredClient = dj?.client ?? dj?.target;
 
   const minify = await minifyDeclared(root);
-  const ok = await withDevExcluded(nmDir, async (excludes) => {
-    const result = await runCompile(
-      root,
-      cliCompileArgs({
-        doRemote,
-        out: cliTarget,
-        entry: cliEntry,
-        assets,
-        excludes,
-        v8Flags,
-        target: cfg.targetTriple,
-        declaredClient,
-      }),
-      minify,
-    );
-    if (!result.success) return false;
-    // …and then RUN IT — the same rule `runDenoCompile` applies to every other
-    // compiled target, and for the same reason: `deno compile` exiting 0 says
-    // nothing about whether the artifact boots. A project path with a space
-    // makes the embedded npm paths percent-encoded twice, so the binary dies
-    // with ERR_MODULE_NOT_FOUND on every flag, and this target alone still
-    // printed ✓ for it. `--help` is the probe (see `smokeRunArtifact`): the
-    // `cli` target's entry is the app's own program, and `--help` is the one
-    // flag both `aio.run()` and `aio/cli`'s `args()` answer unconditionally.
-    // A `cli-client` is skipped — its entry is a program of the app's own
-    // design with no flag aio can promise it answers, and a 60 s hang on a
-    // client that dials a server is a worse build than an unprobed one.
-    if (!doRemote) {
-      const smoke = await smokeRunArtifact(cliTarget, cfg.targetTriple, [
-        "--help",
-      ]);
-      if (smoke) {
-        console.error(smoke);
-        return false;
+  const keepPackages = await keepPackagesDeclared(root);
+  const ok = await withDevExcluded(
+    nmDir,
+    async (excludes) => {
+      const result = await runCompile(
+        root,
+        cliCompileArgs({
+          doRemote,
+          out: cliTarget,
+          entry: cliEntry,
+          assets,
+          excludes,
+          v8Flags,
+          target: cfg.targetTriple,
+          declaredClient,
+        }),
+        minify,
+      );
+      if (!result.success) return false;
+      // …and then RUN IT — the same rule `runDenoCompile` applies to every other
+      // compiled target, and for the same reason: `deno compile` exiting 0 says
+      // nothing about whether the artifact boots. A project path with a space
+      // makes the embedded npm paths percent-encoded twice, so the binary dies
+      // with ERR_MODULE_NOT_FOUND on every flag, and this target alone still
+      // printed ✓ for it. `--help` is the probe (see `smokeRunArtifact`): the
+      // `cli` target's entry is the app's own program, and `--help` is the one
+      // flag both `aio.run()` and `aio/cli`'s `args()` answer unconditionally.
+      // A `cli-client` is skipped — its entry is a program of the app's own
+      // design with no flag aio can promise it answers, and a 60 s hang on a
+      // client that dials a server is a worse build than an unprobed one.
+      if (!doRemote) {
+        const smoke = await smokeRunArtifact(cliTarget, cfg.targetTriple, [
+          "--help",
+        ]);
+        if (smoke) {
+          console.error(smoke);
+          return false;
+        }
       }
-    }
-    compiled(cliTarget, root);
-    return true;
-  });
+      compiled(cliTarget, root);
+      return true;
+    },
+    undefined,
+    keepPackages,
+  );
 
   if (!ok) {
     console.error(`${NO} compile failed`);

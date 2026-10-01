@@ -4779,7 +4779,7 @@
         },
         "MemoryReport": {
           "kind": "typeAlias",
-          "sig": "3f0d80955c47aac5",
+          "sig": "4ed710ee74d1fee2",
           "members": {
             "level": "req:4b1b016b5e0c9f1c",
             "heapUsed": "req:f6522636230fa080",
@@ -4791,10 +4791,22 @@
             "cellStates": "req:c736e81bf1b4ad31",
             "trend": "req:c296607a2fda9ba7",
             "reason": "req:54eaec92d9f4779d",
-            "machinePct": "req:f6522636230fa080"
+            "machinePct": "req:f6522636230fa080",
+            "native": "opt:object",
+            "native.rss": "req:f6522636230fa080",
+            "native.external": "req:f6522636230fa080",
+            "native.rssGrowth": "req:f6522636230fa080",
+            "nativeLeak": "opt:0ecca0fe3beba89b",
+            "gauges": "opt:bcdf3737f219f749",
+            "topGrower": "opt:object",
+            "topGrower.name": "req:2fb40568533c1a6d",
+            "topGrower.owner": "req:2fb40568533c1a6d",
+            "topGrower.unit": "req:4d0f473aede362ee",
+            "topGrower.value": "req:f6522636230fa080",
+            "topGrower.delta": "req:f6522636230fa080"
           },
           "sigs": [
-            "3f0d80955c47aac5"
+            "4ed710ee74d1fee2"
           ]
         },
         "parseCli": {

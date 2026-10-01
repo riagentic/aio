@@ -402,3 +402,151 @@ Deno.test("monitor: an unmeasurable machine disables only the machine check", ()
   const reports = drive([20 * GB_], { heapLimit: 47 * GB_, total: 0 });
   assertEquals(reports, []);
 });
+
+// ── native (RSS) leaks — the half `heapUsed` cannot see ────────────
+
+/** Drive with SEPARATE heap and RSS series — the only way to express "the heap
+ *  is flat while native memory climbs", which is the signature the old
+ *  heap-only monitor reported as a healthy app. */
+function driveNative(
+  heapSeries: number[],
+  rssSeries: number[],
+  opts: {
+    heapLimit: number;
+    total?: number;
+    trendWindow?: number;
+    growthReportRatio?: number;
+    gauges?: () => import("../src/diagnostics/memory-ledger.ts").GaugeReading[];
+  },
+): Array<
+  {
+    reason: string;
+    nativeLeak: boolean;
+    rssGrowth: number;
+    topGrower?: { name: string };
+  }
+> {
+  const out: Array<
+    {
+      reason: string;
+      nativeLeak: boolean;
+      rssGrowth: number;
+      topGrower?: { name: string };
+    }
+  > = [];
+  let i = 0;
+  const timers: Array<() => void> = [];
+  const realSet = globalThis.setInterval;
+  const realClear = globalThis.clearInterval;
+  // deno-lint-ignore no-explicit-any
+  (globalThis as any).setInterval = (fn: () => void) => {
+    timers.push(fn);
+    return 1;
+  };
+  // deno-lint-ignore no-explicit-any
+  (globalThis as any).clearInterval = () => {};
+  try {
+    createMemoryMonitor({
+      enabled: true,
+      interval: 1,
+      warnThreshold: 0.75,
+      criticalThreshold: 0.9,
+      trendWindow: opts.trendWindow ?? 4,
+      growthReportRatio: opts.growthReportRatio,
+      onReport: (r) =>
+        out.push({
+          reason: r.reason,
+          nativeLeak: r.nativeLeak === true,
+          rssGrowth: r.native?.rssGrowth ?? 0,
+          ...(r.topGrower ? { topGrower: { name: r.topGrower.name } } : {}),
+        }),
+      getMemoryUsage: () => ({
+        heapUsed: heapSeries[i]!,
+        heapTotal: heapSeries[i]!,
+        rss: rssSeries[i]!,
+        external: 0,
+      }),
+      getHeapLimit: () => opts.heapLimit,
+      getTotalMemory: () => opts.total ?? 0,
+      getCellStates: () => [],
+      ...(opts.gauges ? { getGauges: opts.gauges } : {}),
+    });
+    for (; i < heapSeries.length; i++) timers.forEach((t) => t());
+  } finally {
+    globalThis.setInterval = realSet;
+    globalThis.clearInterval = realClear;
+  }
+  return out;
+}
+
+Deno.test("monitor: heap FLAT while RSS climbs → native (the leak that hid)", () => {
+  // The real incident: ~10 GB of RSS against a heap that never moved. Every
+  // heap-relative check stays silent; only a native window can name it.
+  const heap = [200, 205, 198, 202, 200].map((m) => m * 1024 * 1024);
+  const rss = [1, 2, 4, 8, 12].map((g) => g * GB_);
+  const reports = driveNative(heap, rss, {
+    heapLimit: 47 * GB_,
+    total: 192 * GB_,
+  });
+  assertEquals(reports.length >= 1, true, "a native climb must be reported");
+  assertEquals(reports[0]!.nativeLeak, true, "named as a native leak");
+  assertEquals(
+    reports[0]!.rssGrowth > 0,
+    true,
+    "the report says how fast, not just that it happened",
+  );
+});
+
+Deno.test("monitor: heap rising AND rss rising is `growth`, not relabelled `native`", () => {
+  // Both move → the fix is a heap fix; calling it native would send the reader
+  // looking in the wrong place.
+  const both = [1, 3, 5, 7, 9].map((g) => g * GB_);
+  const reports = driveNative(both, both, {
+    heapLimit: 47 * GB_,
+    total: 192 * GB_,
+    growthReportRatio: 0.1,
+  });
+  assertEquals(reports[0]!.reason, "growth");
+});
+
+Deno.test("monitor: RSS steady says nothing — quiet when there is no leak", () => {
+  const heap = [200, 200, 200, 200].map((m) => m * 1024 * 1024);
+  const rss = [2, 2, 2, 2].map((g) => g * GB_);
+  assertEquals(
+    driveNative(heap, rss, { heapLimit: 47 * GB_, total: 192 * GB_ }),
+    [],
+  );
+});
+
+Deno.test("monitor: report names the fastest-growing LEVEL series", () => {
+  // Two series move; the report must name the faster one — the answer to
+  // "which subsystem", which is the whole point of the ledger.
+  let tick = 0;
+  const heap = [200, 200, 200, 200].map((m) => m * 1024 * 1024);
+  const rss = [1, 3, 6, 12].map((g) => g * GB_);
+  const reports = driveNative(heap, rss, {
+    heapLimit: 47 * GB_,
+    total: 192 * GB_,
+    gauges: () => {
+      tick++;
+      return [
+        {
+          name: "broadcast.bufferedBytes",
+          owner: "broadcast",
+          unit: "bytes",
+          kind: "level",
+          value: tick * 1024 * 1024,
+        },
+        {
+          name: "sync.opBufferBytes",
+          owner: "sync",
+          unit: "bytes",
+          kind: "level",
+          value: tick * 8 * 1024 * 1024,
+        },
+      ];
+    },
+  });
+  assertEquals(reports.length >= 1, true);
+  assertEquals(reports[0]!.topGrower?.name, "sync.opBufferBytes");
+});

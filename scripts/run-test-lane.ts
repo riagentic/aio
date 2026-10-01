@@ -4,6 +4,7 @@
 //   deno run -A scripts/run-test-lane.ts fast
 //   deno run -A scripts/run-test-lane.ts seam
 import { fromFileUrl, join } from "@std/path";
+import { HEAP_FLOOR_MB } from "../src/server/heap-policy.ts";
 
 const ROOT = fromFileUrl(new URL("../", import.meta.url));
 const lane = Deno.args[0];
@@ -29,7 +30,12 @@ const cmd = new Deno.Command(Deno.execPath(), {
     ...files,
   ],
   cwd: ROOT,
-  env: { ...Deno.env.toObject(), AIO_APPS_DIR: apps },
+  env: {
+    ...Deno.env.toObject(),
+    AIO_APPS_DIR: apps,
+    // Cap every app these tests spawn at the heap floor, not 25% of the host.
+    AIO_MAX_HEAP_MB: String(HEAP_FLOOR_MB),
+  },
   stdin: "null",
   stdout: "inherit",
   stderr: "inherit",

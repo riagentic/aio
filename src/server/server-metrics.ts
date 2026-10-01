@@ -3,18 +3,29 @@
 // connected clients, per-cell health, and broadcast payload stats — assembled
 // from data the server already tracks (zero new bookkeeping).
 
+import type { GaugeReading } from "../diagnostics/memory-ledger.ts";
+
 /** Input snapshot for {@linkcode formatPrometheus} — everything optional so
  *  the endpoint degrades gracefully when a subsystem is off. */
 export interface MetricsInput {
   /** Seconds since server start */
   uptimeSeconds: number;
   /** Deno.memoryUsage() snapshot */
-  memory?: { rss: number; heapTotal: number; heapUsed: number };
+  memory?: {
+    rss: number;
+    heapTotal: number;
+    heapUsed: number;
+    external?: number;
+  };
   /** Connected clients, BOTH transports — a desktop app's are all on the
    *  UDS socket, and this read 0 for that whole target. */
   clients?: number;
   /** Per-cell health: errors + enabled flag */
   cells?: Record<string, { errors: number; enabled: boolean }>;
+  /** Every named series aio watches (the memory ledger). `level` gauges are
+   *  sizes that should return to baseline; `counter` gauges only rise and
+   *  carry the ceiling that fails loud. */
+  gauges?: GaugeReading[];
   /** Broadcast payload stats, keyed by CONNECTION id. Summed into two
    *  unlabelled totals — the id is an identity, never a metric dimension. */
   /** Process-lifetime broadcast totals — see `formatPrometheus`'s use. */
@@ -95,6 +106,45 @@ export function formatPrometheus(m: MetricsInput): string {
     gauge("aio_memory_rss_bytes", "Resident set size", m.memory.rss);
     gauge("aio_memory_heap_total_bytes", "V8 heap total", m.memory.heapTotal);
     gauge("aio_memory_heap_used_bytes", "V8 heap used", m.memory.heapUsed);
+    // The native half the heap gauges never covered: a leak here climbs
+    // while heap_used_bytes stays flat, which is exactly the shape that ran
+    // unannounced before the memory ledger existed.
+    if (m.memory.external !== undefined) {
+      gauge(
+        "aio_memory_external_bytes",
+        "V8 external (native) memory",
+        m.memory.external,
+      );
+    }
+  }
+
+  if (m.gauges && m.gauges.length > 0) {
+    // One series per named gauge. `name` and `owner` say WHICH subsystem —
+    // the difference between "memory grew" and "the sync buffer grew".
+    lines.push(
+      "# HELP aio_memory_gauge Current value of a named memory-ledger series",
+    );
+    lines.push("# TYPE aio_memory_gauge gauge");
+    for (const g of m.gauges) {
+      lines.push(
+        `aio_memory_gauge{name="${esc(g.name)}",owner="${esc(g.owner)}",` +
+          `unit="${esc(g.unit)}",kind="${esc(g.kind)}"} ${g.value}`,
+      );
+    }
+    const bounded = m.gauges.filter((g) => g.bound !== undefined);
+    if (bounded.length > 0) {
+      // A counter whose ceiling fails loud is only useful if the scrape shows
+      // how close it is — otherwise the number is invisible until it throws.
+      lines.push(
+        "# HELP aio_memory_gauge_limit Ceiling of a bounded memory-ledger series",
+      );
+      lines.push("# TYPE aio_memory_gauge_limit gauge");
+      for (const g of bounded) {
+        lines.push(
+          `aio_memory_gauge_limit{name="${esc(g.name)}"} ${g.bound}`,
+        );
+      }
+    }
   }
 
   if (m.clients !== undefined) {

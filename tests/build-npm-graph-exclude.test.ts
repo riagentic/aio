@@ -6,10 +6,11 @@
 // holds what the page needs — and every cross-compiled exe gained esbuild's
 // Windows binary (10 MB), linked by deno DURING the compile, after the
 // exclude list had been built from the tree on disk.
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import {
   compileModuleRoots,
   type DenoInfoGraph,
+  reachedOutsideBuildTooling,
   unreachableNpmEntries,
 } from "../src/build/build-compile.ts";
 
@@ -97,6 +98,32 @@ Deno.test("npm graph: a reached package with no node_modules entry excludes NOTH
     unreachableNpmEntries([graph], entries(["three@0.170.0"])),
     null,
   );
+});
+
+Deno.test("npm graph: the drop warning ignores aio's own build tooling", () => {
+  const buildDir = "file:///fw/src/build/";
+  const graph: DenoInfoGraph = {
+    modules: [
+      {
+        specifier: "file:///app/src/app.ts",
+        dependencies: [
+          {
+            specifier: "typescript",
+            code: { specifier: "npm:typescript@5.6.3" },
+          },
+        ],
+      },
+      {
+        specifier: `${buildDir}build-bundle.ts`,
+        dependencies: [{ specifier: "npm:esbuild@0.24.2" }],
+      },
+    ],
+  };
+  // The app's own dynamic import is a real runtime load — warn.
+  assert(reachedOutsideBuildTooling([graph], "typescript", buildDir));
+  // esbuild is only reached by aio's build modules (every scaffold declares
+  // it) — do not warn.
+  assertEquals(reachedOutsideBuildTooling([graph], "esbuild", buildDir), false);
 });
 
 Deno.test("npm graph: module roots are the entry plus every included module file", () => {

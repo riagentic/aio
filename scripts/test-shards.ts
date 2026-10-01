@@ -28,6 +28,7 @@
 import { dirname, join, relative } from "@std/path";
 import { homeStoreEnv } from "../src/testing/test-strict.ts";
 import { testDisplay } from "../src/testing/test-display.ts";
+import { HEAP_FLOOR_MB } from "../src/server/heap-policy.ts";
 import {
   nestedDisplayAccepts,
   nestedDisplayCookie,
@@ -209,6 +210,11 @@ export function shardEnv(
     // its restore lands back here instead of on "unset" = the real one.
     ...homeStoreEnv(join(dirname(opts.home), "stores")),
     AIO_TEST_PORT_SLICE: portSliceFor(i, n),
+    // Cap every app this shard spawns at the heap FLOOR. Without it each app
+    // inherits 25% of the HOST's RAM — ~46 GB on a 186 GB box — and the suite's
+    // spawned apps sum to more than the machine, freezing it (2026-10-01).
+    // Sharding does not help: the demand is per-app. See `envHeapCapMB`.
+    AIO_MAX_HEAP_MB: String(HEAP_FLOOR_MB),
     ...(opts.realWindow ? {} : { XDG_RUNTIME_DIR: runtimeDir! }),
   };
 }
@@ -267,12 +273,19 @@ export function cpuFence(
   os: string,
   have: { taskset: boolean; nice: boolean },
 ): { usable: number; prefix: string[] } {
-  const usable = Math.max(1, cores - free);
+  // Never every core. Whatever the caller asks for, ONE core stays untouched:
+  // the OS, the desktop and the freeze watcher need somewhere to run.
+  // `AIO_TEST_FREE_CORES=0` used to mean `taskset -c 0-(n-1)` — the whole
+  // machine — and a run that takes every core is the one load that can wedge a
+  // desktop. "Maximum performance with total stability": take the rest, keep
+  // one. A non-finite request is treated the same way.
+  const leave = Number.isFinite(free) ? Math.max(1, Math.floor(free)) : 1;
+  const usable = Math.max(1, cores - leave);
   const nice = have.nice ? ["nice", "-n", "10"] : [];
-  if (os === "linux" && have.taskset && cores > free) {
+  if (os === "linux" && have.taskset && cores > leave) {
     return {
       usable,
-      prefix: ["taskset", "-c", `${free}-${cores - 1}`, ...nice],
+      prefix: ["taskset", "-c", `${leave}-${cores - 1}`, ...nice],
     };
   }
   return { usable, prefix: nice };

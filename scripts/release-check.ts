@@ -22,6 +22,7 @@
 //   deno task check:release          # everything (fast, then heavy)
 //   deno task check:release --fast   # static gates + surfaces only
 import { VERSION } from "../src/server/aio-cli.ts";
+import { HEAP_FLOOR_MB } from "../src/server/heap-policy.ts";
 import { STAMP_PATH, writeStamp } from "./release-stamp.ts";
 import { descendantPids } from "../src/server/single-instance-lock.ts";
 import { machineFence } from "./test-shards.ts";
@@ -92,7 +93,10 @@ async function run(name: string, cmd: string[]): Promise<Result> {
     args,
     cwd: root,
     // The gate already runs inside FENCE; a nested runner must not fence again.
-    env: { AIO_TEST_FENCED: "1" },
+    // AIO_MAX_HEAP_MB caps every app a gate spawns at the heap floor, so the
+    // suite cannot inherit 25% of the host's RAM per app and sum past the box
+    // (see envHeapCapMB in src/server/heap-policy.ts).
+    env: { AIO_TEST_FENCED: "1", AIO_MAX_HEAP_MB: String(HEAP_FLOOR_MB) },
     stdout: "piped",
     stderr: "piped",
   }).spawn();

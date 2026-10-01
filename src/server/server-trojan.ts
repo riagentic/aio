@@ -19,6 +19,7 @@
 // CSRF-protected (X-AIO header on POST), rate-limited.
 import v8 from "node:v8";
 import { measureCellState } from "../diagnostics/memory-monitor.ts";
+import { readGauges } from "../diagnostics/memory-ledger.ts";
 import { CELL_METHOD_SEP } from "../state/cell-helpers.ts";
 import { getRegisteredCells } from "../state/cell-reactive.ts";
 import { serializeReturn } from "../protocol/return-value.ts";
@@ -668,6 +669,10 @@ function handleGet(
       heapPct: limit ? Math.round((mem.heapUsed / limit) * 100) : null,
       external: mem.external,
       cells,
+      // The ledger: every named series aio watches, so a reading says WHICH
+      // subsystem moved. A `level` should return to baseline; a `counter` only
+      // rises and carries the ceiling that will fail loud (see memory-ledger).
+      gauges: readGauges(),
     });
   }
 

@@ -94,6 +94,8 @@ import {
 } from "../protocol/protocol-version.ts";
 import type { ServerSyncHandler } from "../sync/server-handler.ts";
 import { isPipePath, listenLocal, type LocalConn } from "./local-listen.ts";
+import { peerRefusal, primeLocalPeer } from "./local-peer.ts";
+import { selfUid } from "./dir-permissions.ts";
 import { ensureLockDirOf } from "./single-instance-lock.ts";
 import { flushAllUrgent } from "./broadcast-coalescer.ts";
 import {
@@ -228,6 +230,13 @@ export type UDSHandle = {
   socketPath: string;
   clients: () => UDSClient[];
   requestClientState: (index: number, msg?: string) => Promise<unknown>;
+  /** Arm the local-peer gate with the pid of the window this app spawned. A
+   *  no-op unless the listener was created with `peer.required`. Until it is
+   *  called, a required gate refuses every connection — including a window
+   *  that reconnects, which is why the client's own reconnect loop covers the
+   *  spawn→arm window. Optional so a hand-built `UDSHandle` (tests) need not
+   *  carry it. */
+  armPeerPid?: (pid: number) => void;
 };
 
 export function createUDSListener(
@@ -282,6 +291,13 @@ export function createUDSListener(
    *  the server was quiet, and the server was not: a 5-second poller was
    *  reassigning a ~100 KB array on every tick. */
   costMeter?: import("../vitals/cost-meter.ts").CostMeter,
+  /** Verify the connecting process at accept. When `required`, every
+   *  connection must be this app's own window (pid) and this user (uid); a
+   *  mismatch is refused BEFORE any frame is written — `proto`, `cfg` and the
+   *  accept-time state included. Inert (and so dev/`am`-friendly) when absent,
+   *  which is the default; the production Electron lockdown is the one caller
+   *  that sets it. */
+  peer?: { required: boolean },
 ): UDSHandle {
   const fullThreshold = typeof fullStateThreshold === "number" &&
       Number.isFinite(fullStateThreshold)
@@ -299,16 +315,36 @@ export function createUDSListener(
   // sibling's exit removes it whenever it is empty, and a `singleton: false`
   // app holds no lock to keep it: the bind then failed ENOENT.
   ensureLockDirOf(socketPath);
-  const listener = listenLocal(socketPath);
+  const listener = listenLocal(
+    socketPath,
+    peer?.required ? { peer: true } : undefined,
+  );
   const connSet = new Set<LocalConn>();
   const clientMap = new Map<LocalConn, UDSClient>();
   const counter = clientCounter ?? { value: 0 };
   let closed = false;
+  // The ONE pid allowed on the other end, armed by the app after it spawns its
+  // window. `null` = "not armed yet" = refuse; failing closed here is what
+  // makes the spawn→arm gap safe even if a client beats the spawn.
+  let allowedPid: number | null = null;
+  const _selfUid = peer?.required ? selfUid() : null;
+  // Open the peer-credential library NOW, not lazily on the first frame — a
+  // platform that cannot read peer credentials is then known at construction,
+  // and the gate never opens a library inside a request it must serve.
+  if (peer?.required) primeLocalPeer();
 
   const pendingState = new Map<
     string,
     { resolve: (v: unknown) => void; timer: ReturnType<typeof setTimeout> }
   >();
+
+  // The cell ids a subscription may name — resolved in ONE place so the
+  // trusted window and the (state-less) foreign peer agree on what one is.
+  const knownSubIds = () =>
+    new Set([
+      ...Object.keys((getUIState() ?? {}) as object),
+      ...getRegisteredCells().keys(),
+    ]);
 
   (async () => {
     for await (const conn of listener) {
@@ -319,44 +355,74 @@ export function createUDSListener(
       // shutdown that then throws BadResource). One unserializable snapshot
       // used to be enough. Fail the CONNECTION, loudly, and keep the door open.
       try {
-        connSet.add(conn);
-        const client: UDSClient = {
-          conn,
-          index: counter.value++,
-          id: crypto.randomUUID(),
-          subscriptions: null,
-        };
-        // Same rule as the WS handshake (`drainBeforeSnapshot`, server-ws.ts):
-        // the patches still buffered in a throttle window go out to the peers
-        // whose base they describe BEFORE this peer joins the roster, because
-        // its accept-time snapshot already holds their writes — sent after
-        // it, they were applied a second time (a server-side `push` landed
-        // twice on the window that opened mid-window). Both transports, one
-        // registry, so neither can drift back.
-        flushAllUrgent();
-        clientMap.set(conn, client);
-        debug(`uds: client connected #${client.index} (${connSet.size} total)`);
+        // THE local-peer gate. A same-user process that is NOT this app's
+        // window may not open a SESSION: no `proto`/`cfg` hello, no state, no
+        // methods, no time travel. It MAY still use the `ctl` control plane —
+        // that is how `am` and the packaged-app door test reach a running
+        // production server, and it carries its own gates (and, in prod,
+        // serves no raw state). The per-frame guard in `_handleUDSConn` is the
+        // other half; this decides it ONCE, before anything is sent.
+        const trusted = peer?.required
+          ? peerRefusal(
+            conn.peerIdentity?.() ?? null,
+            { selfUid: _selfUid, allowedPid, requirePid: true },
+          ) === null
+          : true;
 
-        // A3: version handshake — server speaks first, before any state.
-        sendTo(conn, enc("proto", protoHello(VERSION)));
-        if (clientConfig && Object.keys(clientConfig).length > 0) {
-          sendTo(conn, enc("cfg", clientConfig));
+        // `connSet` is the CLEANUP roster (shutdown closes it) and the
+        // `clientMap` is the STATE roster. Only a trusted window joins the
+        // second — keeping them apart is what stops a foreign peer from ever
+        // being handed a broadcast it did not subscribe to.
+        connSet.add(conn);
+
+        if (trusted) {
+          const client: UDSClient = {
+            conn,
+            index: counter.value++,
+            id: crypto.randomUUID(),
+            subscriptions: null,
+          };
+          // Same rule as the WS handshake (`drainBeforeSnapshot`, server-ws.ts):
+          // the patches still buffered in a throttle window go out to the peers
+          // whose base they describe BEFORE this peer joins the roster, because
+          // its accept-time snapshot already holds their writes — sent after
+          // it, they were applied a second time (a server-side `push` landed
+          // twice on the window that opened mid-window). Both transports, one
+          // registry, so neither can drift back.
+          flushAllUrgent();
+          clientMap.set(conn, client);
+          debug(
+            `uds: client connected #${client.index} (${connSet.size} total)`,
+          );
+
+          // A3: version handshake — server speaks first, before any state.
+          sendTo(conn, enc("proto", protoHello(VERSION)));
+          if (clientConfig && Object.keys(clientConfig).length > 0) {
+            sendTo(conn, enc("cfg", clientConfig));
+          }
+          // AIO-239: route the initial write through sendTo() for the
+          // per-connection write queue — and through the SAME snapshot builder
+          // every later frame uses, so the accept-time state cannot drift from
+          // (or crash where) the broadcast-time state does.
+          const initial = _fullJsonFor(client);
+          if (initial !== undefined) {
+            client.queuedJson = initial;
+            sendTo(conn, encRaw("state", initial), () => {
+              client.lastFullJson = initial;
+            });
+          }
+          // Dev: hand the panel its history now — Ctrl+. binds on the first
+          // tt-state frame, so without this the shortcut is inert until the next
+          // recorded action's broadcast.
+          if (tt) sendTo(conn, enc("tt-state", tt.getBroadcast()));
+        } else {
+          log.warn(
+            "uds",
+            `a local process that is not this app's window connected to ` +
+              `${socketPath} (production lockdown) — it is given NO state and ` +
+              `NO methods; only the \`ctl\` control plane answers it.`,
+          );
         }
-        // AIO-239: route the initial write through sendTo() for the
-        // per-connection write queue — and through the SAME snapshot builder
-        // every later frame uses, so the accept-time state cannot drift from
-        // (or crash where) the broadcast-time state does.
-        const initial = _fullJsonFor(client);
-        if (initial !== undefined) {
-          client.queuedJson = initial;
-          sendTo(conn, encRaw("state", initial), () => {
-            client.lastFullJson = initial;
-          });
-        }
-        // Dev: hand the panel its history now — Ctrl+. binds on the first
-        // tt-state frame, so without this the shortcut is inert until the next
-        // recorded action's broadcast.
-        if (tt) sendTo(conn, enc("tt-state", tt.getBroadcast()));
 
         _handleUDSConn(
           conn,
@@ -373,11 +439,10 @@ export function createUDSListener(
           control,
           // Known = the state's cells plus every registered one (a cell
           // hidden from the view exists, and is not a typo).
-          () =>
-            new Set([
-              ...Object.keys((getUIState() ?? {}) as object),
-              ...getRegisteredCells().keys(),
-            ]),
+          knownSubIds,
+          // A foreign peer may open a connection and use `ctl`; every other
+          // frame kind is dropped (see `_handleUDSConn`).
+          trusted,
         );
       } catch (e) {
         log.error("uds", `client handshake failed — ${e}`);
@@ -563,9 +628,14 @@ export function createUDSListener(
 
   return {
     socketPath,
-    // AIO-239: route broadcast through sendTo() to use per-connection write queue
+    armPeerPid: (pid: number) => {
+      allowedPid = pid;
+    },
+    // AIO-239: route broadcast through sendTo() to use per-connection write queue.
+    // `clientMap`, not `connSet`: the latter is the cleanup roster and a foreign
+    // (non-window) peer must never be handed a broadcast it did not subscribe to.
     broadcast: (msg: string) => {
-      for (const conn of connSet) sendTo(conn, msg);
+      for (const conn of clientMap.keys()) sendTo(conn, msg);
     },
     broadcastState: (forceOrPatches?: boolean | PatchEntry[]) => {
       // Counted, not assumed — see the type. Every `sendTo` below bumps one.
@@ -875,11 +945,18 @@ function _handleUDSConn(
   control?: (req: Request) => Promise<Response>,
   /** The cell ids a subscription may name — see `warnUnknownSubs`. */
   knownSubIds?: () => ReadonlySet<string>,
+  /** False for a same-user peer that is not this app's window (production
+   *  lockdown): `ctl` is honoured (the control plane has its own gates), and
+   *  every frame that would read state or run a method is dropped. */
+  trusted = true,
 ): void {
   const decoder = new TextDecoder();
   const MAX_BUF = udsFrameCeiling(maxFrameBytes);
   // Linear in the bytes read, however a frame is chunked (line-reader.ts).
   const lineBuf = createLineReader();
+  /** Kinds already dropped for THIS foreign peer — one line each, so a peer
+   *  that hammers a frame it may not send cannot flood the log. */
+  const _foreignWarned = new Set<string>();
 
   // This connection's native-dialog host — set once its peer (an Electron
   // main process) announces `caps: ["dialog"]` in a `type` frame. Every action
@@ -1049,6 +1126,26 @@ function _handleUDSConn(
           const frame = dec(line);
           if (!frame) {
             log.warn("uds", "undecodable frame — dropped");
+            continue;
+          }
+          // A FOREIGN peer (same user, not this app's window) may use the
+          // control plane and nothing else. Everything that reads state
+          // (`subs`, `resync`, `client-state`) or runs code (`action`, `sfn`,
+          // `op`, `sync-req`, `tt-cmd`) is refused here — the accept-time
+          // decision already withheld the state; this closes the other half.
+          if (
+            !trusted && frame.t !== "ctl" && frame.t !== "ping" &&
+            frame.t !== "proto" && frame.t !== "type" &&
+            !isIgnorableKind(frame.t)
+          ) {
+            if (!_foreignWarned.has(frame.t)) {
+              _foreignWarned.add(frame.t);
+              log.warn(
+                "uds",
+                `dropped a "${frame.t}" frame from a local process that is ` +
+                  `not this app's window (production lockdown)`,
+              );
+            }
             continue;
           }
           switch (frame.t) {

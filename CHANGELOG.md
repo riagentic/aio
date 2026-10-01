@@ -1,5 +1,113 @@
 # Changelog
 
+## v1.0.16-beta — desktop downloads shrink: the compiler leaves the binary, a zstd exe, and minify on by default (2026-10-01)
+
+> **Nothing is removed and nothing changes shape; no app needs a code change.**
+> Two DEFAULTS move — see
+> [the upgrade guide](docs/upgrade/from-1.0.15-beta-to-1.0.16-beta.md):
+> `build.minify` is on now, and a compiled binary no longer embeds the
+> TypeScript compiler or the other build-only npm packages unless
+> `build.keepPackages` names them.
+
+### The size round (feedback/optimal-builds.md Task2)
+
+- **The TypeScript compiler no longer ships inside a compiled binary.**
+  `deno compile` embedded the whole `typescript` package a host's graph could
+  reach — `tsc`/`tsc.exe`, `typescript.js`, hundreds of `lib.*.d.ts`, ~152 MB of
+  VFS on a real desktop host — yet aio builds an app ahead of time, so the
+  shipped binary never runs `tsc`. `typescript` joins
+  `electron`/`esbuild`/`happy-dom` in `DEV_ONLY_PACKAGES`; because dropping a
+  package the graph still reaches is a real (if rare) behavior change, the build
+  **warns** and names the escape hatch:
+  `"build": { "keepPackages": ["typescript"] }`. A release gate reads a real
+  artifact's VFS file table for the compiler, esbuild and the cached
+  `appimagetool`. `tests/build-tool-audit.test.ts`, `tests/build-e2e.test.ts`.
+- **The Windows one-click `.exe` is smaller than its zip, and building it needs
+  no Go toolchain.** The SFX payload is now a **zstd-compressed tar** of the
+  staged package, packed by aio itself in Deno (`@std/tar` through `node:zlib`)
+  — measured ~15% smaller than deflate on a reference Electron tree, and zstd
+  decompresses faster, so first launch is faster too. The stub streams the
+  decode; it still extracts a `zip` payload, so if packing ever fails the exe
+  falls back to the zip payload — larger, never broken. The extractor stub is a
+  **committed prebuilt PE**, so the one-click `.exe` builds with no compiler on
+  the host (Go is needed only to rebuild that stub, rarely — see
+  `src/build/windows-sfx-stub/README.md`). `AIO_WINDOWS_FAT_EXE=1` restores the
+  legacy `deno compile` PE instead. The `.zip` stays a plain, Explorer-openable
+  zip. `tests/build-windows-sfx.test.ts`.
+- **`build.minify` is on by default.** `deno compile` embeds every server
+  module's original text; shipping the reader's design notes back to `strings`
+  is not a choice an app should have to remember to make. `false` is the
+  opt-out, documented in `docs/build/targets.md`.
+- **Optional Chromium extras are an explicit opt-in.**
+  `dxcompiler.dll`/`dxil.dll` and the software Vulkan fallback are kept exactly
+  as Electron shipped them — a 3D app keeps hardware acceleration and a GPU-less
+  VM keeps its software fallback. `"build": { "chromiumExtras": "strip" }`
+  removes them for an app that renders no GPU content, and nothing else: WebGL
+  (`d3dcompiler_47.dll`), media (`ffmpeg`), ICU data and every license file are
+  never candidates. aio's own runtime cache stamps (`.aio-complete`,
+  `.aio-last-used`) are dropped from the package unconditionally.
+  `tests/build-electron-extras.test.ts`.
+- **The SFX stub stays tiny and prebuilt**: the zstd codec lives inside the
+  committed stub and the payload is compressed in Deno, so a Windows build needs
+  no Go toolchain and no network.
+
+### The freeze fix, and a memory ledger for the next one
+
+- **A boot could walk your entire home directory, and freeze the machine.** The
+  app's version is derived from its project tree — the root is the nearest
+  `deno.json` ancestor of the main module, and naming a `-nogit.<hash>`/`-dirty`
+  version then read **every file** under it, with no bound. A stray `deno.json`
+  above the app (measured: a leftover in `$HOME`) made `$HOME` — 896 GB — look
+  like the project, so boot read and hashed it: ~0.5 GB of RSS per 5 s, four
+  busy GC threads, a boot that never returned, and whole-machine freezes when
+  several ran at once. Both tree readers are now **bounded** and refuse **by
+  name** (`[version] refusing to hash …`) past the cap; the app reports
+  `unknown (<reason>)` instead of a guessed hash. `tests/build-version.test.ts`.
+- **aio can see NATIVE memory now, and name what grows.** The memory monitor
+  watched `heapUsed` alone, so a leak outside V8 — socket buffers, SQLite's page
+  cache, a replay holding what it read — was invisible while the process climbed
+  to tens of GB and the heap read a calm “3%”. It now trends `rss`/`external`
+  and reports a **native leak** (the heap flat while RSS climbs), naming the
+  fastest-growing series. A new memory ledger
+  (`src/diagnostics/memory-ledger.ts`) registers named series with their
+  **owner** — `broadcast.bufferedBytes` (broadcast), `journal.replay.entries`
+  (journal) — and `budget()` gives a counter a hard ceiling that throws
+  `MEMORY_UNBOUNDED` by name instead of looping forever. Surfaced where the
+  numbers already were: `am heap` gains a `gauges` array, and `/__aio/metrics`
+  gains `aio_memory_external_bytes` and `aio_memory_gauge{name,owner,unit,kind}`
+  (plus `aio_memory_gauge_limit`). Additive — nothing to change.
+
+### The production local-peer lockdown: only the app's own window may connect
+
+- **In production, an Electron app's socket now serves ONLY the window it
+  spawned.** A Unix socket inside a `0700` dir — or a Windows pipe with an
+  owner-only DACL — keeps other _users_ out, but a second application run by the
+  SAME user could connect and receive state or dispatch methods. On a
+  single-user desktop there was no caller identity to check, so `access: true`
+  ("requires an authenticated caller") had nothing to authenticate. The accept
+  now reads the peer's **kernel** identity — `SO_PEERCRED` (Linux),
+  `LOCAL_PEERPID` (macOS), `GetNamedPipeClientProcessId` (Windows) — and gives
+  any process that is not the Electron pid the server spawned **no session at
+  all**: no `proto`/`cfg` handshake, no state, no methods, no time travel (a
+  per-frame guard drops every such frame). The `ctl` control plane still answers
+  it — deliberately: that is how `am` and the packaged-app doors test reach a
+  running server, it carries its own gates, and in production it serves no raw
+  state. Armed the instant the window is spawned; unarmed refuses (fail closed).
+  On by default whenever `prod && electron && uds && !expose`; dev keeps the
+  door open for `am`/`amui`. On Linux the process is made non-dumpable
+  (`PR_SET_DUMPABLE`) so another same-user process cannot read its memory.
+  `src/server/local-peer.ts`, `tests/local-peer.test.ts`,
+  `tests/local-peer-gate.test.ts`.
+- **Why this is not just `visible`.** `visible`/`forUser` decide what a client
+  may _see_; this decides _who may connect as a session at all_. They are
+  different axes, and both matter: this one is what makes `access` enforceable
+  on desktop.
+- **The boundary, stated.** There is no way to "sniff" a Unix socket or named
+  pipe; the bytes are reachable only by opening a session (a foreign peer is
+  given no state and no methods) or by reading the process's memory (denied
+  where the OS allows). This denies **other processes** — it does not sandbox
+  code running inside the window itself.
+
 ## v1.0.15-beta — the audit round: one cross-caller key, one fail-open gate, and four smaller repairs (2026-09-30)
 
 > **Additive only — nothing is removed and nothing changes shape, and no app

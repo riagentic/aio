@@ -4,6 +4,7 @@ import { removalFor, removalMessage } from "../state/removals-core.ts";
 import { nearestOf } from "../state/cell-helpers.ts";
 import { capDelay, MIN_INTERVAL_MS } from "../state/timer-ceiling.ts";
 import { log } from "./logger-api.ts";
+import type { GaugeReading } from "./memory-ledger.ts";
 
 /** Heap usage report — per-cell breakdown, trend, and WHY it fired. */
 export type MemoryReport = {
@@ -25,11 +26,47 @@ export type MemoryReport = {
    *    ceiling, 75%-of-ceiling is 35 GB, and by then the machine is already
    *    swapping. Ceiling-relative thresholds cannot see it.
    *  • `growth` — climbing steadily with nothing near a threshold. A leak
-   *    announces itself here, hours before either of the above. */
+   *    announces itself here, hours before either of the above.
+   *
+   *  A NATIVE leak (the heap flat while `rss`/`external` climb — outside V8,
+   *  where these thresholds cannot look) reports as `growth` with
+   *  {@linkcode MemoryReport.nativeLeak} set: `reason` is frozen public
+   *  surface and a fourth member would break callers, so the fourth case
+   *  gained its own additive spelling instead. */
   reason: "pressure" | "machine" | "growth";
   /** Heap as a fraction of PHYSICAL RAM (0 when the machine is unmeasurable) —
    *  the number that matters for the machine's health, as opposed to the app's. */
   machinePct: number;
+  /** Native memory — the half `heapUsed` never covered. `rssGrowth` is the
+   *  change across the trend window, so a report says HOW FAST, not just that
+   *  it happened. Optional: the public shape is frozen, and a reader that
+   *  never looks here compiles unchanged. */
+  native?: { rss: number; external: number; rssGrowth: number };
+  /** The JS heap was FLAT while RSS climbed — a leak the heap-relative
+   *  thresholds above cannot see. The additive spelling of the case `reason`
+   *  is too frozen to name (see its doc). */
+  nativeLeak?: boolean;
+  /** Every watched series at report time, from the memory ledger. Absent when
+   *  the host wired no `getGauges`. */
+  gauges?: {
+    name: string;
+    owner: string;
+    unit: "bytes" | "count";
+    kind: "level" | "counter";
+    value: number;
+    bound?: number;
+  }[];
+  /** The fastest-growing LEVEL series — the answer to "which subsystem". Only
+   *  a `level` gauge can be a grower; a `counter` only ever rises by design
+   *  and its ceiling, not its slope, is what matters (see `memory-ledger.ts`).
+   *  Absent when no level gauge grew. */
+  topGrower?: {
+    name: string;
+    owner: string;
+    unit: "bytes" | "count";
+    value: number;
+    delta: number;
+  };
 };
 
 /** Per-cell memory size entry — name, serialized byte size, and largest field info. */
@@ -127,6 +164,10 @@ type MonitorDeps = {
    *  say nothing about the machine, and the machine is what freezes. */
   getTotalMemory?: () => number;
   getCellStates: () => CellEntry[];
+  /** Read every watched series (usual wiring: `memory-ledger.ts`'s
+   *  `readGauges`). Absent ⇒ reports carry `gauges: []` and no `topGrower`,
+   *  exactly as before this existed. */
+  getGauges?: () => GaugeReading[];
 };
 
 /** Recursive size estimator for JS values. */
@@ -211,6 +252,13 @@ export function createMemoryMonitor(deps: MonitorDeps): { stop: () => void } {
   let prevHeapUsed = 0;
   const samples: number[] = []; // sliding window of heapPct samples
   const usedSamples: number[] = []; // …and of absolute bytes, for growth
+  // …and of RSS, for the NATIVE leak the heap windows above cannot see. A
+  // native leak is `rss` climbing while `usedSamples` stays flat — the
+  // signature that ran to 40 GB unannounced before this window existed.
+  const rssSamples: number[] = [];
+  // Last tick's reading per level gauge, so this tick can say which series
+  // moved — the difference between "something grew" and "the sync buffer grew".
+  const prevGauge = new Map<string, number>();
 
   // NaN (`Number(env)` unset), 0 or a negative period was a ~1 ms loop, each
   // tick a recursive sizeof over every cell's state.
@@ -246,27 +294,59 @@ export function createMemoryMonitor(deps: MonitorDeps): { stop: () => void } {
     usedSamples.push(mem.heapUsed);
     if (usedSamples.length > windowSize) usedSamples.shift();
 
-    const total = deps.getTotalMemory?.() ?? 0;
-    const machinePct = total > 0 ? mem.heapUsed / total : 0;
+    // …and native. RSS is the number the machine feels; the heap is inside it.
+    rssSamples.push(mem.rss);
+    if (rssSamples.length > windowSize) rssSamples.shift();
 
-    // THREE reasons to speak, and they are genuinely different problems.
+    // Read the ledger every tick (O(#gauges), never a state walk) so a report
+    // can name the fastest-moving series, and so `prevGauge` is current even
+    // on ticks that do not speak.
+    const gauges = deps.getGauges?.() ?? [];
+    const grower = fastestGrower(gauges, prevGauge);
+
+    const total = deps.getTotalMemory?.() ?? 0;
+    // The machine's share is RSS over RAM, not heap over RAM: RSS is what the
+    // OS must find room for, and a native leak lives entirely inside it while
+    // `heapUsed` stays flat.
+    const machinePct = total > 0 ? mem.rss / total : 0;
+
+    // FOUR reasons to speak, and they are genuinely different problems.
     const pressure = heapPct >= deps.warnThreshold;
     // …a large share of the whole machine, whatever the ceiling allows. On a
     // 47 GB ceiling the pressure threshold is 35 GB, by which point a 64 GB
     // desktop is already swapping — this is the check that sees it first.
     const machine = machinePct >= (deps.machineWarnFraction ?? 0.5);
-    // …or climbing steadily while comfortably below both. That is a leak, and
-    // reporting it only at 75% turns a slow diagnosis into an emergency.
-    const growth = !pressure && !machine && usedSamples.length >= windowSize &&
-      detectTrend(samples) === "rising" &&
+    const heapRising = detectTrend(usedSamples) === "rising";
+    const rssGrowth = rssSamples.length >= 3
+      ? rssSamples[rssSamples.length - 1]! - rssSamples[0]!
+      : 0;
+    // …or the JS heap FLAT while RSS climbs. Requiring a flat heap is what
+    // keeps an ordinary heap climb reported as `growth` rather than relabelled
+    // `native`; the two want different fixes.
+    const native = !pressure && !machine && !heapRising &&
+      rssSamples.length >= windowSize &&
+      detectTrend(rssSamples) === "rising" &&
+      rssGrowth >
+        Math.max(
+          NATIVE_GROWTH_FLOOR_BYTES,
+          rssSamples[0]! * NATIVE_GROWTH_RATIO,
+        );
+    // …or the heap climbing steadily while comfortably below a threshold. That
+    // is a leak, and reporting it only at 75% turns a slow diagnosis into an
+    // emergency.
+    const growth = !pressure && !machine && !native &&
+      usedSamples.length >= windowSize && heapRising &&
       (usedSamples[usedSamples.length - 1]! - usedSamples[0]!) >
         (heapLimit > 0 ? heapLimit : mem.heapTotal) *
           (deps.growthReportRatio ?? 0.15);
 
-    if (!pressure && !machine && !growth) return;
+    for (const g of gauges) prevGauge.set(g.name, g.value);
+
+    if (!pressure && !machine && !growth && !native) return;
     // Once a growth report has gone out, do not repeat it every interval — the
     // window has to climb again by the same amount to earn a second one.
     if (growth) usedSamples.length = 0;
+    if (native) rssSamples.length = 0;
 
     // Measure cell states
     const entries = deps.getCellStates();
@@ -278,6 +358,9 @@ export function createMemoryMonitor(deps: MonitorDeps): { stop: () => void } {
       ? "critical"
       : "warn";
     const trend = detectTrend(samples);
+    // `reason` is frozen public surface: a native leak reports as `growth`
+    // (it IS climbing steadily) with `nativeLeak` set, rather than a fourth
+    // member that would break every existing reader.
     const reason: MemoryReport["reason"] = pressure
       ? "pressure"
       : machine
@@ -296,12 +379,50 @@ export function createMemoryMonitor(deps: MonitorDeps): { stop: () => void } {
       gcReclaimedPct,
       cellStates,
       trend,
+      native: { rss: mem.rss, external: mem.external, rssGrowth },
+      ...(native ? { nativeLeak: true } : {}),
+      gauges,
+      ...(grower ? { topGrower: grower } : {}),
     });
   }, period);
 
   return {
     stop: () => clearInterval(id),
   };
+}
+
+/** A native leak must clear BOTH an absolute floor — so a quiet app's RSS
+ *  jitter never reads as a leak — and a share of the window's starting RSS.
+ *  Sized off the real incident: ~10 GB and climbing across a 10-sample window
+ *  clears both by orders of magnitude, while a warm-up bump does not. */
+const NATIVE_GROWTH_FLOOR_BYTES = 256 * 1024 * 1024;
+const NATIVE_GROWTH_RATIO = 0.25;
+
+/** The fastest-rising LEVEL series between two ticks, or `undefined` when none
+ *  rose. Only `level` gauges qualify: a `counter` (cumulative work) rises by
+ *  design, and calling that a leak would bury the real one. */
+function fastestGrower(
+  gauges: GaugeReading[],
+  prev: Map<string, number>,
+): MemoryReport["topGrower"] {
+  let top: MemoryReport["topGrower"];
+  for (const g of gauges) {
+    if (g.kind !== "level") continue;
+    const before = prev.get(g.name);
+    if (before === undefined) continue;
+    const delta = g.value - before;
+    if (delta <= 0) continue;
+    if (!top || delta > top.delta) {
+      top = {
+        name: g.name,
+        owner: g.owner,
+        unit: g.unit,
+        value: g.value,
+        delta,
+      };
+    }
+  }
+  return top;
 }
 
 /** Detect trend using linear regression slope over sliding window.

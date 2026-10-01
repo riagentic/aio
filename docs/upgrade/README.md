@@ -26,6 +26,11 @@ app, that is a bug in aio, not a step you missed.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [1.0.15-beta → **1.0.16-beta**](from-1.0.15-beta-to-1.0.16-beta.md) — nothing
+  is removed and the surface does not move. The size round: compiled binaries
+  drop the TypeScript compiler and the other build-only npm packages (opt one
+  back in with `build.keepPackages`), `build.minify` is on by default, and the
+  Windows one-click `.exe` carries a smaller zstd payload.
 - [1.0.14-beta → **1.0.15-beta**](from-1.0.14-beta-to-1.0.15-beta.md) — nothing
   is removed and the surface does not move. An audit round: a `Map`/`Set`/class
   field in a `resolveUser` record no longer shares a per-user view cache slot

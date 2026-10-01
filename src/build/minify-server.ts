@@ -49,15 +49,21 @@ import { HEY, NO } from "../diagnostics/fmt.ts";
  *  (`withDevExcluded`). */
 export const MINIFY_STAGE = join(".aio", "minify-stage");
 
-/** `build.minify` from the app's deno.json: `false` when absent, refused when
- *  it is not a boolean — a typo'd `"true"` must not ship the readable tree
- *  while the author believes it is minified. */
+/** `build.minify` from the app's deno.json — ON by default, refused when it is
+ *  not a boolean. A compiled binary embeds every module's ORIGINAL text, so
+ *  leaving minification off ships the whole server tree back — comments,
+ *  design notes, internal names — as a gift to anyone running `strings` on the
+ *  artifact. That is not a choice an app should have to remember to make, so
+ *  the default is the safe one; `false` is the explicit opt-out (it also
+ *  removes the tiny build-time cost of transforming each module). A typo'd
+ *  `"true"` is still refused, never read as true or false. */
 export async function minifyDeclared(root: string): Promise<boolean> {
   const cfg = (await readDenoJson(root))?.config as
     | { build?: { minify?: unknown } }
     | undefined;
   const v = cfg?.build?.minify;
-  if (v === undefined || typeof v === "boolean") return v === true;
+  if (v === undefined) return true;
+  if (typeof v === "boolean") return v;
   throw new Error(
     `${NO} deno.json build.minify is ${
       JSON.stringify(v)

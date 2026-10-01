@@ -189,17 +189,16 @@ anywhere says why.
 A platform's manifest carries ONE artifact, so where a build makes two for one
 platform, publish picks the one an update can install as the platform's
 `<os>-<arch>.json`. An Electron build for Windows makes two **install kinds**:
-the self-contained `<name>-win-x64.exe` (kind `binary`) is the platform's
-update, and the `.zip` gets a manifest of its own,
-`<os>-<arch>.electron-zip.json` — an install unpacked from the zip reads that
-one first and falls back to `<os>-<arch>.json` when the channel has none (a 404
-or 410, then not asked again for a day; a timeout fails the check). A zip
-install running aio older than 1.0.13-beta only reads `<os>-<arch>.json`, is
-offered the `.exe` it cannot install, and must be updated by hand once;
-publish's summary says so. Any other tie is refused, naming both files. A macOS
-`.dmg` is download-only: `downloads` in `--json` lists it, `stranded` lists any
-download whose platform got no manifest, and each of `releases` names its
-`kind`.
+the one-click `<name>-win-x64.exe` SFX (kind `binary`) is the platform's update,
+and the `.zip` gets a manifest of its own, `<os>-<arch>.electron-zip.json` — an
+install unpacked from the zip reads that one first and falls back to
+`<os>-<arch>.json` when the channel has none (a 404 or 410, then not asked again
+for a day; a timeout fails the check). A zip install running aio older than
+1.0.13-beta only reads `<os>-<arch>.json`, is offered the `.exe` it cannot
+install, and must be updated by hand once; publish's summary says so. Any other
+tie is refused, naming both files. A macOS `.dmg` is download-only: `downloads`
+in `--json` lists it, `stranded` lists any download whose platform got no
+manifest, and each of `releases` names its `kind`.
 
 **The data contract.** Publish asks each artifact it can run here
 (`<binary> --aio-data-contract`) and stamps that answer into the manifests of
@@ -410,14 +409,15 @@ thrown error, so a method can show it.
     identity per version therefore leaves nothing for macOS to ask about.
   - A swapped-in version carries no quarantine mark (it was never downloaded by
     a browser), so Gatekeeper does not hold its launch.
-- **Electron (Windows)** — the self-contained `.exe` is replaced like a Linux
-  binary; an install unpacked from the `.zip` is a folder, swapped by a detached
-  helper once the app exits (it waits up to 30 s for every process running from
-  the install, retries each move for 10 s, and always ends with a version
-  started). The helper starts through `CreateProcessW` with no console window;
-  without `--allow-ffi`, through `cmd.exe`. The `--version` check of a new
-  download runs off the app's thread, so the antivirus scan of a new exe does
-  not freeze the window.
+- **Electron (Windows)** — the one-click `.exe` (SFX) is replaced like a Linux
+  binary; on next launch the new SFX re-extracts when its payload stamp differs.
+  An install unpacked from the `.zip` is a folder, swapped by a detached helper
+  once the app exits (it waits up to 30 s for every process running from the
+  install, retries each move for 10 s, and always ends with a version started).
+  The helper starts through `CreateProcessW` with no console window; without
+  `--allow-ffi`, through `cmd.exe`. The `--version` check of a new download runs
+  off the app's thread, so the antivirus scan of a new exe does not freeze the
+  window.
 - **A CLI binary you launched yourself** — with no `auto`, the check at startup
   asks on the terminal: `Update to 2.1.0? The app will restart. [y/N]`. A
   non-interactive launch is never asked, because a service blocking on stdin
