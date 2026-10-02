@@ -55,7 +55,7 @@ import {
 import { mask } from "./source-mask.ts";
 
 /** Unjustified non-literal `in` tests in `src/`. Only ever edit DOWNWARD. */
-const CEILING = 60;
+const CEILING = 54;
 
 /** Every name `Object.prototype` answers `in` for, on any plain object. */
 const PROTO_NAMES: ReadonlySet<string> = new Set([

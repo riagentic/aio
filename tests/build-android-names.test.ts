@@ -72,6 +72,29 @@ Deno.test("android: the Kotlin spelling escapes $ rather than feeding it", () =>
   assertEquals(out, 'rootProject.name = "Cash \\$\\$ Register"');
 });
 
+Deno.test("android: whitespace inside {{ }} cannot survive as a token", () => {
+  // a field report: an overlay reformatted `{{APP_NAME}}` to
+  // `{{ APP_NAME }}`; the substitution matched nothing, the placeholder reached
+  // AndroidManifest.xml, and gradle failed with an opaque merge error.
+  const padded = '<application android:label="{{ APP_NAME }}" {{ ICON_ATTR }}>';
+  const out = _fillTemplate(padded, {
+    "{{APP_NAME}}": "X",
+    "{{ICON_ATTR}}": 'android:icon="@mipmap/ic_launcher"',
+  });
+  assertEquals(
+    out,
+    '<application android:label="X" android:icon="@mipmap/ic_launcher">',
+  );
+  assert(!out.includes("{{"), "no placeholder may survive formatting");
+  // Tabs and newlines inside the braces are the same defect.
+  assertEquals(
+    _fillTemplate("a={{\n\tAPP_NAME\t\n}}", { "{{APP_NAME}}": "Y" }),
+    "a=Y",
+  );
+  // A lowercase name is not a token and is left alone.
+  assertEquals(_fillTemplate("{{ not_a_token }}", {}), "{{ not_a_token }}");
+});
+
 Deno.test("android: both spellings strip control characters", () => {
   // Not legal XML at any escape, and the two deciders disagreed about it.
   for (

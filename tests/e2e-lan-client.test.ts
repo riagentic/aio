@@ -20,6 +20,7 @@ import { join } from "@std/path";
 import { childEnv } from "./e2e-app-harness.ts";
 import { stopChild } from "./stop-child.ts";
 import { childCoverageDir } from "../src/testing/temp-dir.ts";
+import { freePort } from "../src/testing/server-test.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const dec = new TextDecoder();
@@ -38,13 +39,6 @@ function lanIP(): string | null {
 
 const LAN_IP = lanIP();
 const APP_ID = "lan-client-probe";
-
-function freePort(): number {
-  const l = Deno.listen({ port: 0 });
-  const port = (l.addr as Deno.NetAddr).port;
-  l.close();
-  return port;
-}
 
 const CELL_TS = `import { cell } from "aio";
 export const makeCounter = () =>

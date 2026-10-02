@@ -11,6 +11,7 @@ import { assert, assertStringIncludes } from "@std/assert";
 import { childEnv } from "./e2e-app-harness.ts";
 import { stopChild } from "./stop-child.ts";
 import { childCoverageDir } from "../src/testing/temp-dir.ts";
+import { freePort } from "../src/testing/server-test.ts";
 const _childCovDir = childCoverageDir();
 
 const ROOT = new URL("..", import.meta.url).pathname;
@@ -27,13 +28,6 @@ function lanIP(): string | null {
 }
 
 const LAN_IP = lanIP();
-
-function freePort(): number {
-  const l = Deno.listen({ port: 0 });
-  const port = (l.addr as Deno.NetAddr).port;
-  l.close();
-  return port;
-}
 
 Deno.test({
   name: "e2e: --expose serves over the LAN interface — 0.0.0.0 + TLS + token",

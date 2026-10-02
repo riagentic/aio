@@ -6,8 +6,12 @@
 //     restored whatever a PREVIOUS `deno test` run left there;
 //  2. dispose CANCELLED the pending debounced save instead of flushing it, so
 //     the last change before teardown never reached the store and the next
-//     mount restored a stale value. (The harness keeps that debounce open so
-//     the flush cannot be skipped by a timer race under a loaded suite.)
+//     mount restored a stale value.
+//
+// And one made it test LESS than production: to pin (2) the harness held the
+// store's debounce open for 60 s, so a `{ persist: true }` mount wrote nothing
+// while it was mounted — a test reading localStorage after a change saw no
+// write that every real user's browser makes within 100 ms.
 import { assertEquals } from "@std/assert";
 import { cell } from "../mod.ts";
 import { testUI } from "../src/testing/ui-test.ts";
@@ -50,18 +54,16 @@ Deno.test("testUI persist: a previous run's aio:testui entry is never restored",
 });
 
 Deno.test("testUI persist: dispose flushes the pending save, the next mount restores it", async () => {
-  // The harness holds the lazy-store debounce open (60s) for `{ persist: true }`
-  // so this cannot go green via the timer racing dispose under load — only the
-  // dispose `_flushPendingPersist` path can land the last change.
   {
     await using ui = await testUI(App, { persist: true });
     ui.BumpButton.click();
     ui.BumpButton.click();
     await ui.expectCell(counter, (c) => c.n === 2);
-    // One more change AFTER settle, still inside the open debounce window —
-    // dispose must flush THIS value, not a stale earlier snapshot.
-    ui.BumpButton.click();
-    await ui.expectCell(counter, (c) => c.n === 3);
+    // One more change as the LAST thing before teardown, with nothing awaited
+    // after it: the production debounce (100 ms) has not run, so only the
+    // dispose flush can land this value — not a stale earlier snapshot, and
+    // not the timer.
+    counter.bump();
   }
   await using again = await testUI(App, { persist: true });
   assertEquals(
@@ -69,6 +71,38 @@ Deno.test("testUI persist: dispose flushes the pending save, the next mount rest
     3,
     "the last change before teardown must be persisted, not cancelled",
   );
+});
+
+Deno.test("testUI persist: a change reaches the store WHILE mounted, on the production debounce", async () => {
+  const ls = (globalThis as { localStorage?: Storage }).localStorage;
+  if (!ls) return; // no host store → nothing to write to
+  await using ui = await testUI(App, { persist: true });
+  const proto = Object.getPrototypeOf(ls) as Storage;
+  const orig = proto.setItem;
+  const written: string[] = [];
+  proto.setItem = function (k: string, v: string) {
+    written.push(v);
+    return orig.call(this, k, v);
+  };
+  try {
+    const before = (ui.fullState(counter) as { n: number }).n;
+    ui.BumpButton.click();
+    await ui.expectCell(counter, (c) => c.n === before + 1);
+    const saved = () => written.some((v) => v.includes(`"n":${before + 1}`));
+    // 100 ms in production; generous for a loaded suite, nowhere near 60 s.
+    const deadline = Date.now() + 5_000;
+    while (!saved() && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    assertEquals(
+      saved(),
+      true,
+      "a persist mount wrote nothing while mounted — the harness is holding " +
+        "the store's debounce open",
+    );
+  } finally {
+    proto.setItem = orig;
+  }
 });
 
 // Deno's localStorage is ONE on-disk store per project, shared by every test

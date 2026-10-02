@@ -111,10 +111,12 @@ export function safeZipPath(dest: string, name: string): string {
   const clean = name.replaceAll("\\", "/");
   if (
     clean.startsWith("/") || /^[A-Za-z]:/.test(clean) ||
+    // aio-ok: path-split — `\\` normalised to `/` above
     clean.split("/").includes("..")
   ) {
     throw new Error(`refusing zip entry outside the destination: ${name}`);
   }
+  // aio-ok: path-split — `\\` normalised to `/` above
   return join(dest, ...clean.split("/").filter((s) => s.length > 0));
 }
 

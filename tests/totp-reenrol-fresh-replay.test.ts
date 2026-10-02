@@ -3,6 +3,7 @@
 // enrolling a NEW authenticator within the same 30-second step refused the new
 // secret's first, valid code as a "replay" of the old secret's — once, with
 // `invalid_code`, to a user who typed exactly what their app showed.
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { assert, assertEquals } from "@std/assert";
 import { type AuthFlows, handleAuthFlow } from "../src/server/auth-flows.ts";
 import { openSessionStore } from "../src/server/sessions.ts";
@@ -92,5 +93,51 @@ Deno.test("totp: re-enrolling a new secret inside the last code's step is not re
     users.close();
     _resetTotpReplay();
     _resetAuthFails();
+  }
+});
+
+// A row written BEFORE secrets were normalised at the write holds whatever
+// spelling the app passed. Re-staging that same secret now stores the
+// normalised text — and the guard compared it with the stored raw one as
+// strings, so the first re-stage after an upgrade was "a new secret": the
+// replay record was zeroed and a code already spent in this step was good
+// again, once.
+Deno.test("totp: re-staging a secret stored in a pre-normalisation spelling keeps its replay record", async () => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const dir = await tempDir("aio-totp-legacy-");
+  const path = `${dir}/auth.db`;
+  const SECRET = "JBSWY3DPEHPK3PXP";
+  const legacy = SECRET.toLowerCase() + "=="; // what an old build stored
+  try {
+    {
+      const users = openUserStore(path);
+      await users.create("alice", "correct horse battery");
+      users.setTotpSecret("alice", SECRET);
+      users.enableTotp("alice");
+      assertEquals(totpReplayOf(users)!.accept("alice", 77), true);
+      users.close();
+    }
+    {
+      const db = new DatabaseSync(path);
+      db.prepare("UPDATE users SET totp = ? WHERE id = 'alice'").run(legacy);
+      db.close();
+    }
+    const users = openUserStore(path);
+    try {
+      assertEquals(users.totpSecret("alice")?.secret, legacy, "precondition");
+      users.setTotpSecret("alice", legacy);
+      assertEquals(
+        totpReplayOf(users)!.accept("alice", 77),
+        false,
+        "the same secret, re-staged from its old spelling, reopened step 77",
+      );
+      // A DIFFERENT secret still starts a fresh record.
+      users.setTotpSecret("alice", "KRSXG5CTMVRXEZLU");
+      assertEquals(totpReplayOf(users)!.accept("alice", 77), true);
+    } finally {
+      users.close();
+    }
+  } finally {
+    await dropTempDir(dir);
   }
 });

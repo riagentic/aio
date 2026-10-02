@@ -111,9 +111,9 @@ Deno.test({
       }).output();
       assert(planted.success, new TextDecoder().decode(planted.stderr));
 
-      const am = async (...argv: string[]) => {
+      const amIn = async (cwd: string, ...argv: string[]) => {
         const o = await new Deno.Command(Deno.execPath(), {
-          args: ["run", "-A", "--config", CONFIG, AM, ...argv, `--app=${APP}`],
+          args: ["run", "-A", "--config", CONFIG, AM, ...argv],
           cwd,
           clearEnv: true,
           env,
@@ -128,6 +128,7 @@ Deno.test({
           all: d.decode(o.stdout) + d.decode(o.stderr),
         };
       };
+      const am = (...argv: string[]) => amIn(cwd, ...argv, `--app=${APP}`);
       const alive = () => {
         try {
           Deno.kill(sleeper.pid, "SIGCONT");
@@ -166,6 +167,42 @@ Deno.test({
       assertEquals(row.op, "am backup", inst.out);
       assert(!("stopWith" in row), `a hold has no stopWith: ${inst.out}`);
       assert((row.uptime as number) >= 110, `uptime from since: ${inst.out}`);
+
+      // A hold is not a running APP to any other app's command. Asked about
+      // an app that is not running, am listed "1 app is running: <the held
+      // app> @ :0" — and from a directory with no project in it, it took the
+      // hold for "the one app that is running" and answered about THAT app.
+      const ghost = await amIn(cwd, "state", "--app=ammaintghost", "--json");
+      assertEquals(ghost.code, 1, ghost.all);
+      assertStringIncludes(ghost.all, "ammaintghost");
+      assertStringIncludes(ghost.all, "Nothing is running", ghost.all);
+      assert(
+        !ghost.all.includes(APP),
+        `names another app's hold: ${ghost.all}`,
+      );
+      const nowhere = join(base, "nowhere");
+      await Deno.mkdir(nowhere);
+      const guess = await amIn(nowhere, "state", "--json");
+      assertEquals(guess.code, 1, guess.all);
+      assert(!guess.all.includes(APP), `aimed at the hold: ${guess.all}`);
+      assert(!guess.all.includes("am backup"), guess.all);
+      const stopped = await amIn(cwd, "status", "--app=ammaintghost", "--json");
+      assertEquals(JSON.parse(stopped.out).running, [], stopped.all);
+      const zero = await amIn(cwd, "stop", "--port=0", "--json");
+      assertEquals(zero.code, 1, zero.all);
+      assert(!zero.all.includes(APP), `--port=0 named the hold: ${zero.all}`);
+      // …and `--port=N` that names no lock lists apps, not the hold.
+      for (
+        const [verb, flag] of [
+          ["restart", "--port=1"],
+          ["stop", "--app=ammaintghost"],
+        ] as const
+      ) {
+        const r = await amIn(cwd, verb, flag, "--json");
+        assertEquals(r.code, 1, r.all);
+        assert(/no running app holds port 1|not running/.test(r.all), r.all);
+        assert(!r.all.includes(APP), `${verb} lists the hold: ${r.all}`);
+      }
 
       // `am kill`: interrupts the op, says so, and leaves its LOCK to it —
       // the op releases it once it has cleaned up.

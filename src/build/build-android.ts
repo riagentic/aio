@@ -538,6 +538,7 @@ export async function _packAssetMounts(
   const taken = new Set(["index.html", BUNDLE_JS, APP_STYLE]);
   for (const m of assetMounts((await readDenoJson(root))?.config, root)) {
     const at = m.prefix.replace(/^\/+|\/+$/g, "");
+    // aio-ok: path-split — a URL mount prefix, not an OS path
     const segs = at.split("/");
     if (
       !at || taken.has(segs[0]!) ||
@@ -696,12 +697,23 @@ export function _appNameXml(title: string): string {
  *  The Kotlin escape writes `\$`, which FED the pattern — so escaping made it
  *  worse rather than better. A function replacement is not a pattern.
  *
+ *  Whitespace INSIDE the braces is normalised first. The template is a normal
+ *  source file, so a formatter (or a merge) may rewrite `{{APP_NAME}}` as
+ *  `{{ APP_NAME }}` — and then the substitution matched nothing, the placeholder
+ *  survived into `AndroidManifest.xml`, and `gradle` failed with an opaque
+ *  `ManifestMerger2$MergeFailureException` (field report,
+ *  a field report; an overlay was reformatted by "Format the tree").
+ *  A formatter must never be able to break a build silently.
+ *
  *  @internal Exported so it can be tested without a toolchain. */
 export function _fillTemplate(
   content: string,
   subs: Record<string, string>,
 ): string {
-  let out = content;
+  // `{{ APP_NAME }}`, `{{\tAPP_NAME\n}}` → `{{APP_NAME}}`, before any lookup.
+  // Only `[A-Z_]` names are tokens, so `{{ somethingLowercase }}` is left
+  // exactly as written.
+  let out = content.replace(/\{\{\s*([A-Z_]+)\s*\}\}/g, "{{$1}}");
   for (const [token, value] of Object.entries(subs)) {
     out = out.replaceAll(token, () => value);
   }
@@ -754,6 +766,7 @@ export function apkApplicationId(
   apkFile: string,
   explicit?: string,
 ): string | null {
+  // aio-ok: path-split — `\\` normalised to `/` first
   const name = apkFile.replaceAll("\\", "/").split("/").pop() ?? apkFile;
   return androidApplicationId(
     stripVersionToken(name.replace(/\.apk$/, "")),

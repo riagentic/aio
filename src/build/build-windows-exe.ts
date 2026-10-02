@@ -24,6 +24,12 @@
  * `ELECTRON_PATH` set — same layout and fuse-off Electron as unzipping the zip
  * today. Second launch skips extract when the stamp matches. No network.
  *
+ * The extracted tree is an ordinary unpacked Electron install, so the app's
+ * own updater replaces it in place (`electron-zip`); it carries the stamp into
+ * the new tree (`SFX_STAMP_FILE` / `carrySfxStamp` in
+ * `server/updates-apply.ts`), which keeps the downloaded `.exe` a plain
+ * launcher for the updated app instead of extracting its old payload over it.
+ *
  * ## The payload: zstd-compressed tar, packed by Deno (no Go)
  *
  * The stub extracts any payload, so the `.exe` need not reuse the `.zip`'s
@@ -37,24 +43,28 @@
  * Explorer); if packing fails, the exe falls back to the zip payload
  * (`format: "zip"`) — larger, never broken.
  *
- * Ship still labels the PE as install kind `binary` (updates replace the SFX).
+ * A Windows install has no symlinks, and the stub refuses one. A symlink in
+ * the staged app is therefore packed as a copy of what it points at
+ * ({@link appDirEntries}); one that points outside the app, at nothing, or at
+ * a folder it is inside stops the build, naming the path.
  *
  * Emergency rollback: `AIO_WINDOWS_FAT_EXE=1` restores the old embedded-runtime
- * `deno compile` path (gated; not the default).
+ * `deno compile` path (gated; not the default). The same path is the loud
+ * fallback when the stub cannot be obtained or fails its checksum.
  */
-import { dirname, join, relative } from "@std/path";
+import { dirname, fromFileUrl, join, relative, SEPARATOR } from "@std/path";
 import { TarStream, type TarStreamInput } from "@std/tar";
 import zlib from "node:zlib";
 import { Readable } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import { pipeline } from "node:stream/promises";
 import { createWriteStream } from "node:fs";
+import { createHash } from "node:crypto";
 import type { BuildConfig } from "./build-config.ts";
 import { electronStagingDir } from "./build-electron.ts";
 import { runDenoCompile } from "./build-compile.ts";
 import { ensureHeadroom } from "./freeze-guard.ts";
-import { formatMb } from "./build-helpers.ts";
-import { sha256Hex } from "./ship.ts";
+import { artifactMode, formatMb } from "./build-helpers.ts";
 import {
   ELECTRON_VERSION_FILE,
   electronSlug,
@@ -67,6 +77,22 @@ import { HEY, NO, OK } from "../diagnostics/fmt.ts";
  *  `windows-sfx-stub/format.go`. `AIOSFX01` was a bare zip payload; `AIOSFX02`
  *  is a zstd tar (the stub still extracts a `zip` payload for old artifacts). */
 export const SFX_MAGIC = "AIOSFX02";
+
+/** SHA-256 of the committed stub PE. {@link ensureWindowsSfxStub} refuses any
+ *  other bytes, so what goes into every user's `.exe` is exactly the binary
+ *  built from `windows-sfx-stub/` by the command in its README — update this
+ *  line with every rebuild. */
+export const SFX_STUB_SHA256 =
+  "e9bee8d42ef71032400fb36bc1f4cffdf932af8e7895cf1965d5c2873af17263";
+
+/** SHA-256 over the stub's SOURCES (`*.go`, `go.mod`, `go.sum`) as they were
+ *  when {@link SFX_STUB_SHA256} was built. Rebuilding needs Go, which the
+ *  gates do not have; this needs none, so a source edit that was not followed
+ *  by a rebuild and a re-pin of both lines goes red everywhere
+ *  (`tests/build-windows-sfx-stub.test.ts` prints the value to put here). */
+// aio-ok: a test-only seam — the pin a gate without Go compares the sources with.
+export const SFX_STUB_SOURCE_SHA256 =
+  "2aabfadf55385b773e8fe8cc67f9aa6a95c77544e9579d963df1682366205834";
 
 /** Payload kinds the stub understands. */
 export type SfxFormat = "tar.zstd" | "zip";
@@ -92,60 +118,98 @@ export type SfxHeader = {
   format: SfxFormat;
 };
 
+/** The bytes that follow the payload: JSON | u32 hdrLen | u64 payloadLen |
+ *  magic. Pure. */
+export function sfxTrailer(
+  header: SfxHeader,
+  payloadLength: number,
+): Uint8Array {
+  const hdr = new TextEncoder().encode(JSON.stringify(header));
+  const out = new Uint8Array(hdr.length + 4 + 8 + SFX_MAGIC.length);
+  out.set(hdr, 0);
+  const view = new DataView(out.buffer);
+  view.setUint32(hdr.length, hdr.length, true);
+  // payload length as u64 LE
+  view.setUint32(hdr.length + 4, payloadLength >>> 0, true);
+  view.setUint32(
+    hdr.length + 8,
+    Math.floor(payloadLength / 0x100000000),
+    true,
+  );
+  out.set(new TextEncoder().encode(SFX_MAGIC), hdr.length + 12);
+  return out;
+}
+
 /** Append a payload + trailer onto a stub PE. Pure bytes → bytes.
  *
  *  Trailer (end of file): payload | JSON | u32 hdrLen | u64 payloadLen | magic. */
+// aio-ok: a test-only seam — the in-memory form of the streamed writer, pinned against it.
 export function appendSfxPayload(
   stub: Uint8Array,
   payload: Uint8Array,
   header: SfxHeader,
 ): Uint8Array {
-  const hdr = new TextEncoder().encode(JSON.stringify(header));
-  const out = new Uint8Array(
-    stub.length + payload.length + hdr.length + 4 + 8 + SFX_MAGIC.length,
-  );
-  let o = 0;
-  out.set(stub, o);
-  o += stub.length;
-  out.set(payload, o);
-  o += payload.length;
-  out.set(hdr, o);
-  o += hdr.length;
-  const view = new DataView(out.buffer, out.byteOffset, out.byteLength);
-  view.setUint32(o, hdr.length, true);
-  o += 4;
-  // payload length as u64 LE
-  const payloadLen = payload.length;
-  view.setUint32(o, payloadLen >>> 0, true);
-  view.setUint32(o + 4, Math.floor(payloadLen / 0x100000000), true);
-  o += 8;
-  out.set(new TextEncoder().encode(SFX_MAGIC), o);
+  const trailer = sfxTrailer(header, payload.length);
+  const out = new Uint8Array(stub.length + payload.length + trailer.length);
+  out.set(stub, 0);
+  out.set(payload, stub.length);
+  out.set(trailer, stub.length + payload.length);
   return out;
 }
 
-/** Parse an SFX trailer from the end of `bytes`. Returns null when not an
- *  aio SFX (no magic). Used by tests / size gates. */
-export function readSfxTrailer(bytes: Uint8Array): {
+/** What an SFX trailer says. */
+export type SfxTrailer = {
   header: SfxHeader;
   payloadOffset: number;
   payloadLength: number;
-} | null {
+};
+
+/** Parse an SFX trailer from the end of `bytes`. Returns null when not an
+ *  aio SFX (no magic). Used by tests / size gates. */
+// aio-ok: a test-only seam — the in-memory form of readSfxTrailerOfFile.
+export function readSfxTrailer(bytes: Uint8Array): SfxTrailer | null {
+  return parseSfxTrailer(bytes, bytes.length);
+}
+
+/** {@link readSfxTrailer} for a file on disk, reading only its tail — an SFX
+ *  is hundreds of MB and the trailer is a few hundred bytes. */
+export async function readSfxTrailerOfFile(
+  path: string,
+): Promise<SfxTrailer | null> {
+  using f = await Deno.open(path, { read: true });
+  const size = (await f.stat()).size;
+  const tail = new Uint8Array(Math.min(size, 64 * 1024));
+  await f.seek(size - tail.length, Deno.SeekMode.Start);
+  let n = 0;
+  while (n < tail.length) {
+    const r = await f.read(tail.subarray(n));
+    if (r === null) return null;
+    n += r;
+  }
+  return parseSfxTrailer(tail, size);
+}
+
+/** `tail` is the last bytes of a file of `fileSize` bytes. Pure. */
+export function parseSfxTrailer(
+  tail: Uint8Array,
+  fileSize: number,
+): SfxTrailer | null {
   const mag = SFX_MAGIC.length;
-  if (bytes.length < mag + 8 + 4) return null;
-  const end = bytes.length;
-  const magicBytes = bytes.subarray(end - mag);
+  if (tail.length < mag + 8 + 4) return null;
+  const end = tail.length;
+  const magicBytes = tail.subarray(end - mag);
   if (new TextDecoder().decode(magicBytes) !== SFX_MAGIC) return null;
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const view = new DataView(tail.buffer, tail.byteOffset, tail.byteLength);
   const lenLo = view.getUint32(end - mag - 8, true);
   const lenHi = view.getUint32(end - mag - 4, true);
   const payloadLength = lenLo + lenHi * 0x100000000;
   const hdrLen = view.getUint32(end - mag - 8 - 4, true);
   if (hdrLen === 0 || hdrLen > 1 << 20) return null;
   const hdrOff = end - mag - 8 - 4 - hdrLen;
-  const payloadOffset = hdrOff - payloadLength;
+  const payloadOffset = fileSize - tail.length + hdrOff - payloadLength;
   if (payloadOffset < 0 || hdrOff < 0) return null;
   const header = JSON.parse(
-    new TextDecoder().decode(bytes.subarray(hdrOff, hdrOff + hdrLen)),
+    new TextDecoder().decode(tail.subarray(hdrOff, hdrOff + hdrLen)),
   ) as SfxHeader;
   if (!header.format) header.format = "zip"; // pre-AIOSFX02 headers
   return { header, payloadOffset, payloadLength };
@@ -153,6 +217,7 @@ export function readSfxTrailer(bytes: Uint8Array): {
 
 /** True when `bytes` look like a PE that embeds `electron-runtime.zip` as a
  *  Deno VFS file name — the old fat path. Size-regression / packaging gate. */
+// aio-ok: a test-only seam — the packaging gate reads a built exe with it.
 export function peEmbedsElectronRuntimeZip(bytes: Uint8Array): boolean {
   // Deno VFS records the file name as JSON text inside the PE.
   const needle = new TextEncoder().encode('"electron-runtime.zip"');
@@ -169,82 +234,271 @@ function indexOfBytes(hay: Uint8Array, needle: Uint8Array): number {
   return -1;
 }
 
+/** The committed stub PE, relative to this module. */
+const STUB_REL = "./windows-sfx-stub/prebuilt/aio-windows-sfx-stub-amd64.exe";
+
 /** Directory holding the SFX stub source and the committed prebuilt PE (next
- *  to this module). */
+ *  to this module). A local path: it exists only when aio itself is on disk
+ *  (a checkout), not when it is imported from a registry —
+ *  {@link ensureWindowsSfxStub} covers both. */
+// aio-ok: a test-only seam — the stub's source is checked against its prebuilt PE.
 export function windowsSfxStubDir(): string {
-  return join(dirname(new URL(import.meta.url).pathname), "windows-sfx-stub");
+  // `fromFileUrl`, never `URL.pathname`: the pathname keeps `%20` for a space
+  // and `/C:/…` on Windows, so the stub was "missing" from any checkout whose
+  // path was not plain ASCII.
+  return fromFileUrl(new URL("./windows-sfx-stub", import.meta.url));
 }
 
 /** The committed Windows stub — a prebuilt PE, so building the one-click `.exe`
  *  needs no Go toolchain on the build host. Rebuilt only when the stub's source
  *  changes; see `windows-sfx-stub/README.md`. */
+// aio-ok: a test-only seam — the product reads the stub through ensureWindowsSfxStub.
 export function prebuiltStubPath(): string {
-  return join(
-    windowsSfxStubDir(),
-    "prebuilt",
-    "aio-windows-sfx-stub-amd64.exe",
-  );
+  return fromFileUrl(new URL(STUB_REL, import.meta.url));
 }
 
-/** The prebuilt Windows stub, verified to be a PE. Throws with the fix when it
- *  is missing or truncated (a checkout that dropped the committed binary). */
-export async function ensureWindowsSfxStub(): Promise<string> {
-  const path = prebuiltStubPath();
-  let st: Deno.FileInfo;
-  try {
-    st = await Deno.stat(path);
-  } catch {
-    throw new Error(
-      `the prebuilt Windows SFX stub is missing: ${path}\n` +
-        `       it is committed to the repo (see windows-sfx-stub/README.md); ` +
-        `restore it from git, or rebuild it and commit the result.`,
-    );
-  }
-  if (!st.isFile || st.size < 100_000) {
-    throw new Error(`the prebuilt Windows SFX stub looks truncated: ${path}`);
-  }
-  const head = new Uint8Array(2);
-  const f = await Deno.open(path, { read: true });
-  try {
-    await f.read(head);
-  } finally {
-    f.close();
-  }
-  // "MZ" — every Windows PE begins with the DOS stub signature.
-  if (head[0] !== 0x4d || head[1] !== 0x5a) {
-    throw new Error(`the prebuilt Windows SFX stub is not a PE: ${path}`);
-  }
-  return path;
+/** The prebuilt Windows stub as a local file whose bytes are EXACTLY the
+ *  pinned build ({@link SFX_STUB_SHA256}). Throws with the fix when it is
+ *  missing, unreachable or different.
+ *
+ *  aio on disk: the committed file itself. aio imported from a registry (an
+ *  `https:` module URL — there is no file beside the module): the stub is
+ *  fetched from the module's own origin and written to a file of its own,
+ *  which the caller removes. `moduleUrl` is a test seam. */
+// aio-ok: the earlier signature, kept for its callers — the build itself goes through resolveWindowsSfxStub.
+export async function ensureWindowsSfxStub(
+  moduleUrl: string = import.meta.url,
+): Promise<string> {
+  return (await resolveWindowsSfxStub(moduleUrl)).path;
 }
 
-/** Every entry under `dir`, depth-first, as `@std/tar` inputs (paths relative
- *  to `root`). Symlinks and devices are refused — a Windows AppDir has none,
- *  and silently dropping a file the app needs is worse. */
-async function* tarEntries(
-  root: string,
-  dir: string,
-): AsyncGenerator<TarStreamInput> {
-  for await (const e of Deno.readDir(dir)) {
-    const full = join(dir, e.name);
-    const rel = relative(root, full);
-    if (e.isDirectory) {
-      yield { type: "directory", path: rel };
-      yield* tarEntries(root, full);
-    } else if (e.isFile) {
-      const st = await Deno.stat(full);
-      yield {
-        type: "file",
-        path: rel,
-        size: st.size,
-        readable: (await Deno.open(full)).readable,
-      };
-    } else {
+/** {@link ensureWindowsSfxStub}, saying also whether `path` is a fetched copy
+ *  the caller must remove (`temp`) — decided once, here, where the copy is
+ *  made. The copy goes into `scratch` under one fixed name when the caller has
+ *  a scratch folder (the build's own): a build that is interrupted then leaves
+ *  it where the next build writes over it, not one more file in the system
+ *  temp folder each time. The whole fetch, body included, gets
+ *  `fetchTimeoutMs` (a test seam): a registry that never answers, or answers
+ *  too slowly to finish in that time, is given up on, so the build reaches its
+ *  fallback instead of hanging. */
+export async function resolveWindowsSfxStub(
+  moduleUrl: string = import.meta.url,
+  fetchTimeoutMs = 60_000,
+  scratch?: string,
+): Promise<{ path: string; temp: boolean }> {
+  const url = new URL(STUB_REL, moduleUrl);
+  const local = url.protocol === "file:" ? fromFileUrl(url) : null;
+  let bytes: Uint8Array;
+  if (local) {
+    try {
+      bytes = await Deno.readFile(local);
+    } catch (e) {
       throw new Error(
-        `unsupported file type (not a regular file): ${rel} — a Windows ` +
-          `AppDir has no symlinks or devices`,
+        `the prebuilt Windows SFX stub cannot be read: ${local} (${
+          e instanceof Error ? e.message : e
+        })\n` +
+          `       it is committed to the repo (see windows-sfx-stub/README.md); ` +
+          `restore it from git, or rebuild it and commit the result.`,
+      );
+    }
+  } else {
+    try {
+      const res = await fetch(url, {
+        signal: AbortSignal.timeout(fetchTimeoutMs),
+      });
+      if (!res.ok) {
+        await res.body?.cancel();
+        throw new Error(`HTTP ${res.status}`);
+      }
+      bytes = new Uint8Array(await res.arrayBuffer());
+    } catch (e) {
+      throw new Error(
+        `the prebuilt Windows SFX stub could not be fetched from ${url} (${
+          e instanceof Error ? e.message : e
+        })`,
       );
     }
   }
+  const got = createHash("sha256").update(bytes).digest("hex");
+  if (got !== SFX_STUB_SHA256) {
+    throw new Error(
+      `the prebuilt Windows SFX stub is not the pinned build: ${
+        local ?? url
+      }\n` +
+        `       sha256 ${got}\n` +
+        `       pinned ${SFX_STUB_SHA256} (SFX_STUB_SHA256)\n` +
+        `       restore it from git — or, after a deliberate rebuild, update ` +
+        `the pin (see windows-sfx-stub/README.md).`,
+    );
+  }
+  if (local) return { path: local, temp: false };
+  if (scratch) await Deno.mkdir(scratch, { recursive: true });
+  const tmp = scratch
+    ? join(scratch, "aio-sfx-stub.exe")
+    : await Deno.makeTempFile({ prefix: "aio-sfx-stub-", suffix: ".exe" });
+  await Deno.writeFile(tmp, bytes);
+  return { path: tmp, temp: true };
+}
+
+/** A tar entry name: always `/`-separated, whatever the build host's
+ *  separator — the stub (and every tar reader) treats `\` as part of a name.
+ *  Pure; `sep` is a test seam. */
+export function tarEntryName(rel: string, sep: string = SEPARATOR): string {
+  return sep === "/" ? rel : rel.replaceAll(sep, "/");
+}
+
+/** One entry of a staged app, as it is packed. */
+export type AppDirEntry = {
+  /** `/`-separated, relative to the app. */
+  path: string;
+  /** Where its bytes are read from. */
+  full: string;
+  /** Bytes of a file; null for a directory. */
+  size: number | null;
+  /** Reached through a symlink: packed as a copy of the link's target. */
+  linked: boolean;
+};
+
+/** Every entry under `root`, depth-first, sorted by name — so the same app
+ *  packs to the same bytes (and the same payload stamp) on every build.
+ *
+ *  A symlink is resolved to what it points at: a Windows install has none and
+ *  the stub refuses one, so a link to a file is packed as that file and a link
+ *  to a folder as that folder. One that cannot be resolved to something INSIDE
+ *  the app throws, naming it — packing a file from elsewhere on the build
+ *  machine, or leaving the file out, is never what the app asked for. So does
+ *  a device, socket or pipe. */
+export async function appDirEntries(root: string): Promise<AppDirEntry[]> {
+  const out: AppDirEntry[] = [];
+  // `realDirs`: the real path of every folder from the app down to `dir`.
+  const walk = async (dir: string, realDirs: string[], linked: boolean) => {
+    const entries = await Array.fromAsync(Deno.readDir(dir));
+    entries.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+    for (const e of entries) {
+      const full = join(dir, e.name);
+      const path = tarEntryName(relative(root, full));
+      let real = join(realDirs.at(-1)!, e.name);
+      let { isDirectory, isFile } = e;
+      if (e.isSymlink) {
+        try {
+          real = await Deno.realPath(full);
+        } catch (err) {
+          if (!(err instanceof Deno.errors.NotFound)) throw err;
+          throw new Error(
+            `a symlink in the app points at nothing: ${path} → ` +
+              `${await Deno.readLink(full)}`,
+          );
+        }
+        if (!real.startsWith(realDirs[0]! + SEPARATOR)) {
+          throw new Error(
+            real === realDirs[0] || realDirs[0]!.startsWith(real + SEPARATOR)
+              ? `a symlink in the app points at a folder it is inside: ${path} → ${real}`
+              : `a symlink in the app points outside it: ${path} → ${real} — ` +
+                `a Windows install has no symlinks, so each is packed as a ` +
+                `copy of its target, and only a target inside the app is the ` +
+                `app's to pack. Copy it into the app.`,
+          );
+        }
+        if (realDirs.includes(real)) {
+          throw new Error(
+            `a symlink in the app points at a folder it is inside: ${path} → ${real}`,
+          );
+        }
+        ({ isDirectory, isFile } = await Deno.stat(real));
+      }
+      const via = linked || e.isSymlink;
+      if (isDirectory) {
+        out.push({ path, full, size: null, linked: via });
+        await walk(full, [...realDirs, real], via);
+      } else if (isFile) {
+        const { size } = await Deno.stat(full);
+        out.push({ path, full, size, linked: via });
+      } else {
+        throw new Error(
+          `unsupported file type (not a regular file): ${path} — a Windows ` +
+            `install has only files and folders`,
+        );
+      }
+    }
+  };
+  await walk(root, [await Deno.realPath(root)], false);
+  return out;
+}
+
+/** The pack's one file — being opened, or open — and whether the pack has
+ *  failed: so the pack can close what it was reading when it stops early, and
+ *  never returns while an open is still on its way. */
+type PackState = { opening?: Promise<Deno.FsFile>; failed?: boolean };
+
+/** What Windows runs by its name. The payload is a Windows package: there is
+ *  no exec bit to carry, and on a Windows build host none to read — so what
+ *  counts as executable in it is decided by the name, on every host alike. */
+const WINDOWS_RUNS = /\.(exe|bat|cmd|com)$/i;
+
+/** {@link appDirEntries} as `@std/tar` inputs, with a fixed mtime and the
+ *  mode every package entry gets ({@link artifactMode}) — stated, so the same
+ *  staged package packs to the same bytes whatever it was staged with. */
+async function* tarEntries(
+  entries: AppDirEntry[],
+  pack: PackState,
+): AsyncGenerator<TarStreamInput> {
+  for (const { path, full, size } of entries) {
+    const options = {
+      mtime: 0,
+      mode: size === null
+        ? artifactMode("dir", 0)
+        : artifactMode("file", WINDOWS_RUNS.test(path) ? 0o755 : 0o644),
+    };
+    yield size === null ? { type: "directory", path, options } : {
+      type: "file",
+      path,
+      size,
+      readable: ReadableStream.from(fileChunks(path, full, size, pack)),
+      options,
+    };
+  }
+}
+
+/** The bytes of one file, opened only when the tar starts reading it (it may
+ *  take an entry before it is done with the one before, or refuse an entry's
+ *  name without reading it) and closed when it has read it all.
+ *
+ *  The app was listed before the pack began, and a file can change under it.
+ *  One that is no longer a regular file, or not the `size` it was listed
+ *  with, stops the pack here, by name: the tar's own complaint names no file,
+ *  and opening what has become a pipe waits for ever. */
+async function* fileChunks(
+  path: string,
+  full: string,
+  size: number,
+  pack: PackState,
+): AsyncGenerator<Uint8Array> {
+  pack.opening = openRegularFile(path, full);
+  using file = await pack.opening;
+  if (pack.failed) return;
+  let read = 0;
+  for await (const chunk of file.readable) {
+    read += chunk.length;
+    yield chunk;
+  }
+  if (read !== size) {
+    throw new Error(
+      `${path} changed while the app was being packed: ${size} bytes when ` +
+        `it was listed, ${read} now`,
+    );
+  }
+}
+
+async function openRegularFile(
+  path: string,
+  full: string,
+): Promise<Deno.FsFile> {
+  if (!(await Deno.stat(full)).isFile) {
+    throw new Error(
+      `${path} was a file when the app was listed and is not one now`,
+    );
+  }
+  return await Deno.open(full);
 }
 
 /** `ZSTD_c_compressionLevel` (zstd.h). Deno's bundled `node:zlib` types predate
@@ -254,7 +508,8 @@ const ZSTD_C_COMPRESSION_LEVEL = 100;
 /** Pack `dir` into a **zstd-compressed tar** at `outPath`, entirely in Deno:
  *  `@std/tar` → `node:zlib`'s `createZstdCompress` at maximum compression.
  *  No Go, no host packer binary. Entries stream lazily, so only one file is
- *  open at a time and the ~800 MB tree is never buffered whole.
+ *  open at a time, none is left open when the pack ends — however it ends —
+ *  and the ~800 MB tree is never buffered whole.
  *
  *  SYSTEM stability: this is the biggest memory/IO burst aio owns, so it asks
  *  {@link ensureHeadroom} first and declines while the machine is already
@@ -266,24 +521,80 @@ const ZSTD_C_COMPRESSION_LEVEL = 100;
 export async function packAppDirTarZstd(
   dir: string,
   outPath: string,
+  entries?: AppDirEntry[],
 ): Promise<void> {
   await ensureHeadroom("packing the Windows payload (zstd)");
+  entries ??= await appDirEntries(dir);
   await Deno.mkdir(dirname(outPath), { recursive: true });
   const tmp = `${outPath}.incoming`;
-  const tar = ReadableStream.from(tarEntries(dir, dir)).pipeThrough(
+  const pack: PackState = {};
+  const tar = ReadableStream.from(tarEntries(entries, pack)).pipeThrough(
     new TarStream(),
   );
-  await pipeline(
-    Readable.fromWeb(tar as unknown as NodeReadableStream),
-    zlib.createZstdCompress({
-      params: { [ZSTD_C_COMPRESSION_LEVEL]: 19 },
-    }),
-    createWriteStream(tmp),
-  );
-  await Deno.rename(tmp, outPath);
+  try {
+    await pipeline(
+      Readable.fromWeb(tar as unknown as NodeReadableStream),
+      zlib.createZstdCompress({
+        params: { [ZSTD_C_COMPRESSION_LEVEL]: 19 },
+      }),
+      createWriteStream(tmp),
+    );
+    await Deno.rename(tmp, outPath);
+  } catch (e) {
+    pack.failed = true;
+    await removeQuietly(tmp);
+    throw e;
+  } finally {
+    // A pack that stops early (a name the tar refuses, a write that fails)
+    // tells no one upstream: the file it was reading is closed here, not
+    // whenever the stream is collected — after the open it had asked for has
+    // landed, so nothing of the pack is still under way when it returns. A
+    // no-op for a file already closed.
+    const file = await pack.opening?.catch(() => {
+      // aio-ok(silent-catch): an open that failed opened nothing to close,
+      // and its error is the one the pack is already throwing.
+    });
+    file?.[Symbol.dispose]();
+  }
 }
 
-/** Pack stub + payload → SFX exe on disk. */
+/** Remove build scratch whose absence is the outcome wanted. */
+async function removeQuietly(path: string): Promise<void> {
+  await Deno.remove(path).catch(() => {
+    // aio-ok(silent-catch): scratch that may never have been created; the
+    // caller is already reporting the real failure.
+  });
+}
+
+/** Zip `dir`'s contents into `out` with every symlink FOLLOWED — the zip
+ *  payload of an app that has symlinks. (The `.zip` artifact stores a link as
+ *  a link, which the stub refuses.) Throws with the reason. */
+async function zipFollowingLinks(dir: string, out: string): Promise<void> {
+  // `zip -r` updates an existing archive; only a fresh one holds just this tree.
+  await removeQuietly(out);
+  let r: Deno.CommandOutput;
+  try {
+    r = await new Deno.Command("zip", {
+      args: ["-r", "-q", out, "."],
+      cwd: dir,
+      stdout: "null",
+      stderr: "piped",
+    }).output();
+  } catch (e) {
+    throw new Error(
+      `zip could not be run (${e instanceof Error ? e.message : e})`,
+    );
+  }
+  if (!r.success) {
+    throw new Error(
+      `zip: ${new TextDecoder().decode(r.stderr).trim().split("\n")[0] ?? ""}`,
+    );
+  }
+}
+
+/** Pack stub + payload → SFX exe on disk. The payload is STREAMED through the
+ *  hash into the output — it is hundreds of MB, and buffering stub + payload +
+ *  output held three copies of it in memory. */
 export async function writeWindowsSfxExe(opts: {
   stubPath: string;
   payloadPath: string;
@@ -293,38 +604,105 @@ export async function writeWindowsSfxExe(opts: {
   archStr: string;
 }): Promise<{ size: number; sha256: string; payloadSize: number }> {
   const stub = await Deno.readFile(opts.stubPath);
-  const payload = await Deno.readFile(opts.payloadPath);
-  const sha256 = await sha256Hex(payload);
-  const bytes = appendSfxPayload(stub, payload, {
-    sha256,
-    binary: opts.binaryName,
-    arch: opts.archStr,
-    format: opts.payloadFormat,
-  });
   await Deno.mkdir(dirname(opts.outPath), { recursive: true });
   const tmp = `${opts.outPath}.incoming`;
-  await Deno.writeFile(tmp, bytes);
-  await Deno.rename(tmp, opts.outPath);
-  return { size: bytes.length, sha256, payloadSize: payload.length };
+  const hash = createHash("sha256");
+  let payloadSize = 0;
+  let size = 0;
+  let sha256 = "";
+  try {
+    const out = (await Deno.open(tmp, {
+      write: true,
+      create: true,
+      truncate: true,
+    })).writable.getWriter();
+    try {
+      await out.write(stub);
+      for await (const chunk of (await Deno.open(opts.payloadPath)).readable) {
+        hash.update(chunk);
+        payloadSize += chunk.length;
+        await out.write(chunk);
+      }
+      sha256 = hash.digest("hex");
+      const trailer = sfxTrailer({
+        sha256,
+        binary: opts.binaryName,
+        arch: opts.archStr,
+        format: opts.payloadFormat,
+      }, payloadSize);
+      await out.write(trailer);
+      size = stub.length + payloadSize + trailer.length;
+    } finally {
+      await out.close();
+    }
+    await Deno.rename(tmp, opts.outPath);
+  } catch (e) {
+    await removeQuietly(tmp);
+    throw e;
+  }
+  return { size, sha256, payloadSize };
 }
 
 /** Build `<bin>-win-<arch>.exe` as an SFX over the staged AppDir. Exits the
- *  process on failure, like every other packaging step. */
+ *  process on failure, like every other packaging step. `deps` is a test seam
+ *  for the two things a unit test cannot afford: the fat `deno compile` and a
+ *  stub that is not there. */
 export async function buildSelfContainedWindowsExe(
   cfg: BuildConfig,
+  deps: {
+    fat?: (cfg: BuildConfig) => Promise<void>;
+    stub?: () => Promise<{ path: string; temp: boolean }>;
+  } = {},
 ): Promise<void> {
+  const fat = deps.fat ?? buildFatEmbeddedWindowsExe;
   if (Deno.env.get("AIO_WINDOWS_FAT_EXE") === "1") {
     console.warn(
       `${NO} AIO_WINDOWS_FAT_EXE=1 — building the legacy fat PE (embedded ` +
         `electron-runtime.zip). Prefer the default SFX path.`,
     );
-    await buildFatEmbeddedWindowsExe(cfg);
+    await fat(cfg);
     return;
   }
-  await buildWindowsSfxExe(cfg);
+  // No stub, no SFX — but the fat exe needs none, and a one-click exe that is
+  // twice the size beats a build that stops. Said loudly: the size is not what
+  // the docs promise, and the cause is fixable.
+  let stub: { path: string; temp: boolean };
+  try {
+    stub = await (deps.stub?.() ??
+      resolveWindowsSfxStub(
+        undefined,
+        undefined,
+        dirname(electronStagingDir(cfg.root)),
+      ));
+  } catch (e) {
+    console.warn(
+      `${NO} ${e instanceof Error ? e.message : e}\n` +
+        `       FALLING BACK to the legacy fat exe (Electron's zip embedded ` +
+        `in the Deno PE): it runs the same, offline, but the download is ` +
+        `about twice the size of the zip. Fix the stub to get the small SFX.`,
+    );
+    await fat(cfg);
+    return;
+  }
+  // The exit comes AFTER the temp stub is removed: `Deno.exit` runs no
+  // `finally`.
+  let failure: string | null;
+  try {
+    failure = await buildWindowsSfxExe(cfg, stub.path);
+  } finally {
+    if (stub.temp) await removeQuietly(stub.path);
+  }
+  if (failure !== null) {
+    console.error(`${NO} ${failure}`);
+    Deno.exit(1);
+  }
 }
 
-async function buildWindowsSfxExe(cfg: BuildConfig): Promise<void> {
+/** The SFX step. Returns why it failed, or null. */
+async function buildWindowsSfxExe(
+  cfg: BuildConfig,
+  stubPath: string,
+): Promise<string | null> {
   const { root, binaryName, archStr } = cfg;
   const outDir = cfg.outDir ?? root;
   const zipPath = join(outDir, windowsZipName(binaryName, archStr));
@@ -332,25 +710,42 @@ async function buildWindowsSfxExe(cfg: BuildConfig): Promise<void> {
   try {
     zipSize = (await Deno.stat(zipPath)).size;
   } catch {
-    console.error(
-      `${NO} ${windowsZipName(binaryName, archStr)} is missing — build the ` +
-        `Electron Windows package first (it stages the AppDir and the zip).`,
-    );
-    Deno.exit(1);
+    return `${windowsZipName(binaryName, archStr)} is missing — build the ` +
+      `Electron Windows package first (it stages the AppDir and the zip).`;
   }
 
   const appDir = electronStagingDir(root);
   const scratch = dirname(appDir);
   const payloadPath = join(scratch, `${binaryName}-win-${archStr}.tar.zst`);
+  const zipPayloadPath = join(scratch, `${binaryName}-win-${archStr}.sfx.zip`);
+
+  let entries: AppDirEntry[];
+  try {
+    entries = await appDirEntries(appDir);
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+  const links = entries.filter((e) => e.linked);
+  // What the copies add over the zip, which stores a link as a link.
+  const linkedBytes = links.reduce((n, e) => n + (e.size ?? 0), 0);
+  if (links.length > 0) {
+    console.warn(
+      `${HEY} ${links[0]!.path}${
+        links.length > 1 ? ` and ${links.length - 1} more are` : " is"
+      } reached through a symlink — a Windows install has none, so the ` +
+        `.exe carries a copy of the target (${formatMb(linkedBytes)} MB).`,
+    );
+  }
 
   // Preferred payload: a zstd tar packed in Deno. Fall back to the zip when
   // packing fails — larger, never broken.
+  let payloadForPack = payloadPath;
   let format: SfxFormat = "tar.zstd";
   try {
     console.log(
       `${OK} packing the Windows payload (zstd, best compression)...`,
     );
-    await packAppDirTarZstd(appDir, payloadPath);
+    await packAppDirTarZstd(appDir, payloadPath, entries);
     console.log(
       `${OK} payload ${formatMb((await Deno.stat(payloadPath)).size)} MB ` +
         `(zip ${formatMb(zipSize)} MB)`,
@@ -362,17 +757,21 @@ async function buildWindowsSfxExe(cfg: BuildConfig): Promise<void> {
       }\n       falling back to the zip payload (larger, still one-click offline).`,
     );
     format = "zip";
+    payloadForPack = zipPath;
+    if (links.length > 0) {
+      // The zip beside the exe stores the links themselves.
+      try {
+        await zipFollowingLinks(appDir, zipPayloadPath);
+      } catch (err) {
+        await removeQuietly(zipPayloadPath);
+        return `the zip payload could not be packed either: ${
+          err instanceof Error ? err.message : err
+        }`;
+      }
+      payloadForPack = zipPayloadPath;
+    }
   }
 
-  let stubPath: string;
-  try {
-    stubPath = await ensureWindowsSfxStub();
-  } catch (e) {
-    console.error(`${NO} ${e instanceof Error ? e.message : e}`);
-    Deno.exit(1);
-  }
-
-  const payloadForPack = format === "zip" ? zipPath : payloadPath;
   const out = join(outDir, selfContainedExeName(binaryName, archStr));
   let result: { size: number; sha256: string; payloadSize: number };
   try {
@@ -385,39 +784,29 @@ async function buildWindowsSfxExe(cfg: BuildConfig): Promise<void> {
       archStr,
     });
   } catch (e) {
-    console.error(`${NO} ${e instanceof Error ? e.message : e}`);
-    Deno.exit(1);
+    return e instanceof Error ? e.message : String(e);
   } finally {
-    if (format === "tar.zstd") {
-      await Deno.remove(payloadPath).catch(() => {
-        // aio-ok: build scratch, removed once its bytes are inside the SFX.
-      });
-    }
+    // Build scratch, removed once its bytes are inside the SFX.
+    await removeQuietly(payloadPath);
+    await removeQuietly(zipPayloadPath);
   }
 
-  // Sanity: SFX must not be the old fat VFS embed, and should never be larger
-  // than the zip it replaces.
-  const pe = await Deno.readFile(out);
-  if (peEmbedsElectronRuntimeZip(pe)) {
-    console.error(
-      `${NO} SFX unexpectedly contains an embedded electron-runtime.zip ` +
-        `VFS name — refusing to ship a fat PE`,
-    );
-    Deno.exit(1);
+  // Sanity: what is on disk ends in the trailer just written, and the SFX
+  // should never be larger than the zip it replaces — plus the copies it
+  // carries where the zip has a link. (It cannot be the old fat VFS embed: it
+  // is the pinned stub plus an opaque payload.)
+  const trailer = await readSfxTrailerOfFile(out);
+  if (
+    !trailer || trailer.header.sha256 !== result.sha256 ||
+    trailer.payloadLength !== result.payloadSize
+  ) {
+    return `SFX trailer missing or checksum mismatch after write`;
   }
-  const trailer = readSfxTrailer(pe);
-  if (!trailer || trailer.header.sha256 !== result.sha256) {
-    console.error(`${NO} SFX trailer missing or checksum mismatch after write`);
-    Deno.exit(1);
-  }
-  const ratio = result.size / Math.max(1, zipSize);
+  const ratio = result.size / Math.max(1, zipSize + linkedBytes);
   if (ratio > 1.15) {
-    console.error(
-      `${NO} ${selfContainedExeName(binaryName, archStr)} is ` +
-        `${(ratio * 100).toFixed(0)}% of the zip — an SFX must never exceed ` +
-        `the zip it is built beside (payload format ${format}).`,
-    );
-    Deno.exit(1);
+    return `${selfContainedExeName(binaryName, archStr)} is ` +
+      `${(ratio * 100).toFixed(0)}% of the zip — an SFX must never exceed ` +
+      `the zip it is built beside (payload format ${format}).`;
   }
 
   console.log(
@@ -429,6 +818,7 @@ async function buildWindowsSfxExe(cfg: BuildConfig): Promise<void> {
       } MB vs zip ${formatMb(zipSize)} MB — offline double-click; extract ` +
       `once to %LOCALAPPDATA%\\aio-sfx)`,
   );
+  return null;
 }
 
 /** Legacy path: re-compile with Electron's published zip inside Deno VFS.

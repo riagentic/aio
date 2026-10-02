@@ -30,11 +30,12 @@ import {
   resolve,
   SEPARATOR,
 } from "@std/path";
-import { copyDir, slugify } from "./build/build-helpers.ts";
+import { moveArtifact, slugify } from "./build/build-helpers.ts";
 import {
   emptyDir,
   foreignDistRefusal,
   moveDirContents,
+  previousReleaseNote,
 } from "./build/dist-staging.ts";
 import {
   flagVocabulary,
@@ -49,6 +50,14 @@ import {
   resolveEntry,
 } from "./build/build-config.ts";
 import { DIST_DIR } from "./server/app-files.ts";
+import {
+  outDirListing,
+  recordOutput,
+  unsafeOutDir,
+} from "./server/build-outputs.ts";
+// The out-dir guard lives with the record it also guards; this is its public
+// name.
+export { unsafeOutDir };
 import { bakedServerUrl } from "./server/paths.ts";
 import { ansi } from "./diagnostics/color.ts";
 import { bytes, count, style, tally } from "./diagnostics/fmt.ts";
@@ -678,21 +687,6 @@ async function manifestTargetNames(path: string): Promise<string[]> {
   }
 }
 
-/** Strip a trailing separator so `/proj/apps/` and `/proj/apps` compare equal.
- *  (`/` itself keeps its single separator.) */
-function trimSep(p: string): string {
-  return p.length > 1 && p.endsWith(SEPARATOR) ? p.slice(0, -1) : p;
-}
-
-/** True when `a` IS `b` or lives inside it, compared by PATH SEGMENTS.
- *  Never `a.startsWith(b)`: that makes `/proj/appsX` "inside" `/proj/apps`, so
- *  a sibling with a near-miss name would be refused (or, in the other
- *  direction, a real containment missed). */
-function within(a: string, b: string): boolean {
-  const x = trimSep(a), y = trimSep(b);
-  return x === y || x.startsWith(y.endsWith(SEPARATOR) ? y : y + SEPARATOR);
-}
-
 /** EVERY value flag the single-target builder reads, and the fleet flag that
  *  carries it. The fleet is the only build path now (see ONE BUILD PATH), so a
  *  flag this map does not name is a flag that is PARSED, VALIDATED and then
@@ -751,73 +745,6 @@ export function forwardedToFleet(args: readonly string[]): string[] {
   return out;
 }
 
-/** True if `outDir` is unsafe to wipe+recreate: the `out` dir is assembled by
- *  removing it RECURSIVELY, so it must be a dedicated subdir of the project
- *  that CONTAINS no protected directory and lives INSIDE none — never the root,
- *  an ancestor (`out: ".."`), `.aio` (our staging parent), `.git`, or a source
- *  dir. `out: ""` / `"."` resolve to the root and are caught here.
- *
- *  Containment, in BOTH directions, is the whole guard. Exact-set membership
- *  (what this used to test) let `out: "apps"` past while the app lived in
- *  `apps/web/` — the build then deleted the user's source tree, printed
- *  `✓ 1/1 build(s)` and exited 0. The descendant direction is just as fatal:
- *  `out: "src/ui"` under an app dir of `src/` wipes half the app.
- *
- *  `appDirs` are THE app-dir decider's answers (`BuildConfig.appDir`), one per
- *  target. `src/` is hardcoded only because it is the scaffold's convention; an
- *  app whose entry lives at `apps/web/main.ts` keeps its sources somewhere this
- *  list cannot guess.
- *
- *  It is a LIST, not one dir, because per-target entries mean one repo can hold
- *  two apps: guarding only the first target's dir would leave the second app's
- *  sources deletable — the exact hole the guard exists to close. Pass every
- *  target's dir; duplicates are fine. An app dir that IS the root (a flat
- *  layout, entry `app.ts`) is dropped: the root is already refused above, and
- *  keeping it would make every possible out dir "inside a protected dir" and
- *  leave a flat-layout app with nowhere to build.
- *
- *  @internal alpha70 — a build/tooling internal reachable for tests via
- *  src/testing/internal.ts; not app-facing API. */
-export function unsafeOutDir(
-  outDir: string,
-  root: string,
-  appDirs: readonly string[] = [],
-): boolean {
-  const out = trimSep(outDir);
-  const rootDir = trimSep(root);
-  // Must be a STRICT subdirectory of the project (this also catches the root
-  // itself, `/`, and anything outside the project).
-  if (out === rootDir || !within(out, rootDir)) return true;
-  const protectedDirs = [
-    join(rootDir, ".aio"),
-    join(rootDir, "src"),
-    join(rootDir, ".git"),
-    ...appDirs,
-  ].map(trimSep).filter((d) => d !== rootDir);
-  // dist/ is the per-target builds' own scratch: every child wipes it
-  // recursively before bundling, so an out dir INSIDE it is deleted mid-run by
-  // a sibling target — after the first one reported success. `out: "dist"`
-  // ITSELF stays legal, and is the default: the fleet moves the previous dist/
-  // aside before any child runs, which is what makes the exact case safe and
-  // the nested case fatal. The single-target builder refused `--out=dist/x`
-  // for the same reason; since alpha73 routes every build through the fleet,
-  // the rule has to live where the decision now is.
-  // Both directions: `out` may not sit inside a protected dir, and may not
-  // swallow one. Compared CASE-FOLDED: on a case-insensitive filesystem (the
-  // macOS and Windows defaults) `--out=Src` IS `src/`, passed a byte-exact
-  // check, and the out-dir wipe deleted the app's source. Folding everywhere
-  // costs a Linux user only the name `SRC` for a build folder.
-  const lo = (p: string) => p.toLowerCase();
-  // dist/ is per-target scratch, folded like everything else: `--out=DIST` is
-  // dist/ on macOS/Windows, and the byte-exact check let it (and `Dist/x`)
-  // through while `--out=Src` was rightly refused.
-  const distDir = trimSep(join(rootDir, DIST_DIR));
-  if (lo(out) !== lo(distDir) && within(lo(out), lo(distDir))) return true;
-  return protectedDirs.some((d) =>
-    within(lo(out), lo(d)) || within(lo(d), lo(out))
-  );
-}
-
 /** Move a file, falling back to copy+delete across filesystem boundaries — a
  *  dist/ or .aio on a tmpfs/overlay mount makes a bare rename throw EXDEV. */
 /** Bytes of a file, or of every file under a directory artifact. */
@@ -829,27 +756,6 @@ async function sizeOf(path: string): Promise<number> {
     total += await sizeOf(join(path, e.name));
   }
   return total;
-}
-
-async function moveFile(from: string, to: string): Promise<void> {
-  try {
-    await Deno.rename(from, to);
-  } catch (e) {
-    if (e instanceof Deno.errors.NotFound) throw e;
-    // EXDEV (cross-device) or any rename failure → copy then remove.
-    // A DIRECTORY artifact (`web`, `ios-client`) is moved too, and
-    // `Deno.copyFile` cannot copy one — it threw a raw TypeError, killed the
-    // fleet after the target had "built", and left the artifact in the root
-    // with no manifest. `copyDir` is the same recursive copy the rest of the
-    // build uses.
-    if ((await Deno.lstat(from)).isDirectory) {
-      await copyDir(from, to);
-      await Deno.remove(from, { recursive: true });
-    } else {
-      await Deno.copyFile(from, to);
-      await Deno.remove(from);
-    }
-  }
 }
 
 function printTargets(): void {
@@ -1179,35 +1085,7 @@ export async function buildAll(): Promise<number> {
   // …and it must hold nothing but a previous release. dist/ is exempt: it is
   // aio's own staging dir, which every per-target build wipes anyway.
   if (outDir !== resolve(join(root, DIST_DIR))) {
-    const entries: string[] = [];
-    // A directory's own entries — a publish channel dir (see
-    // foreignOutEntries) is aio's only when everything in it is.
-    const dirs: Record<string, string[]> = {};
-    try {
-      for await (const e of Deno.readDir(outDir)) {
-        entries.push(e.name);
-        if (!e.isDirectory) continue;
-        const inside: string[] = [];
-        for await (const f of Deno.readDir(join(outDir, e.name))) {
-          // A nested directory is never publish output: listed as itself, it
-          // matches no rule and keeps the directory foreign.
-          inside.push(f.isDirectory ? `${f.name}/` : f.name);
-        }
-        dirs[e.name] = inside;
-      }
-    } catch (e) {
-      if (!(e instanceof Deno.errors.NotFound)) throw e;
-    }
-    let previous: unknown = null;
-    try {
-      previous = JSON.parse(
-        await Deno.readTextFile(join(outDir, "manifest.json")),
-      );
-    } catch {
-      // aio-ok: no previous release here — every entry is foreign, which is
-      // the refusing answer, so nothing is swallowed
-    }
-    const foreign = foreignOutEntries(entries, previous, dirs);
+    const foreign = foreignOutEntries(...await outDirListing(outDir));
     if (foreign.length > 0) {
       const shown = foreign.slice(0, 5).join(", ") +
         (foreign.length > 5 ? `, … (${foreign.length} in all)` : "");
@@ -1228,6 +1106,10 @@ export async function buildAll(): Promise<number> {
     console.error(`${C.red}✗ ${distRefusal}${C.r}`);
     return 1;
   }
+  // Where this build puts its release, written down for every later tree
+  // read: the next build may be told another `--out`, and this one is still
+  // output then. (`dist/` is known by name.)
+  await recordOutput(root, outDir);
   const release = Deno.args.includes("--release");
   const force = Deno.args.includes("--force");
   // THE app version, resolved ONCE for the whole fleet and handed to every
@@ -1325,21 +1207,21 @@ export async function buildAll(): Promise<number> {
   // life of the lab while every host-side reading stayed correct — see
   // `emptyDir` in src/build/dist-staging.ts.
   let preserved = false;
+  const outIsStaging = outDir === resolve(join(root, DIST_DIR));
   try {
     preserved = await moveDirContents(outDir, preservedOut);
   } catch (e) {
     // SAID, not swallowed. The previous release stays where it is (the move
-    // rolls itself back), but the per-target builds treat `out` as scratch and
-    // will empty it — so this is the moment the last good release stops being
-    // recoverable, and a build that fails after it used to report "the
-    // previous dist/ is intact" when it no longer was.
+    // rolls itself back). In `dist/` the per-target builds will empty it — so
+    // this is the moment the last good release stops being recoverable, and a
+    // build that fails after it used to report "the previous dist/ is intact"
+    // when it no longer was. Any other out dir keeps it until placement.
     console.warn(
       `${C.yellow}! could not move the previous ${
         outDir.replace(root + SEPARATOR, "")
-      }/ aside${C.r} — ${
-        e instanceof Error ? e.message : String(e)
-      }. It is still there and still intact, but this build will overwrite it: ` +
-        `if it fails, there is no release to put back.`,
+      }/ aside${C.r} — ${e instanceof Error ? e.message : String(e)}. ${
+        previousReleaseNote("aside", "", { preserved: false, outIsStaging })
+      }`,
     );
   }
 
@@ -1469,7 +1351,7 @@ export async function buildAll(): Promise<number> {
         await Deno.mkdir(tdir, { recursive: true });
         const artifacts: ArtifactRec[] = [];
         for (const name of fresh) {
-          await moveFile(join(root, name), join(tdir, name));
+          await moveArtifact(join(root, name), join(tdir, name));
           artifacts.push({
             file: name,
             bytes: await sizeOf(join(tdir, name)),
@@ -1558,9 +1440,7 @@ export async function buildAll(): Promise<number> {
         const rel = outDir.replace(root + SEPARATOR, "");
         console.error(
           `\n${C.red}✗ no artifacts produced — ${
-            preserved
-              ? `the previous ${rel}/ is intact`
-              : `${rel}/ holds no release`
+            previousReleaseNote("failed", rel, { preserved, outIsStaging })
           }${C.r}`,
         );
       }
@@ -1613,7 +1493,7 @@ export async function buildAll(): Promise<number> {
             );
           }
           used.set(name, r.target);
-          await moveFile(
+          await moveArtifact(
             join(staging, `${r.target}__${r.platform}`, a.file),
             join(outDir, name),
           );

@@ -36,10 +36,24 @@ import {
   liveLock,
   lockHasNoDoor,
   noDoorMessage,
+  parseNumArg,
   resolveAmAppId,
 } from "./am-utils.ts";
 import { appPageTargets, cdpConnect, cdpTargets } from "./am-cdp.ts";
 import { noCdpMessage } from "./am-cmd-shot.ts";
+
+/** Pure: which window `--window=<n>` names — 0 when the flag is absent, a
+ *  refusal when it cannot be read. `Number("")` is 0, so `--window=` (an empty
+ *  variable) evaluated in the FIRST window and said nothing.
+ *  @internal exported for tests. */
+export function evalWindowIndex(
+  args: readonly string[],
+): { ok: true; value: number } | { ok: false; error: string } {
+  const raw = args.find((a) => a.startsWith("--window="))?.slice(9);
+  return raw === undefined
+    ? { ok: true, value: 0 }
+    : parseNumArg(raw, "--window", { min: 0, integer: true });
+}
 
 /** What `Runtime.evaluate` answers with. */
 type EvalReply = {
@@ -178,12 +192,12 @@ export async function cmdEval(
     Deno.exit(1);
   }
   const timeout = flags.timeout ?? 8000;
-  const idxRaw = args.find((a) => a.startsWith("--window="))?.slice(9);
-  const idx = idxRaw === undefined ? 0 : Number(idxRaw);
-  if (!Number.isInteger(idx) || idx < 0) {
-    outError(`invalid --window=${idxRaw} — a non-negative integer`, mode);
+  const window = evalWindowIndex(args);
+  if (!window.ok) {
+    outError(window.error, mode);
     Deno.exit(1);
   }
+  const idx = window.value;
 
   let targets;
   try {

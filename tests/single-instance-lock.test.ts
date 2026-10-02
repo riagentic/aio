@@ -1,5 +1,6 @@
 import { assertEquals } from "@std/assert";
 import {
+  _zombieDeps,
   AppLock,
   instances,
   isProcessAlive,
@@ -12,6 +13,7 @@ import {
 } from "../src/server/single-instance-lock.ts";
 import { stopChild } from "./stop-child.ts";
 import { getLogger, setLogger } from "../src/diagnostics/logger-api.ts";
+import { freePort } from "../src/testing/server-test.ts";
 
 /** Collect the warnings an async body produces. */
 async function warningsOf(body: () => Promise<void>): Promise<string[]> {
@@ -307,12 +309,26 @@ Deno.test("isProcessAlive: dead PID returns false", () => {
   assertEquals(isProcessAlive(999999), false);
 });
 
+/** A holder is judged a zombie only when its record has not changed for the
+ *  startup grace, and only after every probe of several, seconds apart, found
+ *  nothing listening. For these tests: the record aged, the gaps skipped —
+ *  the probes themselves are real. */
+async function asSettledZombie<T>(appId: string, fn: () => Promise<T>) {
+  const old = new Date(Date.now() - 60_000);
+  Deno.utimeSync(lockPath(appId), old, old);
+  const delay = _zombieDeps.delay;
+  _zombieDeps.delay = () => Promise.resolve();
+  try {
+    return await fn();
+  } finally {
+    _zombieDeps.delay = delay;
+  }
+}
+
 Deno.test("zombie reclaim: pid alive but port dead → lock reclaimed (notes #5)", async () => {
   const appId = "zombie-test-" + crypto.randomUUID().slice(0, 8);
   // A port that is definitely closed: bind then release it
-  const l = Deno.listen({ port: 0 });
-  const deadPort = (l.addr as Deno.NetAddr).port;
-  l.close();
+  const deadPort = freePort();
   // Lock owned by a live foreign process (a spawned sleeper) whose "server"
   // port refuses connections, past the startup grace window.
   const sleeper = new Deno.Command("sleep", { args: ["30"] }).spawn();
@@ -321,13 +337,14 @@ Deno.test("zombie reclaim: pid alive but port dead → lock reclaimed (notes #5)
       appId,
       pid: sleeper.pid,
       port: deadPort,
+      host: "127.0.0.1",
       startedAt: Date.now() - 60_000,
       status: "started",
       cwd: Deno.cwd(),
     });
 
     const lock = new AppLock(appId);
-    const result = await lock.acquire(4321);
+    const result = await asSettledZombie(appId, () => lock.acquire(4321));
     assertEquals(
       result.ok,
       true,
@@ -341,9 +358,7 @@ Deno.test("zombie reclaim: pid alive but port dead → lock reclaimed (notes #5)
 
 Deno.test("zombie reclaim: UDS instance with dead socket is reclaimed", async () => {
   const appId = "zombie-uds-" + crypto.randomUUID().slice(0, 8);
-  const l = Deno.listen({ port: 0 });
-  const deadPort = (l.addr as Deno.NetAddr).port;
-  l.close();
+  const deadPort = freePort();
   // UDS instance whose socket path doesn't exist (listener died) — MUST be
   // reclaimed now that the zombie check probes UDS liveness, not just TCP.
   const sleeper = new Deno.Command("sleep", { args: ["30"] }).spawn();
@@ -359,7 +374,7 @@ Deno.test("zombie reclaim: UDS instance with dead socket is reclaimed", async ()
         ".sock",
     });
     const lock = new AppLock(appId);
-    const result = await lock.acquire(4322);
+    const result = await asSettledZombie(appId, () => lock.acquire(4322));
     assertEquals(
       result.ok,
       true,
@@ -373,9 +388,7 @@ Deno.test("zombie reclaim: UDS instance with dead socket is reclaimed", async ()
 
 Deno.test("zombie reclaim: skipped during startup grace", async () => {
   const appId = "zombie-grace-" + crypto.randomUUID().slice(0, 8);
-  const l = Deno.listen({ port: 0 });
-  const deadPort = (l.addr as Deno.NetAddr).port;
-  l.close();
+  const deadPort = freePort();
   // Owner is still within the 10s startup grace — must NOT be reclaimed even
   // though its port refuses connections.
   const sleeper = new Deno.Command("sleep", { args: ["30"] }).spawn();

@@ -45,6 +45,7 @@ Deno.test("docs promise: dependsOn init order, reverse destroy, disable/enable",
   const a = mk("lcA"), b = mk("lcB"), c = mk("lcC");
   order.length = 0;
   const app = await aio.run({
+    watch: false,
     // Listed out of order on purpose: the declared deps decide.
     cells: [
       { cell: c, dependsOn: ["lcA", "lcB"] },
@@ -107,6 +108,7 @@ Deno.test("docs promise: a dependency cycle and a missing dependency refuse the 
       await assertRejects(
         () =>
           aio.run({
+            watch: false,
             cells: cells as CellDef[],
             appId: "docs-promise-lifecycle-bad",
             client: "server-only",

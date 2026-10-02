@@ -9,7 +9,7 @@
 import { join, relative, SEPARATOR } from "@std/path";
 import type { BuildConfig } from "./build-config.ts";
 import { emptyDir, foreignArtifactRefusal } from "./dist-staging.ts";
-import { resolveAppIcon } from "./build-helpers.ts";
+import { normalizeArtifactModes, resolveAppIcon } from "./build-helpers.ts";
 import { _packAssetMounts, _warnRunOptions } from "./build-android.ts";
 import { appHue, appIconLabel, appIconPng, hsl, pngSize } from "./app-icon.ts";
 import { androidLocalHTML } from "../server/server-html-gen.ts";
@@ -320,6 +320,9 @@ export async function buildWeb(cfg: BuildConfig): Promise<void> {
       ),
     ),
   );
+  // A static host serves this folder as another account: stated modes, not
+  // the builder's umask.
+  await normalizeArtifactModes(outDir);
   console.log(
     `${OK} ${webArtifactName(binaryName)}/ — ${
       count(files.length + 1, "file")

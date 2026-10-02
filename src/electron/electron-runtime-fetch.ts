@@ -29,6 +29,7 @@
 import { electronFuseBinary, fuseElectronFile } from "./electron-fuses.ts";
 import { basename, dirname, join } from "@std/path";
 import { log as flog } from "../diagnostics/logger-api.ts";
+import { renameOver } from "../diagnostics/rename-over.ts";
 import { homedir } from "../server/paths.ts";
 import { isLockOwnerAlive } from "../server/single-instance-lock.ts";
 import {
@@ -189,6 +190,30 @@ export function electronRuntimeDir(version: string, slug: string): string {
   const v = version.startsWith("v") ? version.slice(1) : version;
   return join(toolCacheDir(), "electron", `${v}-${slug}`);
 }
+
+/** The window's executable inside a macOS `.app`: a LINK in the bundle's own
+ *  `Contents/MacOS/`, pointing at the runtime nested below it
+ *  ({@linkcode MAC_WINDOW_LINK_TARGET}).
+ *
+ *  macOS decides which app a process IS from the path it was started by — a
+ *  link is not resolved for that — while the runtime finds its own frameworks
+ *  and helpers from the real file. Started as `…/Contents/MacOS/electron/
+ *  Electron.app/Contents/MacOS/Electron`, the window registered as the NESTED
+ *  bundle, so the system held no running app at the path the user installed.
+ *  Opening the app a second time (Finder, the Dock, `open`) then made a
+ *  second record for the same bundle id, bound to the server process, which
+ *  takes no Apple events — and "quit this app" (AppleScript, the Dock menu,
+ *  log-out) was sent there and went nowhere (measured, macOS 14: -600 /
+ *  -1712, every process still alive). Started through this link the window
+ *  IS the app: one record, at the installed path, that takes the quit.
+ *
+ *  The name carries a `_`, which no app's binary name can (`slugify` emits
+ *  `[a-z0-9-]`): the two sit in one directory, on a case-insensitive disk. */
+export const MAC_WINDOW_LINK = "app_window";
+
+/** What {@linkcode MAC_WINDOW_LINK} points at, relative to `Contents/MacOS/`. */
+export const MAC_WINDOW_LINK_TARGET = "electron/Electron.app/Contents/MacOS/" +
+  "Electron";
 
 /** The executable inside an unpacked runtime directory. Pure. */
 export function electronBinIn(dir: string, os: string = Deno.build.os): string {
@@ -664,7 +689,7 @@ export async function ensureElectronZip(
   await Deno.mkdir(join(zip, ".."), { recursive: true });
   const tmp = `${zip}.incoming.${stageTag()}`;
   await Deno.writeFile(tmp, bytes);
-  await Deno.rename(tmp, zip);
+  await renameOver(tmp, zip);
   await Deno.writeTextFile(`${zip}.sha256`, `${sha256}\n`);
   return { path: zip, sha256, name };
 }

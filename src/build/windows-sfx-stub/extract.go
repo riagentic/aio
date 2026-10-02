@@ -47,6 +47,9 @@ func extractZip(r io.ReaderAt, size int64, dest string) error {
 			}
 			continue
 		}
+		if !zf.Mode().IsRegular() {
+			return fmt.Errorf("unsupported zip entry %q (mode %v)", zf.Name, zf.Mode())
+		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err
 		}
@@ -115,8 +118,10 @@ func extractTarZstd(r io.Reader, dest string) error {
 				return err
 			}
 		default:
-			// Symlinks and devices have no place in a Windows AppDir; skip
-			// rather than fail — the packer never writes them.
+			// A symlink, device or any other entry: the packer never writes one
+			// (a Windows AppDir has none), so this payload is not ours to guess
+			// at — skipping it would install an app with a file missing.
+			return fmt.Errorf("unsupported tar entry %q (type %q)", hdr.Name, hdr.Typeflag)
 		}
 	}
 	return nil

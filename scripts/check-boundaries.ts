@@ -124,12 +124,9 @@ const ALLOWED: Record<string, string[]> = {
     // copy of the theme, or a second rule for where app assets live, is the
     // drift this matrix exists to prevent.
     "build",
-    // The control plane over UDS: `am` speaks the SAME v2 wire envelope as
-    // every other peer (`ctl` out, `ctlr` back) rather than inventing a
-    // socket-only control format. Widened deliberately — the alternative is a
-    // second wire vocabulary for one client, which is exactly the drift the
-    // envelope's single catalog exists to prevent (`SERVES.am` records it).
-    "protocol",
+    // (No `protocol`: the control client that speaks the v2 envelope — `ctl`
+    // out, `ctlr` back — is `server/local-request.ts`, which a launch taking
+    // over sends too; `am/am-uds.ts` re-exports it.)
     // `am testgen` writes a TYPED TEST CLIENT from the app's rendered surface
     // (report 8 §11/§18: `ui.App["tab-settings"]` is a string key whose
     // typo is a runtime undefined). The generator already existed in

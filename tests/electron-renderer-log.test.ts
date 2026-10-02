@@ -134,14 +134,20 @@ Deno.test("shells: both generated main scripts hook every renderer failure and t
     assertStringIncludes(script, "typeof e.level === 'string'");
     assertStringIncludes(script, "['debug', 'info', 'warning', 'error'][a[0]]");
   }
-  // Only the shell with a preload (and therefore a mount signal) runs the
-  // empty-#root watchdog; on the WS shell it would fire on every healthy page.
-  assertStringIncludes(uds, `${MOUNT_DEADLINE_MS}ms of the page loading`);
-  assert(
-    !ws.includes("did not mount within"),
-    "ws shell must not run the mount watchdog",
-  );
-  assertStringIncludes(tmplRendererDiagnostics(false), "'console-message'");
+  // Both window shells carry the mount signal in their preload, so both run
+  // the empty-#root watchdog. (The WebSocket shell had neither: its page was
+  // up and its log never said `ui mounted`, the line the docs name as the
+  // renderer's positive signal.) A shell WITHOUT that preload passes `false`
+  // — there the watchdog would fire on every healthy page.
+  for (const script of [uds, ws]) {
+    assertStringIncludes(script, `${MOUNT_DEADLINE_MS}ms of the page loading`);
+    assertStringIncludes(script, "ipcMain.on('__aio:mounted'");
+    // …and the preload that SENDS it (the script carries it as a string).
+    assertStringIncludes(script, "ipcRenderer.send('__aio:mounted'");
+  }
+  const bare = tmplRendererDiagnostics(false);
+  assertStringIncludes(bare, "'console-message'");
+  assert(!bare.includes("did not mount within"));
 });
 
 Deno.test("shells: the UDS preload reports the mount, and the main script logs it with the one spelling", () => {

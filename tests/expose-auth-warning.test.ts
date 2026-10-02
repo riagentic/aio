@@ -44,6 +44,7 @@ async function bootExposedCapture(
       appDir: await Deno.makeTempDir(),
       expose: true,
       ...extra,
+      watch: false,
     });
     await app.close();
   } finally {

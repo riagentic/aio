@@ -19,7 +19,7 @@
 //   silently WIDEN permissions. Then we fall back to the warning.
 // - opt out with AIO_NO_DEV_RESTART=1
 
-import { dirname, fromFileUrl } from "@std/path";
+import { basename, dirname, fromFileUrl } from "@std/path";
 import { log } from "../diagnostics/logger-api.ts";
 import {
   instances,
@@ -235,7 +235,7 @@ export async function restartForCellChange(
   if (_restarting) return;
   _restarting = true;
   const blocked = await restartBlockedReason();
-  const file = path.split("/").pop() ?? path;
+  const file = basename(path) || path;
   // The watcher also restarts for the server ENTRY (routes, schedules, auth
   // live there) and for a plain module the server imports — name each as
   // what it is.

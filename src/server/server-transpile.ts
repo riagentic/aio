@@ -6,6 +6,8 @@ import {
   stopEsbuildService,
 } from "../build/esbuild-shared.ts";
 import { importOutsideApp } from "./outside-app.ts";
+import { log } from "../diagnostics/logger-api.ts";
+import { TEARDOWN_TIMEOUT_MS } from "./shutdown-budget.ts";
 
 export type EsbuildMessage = {
   text: string;
@@ -18,28 +20,62 @@ export type EsbuildMessage = {
 };
 type TransformResult = { code: string; warnings: EsbuildMessage[] };
 
-// Lazy esbuild — dynamic import with computed specifier so deno compile won't embed the native binary
+/** What ONE stop may cost, the wait for work in flight and the reap of the
+ *  child TOGETHER. Derived from the teardown budget, because that is whose
+ *  time it spends: the stop runs inside the server's close, a phase that may
+ *  be given all of `TEARDOWN_TIMEOUT_MS` and shares it with whatever else
+ *  that close does. Two fifths (2 s — what the reap alone cost before the
+ *  wait existed). A bound of its own here (10 s, for a while) was a bound the
+ *  teardown cut first: the wait's warning was said five seconds after close
+ *  had returned. */
+const STOP_BUDGET_MS = TEARDOWN_TIMEOUT_MS * 2 / 5;
+
+/** Mutable only as a test seam: an esbuild that cannot load, and a stop that
+ *  gives up, cannot be built portably otherwise. @internal */
+export const _ESBUILD = {
+  /** What {@link loadEsbuild} imports. */
+  spec: ESBUILD_SPEC,
+  /** {@link STOP_BUDGET_MS}. */
+  budgetMs: STOP_BUDGET_MS,
+};
+
 let transformFn:
   | ((input: string, opts: Record<string, unknown>) => Promise<TransformResult>)
   | null = null;
 let esbuildStop: (() => Promise<void>) | null = null;
+
+/** THE way a server process gets esbuild — the dev transpiler and the
+ *  prod-bundle judge both come through here, so the service has ONE owner and
+ *  {@link stopEsbuild} always holds its stop.
+ *
+ *  The judge used to import esbuild by itself. A boot whose whole graph the
+ *  transpile cache answered (a second `aio.run()` in one process) never went
+ *  through the transpiler's load, so the judge's build started a service that
+ *  `stopEsbuild()` had never heard of, and close left it running.
+ *
+ *  Use what it returns inside {@link esbuildWork}, so a stop waits for it.
+ *
+ *  B-6: the EXACT version deno.json pins (esbuild@0.24.2) — a `^0.24` range
+ *  could resolve a different esbuild than the project tested. The specifier
+ *  is COMPUTED (`.join`), not a literal, on purpose: deno's static graph
+ *  analysis (`deno install`/`cache`/`compile`) can't resolve it, so the heavy
+ *  esbuild NATIVE BINARY is fetched only when the dev server actually
+ *  transpiles — never when installing `am` (which never transpiles) or
+ *  compiling an app. Prevents `deno install am` from pulling ~10MB of esbuild
+ *  it doesn't use (and the ETXTBSY it hits under concurrent esbuild). */
+export async function loadEsbuild<T = Record<string, unknown>>(): Promise<T> {
+  const mod = await importOutsideApp<T>(_ESBUILD.spec);
+  esbuildStop = (mod as { stop: () => Promise<void> }).stop;
+  return mod;
+}
+
 async function getTransform() {
   if (!transformFn) {
-    // B-6: pin the EXACT version deno.json pins (esbuild@0.24.2) — a `^0.24`
-    // range could resolve a different esbuild than the project tested.
-    // The specifier is COMPUTED (`.join`), not a literal, on purpose: deno's
-    // static graph analysis (`deno install`/`cache`/`compile`) can't resolve it,
-    // so the heavy esbuild NATIVE BINARY is fetched only when the dev server
-    // actually transpiles — never when installing `am` (which never transpiles)
-    // or compiling an app. Prevents `deno install am` from pulling ~10MB of
-    // esbuild it doesn't use (and the ETXTBSY it hits under concurrent esbuild).
-    const esbuildPkg = ESBUILD_SPEC; // shared pin (build/esbuild-shared.ts)
-    const mod = await importOutsideApp(esbuildPkg);
+    const mod = await loadEsbuild();
     transformFn = mod.transform as (
       input: string,
       opts: Record<string, unknown>,
     ) => Promise<TransformResult>;
-    esbuildStop = mod.stop as () => Promise<void>;
   }
   return transformFn!;
 }
@@ -79,15 +115,89 @@ export function _explainTranspileFailure(e: unknown): unknown {
   );
 }
 
-/** Stop the esbuild subprocess and return only once it has EXITED — see
- *  `stopEsbuildService`, the one place that knows how to wait for esbuild's
- *  native child, because every esbuild caller needs the same wait. */
-export async function stopEsbuild(): Promise<void> {
+// ── work in flight ─────────────────────────────────────────────────────
+//
+// A stop has to come AFTER the esbuild work that was already under way, for
+// two measured reasons:
+//   - `getTransform()` knows the service only once esbuild has loaded. A stop
+//     that arrived inside that load found nothing to stop and returned; the
+//     load landed, the transform spawned the native child, and nobody was
+//     left to stop it.
+//   - a transform still pending when esbuild's `stop()` destroys the pipes
+//     never settles — its caller waits for good.
+// So every transpile is in this set until it settles, and so is whatever a
+// caller declares with `esbuildWork` (a graph walk is many transpiles with
+// file reads between them: no single one is in flight at the gap).
+const _inFlight = new Set<Promise<void>>();
+
+/** Declare `work` as esbuild work in flight: {@link stopEsbuild} waits for it
+ *  to settle before it stops the service. Returns `work` itself. */
+export function esbuildWork<T>(work: Promise<T>): Promise<T> {
+  const settle = () => void _inFlight.delete(settled);
+  const settled: Promise<void> = work.then(settle, settle);
+  _inFlight.add(settled);
+  return work;
+}
+
+/** Wait for the work in flight, at most `ms`. False when it gave up. */
+async function inFlightSettled(ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<false>((r) => {
+    timer = setTimeout(() => r(false), ms);
+  });
+  try {
+    // Re-checked after every wait: work that started meanwhile is waited for
+    // too, so the stop follows an EMPTY set in the same turn.
+    while (_inFlight.size > 0) {
+      const settled = Promise.all([..._inFlight]).then(() => true as const);
+      if (!await Promise.race([settled, expired])) return false;
+    }
+    return true;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function stopNow(): Promise<void> {
+  // The wait ends on a real event wherever one exists: a transform settles
+  // when esbuild answers, and REJECTS when the service dies under it (its
+  // pipe ends). Work with no such event — a wedged service, a declared walk
+  // stuck on a read — is given up on by name, never waited for in silence.
+  const deadline = Date.now() + _ESBUILD.budgetMs;
+  // Three quarters of the budget for the wait; the reap gets what is left of
+  // it — all of it when nothing was in flight.
+  const waitMs = _ESBUILD.budgetMs * 3 / 4;
+  if (!await inFlightSettled(waitMs)) {
+    log.warn(
+      "esbuild",
+      `stopping esbuild with ${_inFlight.size} piece(s) of work still in ` +
+        `flight after ${waitMs} ms — not waiting any longer. A ` +
+        `transform pending when the service stops never settles, so ` +
+        `whatever awaits that work is abandoned.`,
+    );
+    _inFlight.clear();
+  }
   if (!esbuildStop) return;
   const stop = esbuildStop;
   esbuildStop = null;
   transformFn = null;
-  await stopEsbuildService(stop);
+  await stopEsbuildService(stop, Math.max(0, deadline - Date.now()));
+}
+
+let _stops: Promise<void> = Promise.resolve();
+
+/** Stop the esbuild subprocess and return only once it has EXITED — see
+ *  `stopEsbuildService`, the one place that knows how to wait for esbuild's
+ *  native child, because every esbuild caller needs the same wait.
+ *
+ *  Waits for the work in flight first (above); wait and reap together are
+ *  bounded by {@link STOP_BUDGET_MS}.
+ *  Stops run ONE AT A TIME, in the order asked: a second caller used to find
+ *  the handle already taken and return while the first was still waiting for
+ *  the child to exit. Work that STARTS after this resolves starts the service
+ *  again, and stopping that is its caller's. */
+export function stopEsbuild(): Promise<void> {
+  return _stops = _stops.then(stopNow, stopNow);
 }
 
 // Transpile cache — keyed by filepath, invalidated when source changes, capped at 200 entries
@@ -178,13 +288,15 @@ export async function transpile(
   const jsxOpts = ESBUILD_JSX; // shared dev==prod JSX config
   let result: TransformResult;
   try {
-    const transform = await getTransform();
-    result = await transform(source, {
-      loader,
-      format: "esm",
-      target: "esnext",
-      ...jsxOpts,
-    });
+    result = await esbuildWork((async () => {
+      const transform = await getTransform();
+      return await transform(source, {
+        loader,
+        format: "esm",
+        target: "esnext",
+        ...jsxOpts,
+      });
+    })());
   } catch (e) {
     throw _explainTranspileFailure(e);
   }

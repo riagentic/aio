@@ -18,6 +18,7 @@ import type { GraphResult } from "./graph-validator.ts";
 import { type ProdGraphCheck, validateGraph } from "./graph-validator.ts";
 import {
   clearTranspileCaches,
+  esbuildWork,
   normPath,
   transpile,
 } from "./server-transpile.ts";
@@ -77,6 +78,9 @@ export interface WatcherDeps {
    *  at save speed. A burst whose changes are all self-written skips the step
    *  and the sequence terminates. */
   runCss?: () => Promise<readonly string[]>;
+  /** The transpiler the graph walks use (default: the dev server's own).
+   *  Injected only by tests, to hold a walk at a known point. */
+  transpile?: (source: string, filepath: string) => Promise<string>;
 }
 
 /** The framework's own `src/` when this app imports aio BY PATH, or null.
@@ -171,6 +175,10 @@ export interface FileWatcher {
    *  non-recursively and every other name in it is ignored, so the watch set
    *  is the served graph, never the project. */
   watchServed: (file: string) => void;
+  /** Resolves once the CSS step this watcher started, if one is running, has
+   *  ended. `shutdown()` is synchronous and cannot wait; a server's close
+   *  awaits this, so the step's subprocess does not outlive it. */
+  cssSettled: () => Promise<void>;
   /** Whether the watcher is currently active */
   readonly active: boolean;
   /** Clean up watcher, timers, sentinel */
@@ -183,9 +191,10 @@ export interface FileWatcher {
 function describeChanged(paths: string[]): string {
   if (paths.length === 0) return "the project";
   const cwd = Deno.cwd();
-  const rel = paths.map((p) =>
-    p.startsWith(cwd + "/") ? p.slice(cwd.length + 1) : p
-  );
+  const rel = paths.map((p) => {
+    const r = relative(cwd, p);
+    return r && !/^\.\.(?:[\\/]|$)/.test(r) && !isAbsolute(r) ? r : p;
+  });
   return rel.length <= 3
     ? rel.join(", ")
     : `${rel.slice(0, 3).join(", ")} +${rel.length - 3} more`;
@@ -248,6 +257,36 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
       !entryRel.startsWith("..") && !isAbsolute(entryRel)
     ? serverEntryReal
     : null;
+  /** `transpile`, for as long as this watcher is live.
+   *
+   *  A walk started by a save is not something `shutdown()` can wait for (it
+   *  is synchronous), so it is declared as esbuild work — the server's close
+   *  waits for that before it stops esbuild — and it ends HERE: once shut
+   *  down, every remaining module is refused instead of transpiled, so the
+   *  close pays for the file reads that are left and nothing else. It used to
+   *  run on beneath a stopped esbuild, start the service again with nobody
+   *  left to stop it, and print a reload for a server that had closed. */
+  const liveTranspile = (src: string, f: string): Promise<string> =>
+    _shutDown
+      ? Promise.reject(new Error("the file watcher was shut down"))
+      : (deps.transpile ?? transpile)(src, f);
+  /** What ends a reload run whose watcher was shut down under it. */
+  const SHUT_DOWN = Symbol("the file watcher was shut down");
+  /** THE gate of a reload run: every `await` in it goes through here, so a
+   *  run that comes back to a watcher that has been shut down ends on the
+   *  spot — whichever branch it was in — and says, sends, restyles and
+   *  reloads nothing more. One decider, not a check per branch: the check
+   *  used to follow the graph walk only, so a shutdown that landed during
+   *  the CSS step (or in a project with no root component, which skips the
+   *  walk) still broadcast a reload and printed `reloaded …` for a server
+   *  that had closed. */
+  const whileLive = async <T>(work: Promise<T>): Promise<T> => {
+    const value = await work;
+    if (_shutDown) throw SHUT_DOWN;
+    return value;
+  };
+  /** The CSS step in flight, for {@link FileWatcher.cssSettled}. */
+  let cssRun: Promise<unknown> | null = null;
   /** Is `p` statically or dynamically imported from the server entry? Such a
    *  module is loaded by THIS process (a helper a cell method or a route
    *  calls), so a browser reload cannot apply an edit to it. Framework and
@@ -256,11 +295,11 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
   const inServerGraph = async (p: string): Promise<boolean> => {
     if (serverGraphRoot === null) return false;
     try {
-      const g = await validateGraph(
+      const g = await esbuildWork(validateGraph(
         serverGraphRoot,
         deps.importMapObj,
-        (src: string, f: string) => transpile(src, f),
-      );
+        liveTranspile,
+      ));
       const want = realOrSelf(p);
       for (const m of g.modules.keys()) {
         if (m === p || m === want || realOrSelf(m) === want) return true;
@@ -457,7 +496,10 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
           // above.
           const changedPath = path;
           void inServerGraph(changedPath).then((hit) => {
-            if (hit) serverSideChanged(changedPath, "server module");
+            // Shut down while the walk ran: a closed server restarts nothing.
+            if (hit && !_shutDown) {
+              serverSideChanged(changedPath, "server module");
+            }
           });
         }
       } catch { /* unreadable — skip */ }
@@ -528,16 +570,17 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
           const timeout = new Promise<null>((r) => {
             timer = setTimeout(() => r(null), graphTimeoutMs);
           });
-          const revalTranspile = (s: string, f: string) => transpile(s, f);
-          const validation = validateGraph(
+          const validation = esbuildWork(validateGraph(
             join(absBaseDir, deps.uiEntry ?? UI_ENTRY),
             deps.importMapObj,
-            revalTranspile,
+            liveTranspile,
             undefined,
             deps.prodGraph,
-          );
-          const result = await Promise.race([validation, timeout]).finally(
-            () => clearTimeout(timer),
+          ));
+          const result = await whileLive(
+            Promise.race([validation, timeout]).finally(
+              () => clearTimeout(timer),
+            ),
           );
           // Stale validation — a newer file change already started a new validation
           if (gen !== graphGeneration) return;
@@ -595,7 +638,9 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
           // source, on screen it is not).
           if (deps.runCss && !changed.every((c) => cssSelfWritten.has(c))) {
             cssSelfWritten.clear();
-            for (const w of await deps.runCss()) cssSelfWritten.add(w);
+            const run = deps.runCss();
+            cssRun = run;
+            for (const w of await whileLive(run)) cssSelfWritten.add(w);
           }
           // Normal reload (no graph issues) — or a PATCH, when the whole
           // burst is the UI entry and nothing else.
@@ -648,7 +693,9 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
             } ${describeChanged(changed)} (${Date.now() - burstStartedAt}ms)`,
           );
         }
-      })().catch((err) => debug(`graph: unexpected error — ${err}`));
+      })().catch((err) => {
+        if (err !== SHUT_DOWN) debug(`graph: unexpected error — ${err}`);
+      });
     }, _debounceDelay(Date.now() - debounceStartedAt));
   }
 
@@ -672,10 +719,7 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
       const dir = dirname(cfg);
       // Already covered by the recursive app watch — a second watch would only
       // double every event.
-      if (
-        dir === absBaseDir || dir.startsWith(absBaseDir + "/") ||
-        dir.startsWith(absBaseDir + "\\")
-      ) continue;
+      if (dir === absBaseDir || _under(absBaseDir, dir)) continue;
       dirs.add(dir);
     }
     if (dirs.size === 0) return;
@@ -724,6 +768,7 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
   }
 
   function _under(root: string, p: string): boolean {
+    // aio-ok: path-split — both separators checked
     return p === root || p.startsWith(root + "/") || p.startsWith(root + "\\");
   }
 
@@ -936,10 +981,20 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
     } catch { /* already gone */ }
   }
 
+  async function cssSettled(): Promise<void> {
+    try {
+      await cssRun;
+    } catch {
+      // aio-ok: the step's failure is its run's to report (and it has, with
+      // the command and the tool's own output) — this only waits for the end.
+    }
+  }
+
   return {
     start,
     scheduleReload,
     watchServed,
+    cssSettled,
     get active() {
       return watcherActive;
     },

@@ -37,26 +37,38 @@ import {
   resolveUpdates,
   type UpdatesInput,
 } from "./updates-core.ts";
-import { readTrust, writeTrust } from "./updates-check.ts";
+import {
+  abandonedOldStage,
+  forgetInstalledDigest,
+  readTrust,
+  recordInstalledSha256,
+  writeTrust,
+} from "./updates-check.ts";
+import { adoptOlder, ownedPath, sweepOwned } from "./updates-owned.ts";
+import { isProcessAlive } from "./single-instance-lock.ts";
 import { reconcileInstalledVersion } from "./install-record.ts";
-import { basename, dirname } from "@std/path";
+import { basename, dirname, join } from "@std/path";
 import {
   artifactPath,
   claimFirstBoot,
+  classifyTarget,
   clearPending,
   exeIdentity,
   failedUpdatePath,
   FIRST_BOOT_WAIT_S,
   firstBootPath,
+  installDir,
   judgePending,
   KEEP_OLD,
+  madeByOlderUpdater,
   parseUpdateRecord,
+  pendingPath,
   pruneOld,
   readPending,
+  repairSfxStamp,
   restoreArtifact,
   setAsideRecord,
   swapDirectoryDetached,
-  sweepStaleSwaps,
   writePending,
   writeRecordAtomic,
 } from "./updates-apply.ts";
@@ -83,6 +95,35 @@ import type { PendingUpdate } from "./updates-apply.ts";
  *  started by hand — a copy, with its own identity) only clears it. Never
  *  more: two builds can report the same version.
  *  `deps` are test seams. */
+/** The update (its marker's `startedAt`) this process counted a boot attempt
+ *  of — the only one it may give back. */
+let counted: string | undefined;
+
+/** Give back the boot attempt this process counted. For a launch that was
+ *  refused for what was TYPED — a flag this client cannot honour — and so
+ *  says nothing about the build: counted, three such launches rolled a
+ *  healthy update back. Never for a boot that failed on its own: those are
+ *  what a rollback counts. */
+export function returnBootAttempt(dataDir: string, log: Log): void {
+  const p = readPending(dataDir);
+  if (!p || p.startedAt !== counted) return;
+  counted = undefined;
+  try {
+    writePending(dataDir, { ...p, attempts: p.attempts - 1 });
+    log.info(
+      "updates",
+      `this launch was refused before the app started — not counted as a ` +
+        `boot attempt of update ${p.from} → ${p.to}`,
+    );
+  } catch (e) {
+    log.warn(
+      "updates",
+      `could not give back the boot attempt of update ${p.from} → ${p.to} ` +
+        `(${e}) — this refused launch stays counted`,
+    );
+  }
+}
+
 export async function judgePendingUpdate(
   dataDir: string,
   log: Log,
@@ -139,7 +180,7 @@ export async function judgePendingUpdate(
       "updates",
       `update ${pending.from} → ${pending.to} did not take effect — this is ` +
         `still ${appVersion ?? pending.from}, the build it was to replace. ` +
-        `Recorded as failed; it is not installed again automatically.`,
+        `Recorded as failed.`,
     );
     // The swap helper's own record of THIS update (a rollback, a failed swap)
     // is the truthful one: it is kept, and only the marker it could not
@@ -206,6 +247,7 @@ export async function judgePendingUpdate(
       );
       return false;
     }
+    counted = pending.startedAt;
     log.info(
       "updates",
       `verifying update ${pending!.from} → ${pending!.to} ` +
@@ -249,18 +291,32 @@ export async function judgePendingUpdate(
       return false;
     }
     log.error(`the update helper puts ${verdict.to} back once this exits`);
-    writeTrust(dataDir, { installedSha256: undefined });
+    // The record follows the artifact on THIS layout too (see the flat path
+    // below): left alone, `installed.json` kept naming the failed version
+    // while the old one ran. Written now because nothing of this build runs
+    // after the helper's moves — best-effort and non-fatal, like every
+    // reconcile.
+    await reconcileInstalledVersion(dirname(current), {
+      version: verdict.to,
+      artifact: basename(current),
+    });
+    forgetInstalledDigest(dataDir);
     // The helper's moves happen after this process is gone, and when they
     // fail it starts THIS build again. The record carries this executable's
-    // identity, so that boot learns the rollback did not happen (startUpdates).
+    // identity, so that boot learns the rollback did not happen (startUpdates)
+    // — and the path decided here, which a marker staged by an older build
+    // does not carry: that boot puts `installed.json` back beside it.
+    // Without the reason an earlier attempt failed for (see the flat path).
     keepFailed(dataDir, {
       ...pending,
+      artifact: current,
       failedExe: deps.exe ?? exeIdentity(),
+      rollbackFailed: undefined,
     }, log);
     return true;
   }
   try {
-    await restoreArtifact(current, verdict.previous);
+    await restoreArtifact(current, verdict.previous, dataDir);
     log.error(`rolled back the artifact → ${verdict.to} (${current})`);
     // The record must follow the ARTIFACT, exactly as the forward swap's
     // reconcile makes it. Left alone, `installed.json` kept naming the failed
@@ -284,10 +340,12 @@ export async function judgePendingUpdate(
     // The recorded digest names the build that just failed; the artifact at
     // `current` is the old one again. Forget it so the next check re-measures
     // instead of offering this install its own bytes as a "new build".
-    writeTrust(dataDir, { installedSha256: undefined });
+    forgetInstalledDigest(dataDir);
     // Kept as the FAILED record, not deleted: the next boot names it and does
-    // not auto-install this version again (see `startUpdates`).
-    keepFailed(dataDir, pending, log);
+    // not auto-install this version again (see `startUpdates`). Without the
+    // reason an earlier attempt at this rollback failed for: it has happened
+    // now, and the record with that reason reads as "still not put back".
+    keepFailed(dataDir, { ...pending, rollbackFailed: undefined }, log);
     // Exit so the supervisor (or the user) starts the version that works. The
     // artifact at `current` is the old one now; this process is still the new
     // build and must not keep running.
@@ -412,27 +470,173 @@ export function confirmPendingUpdate(
     `update ${pending!.from} → ${pending!.to} confirmed healthy`,
   );
   clearPending(dataDir);
+  // …and so does what is installed, by digest: a directory swap's is carried
+  // on the marker (the helper that made the swap knows neither), and the
+  // update it belongs to is now the build that stays. A marker without one
+  // (a single-file swap, which recorded it as it swapped) changes nothing.
+  if (pending!.sha256) {
+    recordInstalledSha256(dataDir, pending!.sha256, pending!.releasedAt);
+  }
+  writeTrust(dataDir, { failedSwaps: undefined });
+  // The helper that swapped a directory install in wrote no record (it runs
+  // after the build that knew the version has exited): the new version goes
+  // on it now that it is the one that stays. A single-file swap wrote it as
+  // it swapped, and this finds nothing to change. Only over the version the
+  // update replaced: a record that names anything else was written by an
+  // install made since, and is newer than this update.
+  if (pending!.artifact) {
+    recordInstalledVersion(pending!.artifact, pending!.to, dataDir, {
+      from: pending!.from,
+    });
+  }
   // A confirmed update is the moment nothing is in flight, so it is the only
   // safe moment to remove what an interrupted swap left behind. Bounded, aged,
   // and best-effort — never a reason a boot fails.
   // …and the kept-aside copies past KEEP_OLD. A DIRECTORY swap (electron-zip,
   // a macOS .app) is handed to a shell that exits with the process, so
   // nothing pruned them: one whole ~300 MB install leaked per update.
-  void pruneOld(pending!.artifact ?? artifactPath(), KEEP_OLD).catch((e) =>
-    log.warn("updates", `could not prune old installs: ${e}`)
-  );
-  void sweepStaleSwaps(pending!.artifact ?? artifactPath())
-    .then((removed) => {
-      if (removed.length > 0) {
-        log.info(
-          "updates",
-          `swept ${removed.length} leftover${
-            removed.length === 1 ? "" : "s"
-          } from interrupted swaps: ${removed.join(", ")}`,
-        );
-      }
-    })
-    .catch(() => {});
+  // The sweep first: it puts an older build's copies on the record, which is
+  // all the pruning counts.
+  sweepLeftovers(dataDir, pending!.artifact ?? artifactPath(), log);
+  void pruneOld(pending!.artifact ?? artifactPath(), KEEP_OLD, dataDir).catch((
+    e,
+  ) => log.warn("updates", `could not prune old installs: ${e}`));
+}
+
+/** What to do about a swap that could not be made, for the line that
+ *  dismisses the release: which path was held — the earlier copy when the
+ *  helper's reason names it, else the install — and what holds a folder on
+ *  this OS. Pure. */
+export function swapAdvice(
+  failed: { swapFailed?: string; artifact?: string; previous: string },
+  os: typeof Deno.build.os = Deno.build.os,
+): string {
+  const held = failed.previous && failed.swapFailed?.includes(failed.previous)
+    ? failed.previous
+    : failed.artifact ?? "the install folder";
+  return os === "windows"
+    ? `Close whatever is open in ${held} (a program started from it, an ` +
+      `Explorer window, an antivirus scan) or restart the computer`
+    : `Make sure this user may move and remove ${held} (its permissions, ` +
+      `and those of the folder it is in) and that no program runs from it`;
+}
+
+/** Remove the temp files of update records whose write was cut off: a kill
+ *  between the write and the rename left `update-trust.json.tmp-<pid>` in the
+ *  data directory for good. The directory is the updater's own, so the name
+ *  is the proof; one that another LIVE process is writing is left. This
+ *  process writes them synchronously, so one carrying its own pid at this
+ *  point is an earlier run's. */
+export function sweepRecordTmps(
+  dataDir: string,
+  alive: (pid: number) => boolean = isProcessAlive,
+): void {
+  try {
+    for (const e of [...Deno.readDirSync(dataDir)]) {
+      const pid = /^update-[a-z-]+\.json\.tmp-(\d+)$/.exec(e.name)?.[1];
+      if (!pid || !e.isFile) continue;
+      if (Number(pid) !== Deno.pid && alive(Number(pid))) continue;
+      Deno.removeSync(join(dataDir, e.name));
+    }
+  } catch {
+    // aio-ok: no data directory yet, or gone meanwhile — nothing to remove
+  }
+}
+
+/** Remove what unfinished updates left beside `install` — only what is on
+ *  the updater's record (`sweepOwned`) — and say what went, and what looks
+ *  like the updater's but is not on it and was left. First, once per record,
+ *  what builds older than the record made is taken onto it (`adoptOlder`).
+ *  For a moment when no update is in flight. Never a reason a boot fails. */
+function sweepLeftovers(dataDir: string, install: string, log: Log): void {
+  // A run from source has the `deno` binary as its "install": no update is
+  // ever applied there, so nothing beside it is ours, and the one-time look
+  // must not judge the files next to someone's `deno` by name and content.
+  if (classifyTarget({ execPath: install }) === "source") return;
+  let sweeping: ReturnType<typeof sweepOwned>;
+  try {
+    const taken = adoptOlder(
+      dataDir,
+      install,
+      (p) =>
+        basename(p).startsWith(".aio-update-")
+          ? abandonedOldStage(p)
+          : madeByOlderUpdater(p, install),
+    );
+    // Said whenever the look is taken — the first start on this version,
+    // and any start that finds no record, or one without its mark.
+    if (taken !== null) {
+      log.info(
+        "updates",
+        `looked for what an earlier version's updater left beside ` +
+          `${install} (the record of what it made has no mark of that ` +
+          `yet): ${
+            taken.length > 0
+              ? `took over ${taken.join(", ")}`
+              : "nothing to take over"
+          }`,
+      );
+    }
+    sweeping = sweepOwned(dataDir, install);
+  } catch (e) {
+    log.warn(
+      "updates",
+      `the record of what the updater made (${ownedPath(dataDir)}) could ` +
+        `not be read or written, or the folder of ${install} not listed: ` +
+        `${e} — nothing beside ${install} is removed`,
+    );
+    return;
+  }
+  try {
+    repairSfxStamp(install, dataDir, log);
+  } catch (e) {
+    log.warn(
+      "updates",
+      `could not look for the one-click .exe's stamp for ${install} (${e}) ` +
+        `— if it is missing, opening that .exe reinstalls the version it ` +
+        `carries`,
+    );
+  }
+  void sweeping.then(({ removed, left, unproven, dropped, unreadable }) => {
+    if (unreadable.length > 0) {
+      log.warn(
+        "updates",
+        `left alone beside ${install}: cannot be looked at — ${
+          unreadable.map((u) => `${u.name} (${u.error})`).join(", ")
+        }`,
+      );
+    }
+    if (dropped.length > 0) {
+      log.info(
+        "updates",
+        `off the record of what the updater made (something else has the ` +
+          `name now): ${dropped.join(", ")}`,
+      );
+    }
+    for (const { path, bytes } of unproven) {
+      log.warn(
+        "updates",
+        `${path} (${Math.ceil(bytes / 1e6)} MB) was made by this app's ` +
+          `updater, but this file system gives no creation time to prove ` +
+          `it is still the same thing — it is not removed, and old versions ` +
+          `are not pruned here. Delete it by hand while no update runs.`,
+      );
+    }
+    if (removed.length > 0) {
+      log.info(
+        "updates",
+        `removed what an unfinished update left beside ${install}: ` +
+          removed.join(", "),
+      );
+    }
+    if (left.length > 0) {
+      log.info(
+        "updates",
+        `left alone beside ${install}: not made by this app's updater — ` +
+          left.join(", "),
+      );
+    }
+  });
 }
 
 /** The confirm for THIS boot's pending marker, read now — before any check
@@ -498,6 +702,11 @@ export type StartUpdatesDeps = {
   slot?: UpdatesSlot;
   /** Test seam: `exeIdentity()` of this process's executable. */
   exe?: string;
+  /** Test seam: `installDir()` — the directory install this process runs
+   *  from, or null when it is not one. */
+  installDir?: string | null;
+  /** Test seam: `artifactPath()` — the file this process was started as. */
+  artifact?: string;
 };
 
 /** What the boot report needs to describe the update configuration. */
@@ -549,7 +758,78 @@ export function updateBackoffMs(intervalMs: number, failures: number): number {
   return Math.max(intervalMs, Math.min(intervalMs * factor, cap));
 }
 
+/** How many times in a row a release whose swap could not be made is tried
+ *  before it is dismissed like one that was rolled back. */
+export const MAX_FAILED_SWAPS = 3;
+
+/** Put `version` on the `installed.json` beside the install at `here`.
+ *
+ *  A directory install's moves are made by a helper after the process that
+ *  decided them has gone, so nothing wrote the record as they happened (the
+ *  single-file swaps do). It is written when the update is CONFIRMED — the
+ *  new build is the one that stays — and checked at every boot of a directory
+ *  install, which repairs what a confirm cannot see: a version put back by
+ *  hand, a rollback the helper did not make, a record an older build left
+ *  behind. That repair is said (`said`); a confirm is not — its own line says
+ *  the update is healthy.
+ *
+ *  Only the record written for THIS artifact, and only while nothing is in
+ *  flight: a pending marker or a first-boot token means the updater is still
+ *  deciding which build stays. Never fatal — the writer reports a write that
+ *  failed, and the next boot makes it again. */
+function recordInstalledVersion(
+  here: string,
+  version: string,
+  dataDir: string,
+  { from, said }: {
+    /** Only a record that still names this version is rewritten. */
+    from?: string;
+    said?: Log;
+  } = {},
+): void {
+  if (isThere(pendingPath(dataDir)) || isThere(firstBootPath(dataDir))) return;
+  const dir = dirname(here);
+  // This process is already writing it (a confirm earlier in this boot).
+  if (recordWrites.has(dir)) return;
+  let rec: { version?: unknown; artifact?: unknown } | null;
+  try {
+    rec = JSON.parse(Deno.readTextFileSync(join(dir, "installed.json")));
+  } catch {
+    return; // aio-ok: no record beside this install — nothing to keep true
+  }
+  // A kept-aside copy started by hand runs beside a record that is not its.
+  if (rec?.artifact !== basename(here)) return;
+  const named = rec.version;
+  if (typeof named !== "string" || named === version) return;
+  if (from !== undefined && named !== from) return;
+  recordWrites.add(dir);
+  // Said once the writer has answered: it alone decides what is a record it
+  // can rewrite, and it reports a write that failed, with the path and why.
+  void reconcileInstalledVersion(dir, { version }).then((written) => {
+    if (written) {
+      said?.warn(
+        "updates",
+        `${join(dir, "installed.json")} named ${named} while ${version} is ` +
+          `running — corrected`,
+      );
+    }
+  }).finally(() => recordWrites.delete(dir));
+}
+
+/** Install folders whose record this process is rewriting right now. */
+const recordWrites = new Set<string>();
+
+function isThere(path: string): boolean {
+  try {
+    Deno.lstatSync(path);
+    return true;
+  } catch {
+    return false; // aio-ok: absent is the answer asked for
+  }
+}
+
 export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
+  sweepRecordTmps(deps.dataDir);
   const trust = readTrust(deps.dataDir);
   const envChannel = Deno.env.get("AIO_UPDATE_CHANNEL") ?? undefined;
   const config = resolveUpdates(deps.updates, {
@@ -653,10 +933,10 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
   // A rollback handed to the Windows swap helper that is still running the
   // build it was to put back: the helper's move failed, and it restarted this
   // one. The record is rewritten to say so — never "rolled back".
-  if (
-    failed?.failedExe !== undefined && !failed.rollbackFailed &&
-    failed.failedExe === (deps.exe ?? exeIdentity())
-  ) {
+  const exe = deps.exe ?? exeIdentity();
+  const stillFailedBuild = failed?.failedExe !== undefined &&
+    failed.failedExe === exe;
+  if (failed && stillFailedBuild && !failed.rollbackFailed) {
     failed = {
       ...failed,
       rollbackFailed: `the update helper could not move ${failed.previous} ` +
@@ -668,10 +948,56 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
       deps.log.warn("updates", `could not keep the failed-update record: ${e}`);
     }
   }
+  const here = deps.installDir !== undefined ? deps.installDir : installDir();
+  if (here) {
+    recordInstalledVersion(here, deps.appVersion, deps.dataDir, {
+      said: deps.log,
+    });
+  }
+  // The old version was put back BY HAND after the helper could not: another
+  // build than the failed one now runs from the path the rollback was for.
+  const byHand = !!failed?.rollbackFailed && failed.failedExe !== undefined &&
+    exe !== undefined && exe !== failed.failedExe && here !== null &&
+    here === failed.artifact;
+  // A swap that was never MADE says nothing about the release: the new
+  // version never ran, and what stopped the move (a file in use, a program
+  // whose working directory is the install) is usually gone a moment later.
+  // Dismissing it — the rule for a release that ran and failed — hid a good
+  // release for good after one click at a bad moment. So it stays on offer,
+  // counted per release on the trust record: after MAX_FAILED_SWAPS in a row
+  // it is dismissed after all, with what to do about it. Only when the very
+  // executable the update was to replace runs from where it was installed —
+  // an old copy started from where it was set aside is not "nothing moved".
+  const neverSwapped = !!failed?.swapFailed && !failed.rollbackFailed &&
+    failed.fromExe !== undefined && failed.fromExe === exe &&
+    (here === null || failed.artifact === undefined ||
+      here === failed.artifact);
+  let swapFailures = 0;
+  if (failed && neverSwapped) {
+    const prior = trust.failedSwaps?.to === failed.to
+      ? trust.failedSwaps.count
+      : 0;
+    writeTrust(deps.dataDir, {
+      failedSwaps: { to: failed.to, count: prior + 1 },
+    });
+    // Counted ON DISK, or not offered again: a retry nothing counts never ends.
+    try {
+      const kept = readTrust(deps.dataDir).failedSwaps;
+      if (kept?.to === failed.to && kept.count === prior + 1) {
+        swapFailures = prior + 1;
+      }
+    } catch (e) {
+      deps.log.warn("updates", `could not count the failed install: ${e}`);
+    }
+  }
+  const offeredAgain = swapFailures > 0 && swapFailures < MAX_FAILED_SWAPS;
   if (failed) {
     deps.log.error(
       "updates",
-      failed.rollbackFailed
+      byHand
+        ? `update ${failed.from} → ${failed.to} was rolled back by hand ` +
+          `(${failed.rollbackFailed}) — this is ${deps.appVersion}`
+        : failed.rollbackFailed
         ? `ROLLBACK FAILED of update ${failed.from} → ${failed.to}: ` +
           `${failed.rollbackFailed} — this is ${
             // Neither copy could be moved back: the helper started the old
@@ -685,7 +1011,11 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
           } by hand (stop the app first).`
         : failed.swapFailed
         ? `update ${failed.from} → ${failed.to} could not be installed: ` +
-          `${failed.swapFailed}, so ${failed.from} was started again`
+          `${failed.swapFailed}, so ${failed.from} was started again` +
+          (offeredAgain
+            ? ` — ${failed.to} stays on offer (failed attempt ` +
+              `${swapFailures} of ${MAX_FAILED_SWAPS})`
+            : "")
         : `update ${failed.from} → ${failed.to} was rolled back: ${
           failed.attempts === 0
             ? `it never started (no first boot within ${FIRST_BOOT_WAIT_S} ` +
@@ -698,7 +1028,37 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
         }`,
     );
     // The digest recorded at swap time names the build that was put back.
-    writeTrust(deps.dataDir, { installedSha256: undefined });
+    forgetInstalledDigest(deps.dataDir);
+  }
+  // Said and counted: the record goes, and nothing is dismissed. An
+  // unattended install waits for a later check — tried again in the boot
+  // that follows its own failure, it would restart the app in a loop.
+  let swapRetry: string | undefined;
+  if (failed && offeredAgain) {
+    swapRetry = failed.to;
+    failed = null;
+    try {
+      Deno.removeSync(failedUpdatePath(deps.dataDir));
+    } catch (e) {
+      if (!(e instanceof Deno.errors.NotFound)) {
+        deps.log.warn(
+          "updates",
+          `could not remove the failed-update record: ${e}`,
+        );
+      }
+    }
+  }
+  // No update in flight: whatever an unfinished one left beside the install
+  // is a leftover — a whole copy of the app per failed swap, a download that
+  // was cut off — whatever kind of install this is.
+  if (
+    !isThere(pendingPath(deps.dataDir)) && !isThere(firstBootPath(deps.dataDir))
+  ) {
+    sweepLeftovers(
+      deps.dataDir,
+      here ?? deps.artifact ?? artifactPath(),
+      deps.log,
+    );
   }
 
   /** One check, plus whatever the policy says to do about the answer. */
@@ -755,6 +1115,17 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
       else failures = 0;
     };
 
+    if (config.auto && available.version === swapRetry) {
+      swapRetry = undefined;
+      failures = 0;
+      deps.log.warn(
+        "updates",
+        `${available.version} is available — its last install could not be ` +
+          `made on this machine, so it is tried again at the next check, ` +
+          `not now (auto)`,
+      );
+      return;
+    }
     if (config.auto && available.version === rolledBackTo) {
       failures = 0;
       deps.log.warn(
@@ -830,9 +1201,17 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
     if (failed) {
       deps.log.warn(
         "updates",
-        `not installing ${failed.to} again — it was rolled back on this ` +
-          `machine. Dismissed; \`undismiss()\` offers it again, and a newer ` +
-          `release is offered as usual.`,
+        neverSwapped
+          ? `not installing ${failed.to} again — it could not be put in ` +
+            `place on this machine${
+              swapFailures > 0 ? ` ${swapFailures} times in a row` : ""
+            }. Dismissed. ${
+              swapAdvice(failed)
+            }; \`undismiss()\` then offers it ` +
+            `again, and a newer release is offered as usual.`
+          : `not installing ${failed.to} again — it was rolled back on this ` +
+            `machine. Dismissed; \`undismiss()\` offers it again, and a ` +
+            `newer release is offered as usual.`,
       );
     }
     // The record goes only once the dismissal is COMMITTED: removed first, a
@@ -843,6 +1222,11 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
     rolledBackTo = rolledBack?.to;
     void readyUpdates(slot, rolledBack?.to).then((done) => {
       if (!rolledBack || !done) return;
+      // The count ends with the dismissal it led to: a release somebody
+      // un-dismisses gets its tries afresh, not one more and "4 in a row".
+      if (swapFailures >= MAX_FAILED_SWAPS) {
+        writeTrust(deps.dataDir, { failedSwaps: undefined });
+      }
       try {
         Deno.removeSync(failedUpdatePath(deps.dataDir));
       } catch (e) {

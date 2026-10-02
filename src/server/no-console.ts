@@ -39,6 +39,28 @@ export function spawnInheritingOrNull(
   }
 }
 
+/** The working directory for a child that needs none of its own: the Windows
+ *  directory on Windows, the inherited one (`undefined`) elsewhere.
+ *
+ *  A desktop app's working directory is its install folder, a child inherits
+ *  it, and Windows refuses to move a folder that is ANY process's working
+ *  directory — so one helper still alive when an update swaps the install
+ *  made the swap fail (measured on Windows 11: an orphaned `PING.EXE` held it
+ *  for 30 s after every start). POSIX moves a directory under a process, so
+ *  nothing changes there. `tests/spawn-cwd-outside-install.test.ts` walks
+ *  every spawn site: a new one takes this, or says why it must not. */
+export function neutralCwd(
+  os: typeof Deno.build.os = Deno.build.os,
+  systemRoot: () => string | undefined = () => Deno.env.get("SystemRoot"),
+): string | undefined {
+  if (os !== "windows") return undefined;
+  try {
+    return systemRoot() || "C:\\Windows";
+  } catch {
+    return "C:\\Windows"; // aio-ok: no --allow-env — where Windows lives by default
+  }
+}
+
 /** Give a console-less Windows process ONE hidden console, so every console
  *  program it starts afterwards opens no window.
  *
@@ -54,17 +76,35 @@ export function spawnInheritingOrNull(
  *  inherit it — measured: PowerShell ×3, cmd, taskkill, zero windows, output
  *  intact.
  *
+ *  The helper is `PING.EXE` itself — a console program that only waits —
+ *  started by its full path, outside the install ({@link neutralCwd}). It
+ *  used to be `cmd.exe /c ping … >nul`: ending cmd left its PING.EXE child
+ *  running for 30 s with the install folder as its working directory, and an
+ *  update taken in that time could not move the folder (measured on
+ *  Windows 11). With no child of its own, ending the helper ends all of it.
+ *
  *  Only when there is no console at all (a terminal-started app keeps its
  *  own). Never fatal: on any failure the app runs exactly as before, and the
  *  reason is returned for the caller to log. */
 export function adoptHiddenConsole(
   os: typeof Deno.build.os = Deno.build.os,
+  /** Test seams: kernel32, and "was this started from a terminal". */
+  deps: {
+    open?: (
+      name: string,
+      symbols: typeof K32,
+    ) => Deno.DynamicLibrary<typeof K32>;
+    isTerminal?: () => boolean;
+  } = {},
 ): "adopted" | "has-console" | "not-windows" | string {
   if (os !== "windows") return "not-windows";
   // Started from a terminal: it has a console, and asking needs no FFI (a
   // terminal-run app without --allow-ffi must not be warned for nothing).
   try {
-    if (Deno.stdout.isTerminal() || Deno.stderr.isTerminal()) {
+    if (
+      deps.isTerminal?.() ??
+        (Deno.stdout.isTerminal() || Deno.stderr.isTerminal())
+    ) {
       return "has-console";
     }
   } catch {
@@ -79,24 +119,25 @@ export function adoptHiddenConsole(
   }
   let k32: Deno.DynamicLibrary<typeof K32> | null = null;
   try {
-    k32 = Deno.dlopen("kernel32.dll", K32);
+    const open: NonNullable<typeof deps.open> = deps.open ?? Deno.dlopen;
+    k32 = open("kernel32.dll", K32);
     const one = new Uint32Array(1);
     if (k32.symbols.GetConsoleProcessList(one, 1) > 0) return "has-console";
     const si = new Uint8Array(104); // STARTUPINFOW, x64
     new DataView(si.buffer).setUint32(0, si.byteLength, true);
     const pi = new Uint8Array(24); // PROCESS_INFORMATION, x64
-    const cmdline = utf16z("cmd.exe /d /c ping -n 30 127.0.0.1 >nul");
+    const helper = hiddenConsoleHelper(neutralCwd(os)!);
     const CREATE_NO_WINDOW = 0x08000000;
     if (
       !k32.symbols.CreateProcessW(
         null,
-        cmdline,
+        utf16z(helper.cmdline),
         null,
         null,
         0,
         CREATE_NO_WINDOW,
         null,
-        null,
+        utf16z(helper.cwd),
         si,
         pi,
       )
@@ -131,6 +172,24 @@ export function adoptHiddenConsole(
   }
 }
 
+/** What owns the hidden console until this process has attached to it: one
+ *  program with no child, by full path (a bare name is looked up in the
+ *  app's own folder first), with a working directory outside the install.
+ *  30 echo requests ≈ 29 s: its own end, should ending it ever fail. */
+export function hiddenConsoleHelper(
+  systemRoot: string,
+): { cmdline: string; cwd: string } {
+  return {
+    cmdline: windowsCommandLine([
+      `${systemRoot}\\System32\\PING.EXE`,
+      "-n",
+      "30",
+      "127.0.0.1",
+    ]),
+    cwd: systemRoot,
+  };
+}
+
 const K32 = {
   GetConsoleProcessList: { parameters: ["buffer", "u32"], result: "u32" },
   AttachConsole: { parameters: ["u32"], result: "i32" },
@@ -145,7 +204,7 @@ const K32 = {
       "i32",
       "u32",
       "pointer",
-      "pointer",
+      "buffer",
       "buffer",
       "buffer",
     ],

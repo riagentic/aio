@@ -43,21 +43,48 @@ function inProcTable(pid: number): boolean {
   }
 }
 
+/** The pids listed in `/proc/self/task/<tid>/children`, over every thread.
+ *
+ *  Each task is read on its own: a thread can exit between the listing and
+ *  its read (test-file workers, the blocking pool), and that read then fails.
+ *  One vanished thread used to drop the WHOLE list — the caller saw "no
+ *  children", skipped the wait for a live esbuild and returned on the fixed
+ *  one, which is the leaked-subprocess failure this section exists to end.
+ *  Pure: the lister and the reader are passed in. @internal */
+export function _childPids(
+  tasks: Iterable<string>,
+  readChildren: (tid: string) => string,
+): number[] {
+  const kids: number[] = [];
+  for (const tid of tasks) {
+    let raw: string;
+    try {
+      raw = readChildren(tid);
+    } catch {
+      // aio-ok: that thread exited since the listing — skip IT. The other
+      // threads' children are still true, and they are what the caller needs.
+      continue;
+    }
+    for (const p of raw.trim().split(/\s+/)) if (p) kids.push(Number(p));
+  }
+  return kids;
+}
+
 /** The esbuild service processes this process started (Linux: `/proc`).
  *  Empty elsewhere, or when nothing can tell. */
 function esbuildChildPids(): number[] {
   if (Deno.build.os !== "linux") return [];
   try {
-    const kids: number[] = [];
-    for (const t of Deno.readDirSync("/proc/self/task")) {
-      const raw = Deno.readTextFileSync(`/proc/self/task/${t.name}/children`);
-      for (const p of raw.trim().split(/\s+/)) if (p) kids.push(Number(p));
-    }
-    return kids.filter((pid) => {
+    const tasks = [...Deno.readDirSync("/proc/self/task")].map((t) => t.name);
+    return _childPids(
+      tasks,
+      (tid) => Deno.readTextFileSync(`/proc/self/task/${tid}/children`),
+    ).filter((pid) => {
       try {
-        return Deno.readTextFileSync(`/proc/${pid}/cmdline`).includes(
-          "esbuild",
-        );
+        // The SERVICE, not anything named esbuild: `stop()` ends only that
+        // one, and waiting on another child would be waiting for nothing.
+        const cmd = Deno.readTextFileSync(`/proc/${pid}/cmdline`);
+        return cmd.includes("esbuild") && cmd.includes("--service=");
       } catch {
         return false; // already gone
       }
@@ -67,18 +94,102 @@ function esbuildChildPids(): number[] {
   }
 }
 
+/** How long a stopped service gets to leave the process table, for a caller
+ *  with no budget of its own (a test, a script). The dev server passes what
+ *  is left of ITS stop budget instead — see `stopEsbuild`. */
+const STOP_REAP_MS = 2000;
+
 /** Run esbuild's own `stop()` and return only once its child has EXITED.
- *  The fixed wait stays only where no process table can be read. */
+ *
+ *  Why there is a process-table scan here at all: the pinned npm build gives
+ *  no handle on the exit. Its `stop()` destroys the pipes, sends the kill and
+ *  returns `Promise.resolve()`; the child lives in a closure inside
+ *  `ensureServiceIsRunning` and is never exported (lib/main.js). The only
+ *  deterministic wait would be to patch `node:child_process.spawn`
+ *  process-wide to capture it, which is a worse thing than the scan.
+ *
+ *  What this guarantees:
+ *   - Linux: every esbuild service child this process had is REAPED — and its
+ *     subprocess resource with it, the runtime closes it in the same turn —
+ *     or, after `reapMs`, it is named on stderr and left behind.
+ *   - No `/proc` (macOS, Windows): the kill has been sent and one loop turn
+ *     has passed. The exit itself is NOT awaited there; nothing can tell.
+ *
+ *  Call it with nothing in flight: a transform still pending when the pipes
+ *  are destroyed never settles (measured on 0.24.2 — neither resolved nor
+ *  rejected). `stopEsbuild` in server-transpile.ts waits for its own first. */
+/** The services among `pids` that `stop()` just ended: those whose stdin this
+ *  process no longer holds. esbuild's `stop()` destroys the stdin pipe of ITS
+ *  service — synchronously — and nothing else; a service whose pipe is still
+ *  open here belongs to another live esbuild instance in this process (a
+ *  worker's isolate, a second copy of the package), which was never asked to
+ *  stop. Waiting on one of those cost every close the whole reap and named a
+ *  process the stop had never touched (measured: one such service, then 2 s
+ *  and a wrong `note:` on every dev-server close for the rest of the run).
+ *  Pure: both readers are passed in; a pid whose stdin cannot be read is
+ *  kept — waiting on it is the old behaviour, never a skipped wait. @internal */
+export function _stoppedByUs(
+  pids: number[],
+  stdinOf: (pid: number) => string,
+  heldHere: () => Set<string>,
+): number[] {
+  const held = heldHere();
+  return pids.filter((pid) => {
+    let pipe: string;
+    try {
+      pipe = stdinOf(pid);
+    } catch {
+      return true; // aio-ok: unreadable — wait on it, as before
+    }
+    return !held.has(pipe);
+  });
+}
+
+/** Every file this process holds open, as `/proc/self/fd` names them. */
+function heldHere(): Set<string> {
+  const held = new Set<string>();
+  try {
+    for (const e of Deno.readDirSync("/proc/self/fd")) {
+      try {
+        held.add(Deno.readLinkSync(`/proc/self/fd/${e.name}`));
+      } catch {
+        // aio-ok: the fd that listed the directory itself, closed by now
+      }
+    }
+  } catch {
+    // aio-ok: no /proc — then no pid was listed either, nothing to judge
+  }
+  return held;
+}
+
 export async function stopEsbuildService(
   stop: () => void | Promise<void>,
+  reapMs: number = STOP_REAP_MS,
 ): Promise<void> {
-  const pids = esbuildChildPids();
+  const before = esbuildChildPids();
   await stop();
-  const deadline = Date.now() + 2000;
+  // Only what this stop ended is waited for — see `_stoppedByUs`.
+  const pids = _stoppedByUs(
+    before,
+    (pid) => Deno.readLinkSync(`/proc/${pid}/fd/0`),
+    heldHere,
+  );
+  const asked = Date.now();
+  const deadline = asked + reapMs;
   while (pids.some(inProcTable) && Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 5));
   }
-  // one more turn so the runtime settles the exit it just observed
+  const stuck = pids.filter(inProcTable);
+  if (stuck.length > 0) {
+    console.warn(
+      `note: esbuild's service process (pid ${stuck.join(", ")}) was told ` +
+        `to stop and is still there ${
+          ((Date.now() - asked) / 1000).toFixed(1)
+        } s later — not waiting any longer; it is left to exit by itself.`,
+    );
+  }
+  // One more turn, so the exit the runtime has just observed is delivered
+  // (a turn, not a duration: any timer yields one).
   await new Promise((r) => setTimeout(r, 10));
 }
 

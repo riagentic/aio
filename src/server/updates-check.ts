@@ -6,7 +6,7 @@
 // boring reasons (DNS, a 500, a half-written file) is in one place with one
 // error vocabulary. Nothing here decides anything — it fetches, it verifies,
 // it reports.
-import { dirname, join } from "@std/path";
+import { basename, dirname, join } from "@std/path";
 // Incremental SHA-256. WebCrypto's digest takes the WHOLE buffer, which is why
 // this file used to read a 156 MB AppImage into memory twice; node:crypto's
 // hash is a streaming one, and it is the same import the session, user and blob
@@ -20,7 +20,15 @@ import {
 import type { GitHead } from "./updates-core.ts";
 import type { InstalledTarget } from "./updates-apply.ts";
 import { gitOwnRepoEnv } from "./git-noninteractive.ts";
-import { outlivingParent } from "./no-console.ts";
+import { neutralCwd, outlivingParent } from "./no-console.ts";
+import {
+  identity,
+  made,
+  OLD_STAGE_AGE_MS,
+  record,
+  sumOf,
+} from "./updates-owned.ts";
+import { moveFile, renameOverSync } from "../diagnostics/rename-over.ts";
 import { DOWNLOAD_STALL_MS } from "../electron/electron-runtime-fetch.ts";
 
 /** What an install remembers between runs. Lives beside the app's data,
@@ -71,6 +79,11 @@ export type TrustStore = {
   /** The signed `releasedAt` of the release `installedSha256` came from —
    *  what tells an older build of the same version from a newer one. */
   installedReleasedAt?: string;
+  /** How many times in a row the swap of release `to` could not be made on
+   *  this machine (the running version could not be moved, the helper could
+   *  not start). Such a release never ran, so it is offered again — and this
+   *  count is what stops that from going on for ever. */
+  failedSwaps?: { to: string; count: number };
 };
 
 const TRUST_FILE = "update-trust.json";
@@ -140,7 +153,7 @@ function writeTrustFile(path: string, next: TrustStore): void {
     } finally {
       f.close();
     }
-    Deno.renameSync(tmp, path);
+    renameOverSync(tmp, path);
   } catch (e) {
     try {
       Deno.removeSync(tmp);
@@ -173,6 +186,16 @@ export function recordInstalledSha256(
   writeTrust(dataDir, {
     installedSha256: sha256,
     installedReleasedAt: releasedAt,
+  });
+}
+
+/** The build the digest described is no longer the one installed (it was put
+ *  back, or never went in): forget the digest AND its release time. The time
+ *  alone was left behind, naming a release that was not running. */
+export function forgetInstalledDigest(dataDir: string): void {
+  writeTrust(dataDir, {
+    installedSha256: undefined,
+    installedReleasedAt: undefined,
   });
 }
 
@@ -276,7 +299,16 @@ export type ManifestFetch =
      *  `pinKey` is handed as `from`. */
     pinFrom: string;
   }
-  | { kind: "error"; error: string };
+  | {
+    kind: "error";
+    error: string;
+    /** Set when the URL simply gave no manifest, so a caller with another
+     *  URL to read may read it: `no-such-file` — the host said so (404, 410);
+     *  `this-time` — any other status, or a host that could not be reached.
+     *  Never for a timeout (the host said nothing) or a body that was served
+     *  and is wrong. */
+    absent?: "no-such-file" | "this-time";
+  };
 
 /** A manifest is a few hundred bytes. Anything approaching a megabyte is a
  *  login page, an error document, or a host that decided to hand back a DVD —
@@ -511,50 +543,47 @@ export function kindManifestUrl(platformUrl: string, kind: string): string {
 const KIND_ABSENT_MS = 24 * 60 * 60 * 1000;
 const kindAbsentUntil = new Map<string, number>();
 
-/** The manifest THIS install reads.
+/** Fetch the manifest THIS install reads — ONE request per check.
  *
  *  A platform can publish two install kinds — Windows Electron's
  *  self-contained `.exe` (`binary`, the platform's own manifest) and the
  *  `.zip` (`electron-zip`). An install unpacked from the zip refuses the
  *  `.exe`'s release, so it reads `<os>-<arch>.electron-zip.json` when the
- *  channel serves one (2xx), and the platform's manifest otherwise — exactly
- *  what it read before the kind manifest existed, so a channel without one,
- *  or one this probe cannot reach, behaves as it always did. Every other
- *  install kind reads the platform's manifest, unprobed.
+ *  channel serves one, and the platform's manifest otherwise — exactly what
+ *  it read before the kind manifest existed, so a channel without one, or one
+ *  that cannot be reached, behaves as it always did. Every other install kind
+ *  reads the platform's manifest.
  *
- *  The probe waits as long as the manifest fetch itself: a slow channel's
- *  answer is its answer. A probe that TIMES OUT throws — the channel said
- *  nothing, which is not "absent", and reading the platform's manifest on it
- *  offered a zip install the `.exe` it refuses; it also spares an unreachable
- *  host a second full wait. Only a 404 or 410 — the channel saying "no such
- *  file" — is believed for `KIND_ABSENT_MS`; any other status (a 403 of a
- *  private bucket, a 429, a 5xx) reads the platform's manifest this time and
- *  asks again next check. */
-export async function installManifestUrl(
+ *  The kind manifest is FETCHED, not probed for: a probe followed by the
+ *  fetch asked a channel that has one twice on every poll, for good. A second
+ *  request is made only when the first found no kind manifest.
+ *
+ *  A kind fetch that TIMES OUT fails the check — the channel said nothing,
+ *  which is not "absent", and reading the platform's manifest on it offered a
+ *  zip install the `.exe` it refuses; it also spares an unreachable host a
+ *  second full wait. Only a 404 or 410 — the channel saying "no such file" —
+ *  is believed for `KIND_ABSENT_MS`; any other status (a 403 of a private
+ *  bucket, a 429, a 5xx) reads the platform's manifest this time and asks
+ *  again next check. `etagFor` is the cached validator for a URL, if any. */
+export async function fetchInstallManifest(
   platformUrl: string,
   installed: InstalledTarget,
-  timeoutMs: number = MANIFEST_TIMEOUT_MS,
-): Promise<string> {
-  if (installed !== "electron-zip") return platformUrl;
+  etagFor: (url: string) => string | undefined = () => undefined,
+  timeoutMs?: number,
+): Promise<{ url: string; got: ManifestFetch }> {
+  const read = async (url: string) => ({
+    url,
+    got: await fetchManifest(url, etagFor(url), { timeoutMs }),
+  });
+  if (installed !== "electron-zip") return read(platformUrl);
   const kind = kindManifestUrl(platformUrl, installed);
-  if ((kindAbsentUntil.get(kind) ?? 0) > Date.now()) return platformUrl;
-  try {
-    const res = await fetch(kind, {
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    await res.body?.cancel();
-    if (res.ok) return kind;
-    if (res.status === 404 || res.status === 410) {
-      kindAbsentUntil.set(kind, Date.now() + KIND_ABSENT_MS);
-    }
-    return platformUrl;
-  } catch (e) {
-    if (e instanceof DOMException && e.name === "TimeoutError") {
-      throw new Error(fetchFailure(e, kind, timeoutMs));
-    }
-    // aio-ok: unreachable or absent → the platform manifest, whose own fetch reports any transport failure
-    return platformUrl;
+  if ((kindAbsentUntil.get(kind) ?? 0) > Date.now()) return read(platformUrl);
+  const own = await read(kind);
+  if (own.got.kind !== "error" || !own.got.absent) return own;
+  if (own.got.absent === "no-such-file") {
+    kindAbsentUntil.set(kind, Date.now() + KIND_ABSENT_MS);
   }
+  return read(platformUrl);
 }
 
 /** Fetch and parse a manifest. `file:` URLs skip conditional requests — there
@@ -585,6 +614,8 @@ export async function fetchManifest(
   // through the response, so a host that sends headers and then stalls the
   // body is cut off too.
   const signal = AbortSignal.timeout(timeoutMs);
+  // Whether the host answered at all — see `ManifestFetch`'s `absent`.
+  let answered = false;
   try {
     // Redirects are followed BY HAND, so every hop's transport is seen: a key
     // may be pinned only if EACH leg authenticated its host. Judging the
@@ -613,6 +644,7 @@ export async function fetchManifest(
       at = new URL(next, at).href;
       if (transportAuthenticatesHost(pinFrom)) pinFrom = at;
     }
+    answered = true;
     if (res.status === 304) {
       await res.body?.cancel();
       return { kind: "not-modified" };
@@ -628,11 +660,13 @@ export async function fetchManifest(
         return {
           kind: "error",
           error: missingManifestError(url, "HTTP 404"),
+          absent: "no-such-file",
         };
       }
       return {
         kind: "error",
         error: `${res.status} ${res.statusText} from ${url}`,
+        absent: res.status === 410 ? "no-such-file" : "this-time",
       };
     }
     const body = await readCapped(res, MANIFEST_MAX_BYTES, url);
@@ -665,6 +699,10 @@ export async function fetchManifest(
     };
   } catch (e) {
     const msg = fetchFailure(e, url, timeoutMs);
+    const absent = !answered &&
+        !(e instanceof DOMException && e.name === "TimeoutError")
+      ? "this-time" as const
+      : undefined;
     // Same rule as unpackArchive / gitLsRemote: a raw ENOENT is the least
     // obvious form of "this path does not exist". A file:// channel that was
     // never published used to surface Deno's fetch wording and nothing else.
@@ -672,11 +710,13 @@ export async function fetchManifest(
       return {
         kind: "error",
         error: missingManifestError(url, "the file does not exist"),
+        absent,
       };
     }
     return {
       kind: "error",
       error: msg.startsWith(url) ? msg : `${url}: ${msg}`,
+      absent,
     };
   }
 }
@@ -756,7 +796,9 @@ const MB = (n: number) =>
  *
  *  Removes everything it staged on any failure — a half-downloaded file left
  *  beside a binary is the kind of thing a later boot mistakes for a staged
- *  update. */
+ *  update. A process that is KILLED mid-download removes nothing: with
+ *  `owner`, the staging directory and the finished file are on record first,
+ *  and a later boot removes them (`sweepOwned`). */
 export async function downloadArtifact(opts: {
   url: string;
   /** Where the verified artifact ends up (a sibling of the install target). */
@@ -778,6 +820,9 @@ export async function downloadArtifact(opts: {
   signal?: AbortSignal;
   /** Test seam: the no-bytes deadline (default `DOWNLOAD_STALL_MS`). */
   stallMs?: number;
+  /** The data directory of the app this download is for: what is made beside
+   *  the install is recorded there before it is made. */
+  owner?: string;
 }): Promise<{ ok: true; path: string } | { ok: false; error: string }> {
   if (
     !Number.isInteger(opts.expectSize) || opts.expectSize <= 0
@@ -822,8 +867,14 @@ export async function downloadArtifact(opts: {
   // 0700 and freshly made: whatever is at `dest` right now cannot influence
   // where the bytes land, and no other user can read a half-written artifact
   // or swap it for their own.
-  const stage = join(parent, `.aio-update-${crypto.randomUUID().slice(0, 8)}`);
+  const stage = join(parent, downloadStageName(opts.dest));
+  try {
+    if (opts.owner) record(opts.owner, stage, "dir");
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
   await Deno.mkdir(stage, { recursive: false, mode: 0o700 });
+  if (opts.owner) made(opts.owner, stage);
   const staged = join(stage, "artifact");
   let done = false;
   // Re-armed on every chunk: fires only when the host stops sending.
@@ -923,7 +974,14 @@ export async function downloadArtifact(opts: {
     // Same filesystem (the staging dir is a sibling), so this is atomic — and
     // it REPLACES anything at `dest`, including a symlink, rather than
     // writing through it.
-    await Deno.rename(staged, opts.dest);
+    // A leftover of ours at `dest` is replaced; anything else there refuses.
+    if (opts.owner) {
+      record(opts.owner, opts.dest, "file", {
+        is: identity(staged),
+        sum: sumOf(staged),
+      });
+    }
+    await moveFile(staged, opts.dest);
     return { ok: true, path: opts.dest };
   } catch (e) {
     return {
@@ -938,6 +996,38 @@ export async function downloadArtifact(opts: {
   } finally {
     clearTimeout(stallTimer);
     if (!done) await Deno.remove(stage, { recursive: true }).catch(() => {});
+  }
+}
+
+/** A download's staging directory: named for what is being downloaded and
+ *  for the process doing it, so a person looking at the folder can tell. The
+ *  random part keeps two downloads of one release in one process apart, and
+ *  the name unguessable. What a boot may remove is decided by the record
+ *  (`updates-owned.ts`), never by this name. */
+function downloadStageName(dest: string): string {
+  return `.aio-update-${basename(dest)}-${Deno.pid}-${
+    crypto.randomUUID().slice(0, 8)
+  }`;
+}
+
+/** Is `path` a download folder a build up to 1.0.16 left behind? Those are
+ *  named `.aio-update-<8 hex>` and are on no record, so the proof is content:
+ *  a real directory holding nothing but a file `artifact` (or nothing), and
+ *  nothing in it written for an hour. */
+export function abandonedOldStage(path: string): boolean {
+  if (!/^\.aio-update-[0-9a-f]{8}$/.test(basename(path))) return false;
+  try {
+    if (!Deno.lstatSync(path).isDirectory) return false;
+    const inside = [...Deno.readDirSync(path)];
+    if (inside.some((e) => e.name !== "artifact" || !e.isFile)) return false;
+    const newest = Math.max(
+      ...[path, ...inside.map((e) => join(path, e.name))].map((p) =>
+        Deno.lstatSync(p).mtime?.getTime() ?? Infinity
+      ),
+    );
+    return Date.now() - newest > OLD_STAGE_AGE_MS;
+  } catch {
+    return false; // aio-ok: unreadable — not provably a download, left alone
   }
 }
 
@@ -993,6 +1083,7 @@ function killGitTree(pid: number): void {
     if (Deno.build.os !== "windows") return Deno.kill(-pid, "SIGKILL");
     new Deno.Command("taskkill", {
       args: ["/T", "/F", "/PID", String(pid)],
+      cwd: neutralCwd(),
       stdin: "null",
       stdout: "null",
       stderr: "null",

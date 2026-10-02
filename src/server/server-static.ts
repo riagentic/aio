@@ -12,7 +12,14 @@ import {
   readBounded,
   SNAPSHOT_MAX_BODY,
 } from "./read-body.ts";
-import { TROJAN_PREFIX } from "./server-auth.ts";
+import {
+  LOCAL_CONTROL_HEADER,
+  localControlAuthorized,
+  STOP_REFUSED,
+  stopRequester,
+  TROJAN_PREFIX,
+} from "./server-auth.ts";
+import { PROBE_FLOOD } from "./local-peer.ts";
 import { isServerOnlyMarker, SERVER_FILE_RE } from "../entries.ts";
 import type { CallTimeouts } from "../protocol/protocol-types.ts";
 import {
@@ -28,7 +35,7 @@ import {
 import { appConfigTitle, locateDenoJsonAbove } from "./deno-json.ts";
 import { formatPrometheus, healthCells } from "./server-metrics.ts";
 import { readGauges } from "../diagnostics/memory-ledger.ts";
-import { log } from "../diagnostics/logger-api.ts";
+import { getLogger, log } from "../diagnostics/logger-api.ts";
 import type { RenderBudget } from "../vitals/types.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
 import {
@@ -179,6 +186,7 @@ export async function realPathInside(
 
 /** Is this (decoded) URL path under {@link SRC_TREE_PREFIX}? Pure. */
 function _isSrcTreeUrl(pathname: string): boolean {
+  // aio-ok: path-split — a URL pathname
   return pathname.startsWith(SRC_TREE_PREFIX + "/");
 }
 
@@ -318,7 +326,9 @@ export function isProtectedPath(pathname: string, prod = false): boolean {
   // judged protected slightly more often, never less.
   const decoded = _decodePathname(pathname);
   const segments = [
+    // aio-ok: path-split — URL pathnames
     ...pathname.split("/"),
+    // aio-ok: path-split — a decoded URL pathname
     ...(decoded === null ? [] : decoded.split("/")),
   ].filter((seg) => seg !== "");
   if (segments.length === 0) return false;
@@ -340,7 +350,9 @@ export function isProtectedPath(pathname: string, prod = false): boolean {
   // readable, unauthenticated".
   // Both spellings' last segments, for the same reason.
   const lasts = [
+    // aio-ok: path-split — URL pathnames
     pathname.split("/").filter((x) => x !== "").pop() ?? "",
+    // aio-ok: path-split — a decoded URL pathname
     decoded.split("/").filter((x) => x !== "").pop() ?? "",
   ].map((x) => x.toLowerCase());
   for (const last of lasts) {
@@ -442,6 +454,7 @@ export function isShellAsset(rawPathname: string, dev: boolean): boolean {
   // (`assetlinks.json` was a 401 on every `auth: true` app). Dotfiles
   // elsewhere stay `isProtectedPath`'s refusal.
   if (pathname.startsWith("/.well-known/")) return true;
+  // aio-ok: path-split — a URL pathname
   const segments = pathname.split("/").filter((s) => s !== "");
   const last = segments[segments.length - 1];
   // No file named at all → the SPA shell (a client route).
@@ -535,6 +548,7 @@ export function logSafe(text: unknown, max = 2000): string | undefined {
  *  traversal step. Pure; exported for tests. */
 export function _decodePathname(pathname: string): string | null {
   const out: string[] = [];
+  // aio-ok: path-split — a URL pathname
   for (const seg of pathname.split("/")) {
     let d: string;
     try {
@@ -989,6 +1003,35 @@ export interface ServeStaticOptions {
   anonymous?: boolean;
 }
 
+/** A refused production stop, said — never silently a 404 alone: `am stop`
+ *  with a stale credential must leave a trace. Bounded like the local-peer
+ *  probes: {@linkcode PROBE_FLOOD} lines a minute, then one count when the
+ *  minute turns. Never the presented value. */
+export function _stopRefusalLog(
+  say: (msg: string) => void,
+  now: () => number = Date.now,
+): (presented: boolean) => void {
+  let since = 0, n = 0;
+  return (presented) => {
+    const t = now();
+    if (t - since >= 60_000) {
+      if (n > PROBE_FLOOD) {
+        say(`[aio] … and ${n - PROBE_FLOOD} more refused stops in that minute`);
+      }
+      since = t;
+      n = 0;
+    }
+    if (++n > PROBE_FLOOD) return;
+    say(
+      `[aio] refused a stop request (POST ${TROJAN_PREFIX}shutdown): ` +
+        (presented
+          ? "wrong control credential — not this boot's control.key"
+          : "no control credential") +
+        " — answered 404, the app keeps running",
+    );
+  };
+}
+
 export function createStaticHandler(deps: StaticDeps): {
   serveStatic: (
     pathname: string,
@@ -1006,6 +1049,7 @@ export function createStaticHandler(deps: StaticDeps): {
   >;
 } {
   let lastError = ""; // last transpile error
+  const refusedStop = _stopRefusalLog((m) => log.info(m));
   const errorMap = new Map<string, ErrorEntry>();
   // Memoized: in prod, is the browser bundle (dist/app.js) actually present?
   // A `--headless` build skips it, but the server still serves the UI shell —
@@ -1093,6 +1137,7 @@ export function createStaticHandler(deps: StaticDeps): {
     const sr = _srcRoot();
     const url = devModuleUrl(file, deps.absBaseDir, _roots, sr);
     if (url !== null) {
+      // aio-ok: path-split — a URL
       if (url.startsWith(SRC_TREE_PREFIX + "/") && !_srcServable.has(file)) {
         _srcServable.add(file);
         deps.onSrcServed?.(file);
@@ -1453,6 +1498,40 @@ export function createStaticHandler(deps: StaticDeps): {
     // ── Prometheus metrics endpoint ──
     if (pathname === "/__aio/metrics") {
       return handleMetrics();
+    }
+
+    // ── Prod: the ONE control request a release build answers — the stop ──
+    // Presented with the per-boot, owner-only control credential
+    // (`armLocalControl`), and nothing else of the trojan exists here. Without
+    // it a production app could only be stopped by a signal, and on Windows a
+    // signal is `TerminateProcess`: no `onStop`, no final flush.
+    if (
+      prod && req && pathname === `${TROJAN_PREFIX}shutdown` &&
+      req.method === "POST"
+    ) {
+      if (!localControlAuthorized(req)) {
+        const presented = req.headers.has(LOCAL_CONTROL_HEADER);
+        refusedStop(presented);
+        // The caller may end this process the moment it reads the answer —
+        // `am stop`'s fallback, which on Windows is TerminateProcess — and a
+        // buffered line dies with it: the line reaches app.log FIRST.
+        await getLogger()?.flush();
+        return Response.json({
+          error: `${STOP_REFUSED}: ` +
+            (presented
+              ? "wrong control credential — not this boot's control.key"
+              : "no control credential"),
+        }, { status: 404 });
+      } else {
+        const stop = (deps.getTrojanDeps() as {
+          trojan?: { shutdown?: (by: "am stop" | "takeover") => Promise<void> };
+        }).trojan?.shutdown;
+        if (stop) {
+          const by = stopRequester(req);
+          queueMicrotask(() => void stop(by));
+          return Response.json({ ok: true, msg: "shutting down" });
+        }
+      }
     }
 
     // ── Trojan: control REST API — DEV-ONLY, never mounted in prod ──

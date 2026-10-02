@@ -19,9 +19,22 @@ export const BACKOFF_BASE_MS = 1000;
 export const BACKOFF_MAX_MS = 8000;
 
 /** Exponential reconnect delay with ±`jitter` randomization (default 20%).
- *  Jitter prevents a thundering herd when many clients lose one server. */
-export function backoffDelay(retry: number, jitter = 0.2): number {
-  const base = Math.min(BACKOFF_BASE_MS * Math.pow(2, retry), BACKOFF_MAX_MS);
+ *  Jitter prevents a thundering herd when many clients lose one server.
+ *
+ *  `baseMs`/`maxMs` are parameters because this function's SOURCE is emitted
+ *  into a generated script (electron-uds): the body may name nothing outside
+ *  itself. It used to read the two constants directly, and `build.minify`
+ *  renames a module constant — the emitted copy then asked for a variable
+ *  that existed nowhere, and the window never reconnected. A default is only
+ *  evaluated when its argument is missing, so the generated call site passes
+ *  both and the emitted copy is closed. */
+export function backoffDelay(
+  retry: number,
+  jitter = 0.2,
+  baseMs = BACKOFF_BASE_MS,
+  maxMs = BACKOFF_MAX_MS,
+): number {
+  const base = Math.min(baseMs * Math.pow(2, retry), maxMs);
   return base + base * jitter * (Math.random() * 2 - 1);
 }
 

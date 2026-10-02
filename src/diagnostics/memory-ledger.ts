@@ -122,8 +122,11 @@ export function readGauges(): GaugeReading[] {
  *  of eating the machine in silence. The running value is registered as a
  *  `counter` gauge, so a breach is also visible on `am heap` and metrics. */
 export type Budget = {
-  /** Add to the counter. Throws `MEMORY_UNBOUNDED` (a teachable error naming
-   *  the series and its ceiling) the moment the ceiling is passed. */
+  /** Add to the counter. Throws `MEMORY_UNBOUNDED` (a teachable error whose
+   *  message contains that word and names the series and its ceiling) the
+   *  moment the ceiling is passed. `n` is a finite count ≥ 0 — anything else
+   *  is refused: `spend(NaN)` made the counter NaN, and `NaN > max` is false
+   *  for ever after, which is a ceiling switched off in silence. */
   spend(n?: number): void;
   /** The current value, without spending. */
   value(): number;
@@ -142,7 +145,14 @@ const _budgets = new Map<string, Budget>();
 export function budget(
   name: string,
   max: number,
-  opts: { unit?: GaugeUnit; owner?: string } = {},
+  opts: {
+    unit?: GaugeUnit;
+    owner?: string;
+    /** What a breach of THIS series means, and what to do about it — the
+     *  series' owner knows; the ledger only knows a counter ran away. */
+    why?: string;
+    fix?: string;
+  } = {},
 ): Budget {
   if (!(typeof max === "number" && Number.isFinite(max) && max > 0)) {
     throw teachableError(
@@ -160,17 +170,27 @@ export function budget(
   let used = 0;
   const b: Budget = {
     spend(n = 1): void {
+      if (!(typeof n === "number" && Number.isFinite(n) && n >= 0)) {
+        throw teachableError(
+          `memory-ledger: budget("${name}").spend(${n}) — the amount must ` +
+            `be a finite number ≥ 0. NaN would make the counter NaN, and ` +
+            `nothing is ever greater than NaN: the ceiling would be off.`,
+          "Pass the count that was actually consumed.",
+        );
+      }
       used += n;
       if (used > max) {
         throw teachableError(
-          `memory: "${name}" passed its ceiling — ${used} > ${max} ${unit}. ` +
-            `This series is meant to reset between boots/jobs and has not, so ` +
-            `whatever feeds it is looping. It is a COUNTER (cumulative work), ` +
-            `not a heap size, so this is a control-flow bug, not a memory ` +
-            `setting to raise.`,
-          `Find the loop that keeps calling into "${name}" — the counter's ` +
-            `owner ("${owner}") and the stack trace name the site. ` +
-            `\`am heap\` and /__aio/metrics show every watched series.`,
+          `MEMORY_UNBOUNDED: "${name}" passed its ceiling — ${used} > ` +
+            `${max} ${unit} (+${n} in this call). ` +
+            (opts.why ??
+              `It is a COUNTER (cumulative work), not a heap size: whatever ` +
+                `feeds it is looping, so this is a control-flow bug, not a ` +
+                `memory setting to raise.`),
+          opts.fix ??
+            `Find the loop that keeps calling into "${name}" — the ` +
+              `counter's owner ("${owner}") and the stack trace name the ` +
+              `site. \`am heap\` and /__aio/metrics show every watched series.`,
           "docs/debugging/performance.md",
         );
       }

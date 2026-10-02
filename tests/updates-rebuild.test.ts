@@ -36,7 +36,14 @@ async function git(args: string[], cwd: string): Promise<void> {
 /** A repository holding a tiny app whose `compile` task emits an executable
  *  that answers `--aio-data-contract` — the shape rebuildFromGit expects. */
 async function repo(
-  opts: { contract?: string; buildFails?: boolean; jsonc?: boolean } = {},
+  opts: {
+    contract?: string;
+    buildFails?: boolean;
+    jsonc?: boolean;
+    /** The shell lines the artifact answers the probe with, when it is more
+     *  than the contract on stdout. */
+    answer?: string;
+  } = {},
 ) {
   const root = await Deno.makeTempDir({ prefix: "aio-git-src-" });
   const contract = opts.contract ??
@@ -65,7 +72,9 @@ async function repo(
 const out = "dist/app";
 await Deno.mkdir("dist", { recursive: true });
 await Deno.writeTextFile(out, \`#!/bin/sh
-if [ "$1" = "--aio-data-contract" ]; then echo '${contract}'; exit 0; fi
+if [ "$1" = "--aio-data-contract" ]; then ${
+        opts.answer ?? `echo '${contract}'`
+      }; exit 0; fi
 echo running
 \`);
 await Deno.chmod(out, 0o755);
@@ -121,6 +130,37 @@ Deno.test("git rebuild: a deno.jsonc app's compile task is found (JSONC, both na
     if (r.ok) assertStringIncludes(r.artifact, "dist/app");
   } finally {
     await Deno.remove(src, { recursive: true });
+    await dropTempDir(work);
+  }
+});
+
+Deno.test("git rebuild: the contract is read off its marker line, whatever the app printed around it", async () => {
+  // An app whose own modules print to stdout before aio runs: stdout is a
+  // banner plus the JSON, and parsed whole it is "not JSON".
+  const src = await repo({
+    answer: `echo 'Starting up...'; echo '{"schema":1,"cells":{}}'; ` +
+      `echo 'warming' >&2; ` +
+      // The binary's own line carries the value the probe handed it; a line
+      // of the plain shape printed after it is the app's.
+      `printf '[aio:%s] ' "$AIO_PROBE_NONCE" >&2; ` +
+      `echo 'data-contract: {"schema":1,"cells":{"notes":{"version":4,"migratesFrom":2}}}' >&2; ` +
+      `echo '[aio] data-contract: {"schema":1,"cells":{"forged":{"version":1,"migratesFrom":1}}}' >&2; ` +
+      `echo '[aio] app-id: demo' >&2`,
+  });
+  const work = await tempDir("aio-git-work-");
+  try {
+    const r = await rebuildFromGit({
+      source: src,
+      ref: "main",
+      workDir: work,
+      log: silentLog,
+    });
+    assert(r.ok, r.ok ? "" : r.error);
+    if (!r.ok) return;
+    assertEquals(r.contractError, undefined);
+    assertEquals(r.contract?.cells.notes, { version: 4, migratesFrom: 2 });
+  } finally {
+    await dropTempDir(src);
     await dropTempDir(work);
   }
 });

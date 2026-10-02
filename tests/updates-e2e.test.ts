@@ -5,7 +5,7 @@
 // end — publish v2, check, apply, assert the artifact was replaced — and then
 // the refusals, which are the half that has to be right.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { basename, join } from "@std/path";
 import {
   buildReleaseManifest,
   buildShipManifest,
@@ -17,6 +17,7 @@ import { resolveUpdates } from "../src/server/updates-core.ts";
 import {
   failedUpdatePath,
   firstBootPath,
+  type PendingMark,
   readPending,
   writePending,
 } from "../src/server/updates-apply.ts";
@@ -26,6 +27,7 @@ import {
 } from "../src/server/updates-boot.ts";
 import type { UpdatesSlot } from "../src/state/updates-cell.ts";
 import { readTrust, writeTrust } from "../src/server/updates-check.ts";
+import { identity, readOwned } from "../src/server/updates-owned.ts";
 import type { Log } from "../src/diagnostics/logger.ts";
 
 const platform = { os: Deno.build.os, arch: Deno.build.arch };
@@ -604,15 +606,20 @@ Deno.test("updates e2e: a .zip release is verified, unpacked, and handed to the 
   if (Deno.build.os === "windows") return; // the cmd.exe branch is unit-tested
   const r = await rig();
   try {
-    await publishZip(r, { version: "2.0.0", channel: "prod" });
+    const manifest = await publishZip(r, { version: "2.0.0", channel: "prod" });
     const install = join(r.root, "MyApp");
     await Deno.mkdir(join(install, "electron"), { recursive: true });
     await Deno.writeTextFile(join(install, "VERSION"), "1.0.0");
+    // What an earlier update recorded about the build that is running.
+    writeTrust(r.dataDir, {
+      installedSha256: "ab".repeat(32),
+      installedReleasedAt: "2026-01-01T00:00:00.000Z",
+    });
 
     const swaps: {
       current: string;
       staged: string;
-      pending?: { dataDir: string; from: string; to: string };
+      pending?: PendingMark;
     }[] = [];
     const exits: number[] = [];
     const rt = createUpdatesRuntime({
@@ -659,6 +666,14 @@ Deno.test("updates e2e: a .zip release is verified, unpacked, and handed to the 
     assertEquals(swaps[0]!.pending?.from, "1.0.0");
     assertEquals(swaps[0]!.pending?.dataDir, r.dataDir);
     assertEquals(exits, [0]);
+    // The swap happens after this process: nothing claims 2.0.0 is installed
+    // yet (a failed swap left the old version running under the new
+    // release's date), and the old digest is gone too. Both ride on the
+    // marker, for the confirm to record.
+    assertEquals(readTrust(r.dataDir).installedSha256, undefined);
+    assertEquals(readTrust(r.dataDir).installedReleasedAt, undefined);
+    assertEquals(swaps[0]!.pending?.sha256, manifest.sha256);
+    assertEquals(swaps[0]!.pending?.releasedAt, manifest.releasedAt);
     // The install itself is untouched by this process — the shell does that.
     assertEquals(await Deno.readTextFile(join(install, "VERSION")), "1.0.0");
   } finally {
@@ -671,7 +686,8 @@ Deno.test("updates e2e: a .zip release is verified, unpacked, and handed to the 
 // gone. Nothing was swapped: it is said, undone, and this version restarts.
 // The refusal runs AFTER shutdown, when the logger is gone (VM-measured: the
 // line reached no file) — so it is kept in the failed record, and the
-// relaunched version names it at boot and dismisses the release.
+// relaunched version names it at boot and counts a failed attempt — it is
+// the machine that refused, not the release.
 Deno.test("updates e2e: a swap helper that cannot start — not installed, undone, this version restarts", async () => {
   if (Deno.build.os === "windows") return;
   const r = await rig();
@@ -745,12 +761,15 @@ Deno.test("updates e2e: a swap helper that cannot start — not installed, undon
       argv: [],
       slot: { runtime: null, cell: null } as unknown as UpdatesSlot,
     }).stop();
+    // Nothing was swapped — an attempt that failed, counted like a move the
+    // helper could not make, not a release that failed: still on offer.
     assertStringIncludes(
       said.join("\n"),
-      "update 1.0.0 → 2.0.0 could not be installed: the update helper " +
-        "could not start (PermissionDenied: blocked by policy), so 1.0.0 " +
-        "was started again",
+      "update 1.0.0 → 2.0.0 could not be installed: the swap could not be " +
+        "started (PermissionDenied: blocked by policy), so 1.0.0 was " +
+        "started again — 2.0.0 stays on offer (failed attempt 1 of 3)",
     );
+    assert(!said.join("\n").includes("Dismissed"), said.join("\n"));
     assertEquals(readPending(r.dataDir), null);
     assertEquals(
       await Deno.stat(firstBootPath(r.dataDir)).catch(() => null),
@@ -1520,6 +1539,185 @@ Deno.test("updates e2e: setChannel clears the ETag that is actually READ", async
     const got = await rt.check({ dismissed: null });
     assertEquals(got.kind, "offer");
     if (got.kind === "offer") assertEquals(got.update.version, "3.0.0");
+  } finally {
+    await Deno.remove(r.root, { recursive: true });
+  }
+});
+
+// ── what an update makes beside the install is its own, on record ──────────
+//
+// An update's names (`<install>.new-<v>`, `.staged-<v>`, `.zip-<v>`,
+// `.old-<v>`) are in a folder that is the user's. Each used to be cleared by
+// name before it was made — a recursive delete of whatever was there.
+
+const beside = (r: Rig) =>
+  [...Deno.readDirSync(r.root)].map((e) => e.name).filter((n) =>
+    !["data", "releases", "app", "MyApp"].includes(n) && !n.startsWith("stage-")
+  ).sort();
+
+Deno.test("updates e2e: a single-file update puts what it makes on record — the kept-aside copy as the very file", async () => {
+  const r = await rig();
+  try {
+    await publish(r, { version: "2.0.0", channel: "prod" });
+    const rt = runtimeFor(r, {});
+    assertEquals((await rt.check({ dismissed: null })).kind, "offer");
+    await rt.apply();
+    await settle(rt);
+    const old = `${r.artifact}.old-1.0.0`;
+    assertEquals(beside(r), ["app.old-1.0.0"]);
+    assertEquals(
+      readOwned(r.dataDir).filter((e) => e.path === old)
+        .map((e) => [e.kind, e.role, e.is]),
+      [["file", "kept", identity(old)!]],
+    );
+    // The folder the download was written in was on record too, as made.
+    assertEquals(
+      readOwned(r.dataDir).filter((e) =>
+        basename(e.path).startsWith(".aio-update-app.new-2.0.0-")
+      ).map((e) => [e.kind, e.role, typeof e.is]),
+      [["dir", "temp", "string"]],
+    );
+  } finally {
+    await Deno.remove(r.root, { recursive: true });
+  }
+});
+
+// "Not the updater's" is "not on its record" — whatever the thing looks
+// like: a file of exactly the release's size where the download goes, an
+// executable of the app's own format where the old version is kept.
+for (
+  const [what, name, body] of [
+    [
+      "where the download goes",
+      "app.new-2.0.0",
+      (size: number) => "n".repeat(size),
+    ],
+    [
+      "where the old version is kept",
+      "app.old-1.0.0",
+      (_: number) => appBody("0.9.0"),
+    ],
+  ] as const
+) {
+  Deno.test(`updates e2e: a file of the user's ${what} refuses a single-file update — nothing is downloaded, nothing changes`, async () => {
+    const r = await rig();
+    try {
+      const m = await publish(r, { version: "2.0.0", channel: "prod" });
+      const mine = body(m.size);
+      await Deno.writeTextFile(join(r.root, name), mine);
+      const rt = runtimeFor(r, {});
+      assertEquals((await rt.check({ dismissed: null })).kind, "offer");
+      let failed = "";
+      await rt.apply().catch((e) => (failed = String(e)));
+      assertStringIncludes(
+        failed,
+        `${join(r.root, name)} is in the way of the update, and it was not ` +
+          `made by this app's updater`,
+      );
+      assertEquals(beside(r), [name]);
+      assertEquals(await Deno.readTextFile(join(r.root, name)), mine);
+      assertEquals(await Deno.readTextFile(r.artifact), appBody("1.0.0"));
+      assertEquals(readPending(r.dataDir), null);
+      // Nothing written down either: a refusal leaves no entry for a
+      // download or a tree it never made.
+      assertEquals(readOwned(r.dataDir), [], "something was put on record");
+    } finally {
+      await Deno.remove(r.root, { recursive: true });
+    }
+  });
+}
+
+/** A runtime for the unpacked install `MyApp`; `swaps` collects handovers. */
+async function zipRuntime(r: Rig, swaps: string[]) {
+  const install = join(r.root, "MyApp");
+  await Deno.mkdir(join(install, "electron"), { recursive: true });
+  await Deno.writeTextFile(join(install, "run.sh"), "#!/bin/sh\necho 1.0.0\n");
+  return {
+    install,
+    rt: createUpdatesRuntime({
+      config: resolveUpdates({
+        source: `file://${r.releases}`,
+        channel: "prod",
+      }),
+      dataDir: r.dataDir,
+      appVersion: "1.0.0",
+      local: { schema: 1, cells: { todos: 1 } },
+      exposed: false,
+      log: silentLog,
+      argv: [],
+      artifact: install,
+      canInstall: ["electron-zip"],
+      exit: () => {},
+      swapDirectory: ({ current, staged }) => {
+        swaps.push(staged);
+        return { previous: `${current}.old-1.0.0` };
+      },
+      shutdown: () => Promise.resolve(),
+    }),
+  };
+}
+
+for (
+  const name of ["MyApp.staged-2.0.0", "MyApp.zip-2.0.0", "MyApp.old-1.0.0"]
+) {
+  Deno.test(`updates e2e: a folder of the user's named ${name} refuses a .zip update before anything is downloaded — it is not removed`, async () => {
+    if (Deno.build.os === "windows") return;
+    const r = await rig();
+    try {
+      await publishZip(r, { version: "2.0.0", channel: "prod" });
+      const swaps: string[] = [];
+      const { rt } = await zipRuntime(r, swaps);
+      // A copy of this very app, made by hand, with a file of their own.
+      await Deno.mkdir(join(r.root, name, "electron"), { recursive: true });
+      await Deno.writeTextFile(
+        join(r.root, name, "run.sh"),
+        "#!/bin/sh\necho 1.0.0\n",
+      );
+      await Deno.writeTextFile(join(r.root, name, "user.txt"), "mine");
+      assertEquals((await rt.check({ dismissed: null })).kind, "offer");
+      let failed = "";
+      await rt.apply().catch((e) => (failed = String(e)));
+      assertStringIncludes(failed, `${join(r.root, name)} is in the way`);
+      assertEquals(beside(r), [name]);
+      assertEquals(
+        await Deno.readTextFile(join(r.root, name, "user.txt")),
+        "mine",
+      );
+      assertEquals(swaps, []);
+    } finally {
+      await Deno.remove(r.root, { recursive: true });
+    }
+  });
+}
+
+Deno.test("updates e2e: a .zip update's staged tree is on record as the very folder it unpacked into, and its own leftover is replaced", async () => {
+  if (Deno.build.os === "windows") return;
+  const r = await rig();
+  try {
+    await publishZip(r, { version: "2.0.0", channel: "prod" });
+    const swaps: string[] = [];
+    const { install, rt } = await zipRuntime(r, swaps);
+    assertEquals((await rt.check({ dismissed: null })).kind, "offer");
+    await rt.apply();
+    await settle(rt);
+    const staged = `${install}.staged-2.0.0`;
+    assertEquals(swaps, [staged]);
+    const mine = () =>
+      readOwned(r.dataDir).filter((e) => e.path === staged)
+        .map((e) => [e.kind, e.role, e.is]);
+    assertEquals(mine(), [["dir", "temp", identity(staged)!]]);
+    // The swap was never made (the stand-in helper moves nothing). The same
+    // update again: its own leftover is not in the way.
+    await Deno.writeTextFile(join(staged, "stale"), "from the first try");
+    await rt.apply();
+    await settle(rt);
+    assertEquals(swaps, [staged, staged]);
+    assertEquals(
+      await Deno.stat(join(staged, "stale")).catch(() => null),
+      null,
+      "the first try's tree was unpacked INTO, not replaced",
+    );
+    assertEquals(mine(), [["dir", "temp", identity(staged)!]]);
   } finally {
     await Deno.remove(r.root, { recursive: true });
   }

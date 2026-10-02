@@ -55,6 +55,7 @@ async function cycle(i: number): Promise<void> {
   const c = i % 2 === 0 ? shared : fresh(i);
   const port = freePort();
   const app = await aio.run({
+    watch: false,
     cells: [c],
     appId: `gcprobe-${i}`,
     appDir: `${root}/app${i}`,

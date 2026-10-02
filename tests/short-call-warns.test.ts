@@ -23,6 +23,7 @@ import { aio, cell } from "../mod.ts";
 import { tempDir } from "../src/testing/temp-dir.ts";
 import { getLogger, setLogger } from "../src/diagnostics/logger-api.ts";
 import { _resetShortCallWarnings } from "../src/state/cell-methods-internals.ts";
+import { freePort } from "../src/testing/server-test.ts";
 
 const c = cell("shortcall", {
   state: { rows: [] as unknown[] },
@@ -59,9 +60,7 @@ const post = (port: number, body: unknown) =>
   });
 
 Deno.test("a short call is named, a complete one is silent", async () => {
-  const l = Deno.listen({ port: 0 });
-  const port = (l.addr as Deno.NetAddr).port;
-  l.close();
+  const port = freePort();
   const app = await aio.run({
     cells: [c],
     appId: `shortcall-${Deno.pid}`,

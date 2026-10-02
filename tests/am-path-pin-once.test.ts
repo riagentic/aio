@@ -8,7 +8,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { tempDir } from "../src/testing/temp-dir.ts";
 import { fromFileUrl, join, toFileUrl } from "@std/path";
-import { readPinQuiet, sameFile } from "../src/am.ts";
+import { readPinQuiet, runsFrom, sameFile } from "../src/am.ts";
 
 const ROOT = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
 
@@ -71,6 +71,33 @@ Deno.test("delegation compares a real path, not a URL pathname (a space in the p
       "precondition: pathname keeps %20",
     );
     assert(sameFile(fromFileUrl(url), entry), "fromFileUrl is the real path");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("delegation from an am that is NOT a file (run from the registry): not the checkout, no throw", async () => {
+  // `fromFileUrl(import.meta.url)` throws "URL must be a file URL" for the
+  // `https://jsr.io/…` module of `deno run -A jsr:@riagentic/aio/am` — every
+  // command died in a path-pinned app. The `.pathname` comparison it replaced
+  // answered "not the same file" there, and handed off.
+  const dir = await app();
+  try {
+    const entry = join(dir, "dep/aio/src/am.ts");
+    for (
+      const url of [
+        "https://jsr.io/@riagentic/aio/1.0.17-beta/src/am.ts",
+        "http://localhost:8000/src/am.ts",
+        // even one whose pathname IS the entry's spelling
+        `https://example.test${entry}`,
+      ]
+    ) {
+      assertEquals(runsFrom(url, entry), false, url);
+    }
+    // …and the file cases keep their answers: itself, and through the link.
+    assert(runsFrom(toFileUrl(entry).href, entry));
+    assert(runsFrom(toFileUrl(join(ROOT, "src/am.ts")).href, entry));
+    assert(!runsFrom(toFileUrl(join(ROOT, "mod.ts")).href, entry));
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

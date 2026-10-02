@@ -55,6 +55,7 @@ async function bootCallClose(
     },
   });
   const app = await aio.run({
+    watch: false,
     cells: [c],
     appId: `scope-end-${crypto.randomUUID().slice(0, 8)}`,
     appDir: dir,

@@ -505,7 +505,7 @@ may change — it's typed and stripped from the DOM.
 "Visible text" is the element's OWN text: `<button><span>Save</span></button>`
 and `<input type="submit" value="Send">` get the bare numbered role (`Button2`).
 Give them a `t` or an `aria-label`. (Reading nested text would rename elements
-that existing tests already address by number — see `untracked/v2.md`.)
+that existing tests already address by number — major-version material.)
 
 Names match **exactly**. There is no prefix or substring matching anywhere in
 the surface — `toggle-negative` and `negative` are two unrelated handles.

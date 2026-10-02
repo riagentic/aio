@@ -27,7 +27,7 @@ import { BUILD_BOOL_FLAGS, BUILD_VALUE_FLAGS } from "../build/build-flags.ts";
  *  annotation is a WIDENING for every consumer — with the literal type,
  *  `VERSION === "1.0.0-alpha76"` was a compile error for having no overlap;
  *  now it is an ordinary comparison. */
-export const VERSION: string = "1.0.16-beta";
+export const VERSION: string = "1.0.17-beta";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *
@@ -320,11 +320,40 @@ export function parseCdp(
 }
 
 let _cdpPort: number | undefined | null;
+let _cdpEnvIgnoredSaid = false;
 
 /** THE CDP port for this process — undefined unless asked for (`--cdp`,
  *  `AIO_CDP`). Decided once: the lock records it, the boot line prints it and
- *  the Electron launch binds it, and the three must agree. */
-export function cdpPort(): number | undefined {
+ *  the Electron launch binds it, and the three must agree.
+ *
+ *  `client` — passed by the boot, at its first read — settles what an AMBIENT
+ *  `AIO_CDP` means on a client with no Electron window: nothing. Said once
+ *  per process, then absent everywhere (no lock entry, no `cdp` line, no
+ *  port). It booted with a debugger port nothing listened on through 1.0.14
+ *  and was REFUSED from 1.0.15 — which turned one `AIO_CDP=1` in a CI or
+ *  compose environment into a failed boot for every server-only app and every
+ *  `testServer` under it. A variable someone exported for another app is not
+ *  a flag someone just typed: `--cdp` there is still refused
+ *  ({@linkcode electronOnlyFlagRefusal}). */
+export function cdpPort(client?: string): number | undefined {
+  if (
+    client !== undefined && client !== "electron" &&
+    parseCli().cdp === undefined
+  ) {
+    if (
+      !_cdpEnvIgnoredSaid &&
+      cdpRequest(undefined, Deno.env.get("AIO_CDP")) !== undefined
+    ) {
+      _cdpEnvIgnoredSaid = true;
+      log.warn(
+        `AIO_CDP is set, and this app's client is "${client}" — there is no ` +
+          `Electron window to debug, so it is ignored (no debugging port is ` +
+          `opened). Unset it for this app, or run with --client=electron.`,
+      );
+    }
+    _cdpPort = null;
+    return undefined;
+  }
   if (_cdpPort !== undefined) return _cdpPort ?? undefined;
   const want = parseCdp(parseCli().cdp, Deno.env.get("AIO_CDP"));
   _cdpPort = want === undefined ? null : want === true ? findFreePort() : want;
@@ -333,6 +362,21 @@ export function cdpPort(): number | undefined {
 
 /** The variable behind the port chain's LAST rung — see `envDefaultPort`. */
 export const DEFAULT_PORT_ENV = "AIO_DEFAULT_PORT";
+
+/** Did anyone NAME a port — `--port`, `AIO_PORT`, or `aio.run({ port })`?
+ *  `0` means "pick a free one", exactly as if no port were named, so it does
+ *  NOT count: a local Electron app keeps its zero-TCP-port default. The env
+ *  rung used to be read as `!== undefined`, so `AIO_PORT=0` alone opted out.
+ *  Pure. */
+export function portWasRequested(
+  flag: number | undefined,
+  env: number | undefined,
+  config: number | undefined,
+): boolean {
+  return !!flag || !!env || !!config;
+}
+
+let _defaultPortSpellingSaid = false;
 
 /** The port to bind when NOTHING names one — `AIO_DEFAULT_PORT`.
  *
@@ -348,20 +392,12 @@ export const DEFAULT_PORT_ENV = "AIO_DEFAULT_PORT";
  *  Read the same way in dev, prod and compiled: it is an environment fact,
  *  and a malformed value is REFUSED exactly as `AIO_PORT` is (see `envPort`) —
  *  a typo that quietly fell back to a random port is the bug this rung fixes.
- *  `0` means "pick a free one", the same as saying nothing. */
-/** Did anyone NAME a port — `--port`, `AIO_PORT`, or `aio.run({ port })`?
- *  `0` means "pick a free one", exactly as if no port were named, so it does
- *  NOT count: a local Electron app keeps its zero-TCP-port default. The env
- *  rung used to be read as `!== undefined`, so `AIO_PORT=0` alone opted out.
- *  Pure. */
-export function portWasRequested(
-  flag: number | undefined,
-  env: number | undefined,
-  config: number | undefined,
-): boolean {
-  return !!flag || !!env || !!config;
-}
-
+ *  `0` means "pick a free one", the same as saying nothing.
+ *
+ *  A value that IS a port in a spelling `--port` would refuse (`0x1F90`,
+ *  `1e3`, `+3000`) is read as it always was, and said once: 1.0.15 refused
+ *  those too, and an environment variable that booted the app yesterday must
+ *  not be what stops it today. */
 export function envDefaultPort(): number | undefined {
   let raw: string | undefined;
   try {
@@ -370,13 +406,20 @@ export function envDefaultPort(): number | undefined {
     return undefined; // no --allow-env here: the environment is not readable
   }
   if (raw === undefined || raw.trim() === "") return undefined;
-  // Decimal digits only — the same rule as `AIO_PORT` (`envPort`) and `--port`.
   const s = raw.trim();
   const n = Number(s);
-  if (!/^\d+$/.test(s) || n > 65535) {
+  if (!Number.isInteger(n) || n < 0 || n > 65535) {
     throw new Error(
-      `${DEFAULT_PORT_ENV}=${raw} is not a port (want decimal digits 0-65535; ` +
+      `${DEFAULT_PORT_ENV}=${raw} is not a port (want an integer 0-65535; ` +
         `0 means "pick a free one"). Fix or unset it — it will not be ignored.`,
+    );
+  }
+  if (!/^\d+$/.test(s) && !_defaultPortSpellingSaid) {
+    _defaultPortSpellingSaid = true;
+    log.warn(
+      `${DEFAULT_PORT_ENV}=${raw} is read as port ${n}, as before — but it ` +
+        `is not written in decimal digits, which is the only spelling --port ` +
+        `accepts. Write ${DEFAULT_PORT_ENV}=${n}.`,
     );
   }
   return n;
@@ -709,6 +752,22 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
   return r;
 }
 
+/** The runtime flag for a BUILD word that selects a client — `--headless` →
+ *  `--client=server-only` — or null. ONE table: the refusal below names it,
+ *  and `am start`, a launcher, translates with it (`--headless` on its
+ *  command line wins, as the app-manager docs say). Pure. */
+export function runtimeSpelling(flag: string): string | null {
+  return Object.hasOwn(RUNTIME_SPELLING, flag) ? RUNTIME_SPELLING[flag]! : null;
+}
+const RUNTIME_SPELLING: Readonly<Record<string, string>> = {
+  "--headless": "--client=server-only",
+  "--no-electron": "--client=browser",
+  "--service": "--client=server-only",
+  "--cli": "--client=cli",
+  "--client": "--client=browser",
+  "--electron": "--client=electron",
+};
+
 /** Is this flag part of the BUILD's vocabulary rather than the runtime's? If
  *  so, say that — and name the runtime spelling where one exists.
  *
@@ -720,19 +779,11 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
  *  direction (a runtime flag passed to the build) is already a red gate —
  *  `tests/build-flags.test.ts`. */
 function _buildFlagAdvice(name: string): string | null {
-  const RUNTIME_SPELLING: Record<string, string> = {
-    "--headless": "--client=server-only",
-    "--no-electron": "--client=browser",
-    "--service": "--client=server-only",
-    "--cli": "--client=cli",
-    "--client": "--client=browser",
-    "--electron": "--client=electron",
-  };
   const isBuild = (BUILD_BOOL_FLAGS as readonly string[]).includes(name) ||
     (BUILD_VALUE_FLAGS as readonly string[]).includes(name) ||
     name === "--no-electron";
   if (!isBuild) return null;
-  const runtime = RUNTIME_SPELLING[name];
+  const runtime = runtimeSpelling(name);
   return `that is a BUILD flag (\`deno task build\`), not a runtime one — it ` +
     `is a decision baked into the artifact, so a built binary cannot be asked ` +
     `to change it now.` +
@@ -855,9 +906,6 @@ export function electronOnlyFlagRefusal(
   >,
   client: string,
   config: { serverUrl?: string; keepServer?: boolean } = {},
-  /** The RESOLVED cdp request — `cdpRequest(cli.cdp, AIO_CDP)` — so the env
-   *  spelling is refused exactly like the flag. Defaults to the flag alone. */
-  cdp: number | true | undefined = cli.cdp,
 ): Error | null {
   if (client === "electron") return null;
   /** [what was typed, how to undo it] — first match wins. */
@@ -874,9 +922,9 @@ export function electronOnlyFlagRefusal(
   else if (config.keepServer) {
     asked.push(["keepServer: true (aio.run())", "remove keepServer"]);
   }
-  if (cdp !== undefined) {
-    asked.push([cli.cdp !== undefined ? "--cdp" : "AIO_CDP", "drop it"]);
-  }
+  // The FLAG only: an ambient `AIO_CDP` is ignored with a warning instead
+  // (see `cdpPort`), never a refused boot.
+  if (cli.cdp !== undefined) asked.push(["--cdp", "drop it"]);
   if (cli.width !== undefined) asked.push(["--width", "drop it"]);
   if (cli.height !== undefined) asked.push(["--height", "drop it"]);
   const first = asked[0];

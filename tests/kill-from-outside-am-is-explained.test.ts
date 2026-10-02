@@ -9,7 +9,8 @@
 // What it CAN do is leave the answer where the person will look: one line, on
 // SIGTERM, naming the command that would have ended this app alone.
 //
-// SIGINT is deliberately silent, and that split is the claim worth pinning. A
+// SIGINT deliberately gets no such advice (only the one-line reason every
+// signal stop logs), and that split is the claim worth pinning. A
 // human pressing Ctrl-C on an app they are watching knows exactly what they
 // did; telling them again is noise, and noise is how a real warning stops
 // being read. So this tests both sides on a real process — the line appears

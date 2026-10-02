@@ -6,9 +6,16 @@ Nothing is removed and nothing changes shape. No app needs a code change.
 am pin --latest
 ```
 
-This is the audit round: 46 confirmed defects fixed across four hunt rounds,
-each with a test that is red before the fix. One of them could hand a client
-another caller's filtered view; the rest are narrower. None is a migration step.
+This is the audit round: 46 confirmed defects fixed across four hunt rounds. One
+of them could hand a client another caller's filtered view; the rest are
+narrower. None is a migration step.
+
+> **Go straight to 1.0.17-beta** (`am pin --latest` does). 1.0.15-beta itself
+> introduced regressions — it refused a boot over `AIO_CDP` and over a
+> hex/exponent/signed `AIO_PORT`, made `"x" in s` differ between sync and async
+> methods, and stopped `testUI({ persist: true })` writing while mounted — which
+> 1.0.17-beta repairs. This page describes what you get on 1.0.17-beta; the
+> three items that changed since it was first published are marked.
 
 ## What you may notice
 
@@ -41,8 +48,10 @@ another caller's filtered view; the rest are narrower. None is a migration step.
   for callers whose user records differ only inside such a field (a `Set` of
   scopes, a `Map` of tenant claims) instead of the second caller being served
   the first's slice, and a `ttl` / `first` method result is no longer reused
-  across those callers. A `Date` field is unaffected — it stays a cache key. If
-  you keep user records as plain data, nothing changes at all.
+  across those callers. A `Date` or `bigint` field is unaffected — it stays part
+  of the cache key. A record that is itself a class instance or a `Proxy` has no
+  key, so its view is recomputed per client. If you keep user records as plain
+  data, nothing changes at all.
 - **A cell whose name is an `Object.prototype` member** (`valueOf`, `toString`,
   `hasOwnProperty`, … — always legal) **receives its full state again.** A
   subscription to such a cell used to yield an empty frame, so the client's base
@@ -62,16 +71,26 @@ another caller's filtered view; the rest are narrower. None is a migration step.
 - **`deepFreeze` no longer runs a getter** in state that declares an accessor
   (which dev already warns about). Before, a throwing getter left the declared
   `state:` **unfrozen** in dev without saying so.
-- **`AIO_CDP` on a browser/CLI client is refused** like `--cdp` (it used to boot
-  and advertise a debugger port nothing listened on). **`AIO_PORT=0`** means
-  "pick a free one" everywhere — it no longer opts a local Electron app out of
-  zero TCP ports. A hex/exponent/signed `AIO_PORT` is refused, as `--port=`
-  already was.
+- **An ambient `AIO_CDP` on a browser/CLI client is ignored, with one warning**
+  (changed in 1.0.17-beta). Through 1.0.14 it booted and advertised a debugger
+  port nothing listened on; 1.0.15 and 1.0.16 refused the boot. Now no port is
+  opened or advertised and the app starts. `--cdp` typed on such an app is still
+  refused. To do: unset it for that app if the warning bothers you.
+- **`AIO_PORT=0`** means "pick a free one" everywhere — it no longer opts a
+  local Electron app out of zero TCP ports.
+- **`AIO_PORT` / `AIO_DEFAULT_PORT` written `0x1F90`, `1e3` or `+3000` bind the
+  port they always did, with one warning** (changed in 1.0.17-beta; 1.0.15 and
+  1.0.16 refused the boot). Only a value that is not a port (`abc`, `70000`) is
+  refused. To do: write the port in decimal digits.
 - **`--host=LOCALHOST`** is treated as loopback; the boot report and share-link
   note match `localhost`.
-- **The aio client's certificate PIN works again** — it is keyed by `host:port`
-  like the lookup, so an imported `.aioapp` / paired app on a non-default port
-  is trusted by its pin rather than by the looser first-fetch check.
+- **The aio client's certificate pin matches, and warns when it changes**
+  (changed in 1.0.17-beta). It is keyed by `host:port` like the lookup, and is
+  met by the pinned certificate or by one signed by the pinned root. A pinned
+  host that presents anything else gets a warning in the client's log and on its
+  connect page — `The certificate pinned for <host> has CHANGED` — and the
+  client still connects; it is not a refusal. To do: after reinstalling a server
+  or regenerating its certificate, pair again (or import a fresh `.aioapp`).
 - **An in-app rollback updates `installed.json`**, so `am installed` reports the
   version that is actually running.
 - **`am start` / `am status` print the URL to open** (`http://localhost:<port>`,

@@ -14,6 +14,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { lintProject } from "../aiol/mod.ts";
+import { topLevelKeyOffsets } from "../aiol/scan.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const DENO = {
@@ -217,7 +218,10 @@ export const counter = cell("counter", {
 });
 
 Deno.test("aiol call-timeout rule: a member `.call({ timeout })` is not aio's call", async () => {
-  const cell = `import { cell } from "aio";
+  // The file imports aio's `call` (the rule looks at no other file), so the
+  // member call is told apart by its `.`, not by the import being absent.
+  const cell = `import { call, cell } from "aio";
+export const one = call({ timeoutMs: 5000 }, () => Promise.resolve(1));
 function f(this: { timeout: number }) { return this.timeout; }
 export const n = f.call({ timeout: 5 });
 export const counter = cell("counter", {
@@ -253,6 +257,40 @@ export const counter = cell("counter", {
     "a removed option after a comment line was reported clean",
   );
   assert(files["src/cell.ts"]!.includes("timeoutMs: 5000"));
+  // The key locator the other option rules read through sees past a comment
+  // too: a key under a comment is still a key of that object.
+  const lined = "{\n  // the slow path\n  timeout: 5000,\n}";
+  assertEquals(topLevelKeyOffsets(lined, 0, "timeout"), [
+    lined.indexOf("timeout"),
+  ]);
+  const blocked = "{ /* the slow path */ timeout: 5000 }";
+  assertEquals(topLevelKeyOffsets(blocked, 0, "timeout"), [
+    blocked.indexOf("timeout"),
+  ]);
+});
+
+Deno.test("aiol return-effect hint: a rerun is suggested only where renaming the draft lets the fix run", async () => {
+  const method = (spec: string, name: string) =>
+    `import { cell, schedule } from "${spec}";\nexport const ${name} = cell("${name}", {\n  state: { a: 1 },\n  methods: {\n    tick(_s: { a: number }) {\n      return schedule.after("t", 5, { type: "${name}:x" });\n    },\n  },\n});\n`;
+  const { report } = await lintAndFix({
+    "src/fw.ts":
+      `export const cell = <T,>(name: string, o: T) => ({ name, ...o });\nexport const schedule = { after: (...a: unknown[]) => a };\n`,
+    // aio's: the draft's name is all that stops the fix.
+    "src/mine.ts": method("aio", "mine"),
+    // The app's own `cell`: no rerun will ever rewrite this.
+    "src/theirs.ts": method("./fw.ts", "theirs"),
+  });
+  const hint = (file: string) =>
+    report.issues.find((i) =>
+      i.file === file && i.message.includes("return effect")
+    )!;
+  assert(hint("src/mine.ts").manual!.includes("draft param is '_s'"));
+  assert(hint("src/mine.ts").fix!.includes("rerun --safe-fix"));
+  assert(hint("src/theirs.ts").manual!.includes(`imported from "./fw.ts"`));
+  assertEquals(
+    hint("src/theirs.ts").fix,
+    "rewrite by hand: _s.$do(effect); return;",
+  );
 });
 
 Deno.test("aiol key:false migration: a nested tls.key does not make the fix decline", async () => {

@@ -24,19 +24,21 @@ import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 function capture() {
   const warns: string[] = [];
+  const infos: string[] = [];
   const prev = getLogger();
   setLogger(
     {
       logDir: "",
       pub: (lvl: string, _cat: string, msg: string) => {
         if (lvl === "warn") warns.push(msg);
+        if (lvl === "info") infos.push(msg);
       },
       perf: () => {},
       flush: () => Promise.resolve(),
       // deno-lint-ignore no-explicit-any
     } as any,
   );
-  return { warns, restore: () => setLogger(prev) };
+  return { warns, infos, restore: () => setLogger(prev) };
 }
 
 Deno.test("journal: a watermark before the first append says nothing", async () => {
@@ -96,6 +98,44 @@ Deno.test("journal: a compaction that really fails is still loud", async () => {
     restore();
     await dropTempDir(dir);
   }
+});
+
+Deno.test({
+  name:
+    "journal: a run of failed compactions is ONE warning, and one line with the count when it compacts again",
+  ignore: Deno.build.os === "windows", // a read-only directory, by mode bits
+  async fn() {
+    const dir = await tempDir("aio-journal-compact-episode-");
+    const { warns, infos, restore } = capture();
+    try {
+      const path = join(dir, "actions.journal");
+      const j = createJournal(path);
+      j.append({ type: "c:m", payload: { n: 1 } }, 1);
+      Deno.chmodSync(dir, 0o500);
+      try {
+        for (let i = 0; i < 10; i++) j.setWatermark(1); // every persist
+      } finally {
+        Deno.chmodSync(dir, 0o700);
+      }
+      const said = warns.filter((w) => w.includes("could not compact"));
+      assertEquals(said.length, 1, warns.join("\n"));
+      assertEquals(infos.filter((l) => l.includes("compacts again")), []);
+      j.setWatermark(1);
+      const back = infos.filter((l) => l.includes("compacts again"));
+      assertEquals(back.length, 1, infos.join("\n"));
+      assertStringIncludes(back[0]!, "10 compaction(s) failed");
+      j.setWatermark(1);
+      assertEquals(
+        infos.filter((l) => l.includes("compacts again")).length,
+        1,
+        "said once per run",
+      );
+      j.close();
+    } finally {
+      restore();
+      await dropTempDir(dir);
+    }
+  },
 });
 
 // ── and `am replay` explains an empty journal, rather than restating it ──

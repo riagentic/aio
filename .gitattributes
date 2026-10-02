@@ -49,5 +49,8 @@ import_map.json text eol=lf
 # Electron binary files
 *.AppImage binary
 
+# Windows binaries (the committed SFX stub PE)
+*.exe binary
+
 # Lock files - preserve as-is
 package-lock.json text

@@ -39,6 +39,7 @@ export const refusingMain = cell("refusingMain", {
 
 if (isCellWorker()) {
   await aio.run({
+    watch: false,
     appId: "worker-validate-probe",
     cells: [refusingWorker, refusingMain],
     client: "server-only",

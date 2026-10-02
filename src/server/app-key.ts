@@ -4,6 +4,7 @@
 // common "one shared key" case.
 import { appDirs } from "./app-dirs.ts";
 import { octal, privateDirRefusal, sharedBits } from "./dir-permissions.ts";
+import { writeOwnerOnlyFile } from "./win-pipe.ts";
 import { dirname, join } from "@std/path";
 import { log } from "../diagnostics/logger-api.ts";
 
@@ -148,8 +149,9 @@ export function appKeyPath(appId: string, home?: string): string {
 // directory — and `am`/amui read it and present it on `/__aio/trojan/*` calls.
 // "Can read this file" is therefore exactly "owns the app's data", which is the
 // same trust boundary that makes the trojan's same-machine rule meaningful in
-// the first place. A second local user, a remote caller, and a production build
-// all still get nothing (see the gate in server-auth.ts).
+// the first place. A second local user and a remote caller still get nothing;
+// a production build mints it too, but there it authorizes only the stop
+// (see `armLocalControl` in server-auth.ts).
 //
 // WHY NOT REUSE THE APP KEY (`app.key`), which already exists here:
 //  1. it does not exist where the problem is. aio.ts mints the app key only for
@@ -189,10 +191,12 @@ export type ControlKeyResult =
  *  Returns the refusal, or null when the directory keeps a secret.
  *  On Windows the mode carries no permission bits at all (it is the same
  *  number for every directory — `dir-permissions.ts` has the measurement), so
- *  the bit test abstains there: the ACLs of the user's own profile directory
- *  are the boundary, and the trojan is still dev-only and same-machine-only.
- *  Not a `null` mode — Windows reports `0o40666`, and reading that as
- *  "world-readable" is what made this refuse every directory on Windows.
+ *  the bit test abstains there — and the FILE is judged instead: it is created
+ *  with an owner-only DACL and that DACL is read back and checked
+ *  ({@linkcode _ownerOnlyDaclRefusal}), whatever directory `AIO_APPS_DIR` or
+ *  `appDir` points at. Not a `null` mode — Windows reports `0o40666`, and
+ *  reading that as "world-readable" is what made this refuse every directory
+ *  on Windows.
  *  @internal */
 export function _controlDirRefusal(
   dir: string,
@@ -209,6 +213,34 @@ export function _controlDirRefusal(
   return `app data dir: ${why} — refusing to write a control-plane ` +
     `credential where another local user could read it; chmod 700 it (or ` +
     `unset AIO_APPS_DIR if it points at a shared directory) and restart`;
+}
+
+/** Does this DACL (SDDL, as Windows read it back) keep a secret — protected
+ *  (`P`: no inherited ACE can widen it later), and every ALLOW ace for the
+ *  object's owner (`OW`) or LocalSystem (`SY`) alone? The refusal, or null.
+ *  Windows' twin of the POSIX "0600 in a 0700 dir" rule, as a pure function
+ *  so it is pinned on every OS (the FFI that produces the string runs on
+ *  Windows only).
+ *  @internal */
+export function _ownerOnlyDaclRefusal(
+  path: string,
+  sddl: string,
+): string | null {
+  const m = /^D:([A-Z]*)((?:\([^()]*\))*)$/.exec(sddl);
+  const bad = !m
+    ? "unparsable"
+    : !m[1]!.includes("P")
+    ? "not protected — an inherited ACE can widen it"
+    : (m[2]!.match(/\([^()]*\)/g) ?? []).find((ace) => {
+      const f = ace.slice(1, -1).split(";");
+      return f[0] !== "D" &&
+        !(f[0] === "A" && (f[5] === "OW" || f[5] === "SY"));
+    });
+  return bad
+    ? `${path} has DACL ${sddl} (${
+      bad.startsWith("(") ? `grants ${bad}` : bad
+    }) — not owner-only`
+    : null;
 }
 
 /** Mint (or replace) this app's local control credential. Server side, boot.
@@ -245,7 +277,25 @@ export function mintControlKey(appId: string): ControlKeyResult {
     (b) => b.toString(16).padStart(2, "0"),
   ).join("");
   try {
-    writeSecretFileSync(path, key + "\n");
+    if (Deno.build.os === "windows") {
+      // The directory's mode says nothing here; the file's own DACL does.
+      try {
+        Deno.removeSync(path);
+      } catch {
+        /* aio-ok: no key from an earlier boot — CREATE_NEW needs none */
+      }
+      const why = _ownerOnlyDaclRefusal(
+        path,
+        writeOwnerOnlyFile(path, key + "\n"),
+      );
+      if (why) {
+        Deno.removeSync(path);
+        return {
+          error: `${why} — refusing to keep a control-plane credential ` +
+            `another local user could read`,
+        };
+      }
+    } else writeSecretFileSync(path, key + "\n");
   } catch (e) {
     return {
       error: `cannot write ${path} (${
@@ -274,9 +324,9 @@ export function readControlKey(
   } catch {
     return {
       error: `no local control credential at ${path} — the app mints one at ` +
-        `boot in dev; it is absent for a production build, for an app started ` +
-        `before this aio version, or when this app's data lives elsewhere ` +
-        `(AIO_APPS_DIR / appDir). Restart the app in dev to get one`,
+        `boot; it is absent for an app started before this aio version (a ` +
+        `production build before 1.0.17-beta), or when this app's data lives ` +
+        `elsewhere (AIO_APPS_DIR / appDir). Restart the app to get one`,
     };
   }
   const shared = sharedBits(st.mode);

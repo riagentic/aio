@@ -44,7 +44,15 @@ export const wk = cell("wk", {
     }
     return s;
   },
-  methods: { add(s, t) { s.items.push(t); } },
+  methods: {
+    add(s, t) { s.items.push(t); },
+    // Its write ships at the await, and its save is over long before the
+    // call ends: the reply must still carry that save's verdict.
+    async addSlow(s, t) {
+      s.items.push(t);
+      await new Promise((r) => setTimeout(r, 400));
+    },
+  },
 });
 await aio.run({
   cells: [wk],
@@ -69,9 +77,9 @@ const frames = [];
 ws.onmessage = (e) => { try { frames.push(JSON.parse(e.data)); } catch { /* not a frame */ } };
 await new Promise((r) => (ws.onopen = r));
 let n = 0;
-const call = async (t) => {
+const call = async (t, type = "wk:add") => {
   const cid = "c" + (++n);
-  ws.send(JSON.stringify({ v: 2, t: "action", d: { type: "wk:add", payload: { args: [t] }, cid } }));
+  ws.send(JSON.stringify({ v: 2, t: "action", d: { type, payload: { args: [t] }, cid } }));
   const t0 = Date.now();
   for (;;) {
     const f = frames.find((f) => f.t === "ack" && f.d.cid === cid);
@@ -87,9 +95,11 @@ Deno.mkdirSync(J); // every append refused: saves stand in for the lines
 if (MODE === "kill") {
   out.trojan = await trojan("T1");
   out.ws = await call("W1");
+  out.wsSlow = await call("W2", "wk:addSlow");
 } else {
   out.trojan = await trojan("BAD1");
   out.ws = await call("BAD2");
+  out.wsSlow = await call("BAD3", "wk:addSlow");
 }
 Deno.writeTextFileSync(DIR + "/out.json", JSON.stringify(out));
 Deno.writeTextFileSync(DIR + "/expected.json", JSON.stringify(wk.items));
@@ -139,11 +149,12 @@ async function go(mode: string) {
 Deno.test("worker cell: a call is answered after its batches' stand-in save — a kill at the reply keeps it", async () => {
   for (let i = 0; i < 3; i++) {
     const { out, expected, recovered } = await go("kill");
-    assert(out.trojan.ok && out.ws.ok, JSON.stringify(out));
+    assert(out.trojan.ok && out.ws.ok && out.wsSlow.ok, JSON.stringify(out));
     // The trojan reply always carries the key (`null`: nothing unsaved).
     assertEquals(out.trojan.unsaved, null, JSON.stringify(out));
     assertEquals(out.ws.unsaved, undefined, JSON.stringify(out));
-    assertEquals(expected, ["a1", "T1", "W1"], "live");
+    assertEquals(out.wsSlow.unsaved, undefined, JSON.stringify(out));
+    assertEquals(expected, ["a1", "T1", "W1", "W2"], "live");
     assertEquals(recovered, expected, `run ${i}`);
   }
 });
@@ -155,4 +166,8 @@ Deno.test("worker cell: a failed stand-in save is `unsaved` on the call's reply,
   assertMatch(String(out.trojan.unsaved), said, JSON.stringify(out.trojan));
   assert(out.ws.ok, JSON.stringify(out.ws));
   assertMatch(String(out.ws.unsaved), said, JSON.stringify(out.ws));
+  // A save that ended before the call did: its verdict was dropped (the
+  // batch left the pool's set as it settled), and the call read as saved.
+  assert(out.wsSlow.ok, JSON.stringify(out.wsSlow));
+  assertMatch(String(out.wsSlow.unsaved), said, JSON.stringify(out.wsSlow));
 });

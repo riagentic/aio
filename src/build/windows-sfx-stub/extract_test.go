@@ -2,7 +2,9 @@ package main
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,5 +97,58 @@ func TestExtractTarZstdRefusesSlip(t *testing.T) {
 	})
 	if err := extractTarZstd(bytes.NewReader(payload), t.TempDir()); err == nil {
 		t.Fatal("a ../ entry must be refused")
+	}
+}
+
+// A symlink (or any entry the packer never writes) must fail the extraction,
+// never be skipped: skipping installs an app with a file missing.
+func TestExtractTarZstdRefusesSymlink(t *testing.T) {
+	var buf bytes.Buffer
+	zw, err := zstd.NewWriter(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tw := tar.NewWriter(zw)
+	if err := tw.WriteHeader(&tar.Header{Name: "link", Typeflag: tar.TypeSymlink, Linkname: "app.exe"}); err != nil {
+		t.Fatal(err)
+	}
+	tw.Close()
+	zw.Close()
+	err = extractTarZstd(bytes.NewReader(buf.Bytes()), t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "unsupported tar entry") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// The same rule for the zip payload: a symlink entry would be written as a
+// file holding the link's target path.
+func TestExtractZipRefusesSymlink(t *testing.T) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.Create("app.exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Write([]byte("inner"))
+	fh := &zip.FileHeader{Name: "link.exe"}
+	fh.SetMode(fs.ModeSymlink | 0o777)
+	if w, err = zw.CreateHeader(fh); err != nil {
+		t.Fatal(err)
+	}
+	w.Write([]byte("app.exe"))
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dest := t.TempDir()
+	err = extractZip(bytes.NewReader(buf.Bytes()), int64(buf.Len()), dest)
+	if err == nil || !strings.Contains(err.Error(), `unsupported zip entry "link.exe"`) {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dest, "link.exe")); err == nil {
+		t.Fatal("the symlink entry was written")
+	}
+	// The regular entry before it was extracted as itself.
+	if got, _ := os.ReadFile(filepath.Join(dest, "app.exe")); string(got) != "inner" {
+		t.Fatalf("app.exe = %q", got)
 	}
 }

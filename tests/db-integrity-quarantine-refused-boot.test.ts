@@ -9,7 +9,12 @@
 // on checkIntegrityOnBoot — which was on, and was what had found the damage.
 // The boot now refuses at the site, saying the file is damaged, where it is,
 // and why it could not be moved.
-import { assert, assertRejects, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "@std/assert";
 import { join } from "@std/path";
 import { aio, cell } from "../mod.ts";
 import { freePort } from "../src/testing/server-test.ts";
@@ -20,6 +25,7 @@ Deno.test("integrity: a damaged database whose quarantine fails refuses the boot
   const appId = `quarantine-refused-${Deno.pid}`;
   const boot = (check: boolean) =>
     aio.run({
+      watch: false,
       cells: [cell("box", { state: { n: 0, pad: "" }, methods: {} })],
       appId,
       client: "server-only",
@@ -50,6 +56,13 @@ Deno.test("integrity: a damaged database whose quarantine fails refuses the boot
     assert(!msg.includes("handle is CLOSED"), msg);
     assertStringIncludes(msg, "EACCES (injected)");
     assertStringIncludes(msg, dbPath);
+    // "Could not be moved aside" must leave it WHERE IT WAS: it is the only
+    // copy, and a failed move that removed its source would have deleted it.
+    assertEquals(
+      await Deno.readFile(dbPath),
+      bytes,
+      "the damaged database must still be at its path, untouched",
+    );
   } finally {
     Deno.rename = rename;
     await dropTempDir(dir);

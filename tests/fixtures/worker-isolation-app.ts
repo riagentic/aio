@@ -62,6 +62,7 @@ export const isolationProbe = cell("isolationProbe", {
 // boot a second app behind the harness's back.
 if (isCellWorker()) {
   await aio.run({
+    watch: false,
     appId: "worker-isolation-probe",
     cells: [isolationProbe],
     client: "server-only",

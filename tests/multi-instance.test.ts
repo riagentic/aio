@@ -27,6 +27,7 @@ Deno.test("multi-instance: two libraryMode apps coexist with disjoint cells", as
   });
 
   const app1 = await aio.run({
+    watch: false,
     cells: [a],
     appId: "mi-app-1",
     libraryMode: true,
@@ -34,6 +35,7 @@ Deno.test("multi-instance: two libraryMode apps coexist with disjoint cells", as
     client: "server-only",
   });
   const app2 = await aio.run({
+    watch: false,
     cells: [b],
     appId: "mi-app-2",
     libraryMode: true,
@@ -72,6 +74,7 @@ Deno.test("multi-instance: binding one def to two apps throws the D2 error", asy
   });
 
   const app1 = await aio.run({
+    watch: false,
     cells: [shared],
     appId: "mi-excl-1",
     libraryMode: true,
@@ -82,6 +85,7 @@ Deno.test("multi-instance: binding one def to two apps throws the D2 error", asy
     let msg = "";
     try {
       await aio.run({
+        watch: false,
         cells: [shared],
         appId: "mi-excl-2",
         libraryMode: true,

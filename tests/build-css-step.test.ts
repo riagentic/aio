@@ -137,3 +137,72 @@ Deno.test("build.css: dev REPORTS a failure and keeps serving", async () => {
     await dropTempDir(dir);
   }
 });
+
+// The dev server's close ends a step still running: a stop is neither a
+// success nor a failure of the command, and it returns when the step's
+// process has EXITED — an event, not the 30 s the step would have taken.
+Deno.test({
+  name:
+    "build.css: a step ended by its signal is `stopped` — not failed, not reported, and gone",
+  sanitizeOps: true,
+  sanitizeResources: true,
+  fn: async () => {
+    const dir = await tempDir("aio-css-step-stopped-");
+    try {
+      await Deno.writeTextFile(
+        join(dir, "deno.json"),
+        JSON.stringify({ build: { css: ["sleep", "30"] } }),
+      );
+      const said: string[] = [];
+      const stop = new AbortController();
+      const t0 = Date.now();
+      const running = runCssBuild(dir, {
+        throwOnFail: false,
+        log: (m) => said.push(m),
+        signal: stop.signal,
+      });
+      // Aborted from a timer armed now: by then the step is either running
+      // (killed) or about to start (never started) — `stopped` both ways.
+      const abort = setTimeout(() => stop.abort(), 100);
+      const res = await running;
+      clearTimeout(abort);
+      assertEquals(res.stopped, true);
+      assertEquals(res.ok, false);
+      assertEquals(said, [], "a stopped step was reported as a failure");
+      assert(Date.now() - t0 < 10_000, "the stop waited for the step");
+    } finally {
+      await dropTempDir(dir);
+    }
+  },
+});
+
+Deno.test({
+  name: "build.css: a step whose signal is already aborted never starts",
+  sanitizeOps: true,
+  sanitizeResources: true,
+  fn: async () => {
+    const dir = await tempDir("aio-css-step-unstarted-");
+    try {
+      await Deno.writeTextFile(
+        join(dir, "deno.json"),
+        JSON.stringify({ build: { css: ["sh", "-c", "echo x > ran"] } }),
+      );
+      const said: string[] = [];
+      const res = await runCssBuild(dir, {
+        throwOnFail: false,
+        log: (m) => said.push(m),
+        signal: AbortSignal.abort(),
+      });
+      assertEquals(res.stopped, true);
+      assertEquals(res.ms, undefined, "no run, so no duration");
+      assertEquals(said, []);
+      // The command's one effect is absent: it did not run.
+      await assertRejects(
+        () => Deno.stat(join(dir, "ran")),
+        Deno.errors.NotFound,
+      );
+    } finally {
+      await dropTempDir(dir);
+    }
+  },
+});

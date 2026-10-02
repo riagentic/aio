@@ -18,6 +18,7 @@ Deno.test("app.loadSnapshot force: an undeclared cell is dropped, as a restart d
   });
   const dir = await tempDir("aio-loadsnap-force-");
   const app = await aio.run({
+    watch: false,
     cells: [counter],
     appId: `loadsnap-force-${crypto.randomUUID().slice(0, 8)}`,
     appDir: dir,

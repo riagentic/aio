@@ -997,6 +997,7 @@ export async function cmdFix(
       const rel = m[1]!;
       // Only app-relative scripts: a leading "/" (absolute or a URL tail like
       // "//host/install.sh") or a ".." segment could chmod a file outside dir.
+      // aio-ok: path-split — a script path as written in deno.json task text (`./x.sh`), not an OS path
       if (rel.startsWith("/") || rel.split("/").includes("..")) continue;
       scripts.add(rel);
     }

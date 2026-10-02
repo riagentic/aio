@@ -2,7 +2,7 @@
 //
 // A setting that can come from a flag, `aio.run({ … })`, an env var or
 // deno.json is a question with several answers, and the bug this module
-// exists for came back four times (feedback/frustration.md F6): the declared
+// exists for came back four times (a field report): the declared
 // window size lost to `--width` in one place and not another, `expose`, the
 // bind address, the database file. Each time, two sites answered the same
 // question with their own `??` chain, and one of them drifted.

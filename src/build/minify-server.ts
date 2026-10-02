@@ -19,8 +19,9 @@
  *
  * What it is NOT: encryption. Minified JS is still readable to a determined
  * person. It removes the free gift — comments, and the local names that
- * explain them. Function and class NAMES are kept (esbuild `keepNames`), so
- * everything that reads `fn.name` behaves exactly as unminified. The client
+ * explain them. Function and class NAMES are kept (esbuild `keepNames`, applied
+ * through one global — see `KEEP_NAME`), so everything that reads `fn.name`
+ * behaves exactly as unminified. The client
  * bundle's source map (`dist/.app.js.map`, names and paths only) is left out
  * too; the cost is that a forwarded browser error says `app.js:1:22073`
  * instead of `App.tsx:12`.
@@ -83,10 +84,61 @@ type Esbuild = {
   transform: (src: string, opts: any) => Promise<{ code: string }>;
 };
 
+/** The ONE name every kept function name is applied through, in every
+ *  minified module: `__aioName(fn, "name")`, a global.
+ *
+ *  esbuild's `keepNames` calls a helper it declares at the top of EACH module,
+ *  under a minified name that differs per module (`t` here, `n` there). A
+ *  function's source then names a variable of the module around it — and a
+ *  function is sometimes rebuilt from its source somewhere else:
+ *  `blocking(id, fn)` ships `fn.toString()` to a worker, where a nested
+ *  `const square = (x) => x * x` died with `t is not defined`. Dev and tests
+ *  (never minified) passed; every compiled build failed.
+ *
+ *  One global name closes that: each module that needs it defines it
+ *  (`globalThis.__aioName ??= …`), and `blocking-worker.ts` defines the same
+ *  one for the functions it rebuilds. Mirrored there by hand — a worker entry
+ *  imports nothing — and pinned by `tests/emitted-source-minified.test.ts`. */
+export const KEEP_NAME = "__aioName";
+
+/** esbuild 0.24's un-minified `keepNames` helper, as it prints it (the
+ *  version is pinned exactly — `runCompile`). A user binding called `__name`
+ *  makes esbuild number its own (`__name2`), hence the capture — and one
+ *  called `target` or `value` makes it number the PARAMETERS
+ *  (`(target, value2) => … { value: value2, … }`), hence the other two. */
+const NAME_HELPER =
+  /^var (__name\d*) = \((\w+), (\w+)\) => __defProp\d*\(\2, "name", \{ value(?:: \3)?, configurable: true \}\);$/m;
+/** Any line that IS that helper, whatever its exact print. */
+const NAME_HELPER_LINE = /^var __name\d* = \(.*=> __defProp/m;
+/** `KEEP_NAME` as a name of the module's own (a binding, a free call, an
+ *  object key) — not a property read (`globalThis.__aioName`) and not a whole
+ *  string. Run over the first pass's output, which has no comments. */
+const OWN_KEEP_NAME = new RegExp(`(?<![.\\w$"'\`])${KEEP_NAME}(?![\\w$])`);
+/** The helpers esbuild declares for a module that has a decorator
+ *  (`__decoratorStart`, `__decorateElement`, …) — see the first pass of
+ *  {@link minifyModule}. A module may have lines like these of its own. */
+const DECORATOR_HELPER_LINES = /^var __decorat\w+ = /gm;
+
+/** A module {@link minifyModule} will not hand back minified, because the
+ *  minified text would not mean what the source means. `stageMinified` ships
+ *  such a module as written and names it — the build goes on. */
+export class Unminifiable extends Error {
+  constructor(why: string) {
+    super(why);
+    this.name = "Unminifiable";
+  }
+}
+
 /** One module's minified text. ESM, whitespace + syntax + local names, no
  *  comments at all (`legalComments: "none"`), names kept, JSX left for Deno
  *  to transform with the app's own `jsxImportSource`. `.cjs`/`.cts` get
- *  `format: "cjs"`. Throws on a parse error. Pure given `esbuild`. */
+ *  `format: "cjs"`. Throws on a parse error, and {@link Unminifiable} for a
+ *  module that must ship as written. Pure given `esbuild`.
+ *
+ *  Two passes, because `keepNames` and `minify` in one give the per-module
+ *  helper described at `KEEP_NAME`: the first makes every kept name an
+ *  explicit `__name(fn, "name")` call, the helper's declaration is swapped
+ *  for the global, and the second minifies with the call renamed to it. */
 export async function minifyModule(
   esbuild: Esbuild,
   path: string,
@@ -94,22 +146,111 @@ export async function minifyModule(
 ): Promise<string> {
   const ext = extname(path).slice(1);
   const loader = ext.replace(/^[mc]/, "");
-  const r = await esbuild.transform(src, {
-    loader,
+  // The first pass's output is plain JS, so the second reads it as JS.
+  const jsLoader = loader.replace("t", "j");
+  const base = {
     format: ext.startsWith("c") ? "cjs" : "esm",
-    minify: true,
-    keepNames: true,
     jsx: "preserve",
     legalComments: "none",
     target: "esnext",
     sourcefile: path,
-  });
-  return r.code;
+  };
+  // Decorators are asked for LOWERED, so that esbuild — which parsed the
+  // module — says whether it has one: a lowered decorator needs helpers, and
+  // each helper's declaration is a line of its own. The lowered text itself
+  // is never shipped. (Read off the source instead, an `@media` line of a CSS
+  // template would count as a decorator.)
+  const first = async (opts: Record<string, unknown>) =>
+    (await esbuild.transform(src, {
+      ...base,
+      loader,
+      keepNames: true,
+      ...opts,
+    })).code;
+  const lowered = { supported: { decorators: false } };
+  const helpers = (code: string) =>
+    code.match(DECORATOR_HELPER_LINES)?.length ?? 0;
+  let named: string;
+  let decorated: boolean;
+  try {
+    named = await first(lowered);
+    // Such a line may be the module's own (a hand-written `var __decorate =`,
+    // compiler output kept as a `.js`, a line of a template): only the ones
+    // lowering ADDED are esbuild's — so the module is read once more with its
+    // decorators left in place, and the two are counted.
+    decorated = helpers(named) > 0 && helpers(named) > helpers(await first({}));
+  } catch (e) {
+    // A parameter decorator is syntax only under `experimentalDecorators`. A
+    // module that reads that way and no other has one; one that does not read
+    // either way was not readable: the first error is the one to report.
+    named = await first({
+      ...lowered,
+      tsconfigRaw: { compilerOptions: { experimentalDecorators: true } },
+    }).catch(() => {
+      throw e;
+    });
+    decorated = true;
+  }
+  if (decorated) {
+    // A decorator is handed names: `@d class K {}` gives it `"K"`, and the
+    // minified class is `n` — the kept-name call runs too late for it, and
+    // `K.name` stayed `"n"` in the binary. `@d #secret` is renamed the same
+    // way, and legacy decorator metadata is made from the types, which are
+    // gone here. Dev sees the real names; so must the build.
+    throw new Unminifiable(
+      "it uses decorators (the class and private names a decorator is " +
+        "handed do not survive minification)",
+    );
+  }
+  const helper = NAME_HELPER.exec(named)?.[1];
+  if (!helper && NAME_HELPER_LINE.test(named)) {
+    // Left in, the per-module helper is the `blocking()` failure above.
+    throw new Unminifiable("esbuild's name helper was not recognised");
+  }
+  if (helper && OWN_KEEP_NAME.test(named)) {
+    // The kept-name calls would land on the module's own binding.
+    throw new Unminifiable(`it uses the name ${KEEP_NAME} itself`);
+  }
+  const global = helper
+    ? named.replace(
+      NAME_HELPER,
+      () =>
+        `globalThis.${KEEP_NAME} ??= (target, value) => ` +
+        `Object.defineProperty(target, "name", { value, configurable: true });`,
+    )
+    : named;
+  const code = (await esbuild.transform(global, {
+    ...base,
+    loader: jsLoader,
+    minify: true,
+    ...(helper ? { define: { [helper]: KEEP_NAME } } : {}),
+  })).code;
+  // The minified JS is written back to a `.ts` path, and TypeScript reads one
+  // shape differently: esbuild drops the author's parentheses from
+  // `[(a < b), c > (d ?? 0)]`, and `a<b,c>(d??0)` in a `.ts` file is a generic
+  // CALL of `a` — the compiled build threw `a is not a function` where dev
+  // ran. So the final text is read both ways, and must come out the same.
+  if (jsLoader !== loader) {
+    const read = async (l: string) =>
+      (await esbuild.transform(code, { ...base, loader: l })).code;
+    // Not read at all (`a<b,c>/x/.test(s)`) is the same finding.
+    const asTs = await read(loader).catch(() => null); // aio-ok: null never equals the JS read — refused below
+    if (asTs !== await read(jsLoader)) {
+      throw new Unminifiable(
+        "its minified form reads differently as TypeScript (a comparison " +
+          "like `(a < b) > (c ? d : e)` turns into a generic call)",
+      );
+    }
+  }
+  return code;
 }
 
-/** Every LOCAL file module `root` reaches, from `deno info --json`. Throws
- *  (with deno's own words) when deno cannot build the graph. */
-async function localGraph(cwd: string, module: string): Promise<string[]> {
+/** Every module `module` reaches, from `deno info --json`. Throws (with deno's
+ *  own words) when deno cannot build the graph. */
+async function denoInfo(
+  cwd: string,
+  module: string,
+): Promise<{ specifier?: string; error?: string }[]> {
   const o = await new Deno.Command("deno", {
     args: ["info", "--json", module],
     cwd,
@@ -125,7 +266,12 @@ async function localGraph(cwd: string, module: string): Promise<string[]> {
   const j = JSON.parse(new TextDecoder().decode(o.stdout)) as {
     modules?: { specifier?: string; error?: string }[];
   };
-  return (j.modules ?? []).flatMap((m) =>
+  return j.modules ?? [];
+}
+
+/** Every LOCAL file module `module` reaches. */
+async function localGraph(cwd: string, module: string): Promise<string[]> {
+  return (await denoInfo(cwd, module)).flatMap((m) =>
     m.specifier?.startsWith("file:") && !m.error
       ? [fromFileUrl(m.specifier)]
       : []
@@ -166,7 +312,10 @@ async function copyTree(from: string, to: string): Promise<void> {
  *     between a module and that ancestor is copied, and `node_modules` /
  *     `vendor` next to one are linked, so resolution is unchanged.
  *  4. Include/entry paths are remapped into the stage; the output path, the
- *     excludes (npm cache paths) and the icon are left alone. */
+ *     excludes (npm cache paths) and the icon are left alone.
+ *  5. deno reads the staged graph (`deno info`, nothing runs), and a minified
+ *     module it cannot parse is put back as written — `minifyModule`'s own
+ *     check asks esbuild, and deno's TypeScript parser is not esbuild's. */
 export async function stageMinified(
   esbuild: Esbuild,
   root: string,
@@ -261,6 +410,18 @@ export async function stageMinified(
     rmStage().catch((e) =>
       console.warn(`${HEY} build.minify: could not remove ${stage}: ${e}`)
     );
+  // One module as written beats a build that stops, or a binary that runs
+  // differently from dev. Said per module: its comments ship.
+  const asWritten = async (f: string, why: string) => {
+    console.warn(
+      `${HEY} build.minify: ${
+        relative(root, f)
+      } ships UN-minified (comments and local names included) — ${why}.`,
+    );
+    await Deno.copyFile(f, to(f));
+  };
+  /** Staged path → source, for the modules staged minified. */
+  const minified = new Map<string, string>();
   try {
     for (const f of files) {
       await Deno.mkdir(dirname(to(f)), { recursive: true });
@@ -273,6 +434,10 @@ export async function stageMinified(
       try {
         code = await minifyModule(esbuild, f, src);
       } catch (e) {
+        if (e instanceof Unminifiable) {
+          await asWritten(f, e.message);
+          continue;
+        }
         throw new Error(
           `${NO} build.minify: could not minify ${relative(root, f)}: ${
             e instanceof Error ? e.message : e
@@ -280,6 +445,7 @@ export async function stageMinified(
         );
       }
       await Deno.writeTextFile(to(f), code);
+      minified.set(to(f), f);
     }
     // 3. Includes, configs, linked dirs.
     for (const p of plainIncludes) {
@@ -307,6 +473,26 @@ export async function stageMinified(
         ? remap(abs(a))
         : a
     );
+    // 5. deno's own reading of what it is about to compile. Where a `>` is
+    // followed by `{`, deno's TypeScript parser takes the `a<b,c>` before it
+    // for type arguments and stops at the brace (`Expected ',', got '{'`);
+    // esbuild reads the comparison in both dialects — so `[(a < b), c > {}]`
+    // passed the check in `minifyModule` and failed the compile.
+    const roots = [abs(entry), ...includes.filter((p) => SCRIPT.test(p))]
+      .map((p) => remap(canonIncludes.get(p) ?? p));
+    for (const r of roots) {
+      for (const m of await denoInfo(to(root), r)) {
+        if (!m.error || !m.specifier?.startsWith("file:")) continue;
+        const staged = fromFileUrl(m.specifier);
+        const f = minified.get(staged);
+        if (!f) continue;
+        minified.delete(staged);
+        await asWritten(
+          f,
+          `deno cannot read its minified form (${m.error.split("\n")[0]})`,
+        );
+      }
+    }
     if (!out.includes("--no-check")) out.splice(1, 0, "--no-check");
     return { argv: out, cwd: to(root), modules: files.size, dispose };
   } catch (e) {

@@ -5,6 +5,8 @@
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import {
   adoptHiddenConsole,
+  hiddenConsoleHelper,
+  neutralCwd,
   outlivingParent,
   spawnInheritingOrNull,
   startWindowless,
@@ -335,4 +337,138 @@ Deno.test("startWindowless: each failed CreateProcessW's error is read right aft
   const why = startWindowless("x", {}, undefined, () => fake);
   assertEquals(calls, ["create", "error 6", "create", "error 8"]);
   assertEquals(why, "CreateProcessW failed (6, then 8)");
+});
+
+// Windows refuses to move a folder that is ANY process's working directory.
+// A desktop app's is its install folder, every child inherits it, and the
+// update swap moves that folder.
+Deno.test("neutralCwd: the Windows directory on Windows, the inherited one elsewhere", () => {
+  assertEquals(neutralCwd("windows", () => "D:\\WINNT"), "D:\\WINNT");
+  assertEquals(neutralCwd("windows", () => undefined), "C:\\Windows");
+  assertEquals(
+    neutralCwd("windows", () => {
+      throw new Deno.errors.NotCapable("env");
+    }),
+    "C:\\Windows",
+  );
+  // POSIX renames a directory under a process: nothing to change there.
+  assertEquals(neutralCwd("linux", () => "D:\\WINNT"), undefined);
+  assertEquals(neutralCwd("darwin", () => "D:\\WINNT"), undefined);
+});
+
+/** kernel32 as `adoptHiddenConsole` uses it, recording every call. */
+function fakeConsoleKernel(
+  { attachAfter = 0, hasConsole = false } = {},
+) {
+  const calls: string[] = [];
+  const created: { cmdline: string; cwd: string | null; app: unknown }[] = [];
+  const text = (b: Uint8Array | null) =>
+    b === null
+      ? null
+      : new TextDecoder("utf-16le").decode(b).replace(/\0+$/, "");
+  let attaches = 0;
+  const HANDLE = 0x1234n, THREAD = 0x5678n, PID = 4242;
+  const lib = {
+    symbols: {
+      GetConsoleProcessList: () => hasConsole ? 1 : 0,
+      CreateProcessW: (
+        app: unknown,
+        cmdline: Uint8Array,
+        _pa: unknown,
+        _ta: unknown,
+        _inherit: number,
+        flags: number,
+        _env: unknown,
+        cwd: Uint8Array | null,
+        _si: Uint8Array,
+        pi: Uint8Array,
+      ) => {
+        calls.push(`create 0x${flags.toString(16)}`);
+        created.push({ cmdline: text(cmdline)!, cwd: text(cwd), app });
+        const dv = new DataView(pi.buffer);
+        dv.setBigUint64(0, HANDLE, true);
+        dv.setBigUint64(8, THREAD, true);
+        dv.setUint32(16, PID, true);
+        return 1;
+      },
+      AttachConsole: (pid: number) => (
+        calls.push(`attach ${pid}`), ++attaches > attachAfter ? 1 : 0
+      ),
+      GetLastError: () => 6,
+      Sleep: () => {},
+      TerminateProcess: (h: Deno.PointerValue) => (
+        calls.push(`terminate 0x${Deno.UnsafePointer.value(h).toString(16)}`), 1
+      ),
+      CloseHandle: (h: Deno.PointerValue) => (
+        calls.push(`close 0x${Deno.UnsafePointer.value(h).toString(16)}`), 1
+      ),
+    },
+    close: () => void calls.push("unload"),
+  };
+  type Open = NonNullable<
+    NonNullable<Parameters<typeof adoptHiddenConsole>[1]>["open"]
+  >;
+  return { calls, created, open: (() => lib) as unknown as Open };
+}
+
+// Measured on Windows 11: the console's helper was `cmd.exe /c ping … >nul`,
+// started with the app's working directory (the install folder). Ending cmd
+// left PING.EXE running for ~29 s with that folder as ITS working directory,
+// so an update clicked within half a minute of the app's start could not move
+// the install: "the running version could not be moved aside".
+Deno.test("adoptHiddenConsole: the helper is one process outside the install, and it is ended", () => {
+  const k = fakeConsoleKernel({ attachAfter: 2 });
+  const r = adoptHiddenConsole("windows", {
+    open: k.open,
+    isTerminal: () => false,
+  });
+  assertEquals(r, "adopted");
+  assertEquals(k.created.length, 1);
+  const { cmdline, cwd, app } = k.created[0]!;
+  // No shell: whatever is started is the whole tree, so ending it ends all.
+  assert(!/cmd(\.exe)?\b/i.test(cmdline), cmdline);
+  assert(!/[>|&]/.test(cmdline), `a shell line: ${cmdline}`);
+  const root = neutralCwd("windows")!;
+  assertEquals(cmdline, `${root}\\System32\\PING.EXE -n 30 127.0.0.1`);
+  assertEquals(app, null);
+  // Its working directory is given, and it is not the app's.
+  assertEquals(cwd, root);
+  // Windowless, attached (retried until its console exists), then ended —
+  // the process handle, not only closed.
+  assertEquals(k.calls, [
+    "create 0x8000000",
+    "attach 4242",
+    "attach 4242",
+    "attach 4242",
+    "terminate 0x1234",
+    "close 0x1234",
+    "close 0x5678",
+    "unload",
+  ]);
+});
+
+Deno.test("adoptHiddenConsole: a path with a space is one quoted program, by full path", () => {
+  assertEquals(hiddenConsoleHelper("C:\\Win dows"), {
+    cmdline: '"C:\\Win dows\\System32\\PING.EXE" -n 30 127.0.0.1',
+    cwd: "C:\\Win dows",
+  });
+});
+
+Deno.test("adoptHiddenConsole: a process that has a console starts nothing", () => {
+  const term = fakeConsoleKernel();
+  assertEquals(
+    adoptHiddenConsole("windows", { open: term.open, isTerminal: () => true }),
+    "has-console",
+  );
+  assertEquals(term.calls, [], "a terminal-started app needs no kernel32");
+  const attached = fakeConsoleKernel({ hasConsole: true });
+  assertEquals(
+    adoptHiddenConsole("windows", {
+      open: attached.open,
+      isTerminal: () => false,
+    }),
+    "has-console",
+  );
+  assertEquals(attached.created, []);
+  assertEquals(attached.calls, ["unload"]);
 });

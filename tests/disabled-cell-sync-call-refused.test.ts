@@ -31,6 +31,7 @@ const dis = cell("r9disabled", {
 Deno.test("disabled cell: a SYNC call is refused like an ASYNC one (refusalsReject: true)", async () => {
   const dir = await tempDir("r9-disabled-");
   const app = await aio.run({
+    watch: false,
     cells: [dis],
     appId: "r9disabled",
     client: "server-only",

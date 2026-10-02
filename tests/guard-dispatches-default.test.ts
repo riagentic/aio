@@ -31,6 +31,7 @@ Deno.test({
       },
     });
     const app = await aio.run({
+      watch: false,
       appId: `guard-default-${crypto.randomUUID().slice(0, 8)}`,
       cells: [c],
       dbPath: ":memory:",

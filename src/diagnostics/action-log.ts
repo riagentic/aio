@@ -1,6 +1,7 @@
 // src/diagnostics/action-log.ts — Rolling JSONL action recorder
 
 import { log } from "./logger-api.ts";
+import { renameOver } from "./rename-over.ts";
 
 // What counts as framework noise is decided ONCE, in action-kind.ts. This file
 // used to carry its own copy that dropped every `:__set` type — so an async
@@ -304,7 +305,7 @@ export function createActionLog(
           mode: 0o600,
           createNew: true,
         });
-        await Deno.rename(tmp, path);
+        await renameOver(tmp, path);
       } catch (e) {
         await Deno.remove(tmp).catch(() => {/* aio-ok: never written */});
         throw e;

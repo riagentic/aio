@@ -1,4 +1,4 @@
-// ONE decider per setting with more than one home (feedback/frustration.md F6).
+// ONE decider per setting with more than one home (a field report).
 //
 // The declared window size lost to `--width` in one place and not another;
 // `expose`, the bind address and the database file went the same way — each

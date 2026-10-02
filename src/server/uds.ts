@@ -94,9 +94,16 @@ import {
 } from "../protocol/protocol-version.ts";
 import type { ServerSyncHandler } from "../sync/server-handler.ts";
 import { isPipePath, listenLocal, type LocalConn } from "./local-listen.ts";
-import { peerRefusal, primeLocalPeer } from "./local-peer.ts";
+import {
+  createLocalPeerGate,
+  foreignCtlAllowed,
+  foreignHealthView,
+  type LocalPeerGate,
+  PROBE_GRACE_MS,
+  requireLocalPeer,
+} from "./local-peer.ts";
 import { selfUid } from "./dir-permissions.ts";
-import { ensureLockDirOf } from "./single-instance-lock.ts";
+import { ensureLockDirOf, processStartToken } from "./single-instance-lock.ts";
 import { flushAllUrgent } from "./broadcast-coalescer.ts";
 import {
   filterPatchesBySubs,
@@ -237,7 +244,26 @@ export type UDSHandle = {
    *  spawn→arm window. Optional so a hand-built `UDSHandle` (tests) need not
    *  carry it. */
   armPeerPid?: (pid: number) => void;
+  /** The window process `pid` exited: stop trusting it (a no-op when another
+   *  pid is armed by now). A pid is reused by the kernel; a gate left armed
+   *  after its window died would trust whatever process receives it next. */
+  disarmPeerPid?: (pid: number) => void;
 };
+
+/** Build the gate a `peer.required` listener asks — exported so the app's
+ *  OTHER local door (the HTTP socket, server.ts) is handed the same object. */
+export function createAppPeerGate(): LocalPeerGate {
+  // Fail at CONSTRUCTION when this process cannot read peer credentials (no
+  // `--allow-ffi`): a gate that refuses everyone is a dead app, not a safe one.
+  requireLocalPeer();
+  return createLocalPeerGate({
+    selfUid: selfUid(),
+    startOf: processStartToken,
+    warn: (m) => log.warn("uds", m),
+    error: (m) => log.error("uds", m),
+    debug: (m) => log.debug("uds", m),
+  });
+}
 
 export function createUDSListener(
   socketPath: string,
@@ -296,8 +322,10 @@ export function createUDSListener(
    *  mismatch is refused BEFORE any frame is written — `proto`, `cfg` and the
    *  accept-time state included. Inert (and so dev/`am`-friendly) when absent,
    *  which is the default; the production Electron lockdown is the one caller
-   *  that sets it. */
-  peer?: { required: boolean },
+   *  that sets it. `gate` is the app's ONE gate when it has more local doors
+   *  than this socket (see `createAppPeerGate`); absent, the listener builds
+   *  its own. */
+  peer?: { required: boolean; gate?: LocalPeerGate },
 ): UDSHandle {
   const fullThreshold = typeof fullStateThreshold === "number" &&
       Number.isFinite(fullStateThreshold)
@@ -323,15 +351,19 @@ export function createUDSListener(
   const clientMap = new Map<LocalConn, UDSClient>();
   const counter = clientCounter ?? { value: 0 };
   let closed = false;
-  // The ONE pid allowed on the other end, armed by the app after it spawns its
-  // window. `null` = "not armed yet" = refuse; failing closed here is what
-  // makes the spawn→arm gap safe even if a client beats the spawn.
-  let allowedPid: number | null = null;
-  const _selfUid = peer?.required ? selfUid() : null;
-  // Open the peer-credential library NOW, not lazily on the first frame — a
-  // platform that cannot read peer credentials is then known at construction,
-  // and the gate never opens a library inside a request it must serve.
-  if (peer?.required) primeLocalPeer();
+  // The ONE process allowed on the other end, armed by the app after it spawns
+  // its window. Unarmed = refuse; failing closed here is what makes the
+  // spawn→arm gap safe even if a client beats the spawn. Built (and the
+  // peer-credential library opened) NOW, not lazily on the first frame — a
+  // process that cannot read peer credentials throws here, at construction.
+  const gate = peer?.required ? (peer.gate ?? createAppPeerGate()) : null;
+  // The window exited: its sessions end with it. A descriptor the window
+  // handed to a child would otherwise stay a full session — state, methods —
+  // for a process that is not the window. Closing the connection is all it
+  // takes; each one's read loop does its own cleanup.
+  gate?.onDisarm(() => {
+    for (const conn of [...clientMap.keys()]) conn.close();
+  });
 
   const pendingState = new Map<
     string,
@@ -348,6 +380,7 @@ export function createUDSListener(
 
   (async () => {
     for await (const conn of listener) {
+      let firstBytes: ((sent: boolean) => void) | undefined;
       // Everything below is PER-CONNECTION work, and this loop is the
       // transport's only door: a throw here does not fail one client, it ends
       // the loop — and `for await` disposes the listener on the way out, so the
@@ -357,17 +390,35 @@ export function createUDSListener(
       try {
         // THE local-peer gate. A same-user process that is NOT this app's
         // window may not open a SESSION: no `proto`/`cfg` hello, no state, no
-        // methods, no time travel. It MAY still use the `ctl` control plane —
-        // that is how `am` and the packaged-app door test reach a running
-        // production server, and it carries its own gates (and, in prod,
-        // serves no raw state). The per-frame guard in `_handleUDSConn` is the
-        // other half; this decides it ONCE, before anything is sent.
-        const trusted = peer?.required
-          ? peerRefusal(
-            conn.peerIdentity?.() ?? null,
-            { selfUid: _selfUid, allowedPid, requirePid: true },
-          ) === null
-          : true;
+        // methods, no time travel. It MAY still ask `ctl` the ONE question
+        // `am health` and the packaged-app door test put to a running
+        // production server (`foreignCtlAllowed`). The per-frame guard in
+        // `_handleUDSConn` is the other half; this decides it ONCE, before
+        // anything is sent.
+        // A refusal is logged by the gate, with its reason.
+        // The gate's LINE about a refused peer waits for `asked`: whether it
+        // ever sends a byte (the read loop settles it) or stays connected
+        // (the timer below). The refusal does not.
+        const asked = Promise.withResolvers<boolean>();
+        firstBytes = asked.resolve;
+        const trusted = gate === null || gate.refusal(
+              conn,
+              socketPath,
+              "It is given NO state and NO methods; over `ctl` only " +
+                "GET /__aio/health answers it — and the stop, to this " +
+                "boot's control credential alone.",
+              asked.promise,
+            ) === null;
+        if (!trusted) {
+          // On this socket the SERVER speaks first, so a peer that connects
+          // and waits is asking to be told something — the app's own window
+          // behind a wrapper does exactly that, and so would a process hoping
+          // to be handed state. Only a peer that has already hung up is a
+          // probe. Cleared as soon as the question is answered either way.
+          const stayed = setTimeout(() => asked.resolve(true), PROBE_GRACE_MS);
+          Deno.unrefTimer(stayed);
+          asked.promise.then(() => clearTimeout(stayed));
+        }
 
         // `connSet` is the CLEANUP roster (shutdown closes it) and the
         // `clientMap` is the STATE roster. Only a trusted window joins the
@@ -415,13 +466,6 @@ export function createUDSListener(
           // tt-state frame, so without this the shortcut is inert until the next
           // recorded action's broadcast.
           if (tt) sendTo(conn, enc("tt-state", tt.getBroadcast()));
-        } else {
-          log.warn(
-            "uds",
-            `a local process that is not this app's window connected to ` +
-              `${socketPath} (production lockdown) — it is given NO state and ` +
-              `NO methods; only the \`ctl\` control plane answers it.`,
-          );
         }
 
         _handleUDSConn(
@@ -443,8 +487,12 @@ export function createUDSListener(
           // A foreign peer may open a connection and use `ctl`; every other
           // frame kind is dropped (see `_handleUDSConn`).
           trusted,
+          firstBytes,
         );
       } catch (e) {
+        // Never served and never read: whatever the gate had to say about
+        // this peer is said now rather than lost.
+        firstBytes?.(true);
         log.error("uds", `client handshake failed — ${e}`);
         connSet.delete(conn);
         clientMap.delete(conn);
@@ -628,9 +676,8 @@ export function createUDSListener(
 
   return {
     socketPath,
-    armPeerPid: (pid: number) => {
-      allowedPid = pid;
-    },
+    armPeerPid: (pid: number) => gate?.arm(pid),
+    disarmPeerPid: (pid: number) => gate?.disarm(pid),
     // AIO-239: route broadcast through sendTo() to use per-connection write queue.
     // `clientMap`, not `connSet`: the latter is the cleanup roster and a foreign
     // (non-window) peer must never be handed a broadcast it did not subscribe to.
@@ -946,9 +993,12 @@ function _handleUDSConn(
   /** The cell ids a subscription may name — see `warnUnknownSubs`. */
   knownSubIds?: () => ReadonlySet<string>,
   /** False for a same-user peer that is not this app's window (production
-   *  lockdown): `ctl` is honoured (the control plane has its own gates), and
-   *  every frame that would read state or run a method is dropped. */
+   *  lockdown): `ctl` answers its allow-list (`foreignCtlAllowed`) and nothing
+   *  else, and every frame that would read state or run a method is dropped. */
   trusted = true,
+  /** Told once whether this peer ever sent anything: `true` at its first
+   *  byte, `false` when it hung up having sent none (see the gate's `asked`). */
+  firstBytes?: (sent: boolean) => void,
 ): void {
   const decoder = new TextDecoder();
   const MAX_BUF = udsFrameCeiling(maxFrameBytes);
@@ -1089,6 +1139,7 @@ function _handleUDSConn(
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
+        if (value.length > 0) firstBytes?.(true);
         const lines = lineBuf.push(decoder.decode(value, { stream: true }));
         // No frame ended and the unfinished one is past the ceiling — the
         // exact condition the carried-string check expressed.
@@ -1412,6 +1463,20 @@ function _handleUDSConn(
                   );
                 } catch { /* peer gone mid-call */ }
               };
+              // The app's routes, vitals, metrics and page are the WINDOW's.
+              // 404, as production already answers the control API: `am`
+              // reads that status as "this is a production app" and says so.
+              if (!trusted && !foreignCtlAllowed(c.method, c.path)) {
+                reply(
+                  404,
+                  JSON.stringify({
+                    error: "Not Found — local-peer lockdown: a process that " +
+                      "is not this app's window may ask only GET /__aio/health " +
+                      "(and, with the control credential, the stop)",
+                  }),
+                );
+                continue;
+              }
               if (!control) {
                 reply(
                   503,
@@ -1435,7 +1500,18 @@ function _handleUDSConn(
                   res.headers.forEach((v: string, k: string) => {
                     headers[k] = v;
                   });
-                  reply(res.status, await res.text(), headers);
+                  const body = await res.text();
+                  // An untrusted peer reads `/__aio/health` as "is it up, is it
+                  // this app" — not the whole document. Its other allowed
+                  // request, the stop, answers a fixed `{ok,msg}` or a 404,
+                  // so its status and body pass (no headers).
+                  if (trusted) reply(res.status, body, headers);
+                  else if (c.method === "POST") reply(res.status, body);
+                  else {
+                    reply(res.status, foreignHealthView(body), {
+                      "content-type": "application/json",
+                    });
+                  }
                 })
                 .catch((e: unknown) => {
                   // A throw from the handler is an ANSWER, not a dropped
@@ -1591,6 +1667,9 @@ function _handleUDSConn(
         }
       }
     } catch { /* connection closed */ }
+    // The read ended. A peer that got here without a byte sent none (a
+    // no-op when the first chunk already answered).
+    firstBytes?.(false);
     try {
       reader.releaseLock();
     } catch { /* stream may be errored (AIO-149) */ }

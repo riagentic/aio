@@ -26,6 +26,12 @@ app, that is a bug in aio, not a step you missed.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [1.0.16-beta → **1.0.17-beta**](from-1.0.16-beta-to-1.0.17-beta.md) — nothing
+  is removed and the surface does not move. The size repair: a peer-reached
+  `typescript` (and other dev-only packages) is left out by name, source
+  maps/docs/test fixtures are held aside for the compile, aio's tool cache is
+  excluded, and the artifact audit reads the VFS tree again so it can actually
+  see a compiler it was supposed to catch.
 - [1.0.15-beta → **1.0.16-beta**](from-1.0.15-beta-to-1.0.16-beta.md) — nothing
   is removed and the surface does not move. The size round: compiled binaries
   drop the TypeScript compiler and the other build-only npm packages (opt one

@@ -34,6 +34,7 @@ async function boot(onRestore: (s: D) => D, id: string) {
     },
   } as D);
   const app = await aio.run({
+    watch: false,
     cells: [c],
     appId: `app-onrestore-mutates-${id}`,
     persist: false,

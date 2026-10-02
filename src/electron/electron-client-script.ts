@@ -2,12 +2,16 @@
 
 import {
   CONNECT_HTML,
+  tmplAppMenu,
   tmplBounds,
   tmplCrashGuard,
   tmplPermissionGuard,
 } from "./electron-shared.ts";
 
 /** Generates a self-contained Electron main.cjs with a connect page for aio-client */
+/** The client's `app.name` — the name of its profile directory. */
+export const CLIENT_PROFILE = "aio-client";
+
 export function electronClientScript(bakedUrl?: string | null): string {
   // The address the BUILD already knew. Without it a shipped client opens a box
   // asking the user to type a server they were never told — the build recorded
@@ -22,9 +26,10 @@ const http = require('http');
 const https = require('https');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 
-Menu.setApplicationMenu(null);
-app.name = 'aio-client';
+${tmplAppMenu("aio client")}
+app.name = '${CLIENT_PROFILE}';
 ${tmplCrashGuard()}
 ${tmplPermissionGuard()}
 
@@ -64,6 +69,20 @@ function fetchPage(url, maxRedirects = 5) {
       let data = '';
       res.on('data', (chunk) => data += chunk);
       res.on('end', () => resolve(data));
+    });
+    // The pin is looked at HERE, on the connection that is about to carry the
+    // request line (and the ?token= in it): 'secureConnect' runs inside the
+    // handshake-done callback, before the buffered request is written.
+    req.on('socket', (sock) => {
+      if (mod !== https) return;
+      sock.once('secureConnect', () => {
+        try {
+          const peer = sock.getPeerCertificate();
+          if (peer && peer.raw && pinMismatch(new URL(url).host, peer.raw.toString('base64'))) {
+            warnPinChanged(new URL(url).host);
+          }
+        } catch {}
+      });
     });
     req.on('error', reject);
     req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
@@ -128,7 +147,10 @@ const DISCOVERY_PORT = (() => {
   const s = String(raw).trim();
   const n = Number(s);
   // Decimal digits only — same rule as the server's discoveryPortOf / AIO_PORT.
-  if (!/^\d+$/.test(s) || n < 1 || n > 65535) return 8099;
+  // [0-9], never the backslash class: this script is a template literal, and
+  // an un-doubled backslash-d reaches the file as a bare "d" — the test then
+  // matched no port at all and the variable was ignored outright.
+  if (!/^[0-9]+$/.test(s) || n < 1 || n > 65535) return 8099;
   return n;
 })();
 
@@ -194,6 +216,58 @@ function forgetRecent(url) {
 const _pinnedCerts = new Map(); // host -> cert PEM (strict pinning)
 function normPem(p) { return String(p || '').replace(/\\s+/g, ''); }
 function pinCert(host, cert) { if (host && cert) _pinnedCerts.set(host, normPem(cert)); }
+// Every certificate in a PEM (or bare base64) text, as base64 DER — the PEM
+// armour (whitespace-free after normPem) is the separator.
+function pemBodies(p) { return normPem(p).split(/-----[A-Z0-9]+-----/).filter(Boolean); }
+// Does the certificate a host presents satisfy its pin?
+// What a profile or a pairing reply carries is the file the server serves:
+// leaf THEN the app's own root. Comparing that whole text with the one
+// certificate Chromium hands over never matched, so the strict pin never fired
+// for any current server and every connect rode the looser host list. A pin is
+// met by the exact certificate, or by a certificate SIGNED by one in the pin
+// (the root: the leaf is re-issued whenever the machine's addresses change,
+// the root is the part that does not). The signature is verified — an issuer
+// merely named in a presented chain proves nothing.
+function pinMatches(pinned, cert) {
+  const der = pemBodies(cert)[0];
+  if (!der) return false;
+  const bodies = pemBodies(pinned);
+  if (bodies.includes(der)) return true;
+  try {
+    const leaf = new crypto.X509Certificate(Buffer.from(der, 'base64'));
+    for (const b of bodies) {
+      try {
+        if (leaf.verify(new crypto.X509Certificate(Buffer.from(b, 'base64')).publicKey)) return true;
+      } catch {}
+    }
+  } catch {}
+  return false;
+}
+// True only for a host that HAS a pin and presents something else.
+function pinMismatch(host, cert) {
+  const pinned = _pinnedCerts.get(host);
+  return !!pinned && !pinMatches(pinned, cert);
+}
+// A pinned host presenting ANOTHER certificate is not refused — a server that
+// regenerated its cert must stay reachable, and refusing would lock every
+// paired client out of it. It is never SILENT either: the main-process log
+// says so, and so does the connect page when it is the page on screen (a
+// data: URL — an app page is never scripted, it may own an element named
+// 'err').
+function warnPinChanged(pinnedHost) {
+  const pinNote = 'The certificate pinned for ' + pinnedHost + ' has CHANGED. ' +
+    'If the server of this app was reinstalled or regenerated its certificate, pair again (or import a fresh .aioapp) to pin the new one. ' +
+    'If it was not, something between this client and the app is answering in its place — do not enter anything you would not hand to a stranger.';
+  console.error('[aio-client] WARNING: ' + pinNote);
+  try {
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (!String(w.webContents.getURL()).startsWith('data:text/html')) continue;
+      w.webContents.executeJavaScript(
+        "document.getElementById('err') && (document.getElementById('err').textContent = " + JSON.stringify(pinNote) + ")"
+      ).catch(() => {});
+    }
+  } catch {}
+}
 
 // Turn a .aioapp profile into a connectable recent entry.
 function profileToRecent(pr) {
@@ -339,9 +413,12 @@ app.on('certificate-error', (event, _webContents, url, _error, cert, callback) =
     const host = new URL(url).host;
     // Strict pinning: a profile gave us the exact cert for this host.
     const pinned = _pinnedCerts.get(host);
-    if (pinned && cert && normPem(cert.data) === pinned) {
+    if (pinned && cert && pinMatches(pinned, cert.data)) {
       event.preventDefault(); callback(true); return;
     }
+    // A pin that did NOT match falls through to the looser list below (see
+    // warnPinChanged for why it is not refused) — loudly.
+    if (pinned) warnPinChanged(host);
     // Fallback: a host we fetched + validated as an aio app (manual connects
     // without a profile). Looser than pinning, but the user chose the address.
     if (_trustedHosts.has(host)) { event.preventDefault(); callback(true); return; }
@@ -369,6 +446,7 @@ app.on('ready', () => {
 
   let directUrl = null;
   let profileFile = null;
+  let bootErr = null; // an unusable profile: shown on the connect page
   for (const arg of process.argv) {
     if (arg.startsWith('--server-url=')) directUrl = arg.slice(13);
     else if (arg.startsWith('--profile=')) profileFile = arg.slice(10);
@@ -386,14 +464,22 @@ app.on('ready', () => {
   if (profileFile) {
     const pr = loadProfileFile(profileFile);
     if (!pr) { console.error('invalid .aioapp profile: ' + profileFile); process.exit(1); }
-    const rec = profileToRecent(pr);
-    pinCert(new URL(rec.url).host, rec.cert);
-    saveRecent(rec);
-    connectTo(win, rec.url);
-    return;
+    // loadProfileFile's host rule admits spellings no URL does ("::1"
+    // unbracketed, "a:b"); new URL() throwing here killed the 'ready' handler
+    // with a blank 480x300 window and no word why.
+    try {
+      const rec = profileToRecent(pr);
+      pinCert(new URL(rec.url).host, rec.cert);
+      saveRecent(rec);
+      connectTo(win, rec.url);
+      return;
+    } catch (e) {
+      bootErr = 'This .aioapp profile names a host that is not a usable address: ' + JSON.stringify(String(pr.host)) + '. Ask for a fresh profile, or type the address below.';
+      console.error('[aio-client] ' + bootErr + ' (' + profileFile + ')');
+    }
   }
 
-  if (directUrl) {
+  if (!bootErr && directUrl) {
     if (!directUrl.startsWith('http://') && !directUrl.startsWith('https://')) {
       console.error('--server-url must use http:// or https:// scheme');
       process.exit(1);
@@ -406,7 +492,7 @@ app.on('ready', () => {
   // precedence behind an explicit flag and an imported profile — both of which
   // are someone choosing THIS run — and skipped entirely by --connect, so the
   // picker is always one flag away when the baked server has moved.
-  if (__AIO_BAKED_URL && !process.argv.includes('--connect')) {
+  if (!bootErr && __AIO_BAKED_URL && !process.argv.includes('--connect')) {
     connectTo(win, __AIO_BAKED_URL);
     return;
   }
@@ -426,6 +512,7 @@ app.on('ready', () => {
   win.webContents.once('did-finish-load', () => {
     inject('window.__aioSetRecents && window.__aioSetRecents(' + JSON.stringify(loadRecents()) + ')');
     inject('window.__aioSetDiscovered && window.__aioSetDiscovered([])');
+    if (bootErr) inject("document.getElementById('err') && (document.getElementById('err').textContent = " + JSON.stringify(bootErr) + ")");
     scan();
     scanTimer = setInterval(scan, 4000); // keep the LAN list fresh
   });

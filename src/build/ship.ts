@@ -6,13 +6,19 @@
 // signable, verifiable artifact it would distribute.
 import { readDenoJson } from "../server/deno-json.ts";
 import { appIdFromConfig } from "../server/single-instance-lock.ts";
-import { isComparableVersion } from "../server/updates-core.ts";
+import {
+  DATA_CONTRACT_MARK,
+  isComparableVersion,
+  markedDataContract,
+  PROBE_NONCE_ENV,
+  probedFact,
+} from "../server/updates-core.ts";
 import { basename, dirname, join, resolve as resolvePath } from "@std/path";
 // Synchronous SHA-256 for `keyFingerprint`: WebCrypto's digest is async, and a
 // key fingerprint is shown from render/report paths that are not. Same import
 // the session and user stores already use.
 import { createHash } from "node:crypto";
-import { resolveAppDir, resolveEntry } from "./build-config.ts";
+import { resolveAppDir, resolveEntry } from "./config-rules.ts";
 import { buildVersionFor, unpublishableReason } from "./build-version.ts";
 import {
   flagVocabulary,
@@ -790,11 +796,15 @@ export async function probeArtifact(
   binaryPath: string,
 ): Promise<{ contract: DataContract; appId?: string }> {
   let out: Deno.CommandOutput;
+  const nonce = crypto.randomUUID();
   try {
     out = await new Deno.Command(binaryPath, {
       args: ["--aio-data-contract"],
       stdout: "piped",
       stderr: "piped",
+      // The lines that carry this value are the framework's own — nothing
+      // the app prints can pass for one.
+      env: { [PROBE_NONCE_ENV]: nonce },
     }).output();
   } catch (e) {
     // The spawn itself failed — ENOEXEC, EACCES, no such file. The artifact is
@@ -821,8 +831,12 @@ export async function probeArtifact(
       `exited ${out.code}${tail ? `:\n       ${tail}` : ""}`,
     ));
   }
+  const stderr = new TextDecoder().decode(out.stderr);
+  // The marker line first: it is the contract whatever else the app's own
+  // modules printed. A build older than the marker has none, and its stdout
+  // is the contract.
   const contract = parseDataContract(
-    stdout,
+    probedFact(stderr, "data-contract", nonce) ?? stdout,
     `\`${binaryPath} --aio-data-contract\``,
   );
   // THE WARNING THE CLI USED TO OWN.
@@ -838,10 +852,8 @@ export async function probeArtifact(
   // function just parsed, and the count the binary printed on stderr. Silent
   // when the app really persists nothing, which is the other meaning of an
   // empty contract and is not a defect.
-  const stderr = new TextDecoder().decode(out.stderr);
-  const persisting = Number(
-    /^\[aio\] persisting-cells: (\d+)$/m.exec(stderr)?.[1] ?? "0",
-  );
+  const count = probedFact(stderr, "persisting-cells", nonce) ?? "";
+  const persisting = /^\d+$/.test(count) ? Number(count) : 0;
   if (Object.keys(contract.cells).length === 0 && persisting > 0) {
     console.warn(
       `${HEY} the data contract declares 0 cells, but this build persists ` +
@@ -854,8 +866,8 @@ export async function probeArtifact(
     );
   }
   // The id the build RUNS as (1.0.13+; an older artifact prints none).
-  const appId = /^\[aio\] app-id: (\S+)\s*$/m.exec(stderr)?.[1];
-  return appId ? { contract, appId } : { contract };
+  const appId = probedFact(stderr, "app-id", nonce) ?? "";
+  return /^\S+$/.test(appId) ? { contract, appId } : { contract };
 }
 
 /** Why a release signed for `name` would be refused by every install of a
@@ -985,7 +997,8 @@ function notRunnable(binaryPath: string, why: string): string {
 export function parseDataContract(text: string, source: string): DataContract {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(text);
+    // A capture of stderr (or of both streams) holds the marker line.
+    parsed = JSON.parse(markedDataContract(text) ?? text);
   } catch (e) {
     const first = text.trim().split("\n")[0] ?? "";
     throw new Error(
@@ -995,7 +1008,10 @@ export function parseDataContract(text: string, source: string): DataContract {
         `\`<binary> --aio-data-contract\` and NOTHING else — if the file also ` +
         `holds boot log lines, recapture it with ` +
         `\`<binary> --aio-data-contract > contract.json\` ` +
-        `(aio prints the contract on stdout and everything else on stderr).`,
+        `(aio prints the contract on stdout and everything else on stderr). ` +
+        `An app that prints to stdout itself: capture stderr instead ` +
+        `(\`2> contract.json\`) — the contract is on its ` +
+        `"${DATA_CONTRACT_MARK.trim()}" line there.`,
     );
   }
   if (

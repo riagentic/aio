@@ -23,7 +23,15 @@ import {
   profileOfHome,
 } from "./app-dirs.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import {
+  _renameDeps,
+  isHeldOpenError,
+  removeOverSync,
+  RENAME_BACKOFF_MS,
+} from "../diagnostics/rename-over.ts";
 import { EXIT_WAIT_MS } from "./shutdown-budget.ts";
+import { appKeyPath, readControlKey } from "./app-key.ts";
+import { udsRequest } from "./local-request.ts";
 import { locateDenoJsonAbove, readDenoJsonSync } from "./deno-json.ts";
 import { inheritedWorkerAppId } from "./cell-worker-protocol.ts";
 import { DEFAULT_ENTRY } from "./app-files.ts";
@@ -168,6 +176,22 @@ export type LockData = {
    *  alpha66 — a missing value means the default home. */
   home?: string;
   socketPath?: string; // UDS socket path (when using UDS transport)
+  /** The address `port` is bound on, as configured (`127.0.0.1`, `0.0.0.0`,
+   *  `::`, a LAN address, a name) — written when the lock is taken, from the
+   *  same decider the server binds with. `port`
+   *  alone does not say where to connect — an app with `host: "127.0.0.2"`
+   *  refuses on `127.0.0.1` forever. Whoever asks "is this instance's
+   *  listener still there?" asks at THIS address ({@linkcode probeEndpoint}).
+   *  Absent on a socket-only app and on locks written before 1.0.17-beta —
+   *  and then nobody may conclude from a refused connect that the listener
+   *  is gone. */
+  host?: string;
+  /** A one-time secret on a lock `am start` holds while it spawns the app:
+   *  the child is handed the same value in {@linkcode HANDOFF_ENV}, and only
+   *  a process holding it takes this lock over. The pid of whoever filed it
+   *  says nothing — a child is not reliably that pid's child (on Windows the
+   *  launcher is an intermediate process). */
+  handoff?: string;
   trojanPort?: number; // plain-HTTP control port (when TLS active)
   // LAN-discovery metadata — present only for --expose'd apps, so any
   // discovery responder on the host can report EVERY exposed app (not just
@@ -262,10 +286,54 @@ export type LockMeta = {
    *  as `name → "value (source)"` — what `am doctor` shows. Decided by
    *  config-sources.ts; absent on locks written before 1.0.6. */
   settings?: Record<string, string>;
+  /** The address the boot will bind `port` on — see {@linkcode LockData}
+   *  `host`. */
+  host?: string;
+  /** See {@linkcode LockData} `handoff`. */
+  handoff?: string;
 };
+
+/** The variable `am start` hands its child the lock's `handoff` secret in. */
+export const HANDOFF_ENV = "AIO_LOCK_HANDOFF";
+
+let _secret: string | undefined | null = null;
+/** The hand-off secret this process was given — read ONCE and taken out of
+ *  the environment, so no child of the app (a worker, the window, a
+ *  subprocess) inherits it. */
+function handoffSecret(): string | undefined {
+  if (_secret === null) {
+    _secret = Deno.env.get(HANDOFF_ENV);
+    if (_secret !== undefined) Deno.env.delete(HANDOFF_ENV);
+  }
+  return _secret;
+}
+
+/** Was `lock` filed FOR this process — does it carry the hand-off secret
+ *  this process was given? Never by pid or parent pid. Pure. @internal */
+export function _handedOver(
+  lock: { handoff?: string },
+  secret: string | undefined = handoffSecret(),
+): boolean {
+  return !!secret && lock.handoff === secret;
+}
 
 /** Instance info returned by instances() — lock data + liveness */
 export type InstanceInfo = LockData & { alive: boolean };
+
+/** What {@linkcode AppLock.acquire} answers. `unendable`: the holder is a
+ *  zombie by the sustained verdict and could not be ended — the refusal
+ *  names it rather than calling it a running app. */
+export type AcquireResult =
+  | { ok: true }
+  | {
+    ok: false;
+    existing: LockData;
+    unendable?: true;
+    /** The owner `existing` names is DEAD, and its lock file could not be
+     *  removed (why) — another program has it open. Not "already running":
+     *  see {@linkcode AppLock.adoptUnfiled}. */
+    held?: string;
+  };
 
 /** What to do when another instance of the same app is already running */
 export type SingletonMode = boolean;
@@ -343,6 +411,7 @@ function _shortHash(s: string): string {
 export function appIdFromConfig(
   cfg: { appId?: string; title?: string; name?: string } | null | undefined,
 ): string | null {
+  // aio-ok: path-split — a package name (`@scope/name`)
   const raw = cfg?.appId ?? cfg?.title ?? cfg?.name?.split("/").pop();
   return raw ? slugify(raw) : null;
 }
@@ -379,6 +448,7 @@ function _fileEntry(): URL | null {
 /** The entry's directory name — its parent when the entry sits in `src/`.
  *  The last rung when no deno.json is anywhere near the entry. */
 function _entryDirAppId(main: URL): string | null {
+  // aio-ok: path-split — a file: URL pathname — always `/`
   const parts = main.pathname.split("/").filter(Boolean);
   parts.pop(); // the entry file itself
   const dir = parts.pop();
@@ -508,6 +578,7 @@ export function inferredIdFallbackWarning(): string | null {
   if (inheritedWorkerAppId()) return null;
   const main = _fileEntry();
   if (!main) return null;
+  // aio-ok: path-split — a file: URL pathname — always `/`
   if (main.pathname.split("/").some((p) => p.startsWith("deno-compile-"))) {
     return null;
   }
@@ -548,6 +619,7 @@ export function resolveAppId(appId?: string): string {
   // binary regardless of launch directory.
   try {
     const main = new URL(Deno.mainModule);
+    // aio-ok: path-split — a file: URL pathname — always `/`
     const compiledSeg = main.pathname.split("/").find((p) =>
       p.startsWith("deno-compile-")
     );
@@ -772,12 +844,8 @@ export function pruneDeadLockDirAt(dir: string, rootGone = false): boolean {
     if (n.endsWith(".lock")) {
       // Read through the path: `readLock` resolves under `lockDir()`, which
       // may be a different scope in this process.
-      let raw: string | null = null;
-      try {
-        raw = Deno.readTextFileSync(path);
-      } catch { /* aio-ok: gone meanwhile, or not a file — rmdir decides */ }
+      const { raw, data: own } = readLockAt(path);
       if (raw === null) continue; // gone, or not a file — rmdir decides
-      const own = parseLock(raw, path);
       if (!own) {
         if (unknownLockDead(path, raw, rootGone)) removeLockFileIf(path, raw);
         continue;
@@ -811,7 +879,7 @@ export function pruneDeadLockDirAt(dir: string, rootGone = false): boolean {
   // A pre-alpha38 `<appId>.launch.json` (nothing writes one there now; it is
   // only read) goes once no lock of that app is left beside it.
   for (const n of names) {
-    const m = /^(.+)\.(?:launch\.json|show)$/.exec(n);
+    const m = /^(.+)\.(?:launch\.json|show|quit)$/.exec(n);
     if (m && !_exists(join(dir, `${m[1]}.lock`))) {
       try {
         Deno.removeSync(join(dir, n));
@@ -1681,6 +1749,204 @@ function takeHold(lockFile: string): { f: Deno.FsFile; path: string } | null {
   return null;
 }
 
+/** What one connection attempt to a holder's endpoint found.
+ *  `up`: something accepted. `gone`: NOTHING listens there — the address
+ *  refused, or the socket/pipe does not exist. `busy`: something is there
+ *  and did not take this connection (every pipe instance in use, access
+ *  denied, a timeout) — a listener that is busy is a listener. */
+export type EndpointProbe = { state: "up" | "busy" | "gone"; why?: string };
+
+/** Where a lock record says its holder listens — its local socket when it
+ *  has one, else the TCP address it BOUND (`host` + `port`). A wildcard bind
+ *  is reached on loopback: `0.0.0.0` at `127.0.0.1`; `::`, which binds both
+ *  families on most systems, at `::1` AND `127.0.0.1`. Null: the record
+ *  names no endpoint — it has no door, or it was written by an aio that
+ *  recorded the port without the address, which says nothing about where to
+ *  connect. Pure. */
+export function endpointOf(
+  l: Pick<LockData, "socketPath" | "port" | "host">,
+): { socket: string } | { hostnames: string[]; port: number } | null {
+  if (l.socketPath) return { socket: l.socketPath };
+  if (!(l.port > 0) || typeof l.host !== "string" || !l.host) return null;
+  const h = l.host.replace(/^\[|\]$/g, "");
+  const hostnames = h === "0.0.0.0"
+    ? ["127.0.0.1"]
+    : h === "::"
+    ? ["::1", "127.0.0.1"]
+    : [h];
+  return { hostnames, port: l.port };
+}
+
+/** The OS steps of {@linkcode probeEndpoint}. `value`-style seam: replaced
+ *  by its test, to answer as a machine without an IPv6 loopback does. */
+export const _probeDeps = {
+  connect: (o: { hostname: string; port: number }): Promise<Deno.Conn> =>
+    Deno.connect(o),
+};
+
+/** An answer that says nothing about the listener: this machine cannot
+ *  reach that address at all (no IPv6 loopback — EADDRNOTAVAIL, an
+ *  unreachable network). Pure. */
+function noRoute(e: unknown): boolean {
+  return e instanceof Deno.errors.AddrNotAvailable ||
+    (e instanceof Error &&
+      /\(os error (99|101|10049|10051|49|51)\)/.test(e.message));
+}
+
+/** One connection attempt to the endpoint a lock record NAMES
+ *  ({@linkcode endpointOf}) — never to an address guessed from its port.
+ *  Null: the record names nothing to probe. Several addresses (a `::` bind):
+ *  any accept is `up`; `gone` only when every address that could be reached
+ *  refused, at least one did, and none was `busy`; an address this machine
+ *  cannot reach at all counts for nothing — and when NO address gave a
+ *  definite answer, the probe is `busy`, the safe side.
+ *  @internal */
+export async function probeEndpoint(
+  l: Pick<LockData, "socketPath" | "port" | "host">,
+): Promise<EndpointProbe | null> {
+  const at = endpointOf(l);
+  if (!at) return null;
+  const one = async (
+    open: () => Promise<{ close(): void }>,
+  ): Promise<EndpointProbe & { noRoute?: true }> => {
+    try {
+      (await open()).close();
+      return { state: "up" };
+    } catch (e) {
+      const why = e instanceof Error ? e.message : String(e);
+      if (noRoute(e)) return { state: "busy", why, noRoute: true };
+      const nothingThere = e instanceof Deno.errors.NotFound ||
+        e instanceof Deno.errors.ConnectionRefused;
+      return { state: nothingThere ? "gone" : "busy", why };
+    }
+  };
+  if ("socket" in at) {
+    const { state, why } = await one(() => connectLocal(at.socket));
+    return why === undefined ? { state } : { state, why };
+  }
+  const all = [];
+  for (const hostname of at.hostnames) {
+    all.push(await one(() => _probeDeps.connect({ hostname, port: at.port })));
+  }
+  if (all.some((p) => p.state === "up")) return { state: "up" };
+  const definite = all.filter((p) => !p.noRoute);
+  const busy = definite.find((p) => p.state === "busy");
+  if (busy) return { state: "busy", why: busy.why };
+  if (definite.length > 0) return { state: "gone", why: definite[0]!.why };
+  return { state: "busy", why: all[0]?.why };
+}
+
+/** How many connection attempts, and how far apart, before a LIVE process is
+ *  called a zombie: six over 2.5 s. Taking the lock of a live process is the
+ *  most dangerous thing the lock does — one refused connect is not evidence
+ *  (a listener binds a moment after its record says `started`; a named pipe
+ *  refuses between two accepts). */
+export const ZOMBIE_PROBES = 6;
+export const ZOMBIE_PROBE_GAP_MS = 500;
+
+/** The steps of the zombie verdict a test replaces. @internal */
+export const _zombieDeps = {
+  probe: probeEndpoint,
+  delay: (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms)),
+  /** Ms since the lock file last changed. */
+  recordAge: (key: string): number => lockAgeMs(key),
+  /** End the process `l` names — ask, wait, then force — and say whether it
+   *  is gone. False also when it is not this user's to signal. */
+  async end(l: LockData): Promise<boolean> {
+    try {
+      await killProcess(l.pid, undefined, l);
+    } catch {
+      return false; // aio-ok: not ours to signal — the caller refuses, by name
+    }
+    return !isProcessAlive(l.pid);
+  },
+};
+
+/** What the zombie verdict found: how many attempts, over how long, and the
+ *  last answer. */
+export type ZombieVerdict = { tries: number; ms: number; why: string };
+
+/** THE verdict "this LIVE process is a zombie" — one rule for a launch that
+ *  would take its lock and for `am start`, which would end it.
+ *
+ *  Taking over from a live process is the most dangerous thing the lock
+ *  does, so it needs sustained evidence, never one probe. One refused
+ *  connect called a healthy app a zombie — measured on Windows, 10 of 60
+ *  double-click pairs: the holder's record said `started` 56 ms before its
+ *  pipe was bound, and the losing launch took its lock and opened the same
+ *  database. So:
+ *   · a holder still inside its startup grace is not judged;
+ *   · a record that CHANGED within the grace is not judged either — its
+ *     owner wrote it a moment ago, which a wedged process does not do;
+ *   · the endpoint must answer "nothing is here" to every one of
+ *     ZOMBIE_PROBES attempts spread over seconds — an accept, or an endpoint
+ *     that is there but busy, ends it: alive;
+ *   · and the record must be the same bytes at the end as at the start
+ *     (`"moved"`: judge what is there now).
+ *  Null: alive, or nothing to ask. */
+export async function zombieVerdict(
+  key: string,
+  existing: LockData,
+  raw: string | null = readLockRaw(key),
+): Promise<ZombieVerdict | "moved" | null> {
+  const pastStartup = existing.status !== "starting" ||
+    ageSince(existing.startedAt) > STARTUP_GRACE_MS;
+  if (!pastStartup || !(_zombieDeps.recordAge(key) > STARTUP_GRACE_MS)) {
+    return null;
+  }
+  const t0 = performance.now();
+  for (let n = 1;; n++) {
+    const p = await _zombieDeps.probe(existing);
+    if (p === null || p.state !== "gone") return null;
+    if (readLockRaw(key) !== raw) return "moved";
+    if (n === ZOMBIE_PROBES) {
+      return {
+        tries: n,
+        ms: Math.round(performance.now() - t0),
+        why: p.why ?? "refused",
+      };
+    }
+    await _zombieDeps.delay(ZOMBIE_PROBE_GAP_MS);
+  }
+}
+
+/** What a refused `am` verb says when `acquire` answered `held`: the owner
+ *  is gone, its file is not — never "running". Pure. */
+export function heldLockLine(appId: string, existing: LockData, why: string) {
+  return `"${printable(appId)}" is not running — its previous run (pid ` +
+    `${existing.pid}) is gone, but its lock file cannot be removed ` +
+    `(${printable(why)}): another program has it open. Try again in a moment.`;
+}
+
+/** The line for a zombie verdict on `l`: what was seen. */
+export function zombieLine(l: LockData, v: ZombieVerdict): string {
+  const at = endpointOf(l);
+  const where = !at
+    ? `port ${l.port}`
+    : "socket" in at
+    ? `socket ${printable(at.socket)}`
+    : `${printable(at.hostnames.join(" and "))} port ${at.port}`;
+  // Said as what it is: the file is not there. A cleaner of the runtime
+  // directory removes it from under a LIVE app too, which then dies here —
+  // its own tick has said so in its log since (`lockTick`).
+  let noFile = "";
+  if (at && "socket" in at && !isPipePath(at.socket)) {
+    try {
+      Deno.lstatSync(at.socket);
+    } catch (e) {
+      if (e instanceof Deno.errors.NotFound) {
+        noFile = " (the socket file is gone — its listener ended, or the " +
+          "file was removed from under it)";
+      }
+    }
+  }
+  return `pid ${l.pid} is alive but nothing listens on ${where}${noFile} — ` +
+    `${v.tries} connection attempts over ${v.ms} ms were all refused (${
+      printable(v.why)
+    }), and its lock record has not changed for more than ` +
+    `${STARTUP_GRACE_MS / 1000} s`;
+}
+
 /** Check if a TCP port has something listening */
 export async function isPortInUse(port: number): Promise<boolean> {
   try {
@@ -1712,8 +1978,35 @@ export async function isSocketAlive(socketPath: string): Promise<boolean> {
 /** Read a lock by its key — the plain appId for a default-home app, or the
  *  `<appId>@<hash8(home)>` key {@linkcode lockKey} builds for any other home. */
 export function readLock(key: string): LockData | null {
-  return parseLock(readLockRaw(key), lockPath(key));
+  return readLockAt(lockPath(key)).data;
 }
+
+/** The lock file at `path`: its exact bytes and the record they hold — for a
+ *  reader that does NOT hold the lock's mutex.
+ *
+ *  An owner rewrites its record IN PLACE (see {@linkcode rewriteLock}), so
+ *  such a reader can catch the file mid-write. A record written that way
+ *  carries a check ({@linkcode sealLock}); bytes that do not pass it, or do
+ *  not parse, are read again — the write is one small call, done long before
+ *  the last look. Still unreadable after that: `data` null, as for a file a
+ *  crash left empty. */
+function readLockAt(
+  path: string,
+): { raw: string | null; data: LockData | null } {
+  for (let look = 0;; look++) {
+    let raw: string | null = null;
+    try {
+      raw = Deno.readTextFileSync(path);
+    } catch { /* aio-ok: no lock file — null is the answer */ }
+    const data = parseLock(raw, path);
+    if (raw === null || data !== null || look === TORN_REREADS) {
+      return { raw, data };
+    }
+    pauseSync(1 << look); // 1, 2, 4, 8 ms
+  }
+}
+/** How many times bytes that do not read as a record are read again. */
+const TORN_REREADS = 4;
 
 /** The lock file's exact bytes (as text), or null when there is no file.
  *  Every removal compares against THIS — see {@linkcode removeLockIf}. */
@@ -1729,6 +2022,9 @@ function readLockRaw(key: string): string | null {
 function parseLock(raw: string | null, path?: string): LockData | null {
   if (raw === null) return null;
   try {
+    // A sealed record whose check does not match is a write caught half-way.
+    const seal = SEAL.exec(raw);
+    if (seal && sealOf(raw.slice(0, seal.index)) !== seal[1]) return null;
     const data = JSON.parse(raw) as LockData;
     // Validate the SHAPE of each field, never its truthiness.
     //
@@ -1773,7 +2069,7 @@ function parseLock(raw: string | null, path?: string): LockData | null {
 //     written to a private tmp file and PUBLISHED with `link()`, which fails
 //     with EEXIST when the name is taken: the lock file never exists without
 //     its whole content. (`writeLock`'s in-place overwrite had the same hole
-//     for every update; updates now replace the file with one `rename`.)
+//     for every update; see the seal below for how an update is written.)
 //  2. DELETE-BY-PATH. A reclaim judged the record at the path dead, then
 //     removed WHATEVER was at the path — by then possibly a fresh lock a live
 //     racer had just taken. Every removal is now compare-and-delete: under a
@@ -1794,25 +2090,195 @@ function parseLock(raw: string | null, path?: string): LockData | null {
 
 const _nonce = (): string => crypto.randomUUID().slice(0, 8);
 
+// ── The seal: a record that is rewritten in place says when it is whole ──
+//
+// A lock's owner changes its record (`starting` → `started`, its socket, its
+// port) by writing the new bytes OVER the old ones through a handle it keeps
+// open, never by writing a new file and renaming it. The lock is published
+// through a hard link (`publishExclusive`), and on Windows a rename over a
+// file published that way is refused with "access denied" — measured, 2 000
+// tries a cell: 1.4–4.1 % of them, clearing after 0.5–1.3 s on a quiet
+// machine and not within 10 s right after an install or an update, which is
+// where a desktop app's boot was refused with an 11-try, 1.3 s wait already
+// in place. A rename over a file written any other way was refused 0 times
+// in 20 000, and a write through an open handle 0 times in 8 000.
+//
+// The price is that a reader without the mutex can see the write half done.
+// So such a record ends in a SEAL: 32 spaces and tabs — the 32 bits of a hash
+// of the JSON before them — on a line of their own. To `JSON.parse` (and to
+// every older aio that reads a lock) that is trailing whitespace. To this
+// reader it is the proof the bytes are one whole record: a mix of two writes
+// does not pass, and is read again ({@linkcode readLockAt}).
+//
+// A placeholder filed by `am` or a dev session, and anything an older aio
+// wrote, carries no seal: plain `JSON.stringify` text, which its writer
+// compares byte for byte. Such a record is changed in place too, the file
+// emptied first ({@linkcode rewriteLock}).
+
+/** The seal at the end of a record: its 32 marks. */
+const SEAL = /\n([ \t]{32})\n$/;
+
+/** The 32 marks for `json`: the bits of its FNV-1a hash, space = 0, tab = 1. */
+function sealOf(json: string): string {
+  return parseInt(hash8(json), 16).toString(2).padStart(32, "0")
+    .replaceAll("0", " ").replaceAll("1", "\t");
+}
+
+/** `data` as the text an owner's own record is stored as. */
+function sealLock(data: LockData): string {
+  const json = JSON.stringify(data);
+  return `${json}\n${sealOf(json)}\n`;
+}
+
+/** The seal's two halves, for their test. @internal */
+// aio-ok: a test seam — the product reaches both through the lock's own reads and writes
+export const _seal = {
+  text: sealLock,
+  parse: (raw: string): LockData | null => parseLock(raw),
+};
+
+/** The file steps a test replaces (a write that fails, a platform).
+ *  @internal */
+export const _lockDeps = {
+  /** The whole record over the old one: one write from offset 0, then the
+   *  length. */
+  write(f: Deno.FsFile, bytes: Uint8Array): void {
+    f.seekSync(0, Deno.SeekMode.Start);
+    for (let at = 0; at < bytes.length;) at += f.writeSync(bytes.subarray(at));
+    f.truncateSync(bytes.length);
+  },
+  open: (path: string): Deno.FsFile =>
+    Deno.openSync(path, { read: true, write: true }),
+  windows: (): boolean => Deno.build.os === "windows",
+};
+
+/** Open the lock file at `path` to rewrite it. On Windows a process that has
+ *  it open without write sharing refuses this for as long as it looks — the
+ *  same bounded wait as a rename gets. (An owner does not come here: it
+ *  writes through the handle it has had open since it made the file.) */
+function openToRewrite(path: string): Deno.FsFile {
+  for (let tries = 1;; tries++) {
+    try {
+      return _lockDeps.open(path);
+    } catch (e) {
+      const wait = _lockDeps.windows() && isHeldOpenError(e)
+        ? RENAME_BACKOFF_MS[tries - 1]
+        : undefined;
+      if (wait === undefined) throw e;
+      pauseSync(wait);
+    }
+  }
+}
+
+/** Change the record at `path` to `data` — the caller holds the mutex and
+ *  has read `was`, the bytes there now. Returns the handle an OWNER keeps
+ *  (`owner`: the caller is the lock's holder, `held` its handle so far).
+ *
+ *  ALWAYS in place, never a replace by rename: the file was published
+ *  through a hard link ({@linkcode publishExclusive}), and on Windows a
+ *  rename over such a file is refused (ACCESS_DENIED) in 1.4–4.1 % of the
+ *  tries for a second or longer — measured; a write through an open handle
+ *  was refused in none of 8 000. It goes through `held` when that is still
+ *  the file at the path, else through a handle opened for this write (which
+ *  an owner then keeps instead).
+ *
+ *  Sealed over a sealed record of the same process: written over it, and a
+ *  reader that catches the two mixed fails the check and reads again.
+ *  Anything else — a record with no seal, a dead owner's record, a writer
+ *  that stores the plain bytes it compares later — has no check both sides
+ *  share, so the file is EMPTIED first: a reader then sees the old record,
+ *  nothing, a cut-off start of the new one (none of which parses, bar the
+ *  whole new record short of its seal), or the new one — never a splice of
+ *  two records that reads as a third. An owner always writes sealed. */
+function rewriteLock(
+  path: string,
+  was: string,
+  data: LockData,
+  held: Deno.FsFile | null,
+  owner: boolean,
+): Deno.FsFile | null {
+  const over = SEAL.test(was) && parseLock(was)?.pid === data.pid;
+  const text = owner || over ? sealLock(data) : JSON.stringify(data);
+  const mine = held !== null && sameFile(held, path);
+  const f = mine ? held : openToRewrite(path);
+  try {
+    if (!over) f.truncateSync(0);
+    _lockDeps.write(f, new TextEncoder().encode(text));
+  } catch (e) {
+    if (!mine) f.close(); // the owner's own handle stays the owner's
+    throw e;
+  }
+  if (mine) return held;
+  if (!owner) {
+    f.close();
+    return null;
+  }
+  held?.close(); // open on a file that is no longer the lock
+  return f;
+}
+
 /** Publish `text` at `path` only if nothing is there — never a half-written
  *  file. True on success, false if the name is taken. */
-function publishExclusive(path: string, text: string): boolean {
+function publishExclusive(
+  path: string,
+  text: string,
+  /** Handed the handle the record was written through, still open — the
+   *  owner keeps it for the lock's life ({@linkcode rewriteLock}). Without
+   *  it the handle is closed here. */
+  keep?: (f: Deno.FsFile) => void,
+): boolean {
   const tmp = `${path}.${ownPidTag()}.${_nonce()}.tmp`;
-  const writeTmp = () => Deno.writeTextFileSync(tmp, text, { mode: 0o600 });
+  const bytes = new TextEncoder().encode(text);
+  const fill = (at: string): Deno.FsFile => {
+    const f = Deno.openSync(at, {
+      read: true,
+      write: true,
+      createNew: true,
+      mode: 0o600,
+    });
+    try {
+      for (let n = 0; n < bytes.length;) n += f.writeSync(bytes.subarray(n));
+    } catch (e) {
+      f.close();
+      throw e;
+    }
+    return f;
+  };
+  /** Published: the handle goes to the owner, or is closed. */
+  const done = (f: Deno.FsFile): true => {
+    if (keep) keep(f);
+    else f.close();
+    return true;
+  };
+  let f: Deno.FsFile;
   try {
-    writeTmp();
+    f = fill(tmp);
   } catch (e) {
     // The directory can vanish between `lockDir()` and this write: a sibling
     // app's shutdown pruned its (momentarily empty) scoped dir. Re-create and
     // try once more — an ENOENT here is never "someone holds the lock".
     if (!(e instanceof Deno.errors.NotFound)) throw e;
     remakeLockDir(dirname(path));
-    writeTmp();
+    f = fill(tmp);
   }
   try {
+    // The handle opened on the temp name IS the published file (a hard link
+    // is a second name for the same file). The owner keeps one opened by the
+    // lock's OWN name instead, taken while this one is still open: nobody
+    // can have the file open in a way that refuses it, since their open had
+    // to allow this handle's writing. Not opened: this one is kept.
     Deno.linkSync(tmp, path);
-    return true;
+    if (!keep) return done(f);
+    let named: Deno.FsFile;
+    try {
+      named = _lockDeps.open(path);
+    } catch {
+      return done(f); // aio-ok: the first handle is the same file — kept
+    }
+    f.close();
+    return done(named);
   } catch (e) {
+    f.close();
     if (e instanceof Deno.errors.AlreadyExists) return false;
     // A filesystem without hard links: fall back to an exclusive create. The
     // content goes in with ONE write call; readers treat a short/empty file
@@ -1820,40 +2286,11 @@ function publishExclusive(path: string, text: string): boolean {
     // `mode` as the tmp above has it: the record names the owner's pid,
     // cwd and home, and this branch used to create it at the umask default
     // (0644 — every local user reads it) while the link path gave 0600.
-    const excl = { createNew: true, write: true, mode: 0o600 };
-    const fd = Deno.openSync(path, excl);
-    try {
-      fd.writeSync(new TextEncoder().encode(text));
-    } finally {
-      fd.close();
-    }
-    return true;
+    return done(fill(path));
   } finally {
     try {
       Deno.removeSync(tmp);
     } catch { /* aio-ok: already gone */ }
-  }
-}
-
-/** Replace `path` with `text` in one step (tmp → rename). */
-function replaceAtomic(path: string, text: string): void {
-  const tmp = `${path}.${ownPidTag()}.${_nonce()}.tmp`;
-  try {
-    Deno.writeTextFileSync(tmp, text, { mode: 0o600 });
-  } catch (e) {
-    // Same case as publishExclusive: a sibling's shutdown pruned the scoped
-    // lock dir between our `lockDir()` and this write. Re-create, write again.
-    if (!(e instanceof Deno.errors.NotFound)) throw e;
-    remakeLockDir(dirname(path));
-    Deno.writeTextFileSync(tmp, text, { mode: 0o600 });
-  }
-  try {
-    Deno.renameSync(tmp, path);
-  } catch (e) {
-    try {
-      Deno.removeSync(tmp);
-    } catch { /* aio-ok: already gone */ }
-    throw e;
   }
 }
 
@@ -2029,6 +2466,10 @@ export function removeLockFileIf(
   path: string,
   judged: string,
   recreate = false,
+  /** Wait out a Windows process that has the file open (`removeOverSync`),
+   *  and THROW when it is still there at the bound — the owner's own release
+   *  asks for this. A reclaim does not: its caller's loop is the retry. */
+  wait = false,
 ): boolean {
   return withLockMutexAt(path, () => {
     let now: string | null = null;
@@ -2036,13 +2477,33 @@ export function removeLockFileIf(
       now = Deno.readTextFileSync(path);
     } catch { /* aio-ok: gone — nothing to remove */ }
     if (now !== judged) return false;
+    if (wait) return removeOverSync(path);
     try {
-      Deno.removeSync(path);
+      _renameDeps.remove(path); // the OS step `removeOverSync` takes too
       return true;
     } catch {
-      return false; // aio-ok: removed meanwhile — the goal holds
+      return false; // aio-ok: removed meanwhile, or held — the caller's loop looks again
     }
   }, recreate) ?? false;
+}
+
+/** Beside the lock: "the instance this lock names quit CLEANLY and could not
+ *  remove it". A lock whose owner is gone otherwise means a crash, and the
+ *  next start says so — which would be false here. Holds the lock's bytes. */
+function quitMarkPath(key: string): string {
+  return join(lockDir(), `${key}.quit`);
+}
+
+/** Is the dead owner's lock `raw` one its owner tried to remove on a clean
+ *  quit? The mark is consumed either way. */
+function takeQuitMark(key: string, raw: string): boolean {
+  const path = quitMarkPath(key);
+  let mark: string | null = null;
+  try {
+    mark = Deno.readTextFileSync(path);
+    Deno.removeSync(path);
+  } catch { /* aio-ok: no mark — the owner did not quit cleanly */ }
+  return mark === raw;
 }
 
 /** Remove the lock at `key` only if it still names the owner that was judged
@@ -2067,20 +2528,33 @@ export function removeLockIfOwner(
       owner.startEpoch !== now.startEpoch
     ) return false;
     try {
-      Deno.removeSync(lockPath(key));
-      return true;
-    } catch {
-      return false; // aio-ok: removed meanwhile — the goal holds
+      removeOverSync(lockPath(key));
+      return true; // removed, or removed meanwhile — the goal holds
+    } catch (e) {
+      log.warn(
+        "lock",
+        `${printable(lockPath(key))} could not be removed (${
+          e instanceof Error ? e.message : String(e)
+        }) — the next start reclaims it`,
+      );
+      return false;
     }
   });
 }
 
-/** Write lock file — an atomic whole-file replace (never a half-written file a
- *  reader could take for a dead lock), under the lock's mutex.
+/** Write lock file — created whole if none is there, else written over in
+ *  place ({@linkcode rewriteLock}: a reader never takes a half-written file
+ *  for a record), under the lock's mutex.
  *  @decider */
 export function writeLock(data: LockData): void {
   const key = lockKey(data.appId, data.home, data.profile);
-  withLockMutex(key, () => replaceAtomic(lockPath(key), JSON.stringify(data)));
+  withLockMutex(key, () => {
+    const path = lockPath(key);
+    const was = readLockRaw(key);
+    if (was === null && publishExclusive(path, JSON.stringify(data))) return;
+    // There, or filed in the instant since the read: written over.
+    rewriteLock(path, was ?? readLockRaw(key) ?? "", data, null, false);
+  });
 }
 
 /** Compare-and-swap for `am`'s own lock writes (the placeholder, the
@@ -2111,10 +2585,11 @@ export function replaceLockIf(
       if (typeof next === "function") return false;
       return publishExclusive(path, JSON.stringify(next));
     }
-    const now = parseLock(readLockRaw(key));
+    const was = readLockRaw(key);
+    const now = parseLock(was);
     if (!now || !sameRecord(expected, now)) return false;
     const data = typeof next === "function" ? next(now) : next;
-    replaceAtomic(path, JSON.stringify(data));
+    rewriteLock(path, was!, data, null, false);
     return true;
   }) ?? false;
 }
@@ -2143,10 +2618,14 @@ function sameRecord(was: LockData, now: LockData): boolean {
 }
 
 /** Atomic create-new lock file — returns false if file already exists (race-safe) */
-function tryCreateLock(data: LockData): boolean {
+function tryCreateLock(
+  data: LockData,
+  /** The owner's: it gets the open handle, and the record is sealed. */
+  keep: (f: Deno.FsFile) => void,
+): boolean {
   const path = lockPath(lockKey(data.appId, data.home, data.profile));
   try {
-    return publishExclusive(path, JSON.stringify(data));
+    return publishExclusive(path, sealLock(data), keep);
   } catch (e) {
     // `false` means ONE thing: the file is already there, so another process
     // won the race. It used to mean "anything went wrong", and the caller
@@ -2397,7 +2876,8 @@ export class AppLock {
       for (const lock of [...AppLock._live]) lock.release();
     };
     const markStopping = (signal: "SIGINT" | "SIGTERM") => {
-      // SIGTERM gets a line in the log; SIGINT does not.
+      // SIGTERM gets the advice line in the log; SIGINT does not (both get
+      // the one-line "<signal> received — stopping" reason from `stopProcess`).
       //
       // That split is the whole point. SIGINT is a human at a terminal
       // pressing Ctrl-C on an app they are watching — they know what they
@@ -2494,7 +2974,7 @@ export class AppLock {
     port: number,
     killExisting = false,
     meta: LockMeta = {},
-  ): Promise<{ ok: true } | { ok: false; existing: LockData }> {
+  ): Promise<AcquireResult> {
     const maxRetries = 30; // 3 seconds total
     // The record a successful create writes — ONE shape for both attempts.
     const fresh = (): LockData => ({
@@ -2516,17 +2996,86 @@ export class AppLock {
       ...(meta.client !== undefined ? { client: meta.client } : {}),
       ...(meta.dataDir !== undefined ? { dataDir: meta.dataDir } : {}),
       ...(meta.settings !== undefined ? { settings: meta.settings } : {}),
+      ...(meta.host !== undefined ? { host: meta.host } : {}),
+      ...(meta.handoff !== undefined ? { handoff: meta.handoff } : {}),
     });
 
+    handoffSecret(); // out of the environment before anything is spawned
     sweepOrphanLockTemps(this.key);
     this._hold ??= takeHold(lockPath(this.key));
     const r = await this._acquire(killExisting, fresh, maxRetries);
-    if (!r.ok) this._dropHold();
+    if (!r.ok && r.held === undefined) this._dropHold();
     return r;
   }
 
   /** This lock's hold file, OS-locked while the lock is ours. */
   private _hold: { f: Deno.FsFile; path: string } | null = null;
+
+  /** The lock file itself, open since this process created it and for as
+   *  long as it holds the lock: every change of the record is written
+   *  through it ({@linkcode rewriteLock}). */
+  private _file: Deno.FsFile | null = null;
+  private _keep = (f: Deno.FsFile): void => {
+    this._file?.close();
+    this._file = f;
+  };
+  private _dropFile(): void {
+    this._file?.close();
+    this._file = null;
+  }
+
+  /** The record as this owner last wrote it. */
+  private _record: LockData | null = null;
+
+  /** File this owner's record again when the lock file is gone, or names a
+   *  process that is gone. True when it had to.
+   *
+   *  The file lives in a runtime directory other things clean, and a running
+   *  app whose lock file was removed was invisible to `am` — status said
+   *  stopped, `am stop` could not reach it — for the rest of its life. The
+   *  owner knows its own record; it looks (one `stat` against the handle it
+   *  holds) on a slow tick and puts it back. A LIVE process named there is
+   *  left alone: it meets the data folder's lock and withdraws. */
+  reassert(): boolean {
+    if (!this.acquired || !this._record) return false;
+    const path = lockPath(this.key);
+    if (this._file && sameFile(this._file, path)) return false;
+    return withLockMutex(this.key, () => {
+      const was = readLockRaw(this.key);
+      const now = parseLock(was, path);
+      if (now && (isOwnLock(now) || isLockOwnerAlive(now))) return false;
+      // A record young enough to be a launch still writing it is not judged.
+      if (was !== null && !now && lockAgeMs(this.key) <= 1_000) return false;
+      // A dead owner's, or unreadable. One try: on Windows a program that has
+      // it open refuses this, and the next tick tries again.
+      if (was !== null) _renameDeps.remove(path);
+      if (!publishExclusive(path, sealLock(this._record!), this._keep)) {
+        return false; // taken in this instant — the next look judges it
+      }
+      log.warn(
+        "lock",
+        `${printable(this.appId)}: the lock file ${printable(path)} ` +
+          (was === null ? `was gone` : `named a process that is gone`) +
+          ` while this app ran — filed again (pid ${Deno.pid})`,
+      );
+      return true;
+    });
+  }
+
+  /** Run WITHOUT the lock file, after `acquire` answered `held`: the
+   *  previous owner is dead and its file cannot be removed while another
+   *  program has it open. Allowed only to a caller that holds the data
+   *  folder's OS lock ({@linkcode claimHome}, `guarded`) — that is what keeps
+   *  a second instance out meanwhile (a second launch meets it and is
+   *  refused, naming this process). The slow tick ({@linkcode reassert})
+   *  files this record once the dead owner's file can be replaced. */
+  adoptUnfiled(): void {
+    if (!this._record) {
+      throw new Error("adoptUnfiled: acquire found no held lock");
+    }
+    this.acquired = true;
+    this._registerCleanupHandlers();
+  }
 
   /** Let the hold file go: unlinked while still locked (a reader that opens
    *  it afterwards finds nothing — dead), then unlocked. */
@@ -2544,16 +3093,16 @@ export class AppLock {
     killExisting: boolean,
     fresh: () => LockData,
     maxRetries: number,
-  ): Promise<{ ok: true } | { ok: false; existing: LockData }> {
+  ): Promise<AcquireResult> {
+    let saidUnreadable = false;
     for (let i = 0; i < maxRetries; i++) {
       // The BYTES, kept: every removal below is compare-and-delete against
       // exactly the record judged here, never "whatever is at the path now".
-      const raw = readLockRaw(this.key);
-      const existing = parseLock(raw, lockPath(this.key));
+      const { raw, data: existing } = readLockAt(lockPath(this.key));
 
       if (!existing) {
         // No lock — try atomic create
-        if (tryCreateLock(fresh())) {
+        if (tryCreateLock(this._record = fresh(), this._keep)) {
           this.acquired = true;
           this._registerCleanupHandlers();
           return { ok: true };
@@ -2576,6 +3125,25 @@ export class AppLock {
         // racer's lock is never seen half-written; only on a filesystem
         // without hard links is it created-then-written, hence the age floor.)
         const judged = readLockRaw(this.key);
+        // There, and it cannot even be READ: another program holds it open
+        // without sharing it (Windows share=None). The wait is silent
+        // otherwise — say once what this launch waits for.
+        if (judged === null && !saidUnreadable) {
+          try {
+            Deno.readTextFileSync(lockPath(this.key));
+          } catch (e) {
+            if (!(e instanceof Deno.errors.NotFound)) {
+              saidUnreadable = true;
+              log.info(
+                "lock",
+                `${printable(this.appId)}: its lock file ${
+                  printable(lockPath(this.key))
+                } is there but cannot be read (${e}) — another program has ` +
+                  `it open; waiting for it to let go`,
+              );
+            }
+          }
+        }
         if (
           judged !== null && parseLock(judged) === null &&
           lockAgeMs(this.key) > 1_000
@@ -2593,8 +3161,9 @@ export class AppLock {
         continue;
       }
 
-      // Lock exists but owner is us (am pre-registered) — take over
-      if (isOwnLock(existing)) {
+      // Lock exists but owner is us — or `am start` filed it FOR us and
+      // handed us its secret — take over.
+      if (isOwnLock(existing) || _handedOver(existing)) {
         removeLockIf(this.key, raw!);
         await delay(100);
         continue;
@@ -2627,8 +3196,30 @@ export class AppLock {
               `(pid ${existing.pid}) is gone — the app was not running, so ` +
               `no state was lost`,
           );
+        } else if (takeQuitMark(this.key, raw!)) {
+          log.info(
+            "lock",
+            `the previous run of "${printable(this.appId)}" (pid ` +
+              `${existing.pid}) quit cleanly but could not remove its lock ` +
+              `file — another process had it open. No state was lost.`,
+          );
         } else log.warn("lock", deadOwnerWarning(this.appId, existing));
-        removeLockIf(this.key, raw!);
+        try {
+          // Waits out a Windows program that has it open, to the bound.
+          removeLockFileIf(lockPath(this.key), raw!, true, true);
+        } catch (e) {
+          // Still held: a scanner looking at a crashed app's file held it for
+          // 10 s, and this loop then refused the start "Already running",
+          // naming the DEAD pid. A dead owner is not a running app; whether
+          // this start may go on without the file is the caller's call — it
+          // holds the data folder's own lock, or it does not.
+          this._record = fresh();
+          return {
+            ok: false,
+            existing,
+            held: e instanceof Error ? e.message : String(e),
+          };
+        }
         await delay(100);
         continue;
       }
@@ -2668,23 +3259,21 @@ export class AppLock {
         await delay(100);
         continue;
       }
-      const pastStartup = existing.status !== "starting" ||
-        ageSince(existing.startedAt) > STARTUP_GRACE_MS;
-      let listenerDead = false;
-      if (pastStartup) {
-        if (existing.socketPath) {
-          listenerDead = !(await isSocketAlive(existing.socketPath));
-        } else if (existing.port > 0) {
-          listenerDead = !(await isPortInUse(existing.port));
-        }
-      }
-      if (listenerDead) {
-        const where = existing.socketPath
-          ? `socket ${printable(existing.socketPath)}`
-          : `port ${existing.port}`;
+      // A LIVE process that is a zombie by the sustained verdict
+      // ({@linkcode zombieVerdict}) is ENDED before its lock is taken: it
+      // still has the database open, and a launch that started beside it was
+      // two processes on one database by decision instead of by race. A
+      // zombie that cannot be ended refuses this start, by name.
+      const verdict = await zombieVerdict(this.key, existing, raw);
+      if (verdict === "moved") continue;
+      if (verdict) {
         log.warn(
-          `[AIO] stale instance: pid ${existing.pid} is alive but ${where} refuses connections — reclaiming lock (zombie server)`,
+          `[AIO] stale instance: ${zombieLine(existing, verdict)}. Ending ` +
+            `it to take over (zombie server).`,
         );
+        if (!(await _zombieDeps.end(existing))) {
+          return { ok: false, existing, unendable: true };
+        }
         removeLockIf(this.key, raw!);
         await delay(100);
         continue;
@@ -2692,13 +3281,13 @@ export class AppLock {
 
       // Owner is alive — behavior depends on killExisting
       if (killExisting) {
-        // Kill the old instance — SIGTERM, then wait out the WHOLE graceful
-        // budget before SIGKILL: a takeover is not a reason to truncate the
-        // previous instance's final snapshot.
+        // End the old instance — ASK it first (`stopInstance`), then wait out
+        // the WHOLE graceful budget before forcing it: a takeover is not a
+        // reason to truncate the previous instance's final snapshot.
         // Wait out the app's OWN self-kill deadline too (`stopProcess`'s
         // watchdog), not just the phase budget: a takeover that SIGKILLs at
         // 9 s cuts off an app that was about to end itself cleanly at 10 s.
-        await killProcess(existing.pid, EXIT_WAIT_MS, existing);
+        await stopInstance(existing);
         removeLockIf(this.key, raw!);
         await delay(100);
         continue;
@@ -2712,7 +3301,7 @@ export class AppLock {
     const existing = readLock(this.key);
     if (existing) return { ok: false, existing };
     // Last-ditch attempt
-    if (tryCreateLock(fresh())) {
+    if (tryCreateLock(this._record = fresh(), this._keep)) {
       this.acquired = true;
       this._registerCleanupHandlers();
       return { ok: true };
@@ -2741,11 +3330,23 @@ export class AppLock {
     // Read-check-write as ONE step under the lock's mutex: a check outside it
     // could pass and then overwrite a lock another process took meanwhile.
     withLockMutex(this.key, () => {
-      const existing = readLock(this.key);
-      if (!existing || !isOwnLock(existing)) return; // not ours
-      replaceAtomic(
+      const was = readLockRaw(this.key);
+      const existing = parseLock(was, lockPath(this.key));
+      if (!existing || !isOwnLock(existing)) {
+        // Not ours on disk — but an owner that runs without its file
+        // (`adoptUnfiled`) files THIS record when it can: keep it current.
+        if (this.acquired && this._record) {
+          this._record = { ...this._record, ...partial };
+        }
+        return;
+      }
+      this._record = { ...existing, ...partial };
+      this._file = rewriteLock(
         lockPath(this.key),
-        JSON.stringify({ ...existing, ...partial }),
+        was!,
+        this._record,
+        this._file,
+        true,
       );
     });
   }
@@ -2766,11 +3367,36 @@ export class AppLock {
         close();
       } catch { /* aio-ok: a close that fails has nothing left to release */ }
     }
-    if (!this.acquired) return;
+    if (!this.acquired) {
+      this._dropHold(); // kept by an acquire that found the file held
+      return;
+    }
+    // Before the removal: on Windows a file is not gone while a handle is on
+    // it, and this is one.
+    this._dropFile();
     // Only remove if it's still ours (PID matches)
-    const raw = readLockRaw(this.key);
-    const now = parseLock(raw);
-    if (now && isOwnLock(now)) removeLockIf(this.key, raw!);
+    const { raw, data: now } = readLockAt(lockPath(this.key));
+    if (now && isOwnLock(now)) {
+      try {
+        removeLockFileIf(lockPath(this.key), raw!, true, true);
+      } catch (e) {
+        // Held open by another process to the end of the wait. The file
+        // stays, and it must not read as a crash: the mark beside it tells
+        // the next start this was a clean quit.
+        try {
+          Deno.writeTextFileSync(quitMarkPath(this.key), raw!, { mode: 0o600 });
+        } catch {
+          // aio-ok: unmarked, the next start warns as for a crash — what it
+          // did before the mark existed.
+        }
+        log.warn(
+          "lock",
+          `${printable(this.appId)}: the lock file could not be removed at ` +
+            `quit (${e instanceof Error ? e.message : String(e)}) — the ` +
+            `next start reclaims it`,
+        );
+      }
+    }
     this._dropHold(); // after the record: never a record naming a gone hold
     this.acquired = false;
     this._unregisterCleanupHandlers();
@@ -2791,23 +3417,73 @@ export class AppLock {
 export const HOME_CLAIM = ".aio-instance.lock";
 const HOME_CLAIM_INFO = ".aio-instance.json";
 
+/** Does another LIVE process hold this data folder's claim
+ *  ({@linkcode claimHome})? A look, never a claim: the OS lock is taken and
+ *  let go at once when it is free. Ground truth even when the lock FILE is
+ *  gone — what a start that has not yet taken the lock asks before it
+ *  touches anything of a running app (its logs). False when there is no
+ *  claim file, or this file system cannot lock. */
+export function homeInUse(home: string): boolean {
+  let f: Deno.FsFile;
+  try {
+    f = Deno.openSync(join(home, HOME_CLAIM), { read: true, write: true });
+  } catch {
+    return false; // aio-ok: no claim file — nothing has claimed this folder
+  }
+  try {
+    if (!f.tryLockSync(true)) return true;
+    f.unlockSync();
+    return false;
+  } catch {
+    return false; // aio-ok: no OS locks here — the lock file is all there is
+  } finally {
+    f.close();
+  }
+}
+
+/** The homes already said to run without the folder guarantee. */
+const _unguarded = new Set<string>();
+
+/** Say, once per home, that it runs without the folder guarantee: its claim
+ *  file could not be opened, or its file system cannot lock. The start goes
+ *  on — the lock file still keeps one instance per lock scope — but a second
+ *  process in ANOTHER scope would no longer be refused on this folder. */
+function unguarded(home: string, e: unknown): void {
+  if (_unguarded.has(home)) return;
+  _unguarded.add(home);
+  log.warn(
+    "lock",
+    `${printable(home)}: the data folder cannot be claimed (${
+      printable(e instanceof Error ? e.message : String(e))
+    }) — this start goes on without the folder guarantee: one process per ` +
+      `lock scope still holds, but a process started under another ` +
+      `AIO_APPS_DIR scope would not be refused on this folder.`,
+  );
+}
+
 /** Take the home claim, or name who holds it.
  *
- *  Refused only ACROSS scopes: a holder filed in THIS lock dir was already
- *  judged by the lock file (a zombie the acquire just reclaimed keeps its OS
- *  lock until it dies), so that verdict stands, exactly as before the claim
- *  existed. A home that does not exist yet and a file system that cannot lock
- *  are not refusals either. @internal */
+ *  The claim is an OS lock a process holds for as long as it uses the data
+ *  folder, so a LIVE holder is ground truth: someone has this database open,
+ *  whatever the lock file says. It always refuses. (A holder filed under
+ *  this very lock used to be let through — "the lock file already judged
+ *  it" — so a launch that found the lock file gone, or took it from a
+ *  process it called a zombie, opened the database beside a live process. A
+ *  zombie is ended before its lock is taken now, and a dead holder's OS lock
+ *  is gone with it.) A home that does not exist yet and a file system that
+ *  cannot lock are not refusals. `who` is written beside the claim, to name
+ *  the holder to whoever is refused. @internal */
 export function claimHome(
   home: string,
   who: { appId: string; port: number; key?: string },
-):
-  | { ok: true; close: () => void }
-  | {
-    ok: false;
-    holder?: { pid?: number; appId?: string; lockDir?: string; lock?: string };
-  } {
-  const none = { ok: true as const, close: () => {} };
+): /** `guarded`: this process now holds the folder's OS lock. False when
+ *  there was nothing to lock (no home yet, a file system that cannot). */
+| { ok: true; close: () => void; guarded: boolean }
+| {
+  ok: false;
+  holder?: { pid?: number; appId?: string; lockDir?: string; lock?: string };
+} {
+  const none = { ok: true as const, close: () => {}, guarded: false };
   let f: Deno.FsFile;
   try {
     f = Deno.openSync(join(home, HOME_CLAIM), {
@@ -2816,15 +3492,18 @@ export function claimHome(
       create: true,
       mode: 0o600,
     });
-  } catch {
-    return none; // aio-ok: no home yet — nothing to guard
+  } catch (e) {
+    // No home yet: nothing in it to guard. Anything else: said.
+    if (!(e instanceof Deno.errors.NotFound)) unguarded(home, e);
+    return none;
   }
   let locked: boolean;
   try {
     locked = f.tryLockSync(true);
-  } catch {
+  } catch (e) {
     f.close();
-    return none; // aio-ok: this file system cannot lock
+    unguarded(home, e);
+    return none;
   }
   const info = join(home, HOME_CLAIM_INFO);
   if (!locked) {
@@ -2842,24 +3521,6 @@ export function claimHome(
     try {
       holder = JSON.parse(Deno.readTextFileSync(info));
     } catch { /* aio-ok: no text — refused, named without it */ }
-    // Only the EXACT lock this acquire just judged — same dir, same name,
-    // and the same MACHINE and pid namespace: on a shared volume (NFS, two
-    // containers) the other side's lock dir sits at the same path but is not
-    // ours, so its lock was never judged here — anything else holding the
-    // home is another process on it. (A holder text without `machine`/`ns`
-    // is from an older aio, or a system with no machine id: the path alone
-    // decides, as it did.) Never the HOSTNAME: macOS renames the machine with
-    // the network, and its own lock after a rename is still its own. A DEAD
-    // holder never reaches here — the OS lock dies with its process.
-    const mine = who.key !== undefined ? lockPath(who.key) : undefined;
-    if (
-      mine !== undefined && holder?.lock === mine &&
-      // An id unknown on EITHER side cannot tell: only two known, different
-      // ids refuse (a process denied /etc/machine-id is still this machine).
-      (holder.machine === undefined || machineId() === undefined ||
-        holder.machine === machineId()) &&
-      (holder.ns === undefined || holder.ns === ownPidNs())
-    ) return none;
     return { ok: false, holder };
   }
   try {
@@ -2876,7 +3537,7 @@ export function claimHome(
       { mode: 0o600 },
     );
   } catch { /* aio-ok: the OS lock is what guards; the text only names it */ }
-  return { ok: true, close: () => f.close() };
+  return { ok: true, close: () => f.close(), guarded: true };
 }
 
 /** This machine's STABLE identity for the home claim: systemd's
@@ -2919,8 +3580,7 @@ export function instances(appId?: string): InstanceInfo[] {
 
       // The BYTES, kept: the stale-lock cleanup below deletes only exactly
       // the record judged here, never whatever a new instance put there since.
-      const raw = readLockRaw(key);
-      const lock = parseLock(raw, lockPath(key));
+      const { raw, data: lock } = readLockAt(lockPath(key));
       if (!lock || (appId && lock.appId !== appId)) continue;
 
       // By OWNER, not by pid: a lock that survived a reboot (the base is
@@ -2979,6 +3639,92 @@ export async function descendantPids(pid: number): Promise<number[]> {
   };
   await walk(pid).catch(() => {});
   return out;
+}
+
+/** Ask the instance `l` names to stop, through the request `am stop` sends:
+ *  `POST /__aio/trojan/shutdown` with the instance's per-boot control
+ *  credential (`<data>/control.key`, which production answers too), at the
+ *  endpoint its record names — the socket (a pipe on Windows), else the
+ *  control port. The app's shared key only when the app asks for it (401/403),
+ *  as `am` does. True when it accepted. @internal */
+export async function askToStop(
+  l: LockData,
+  timeout = ASK_TIMEOUT_MS,
+): Promise<boolean> {
+  const control = readControlKey(l.appId, l.home);
+  if (control.error !== undefined) return false;
+  const headers: Record<string, string> = {
+    "X-AIO": "1",
+    "X-Aio-Control": control.key,
+    // So the old app's log says a takeover ended it, not `am stop`.
+    "X-Aio-Stop-By": "takeover",
+  };
+  const path = "/__aio/trojan/shutdown";
+  const send = async (h: Record<string, string>): Promise<number | null> => {
+    if (l.socketPath) {
+      const r = await udsRequest(l.socketPath, path, {
+        method: "POST",
+        headers: h,
+      }, timeout);
+      return "error" in r ? null : r.status;
+    }
+    const port = l.trojanPort ?? l.port;
+    if (!(port > 0)) return null;
+    const at = endpointOf({ ...l, port });
+    const host = at && "hostnames" in at ? at.hostnames[0]! : "127.0.0.1";
+    try {
+      const r = await fetch(
+        `http://${host.includes(":") ? `[${host}]` : host}:${port}${path}`,
+        { method: "POST", headers: h, signal: AbortSignal.timeout(timeout) },
+      );
+      await r.body?.cancel();
+      return r.status;
+    } catch {
+      return null; // aio-ok: no answer — the caller ends it as before
+    }
+  };
+  let status = await send(headers);
+  if (status === 401 || status === 403) {
+    try {
+      const key = Deno.readTextFileSync(appKeyPath(l.appId, l.home)).trim();
+      if (key) {
+        status = await send({ ...headers, Authorization: `Bearer ${key}` });
+      }
+    } catch { /* aio-ok: no shared key — the refusal stands */ }
+  }
+  return status !== null && status >= 200 && status < 300;
+}
+
+/** How long {@linkcode askToStop} waits for the instance to answer. */
+const ASK_TIMEOUT_MS = 3_000;
+
+/** The steps of {@linkcode stopInstance} a test replaces. @internal */
+export const _stopDeps = { ask: askToStop };
+
+/** THE way a launch ends a HEALTHY instance (`--takeover`): ask it to stop,
+ *  give it the whole teardown budget (`EXIT_WAIT_MS`) to end itself, and only
+ *  then force it ({@linkcode killProcess}). Asking first is what makes the
+ *  stop graceful on Windows, where the signal `killProcess` sends is
+ *  TerminateProcess — no `onStop`, no final save. An instance that does not
+ *  answer (a zombie, a build before the stop request existed) gets
+ *  `killProcess` as before. */
+export async function stopInstance(
+  l: LockData,
+  grace = EXIT_WAIT_MS,
+): Promise<void> {
+  // Not ours to end — asking included (see `killProcess`).
+  const foreign = foreignOwnerRefusal(l);
+  if (foreign) throw new Error(foreign);
+  if (await _stopDeps.ask(l)) {
+    const until = Date.now() + grace;
+    while (Date.now() < until && isLockOwnerAlive(l)) {
+      await delay(KILL_POLL_MS);
+    }
+    if (!isLockOwnerAlive(l)) return;
+    // Asked, and still there after the whole budget: force it, now.
+    return await killProcess(l.pid, 0, l);
+  }
+  await killProcess(l.pid, grace, l);
 }
 
 /** THE process killer: SIGTERM, a grace period, then SIGKILL — and then any

@@ -626,6 +626,7 @@ const TAILWIND_SOURCE = `@import "tailwindcss";
 const GITIGNORE = `.aio/
 .aio-integrity.json
 dist/
+release/
 node_modules/
 dep/
 *.sqlite
@@ -1139,7 +1140,17 @@ export class ScaffoldLedger {
     }
     for (const [p, to] of this.savedLinks) {
       await step(p, () => Deno.remove(p), true);
-      await step(p, () => Deno.symlink(to, p));
+      // As it was made: a link to a DIRECTORY (`dep/aio`) is a junction on
+      // Windows. Left to deno's inference it is a directory symlink, which a
+      // stock box may not create — so the undo failed on the one link create
+      // replaces. A link to a file keeps its kind; a dangling one was dep/aio.
+      await step(p, async () => {
+        const dir = await Deno.stat(resolve(p, "..", to)).then(
+          (st) => st.isDirectory,
+          () => true,
+        );
+        await Deno.symlink(to, p, { type: dir ? dirLinkType() : "file" });
+      });
     }
     for (const p of this.emptyDirs) {
       await step(p, () => Deno.remove(p), true);

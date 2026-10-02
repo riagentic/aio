@@ -11,7 +11,7 @@ import {
 import { isPipePath, listenLocal } from "./local-listen.ts";
 import { serveHttpOverLocal } from "./http-over-conn.ts";
 import { enc } from "../protocol/envelope.ts";
-import { fromFileUrl, join, resolve, toFileUrl } from "@std/path";
+import { dirname, fromFileUrl, join, resolve, toFileUrl } from "@std/path";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { WS_BUFFER_HIGH_WATER } from "./write-backlog.ts";
 import { resolveShare } from "./app-dirs.ts";
@@ -442,7 +442,8 @@ export function createServer(config: ServerConfig): ServerHandle {
   // and amui can reach /__aio/trojan/* on an auth-enabled app. Without it the
   // trojan's (correct) admin gate locks the developer out of inspecting their
   // own running app, which is the pressure that makes people turn auth off in
-  // dev. No-op in prod and for an app with no appId.
+  // dev. In prod it authorizes the stop alone (`am stop` — on Windows a
+  // signal is a hard kill). No-op for an app with no appId.
   armLocalControl(config);
   const _sessionResolver = config.sessionResolver;
   // A LOGIN SESSION does not authenticate an HTTP request from the URL.
@@ -569,7 +570,9 @@ export function createServer(config: ServerConfig): ServerHandle {
     // it, so a pattern that silently over-matches was accepted and then
     // answered requests it was never meant to. Loud at boot beats wrong at
     // runtime.
+    // aio-ok: path-split — an import-map key, not a path
     const star = key.split("/").indexOf("*");
+    // aio-ok: path-split — an import-map key
     if (star !== -1 && star !== key.split("/").length - 1) {
       throw new Error(
         `[aio] invalid custom route "${key}" — "*" must be the LAST segment. ` +
@@ -653,9 +656,8 @@ export function createServer(config: ServerConfig): ServerHandle {
     // itself. The stray `src/style.css` case has been loud at build time for
     // releases; this is the same mistake one directory further in.
     const entry = config.uiEntry ?? UI_ENTRY;
-    const uiDir = entry.includes("/")
-      ? join(absBaseDir, entry.slice(0, entry.lastIndexOf("/")))
-      : null;
+    const entryDir = dirname(entry);
+    const uiDir = entryDir === "." ? null : join(absBaseDir, entryDir);
     if (uiDir && appHasStylesheet(uiDir)) {
       log.warn(
         `style: ${join(uiDir, APP_STYLE)} exists but is NOT served — ` +
@@ -962,6 +964,8 @@ export function createServer(config: ServerConfig): ServerHandle {
   let watcher: ReturnType<typeof createFileWatcher> | null = null;
   /** The boot run of the app's `build.css` step, awaited at shutdown. */
   let _cssBootRun: Promise<void> | null = null;
+  /** Ends a `build.css` step still running at close — the boot's or a save's. */
+  const _cssStop = new AbortController();
   if (!prod) {
     watcher = createFileWatcher({
       absBaseDir,
@@ -975,7 +979,7 @@ export function createServer(config: ServerConfig): ServerHandle {
       onCellChange: config.onCellChange,
       onGraphResult: (result) => graphValidation?.setResult(result),
       prodGraph: graphValidation?.prodGraph,
-      runCss: () => _runAppCssStep(absBaseDir),
+      runCss: () => _runAppCssStep(absBaseDir, _cssStop.signal),
     });
     watcher.start();
     // Once at boot too: a dev server that serves the stylesheet from the last
@@ -989,13 +993,16 @@ export function createServer(config: ServerConfig): ServerHandle {
     // project's own leak round existed to remove. `_runAppCssStep` returns
     // immediately for an app that declares no step, so the common case costs
     // nothing at all.
-    _cssBootRun = _runAppCssStep(absBaseDir).then(() => {}, () => {
-      // aio-ok: `_runAppCssStep` runs with `throwOnFail: false` and has
-      // ALREADY logged the failure with its command and the tool's own output
-      // (server-css-step.ts). Rejecting here would only turn a reported,
-      // recoverable dev-loop failure into an unhandled rejection — the dev
-      // server stays up on purpose so the next save can fix it.
-    });
+    _cssBootRun = _runAppCssStep(absBaseDir, _cssStop.signal).then(
+      () => {},
+      () => {
+        // aio-ok: `_runAppCssStep` runs with `throwOnFail: false` and has
+        // ALREADY logged the failure with its command and the tool's own output
+        // (server-css-step.ts). Rejecting here would only turn a reported,
+        // recoverable dev-loop failure into an unhandled rejection — the dev
+        // server stays up on purpose so the next save can fix it.
+      },
+    );
   }
 
   // ── Build TrojanDeps lazily (uses wsMgr) ──
@@ -1863,22 +1870,40 @@ export function createServer(config: ServerConfig): ServerHandle {
   // ── Start HTTP server ──
   let httpServer: Pick<Deno.HttpServer, "finished" | "shutdown">;
   const udsPath = config.socketPath;
-  if (udsPath && isPipePath(udsPath)) {
-    // Windows: `Deno.serve({ path })` has no pipe equivalent, so the handler
-    // is served by the minimal HTTP/1.1 server over the pipe listener — the
-    // same handler, the same peer claim (`UDS_PEER`), one request per
-    // connection, bodies streamed both ways.
-    const over = serveHttpOverLocal(listenLocal(udsPath), handleRequest);
-    httpServer = { finished: over.finished, shutdown: () => over.close() };
-  } else if (udsPath) {
-    try {
-      Deno.removeSync(udsPath);
-    } catch { /* doesn't exist */ }
-    ensureLockDirOf(udsPath); // pruned since `lockDir()` cached it — see uds.ts
-    httpServer = Deno.serve(
-      { path: udsPath, onListen: () => {} },
+  const peerGate = config.localPeerGate;
+  if (udsPath) {
+    // The handler on a local socket is served by the minimal HTTP/1.1 server
+    // over the local listener — the same handler, the same peer claim
+    // (`UDS_PEER`), connections kept alive, bodies streamed both ways —
+    // on every OS and in every mode.
+    //
+    // Windows has no `Deno.serve({ path })` for a pipe. And under the
+    // local-peer lockdown `Deno.serve` cannot be used on a unix socket either:
+    // it hands the handler no connection to ask "who is this", so this door —
+    // the page, the app's routes, `/__aio/*`, the `/ws` upgrade — answered any
+    // process of the user while the socket beside it refused them. Here each
+    // connection is put to the app's ONE gate before the handler sees a byte.
+    //
+    // Dev takes the same server, ungated: a production-only HTTP server is
+    // one whose every difference from the platform's reaches a packaged app's
+    // window and nothing else. What it owes `Deno.serve` is pinned request by
+    // request in tests/http-over-conn-differential.test.ts.
+    if (!isPipePath(udsPath)) {
+      try {
+        Deno.removeSync(udsPath);
+      } catch { /* aio-ok: no stale socket to remove */ }
+      ensureLockDirOf(udsPath); // pruned since `lockDir()` cached it — see uds.ts
+    }
+    const over = serveHttpOverLocal(
+      listenLocal(udsPath, peerGate ? { peer: true } : undefined),
       handleRequest,
+      peerGate && ((conn) => peerGate.refusal(conn, udsPath)),
+      // A route on a unix socket sees the URL `Deno.serve` gave it there.
+      { unixUrls: !isPipePath(udsPath) },
     );
+    // The window exited: the connections it was trusted for go with it.
+    peerGate?.onDisarm(() => over.dropConnections());
+    httpServer = { finished: over.finished, shutdown: () => over.close() };
   } else {
     const hostname = config.host ?? (config.expose ? "0.0.0.0" : "127.0.0.1");
     const tlsOpts = config.cert && config.key
@@ -2200,24 +2225,48 @@ export function createServer(config: ServerConfig): ServerHandle {
       _unsubRevoke?.();
       _unsubDiag?.();
       wsMgr.shutdown();
-      if (graphValidation) {
-        graphValidation.stop();
-        await graphValidation.done.catch(() => {});
-      }
-      // The boot CSS run, if the app declared one — a subprocess and two
-      // directory reads that must not outlive the server that started them.
-      if (_cssBootRun) await _cssBootRun;
-      await Promise.all([
+      // The boot's graph validation is ENDED here and waited for below, by
+      // `stopEsbuild()` — it is esbuild work, and that wait is the bounded
+      // one. Awaiting it here was blind: with an esbuild that had stopped
+      // answering it never settled, and this close ran until the teardown
+      // budget cut it.
+      graphValidation?.stop();
+      // The app's CSS step, if one is running — the boot's or a save's: a
+      // subprocess that must not outlive the server that started it. Asked
+      // to end, killed if it does not, and waited for until it has exited.
+      _cssStop.abort();
+      // Every part of this close is STARTED before any of them is waited
+      // for, so none can keep another from happening. They used to be
+      // awaited one after the other: a CSS step that would not end, or a
+      // response that never finished, left the listener accepting and
+      // esbuild running, because the lines that close them were never
+      // reached.
+      const listeners = Promise.all([
         httpServer.shutdown(),
         trojanServer?.shutdown(),
       ]);
-      await stopEsbuild();
-      if (udsPath && !isPipePath(udsPath)) {
-        try {
-          Deno.removeSync(udsPath);
-        } catch { /* already removed */ }
+      const parts = await Promise.allSettled([
+        _cssBootRun,
+        watcher?.cssSettled(),
+        // esbuild is stopped NOW, not behind the listeners…
+        stopEsbuild(),
+        // …and once more when they have closed: a request that was still in
+        // flight may have transpiled, and started the service again.
+        listeners.finally(() => stopEsbuild()),
+        listeners.then(() => {
+          if (udsPath && !isPipePath(udsPath)) {
+            try {
+              Deno.removeSync(udsPath);
+            } catch { /* already removed */ }
+          }
+          disposeClientLog();
+        }),
+      ]);
+      // A part that failed is this close's failure — after every other part
+      // has had its turn.
+      for (const part of parts) {
+        if (part.status === "rejected") throw part.reason;
       }
-      disposeClientLog();
     },
   };
 }

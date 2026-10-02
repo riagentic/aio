@@ -92,6 +92,10 @@ export interface Broadcaster {
   shutdown: () => void;
 }
 
+/** Every live broadcaster's "bytes buffered for peers" reader — what the
+ *  process-wide `broadcast.bufferedBytes` gauge sums. Left on `shutdown`. */
+const _liveBuffered = new Set<() => number>();
+
 /** Factory — creates an isolated broadcast subsystem with its own throttle state */
 export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
   const {
@@ -133,10 +137,19 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
   // A live LEVEL series: bytes the runtime is holding for peers that are not
   // draining — the number the r3 chaos hunt measured at 111.9 MB while
   // /__aio/health stayed green, and a native-memory source the heap watcher
-  // could not see at all. `registerGauge` is first-wins per PROCESS (RSS and
-  // the heap are process-wide anyway), so a process hosting several apps
-  // reports the first broadcaster's connections; the ledger's cap and this
-  // note are what keep that from being a silent surprise.
+  // could not see at all. ONE series per process (RSS and the heap are
+  // process-wide anyway), summed over every LIVE broadcaster: the gauge used
+  // to close over the first broadcaster's connections, so after an in-process
+  // restart — or beside a second app — it read a set nobody was sending to.
+  const buffered = () => {
+    let bytes = 0;
+    for (const [ws] of connections) {
+      const n = ws.bufferedAmount;
+      if (typeof n === "number" && Number.isFinite(n) && n > 0) bytes += n;
+    }
+    return bytes;
+  };
+  _liveBuffered.add(buffered);
   registerGauge({
     name: "broadcast.bufferedBytes",
     owner: "broadcast",
@@ -144,10 +157,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
     kind: "level",
     read: () => {
       let bytes = 0;
-      for (const [ws] of connections) {
-        const n = ws.bufferedAmount;
-        if (typeof n === "number" && Number.isFinite(n) && n > 0) bytes += n;
-      }
+      for (const of of _liveBuffered) bytes += of();
       return bytes;
     },
   });
@@ -984,6 +994,7 @@ export function createBroadcaster(deps: BroadcastDeps): Broadcaster {
   }
 
   function shutdown(): void {
+    _liveBuffered.delete(buffered);
     _debtRetry.dispose();
     _unsubscribeRecovered?.();
     coalescer.dispose();

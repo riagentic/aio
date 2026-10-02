@@ -92,6 +92,10 @@ export type AioMeta = {
   /** `electron: { permissions }` — the app page's exact allow-list; null ⇒
    *  the default (the app page keeps every permission). See ElectronConfig. */
   permissions?: ElectronPermissions | null;
+  /** `electron: { allowLocalPeers }` — the production local-peer lockdown's
+   *  opt-out. Decided by the SERVER (aio-server.ts); carried here because
+   *  this mapping is total over the block. See ElectronConfig. */
+  allowLocalPeers?: boolean;
   /** `ui.chrome` — how much of the window the OS draws. See UiConfig. */
   chrome?: "standard" | "themed" | "none";
   /** `ui.tray` — a system tray icon, menu and close-to-tray. See UiConfig. */
@@ -120,12 +124,16 @@ export function electronMetaPolicy(
   cfg: import("../server/aio-types.ts").ElectronConfig | undefined,
 ): Pick<
   AioMeta,
-  "requireSandbox" | "unsandboxedChildWindows" | "permissions"
+  | "requireSandbox"
+  | "unsandboxedChildWindows"
+  | "permissions"
+  | "allowLocalPeers"
 > {
   return {
     requireSandbox: !!cfg?.requireSandbox,
     unsandboxedChildWindows: !!cfg?.unsandboxedChildWindows,
     permissions: cfg?.permissions ?? null,
+    allowLocalPeers: cfg?.allowLocalPeers === true,
   };
 }
 
@@ -134,6 +142,17 @@ export function electronMetaPolicy(
  *  app's lock id are the same identity and must reduce a title the same way. */
 export function toSlug(s: string): string {
   return slugify(s);
+}
+
+/** The `app.name` a generated window shell sets — its profile (`userData`)
+ *  directory's name: the profile the lifecycle derived from this run's HOME,
+ *  or the title's slug. ONE reader: both shells emit it and the launcher
+ *  writes the main script into the directory it names. */
+export function shellProfileName(
+  meta: AioMeta | undefined,
+  title?: string,
+): string {
+  return meta?.profileName ?? toSlug(meta?.title ?? title ?? "aio-app");
 }
 
 /** Electron's `app.name` for an app running from `home` — i.e. the userData
@@ -221,11 +240,29 @@ for (const __aioLv of ['warn', 'error']) {
 let __aioQuitting = false;
 app.on('before-quit', () => { __aioQuitting = true; });
 app.on('will-quit', () => { __aioQuitting = true; });
+// An exit the APP decides — its main process crashed, its server is gone or
+// told it to stop — is not the page's to refuse: quit with the page's
+// beforeunload veto switched off, and end the process if the quit has not
+// finished in time. Once. (A user's own close or quit never comes through
+// here and keeps the page's say.)
+let __aioLeaving = false;
+app.on('web-contents-created', (_e, wc) => {
+  wc.on('will-prevent-unload', (e) => { if (__aioLeaving) e.preventDefault(); });
+});
+const __aioLeave = (why, code) => {
+  if (__aioLeaving) return;
+  __aioLeaving = true;
+  __aioQuitting = true;
+  // A signal is an ordinary stop and the server's log already says so.
+  if (why) console.warn('[aio:electron] ' + why + ' — closing the window');
+  setTimeout(() => app.exit(code || 0), ${LEAVE_BACKSTOP_MS});
+  try { app.quit(); } catch { process.exit(code || 0); }
+};
 process.on('uncaughtException', (err) => {
   const info = (err && err.stack) || String(err);
   if (__aioQuitting) { console.error('[aio:electron] exception during quit (ignored): ' + info); return; }
   console.error('[aio:electron] uncaught exception in main process: ' + info);
-  try { app.quit(); } catch { process.exit(1); }
+  __aioLeave(undefined, 1);
 });
 process.on('unhandledRejection', (reason) => {
   console.error('[aio:electron] unhandled promise rejection in main process: ' + ((reason && reason.stack) || String(reason)));
@@ -453,7 +490,25 @@ const ipcMain = (() => {
  *  launcher passes its pid and the main process watches it: gone ⇒ quit, with
  *  a line saying why. A `process.ppid` check would not do — the `.bin/electron`
  *  shim sits between the two and outlives its parent as well.
- *  Expects `app` and `__aioQuitting` (tmplCrashGuard) in scope. */
+ *
+ *  THAT exit, and the one the server asks for with a signal, is not the
+ *  page's to refuse. Measured (Electron 44, Linux and macOS): `app.quit()`
+ *  and a SIGTERM both close the window through the page's `beforeunload`,
+ *  and a page that cancels it stays — the server gone, the window and its
+ *  helpers alive for good, nothing retrying. A user's own close or quit keeps
+ *  that say (it is Electron's behaviour, and an app may rely on it); a window
+ *  with no server left has nothing to keep it for. So both go through
+ *  `__aioLeave` (tmplCrashGuard, which takes the same exit for a crashed main
+ *  process): a quit with the page's veto switched off (`will-prevent-unload`),
+ *  the same graceful path otherwise — bounds saved, preload swept — and the
+ *  process ends itself if the quit has not finished in
+ *  {@linkcode LEAVE_BACKSTOP_MS} (a renderer too stuck to unload).
+ *
+ *  The signal listeners are registered AFTER `ready` on purpose: Chromium
+ *  installs its own handlers during startup, over any registered before it
+ *  (measured: a listener from load time is never called once the app is
+ *  ready), and its handler is the cancellable quit above.
+ *  Expects `app` and `__aioLeave` (tmplCrashGuard) in scope. */
 export function tmplParentWatch(): string {
   return `
 // Decimal digits only — same rule as the server's parentPidOf / AIO_PORT.
@@ -462,22 +517,32 @@ const __aioParent = (() => {
   if (raw === undefined || String(raw).trim() === "") return 0;
   const s = String(raw).trim();
   const n = Number(s);
-  // [0-9] not \d — this string is a template literal; \d would emit /^d+$/.
+  // [0-9] not the backslash-d class — this string is a template literal, which would emit /^d+$/.
   return /^[0-9]+$/.test(s) && Number.isInteger(n) && n > 0 ? n : 0;
 })();
+app.on('ready', () => {
+  for (const __aioSig of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+    try {
+      process.removeAllListeners(__aioSig);
+      process.on(__aioSig, () => __aioLeave());
+    } catch {}
+  }
+});
 if (__aioParent > 0) {
   const __aioParentTimer = setInterval(() => {
     let alive = true;
     try { process.kill(__aioParent, 0); } catch (e) { alive = !!(e && e.code === 'EPERM'); }
     if (alive) return;
     clearInterval(__aioParentTimer);
-    console.warn('[aio:electron] the aio server (pid ' + __aioParent + ') is gone — closing the window');
-    __aioQuitting = true;
-    try { app.quit(); } catch { process.exit(0); }
+    __aioLeave('the aio server (pid ' + __aioParent + ') is gone');
   }, 2000);
   __aioParentTimer.unref && __aioParentTimer.unref();
 }`;
 }
+
+/** How long a quit the app decided on may take before the process ends
+ *  itself. Emitted into {@linkcode tmplCrashGuard}. */
+export const LEAVE_BACKSTOP_MS = 3_000;
 
 /** Window bounds persistence: stateFile, loadBounds, saveBounds.
  *  @param async Use async fs/promises variant (UDS) vs sync writeFileSync (standard) */
@@ -626,6 +691,49 @@ export function tmplBoundsTracking(): string {
   win.on('resize', save);
   win.on('move', save);
   win.on('close', () => saveBounds(win));`;
+}
+
+/** The application menu: none — except on macOS, where the menu IS the
+ *  keyboard.
+ *
+ *  `Menu.setApplicationMenu(null)` before `ready` keeps Electron's default
+ *  menu from ever being built (File/Edit/View/Window/Help, with DevTools and
+ *  reload items an app did not ask for); on Linux and Windows it also removes
+ *  the menu bar from the window, which is the point. On macOS there is always
+ *  a menu bar, and the standard shortcuts are not key handlers but MENU ITEMS:
+ *  with no Edit menu, Cmd+C / Cmd+V / Cmd+X / Cmd+A / Cmd+Z do nothing in a
+ *  text field, and there is no Cmd+W, Cmd+M or Cmd+H. (Quit survived only
+ *  because the framework's stub menu carries one — measured: `[app] Quit<Q>`
+ *  and nothing else.) So macOS gets the smallest menu that makes those keys
+ *  work: the app menu (Hide, Hide Others, Show All, Quit), Edit, Window — all
+ *  system roles, nothing of aio's own. Close is `win.close()`, the cancellable
+ *  close, so with close-to-tray Cmd+W hides. Built after `ready`
+ *  (`buildFromTemplate` needs it). `title` is the name the two app-menu items
+ *  carry. Expects `app` and `Menu` in scope. */
+export function tmplAppMenu(title: string | undefined): string {
+  return `Menu.setApplicationMenu(null);
+if (process.platform === 'darwin') {
+  app.whenReady().then(() => {
+    const __aioMenuName = ${JSON.stringify(title ?? "")} || app.name;
+    Menu.setApplicationMenu(Menu.buildFromTemplate([
+      { label: __aioMenuName, submenu: [
+        { role: 'hide', label: 'Hide ' + __aioMenuName },
+        { role: 'hideOthers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        { role: 'quit', label: 'Quit ' + __aioMenuName },
+      ] },
+      { role: 'editMenu' },
+      { role: 'windowMenu', submenu: [
+        { role: 'minimize' },
+        { role: 'zoom' },
+        { role: 'close' },
+        { type: 'separator' },
+        { role: 'front' },
+      ] },
+    ]));
+  });
+}`;
 }
 
 /** Local keyboard shortcuts (Ctrl+F5/Ctrl+R reload, F12 devtools,
@@ -824,7 +932,8 @@ ${
         // what fails to resolve: the whole failure is a mismatch between two
         // roots the app author cannot see.
         root = fs.realpathSync(
-          (typeof BASE_DIR === 'string' && BASE_DIR) || process.cwd(),
+          (typeof BASE_DIR === 'string' && BASE_DIR) ||
+            (process.env.AIO_APP_CWD || process.cwd()),
         );
         // No regex on purpose. A /^file:\\/\\// literal here emits
         // /^file:/// into the generated script, where the trailing // is a
@@ -1214,7 +1323,7 @@ const AIO_REQ_TIMEOUT_MS = (() => {
   if (raw === undefined || String(raw).trim() === "") return 30000;
   const s = String(raw).trim();
   const n = Number(s);
-  // [0-9] not \d — this string is a template literal; \d would emit /^d+$/.
+  // [0-9] not the backslash-d class — this string is a template literal, which would emit /^d+$/.
   return /^[0-9]+$/.test(s) && Number.isFinite(n) && n > 0 ? n : 30000;
 })();
 const __aioAgents = new Map();
@@ -1355,40 +1464,50 @@ function socketFetch(reqPath, method, headers, body) {
  *
  *  Both shells wrote `<temp>/__aio_preload_<pid>.cjs` with no mode: a name
  *  anyone on the box can work out in advance, at the process umask (0644 on a
- *  default install), in a directory every user shares. The main script beside
- *  it has always been `Deno.makeTempFile()` — random name, 0600 — so this was
- *  the odd one out rather than a policy (an audit, §8).
+ *  default install), in a directory every user shares (an audit, §8). Then a
+ *  private `mkdtemp` directory per launch in `<temp>` — safe, but the file
+ *  cannot be removed once loaded (measured, Electron 44, sandboxed or not: the
+ *  preload is read again for EVERY document — a reload or a navigation after
+ *  the file is gone raises `preload-error` and the page has no bridge), so a
+ *  window that was SIGKILLed left its directory behind for good: 16 after 20
+ *  kills.
  *
- *  A private directory, not just a mode: `mode:` is the mode a file is CREATED
- *  with and is ignored for one that already exists, which is exactly the case a
- *  predictable name invites. `mkdtempSync` makes the directory 0700 with a name
- *  nobody could have waited for, and the file inside it is 0600.
+ *  So it lives in the app's OWN profile directory (`userData` — the user's,
+ *  never shared with another account), in `aio-preload/` (0700), as
+ *  `<pid>.cjs` (0600, created exclusively). A launch first removes every file
+ *  there whose process is gone: what a killed window left is taken away by
+ *  the next one, and nothing accumulates. The pid keeps two windows on one
+ *  profile from sweeping each other's file.
  *
  *  The markers are load-bearing: `tests/electron-preload-file.test.ts` cuts
  *  this block out of the generated script and RUNS it against real `node:fs`,
  *  so the mode is asserted on a file rather than on the text that was meant to
  *  produce one. Emits `preloadDir` and `preloadFile`; expects `fs`, `path` and
- *  `app` in scope, and `code` is the expression holding the preload source.
+ *  `app` in scope — with `app.name` already set, it decides `userData` — and
+ *  `code` is the expression holding the preload source.
  *  Sweep it with {@linkcode tmplPreloadCleanup}. */
 export function tmplPreloadWrite(code: string): string {
   return `// …swept on the way out, whichever way out this is. \`window-all-closed\` is
 // one of them and not the common one: aio's own shutdown kills this process
 // (shutdown.ts, phase "electron" — \`ep.kill()\`, i.e. SIGTERM), so every
 // Ctrl-C'd \`deno task dev\`, every dev restart and every test that stops an
-// app used to leave one private directory per launch behind in <temp>.
+// app used to leave one preload per launch behind.
 // The signal handlers RE-RAISE after sweeping, so the exit status this
 // process reports is the one it would have had (electronClosedPlan reads it).
+// They cover the time before \`ready\`; from then on a shell with a parent
+// watch replaces them with its own quit (tmplParentWatch), and the sweep
+// runs on 'exit'.
 //
-// ARMED BEFORE THE DIRECTORY EXISTS, which is the whole reason this sits
-// above the block instead of below it. Creating first and arming second
-// leaves a window — short, and wide open on a loaded machine — in which a
-// SIGTERM takes the default action and the directory it names outlives the
-// process. That is not a theory: it is how the suite caught this, under load,
-// after the sweep itself had already shipped. \`preloadDir\` is referenced
-// before its declaration on purpose: a sweep that runs in that window throws
-// on the temporal dead zone and the catch turns it into the no-op it is —
-// there is nothing on disk to remove yet.
-const __aioSweepPreload = () => { try { fs.rmSync(preloadDir, { recursive: true, force: true }); } catch {} };
+// ARMED BEFORE THE FILE EXISTS, which is the whole reason this sits above
+// the block instead of below it. Creating first and arming second leaves a
+// window — short, and wide open on a loaded machine — in which a SIGTERM
+// takes the default action and the file outlives the process. That is not a
+// theory: it is how the suite caught this, under load, after the sweep itself
+// had already shipped. \`preloadFile\` is referenced before its declaration
+// on purpose: a sweep that runs in that window throws on the temporal dead
+// zone and the catch turns it into the no-op it is — there is nothing on disk
+// to remove yet.
+const __aioSweepPreload = () => { try { fs.rmSync(preloadFile, { force: true }); } catch {} };
 process.on('exit', __aioSweepPreload);
 for (const __aioSig of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
   try {
@@ -1399,15 +1518,23 @@ for (const __aioSig of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
     });
   } catch {}
 }
-// ── aio preload file — a private 0700 dir, the file 0600 ──
-const preloadDir = fs.mkdtempSync(path.join(app.getPath('temp'), 'aio-preload-'));
-const preloadFile = path.join(preloadDir, 'preload.cjs');
-fs.writeFileSync(preloadFile, ${code}, { mode: 0o600 });
+// ── aio preload file — a private 0700 dir in the app's profile, the file 0600 ──
+const preloadDir = path.join(app.getPath('userData'), 'aio-preload');
+fs.mkdirSync(preloadDir, { recursive: true, mode: 0o700 });
+// What a killed window left behind: its process is gone, the file is nobody's.
+for (const __aioOld of fs.readdirSync(preloadDir)) {
+  let __aioAlive = true;
+  try { process.kill(Number(__aioOld.split('.')[0]), 0); }
+  catch (e) { __aioAlive = !!(e && e.code === 'EPERM'); }
+  if (!__aioAlive) fs.rmSync(path.join(preloadDir, __aioOld), { recursive: true, force: true });
+}
+const preloadFile = path.join(preloadDir, process.pid + '.cjs');
+fs.rmSync(preloadFile, { force: true });
+fs.writeFileSync(preloadFile, ${code}, { mode: 0o600, flag: 'wx' });
 // ── end aio preload file ──`;
 }
 
-/** Removes the preload directory {@linkcode tmplPreloadWrite} made. The file
- *  alone would leave an empty directory per launch behind in `<temp>`. */
+/** Removes the preload file {@linkcode tmplPreloadWrite} wrote. */
 export function tmplPreloadCleanup(): string {
   return `__aioSweepPreload();`;
 }
@@ -1452,16 +1579,6 @@ contextBridge.exposeInMainWorld('__aioIPC', {
   openWindow: (url, opts) => ipcRenderer.invoke('__aio:openWindow', { url, ...(opts || {}) }),
 });
 ${shellBridgePreload()}
-// Window controls for ui.chrome "themed"/"none": a frameless window loses
-// minimise, maximise and close along with its frame, and a page cannot get
-// them back on its own. Exposed ALWAYS (not only when themed) so an app using
-// chrome:"none" can build its own bar out of the same three verbs — the bridge
-// is the capability; the title bar is just one consumer of it.
-contextBridge.exposeInMainWorld('__aioWindow', {
-  minimize: () => ipcRenderer.send('__aio:win', 'minimize'),
-  maximize: () => ipcRenderer.send('__aio:win', 'maximize'),
-  close:    () => ipcRenderer.send('__aio:win', 'close'),
-});
 // AIO-54: Relay intercepted <a> navigations back to renderer as CustomEvent
 ipcRenderer.on('__aio:navigate', (_e, url) => {
   window.dispatchEvent(new CustomEvent('aio:navigate', { detail: { url } }));
@@ -1520,9 +1637,10 @@ export function udsPreloadDiagnostics(): string {
  *  stream the parent already reads (to drop GPU-probe noise). One tagged
  *  stream, one classifier.
  *
- *  `hasMountSignal`: the UDS shell's preload reports `__aio:mounted`; the
- *  WebSocket shell has no preload, so its watchdog would fire on every healthy
- *  page — it gets the error hooks and no mount deadline.
+ *  `hasMountSignal`: the window's preload reports `__aio:mounted`
+ *  (`udsPreloadDiagnostics` — both window shells carry it), so a page that
+ *  loaded and never mounted is said. A shell without that preload must pass
+ *  `false`: its watchdog would fire on every healthy page.
  *
  *  Expects `win` and `ipcMain` in scope. */
 export function tmplRendererDiagnostics(hasMountSignal: boolean): string {
@@ -1658,7 +1776,8 @@ export function udsProdHTML(
 }
 
 /** The SHELL bridge — what a page can ask the Electron window itself for,
- *  whatever transport it speaks: focus, and the tray's clicks. Separate from
+ *  whatever transport it speaks: focus, the tray's clicks, the three window
+ *  verbs, and the route that makes `window.close()` one of them. Separate from
  *  `__aioIPC` on purpose — that bridge's PRESENCE is what selects the IPC
  *  transport, so the WebSocket window must expose this one and not that.
  *  `standalone` prepends the require for a preload that has nothing else. */
@@ -1672,7 +1791,29 @@ export function shellBridgePreload(
   }contextBridge.exposeInMainWorld('__aioShell', {
   focus:  ()   => ipcRenderer.send('__aio:focus'),
   onTray: (fn) => ipcRenderer.on('__aio:tray', (_e, item) => fn(item)),
-});`;
+});
+// Window controls for ui.chrome "themed"/"none": a frameless window loses
+// minimise, maximise and close along with its frame, and a page cannot get
+// them back on its own. Exposed ALWAYS (not only when themed) so an app using
+// chrome:"none" can build its own bar out of the same three verbs — the bridge
+// is the capability; the title bar is just one consumer of it.
+contextBridge.exposeInMainWorld('__aioWindow', {
+  minimize: () => ipcRenderer.send('__aio:win', 'minimize'),
+  maximize: () => ipcRenderer.send('__aio:win', 'maximize'),
+  close:    () => ipcRenderer.send('__aio:win', 'close'),
+});
+// The page's own window.close() closes THROUGH the window, like the close
+// button and __aioWindow.close(). Left to Chromium it destroys the page
+// first and the window after it, and the window's 'close' event — the one a
+// close-to-tray app turns into a hide, and the one that saves the window's
+// bounds — never fires (measured, Electron 44, Linux and macOS: destroyed,
+// closed, window-all-closed, and the app is gone). Nothing in the main
+// process can cancel that, so the page's function is the place.
+try {
+  contextBridge.executeInMainWorld({ func: () => { window.close = () => window.__aioWindow.close(); } });
+} catch (e) {
+  console.error('[aio] window.close() is not routed through the window: ' + ((e && e.message) || e));
+}`;
 }
 
 /** `ui.tray` — the system tray icon, its menu, and close-to-tray. ONE
@@ -1681,8 +1822,8 @@ export function shellBridgePreload(
  *  file exists to prevent. `iconExpr` is a JS expression the shell supplies
  *  for a nativeImage (or null, or a promise of either); `title` the tooltip
  *  fallback. Expects `win`, `app`, `ipcMain` and `__aioQuitting` in scope.
- *  Always emits `__aioHiding` — the UDS shell's close handler reads it — and
- *  the second-launch watch on `meta.showFile`. */
+ *  Always emits `__aioHiding` — the UDS shell's close handler reads it — the
+ *  second-launch watch on `meta.showFile`, and the macOS re-open answer. */
 export function tmplTray(
   meta: AioMeta | undefined,
   iconExpr: string,
@@ -1699,19 +1840,49 @@ export function tmplTray(
   const TRAY = ${JSON.stringify(cfg)};
   let __aioHiding = false;
   ipcMain.on('__aio:focus', () => { if (!win.isDestroyed()) { win.show(); win.focus(); } });
+  // Window controls (__aioWindow, and the page's window.close()). One
+  // channel, one switch: a renderer can ask for exactly these three verbs and
+  // nothing else. 'close' is win.close() — the SAME cancellable close the
+  // title-bar button makes, so close-to-tray hides and an ordinary window
+  // closes, whoever asked.
+  ipcMain.on('__aio:win', (_event, verb) => {
+    if (win.isDestroyed()) return;
+    if (verb === 'minimize') win.minimize();
+    else if (verb === 'maximize') win.isMaximized() ? win.unmaximize() : win.maximize();
+    else if (verb === 'close') win.close();
+  });
+  const __aioShowWin = () => {
+    if (win.isDestroyed()) return;
+    if (win.isMinimized()) win.restore();
+    win.show(); win.focus();
+  };
+  // macOS: opening the app AGAIN — its Dock icon, Finder, \`open\` — starts
+  // nothing; the system hands the running app an 'activate'. It brings the
+  // app forward but leaves a window that was hidden to the tray or minimized
+  // exactly where it was, so the window answers it itself. (The event exists
+  // on macOS only; elsewhere a second launch is a second process, below.)
+  app.on('activate', __aioShowWin);
   // ── A second launch brings THIS window back (showFile) ──
   // The desktop convention: launching a running app again shows its window —
   // hidden to the tray, minimized or behind others — and the second launch
   // ends quietly. Its request is a file beside the lock; removing it is the
-  // answer it waits for.
+  // answer it waits for — so it is answered only once the page has MOUNTED
+  // (the preload's '__aio:mounted'). Taken earlier, by a window still loading,
+  // it told the second launch "the app is here" seconds before any window
+  // existed; and if this instance died in between, there was no app at all.
   const SHOW_FILE = ${JSON.stringify(meta?.showFile ?? null)};
   if (SHOW_FILE) {
+    let __aioUiUp = false;
     const __aioShowReq = () => {
+      if (!__aioUiUp) return;
       try { require('fs').unlinkSync(SHOW_FILE); } catch { return; }
-      if (win.isDestroyed()) return;
-      if (win.isMinimized()) win.restore();
-      win.show(); win.focus();
+      __aioShowWin();
     };
+    ipcMain.on('__aio:mounted', () => {
+      if (__aioUiUp) return;
+      __aioUiUp = true;
+      __aioShowReq(); // a request made while the page loaded
+    });
     try {
       const __aioShowW = require('fs').watch(require('path').dirname(SHOW_FILE), (_e, f) => {
         if (!f || f === require('path').basename(SHOW_FILE)) __aioShowReq();

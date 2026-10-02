@@ -98,10 +98,77 @@ transport and `\\.\pipe\aio-<lockKey>-http` for the page/route handler
 (`src/server/win-pipe.ts`, driven through `kernel32` directly — overlapped
 `ReadFile`/`WriteFile`, the blocking waits on a pool thread, never the event
 loop). Everything above the socket is the code Linux runs: the NDJSON envelope,
-the control plane, the `aio://` page over the socket. The one piece Windows adds
-is a minimal HTTP/1.1 server over the pipe (`src/server/http-over-conn.ts`),
-because `Deno.serve({ path })` has no pipe form; it is unit-tested on Linux over
-a Unix socket, so both OSs run the same parser and the same streaming writer.
+the control plane, the `aio://` page over the socket — including the server
+behind the page/route handler: one minimal HTTP/1.1 server
+(`src/server/http-over-conn.ts`) on the pipe and on the Unix socket alike, in
+dev and prod. `Deno.serve({ path })` has no pipe form, and on a Unix socket it
+cannot tell the handler which process is connected, which the production
+[lockdown](#who-may-connect-to-the-local-socket) needs. What a route or a client
+can observe — `req.url`, header bytes (a value loses the spaces and tabs around
+it, nothing else), `req.signal`, bodies streamed both ways (the same bytes;
+where a stream is cut into chunks is not part of it), `Content-Length` for a
+body that is already whole (a string, bytes, JSON, and the `HEAD` of one) and
+chunked for a stream, which request heads are refused as malformed (whitespace
+before a header's colon, a line that starts with a space or tab, a control byte
+in a value or in the target, a target in a form its method may not use — `*` is
+for `OPTIONS`, `host:port` for `CONNECT`, anything else starts with `/` or
+`scheme://` —, a `Transfer-Encoding` that is not one final `chunked` or that
+lists an empty or `identity` coding, a 129th header line, a head over 64 KB), an
+answer for a client that half-closes behind its request (`printf … | nc -U`), a
+connection kept for the next request, requests in flight finished at shutdown
+and none started after it began — is held equal to `Deno.serve` by
+`tests/http-over-conn-differential.test.ts`, which runs one handler under both:
+on the Unix socket's two listeners, and on a connection that is only a pair of
+streams, which is what a pipe gives. The differences that remain are deliberate,
+and each is an `EXCEPTION` case of that test:
+
+- **A connection is closed where `Deno.serve` keeps it** in two cases: after a
+  request whose body is still on the connection when the answer is written and
+  that `Deno.serve` would read away — an unread chunked body, a body the route
+  cancelled, a body on a `GET` or `HEAD` — and for an HTTP/1.0 client, even one
+  that asks for `Connection: keep-alive`. The answer says `Connection: close`.
+  (An unread body with a `Content-Length` is treated alike by both: taken, and
+  the connection kept, when it arrived with the head; the connection closed when
+  it is large.)
+- **No WebSocket upgrade.** `Upgrade: websocket` is answered `501` (the window
+  speaks NDJSON on the state socket). Any other `Upgrade` offer is ignored and
+  the request served.
+- **HTTP/1.1 only.** A connection that opens with the HTTP/2 preface is refused
+  `400`; `Deno.serve` speaks HTTP/2 to it.
+- **Refused where `Deno.serve` serves:** `CONNECT`, `TRACE`, `TRACK` → `501`; a
+  method with a lowercase letter, a repeated `Content-Length`, a
+  `Content-Length` or a chunk size above 2^53 − 1, a `Host` or an absolute
+  (`scheme://…`) target no URL can be made of, and a line of the request head
+  ended by LF alone → `400`, as soon as it is seen.
+- **Answered where `Deno.serve` says nothing:** a malformed chunked body is
+  `400` (`Deno.serve` closes the connection without an answer), and a request
+  head that has begun and is not complete within 30 s is `408` — a connection's
+  first head counted from the connect, a later one from its first byte; a kept
+  connection that is idle between requests has no deadline. Every refusal says
+  why in its body, where `Deno.serve`'s `400` is empty.
+- **`req.url` is the parsed URL** — dot segments resolved, characters a URL
+  escapes escaped — not the raw request target.
+- **Header names are written lowercase** — the route's in sorted order (what a
+  `Headers` iterates), then the server's own — not in the handler's spelling and
+  order.
+- **The status line is always `HTTP/1.1`.** An HTTP/1.0 client gets a
+  `Content-Length` or a close-delimited body, never a chunked one.
+- **A stream that is a single chunk, complete when the handler returns it** (a
+  one-part `Blob` too) is sent with its `Content-Length`, not chunked — its real
+  length, whatever length the handler declared for it.
+- **An upload the route never reads is not buffered**: it is read ahead 256 KB
+  at most, so a client that leaves behind a larger unread upload is noticed at
+  the response's next write, not at once.
+- **A client that half-closed and is answered with a stream gets the response
+  head, then the close.** To a streamed answer a half-close is the client
+  leaving, on both servers; `Deno.serve` closes without writing anything.
+- **Shutdown waits 2 s for requests in flight**, then cuts what is left — a
+  stream that never ends cannot hold the app's teardown. A connection with no
+  request in flight is closed at once. A request whose upload is still arriving
+  when the shutdown begins is let finish inside those 2 s; `Deno.serve` fails
+  the route's read of the rest.
+
+What is particular to the pipe:
 
 - **Electron connects natively** — Node's `net.connect(path)` and
   `http.request({ socketPath })` accept `\\.\pipe\…` (libuv). No special case in
@@ -125,7 +192,9 @@ exactly what needs a URL: `--transport=ws`, a browser client, `--expose`.
 
 **Status:** proven under Wine in CI (`tests/wine-pipe-e2e.test.ts` — the pipe
 server, overlapped I/O, the HTTP-over-pipe streaming path, concurrent clients,
-the named errors); one pass on real Windows is still pending.
+the named errors); one pass on real Windows is still pending. A pipe connection
+kept for a second request is not part of that run: keep-alive over a stream pair
+is pinned on Linux, by the differential test's stream-only connection.
 
 ## `routes` vs `serverFn` — what each costs you
 
@@ -149,11 +218,35 @@ bring your own, `--no-tls` for an already-encrypted network path), transport WS,
 a single shared key (`key: true`) or per-user auth. UDS is never used under
 `--expose` — a remote client has no path to a local socket.
 
+## Who may connect to the local socket
+
+The socket's directory (`0700`) and the pipe's DACL keep other **users** out in
+every mode. (The directory is the whole of that: the socket file's own mode is
+whatever the process umask leaves — `0755` under the usual `022`, which is every
+macOS app opened from Finder, `0700` under `077` — on Linux and macOS alike, and
+nothing relies on it.) Which **processes of the same user** are served depends
+on the mode:
+
+| mode                                      | state socket / pipe                         | `ctl` on it                                                                     | HTTP socket / `-http` pipe |
+| ----------------------------------------- | ------------------------------------------- | ------------------------------------------------------------------------------- | -------------------------- |
+| dev                                       | any process of the user                     | the whole handler (the trojan has its own gates)                                | any process of the user    |
+| prod electron                             | **only the window process the app spawned** | others: `GET /__aio/health` → `{ status, appId }`; the stop, with `control.key` | **only the window**        |
+| prod electron, `--port=N`                 | only the window — but the port is open      | as above                                                                        | — (the page is on TCP)     |
+| prod electron, `--cdp`                    | only the window — but DevTools drives it    | as above                                                                        | **only the window**        |
+| prod electron, `electron.allowLocalPeers` | any process of the user                     | the whole handler                                                               | any process of the user    |
+
+The identity is the kernel's (`SO_PEERCRED` / `LOCAL_PEERPID` /
+`GetNamedPipeClientProcessId`), not a secret a same-user process could read.
+What it does and does not protect against, the `--allow-ffi` requirement and the
+opt-out are in
+[Local-peer lockdown](../auth/auth.md#local-peer-lockdown-production-desktop-apps).
+
 ## The trojan port
 
 The control plane (`/__aio/trojan/*`, what `am` and amui talk to) is **dev
-only** — a prod build does not mount it and returns 404 if reached. It follows
-the app's transport:
+only** — a prod build does not mount it and returns 404 if reached, except the
+stop presented with the app's `control.key` (`am stop`). It follows the app's
+transport:
 
 | the app listens on      | trojan is reached via                                                                                    |
 | ----------------------- | -------------------------------------------------------------------------------------------------------- |

@@ -541,7 +541,12 @@ export function openUserStore(
   // never reopens a spent code.
   const updTotp = db.prepare(
     totpStepColumn
-      ? "UPDATE users SET totp_step = CASE WHEN totp IS ?1 THEN totp_step " +
+      // The STORED side is normalised too (`setTotpSecret` passes `?1`
+      // clean): a row written before secrets were normalised holds the raw
+      // spelling, and compared as text it was "another secret" once — the
+      // first re-stage zeroed `totp_step` and reopened a spent code.
+      ? "UPDATE users SET totp_step = " +
+        "CASE WHEN upper(rtrim(totp, '=')) IS ?1 THEN totp_step " +
         "ELSE 0 END, totp = ?1 WHERE id = ?2"
       : "UPDATE users SET totp = ?1 WHERE id = ?2",
   );

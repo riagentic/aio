@@ -252,3 +252,35 @@ Deno.test("preflight: a deno.json with a comment is read the way Deno reads it",
     await Deno.remove(dir, { recursive: true });
   }
 });
+
+Deno.test("preflight: findings in one file come in LINE order (4 before 12)", async () => {
+  // `where` is `file:line`, and a plain string compare sorts `:12` before
+  // `:4` — the refusal listed a file's hits out of the order they are read in.
+  const [first, second] = REMOVALS.filter((x) => x.kind === "cell-config");
+  assert(first && second, "two cell-config removals to tell apart");
+  const dir = await app({
+    "src/cell.ts": `import { cell } from "aio";
+export const app = cell("demo", {
+  state: { n: 0 },
+  ${first.key}: {},
+  methods: {
+    a() {},
+    b() {},
+    c() {},
+    d() {},
+    e() {},
+  },
+  ${second.key}: {},
+});
+`,
+  });
+  try {
+    const blocking = await preflight(dir, "main");
+    assertEquals(blocking.map((b) => b.where), [
+      "src/cell.ts:4",
+      "src/cell.ts:12",
+    ]);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});

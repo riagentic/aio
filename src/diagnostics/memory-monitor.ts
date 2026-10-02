@@ -34,8 +34,10 @@ export type MemoryReport = {
    *  surface and a fourth member would break callers, so the fourth case
    *  gained its own additive spelling instead. */
   reason: "pressure" | "machine" | "growth";
-  /** Heap as a fraction of PHYSICAL RAM (0 when the machine is unmeasurable) —
-   *  the number that matters for the machine's health, as opposed to the app's. */
+  /** RSS as a fraction of PHYSICAL RAM (0 when the machine is unmeasurable) —
+   *  the number that matters for the machine's health, as opposed to the
+   *  app's. RSS, not the heap: it is what the OS must find room for, and a
+   *  native leak lives entirely inside it while `heapUsed` stays flat. */
   machinePct: number;
   /** Native memory — the half `heapUsed` never covered. `rssGrowth` is the
    *  change across the trend window, so a report says HOW FAST, not just that
@@ -44,7 +46,9 @@ export type MemoryReport = {
   native?: { rss: number; external: number; rssGrowth: number };
   /** The JS heap was FLAT while RSS climbed — a leak the heap-relative
    *  thresholds above cannot see. The additive spelling of the case `reason`
-   *  is too frozen to name (see its doc). */
+   *  is too frozen to name (see its doc). Never set on a `machine` report:
+   *  a small heap inside a larger RSS is what every idle process looks like,
+   *  not a leak. */
   nativeLeak?: boolean;
   /** Every watched series at report time, from the memory ledger. Absent when
    *  the host wired no `getGauges`. */
@@ -86,9 +90,12 @@ export type MemoryConfig = {
   warnThreshold?: number;
   criticalThreshold?: number;
   trendWindow?: number; // number of samples for trend detection (default: 10)
-  /** Report when the heap passes this fraction of PHYSICAL RAM, whatever the
-   *  V8 ceiling says. Default 0.5. The ceiling protects the app; this protects
-   *  the machine, and on a big-ceiling build they are nowhere near each other. */
+  /** Report when the process (its RSS) passes this fraction of PHYSICAL RAM,
+   *  whatever the V8 ceiling says. Default 0.5. The ceiling protects the app;
+   *  this protects the machine, and on a big-ceiling build they are nowhere
+   *  near each other. Said once, then again only when RSS has climbed by a
+   *  further tenth of RAM — a small machine an app simply fills is a fact,
+   *  not a new event every interval. */
   machineWarnFraction?: number;
   /** Report sustained growth once the heap has risen by at least this fraction
    *  of the ceiling across the trend window while still below every threshold.
@@ -259,6 +266,20 @@ export function createMemoryMonitor(deps: MonitorDeps): { stop: () => void } {
   // Last tick's reading per level gauge, so this tick can say which series
   // moved — the difference between "something grew" and "the sync buffer grew".
   const prevGauge = new Map<string, number>();
+  // RSS at the last `machine` report: the condition is said again only once
+  // it is WORSE (see MACHINE_REPEAT_STEP), the way a growth report has to
+  // climb again to earn a second one.
+  let machineSaidAt = -Infinity;
+  // Consecutive full windows that looked like a native leak. One is a
+  // warm-up; two is a leak.
+  let nativeWindows = 0;
+  // RSS where that run of windows began — what every window of the run is
+  // measured against.
+  let nativeBase = 0;
+  // RSS at the last native report of that run (see `machineSaidAt`).
+  let nativeSaidAt = -Infinity;
+  // Samples since the run's last climbing window.
+  let nativeIdle = 0;
 
   // NaN (`Number(env)` unset), 0 or a negative period was a ~1 ms loop, each
   // tick a recursive sizeof over every cell's state.
@@ -315,7 +336,18 @@ export function createMemoryMonitor(deps: MonitorDeps): { stop: () => void } {
     // …a large share of the whole machine, whatever the ceiling allows. On a
     // 47 GB ceiling the pressure threshold is 35 GB, by which point a 64 GB
     // desktop is already swapping — this is the check that sees it first.
-    const machine = machinePct >= (deps.machineWarnFraction ?? 0.5);
+    const machineFraction = deps.machineWarnFraction ?? 0.5;
+    const machine = machinePct >= machineFraction;
+    // An UNCHANGED machine condition is said once. On a 512 MB host a small,
+    // steady app sits above half of RAM for its whole life, and every 10 s it
+    // was reported again — a full sizeof walk and the app's hook each time,
+    // about nothing new. It speaks again after another tenth of RAM, and is
+    // re-armed once RSS has fallen a tenth below the threshold.
+    const step = total * MACHINE_REPEAT_STEP;
+    if (machinePct < machineFraction - MACHINE_REPEAT_STEP) {
+      machineSaidAt = -Infinity;
+    }
+    const machineSpeaks = machine && mem.rss >= machineSaidAt + step;
     const heapRising = detectTrend(usedSamples) === "rising";
     const rssGrowth = rssSamples.length >= 3
       ? rssSamples[rssSamples.length - 1]! - rssSamples[0]!
@@ -323,30 +355,79 @@ export function createMemoryMonitor(deps: MonitorDeps): { stop: () => void } {
     // …or the JS heap FLAT while RSS climbs. Requiring a flat heap is what
     // keeps an ordinary heap climb reported as `growth` rather than relabelled
     // `native`; the two want different fixes.
-    const native = !pressure && !machine && !heapRising &&
-      rssSamples.length >= windowSize &&
-      detectTrend(rssSamples) === "rising" &&
-      rssGrowth >
-        Math.max(
-          NATIVE_GROWTH_FLOOR_BYTES,
-          rssSamples[0]! * NATIVE_GROWTH_RATIO,
-        );
+    //
+    // FLAT IS RELATIVE TO THE RSS CLIMB. `detectTrend` answers in the unit it
+    // is fed, and fed bytes its threshold (0.005 — written for fractions)
+    // calls a heap that gains ONE BYTE a tick "rising": any upward drift at
+    // all, which every live heap has, switched this check off, and RSS ran to
+    // tens of GB unannounced. The heap is flat when it explains under
+    // NATIVE_HEAP_SHARE of what RSS gained over the same window.
+    const heapGrowth = usedSamples.length >= 2
+      ? usedSamples[usedSamples.length - 1]! - usedSamples[0]!
+      : 0;
+    const heapFlat = heapGrowth < rssGrowth * NATIVE_HEAP_SHARE;
+    // The share is of the RSS the RUN started at, not of this window's own
+    // first sample: a steady leak adds the same bytes every window to a base
+    // that keeps growing, so measured against itself the second window of a
+    // linear climb always fell short and the leak was never confirmed.
+    if (nativeWindows === 0) nativeBase = rssSamples[0] ?? 0;
+    const nativeBar = Math.max(
+      NATIVE_GROWTH_FLOOR_BYTES,
+      nativeBase * NATIVE_GROWTH_RATIO,
+    );
+    const fullWindow = rssSamples.length >= windowSize;
+    const nativeWindow = !pressure && !machine && heapFlat && fullWindow &&
+      detectTrend(rssSamples) === "rising" && rssGrowth > nativeBar;
+    // A RUN of climbing windows. One is also what a warm-up looks like — a
+    // page cache filling, a first large buffer — and it stops; a leak is the
+    // climb that comes again. The windows of a run need not touch: a leak that
+    // grows in bursts, flat in between, KEEPS what it gained, and that is what
+    // holds a run together. It ends when RSS gives the gain back.
+    const near = nativeIdle <= NATIVE_NEAR_WINDOWS * windowSize;
+    if (nativeWindow) {
+      nativeWindows++;
+      nativeIdle = 0;
+    } else if (nativeWindows > 0) {
+      nativeIdle++;
+      if (fullWindow && mem.rss < nativeBase + nativeBar) {
+        nativeWindows = 0;
+        nativeSaidAt = -Infinity;
+      }
+    }
+    // Confirmed by the second window when it follows the first closely, by
+    // the third otherwise: two steps hours apart are two warm-ups, a step
+    // every hour is a leak. And within a run it is said again only once RSS
+    // stands a bar above where it was last said — memory that climbs and is
+    // given back in step with the window is an unbroken run of climbing
+    // windows with RSS back at its base after each, and was reported every
+    // window, for ever. A leak clears the bar every window, by the rule that
+    // confirms it.
+    const native = nativeWindow &&
+      (nativeWindows >= 3 || (nativeWindows === 2 && near)) &&
+      mem.rss >= nativeSaidAt + nativeBar;
+    if (native) nativeSaidAt = mem.rss;
     // …or the heap climbing steadily while comfortably below a threshold. That
     // is a leak, and reporting it only at 75% turns a slow diagnosis into an
     // emergency.
-    const growth = !pressure && !machine && !native &&
+    const growth = !pressure && !machine && !nativeWindow &&
       usedSamples.length >= windowSize && heapRising &&
-      (usedSamples[usedSamples.length - 1]! - usedSamples[0]!) >
+      heapGrowth >
         (heapLimit > 0 ? heapLimit : mem.heapTotal) *
           (deps.growthReportRatio ?? 0.15);
 
     for (const g of gauges) prevGauge.set(g.name, g.value);
 
-    if (!pressure && !machine && !growth && !native) return;
-    // Once a growth report has gone out, do not repeat it every interval — the
-    // window has to climb again by the same amount to earn a second one.
-    if (growth) usedSamples.length = 0;
-    if (native) rssSamples.length = 0;
+    // Once a window has been judged, do not judge it again every interval —
+    // it has to climb again by the same amount to earn a second report. BOTH
+    // windows restart together: the native check compares the heap's gain to
+    // RSS's over the SAME samples, and a heap window one sample long reads as
+    // "flat" beside a full RSS one.
+    if (growth || nativeWindow) {
+      usedSamples.length = 0;
+      rssSamples.length = 0;
+    }
+    if (!pressure && !machineSpeaks && !growth && !native) return;
+    if (!pressure && machineSpeaks) machineSaidAt = mem.rss;
 
     // Measure cell states
     const entries = deps.getCellStates();
@@ -363,10 +444,9 @@ export function createMemoryMonitor(deps: MonitorDeps): { stop: () => void } {
     // member that would break every existing reader.
     const reason: MemoryReport["reason"] = pressure
       ? "pressure"
-      : machine
+      : machineSpeaks
       ? "machine"
       : "growth";
-
     deps.onReport({
       reason,
       machinePct,
@@ -380,6 +460,9 @@ export function createMemoryMonitor(deps: MonitorDeps): { stop: () => void } {
       cellStates,
       trend,
       native: { rss: mem.rss, external: mem.external, rssGrowth },
+      // Only the confirmed climb. A `machine` report is a share of RAM: a
+      // heap that is the smaller part of RSS there is any idle process, and
+      // calling it a leak labelled a healthy app on a small host as one.
       ...(native ? { nativeLeak: true } : {}),
       gauges,
       ...(grower ? { topGrower: grower } : {}),
@@ -392,11 +475,46 @@ export function createMemoryMonitor(deps: MonitorDeps): { stop: () => void } {
 }
 
 /** A native leak must clear BOTH an absolute floor — so a quiet app's RSS
- *  jitter never reads as a leak — and a share of the window's starting RSS.
+ *  jitter never reads as a leak — and a share of the RSS its run of windows
+ *  started at.
  *  Sized off the real incident: ~10 GB and climbing across a 10-sample window
  *  clears both by orders of magnitude, while a warm-up bump does not. */
 const NATIVE_GROWTH_FLOOR_BYTES = 256 * 1024 * 1024;
 const NATIVE_GROWTH_RATIO = 0.25;
+/** How far apart — in windows — two climbing windows may be and still confirm
+ *  a native leak between them; further apart, it takes a third. */
+const NATIVE_NEAR_WINDOWS = 10;
+/** The heap is FLAT when its gain is under this share of RSS's over the same
+ *  window: the rest of the climb is, by subtraction, not V8's. */
+const NATIVE_HEAP_SHARE = 0.05;
+/** A `machine` report repeats only after RSS has grown by this further share
+ *  of physical RAM, and re-arms once RSS is this far below the threshold. */
+const MACHINE_REPEAT_STEP = 0.1;
+
+/** The one line a memory report is logged as — pure, so the words can be
+ *  pinned. Each reason names the number that fired it: a `machine` report is
+ *  about RSS (it used to print "heap at N%", a figure that had not crossed
+ *  anything), a native leak about RSS against a flat heap, and only a heap
+ *  report about the heap. */
+export function describeMemoryReport(report: MemoryReport): string {
+  const mb = (n: number) => `${(n / 1e6).toFixed(0)} MB`;
+  const native = report.native;
+  if (report.reason === "machine" && native) {
+    return `RSS ${mb(native.rss)} is ${
+      (report.machinePct * 100).toFixed(0)
+    }% of this machine's memory (JS heap ${mb(report.heapUsed)})`;
+  }
+  if (report.nativeLeak && native) {
+    return `native memory rising — RSS ${mb(native.rss)} (+${
+      mb(native.rssGrowth)
+    } this window) while the JS heap stayed flat at ${mb(report.heapUsed)}`;
+  }
+  return `heap at ${
+    report.heapPct < 0.01
+      ? (report.heapPct * 100).toFixed(2)
+      : (report.heapPct * 100).toFixed(0)
+  }% (${mb(report.heapUsed)} / ${mb(report.heapLimit)})`;
+}
 
 /** The fastest-rising LEVEL series between two ticks, or `undefined` when none
  *  rose. Only `level` gauges qualify: a `counter` (cumulative work) rises by

@@ -1,7 +1,8 @@
 // The journal refused MID-METHOD, under concurrent dispatches.
 //
 // tests/journal-append-durability pins the single-shot case: a refused append
-// is PERSIST_ERROR and the write lands in the snapshot at once. This is the
+// lands in the snapshot at once — so it is no PERSIST_ERROR (nothing is at
+// risk; tests/journal-refused-episode pins what IS said). This is the
 // differential the audit asked for — several async methods in flight, the
 // journal replaced by something unwritable while they are suspended, then all
 // of them committing into the refusal at once:
@@ -131,9 +132,11 @@ Deno.test("journal refused mid-method: every ack resolves, health says degraded,
       Array.from({ length: N }, (_, i) => i + 1),
       "every concurrent write is applied",
     );
+    // Saved by the snapshot: not a durability failure — no PERSIST_ERROR
+    // saying changes "will be lost" (health below is where it shows).
     assert(
-      errors.some((e) => e.code === "PERSIST_ERROR"),
-      `the refusals are PERSIST_ERROR, got: ${
+      !errors.some((e) => e.code === "PERSIST_ERROR"),
+      `a refused append the snapshot saved is no PERSIST_ERROR, got: ${
         JSON.stringify(errors.map((e) => e.code))
       }`,
     );

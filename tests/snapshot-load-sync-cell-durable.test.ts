@@ -148,6 +148,7 @@ Deno.test(`snapshot load --force without a sync cell: the cell is wiped to its i
       methods,
     });
     const app = await aio.run({
+      watch: false,
       cells: [plain, shared],
       appId: "snapshot-force-sync",
       client: "server-only",

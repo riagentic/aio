@@ -242,6 +242,22 @@ export const TROJAN_PREFIX = "/__aio/trojan/";
  *  travels on a different header. */
 export const LOCAL_CONTROL_HEADER = "x-aio-control";
 
+/** How a refused stop (`POST /__aio/trojan/shutdown` without this boot's
+ *  control credential) begins its `error` — the server SAYS it refused, so
+ *  `am` can tell that from an app with no stop at all (a production build
+ *  before 1.0.17-beta answers a bare 404). The status stays 404. */
+export const STOP_REFUSED = "stop refused";
+
+/** Who asked a stop (`POST /__aio/trojan/shutdown`), from the OPTIONAL
+ *  `X-Aio-Stop-By` header — so the app's log names the real requester. A
+ *  whitelist, never the header's text: absent or anything unknown is
+ *  `"am stop"`, what every `am` before the header sent. Pure. */
+export function stopRequester(req?: Request): "am stop" | "takeover" {
+  return req?.headers.get("x-aio-stop-by") === "takeover"
+    ? "takeover"
+    : "am stop";
+}
+
 /** The credentials this process has armed, by appId. One process serves one app
  *  (the single-instance lock guarantees it); a TEST process that boots several
  *  servers arms several, and any of them authorizes — they are all the same
@@ -275,9 +291,15 @@ const _armed = new Map<string, { key: string; path: string }>();
  *  WRONG credential be diagnosed instead of 401'd anonymously.
  *  Shutdown needs no edit — `resetTrojanRateLimit()` already disarms.
  *
- *  NEVER in prod: the trojan does not exist there (`server-static` refuses to
- *  mount it, `handleTrojan` refuses again), so a production app writes no
- *  control secret at all — nothing to steal, nothing to protect.
+ *  In production too, where it authorizes exactly ONE request: the stop
+ *  (`POST /__aio/trojan/shutdown`, see `server-static`). The trojan itself
+ *  does not exist there (`server-static` refuses to mount it, `handleTrojan`
+ *  refuses again), so the credential reaches nothing else. Without it a
+ *  production app could only be stopped by a signal — and on Windows a
+ *  signal is `TerminateProcess`: no `onStop`, no final flush, no clean lock
+ *  release. Whoever can read the file can already kill the process (same
+ *  user, owner-only data dir), so it hands no one a power they lacked; it
+ *  turns the kill they had into a clean stop.
  *
  *  A failure is LOUD and leaves the app UNARMED. It never degrades into "allow
  *  anyway": the whole point is that this credential is as trustworthy as the
@@ -285,8 +307,10 @@ const _armed = new Map<string, { key: string; path: string }>();
 export function armLocalControl(
   cfg: { appId?: string; prod?: boolean },
 ): void {
-  if (cfg.prod) return;
   if (!cfg.appId) {
+    // (No appId, no data dir to hold the credential: a production app's stop
+    // falls back to a signal. The warning below is about the dev trojan.)
+    if (cfg.prod) return;
     log.warn(
       "[aio] control plane: no appId — `am`/amui cannot authenticate to " +
         "/__aio/trojan/* on an auth-enabled app. Set appId in aio.run().",
@@ -298,7 +322,10 @@ export function armLocalControl(
   if (r.error !== undefined) {
     log.warn(
       `[aio] control plane: no local control credential — ${r.error}. ` +
-        `\`am\`/amui will need an authenticated admin on this app.`,
+        (cfg.prod
+          ? `\`am stop\` will end this app by a signal (on Windows: killed, ` +
+            `without its onStop or final flush).`
+          : `\`am\`/amui will need an authenticated admin on this app.`),
     );
     _armed.delete(cfg.appId);
     return;

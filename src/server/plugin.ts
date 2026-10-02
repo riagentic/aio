@@ -132,6 +132,7 @@ export interface ResolvedPlugins {
 /** A route pattern with its param NAMES erased — `/u/:id` and `/u/:name` are
  *  one route to the matcher, so they are one claim here. */
 function routeShape(pattern: string): string {
+  // aio-ok: path-split — a route pattern
   return pattern.split("/").map((seg) => seg.startsWith(":") ? ":" : seg)
     .join("/");
 }

@@ -42,10 +42,10 @@ import {
 import {
   currentCommit,
   downloadArtifact,
-  fetchManifest,
+  fetchInstallManifest,
   fileSha256,
+  forgetInstalledDigest,
   gitLsRemote,
-  installManifestUrl,
   pinKey,
   readTrust,
   recordInstalledSha256,
@@ -56,6 +56,7 @@ import {
   artifactPath,
   clearPending,
   detectTarget,
+  exeIdentity,
   failedUpdatePath,
   firstBootPath,
   installableTargets,
@@ -80,6 +81,7 @@ import {
   writeRecordAtomic,
   zipLauncher,
 } from "./updates-apply.ts";
+import { assertNotInTheWay, claim, made } from "./updates-owned.ts";
 import { dataCompatibility, followsPrereleases } from "./updates-core.ts";
 import { rebuildFromGit } from "./updates-rebuild.ts";
 import { retireProfile } from "./updates-retire.ts";
@@ -242,27 +244,22 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
 
   async function checkManifest(opts: CheckOptions): Promise<CheckResult> {
     const trust = readTrust(deps.dataDir);
-    // A zip install reads its own kind's manifest when the channel has one.
-    let url: string;
-    try {
-      url = await installManifestUrl(
-        manifestUrl(config.source, channel, platform),
-        installedTarget(),
-      );
-    } catch (e) {
-      return { kind: "error", error: e instanceof Error ? e.message : `${e}` };
-    }
     // Sent only for the verdict it was cached under — see `etagCurrentFor`.
     const cachedFor = trust.etagCurrentFor;
     // …and the SETTING it was judged under: "X is a prerelease" is current
     // only while prereleases are not followed — cached across turning
     // `prerelease: true` on, the 304 kept the release hidden for good.
     const pre = followsPrereleases(config, deps.appVersion);
-    const validator = cachedFor?.version === deps.appVersion &&
-        cachedFor.url === url && cachedFor.prerelease === pre
-      ? trust.etagCurrent
-      : undefined;
-    const got = await fetchManifest(url, validator);
+    // A zip install reads its own kind's manifest when the channel has one.
+    const { url, got } = await fetchInstallManifest(
+      manifestUrl(config.source, channel, platform),
+      installedTarget(),
+      (at) =>
+        cachedFor?.version === deps.appVersion && cachedFor.url === at &&
+          cachedFor.prerelease === pre
+          ? trust.etagCurrent
+          : undefined,
+    );
     if (got.kind === "error") return { kind: "error", error: got.error };
     if (got.kind === "not-modified") {
       return { kind: "current", reason: `${deps.appVersion} is the latest` };
@@ -553,6 +550,17 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       ? `${current}.staged-${m.version}`
       : `${current}.new-${m.version}`;
     const download = isDirectory ? `${current}.zip-${m.version}` : staged;
+    // What this update makes beside the install goes on record first, and a
+    // leftover of an earlier try is removed — only one the record proves is
+    // the updater's. Anything else under one of these names refuses the
+    // update here, before a byte is downloaded.
+    // Every name checked before any is written down: a refusal leaves no
+    // entry for something that was never made.
+    for (const p of [download, staged, `${current}.old-${deps.appVersion}`]) {
+      assertNotInTheWay(deps.dataDir, p);
+    }
+    claim(deps.dataDir, download, "file");
+    if (isDirectory) claim(deps.dataDir, staged, "dir");
     const url = artifactUrl(manifestUrl(config.source, channel, platform), m);
 
     log.info("updates", `downloading ${m.name} ${m.version} from ${url}`);
@@ -565,6 +573,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       dest: download,
       expectSha256: m.sha256,
       expectSize: m.size,
+      owner: deps.dataDir,
       // Progress rides the normal state channel: the applier dispatches into
       // the same cell the UI is bound to, so a progress bar is an ordinary
       // reactive read rather than a second transport.
@@ -597,7 +606,9 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
     log.info("updates", `verified ${m.version} — ${verified.reason}`);
 
     if (isDirectory) {
-      await Deno.remove(staged, { recursive: true }).catch(() => {});
+      // Made empty and put on record as that very folder, then filled.
+      await Deno.mkdir(staged);
+      made(deps.dataDir, staged);
       const unpacked = isMacApp
         ? await unpackAppTarball(download, staged)
         : await unpackArchive(download, staged);
@@ -663,6 +674,13 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       to: m.version,
       backup,
       exe: replacedExeIdentity(current),
+      // What is installed is recorded when the new build is confirmed, from
+      // here: a directory swap is made after this process has gone, and a
+      // single-file one can be cut off between its renames and the record —
+      // the new build then ran under the old one's digest, and every check
+      // offered it to itself.
+      sha256: m.sha256,
+      releasedAt: m.releasedAt,
     };
 
     if (isDirectory) {
@@ -673,7 +691,11 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
         "updates",
         `installed ${deps.appVersion} → ${m.version}; restarting`,
       );
-      recordInstalledSha256(deps.dataDir, m.sha256, m.releasedAt);
+      // Not the new build's digest yet: the swap has not happened, and when
+      // it fails the old version runs on under a record naming a release
+      // that never went in. Not the old one's either — the new build's first
+      // check would read itself as "another build of this version".
+      forgetInstalledDigest(deps.dataDir);
       deferHandOver(
         () => {
           try {
@@ -693,9 +715,10 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
               pending,
             });
           } catch (e) {
-            // The helper never started (a policy such as AppLocker refused
-            // it): NOTHING was swapped. Undo what was written for the swap,
-            // say so, and start this version again.
+            // The swap never began — the helper refused by a policy such as
+            // AppLocker, or the copy kept aside could not even be looked at:
+            // NOTHING was swapped. Undo what was written for the swap, say
+            // so, and start this version again.
             //
             // Said in the FAILED record, not only the log: this runs after
             // `shutdown()`, whose logger is gone — a line logged here reached
@@ -703,7 +726,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
             // the relaunched app showed no trace of the update it refused.
             // The record is what the next boot names and dismisses, as for
             // every other update put back.
-            const why = `the update helper could not start (${e})`;
+            const why = `the swap could not be started (${e})`;
             try {
               writeRecordAtomic(failedUpdatePath(deps.dataDir), {
                 ...(readPending(deps.dataDir) ?? {
@@ -714,6 +737,11 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
                   attempts: 0,
                   startedAt: new Date().toISOString(),
                 }),
+                // This very build relaunches: the boot reads "nothing was
+                // swapped" off it and counts a failed attempt, as for a move
+                // the helper could not make — the release stays on offer,
+                // never dismissed after one try at a bad moment.
+                fromExe: exeIdentity(),
                 swapFailed: why,
               });
             } catch (w) {
@@ -733,7 +761,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
                 Deno.removeSync(path, { recursive });
               } catch { /* aio-ok: absent, or left for pruneOld to reclaim */ }
             }
-            writeTrust(deps.dataDir, { installedSha256: undefined });
+            forgetInstalledDigest(deps.dataDir);
             log.error(
               "updates",
               `${m.version} was NOT installed: ${why}. ${deps.appVersion} ` +
@@ -764,7 +792,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       // ordering, so nothing here can get it wrong.
       pending,
     });
-    await pruneOld(current, KEEP_OLD);
+    await pruneOld(current, KEEP_OLD, deps.dataDir);
     // What is installed now, by digest. This is the fact that makes the NEXT
     // "same version, re-published" detectable, and it is the digest that was
     // verified above — never one re-read from the file that was just written.
@@ -820,7 +848,9 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       // possible). Copy first, swap second.
       const current = targetOf();
       const staged = `${current}.new-${built.sha.slice(0, 8)}`;
+      claim(deps.dataDir, staged, "file");
       await Deno.copyFile(built.artifact, staged);
+      made(deps.dataDir, staged);
 
       phase("applying");
       await swapArtifact({
@@ -836,7 +866,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
           exe: replacedExeIdentity(current),
         },
       });
-      await pruneOld(current, KEEP_OLD);
+      await pruneOld(current, KEEP_OLD, deps.dataDir);
 
       // Record the commit this install now runs, so the next check compares
       // against what was actually built rather than what was last downloaded.

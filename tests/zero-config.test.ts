@@ -11,16 +11,10 @@ import {
   dropTempDir,
   tempDir,
 } from "../src/testing/temp-dir.ts";
+import { freePort } from "../src/testing/server-test.ts";
 const _childCovDir = childCoverageDir();
 
 const ROOT = new URL("..", import.meta.url).pathname;
-
-function freePort(): number {
-  const l = Deno.listen({ port: 0 });
-  const port = (l.addr as Deno.NetAddr).port;
-  l.close();
-  return port;
-}
 
 async function waitFor<T>(fn: () => Promise<T | null>): Promise<T> {
   const deadline = Date.now() + 30_000;

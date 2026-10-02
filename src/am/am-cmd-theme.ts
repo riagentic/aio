@@ -16,7 +16,7 @@
 // stylesheet is one `ui.theme: "auto"` already steps aside for, so exactly one
 // copy of the theme exists and it is the app's.
 import { readDenoJson } from "../server/deno-json.ts";
-import { join } from "@std/path";
+import { basename, join } from "@std/path";
 import { appThemeCss } from "../build/app-theme.ts";
 import { resolveAppDir } from "../build/build-config.ts";
 import { resolveEntryPath } from "../server/paths.ts";
@@ -55,7 +55,9 @@ function header(appId: string): string {
 function identityOf(cfg: Record<string, unknown>, root: string): string {
   const id = cfg.appId ?? cfg.title;
   if (typeof id === "string" && id.trim()) return id.trim();
-  return root.split("/").filter(Boolean).pop() ?? "app";
+  // The folder's own name — `basename`, which a Windows path (no `/`) has
+  // too; splitting on `/` handed the whole path to the hue there.
+  return basename(root) || "app";
 }
 
 export async function cmdTheme(

@@ -302,21 +302,28 @@ Deno.test("build-version: readTreeFacts without a repository hashes the project 
 });
 
 Deno.test("build-version: readTreeFacts REFUSES an unbounded non-repo walk — a stray ancestor deno.json must not hash $HOME", async () => {
-  // The measured freeze: a leftover `~/deno.json` made the boot of an app
-  // under `~/tmp/aio` resolve its project root to `$HOME`, and this walk then
-  // read and hashed an 896 GB home — ~0.5 GB of RSS per 5 s, four busy GC
-  // threads, a boot that never returned. The cap refuses by name instead.
+  // The measured freeze: a leftover `deno.json` in a home directory made the
+  // boot of an app below it resolve its project root to that home, and this
+  // walk then read and hashed all of it — ~0.5 GB of RSS per 5 s, four busy
+  // GC threads, a boot that never returned. Past the content cap nothing more
+  // is READ; past the listing cap the walk refuses by name. Every cap has its
+  // own case in tests/app-version-tree-bounds.test.ts.
   const dir = await tempDir("aio-version-cap-");
   try {
     for (let i = 0; i < 5; i++) {
       await Deno.writeTextFile(join(dir, `f${i}.ts`), "x");
     }
     // A small tree still hashes (the cap must not break the normal case)…
-    assertMatch((await readTreeFacts(dir)).hash ?? "", /^[0-9a-f]{8}$/);
-    // …and past the cap it refuses, loudly, rather than reading on.
+    const small = await readTreeFacts(dir);
+    assertMatch(small.hash ?? "", /^[0-9a-f]{8}$/);
+    // …past the content cap it is still identified, by a different hash…
+    const cheap = await readTreeFacts(dir, { limits: { files: 3 } });
+    assertMatch(cheap.hash ?? "", /^[0-9a-f]{8}$/);
+    assert(cheap.hash !== small.hash);
+    // …and past the listing cap it refuses, loudly, rather than walking on.
     let err: Error | undefined;
     try {
-      await readTreeFacts(dir, { limits: { files: 3 } });
+      await readTreeFacts(dir, { limits: { listed: 3 } });
     } catch (e) {
       err = e as Error;
     }
@@ -812,6 +819,7 @@ Deno.test("build-version: aio.run({ appVersion }) is RETIRED — refused by name
       try {
         await aio.run(
           {
+            watch: false,
             appId: "retired-v",
             appVersion: "1.0.0",
             libraryMode: true,

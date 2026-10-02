@@ -49,6 +49,7 @@ export const wpp = cell("wpp", {
 
 if ((globalThis as { name?: string }).name?.startsWith("aio-cell:")) {
   await aio.run({
+    watch: false,
     appId: "worker-pending-policy-probe",
     cells: [wpp],
     client: "server-only",

@@ -10,6 +10,7 @@ import type {
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isCompiled } from "../server/paths.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { renameOver } from "../diagnostics/rename-over.ts";
 import { capDelay } from "../state/timer-ceiling.ts";
 import { looksLikeWrite, statementVerb } from "./sql-shape.ts";
 import { syncDir, syncFile } from "./durable.ts";
@@ -1139,7 +1140,7 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
         // torn snapshot under the good name — the file recovery restores),
         // and the directory after it (else the rename itself can be lost).
         await syncFile(tmp);
-        await Deno.rename(tmp, path); // atomic replace
+        await renameOver(tmp, path); // atomic replace
         await syncDir(dirname(resolve(path)));
       } catch (e) {
         await Deno.remove(tmp).catch(() => {/* never written */});

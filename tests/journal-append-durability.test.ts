@@ -8,9 +8,10 @@
 // under the one option that exists to prevent exactly that.
 //
 // The state is already committed and broadcast when the append runs, so the
-// promise is kept by the other mechanism: the failure is reported as what it
-// is (PERSIST_ERROR) and the debounce window is closed NOW, so the snapshot
-// carries the write. Proof: with an effectively infinite debounce, the write
+// promise is kept by the other mechanism: the debounce window is closed NOW,
+// so the snapshot carries the write. Which is also why the refusal is no
+// PERSIST_ERROR ("changes … will be lost on restart" — false here): it is
+// said once per episode as a WARN, and health shows the journal degraded. Proof: with an effectively infinite debounce, the write
 // is on disk — read through a second connection, before close — anyway.
 import { assert, assertEquals } from "@std/assert";
 // @ts-ignore node:sqlite types unavailable when an old @types/node shadows them
@@ -29,7 +30,7 @@ const kvHolds = (dbPath: string, needle: string): boolean => {
   }
 };
 
-Deno.test("journal: a refused append is PERSIST_ERROR and the write lands in the snapshot at once", async () => {
+Deno.test("journal: a refused append lands in the snapshot at once — no PERSIST_ERROR, no HOOK_ERROR", async () => {
   const dir = await Deno.makeTempDir();
   const dbPath = dir + "/data.db";
   _resetAioRuntime();
@@ -64,8 +65,8 @@ Deno.test("journal: a refused append is PERSIST_ERROR and the write lands in the
     await (c as unknown as { add: (n: number) => Promise<void> }).add(7);
 
     assert(
-      errors.some((e) => e.code === "PERSIST_ERROR"),
-      `the refused append is a durability failure, got: ${
+      !errors.some((e) => e.code === "PERSIST_ERROR"),
+      `saved by the snapshot, it is not a durability failure, got: ${
         JSON.stringify(errors.map((e) => e.code))
       }`,
     );

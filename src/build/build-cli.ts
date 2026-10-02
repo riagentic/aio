@@ -3,12 +3,14 @@
  * Build CLI — compiles a headless Deno CLI binary (no browser bundle, no Electron).
  */
 import { minifyDeclared, runCompile } from "./minify-server.ts";
+import { warnBuildToolsIn } from "./artifact-audit.ts";
 import { artifactName } from "./platforms.ts";
 import { join } from "@std/path";
 import {
   _compileArgv,
   assetIncludes,
   bakedClientArgs,
+  compileModuleRoots,
   dbWorkerInclude,
   keepPackagesDeclared,
   smokeRunArtifact,
@@ -192,11 +194,23 @@ export async function buildCli(cfg: BuildConfig): Promise<void> {
           return false;
         }
       }
+      await warnBuildToolsIn(cliTarget, keepPackages, cfg.platform);
       compiled(cliTarget, root);
       return true;
     },
-    undefined,
+    // Read for the warnings and the name rules (a build-only package this
+    // CLI imports is dropped — say so at build time); the CLI's package set
+    // is otherwise embedded as before.
+    {
+      cwd: root,
+      roots: compileModuleRoots(cliEntry, [
+        ...(doRemote ? [] : dbWorkerInclude()),
+        ...assets,
+      ]),
+      keepUnreached: true,
+    },
     keepPackages,
+    cfg.platform,
   );
 
   if (!ok) {

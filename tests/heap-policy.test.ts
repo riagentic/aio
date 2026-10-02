@@ -17,6 +17,7 @@ import {
   reportHeapCeiling,
   resolveMaxHeapMB,
 } from "../src/server/heap-policy.ts";
+import { getLogger, setLogger } from "../src/diagnostics/logger-api.ts";
 
 const GB = 1024 * 1024 * 1024;
 
@@ -69,17 +70,112 @@ Deno.test("heap: a controlled environment's cap clamps share AND a declared ask"
   assertEquals(resolveMaxHeapMB(64 * GB), 16384);
 });
 
-Deno.test("envHeapCapMB: reads AIO_MAX_HEAP_MB, floors it, ignores nonsense", () => {
-  assertEquals(envHeapCapMB(null), null);
-  assertEquals(envHeapCapMB(""), null);
-  assertEquals(envHeapCapMB("   "), null);
-  assertEquals(envHeapCapMB("nonsense"), null);
-  assertEquals(envHeapCapMB("0"), null);
-  assertEquals(envHeapCapMB("-4"), null);
-  assertEquals(envHeapCapMB("4096"), 4096);
-  assertEquals(envHeapCapMB("8192"), 8192);
+Deno.test("envHeapCapMB: reads AIO_MAX_HEAP_MB as decimal megabytes, never below the floor", () => {
+  const quiet = () => {
+    throw new Error("an accepted value has nothing to say");
+  };
+  assertEquals(envHeapCapMB(null, quiet), null);
+  assertEquals(envHeapCapMB("", quiet), null);
+  assertEquals(envHeapCapMB("   ", quiet), null);
+  assertEquals(envHeapCapMB("4096", quiet), 4096);
+  assertEquals(envHeapCapMB("8192", quiet), 8192);
+  assertEquals(envHeapCapMB(" 8192 ", quiet), 8192);
+});
+
+Deno.test("envHeapCapMB: a value that is not a cap is refused OUT LOUD — never a silent 'no cap'", () => {
+  // `4g` used to mean "no cap at all", silently, on the one variable that
+  // exists to keep a runner from freezing its host.
+  for (
+    const bad of ["4g", "8192MB", "nonsense", "0", "-4", "Infinity", "0x", "1e"]
+  ) {
+    const said: string[] = [];
+    assertEquals(envHeapCapMB(bad, (m) => said.push(m)), null, bad);
+    assertEquals(said.length, 1, `${bad} must be said`);
+    assertEquals(said[0]!.includes(`AIO_MAX_HEAP_MB=${bad}`), true);
+    assertEquals(said[0]!.includes("NOT capped"), true);
+    // Once per value: every boot asks twice (the launcher, the boot report).
+    assertEquals(envHeapCapMB(bad, (m) => said.push(m)), null);
+    assertEquals(said.length, 1, "…and only once");
+  }
+});
+
+Deno.test("envHeapCapMB: an odd spelling of a number still CAPS — the safety variable never fails open", () => {
+  // Every one of these capped the heap in 1.0.16. Refusing them as "not
+  // decimal digits" left the app UNCAPPED with a warning: the variable that
+  // exists to bound a runner, switched off by a trailing `.0`.
+  for (
+    const [spelling, cap] of [
+      ["4096.0", 4096],
+      ["8192.9", 8192],
+      ["1e4", 10000],
+      ["0x2000", 8192],
+      ["+4096", 4096],
+      // Under the floor AND oddly spelled: one line, the number it becomes.
+      ["512.5", HEAP_FLOOR_MB],
+    ] as const
+  ) {
+    const said: string[] = [];
+    assertEquals(envHeapCapMB(spelling, (m) => said.push(m)), cap, spelling);
+    assertEquals(said, [
+      `AIO_MAX_HEAP_MB=${spelling} is not plain decimal digits — read as a ` +
+      `cap of ${cap} MB. Write it as ${cap} to say exactly that.`,
+    ]);
+    assertEquals(envHeapCapMB(spelling, (m) => said.push(m)), cap);
+    assertEquals(said.length, 1, "said once per value");
+  }
+});
+
+Deno.test("envHeapCapMB: with no sink injected, what it says goes through the logger — with a level", () => {
+  const lines: string[] = [];
+  const prev = getLogger();
+  setLogger(
+    {
+      logDir: "",
+      pub: (lvl: string, cat: string, msg: string) =>
+        lines.push(`${lvl} ${cat} ${msg}`),
+      perf: () => {},
+      flush: () => Promise.resolve(),
+    } as unknown as Parameters<typeof setLogger>[0],
+  );
+  try {
+    assertEquals(envHeapCapMB("7g"), null);
+  } finally {
+    setLogger(prev);
+  }
+  assertEquals(lines.length, 1, lines.join(" | "));
+  assertEquals(lines[0]!.startsWith("warn heap AIO_MAX_HEAP_MB=7g "), true);
+});
+
+Deno.test("envHeapCapMB: a cap below the floor is RAISED, and says so", () => {
+  const said: string[] = [];
   // Never below the floor: a 512 MB request is still 4 GB.
-  assertEquals(envHeapCapMB("512"), HEAP_FLOOR_MB);
+  assertEquals(envHeapCapMB("512", (m) => said.push(m)), HEAP_FLOOR_MB);
+  assertEquals(said.length, 1);
+  assertEquals(
+    said[0]!.includes(`capping at ${HEAP_FLOOR_MB} MB instead`),
+    true,
+    said[0],
+  );
+});
+
+Deno.test("envHeapCapMB: an unreadable environment (no --allow-env) is 'no cap', not a crash", async () => {
+  const mod = new URL("../src/server/heap-policy.ts", import.meta.url).href;
+  // A file, not `deno eval`: eval runs with every permission.
+  const script = await Deno.makeTempFile({ suffix: ".ts" });
+  await Deno.writeTextFile(
+    script,
+    `import { envHeapCapMB } from "${mod}"; console.log("cap:" + envHeapCapMB());`,
+  );
+  const out = await new Deno.Command(Deno.execPath(), {
+    args: ["run", "--no-prompt", "--no-check", script],
+    env: { AIO_MAX_HEAP_MB: "8192" },
+    stdout: "piped",
+    stderr: "piped",
+  }).output().finally(() => Deno.remove(script));
+  const text = new TextDecoder().decode(out.stdout) +
+    new TextDecoder().decode(out.stderr);
+  assertEquals(out.code, 0, text);
+  assertEquals(text.includes("cap:null"), true, text);
 });
 
 Deno.test("heap: asking for more than the share is REPORTED, not refused", () => {

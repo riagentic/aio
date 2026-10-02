@@ -21,8 +21,37 @@ export { DRAIN_TIMEOUT_MS };
  *  its waits (`db/async-db.ts`). */
 export const TEARDOWN_TIMEOUT_MS = 5000;
 
-/** The whole graceful stop, worst case: drain + teardown. Anything that waits
- *  for an aio app to exit before escalating to SIGKILL waits at least this. */
+/** What the stores — the SQLite writer, the KV store, the session and user
+ *  stores, which close LAST — always get, whatever the phases before them
+ *  did.
+ *
+ *  Every phase is handed what is left of the one shared budget. A phase that
+ *  overran — a server close waiting on something that never came — spent all
+ *  of it, and each store got the 1 ms floor: "sqlite did not finish inside the
+ *  5000ms teardown budget", on a stop where the database was never the slow
+ *  part.
+ *
+ *  ADDED, not carved out: a stop whose phases finish inside
+ *  `TEARDOWN_TIMEOUT_MS` is untouched (every phase before the stores still
+ *  has the whole budget), and only one that arrives at the stores with less
+ *  than this left runs past it — by at most this much. It is a floor for the
+ *  stores' close, not a promise of a finished checkpoint: a close that is cut
+ *  loses nothing, the WAL is replayed at the next start.
+ *
+ *  A twenty-fifth of the teardown (200 ms): a store's close is a handful of
+ *  milliseconds, and the overrun has to stay well inside the exit watchdog's
+ *  slack (`EXIT_WATCHDOG_MS`, 2 s). */
+export const STORES_RESERVE_MS = TEARDOWN_TIMEOUT_MS / 25;
+
+/** The whole graceful stop: drain + teardown. Anything that waits for an aio
+ *  app to exit before escalating to SIGKILL waits at least this.
+ *
+ *  A teardown phase that OVERRAN adds `STORES_RESERVE_MS` to it (the stores'
+ *  floor, above). The waits built on this number — the exit watchdog, `am
+ *  stop`, a `--kill-existing` takeover — carry seconds of slack over it; a
+ *  supervisor sized to exactly this number cuts that floor short, which costs
+ *  what the overrun already cost before the floor existed: stores not closed,
+ *  the WAL replayed at the next start, nothing lost. */
 export const SHUTDOWN_BUDGET_MS = DRAIN_TIMEOUT_MS + TEARDOWN_TIMEOUT_MS;
 
 /** Slack over `SHUTDOWN_BUDGET_MS` before an aio process ends ITSELF.

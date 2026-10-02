@@ -100,6 +100,7 @@ export function sharePlugin(shares: readonly ShareRoot[]): {
             return undefined; // a real absolute path — esbuild's business
           } catch {
             const from = args.importer ? ` (imported by ${args.importer})` : "";
+            // aio-ok: path-split — a `/share/…` URL specifier (filter /^\//), not an OS path
             const name = args.path.split("/")[1] ?? "";
             return {
               errors: [{

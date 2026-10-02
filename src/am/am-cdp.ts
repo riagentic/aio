@@ -42,6 +42,7 @@ export function appPageTargets(
     t.type === "page" &&
     (t.url.startsWith("aio://") ||
       origins.some((o) =>
+        // aio-ok: path-split — a DevTools URL, not a path
         t.url === o || t.url.startsWith(o + "/") ||
         t.url.startsWith(o + "?")
       ))

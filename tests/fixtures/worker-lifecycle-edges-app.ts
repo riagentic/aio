@@ -40,6 +40,7 @@ export const wcr = cell("wcr", {
 
 if (isCellWorker()) {
   await aio.run({
+    watch: false,
     appId: "worker-lifecycle-edges-probe",
     cells: [wdt, wcr],
     client: "server-only",

@@ -21,6 +21,10 @@ export interface ServerConfig {
    *  like the whole trojan. */
   dispatchAsServer?: (action: unknown) => Promise<unknown> | void;
   socketPath?: string; // Unix domain socket path — when set, serves over UDS instead of TCP
+  /** The app's local-peer gate (production Electron lockdown). When set, the
+   *  `socketPath` door serves ONLY the process the gate trusts — the same
+   *  object the NDJSON socket asks, so the two doors cannot disagree. */
+  localPeerGate?: import("./local-peer.ts").LocalPeerGate;
   title: string;
   width?: number; // window width hint (embedded in HTML meta)
   height?: number; // window height hint (embedded in HTML meta)
@@ -155,7 +159,8 @@ export interface ServerConfig {
      *  that the data is on disk. */
     forcePersist?: () => Promise<void>;
     sqlQuery?: (sql: string) => Promise<unknown[]>; // read-only SQL query (async)
-    shutdown?: () => Promise<void>; // graceful shutdown
+    /** Graceful shutdown; `by` names the requester in the log line. */
+    shutdown?: (by?: "am stop" | "takeover") => Promise<void>;
     startedAt: number; // Date.now() at boot
     /** Cell id → method (action) names — powers "run a method" buttons. */
     cellMethods?: () => Record<string, string[]>;

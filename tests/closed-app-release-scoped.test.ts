@@ -28,6 +28,7 @@ const config = (id: string, dir: string, cells: unknown[]) => ({
   singleton: false,
   persist: false,
   port: freePort(),
+  watch: false,
 });
 
 Deno.test("close: a second close of an app never ends the scope of a later app booted from the same config object", async () => {

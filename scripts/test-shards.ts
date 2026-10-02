@@ -2,7 +2,7 @@
 /**
  * test-shards.ts — the full suite, split across parallel `deno test` PROCESSES.
  *
- *   deno run -A scripts/test-shards.ts [--shards=N] [files…]
+ *   deno run -A scripts/test-shards.ts [--shards=N] [--quiet-ms=N] [files or dirs…]
  *
  * `deno test tests/` runs one file at a time: 27 minutes on a 32-core box,
  * with 1,270 of ~1,500 files finishing in under a second. The same files, the
@@ -24,8 +24,14 @@
  * `.aio/test-timings.json`, and the next run assigns the slowest files first,
  * each to the least-loaded shard (longest-processing-time first). A file with
  * no timing yet counts as one second.
+ *
+ * A shard's output goes to `.aio/test-shards/<n>.log` AS IT ARRIVES, so a run
+ * that hangs has left, on disk, the file it hangs in. A shard that prints
+ * nothing for `--quiet-ms` (5 minutes) is named on the runner's own output,
+ * with the last file it started — and again every 5 minutes. It is not
+ * stopped: a long test is not a failure.
  */
-import { dirname, join, relative } from "@std/path";
+import { dirname, join, relative, resolve, SEPARATOR } from "@std/path";
 import { homeStoreEnv } from "../src/testing/test-strict.ts";
 import { testDisplay } from "../src/testing/test-display.ts";
 import { HEAP_FLOOR_MB } from "../src/server/heap-policy.ts";
@@ -42,12 +48,42 @@ import {
 import {
   pruneDeadLockDir,
   pruneDeadLockDirAt,
+  rootRegistryEntry,
   sweepRootRegistry,
 } from "../src/server/single-instance-lock.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 const TIMINGS = join(ROOT, ".aio", "test-timings.json");
 const OUT = join(ROOT, ".aio", "test-shards");
+
+/** A running shard's two pipes: both into its `log` as they arrive
+ *  ({@linkcode pumpToLog}), and `say(quietMs, header)` each time BOTH have
+ *  been silent for `quietMs` — `header` is the file stdout last started
+ *  ({@linkcode headerTracker}). Resolves with what each printed. */
+export async function followShard(
+  pipes: {
+    stdout: ReadableStream<Uint8Array>;
+    stderr: ReadableStream<Uint8Array>;
+  },
+  log: { write(p: Uint8Array): Promise<number> },
+  quietMs: number,
+  say: (quietMs: number, header: string | null) => void,
+): Promise<{ stdout: string; stderr: string }> {
+  const at = headerTracker();
+  const quiet = quietWatch(quietMs, (ms) => say(ms, at.last()));
+  try {
+    const [stdout, stderr] = await Promise.all([
+      pumpToLog(pipes.stdout, log, (text) => {
+        at.feed(text);
+        quiet.touch();
+      }),
+      pumpToLog(pipes.stderr, log, quiet.touch),
+    ]);
+    return { stdout, stderr };
+  } finally {
+    quiet.stop();
+  }
+}
 
 /** What in a test file's OWN source means it puts a window
  *  on a DISPLAY — Electron, a headed browser, the shared nested Xephyr, a
@@ -68,18 +104,190 @@ export const REAL_WINDOW =
 const TEST_FILE = /(^|[._])test\.(ts|tsx|mts|js|mjs|jsx)$/;
 
 /** Every test file under the dirs `deno task test` names, repo-relative. */
-export async function discover(dirs: string[]): Promise<string[]> {
+export async function discover(
+  dirs: string[],
+  root: string = ROOT,
+): Promise<string[]> {
   const out: string[] = [];
   const walk = async (dir: string): Promise<void> => {
     for await (const e of Deno.readDir(dir)) {
       if (e.name === "node_modules" || e.name.startsWith(".")) continue;
       const p = join(dir, e.name);
       if (e.isDirectory) await walk(p);
-      else if (e.isFile && TEST_FILE.test(e.name)) out.push(relative(ROOT, p));
+      else if (e.isFile && TEST_FILE.test(e.name)) out.push(relative(root, p));
     }
   };
-  for (const d of dirs) await walk(join(ROOT, d));
+  for (const d of dirs) await walk(resolve(root, d));
   return out.sort();
+}
+
+/** The named arguments as FILES: a directory is the test files under it, the
+ *  way `deno test` reads one. Handed on as a directory it was one "file" that
+ *  is no file — never planned or timed by name, and skipped by the judge
+ *  that every listed file ran its tests ({@linkcode unrunFiles}), so a file
+ *  with no test under it rode a green summary. */
+export async function expandDirs(
+  named: string[],
+  root: string = ROOT,
+): Promise<string[]> {
+  const out: string[] = [];
+  for (const a of named) {
+    const dir = await Deno.stat(resolve(root, a))
+      .then((s) => s.isDirectory, () => false);
+    out.push(...(dir ? await discover([a], root) : [a]));
+  }
+  return [...new Set(out)];
+}
+
+/** The last `running N tests from <file>` line in what a shard printed — the
+ *  file it is in now. */
+export function lastHeader(text: string): string | null {
+  return text.replace(/\x1b\[[0-9;]*m/g, "")
+    .match(/^running \d+ tests? from .+$/gm)?.at(-1) ?? null;
+}
+
+/** {@linkcode lastHeader} of output that arrives in pieces: a header cut in
+ *  two by a chunk boundary is still one line, and the last one stands however
+ *  much the file prints after it. */
+export function headerTracker(): {
+  feed(text: string): void;
+  last(): string | null;
+} {
+  let partial = "";
+  let header: string | null = null;
+  return {
+    feed(text) {
+      const lines = partial + text;
+      const cut = lines.lastIndexOf("\n") + 1;
+      header = lastHeader(lines.slice(0, cut)) ?? header;
+      partial = lines.slice(cut);
+    },
+    last: () => header,
+  };
+}
+
+/** Call `say(quietMs)` each time `ms` pass with no `touch()` — again after
+ *  every further `ms` — until `stop()`. It only tells: nothing is killed. */
+export function quietWatch(
+  ms: number,
+  say: (quietMs: number) => void,
+): { touch(): void; stop(): void } {
+  let rounds = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const arm = () => {
+    timer = setTimeout(() => {
+      say(++rounds * ms);
+      arm();
+    }, ms);
+  };
+  arm();
+  return {
+    touch() {
+      clearTimeout(timer);
+      rounds = 0;
+      arm();
+    },
+    stop: () => clearTimeout(timer),
+  };
+}
+
+/** Copy `stream` into the open `log` chunk by chunk — the file on disk shows
+ *  what a shard has printed while it is still running — and return it whole,
+ *  for the judges. Kept in memory until the end only, a hung shard's output
+ *  was lost with the run that was stopped to end it.
+ *
+ *  The log is shared by a shard's two streams, so it is given WHOLE
+ *  characters only: the bytes of one a chunk ends inside wait for the rest.
+ *  Written as they came, the other stream's text landed between the two
+ *  halves and both were unreadable on disk. `seen` gets the very text the log
+ *  got — the replacement character of a stream that ENDS inside one too. */
+export async function pumpToLog(
+  stream: ReadableStream<Uint8Array>,
+  log: { write(p: Uint8Array): Promise<number> },
+  seen: (text: string) => void,
+): Promise<string> {
+  const dec = new TextDecoder();
+  const enc = new TextEncoder();
+  let all = "";
+  const pass = async (text: string) => {
+    const bytes = enc.encode(text);
+    for (let off = 0; off < bytes.length;) {
+      off += await log.write(bytes.subarray(off));
+    }
+    all += text;
+    seen(text);
+  };
+  for await (const chunk of stream) {
+    await pass(dec.decode(chunk, { stream: true }));
+  }
+  // What a stream that ended inside a character left behind.
+  const cut = dec.decode();
+  if (cut !== "") await pass(cut);
+  return all;
+}
+
+/** THE reader of every whole-number setting of this runner: `raw` as a
+ *  number, or the sentence that refuses it (`said` is the setting as the
+ *  user wrote it). Digits only, no sign, no leading zero, 1 to `max`:
+ *  `Number()` also takes `0x10`, `1e3`, ` 5` and `5.0` and ran each as
+ *  something the setting did not say — and takes `abc` as NaN, which went on
+ *  into the run. Pure. */
+export function wholeNumber(
+  said: string,
+  raw: string | undefined,
+  max: number,
+  what: string,
+): number | string {
+  return raw !== undefined && /^[1-9][0-9]*$/.test(raw) && Number(raw) <= max
+    ? Number(raw)
+    : `test-shards: ${said} is not a whole number of ${what} from 1 to ${max}`;
+}
+
+/** The value of the whole-number flag `--name=N` on a command line:
+ *  undefined when the flag is absent, else {@linkcode wholeNumber} of it.
+ *  EVERY occurrence is read (a later bad one is not excused by an earlier
+ *  good one) and the last one counts; a bare `--name` gives no number at
+ *  all. Pure. */
+function flagNumber(
+  args: readonly string[],
+  name: string,
+  max: number,
+  what: string,
+): number | string | undefined {
+  let value: number | undefined;
+  for (const arg of args) {
+    if (arg !== name && !arg.startsWith(`${name}=`)) continue;
+    const read = wholeNumber(
+      arg,
+      arg === name ? undefined : arg.slice(name.length + 1),
+      max,
+      what,
+    );
+    if (typeof read === "string") return read;
+    value = read;
+  }
+  return value;
+}
+
+/** The `--quiet-ms` of a command line: milliseconds (1 to 2³¹−1 — what a
+ *  timer can hold; 300000 when the flag is absent), or the sentence that
+ *  refuses it. Pure. */
+export function quietMsOf(args: readonly string[]): number | string {
+  return flagNumber(args, "--quiet-ms", 2 ** 31 - 1, "milliseconds") ??
+    300_000;
+}
+
+/** How many shards: `--shards=N`, else `AIO_TEST_SHARDS`, else `fallback` —
+ *  or the sentence that refuses what was said. 1 to 256. Pure. */
+export function shardsOf(
+  args: readonly string[],
+  env: string | undefined,
+  fallback: number,
+): number | string {
+  return flagNumber(args, "--shards", 256, "shards") ??
+    (env === undefined
+      ? fallback
+      : wholeNumber(`AIO_TEST_SHARDS=${env}`, env, 256, "shards"));
 }
 
 /** Split `files` into `n` shards of near-equal measured time. The `serial`
@@ -259,6 +467,61 @@ export function swallowedPresses(
   return [...out];
 }
 
+/** The listed test files a `deno test` that exited 0 did NOT run, each with
+ *  why. Pure.
+ *
+ *  Exit 0 and `ok | N passed` say nothing failed — not that every file ran. A
+ *  file that calls `Deno.exit(0)` at its top level ends its own isolate: deno
+ *  prints a `note`, goes on to the next file, and the summary counts none of
+ *  that file's tests — a failing test beside the call was a green shard. So a
+ *  listed file must be seen running: its `running N tests from ./<file>`
+ *  header, with N > 0 (ignored tests count: deno lists them). A file with no
+ *  code in it (`blank`) has nothing to run, and is the one exception.
+ *
+ *  A file is named as typed on the command line and as deno prints it — two
+ *  spellings of one path, so both are read as that path under `root`: an
+ *  absolute or un-normalised name (`tests/../tests/a.test.ts`) ran, passed,
+ *  and was "never started". */
+export function unrunFiles(
+  log: string,
+  files: string[],
+  blank: (file: string) => boolean,
+  root: string = ROOT,
+): string[] {
+  const key = (f: string) =>
+    relative(root, resolve(root, f.replaceAll("\\", "/")))
+      .replaceAll("\\", "/");
+  // deno-lint-ignore no-control-regex
+  const lines = log.replace(/\x1b\[[0-9;]*m/g, "").split("\n");
+  const ran = new Map<string, number>();
+  const exited = new Map<string, string>();
+  for (const l of lines) {
+    // To the end of the line: a path may hold a space.
+    const r = /^running (\d+) tests? from (.+)$/.exec(l.trim());
+    if (r) ran.set(key(r[2]!), (ran.get(key(r[2]!)) ?? 0) + Number(r[1]));
+    const x = /^note (.+) called `(Deno\.exit\(-?\d*\))` from outside any test/
+      .exec(l.trim());
+    if (x) exited.set(key(x[1]!), x[2]!);
+  }
+  const out: string[] = [];
+  for (const file of files) {
+    const f = key(file);
+    if (exited.has(f)) {
+      out.push(
+        `${f} called ${exited.get(f)} outside any test — deno stopped the ` +
+          `file there, and the tests in it never ran`,
+      );
+    } else if (!ran.has(f)) {
+      out.push(`${f} never started (deno printed no "running N tests" for it)`);
+    } else if (ran.get(f) === 0 && !blank(file)) {
+      out.push(
+        `${f} ran 0 tests — it registered none, so it tested nothing`,
+      );
+    }
+  }
+  return out;
+}
+
 /** The cores a test run may use, and the command prefix that holds it there.
  *
  *  The run used to take the whole machine: 16 shards, each spawning apps,
@@ -304,6 +567,22 @@ async function onPath(cmd: string): Promise<boolean> {
   }
 }
 
+/** `AIO_TEST_FREE_CORES` as a number: unset is 4, a whole number ≥ 0 is
+ *  itself, and anything else THROWS. `Number("abc")` is NaN, which the fence
+ *  read as "keep one core" — a typo took 31 of 32 cores without a word. Pure. */
+export function freeCores(raw: string | undefined): number {
+  if (raw === undefined) return 4;
+  if (!/^\d+$/.test(raw.trim())) {
+    throw new Error(
+      `test-shards: AIO_TEST_FREE_CORES=${
+        JSON.stringify(raw)
+      } is not a whole ` +
+        `number of cores to keep free (e.g. AIO_TEST_FREE_CORES=4)`,
+    );
+  }
+  return Number(raw);
+}
+
 /** THE fence for this machine — the runner and `check:release` share it.
  *  `AIO_TEST_FREE_CORES` (default 4) is how many cores stay untouched. */
 export async function machineFence(): Promise<
@@ -321,7 +600,7 @@ export async function machineFence(): Promise<
     cores,
     ...cpuFence(
       cores,
-      Number(Deno.env.get("AIO_TEST_FREE_CORES") ?? 4),
+      freeCores(Deno.env.get("AIO_TEST_FREE_CORES")),
       Deno.build.os,
       { taskset: await onPath("taskset"), nice: await onPath("nice") },
     ),
@@ -351,9 +630,7 @@ async function dropShardRuntime(runtime: string): Promise<string[]> {
     for (const e of Deno.readDirSync(runtime)) {
       if (!e.isDirectory || !/^aio(-|$)/.test(e.name)) continue;
       const d = join(runtime, e.name);
-      if (pruneDeadLockDirAt(d, true) || !dirHasEntries(d)) continue;
-      await dropRefusedSockets(d);
-      if (!pruneDeadLockDirAt(d, true) && dirHasEntries(d)) left.push(d);
+      if (await lockDirHeld(d)) left.push(d);
     }
     sweepRootRegistry(runtime);
     if (left.length) return left;
@@ -365,6 +642,166 @@ async function dropShardRuntime(runtime: string): Promise<string[]> {
     left.push(`${runtime} (${e instanceof Error ? e.message : String(e)})`);
   }
   return left;
+}
+
+/** Prune lock dir `d` by the one rule; true when something is still in it. */
+async function lockDirHeld(d: string): Promise<boolean> {
+  if (pruneDeadLockDirAt(d, true) || !dirHasEntries(d)) return false;
+  await dropRefusedSockets(d);
+  return !pruneDeadLockDirAt(d, true) && dirHasEntries(d);
+}
+
+/** The runtime base a shard WITHOUT a private one inherits — where the lock
+ *  module puts its lock dirs when nothing says otherwise. */
+export function sessionRuntimeBase(): string {
+  return Deno.build.os === "windows"
+    ? (Deno.env.get("TEMP") ?? Deno.env.get("TMP") ?? "C:\\Temp")
+    : (Deno.env.get("XDG_RUNTIME_DIR") ?? "/tmp");
+}
+
+/** The lock dirs under runtime base `base` that serve an apps root at or
+ *  inside `home` — read from the registry `lockDir()` keeps beside them
+ *  (`<base>/.aio-roots/<dir>` holds the root). By the ROOT, never by the
+ *  name: `base` here is the developer's own session dir, and the apps they
+ *  are running hold locks in it too — under other roots, so they are never
+ *  listed, judged or pruned. Never throws. */
+export function lockDirsOf(base: string, home: string): string[] {
+  const out: string[] = [];
+  let names: string[];
+  try {
+    names = [...Deno.readDirSync(join(base, ".aio-roots"))].map((e) => e.name);
+  } catch {
+    return out; // aio-ok: no registry — no scoped lock dir was made here
+  }
+  for (const n of names.sort()) {
+    if (!n.startsWith("aio-")) continue;
+    const dir = join(base, n);
+    try {
+      const root = Deno.readTextFileSync(rootRegistryEntry(dir));
+      if (root === home || root.startsWith(home + SEPARATOR)) out.push(dir);
+    } catch { /* aio-ok: unregistered meanwhile — its dir is gone */ }
+  }
+  return out;
+}
+
+/** Every entry (`<dir>/<name>`) still in a lock dir of `home` under `base`
+ *  once each is pruned by the one rule — what something live holds — with a
+ *  stamp of WHICH file it is (inode and mtime): a lock published again under
+ *  the same name is another file. `base` itself is never removed. Never
+ *  throws. */
+export async function heldLockEntries(
+  base: string,
+  home: string,
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  for (const d of lockDirsOf(base, home)) {
+    try {
+      if (!await lockDirHeld(d)) continue;
+      for (const e of Deno.readDirSync(d)) {
+        const st = Deno.lstatSync(join(d, e.name));
+        out.set(join(d, e.name), `${st.ino}:${st.mtime?.getTime()}`);
+      }
+    } catch { /* aio-ok: gone between the two looks — nothing holds it */ }
+  }
+  return out;
+}
+
+/** {@link dropShardRuntime}, with patience and no mercy. A child a test
+ *  stopped may not be gone the instant `deno test` exits (a detached app
+ *  still shutting down under a loaded shard), so the dir is asked again,
+ *  `tries` times over ~35 s — and what is STILL held after that is a process
+ *  that outlived its test, which fails the shard whatever the suite's own
+ *  summary says. `first` is what the first ask found, for the log: a shard
+ *  that needed the wait names the lock dirs that made it wait, so the test
+ *  behind a slow teardown is found by name rather than guessed. Never throws. */
+export function settleShardRuntime(
+  runtime: string,
+  tries = 12,
+  stepMs = 500,
+): Promise<Settled> {
+  return settle(() => dropShardRuntime(runtime), tries, stepMs);
+}
+
+/** {@link settleShardRuntime} for the real-window shard, which inherits the
+ *  session's runtime dir `base`: the same wait and the same verdict, over the
+ *  lock dirs of its own apps root `home` and nothing else in `base`. It was
+ *  the one shard never judged — the shard every Electron and Chromium test
+ *  runs in — so an app one of them left running was a green run.
+ *
+ *  `before` is what {@link heldLockEntries} found when the shard STARTED:
+ *  an earlier run's leftover is not this shard's, and a dir holding nothing
+ *  newer is not counted. */
+export function settleHomeLockDirs(
+  base: string,
+  home: string,
+  before: ReadonlyMap<string, string>,
+  tries = 12,
+  stepMs = 500,
+): Promise<Settled> {
+  return settle(
+    async () => [
+      ...new Set(
+        [...await heldLockEntries(base, home)]
+          .filter(([p, stamp]) => before.get(p) !== stamp)
+          .map(([p]) => dirname(p)),
+      ),
+    ],
+    tries,
+    stepMs,
+  );
+}
+
+type Settled = { left: string[]; first: string[]; waitedMs: number };
+
+async function settle(
+  drop: () => Promise<string[]>,
+  tries: number,
+  stepMs: number,
+): Promise<Settled> {
+  const t0 = performance.now();
+  const named = (dirs: string[]) => dirs.map((d) => `${d}${dirEntries(d)}`);
+  let left = named(await drop());
+  const first = left;
+  for (let i = 1; i < tries && left.length > 0; i++) {
+    await new Promise((r) => setTimeout(r, stepMs * i));
+    left = named(await drop());
+  }
+  return {
+    left,
+    first,
+    waitedMs: first.length ? Math.round(performance.now() - t0) : 0,
+  };
+}
+
+/** ` [a.lock, a.sock]` — what is in a held lock dir: the lock's name is the
+ *  appId, which names the test. Empty for anything that is not a directory. */
+function dirEntries(d: string): string {
+  try {
+    return ` [${
+      [...Deno.readDirSync(d)].map((e) => e.name).sort().join(", ")
+    }]`;
+  } catch {
+    return ""; // aio-ok: a `<dir> (error)` entry, or gone meanwhile
+  }
+}
+
+/** The line that fails a shard whose runtime dir is still held, "" for none.
+ *  Unconditional: it was once a log-only WARN whenever the suite itself was
+ *  green — which is exactly when a leaked process is otherwise invisible. Pure. */
+export function leftoverFailure(runtime: string, left: string[]): string {
+  return left.length === 0
+    ? ""
+    : `shard runtime dir ${runtime} still holds live lock dirs (a process ` +
+      `outlived its test): ${left.join(", ")}`;
+}
+
+/** THE verdict on one shard: the `✓`/`✗` beside it and whether the run ends
+ *  red are both this. They were two expressions, and disagreed — a shard could
+ *  print `✗` under a closing `✓ all shards passed`, and the reverse. Pure. */
+export function shardPassed(
+  r: { code: number; left: boolean; unrun?: boolean },
+): boolean {
+  return r.code === 0 && !r.left && !r.unrun;
 }
 
 /** Remove the sockets in `dir` that refuse a connection — nobody is bound. */
@@ -393,6 +830,14 @@ function exists(p: string): boolean {
     return true;
   } catch {
     return false; // aio-ok: absent (or unreadable, which prunes nothing)
+  }
+}
+
+function isFile(p: string): boolean {
+  try {
+    return Deno.statSync(p).isFile;
+  } catch {
+    return false; // aio-ok: a missing path is deno's to refuse, and it does
   }
 }
 
@@ -495,15 +940,28 @@ if (import.meta.main) {
     } catch { /* aio-ok: no such signal here (windows SIGTERM) */ }
   }
   addEventListener("unload", dropAllRuntimesSync);
-  const flag = Deno.args.find((a) => a.startsWith("--shards="));
   const fence = await machineFence();
   const cores = fence.cores;
-  const n = flag ? Number(flag.slice(9)) : Number(
-    Deno.env.get("AIO_TEST_SHARDS") ??
-      Math.max(1, Math.min(16, fence.usable >> 1)),
-  );
+  // A setting that is no whole number stops the run here, by name: `abc`
+  // shards planned nothing and crashed on the empty plan; a timer handed
+  // `Infinity`, `1e10` or `0.5` runs as 1 ms — a line every millisecond.
+  const said = (value: number | string): number => {
+    if (typeof value === "string") {
+      console.error(value);
+      Deno.exit(1);
+    }
+    return value;
+  };
+  const n = said(shardsOf(
+    Deno.args,
+    Deno.env.get("AIO_TEST_SHARDS"),
+    Math.max(1, Math.min(16, fence.usable >> 1)),
+  ));
+  const quietMs = said(quietMsOf(Deno.args));
   const named = Deno.args.filter((a) => !a.startsWith("--"));
-  const files = named.length ? named : await discover(["tests", "amui/src"]);
+  const files = named.length
+    ? await expandDirs(named)
+    : await discover(["tests", "amui/src"]);
   let timings: Record<string, number> = {};
   try {
     timings = JSON.parse(await Deno.readTextFile(TIMINGS));
@@ -511,7 +969,7 @@ if (import.meta.main) {
 
   const windowed = new Set<string>();
   await Promise.all(files.map(async (f) => {
-    const src = await Deno.readTextFile(join(ROOT, f)).catch(() => "");
+    const src = await Deno.readTextFile(resolve(ROOT, f)).catch(() => "");
     if (REAL_WINDOW.test(src)) windowed.add(f);
   }));
   const shards = plan(files, n, timings, (f) => windowed.has(f));
@@ -582,6 +1040,23 @@ if (import.meta.main) {
         prefix: "xdg-shard-",
       });
     if (runtime) _runtimes.add(runtime);
+    const where = runtime ?? sessionRuntimeBase();
+    // Registration is best effort: the dir this home maps to is pruned even
+    // when the registry never heard of it.
+    if (!runtime) pruneDeadLockDir(home);
+    // Held before the shard starts: an earlier run's leftover, named now and
+    // not charged to this shard later.
+    const before = runtime
+      ? new Map<string, string>()
+      : await heldLockEntries(where, home);
+    if (before.size) {
+      console.error(
+        `shard ${i}: its lock dir is already held by a live process an ` +
+          `earlier run left (check:orphans names its owner): ${
+            [...before.keys()].join(", ")
+          }`,
+      );
+    }
     const t0 = performance.now();
     const [cmd, ...pre] = [...fence.prefix, Deno.execPath()];
     const child = new Deno.Command(cmd!, {
@@ -601,28 +1076,35 @@ if (import.meta.main) {
       stderr: "piped",
     }).spawn();
     _children.add(child); // an interrupt stops it before judging its dir
-    const { code, stdout, stderr } = await child.output()
-      .finally(() => _children.delete(child));
+    const logFile = await Deno.open(log, {
+      write: true,
+      create: true,
+      truncate: true,
+    });
+    const [{ code }, { stdout, stderr }] = await Promise.all([
+      child.status,
+      followShard(child, logFile, quietMs, (ms, header) =>
+        console.log(
+          `… shard ${i}: no output for ${Math.round(ms / 1000)}s — ${
+            header ?? "no test file started yet"
+          } (still running; its output so far: ${relative(ROOT, log)})`,
+        )),
+    ]).finally(() => {
+      logFile.close();
+      _children.delete(child);
+    });
     // The shard is done, and so is every process it started: the scoped lock
     // dir its AIO_APPS_DIR made in $XDG_RUNTIME_DIR goes, unless something
     // live is still in it (check:orphans reports that one).
-    let left: string[] = [];
-    if (runtime) {
-      // A just-exited deno test may still hold lock dirs for a beat while
-      // crashed cell-workers and Electron children finish tearing down.
-      // One impatient prune used to fail a fully green suite (0 failed
-      // tests, then "live lock dirs" + Deno's late Uncaught worker lines).
-      // Crash-fixture workers and Electron children can outlive the suite by
-      // several seconds under a full shard; a short prune window used to fail
-      // a fully green run (0 failed tests + late Uncaught + live lock dirs).
-      for (let i = 0; i < 12; i++) {
-        left = await dropShardRuntime(runtime);
-        if (left.length === 0) break;
-        await new Promise((r) => setTimeout(r, 500 * (i + 1)));
-      }
-    } else pruneDeadLockDir(home);
-    const dec = new TextDecoder();
-    const out = dec.decode(stdout) + dec.decode(stderr);
+    // Asked patiently, judged without exception: the private runtime dir
+    // whole, and for the real-window shard — in the session's own — the lock
+    // dirs of this shard's home only.
+    if (!runtime) pruneDeadLockDir(home);
+    const settled = runtime
+      ? await settleShardRuntime(runtime)
+      : await settleHomeLockDirs(where, home, before);
+    const left = settled.left;
+    const out = stdout + stderr;
     // A press the harness only WARNED about fails the run here (see
     // `swallowedPresses`): read each named file's source once, for its marker.
     const swallowed = swallowedPresses(out, (f) => {
@@ -632,58 +1114,66 @@ if (import.meta.main) {
         return ""; // aio-ok: an unreadable file carries no marker — it fails
       }
     });
-    // Suite green from Deno's own summary, before we append harness notes.
-    // Crash-fixture workers can leave lock dirs for a beat after `ok |`;
-    // that is WARN noise, not a red shard, once Uncaught lines are filtered.
-    const suiteClean = code === 0 && failures(out).length === 0;
-    const lockNote = left.length === 0
-      ? ""
-      : suiteClean
-      ? `\nWARN | shard runtime dir ${runtime} still held lock dirs after ` +
-        `retries (crash-fixture teardown): ${left.join(", ")}\n`
-      : `\nFAILED | shard runtime dir ${runtime} still holds live lock ` +
-        `dirs (a process outlived its test): ${left.join(", ")}\n`;
-    const text = out + lockNote +
+    const held = leftoverFailure(where, left);
+    // Exit 0 is only "nothing failed": every listed file must have RUN.
+    const unrun = code === 0
+      ? unrunFiles(
+        out,
+        list.filter((f) => isFile(resolve(ROOT, f))),
+        (f) => Deno.readTextFileSync(resolve(ROOT, f)).trim() === "",
+      )
+      : [];
+    const text = out +
+      (held ? `\nFAILED | ${held}\n` : "") +
+      // Gone in time, but only after a wait: not a failure, and not silent —
+      // the next slow teardown starts from a name instead of a guess.
+      (settled.waitedMs > 0 && !held
+        ? `\nNOTE | shard runtime dir ${where} held lock dirs for ` +
+          `${settled.waitedMs} ms after the shard exited (a child was still ` +
+          `shutting down): ${settled.first.join(", ")}\n`
+        : "") +
       (swallowed.length
         ? `\nFAILED | a press was swallowed by an input and no handler ran ` +
           `(${SWALLOWED_PRESS}) in: ${swallowed.join(", ")} — press on the ` +
           `window (\`ui.window.press(…)\`), or, when the test asserts the ` +
           `binding does NOT fire, mark the file \`// aio-ok: press ` +
           `swallowed on purpose — <why>\`\n`
+        : "") +
+      (unrun.length
+        ? `\nFAILED | ${unrun.length} test file(s) did not run their tests ` +
+          `under a green summary:\n  ${unrun.join("\n  ")}\n`
         : "");
     await Deno.writeTextFile(log, text);
     const secs = Math.round((performance.now() - t0) / 1000);
     const failed = failures(text);
     const summary = text.replace(/\x1b\[[0-9;]*m/g, "")
       .match(/^(ok|FAILED) \| .*$/m)?.[0] ?? `exit ${code}`;
-    const shardOk = suiteClean && swallowed.length === 0;
-    console.log(
-      `${
-        shardOk ? "✓" : "✗"
-      } shard ${i}  ${list.length} files  ${secs}s  ${summary}`,
-    );
     let times: Record<string, number> = {};
     try {
       times = junitTimes(await Deno.readTextFile(junit));
     } catch { /* a shard that died before writing its report */ }
-    // Leftover lock dirs after a green suite are teardown noise (WARN above).
-    // Clear them so the pinned `left:` line stays verbatim for the mutation
-    // ledger / swallowed-press ratchet, and only real leftovers or a
-    // swallowed press fail the shard.
-    if (suiteClean) left = [];
-    return {
+    const result = {
       i,
       code,
-      failed: swallowed.length
-        ? [
-          ...failed,
-          `swallowed press (no handler ran): ${swallowed.join(", ")}`,
-        ]
-        : failed,
+      failed: [
+        ...failed,
+        ...(held ? [held] : []),
+        ...(swallowed.length
+          ? [`swallowed press (no handler ran): ${swallowed.join(", ")}`]
+          : []),
+        ...unrun,
+      ],
       log,
       times,
       left: left.length > 0 || swallowed.length > 0,
+      unrun: unrun.length > 0,
     };
+    console.log(
+      `${
+        shardPassed(result) ? "✓" : "✗"
+      } shard ${i}  ${list.length} files  ${secs}s  ${summary}`,
+    );
+    return result;
   }));
 
   // Remember what each file cost, for the next run's balance.
@@ -692,7 +1182,7 @@ if (import.meta.main) {
   await Deno.mkdir(join(ROOT, ".aio"), { recursive: true });
   await Deno.writeTextFile(TIMINGS, JSON.stringify(merged, null, 0));
 
-  const bad = results.filter((r) => r.code !== 0 || r.left);
+  const bad = results.filter((r) => !shardPassed(r));
   const wall = Math.round((performance.now() - started) / 1000);
   const storeWrites = storeChanges(storesBefore, snapshotStores(storeDirs));
   if (storeWrites.length > 0) {

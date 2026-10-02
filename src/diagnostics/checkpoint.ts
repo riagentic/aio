@@ -2,6 +2,7 @@
 
 import type { CheckpointData } from "./types.ts";
 import { log } from "./logger-api.ts";
+import { renameOver, renameOverSync } from "./rename-over.ts";
 import { capDelay } from "../state/timer-ceiling.ts";
 import { noRedaction, REDACTED } from "./redact.ts";
 import type { Redactor } from "./redact.ts";
@@ -240,12 +241,7 @@ export function createCheckpoint(
         await Deno.mkdir(dir, { recursive: true, mode: 0o700 }).catch(() => {});
         await Deno.writeTextFile(tmp, json, NEW).catch(created);
       }
-      await Deno.rename(tmp, target).catch(async (e) => {
-        await Deno.remove(tmp).catch(
-          () => {/* aio-ok: the rename's error is reported */},
-        );
-        throw e;
-      });
+      await renameOver(tmp, target); // removes `tmp` itself when it fails
     });
   }
 
@@ -385,7 +381,7 @@ export function createCheckpoint(
     // failed after creating it would otherwise leave it behind.)
     try {
       Deno.writeTextFileSync(tmp, _safeStringify(scrub(data)), NEW);
-      Deno.renameSync(tmp, `${dir}/${FILE}`);
+      renameOverSync(tmp, `${dir}/${FILE}`);
     } catch (e) {
       if (!(e instanceof Deno.errors.AlreadyExists)) {
         try {

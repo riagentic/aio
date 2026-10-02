@@ -146,6 +146,7 @@ async function readDisk(dir: string): Promise<{
 async function boot(dir: string, cells: any[]) {
   const { aio } = await import("../mod.ts");
   return await aio.run({
+    watch: false,
     cells,
     appId: APP,
     appDir: dir,

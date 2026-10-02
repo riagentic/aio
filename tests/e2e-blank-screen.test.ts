@@ -7,6 +7,7 @@ import { assert, assertStringIncludes } from "@std/assert";
 import { testDisplayEnv } from "../src/testing/test-display.ts";
 import { stopChild } from "./stop-child.ts";
 import { childCoverageDir, tempDir } from "../src/testing/temp-dir.ts";
+import { freePort } from "../src/testing/server-test.ts";
 const _childCovDir = childCoverageDir();
 
 const ROOT = new URL("..", import.meta.url).pathname;
@@ -29,13 +30,6 @@ function findBrowser(): string | null {
   return null;
 }
 const BROWSER = findBrowser();
-
-function freePort(): number {
-  const l = Deno.listen({ port: 0 });
-  const port = (l.addr as Deno.NetAddr).port;
-  l.close();
-  return port;
-}
 
 async function waitFor<T>(
   what: string,

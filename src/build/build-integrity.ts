@@ -6,7 +6,8 @@
 import { join } from "@std/path";
 import { sha256Hex } from "./ship.ts";
 import { bundleFrameworkEntries } from "./esbuild-shared.ts";
-import { type BuildConfig, isStandalone } from "./build-config.ts";
+import type { BuildConfig } from "./build-config.ts";
+import { isStandalone } from "./config-rules.ts";
 
 // ── Integrity verification ────────────────────────────────────────────────────
 

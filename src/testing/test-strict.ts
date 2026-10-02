@@ -197,19 +197,52 @@ export function aioTestDir(prefix: string): string {
 // (the `prev === undefined` restore) left every later harness in the process
 // on the REAL `~/.<appId>` — the version-store hole, one variable over. The
 // dir itself is made once and re-pinned after such a delete.
+//
+// ONE dir per process, shared by its test files and removed by the LAST of
+// them to unload. `deno test` runs every file in one process with its own
+// module state (this `_appsDir`) but ONE environment, and fires `unload` per
+// file: the first file's unload removed the dir while `AIO_APPS_DIR` still
+// named it, the next file read that as "pinned by the runner", recreated it
+// by using it, and nothing removed it again — one `apps-*` per multi-file
+// run.
+//
+// The dir is named after the process (`apps-<pid>`), so files arming at the
+// same moment under `--parallel` (one thread each) all reach the SAME dir —
+// a counter in the environment let two of them make two dirs and count them
+// as one, and the uncounted one stayed (seen once in a loaded suite). Each
+// file that uses it holds a marker in `<dir>/.users/`; at unload it drops its
+// own, and the one whose `rmdir .users` succeeds (the kernel's answer to "am
+// I the last", atomic across threads) removes the dir. `AIO_APPS_SANDBOX`
+// tells the sandbox from a runner's own pin; a child process inherits it and
+// joins its parent's dir as one more user, so it never removes it early.
+const SANDBOX_ENV = "AIO_APPS_SANDBOX";
 let _appsDir: string | undefined;
 let _appsWarned = false;
 function _sandboxAppDirs(): void {
   try {
-    if (Deno.env.get("AIO_APPS_DIR")) return; // runner (or the test) pinned it
+    const pinned = Deno.env.get("AIO_APPS_DIR");
     if (_appsDir !== undefined) {
-      Deno.env.set("AIO_APPS_DIR", _appsDir);
+      if (!pinned) {
+        Deno.env.set("AIO_APPS_DIR", _appsDir);
+      }
       return;
     }
-    const dir = aioTestDir("apps-");
+    if (pinned && pinned !== Deno.env.get(SANDBOX_ENV)) return; // runner (or the test) pinned it
+    const dir = pinned ?? `${aioTestRoot()}/apps-${Deno.pid}`;
+    const users = `${dir}/.users`;
+    Deno.mkdirSync(users, { recursive: true, mode: 0o700 });
+    const me = `${users}/${crypto.randomUUID()}`;
+    Deno.writeTextFileSync(me, "");
     _appsDir = dir;
     Deno.env.set("AIO_APPS_DIR", dir);
+    Deno.env.set(SANDBOX_ENV, dir);
     globalThis.addEventListener("unload", () => {
+      try {
+        Deno.removeSync(me);
+        Deno.removeSync(users); // throws while another file still holds a marker
+      } catch (e) {
+        if (!(e instanceof Deno.errors.NotFound)) return; // aio-ok: not the last user
+      }
       try {
         Deno.removeSync(dir, { recursive: true });
       } catch {

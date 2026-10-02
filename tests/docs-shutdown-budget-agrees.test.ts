@@ -21,6 +21,7 @@ import { assertEquals } from "@std/assert";
 import {
   DRAIN_TIMEOUT_MS,
   SHUTDOWN_BUDGET_MS,
+  STORES_RESERVE_MS,
   TEARDOWN_TIMEOUT_MS,
 } from "../src/server/shutdown-budget.ts";
 
@@ -59,6 +60,16 @@ Deno.test("docs: the shutdown budget in prose is the one in code", async () => {
     `${DOC} states ${teardown.join(", ")} beside TEARDOWN_TIMEOUT_MS, which ` +
       `is ${TEARDOWN_TIMEOUT_MS}ms`,
   );
+
+  // The stores' floor: stated in seconds beside its constant, and the same.
+  const floor = quotedMs(text, "STORES_RESERVE_MS");
+  assertEquals(
+    floor,
+    [STORES_RESERVE_MS],
+    `${DOC} states ${floor.join(", ")} beside STORES_RESERVE_MS, which is ` +
+      `${STORES_RESERVE_MS}ms`,
+  );
+  assertEquals(STORES_RESERVE_MS, 200);
 
   // The sentence a supervisor is configured from spells the budget as its two
   // halves — both must still be the real ones, and they must still add up.

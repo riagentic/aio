@@ -141,6 +141,7 @@ export function componentAppId(
   // The runtime reads it off `Deno.mainModule` — a URL, so the SAME split of
   // the same (percent-encoded) pathname, or a space in a folder name is two
   // ids for one app.
+  // aio-ok: path-split — a file: URL pathname — always `/`
   const parts = toFileUrl(resolve(entry)).pathname.split("/").filter(Boolean);
   parts.pop(); // the entry file itself
   const dir = parts.pop();

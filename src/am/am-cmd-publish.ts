@@ -26,6 +26,12 @@ import { hostPlatform, PLATFORMS } from "../build/platforms.ts";
 import { detectMode, fail, out, sayErr } from "./am-output.ts";
 import { readDenoJson } from "../server/deno-json.ts";
 import {
+  apartFrom,
+  appDirsOf,
+  recordOutput,
+  unsafeOutDir,
+} from "../server/build-outputs.ts";
+import {
   artifactFormat,
   type DataContract,
   defaultKeyPath,
@@ -280,6 +286,32 @@ export async function cmdPublish(
   const channel = flag("channel") ?? cfg.build?.channel ?? "prod";
   const outDir = resolve(root, flag("dir") ?? "release");
   const targetsArg = flag("targets");
+  // Inside the project, `--dir` answers to the guard the build's `--out`
+  // answers to: what is staged there is left out of the version, and
+  // `--dir=src` left the app's own sources out with it — an edit no longer
+  // changed the version. A directory outside the project is nobody's source.
+  const appDirs = appDirsOf(root, cfg);
+  if (!apartFrom(root, outDir) && unsafeOutDir(outDir, root, appDirs)) {
+    fail(
+      `refusing to publish into ${outDir} — a release is staged in a ` +
+        `directory of its own, which is then left out of the app's version: ` +
+        `it cannot be the project root, an app dir (${appDirs.join(", ")}), ` +
+        `src, .git, .aio, or a directory inside or around one of them, or ` +
+        `inside dist/. Nothing was built or written.`,
+      mode,
+      `--dir=release (the default), or a directory outside the project`,
+    );
+  }
+  // Written down BEFORE the build: what this command stages there is output,
+  // and the build below names its version from the sources alone. Unrecorded,
+  // the staged release was read as a change — a new version from unchanged
+  // sources on every publish, and in a clean checkout the second publish was
+  // refused as a dirty tree. The channel directory is all this command
+  // writes to; `--dir` itself is named too, and counts for nothing unless it
+  // holds channel directories only — a `.DS_Store` left by a look at
+  // `release/` is then not a change either.
+  await recordOutput(root, outDir);
+  await recordOutput(root, join(outDir, channel));
 
   // ── 1. build ──
   if (!args.includes("--no-build")) {

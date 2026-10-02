@@ -40,6 +40,7 @@ Deno.test({
         },
       });
       const a = await aio.run({
+        watch: false,
         cells: [v1],
         appId: "sync-ver-probe",
         appDir: dir,
@@ -96,6 +97,7 @@ Deno.test({
         }`,
       );
       const b = await aio.run({
+        watch: false,
         cells: [v2],
         appId: "sync-ver-probe",
         appDir: dir,
@@ -144,6 +146,7 @@ Deno.test({
       const err = await assertRejects(
         () =>
           aio.run({
+            watch: false,
             cells: [c],
             cellDefaults: { persist: { exclude: ["cache"] } },
             appId: "sync-cd-probe",

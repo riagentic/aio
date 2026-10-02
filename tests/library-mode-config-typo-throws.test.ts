@@ -19,6 +19,7 @@ Deno.test("libraryMode: an unknown aio.run() key rejects aio.run instead of Deno
   try {
     const err = await assertRejects(() =>
       aio.run({
+        watch: false,
         cells: [c],
         appId: `libtypo-${crypto.randomUUID().slice(0, 8)}`,
         appDir: dir,

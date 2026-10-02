@@ -47,6 +47,7 @@ async function defineCell(name: string) {
 async function boot(name: string, dir: string, def: unknown) {
   const { aio } = await import("../mod.ts");
   return await aio.run({
+    watch: false,
     cells: [def],
     appId: name,
     client: "server-only",

@@ -25,6 +25,7 @@ Deno.test("docs promise: four fields across two await-gaps commit as two method-
     },
   });
   const app = await aio.run({
+    watch: false,
     cells: [saver],
     appId: "docs-promise-await-gap",
     client: "server-only",

@@ -656,7 +656,7 @@ export const BRIEF_RUN_KEYS: readonly {
       "wsLimits",
       "maxConnections",
       "childWindows",
-      "electron { requireSandbox, unsandboxedChildWindows, permissions }",
+      "electron { requireSandbox, unsandboxedChildWindows, permissions, allowLocalPeers }",
     ],
   },
   { group: "ui", keys: ["ui (below)"] },

@@ -16,8 +16,17 @@
 //   2. no build module goes back to remove-then-mkdir (the regression), since
 //      the behaviour test only covers the paths that call the helpers.
 
-import { assert, assertEquals } from "@std/assert";
-import { emptyDir, moveDirContents } from "../src/build/dist-staging.ts";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "@std/assert";
+import {
+  emptyDir,
+  moveDirContents,
+  previousReleaseNote,
+} from "../src/build/dist-staging.ts";
 import { tempDir } from "../src/testing/temp-dir.ts";
 
 /** The identity of a directory as a bind mount sees it. */
@@ -75,6 +84,121 @@ Deno.test("build out dir: its contents move aside and back, it does not", async 
   // Nothing to protect is a VALUE, not an exception — the caller says
   // "there was no previous release" with it.
   assertEquals(await moveDirContents(`${tmp}/nope`, aside), false);
+});
+
+/** What `rename` answers between two filesystems. */
+const crossDevice = () =>
+  Promise.reject(new Error("Invalid cross-device link (os error 18)"));
+
+/** `path → what it is` for everything under `dir`. */
+function listing(dir: string, at = ""): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const e of Deno.readDirSync(`${dir}/${at}`)) {
+    const rel = at ? `${at}/${e.name}` : e.name;
+    if (e.isSymlink) out[rel] = `-> ${Deno.readLinkSync(`${dir}/${rel}`)}`;
+    else if (e.isDirectory) Object.assign(out, listing(dir, rel));
+    else out[rel] = Deno.readTextFileSync(`${dir}/${rel}`);
+  }
+  return out;
+}
+
+Deno.test({
+  name:
+    "build out dir: on another filesystem its contents are still set aside, and put back whole",
+  ignore: Deno.build.os === "windows",
+  fn: async () => {
+    // An out dir on its own mount (or a bind-mounted dist/): every rename out
+    // of it is refused. The previous release used to stay where it was — said
+    // on every build — so a failed build had nothing to put back.
+    const tmp = await tempDir("out-move-exdev");
+    const dist = `${tmp}/dist`;
+    const aside = `${tmp}/staging/previous-out`;
+    await Deno.mkdir(`${dist}/site-web/assets`, { recursive: true });
+    await Deno.writeTextFile(`${dist}/manifest.json`, `{"app":"notes"}`);
+    await Deno.writeTextFile(`${dist}/notes-1.2.3`, "binary");
+    await Deno.chmod(`${dist}/notes-1.2.3`, 0o755);
+    await Deno.writeTextFile(`${dist}/site-web/assets/app.js`, "js");
+    await Deno.symlink("assets/app.js", `${dist}/site-web/latest.js`);
+    const release = listing(dist);
+    assertEquals(Object.keys(release).length, 4);
+
+    const before = await inode(dist);
+    assert(await moveDirContents(dist, aside, crossDevice));
+    assertEquals(await inode(dist), before, "the directory stayed put");
+    assertEquals(listing(dist), {}, "nothing is left behind");
+    assertEquals(listing(aside), release);
+    assertEquals(
+      (await Deno.stat(`${aside}/notes-1.2.3`)).mode! & 0o111,
+      0o111,
+    );
+
+    // …and back, the way a build that produced nothing restores it.
+    assert(await moveDirContents(aside, dist, crossDevice));
+    assertEquals(await inode(dist), before);
+    assertEquals(listing(dist), release);
+    assertEquals(listing(aside), {});
+    assertEquals((await Deno.stat(`${dist}/notes-1.2.3`)).mode! & 0o111, 0o111);
+  },
+});
+
+Deno.test("build out dir: a move that fails half way puts every entry back — never half a release in each place", async () => {
+  const tmp = await tempDir("out-move-half");
+  const dist = `${tmp}/dist`;
+  const aside = `${tmp}/staging/previous-out`;
+  await Deno.mkdir(dist);
+  const all = ["a", "b", "c", "d", "e"];
+  for (const n of all) await Deno.writeTextFile(`${dist}/${n}`, n);
+  // Two entries go; the third cannot be moved at all.
+  let calls = 0;
+  const failsThird = (from: string, to: string) =>
+    ++calls === 3
+      ? Promise.reject(new Deno.errors.NotFound("gone under the move"))
+      : Deno.rename(from, to);
+  const names = (d: string) => [...Deno.readDirSync(d)].map((e) => e.name);
+  await assertRejects(
+    () => moveDirContents(dist, aside, failsThird),
+    Deno.errors.NotFound,
+  );
+  assertEquals(calls, 5, "two moved, one refused, two moved back");
+  assertEquals(names(dist).sort(), all);
+  assertEquals(names(aside), []);
+});
+
+Deno.test("build out dir: what is said about the previous release is what happened to it", () => {
+  const dist = { outIsStaging: true };
+  const other = { outIsStaging: false };
+  assertEquals(
+    [
+      previousReleaseNote("failed", "dist", { preserved: true, ...dist }),
+      previousReleaseNote("failed", "release", { preserved: true, ...other }),
+      // Not set aside: dist/ was emptied by the builds; another out dir is
+      // only ever written when there are artifacts to place.
+      previousReleaseNote("failed", "dist", { preserved: false, ...dist }),
+      previousReleaseNote("failed", "release", { preserved: false, ...other }),
+    ],
+    [
+      "the previous dist/ is intact",
+      "the previous release/ is intact",
+      "dist/ holds no release",
+      "release/ is as it was",
+    ],
+  );
+  const lost = previousReleaseNote("aside", "", { preserved: false, ...dist });
+  const kept = previousReleaseNote("aside", "", { preserved: false, ...other });
+  assertStringIncludes(lost, "there is no release to put back");
+  assertStringIncludes(kept, "stays so until this build has artifacts");
+  assert(!kept.includes("no release to put back"), kept);
+});
+
+Deno.test("build out dir: the fleet says it with its own out dir and what it set aside", async () => {
+  const src = await Deno.readTextFile("src/build-all.ts");
+  for (
+    const wired of [
+      `const outIsStaging = outDir === resolve(join(root, DIST_DIR));`,
+      `previousReleaseNote("aside", "", { preserved: false, outIsStaging })`,
+      `previousReleaseNote("failed", rel, { preserved, outIsStaging })`,
+    ]
+  ) assertStringIncludes(src, wired);
 });
 
 Deno.test("build out dir: no build module replaces a directory it owns", async () => {

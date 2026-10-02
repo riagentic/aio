@@ -312,11 +312,14 @@ const CATALOG: Row[] = [
     door: "journal append  (journal: true)",
     writes: "one line per committed action",
     verdict:
-      "PERSIST_ERROR + an immediate flush (verdict → lastCycleError) + degraded(journal) → health",
+      "an immediate flush (its refusal → PERSIST_ERROR, lastCycleError) + one WARN per episode + degraded(journal) → health",
     check: async () => {
       const aio = await code("src/server/aio.ts");
       const body = fnBody(aio, "_journalAppend");
-      assertMatch(body, /createAioError\("PERSIST_ERROR"/);
+      // Not a PERSIST_ERROR of its own: the flush below saves the change, and
+      // only ITS refusal is one (persistence reports it, with the verdict).
+      assert(!/createAioError\("PERSIST_ERROR"/.test(body), body);
+      assertMatch(body, /_journalSaid\.refused\(e\)/);
       // The compensating save is a parameter (a sync cell's fold closes the
       // gap, not a KV flush) — its DEFAULT is still the persist flush, and
       // the body still runs it, owed to the caller (`_saveNow`).
@@ -325,8 +328,8 @@ const CATALOG: Row[] = [
         /function _journalAppend\([^]*?save: SaveNow = \{ clock: "kv" \},?\s*\)/,
       );
       assertMatch(body, /_saveNow\(save\)/);
-      assertMatch(body, /_journalHealth\.fail\(e\)/);
-      assertMatch(body, /_journalHealth\.ok\(\)/);
+      assertMatch(body, /_journalSaid\.landed\(\)/);
+      assertMatch(aio, /health: _journalHealth/);
       // The compensating save's rejection handler is LOUD — flushPersist
       // never rejects by contract, so a rejection there is a broken contract
       // and the one thing it must not be is `.catch(() => {})`.
@@ -341,8 +344,9 @@ const CATALOG: Row[] = [
       assertMatch(saveNow, /\(err\) => \{[^]*log\.error\(/);
       assertMatch(
         aio,
-        /degraded\(`journal:\$\{resolveAppId\(config\.appId\)\}`, \{\s*after: 1,?\s*\}\)/,
+        /_journalKey = `journal:\$\{resolveAppId\(config\.appId\)\}`/,
       );
+      assertMatch(aio, /degraded\(_journalKey, \{\s*after: 1,?\s*\}\)/);
     },
   },
   {

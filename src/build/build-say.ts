@@ -13,6 +13,7 @@
 // goes to stdout cannot be separated with `2>`, and a wrapper cannot tell it
 // from output. Same rule the framework logger follows (logger-format.ts).
 
+import { isAbsolute, relative } from "@std/path";
 import { block, mark, style } from "../diagnostics/fmt.ts";
 import { BUILD_VERSION_ENV } from "../server/app-version.ts";
 
@@ -52,7 +53,10 @@ export function bad(headline: string, body?: string, fix?: string): string {
  *  artifact looks in the wrong place. Under the fleet the line says what it
  *  is: a staged file the summary will place. Standalone, it is the answer. */
 export function compiled(path: string, root: string): void {
-  const rel = path.startsWith(root + "/") ? path.slice(root.length + 1) : path;
+  const inRoot = relative(root, path);
+  const rel = inRoot && !/^\.\.(?:[\\/]|$)/.test(inRoot) && !isAbsolute(inRoot)
+    ? inRoot
+    : path;
   if (Deno.env.get(BUILD_VERSION_ENV) === undefined) {
     ok(path);
     return;

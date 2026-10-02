@@ -16,7 +16,7 @@
 // through these functions, and a format known to two writers is a format that
 // drifts.
 
-import { join } from "@std/path";
+import { basename, join } from "@std/path";
 import { installedAppPaths } from "./app-dirs.ts";
 import { log } from "../diagnostics/logger-api.ts";
 
@@ -174,9 +174,9 @@ export async function pruneVersions(opts: {
   } catch {
     return []; // no versions/ — an install from before this layout, or none
   }
-  const currentName = opts.current
-    ? opts.current.replace(/\/+$/, "").split("/").pop() ?? ""
-    : "";
+  // `basename`, not "after the last `/`": a Windows install path has no `/`,
+  // so the RUNNING version was not recognised as current and could be pruned.
+  const currentName = opts.current ? basename(opts.current) : "";
   const doomed = dirs
     .filter((d) => d.name !== currentName)
     .sort((a, b) => b.mtime - a.mtime) // newest first

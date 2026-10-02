@@ -21,7 +21,9 @@
 import {
   autoInstallElectron,
   electronDistDir,
+  FRAMEWORK_CHECKOUT,
   installedRuntimeVersion,
+  installRefusal,
 } from "./electron/electron-spawn.ts";
 import { DEFAULT_ELECTRON_VERSION } from "./electron/electron-runtime-fetch.ts";
 import { log } from "./diagnostics/logger-api.ts";
@@ -56,6 +58,16 @@ if (asked !== undefined && !/^\d+\.\d+\.\d+$/.test(asked)) {
   Deno.exit(2);
 }
 const want = asked ?? DEFAULT_ELECTRON_VERSION;
+
+// The launcher and the build never install here; this task was asked to.
+if (await installRefusal() === FRAMEWORK_CHECKOUT) {
+  log.warn(
+    "electron",
+    `${Deno.cwd()} is the aio framework's own checkout — this install ` +
+      `WRITES to it: its tracked deno.json (or package.json) and deno.lock ` +
+      `will show as modified.`,
+  );
+}
 
 const ok = await autoInstallElectron(
   {

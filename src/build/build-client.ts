@@ -6,13 +6,13 @@
 import { BUILD_SCRATCH_DIR } from "../server/app-files.ts";
 import { join } from "@std/path";
 import {
-  appimageEnv,
   chmodIfSupported,
   copyDir,
   ensureAppimagetool,
   formatMb,
   misplacedIconHint,
   resolveAppIcon,
+  runAppimagetool,
   toolCacheDir,
   writeDefaultIcon,
 } from "./build-helpers.ts";
@@ -121,14 +121,7 @@ Categories=Utility;
   await Deno.mkdir(cfg.outDir ?? root, { recursive: true });
   const appImageOut = join(cfg.outDir ?? root, `aio-client-${arch}.AppImage`);
   console.log("[appimage] packaging aio-client...");
-  const appimageResult = await new Deno.Command(toolPath, {
-    args: [appDir, appImageOut],
-    stdout: "inherit",
-    stderr: "inherit",
-    env: appimageEnv(arch), // FUSE-less hosts — see appimageEnv
-  }).output();
-
-  if (appimageResult.code !== 0) {
+  if (!await runAppimagetool(toolPath, appDir, appImageOut, arch)) {
     console.error("[appimage] \u2717 appimagetool failed");
     Deno.exit(1);
   }

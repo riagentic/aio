@@ -50,6 +50,7 @@ async function boot(c: unknown, extra: Record<string, unknown> = {}) {
     baseDir: await tempDir("aio-refusal-"),
     dbPath: ":memory:",
     ...extra,
+    watch: false,
   } as never);
 }
 

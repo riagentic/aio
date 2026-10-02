@@ -122,7 +122,7 @@ export function doctorLabel(
 }
 
 /** "Which of my flag, config and deno.json won?" — answered by the running
- *  instance itself (feedback/frustration.md F6), one aligned line per
+ *  instance itself (a field report), one aligned line per
  *  setting. Empty for a lock written before 1.0.6, which does not carry it. */
 export function settingsBlock(
   appId: string,

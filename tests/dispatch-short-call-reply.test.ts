@@ -48,6 +48,7 @@ async function dispatch(
 Deno.test("dispatch: a SHORT call still runs, and the reply says so", async () => {
   const port = freePort();
   const app = await aio.run({
+    watch: false,
     cells: [box],
     appId: `shortcall-${Deno.pid}`,
     client: "server-only",

@@ -51,6 +51,7 @@ async function boot(
     client: "server-only",
     baseDir: dir,
     ...extra,
+    watch: false,
   } as Any);
 }
 

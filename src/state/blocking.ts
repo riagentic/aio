@@ -15,6 +15,8 @@ type Task = {
   id: string;
   n: number;
   src: string;
+  /** `fn.name` — re-applied in the worker (see blocking-worker.ts). */
+  name: string;
   arg: unknown;
   resolve: (v: unknown) => void;
   reject: (e: unknown) => void;
@@ -190,7 +192,12 @@ export function createBlockingPool(opts?: { size?: number }): BlockingPool {
   function assign(w: Worker, task: Task): void {
     active.set(w, task);
     try {
-      w.postMessage({ n: task.n, src: task.src, arg: task.arg });
+      w.postMessage({
+        n: task.n,
+        src: task.src,
+        name: task.name,
+        arg: task.arg,
+      });
     } catch (e) {
       // `postMessage` refuses an uncloneable `arg` SYNCHRONOUSLY. The throw
       // used to unwind out of `pump()` and out of the caller's promise
@@ -261,6 +268,7 @@ export function createBlockingPool(opts?: { size?: number }): BlockingPool {
           id,
           n: ++seq,
           src: fn.toString(),
+          name: fn.name,
           arg,
           resolve: resolve as (v: unknown) => void,
           reject,

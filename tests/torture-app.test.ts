@@ -22,6 +22,7 @@ type App = Awaited<ReturnType<typeof aio.run>>;
 
 async function boot(appId: string, cells: unknown[]): Promise<App> {
   return await aio.run({
+    watch: false,
     cells: cells as never,
     appId,
     libraryMode: true,

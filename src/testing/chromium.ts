@@ -95,6 +95,99 @@ export type LaunchedChromium = {
   close(): Promise<void>;
 };
 
+/** Every live process started with `--user-data-dir=<profile>` (Linux:
+ *  `/proc`; empty elsewhere). Chromium's helpers — the network and storage
+ *  services, the renderers — all carry it, and they are not this process's
+ *  children: a helper that outlives the browser keeps writing into the
+ *  profile, so a profile removed right after the browser exits came back
+ *  (`Default/.org.chromium.Chromium.TransportSecurity.*`, `Default/Cache/`) —
+ *  the `aio-test-browser-*` / `aio-e2e-prof-*` orphans of a loaded run. */
+/** Does the /proc `cmdline` text `cmd` run on `profile`? Not split on NUL:
+ *  Chromium rewrites its process title, so a helper's cmdline is ONE
+ *  space-joined string — matching whole NUL-split arguments found none of
+ *  them, and nothing was ever killed. The flag counts when the character
+ *  after it ends the argument (a longer profile path is another profile).
+ *  @internal exported for its test */
+export function _holdsProfile(cmd: string, profile: string): boolean {
+  const flag = `--user-data-dir=${profile}`;
+  for (let i = cmd.indexOf(flag); i >= 0; i = cmd.indexOf(flag, i + 1)) {
+    const next = cmd[i + flag.length];
+    if (next === undefined || next === "\0" || next === " ") return true;
+  }
+  return false;
+}
+
+function profileProcesses(profile: string): number[] {
+  if (Deno.build.os !== "linux") return [];
+  const out: number[] = [];
+  let entries: Deno.DirEntry[];
+  try {
+    entries = [...Deno.readDirSync("/proc")];
+  } catch {
+    return out; // aio-ok: no /proc — nothing to look for
+  }
+  for (const e of entries) {
+    if (!/^\d+$/.test(e.name)) continue;
+    try {
+      const cmd = Deno.readTextFileSync(`/proc/${e.name}/cmdline`);
+      if (_holdsProfile(cmd, profile)) out.push(Number(e.name));
+    } catch {
+      // aio-ok: the process ended between the listing and the read
+    }
+  }
+  return out;
+}
+
+/** Remove a browser profile once NOTHING writes to it any more: the helpers
+ *  still running on it are killed and waited for (bounded), then the
+ *  directory goes. Call it after the browser itself has exited. */
+export async function dropBrowserProfile(profile: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    const left = profileProcesses(profile);
+    if (left.length === 0 || Date.now() >= deadline) break;
+    for (const pid of left) {
+      try {
+        Deno.kill(pid, "SIGKILL");
+      } catch {
+        // aio-ok: it exited on its own between the scan and the kill
+      }
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  await dropTempDir(profile);
+}
+
+/** The exit-time twin of `dropBrowserProfile`: `unload` cannot await, so the
+ *  helpers are SIGKILLed and their end is waited for synchronously (bounded),
+ *  then the profile goes. A plain SIGTERM here let the browser shut down on
+ *  its own time, after the temp-dir sweep had removed the profile — and its
+ *  network service, flushing state on the way out, created it again
+ *  (`Default/Cache`, `.org.chromium.Chromium.TransportSecurity.*`). */
+function dropBrowserProfileSync(profile: string): void {
+  const deadline = Date.now() + 2_000;
+  const tick = new Int32Array(new SharedArrayBuffer(4));
+  for (;;) {
+    const left = profileProcesses(profile);
+    if (left.length === 0 || Date.now() >= deadline) break;
+    for (const pid of left) {
+      try {
+        Deno.kill(pid, "SIGKILL");
+      } catch {
+        // aio-ok: it exited on its own between the scan and the kill
+      }
+    }
+    Atomics.wait(tick, 0, 0, 10); // exit time: no timer will run again
+  }
+  try {
+    Deno.removeSync(profile, { recursive: true });
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) {
+      console.error(`[testBrowser] could not remove ${profile} at exit: ${e}`);
+    }
+  }
+}
+
 /** Spawn headless Chromium with `args` (URL last). The process is killed and
  *  its profile removed on `close()`, and an `unload` backstop kills it even if
  *  Deno dies mid-test (the orphaned-chrome leak). */
@@ -145,7 +238,10 @@ export async function launchChromium(
     }
   };
   // Backstop: if the Deno process unloads without close(), don't leak chrome.
-  const onUnload = () => kill();
+  const onUnload = () => {
+    kill("SIGKILL");
+    dropBrowserProfileSync(profile);
+  };
   addEventListener("unload", onUnload);
 
   let closing: Promise<void> | null = null;
@@ -165,7 +261,7 @@ export async function launchChromium(
       clearTimeout(timer);
       if (!exited) kill("SIGKILL");
       await proc.status;
-      await dropTempDir(profile);
+      await dropBrowserProfile(profile);
     })();
   return { proc, profile, close };
 }

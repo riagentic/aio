@@ -1,4 +1,4 @@
-// Every option, one page (feedback/frustration.md F9).
+// Every option, one page (a field report).
 //
 // The docs are ~280k words over 200+ pages, and an agent looks things up by
 // NAME. This writes docs/basics/every-option.md: every `cell({ … })` option,

@@ -8,12 +8,10 @@
 
 import { testDisplayEnv } from "../src/testing/test-display.ts";
 import { aioTestDir } from "../src/testing/test-strict.ts";
-import {
-  childCoverageDir,
-  dropTempDir,
-  tempDir,
-} from "../src/testing/temp-dir.ts";
+import { childCoverageDir, tempDir } from "../src/testing/temp-dir.ts";
+import { dropBrowserProfile } from "../src/testing/chromium.ts";
 import { stopChild } from "./stop-child.ts";
+import { freePort } from "../src/testing/server-test.ts";
 
 // Route the spawned server's coverage into the parent's coverage dir when the
 // suite runs under `--coverage` (DENO_COVERAGE_DIR is set by `deno test
@@ -44,12 +42,10 @@ export function findBrowser(): string | null {
 }
 export const BROWSER: string | null = findBrowser();
 
-export function freePort(): number {
-  const l = Deno.listen({ port: 0 });
-  const port = (l.addr as Deno.NetAddr).port;
-  l.close();
-  return port;
-}
+// THE one `freePort` (src/testing): it draws from this run's port slice when
+// one is set, where a `port: 0` twin here handed out a number any other
+// process's `port: 0` could be given before the caller bound it.
+export { freePort };
 
 export async function waitFor<T>(
   what: string,
@@ -402,12 +398,25 @@ export async function openTab(server: Server): Promise<Tab> {
     stderr: "null",
   }).spawn();
 
-  const before = await currentBrowserIndices(server);
-  const index = await waitFor("browser client", async () => {
-    const now = await currentBrowserIndices(server);
-    const fresh = now.find((i) => !before.includes(i));
-    return fresh ?? null;
-  });
+  const close = async () => {
+    await stopChild(proc, { quiet: true });
+    // Its helpers too, before the profile goes: they outlive the browser
+    // and wrote the removed profile back (aio-e2e-prof-* orphans).
+    await dropBrowserProfile(profile);
+  };
+  let index: number;
+  try {
+    const before = await currentBrowserIndices(server);
+    index = await waitFor("browser client", async () => {
+      const now = await currentBrowserIndices(server);
+      const fresh = now.find((i) => !before.includes(i));
+      return fresh ?? null;
+    });
+  } catch (e) {
+    // No tab to hand back, so nobody else will ever close it.
+    await close();
+    throw e;
+  }
 
   const surface = async (): Promise<SurfaceNode[]> => {
     const res = await fetch(`${server.base}/__aio/trojan/surface/${index}`);
@@ -420,10 +429,7 @@ export async function openTab(server: Server): Promise<Tab> {
   return {
     index,
     proc,
-    async close() {
-      await stopChild(proc, { quiet: true });
-      await dropTempDir(profile);
-    },
+    close,
     surface,
     async text(name: string) {
       return findText(await surface(), name);

@@ -53,14 +53,17 @@ import { likelyNew, mtimeUnder } from "./ratchet-kit.ts";
 // fixes (ratcheted to the measured count).
 // 308 → 306 measured when the bug-class ratchets (check-proto-in and
 // friends) joined check:ratchets: the round's fixes had already removed two.
-const CEILING = 303;
+const CEILING = 298;
 
 /** The budget for the PROMISE spelling, counted separately.
  *
  *  Separately because the two are one rule but not one number: folding 102
  *  pre-existing swallows into `CEILING` would move it upward, and this file's
  *  own contract is that it only ever moves down. Two ratchets, both falling. */
-const HANDLER_CEILING = 77;
+// 74 → 73 when the dev server's close stopped awaiting the boot's graph
+// validation behind a `.catch(() => {})`: the stop that waits for it is the
+// bounded one, and it reports what it gives up on.
+const HANDLER_CEILING = 69;
 
 const ROOT = new URL("../src/", import.meta.url).pathname;
 

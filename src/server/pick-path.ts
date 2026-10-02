@@ -458,7 +458,11 @@ function _asDirectory(p: string, os: typeof Deno.build.os): string {
 const _bareExt = (e: string) => e.replace(/^[.*]+/, "");
 const _asEscape = (s: string) =>
   `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-const _psEscape = (s: string) => `'${s.replace(/'/g, "''")}'`;
+// PowerShell ends a single-quoted string at U+0027 AND at each typographic
+// quote (U+2018, 2019, 201A, 201B): a title or a start folder holding one
+// (`Dan’s PC`) cut the string short and ran the rest as code. Each is doubled.
+const _psEscape = (s: string) =>
+  `'${s.replace(/['\u2018\u2019\u201A\u201B]/g, "$&$&")}'`;
 
 // `pickPathBestEffort` lived here: a degrade-instead-of-throw wrapper whose
 // doc named amui's "browse" affordances as its caller. amui has no browse

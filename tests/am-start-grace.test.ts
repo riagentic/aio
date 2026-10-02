@@ -16,6 +16,7 @@ import {
   STUCK_STARTING_MS,
 } from "../src/server/single-instance-lock.ts";
 import { dropFixtureLock } from "./fixture-lock-helper.ts";
+import { freePort } from "../src/testing/server-test.ts";
 
 class ExitSignal extends Error {
   constructor(public code: number) {
@@ -115,9 +116,7 @@ Deno.test("am start: past the grace, a declared port NOT YET BOUND is a slow boo
   // nothing listening is BOOTING, not stuck.
   const appId = `am-grace-${Deno.pid}-c`;
   const child = bootingChild();
-  const l = Deno.listen({ port: 0, hostname: "127.0.0.1" });
-  const port = (l.addr as Deno.NetAddr).port;
-  l.close(); // nothing listens on it: the app has not bound it yet
+  const port = freePort(); // nothing listens on it: the app has not bound it yet
   writePid(
     pf(appId, {
       pid: child.pid,
@@ -161,7 +160,7 @@ Deno.test("am start: nothing bound and no progress for STUCK_STARTING_MS IS stuc
   }
 });
 
-Deno.test("am start: past the grace, a port that is BOUND but never answers ok IS a stuck instance", async () => {
+Deno.test("am start: past the grace, a port that is BOUND but never answers ok is refused, named, never killed", async () => {
   const appId = `am-grace-${Deno.pid}-e`;
   const child = bootingChild();
   const ac = new AbortController();
@@ -181,12 +180,31 @@ Deno.test("am start: past the grace, a port that is BOUND but never answers ok I
       startedAt: Date.now() - STARTUP_GRACE_MS * 2,
     }),
   );
+  // A listener is a live process — and this one is not even the app's (it
+  // is this test's): a port that takes a connect proves nothing about whose
+  // it is. am used to kill the app here. One rule with a `started` one: am
+  // says it is not answering and leaves ending it to the user.
+  const said: string[] = [];
+  const realErr = console.error;
   try {
-    const code = await exitCode(() => ensureSingleton(appId, "json"));
-    assertEquals(code, null, "a zombie listener is cleaned up");
-    assert(!isProcessAlive(child.pid), "the stuck instance is killed");
-    assertEquals(readPid(appId), null, "and its lock removed");
+    const code = await exitCode(() => {
+      const err = console.error, log = console.log;
+      console.error = console.log = (...a: unknown[]) =>
+        void said.push(a.join(" "));
+      return ensureSingleton(appId, "json").finally(() => {
+        console.error = err;
+        console.log = log;
+      });
+    });
+    assertEquals(code, 1, said.join("\n"));
+    const all = said.join("\n");
+    assert(all.includes("not answering"), all);
+    assert(all.includes(`am stop --app=${appId}`), all);
+    assert(all.includes(`am kill --app=${appId}`), all);
+    assert(isProcessAlive(child.pid), "the instance was killed");
+    assertEquals(readPid(appId)?.pid, child.pid, "its lock is kept");
   } finally {
+    console.error = realErr;
     try {
       child.kill("SIGKILL");
     } catch { /* already dead */ }

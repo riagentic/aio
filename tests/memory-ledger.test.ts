@@ -123,6 +123,47 @@ Deno.test("budget: crossing the ceiling throws, by name", () => {
   assertEquals(err.message.includes("control-flow bug"), true);
 });
 
+Deno.test("budget: the breach says MEMORY_UNBOUNDED — the word the docs tell a reader to look for", () => {
+  fresh();
+  const b = budget("sync.ops", 5);
+  const err = assertThrows(() => b.spend(7), Error);
+  assertEquals(
+    err.message.includes('MEMORY_UNBOUNDED: "sync.ops" passed its ceiling'),
+    true,
+    err.message,
+  );
+  // How much, against what, and how much of it THIS call brought.
+  assertEquals(err.message.includes("7 > 5 count (+7 in this call)"), true);
+});
+
+Deno.test("budget: the owner of a series says what ITS breach means", () => {
+  fresh();
+  const b = budget("x.y", 1, { why: "WHY-TEXT.", fix: "FIX-TEXT." });
+  const err = assertThrows(() => b.spend(2), Error, "MEMORY_UNBOUNDED");
+  assertEquals(err.message.includes("WHY-TEXT."), true);
+  assertEquals(err.message.includes("FIX-TEXT."), true);
+});
+
+Deno.test("budget: spend(NaN / negative / Infinity) is refused — it cannot switch the ceiling off", () => {
+  fresh();
+  const b = budget("x", 5);
+  b.spend(2);
+  for (const bad of [NaN, -1, Infinity, -Infinity]) {
+    assertThrows(() => b.spend(bad), Error, "finite number");
+  }
+  assertThrows(
+    () => b.spend("3" as unknown as number),
+    Error,
+    "finite number",
+  );
+  // `spend(NaN)` made the counter NaN, and `NaN > max` is false for ever:
+  // every later spend passed. The counter is untouched, and still counts.
+  assertEquals(b.value(), 2);
+  b.spend(0);
+  b.spend(3);
+  assertThrows(() => b.spend(1), Error, "MEMORY_UNBOUNDED");
+});
+
 Deno.test("budget: a non-ceiling (0, NaN, Infinity) is refused loudly", () => {
   fresh();
   assertThrows(() => budget("x", 0), Error, "positive ceiling");
@@ -189,4 +230,63 @@ Deno.test("ledger: replaying the journal registers its bounded counter", async (
   assertEquals(g!.kind, "counter");
   assertEquals(g!.unit, "count");
   assertEquals(g!.bound, 2_000_000, "the ceiling is visible to a scrape");
+});
+
+// ── the replay ceiling counts RE-ENTRIES within one boot ───────────
+
+/** `n` trivial entries — one shared object, so two million of them are an
+ *  array of pointers. */
+function tail(n: number) {
+  const e = { seq: 1, ts: 0, type: "c:noop" };
+  return new Array(n).fill(
+    e,
+  ) as unknown as import("../src/server/journal.ts").JournalEntry[];
+}
+const replayed = () =>
+  readGauges().find((g) => g.name === "journal.replay.entries")!.value;
+
+Deno.test("replay ceiling: a journal LARGER than the ceiling boots — size is not a loop", async () => {
+  fresh();
+  const { replayJournal, beginReplaySession } = await import(
+    "../src/server/journal.ts"
+  );
+  const reduce = (s: unknown) => ({ state: s });
+  const big = tail(2_000_001);
+  beginReplaySession();
+  assertEquals(replayJournal({}, big, reduce).replayed, 2_000_001);
+  assertEquals(replayed(), 0, "a boot's own tail is not charged");
+  // …and so does the next boot in the same process (an in-process restart,
+  // every test that boots twice). The count used to carry for the life of
+  // the process, so this second boot was already over.
+  beginReplaySession();
+  assertEquals(replayJournal({}, big, reduce).replayed, 2_000_001);
+  assertEquals(replayed(), 0);
+});
+
+Deno.test("replay ceiling: replaying AGAIN within one boot is what is charged, and what trips", async () => {
+  fresh();
+  const { replayJournal, beginReplaySession } = await import(
+    "../src/server/journal.ts"
+  );
+  const reduce = (s: unknown) => ({ state: s });
+  beginReplaySession();
+  replayJournal({}, tail(10), reduce);
+  replayJournal({}, tail(7), reduce);
+  replayJournal({}, tail(5), reduce);
+  assertEquals(replayed(), 12, "the two re-entries, not the first replay");
+  // A recovery path feeding the tail back in: stopped by name, before the
+  // fold, with the journal named and nothing about heap sizes.
+  const err = assertThrows(
+    () => replayJournal({}, tail(2_000_000), reduce),
+    Error,
+    "MEMORY_UNBOUNDED",
+  );
+  assertEquals(err.message.includes('"journal.replay.entries"'), true);
+  assertEquals(err.message.includes("(+2000000 in this call)"), true);
+  assertEquals(err.message.includes("replayed AGAIN within one boot"), true);
+  assertEquals(err.message.includes("not a journal that is too large"), true);
+  // A new boot starts from nothing.
+  beginReplaySession();
+  assertEquals(replayed(), 0);
+  assertEquals(replayJournal({}, tail(3), reduce).replayed, 3);
 });

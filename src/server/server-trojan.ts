@@ -44,7 +44,11 @@ import {
   _isFrameworkInternalActionType,
   sanitizeClientAction,
 } from "./server-ws.ts";
-import { disarmLocalControl, TROJAN_PREFIX } from "./server-auth.ts";
+import {
+  disarmLocalControl,
+  stopRequester,
+  TROJAN_PREFIX,
+} from "./server-auth.ts";
 import { generatePin, PIN_TTL_MS } from "./pairing.ts";
 import { mask as maskSql } from "../db/sql-shape.ts";
 
@@ -103,7 +107,7 @@ export interface TrojanDeps {
       | undefined;
     forcePersist?: () => Promise<void>;
     sqlQuery?: (sql: string) => Promise<unknown[]>;
-    shutdown?: () => Promise<void>;
+    shutdown?: (by?: "am stop" | "takeover") => Promise<void>;
     startedAt: number;
     /** Cell id → its method (action) names — powers `am`/amui method buttons. */
     cellMethods?: () => Record<string, string[]>;
@@ -1371,7 +1375,8 @@ async function handlePost(
     if (!trojan.shutdown) return err("shutdown not available", 501);
     deps.debug(`[trojan] shutdown requested`);
     const resp = json({ ok: true, msg: "shutting down" });
-    queueMicrotask(() => trojan.shutdown!());
+    const by = stopRequester(req);
+    queueMicrotask(() => trojan.shutdown!(by));
     return resp;
   }
 

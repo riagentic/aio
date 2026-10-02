@@ -18,6 +18,7 @@ import { AioLogger } from "../src/diagnostics/logger.ts";
 import {
   DEFAULT_LOG_BUDGET,
   enforceBudget,
+  START_CLAIM,
 } from "../src/diagnostics/logger-rotate.ts";
 import { prepareStdoutLog } from "../src/am/am-cmd-process.ts";
 
@@ -86,7 +87,8 @@ Deno.test("logs: a first boot says nothing — there is no previous run to keep"
     await l.init();
     await l.flush();
     assertEquals(
-      names(dir),
+      // The on-start claim (`.rotate`) is not a log: no LOG file may appear.
+      names(dir).filter((n) => n !== START_CLAIM),
       [],
       "an empty log dir must stay empty — a retention notice with nothing " +
         "retained is noise, and noise is what teaches people to skip logs",

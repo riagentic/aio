@@ -530,6 +530,7 @@ function surfaceDigest(node: UISurfaceNode, maxChars = 2000): string {
 
 /** Last addressable segment of a path — `App/Stage/Row[3]:title` → `title`. */
 function lastSegment(s: string): string {
+  // aio-ok: path-split — a surface path (`App/Row[3]:title`)
   const cut = Math.max(s.lastIndexOf(":"), s.lastIndexOf("/"));
   return cut >= 0 ? s.slice(cut + 1) : s;
 }
@@ -2120,11 +2121,11 @@ async function _buildTestUI(
       // localStorage (see _persistRunKey).
       // Under the harness-only symbol: the runtime ignores an app's
       // `persistKey` (a server option) by design.
-      // Keep the lazy-store debounce window open for the whole mount: the
-      // default 100 ms fires under a loaded suite before dispose reaches
-      // `_flushPendingPersist`, so removing that flush looked green. Continuity
-      // across mounts is the dispose flush (below), not a race with the timer.
-      persistDebounceMs: opts.persist ? 60_000 : undefined,
+      // The store's debounce is the PRODUCTION one (100 ms), never a harness
+      // value: a test that reads localStorage while mounted must see the write
+      // an app's user would. (A 60 s window stood here for two releases to
+      // make one internal test deterministic — and `{ persist: true }` wrote
+      // nothing at all until dispose.)
       // The declared-type write guard a dev server runs, dev-strict.
       [standalone._HARNESS_SHAPE_GUARD]: true,
       [standalone._HARNESS_PERSIST_KEY]: opts.persist

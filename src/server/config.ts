@@ -154,6 +154,16 @@ export const VALID_BUILD_KEYS = new Set<string>([
   // stamped with. The stamp outranks the config literal at run time, which is
   // what stops a test build updating itself into the public release.
   "channel",
+  // npm packages the dev-only exclusion must leave in the binary — read by
+  // `keepPackagesDeclared` (build-compile.ts).
+  "keepPackages",
+  // "keep" | "strip" Chromium's optional graphics libraries from a desktop
+  // artifact — read by `chromiumExtrasStripped` (build/electron-strip.ts).
+  // Both shipped documented and working, and absent from this list: the
+  // build that honoured them also said "aio never reads build.keepPackages —
+  // it does nothing". `tests/build-block-shape-and-typos.test.ts` now derives
+  // the readers from the source, so the next key cannot be forgotten here.
+  "chromiumExtras",
   // `{ bundleId, host }` — read by build-config.ts (`resolveMacBundleId`,
   // `resolveMacHost`) and documented in docs/build/targets.md.
   "macos",
@@ -557,7 +567,7 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
   ],
   electron: [
     "{}",
-    "the Electron process's own security decisions — { requireSandbox } refuses to launch rather than fall back to --no-sandbox, { unsandboxedChildWindows } lets openWindow ask for sandbox:false, { permissions } is the app page's exact permission allow-list (guests then get none); all default to what aio has always done",
+    "the Electron process's own security decisions — { requireSandbox } refuses to launch rather than fall back to --no-sandbox, { unsandboxedChildWindows } lets openWindow ask for sandbox:false, { permissions } is the app page's exact permission allow-list (guests then get none), { allowLocalPeers } lets other processes of the same OS user open a production app's local socket (off: only the app's own window may); all default to what aio has always done",
   ],
   libraryMode: [
     "false",
@@ -1313,6 +1323,7 @@ export const VALID_ELECTRON_KEYS: Set<string> = new Set([
   "requireSandbox",
   "unsandboxedChildWindows",
   "permissions",
+  "allowLocalPeers",
 ]);
 
 /** Every permission name Electron's session handlers are asked about — the

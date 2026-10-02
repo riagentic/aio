@@ -7,14 +7,8 @@ import { connectCli } from "../src/server/cli-client.ts";
 import type { CellDef } from "../src/state/cell-types.ts";
 import { stopChild } from "./stop-child.ts";
 import { childCoverageDir } from "../src/testing/temp-dir.ts";
+import { freePort } from "../src/testing/server-test.ts";
 const _childCovDir = childCoverageDir();
-
-function freePort(): number {
-  const l = Deno.listen({ port: 0 });
-  const port = (l.addr as Deno.NetAddr).port;
-  l.close();
-  return port;
-}
 
 async function waitFor<T>(
   fn: () => T | null,

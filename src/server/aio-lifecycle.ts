@@ -159,6 +159,9 @@ export function electronExitIsCrash(
 export function electronLaunchFailurePlan(
   e: unknown,
   url: string,
+  /** A PACKAGED desktop app that keeps no server on purpose — see
+   *  {@linkcode windowlessStops}. */
+  windowless = false,
 ): { stop: boolean; lines: string[] } {
   if (e instanceof SandboxRefusal) {
     return {
@@ -172,6 +175,15 @@ export function electronLaunchFailurePlan(
       ],
     };
   }
+  if (windowless) {
+    return {
+      stop: true,
+      lines: [
+        `electron: the desktop window could not be started — ${e}.`,
+        WINDOWLESS_STOP_LINE,
+      ],
+    };
+  }
   return {
     stop: false,
     lines: [
@@ -181,6 +193,30 @@ export function electronLaunchFailurePlan(
     ],
   };
 }
+
+/** Does a desktop app whose window never opened STOP?
+ *
+ *  Run from source it keeps serving and says where — there is a terminal, and
+ *  the person at it can install Electron or open the URL. A PACKAGED app has
+ *  neither: with no window it ran on unseen, held the single-instance lock,
+ *  and answered the next double-click with "already running" and nothing on
+ *  screen (measured on macOS: a bundle whose runtime could not be executed).
+ *  So that one stops, loudly, with the reason in its log — unless
+ *  `--keep-server` asked for a server that outlives its window. Pure.
+ *  @decider */
+export function windowlessStops(
+  packaged: boolean,
+  keepServer: boolean,
+): boolean {
+  return packaged && !keepServer;
+}
+
+/** The second line of that stop. */
+export const WINDOWLESS_STOP_LINE =
+  "electron: this is a packaged desktop app and the window is the only way " +
+  "it shows itself — stopping, instead of running on where nobody can see " +
+  "it. The reason is the line above; reinstalling the app repairs a damaged " +
+  "copy.";
 
 /** Parse `AIO_PARENT_PID`: decimal digits, integer > 0, else absent.
  *
@@ -943,7 +979,10 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     // abort kills it. A SIGHUP the operator IGNORED (`nohup`) stays ignored:
     // registering a listener would otherwise turn it back on (`mayTakeSighup`).
     if (!libraryMode && !hasProcessListener("SIGHUP") && mayTakeSighup()) {
-      installProcessListener("SIGHUP", () => void stopProcess(0));
+      installProcessListener(
+        "SIGHUP",
+        () => void stopProcess(0, "SIGHUP received"),
+      );
     }
     const meta: AioMeta = {
       title,
@@ -1093,9 +1132,11 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
           // decide. `openExternalBestEffort` would refuse in a test anyway; the
           // point of not calling it is that a desktop app staying a desktop app
           // is a rule, not a side effect of the environment.
-          for (const line of electronMissingLines(electronUrl)) {
+          const windowless = windowlessStops(isCompiled(), !!keepServer);
+          for (const line of electronMissingLines(electronUrl, windowless)) {
             log.error(line);
           }
+          if (windowless) stopProcess(1);
           return;
         }
         setElectronProc(proc);
@@ -1111,6 +1152,10 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
         proc.status
           .then(async (s) => {
             setElectronProc(null);
+            // …and disarmed the instant it is gone: under `--keep-server` the
+            // server outlives its window, and the pid it trusted goes back to
+            // the kernel to be handed to some other process.
+            udsHandle?.disarmPeerPid?.(proc.pid);
             const plan = electronClosedPlan(s, {
               keepServer: !!keepServer,
               restarting: isRestarting(),
@@ -1142,7 +1187,8 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
         // ONE decider for "the window never opened": an app that refused an
         // unsandboxed launch must not be left serving, with its own log
         // pointing at a browser.
-        const plan = electronLaunchFailurePlan(e, url);
+        const windowless = windowlessStops(isCompiled(), !!keepServer);
+        const plan = electronLaunchFailurePlan(e, url, windowless);
         for (const line of plan.lines) log.error(line);
         if (plan.stop) stopProcess(1);
       });
@@ -1506,7 +1552,18 @@ export function mayTakeSighup(
  *  carries `?token=`, and a log line is not where a credential goes (the
  *  share-link lines are the one place it is printed on purpose), so it is
  *  shown redacted. Pure, so the no-token promise is tested without a launch. */
-export function electronMissingLines(electronUrl: string): string[] {
+export function electronMissingLines(
+  electronUrl: string,
+  /** The app stops instead of serving on — {@linkcode windowlessStops}. */
+  windowless = false,
+): string[] {
+  if (windowless) {
+    return [
+      "electron: the runtime this desktop app needs could not be found or " +
+      "fetched (the lines above say why).",
+      WINDOWLESS_STOP_LINE,
+    ];
+  }
   return [
     "Electron not installed and auto-install failed — this app is a " +
     "desktop app and will NOT be opened in a browser instead",

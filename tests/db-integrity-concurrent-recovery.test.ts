@@ -60,6 +60,7 @@ Deno.test("integrity: two instances recovering one damaged database at once both
   try {
     // A database worth keeping, with a big snapshot beside it.
     const app = await aio.run({
+      watch: false,
       cells: [cell("notes", { state: { n: 0 }, methods: {} })],
       appId: `concurrent-recovery-seed-${Deno.pid}`,
       client: "server-only",

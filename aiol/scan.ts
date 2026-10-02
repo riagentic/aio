@@ -17,11 +17,26 @@
 // not code. A cell declared inside a template's interpolation is generated
 // text, not a cell of this project — exactly what we want skipped.
 //
-// The MASK ITSELF lives in `src/diagnostics/code-mask.ts` and is re-exported
-// here unchanged: aiol had this implementation and `graph-validator.ts`
-// hand-rolled a worse one that destroyed line numbers. One fact, one spelling.
-import { codeMask, codeText } from "../src/diagnostics/code-mask.ts";
-export { codeMask, codeText };
+// The MASK ITSELF lives in `src/diagnostics/code-mask.ts`: aiol had this
+// implementation and `graph-validator.ts` hand-rolled a worse one that
+// destroyed line numbers. One fact, one spelling.
+//
+// aiol asks for it WITH JSX reading, for every file. The text an element
+// shows is prose, and prose lexed as code hides the code after it: the `//`
+// of a URL or an apostrophe blanked the rest of the line, a callback's
+// parameter declared there was never seen, and a fix then took that
+// parameter's uses for aio's. A file with no JSX in it gets the same mask
+// either way (pinned over every `.ts` file of this repo).
+import * as base from "../src/diagnostics/code-mask.ts";
+
+/** Per-offset flags: 1 = real code, 0 = comment / string / template / regex
+ *  body / JSX text. Pure. */
+export const codeMask = (src: string): Uint8Array => base.codeMask(src, true);
+/** The source with everything that is not code blanked to spaces (offsets
+ *  and line breaks kept). Pure. */
+export const codeText = (src: string): string => base.codeText(src, true);
+/** The mask, and the span of every element the reader took. Pure. */
+export const jsxRead = base.jsxRead;
 
 /** Keep only the regex matches whose start offset is real code. Pure. */
 export function codeMatches(

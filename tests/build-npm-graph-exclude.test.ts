@@ -10,6 +10,8 @@ import { assert, assertEquals } from "@std/assert";
 import {
   compileModuleRoots,
   type DenoInfoGraph,
+  devOnlyPackageByName,
+  keptByFamily,
   reachedOutsideBuildTooling,
   unreachableNpmEntries,
 } from "../src/build/build-compile.ts";
@@ -124,6 +126,74 @@ Deno.test("npm graph: the drop warning ignores aio's own build tooling", () => {
   // esbuild is only reached by aio's build modules (every scaffold declares
   // it) — do not warn.
   assertEquals(reachedOutsideBuildTooling([graph], "esbuild", buildDir), false);
+});
+
+Deno.test("npm graph: a peer-suffixed id maps via localPath to the unsuffixed dir (§1)", () => {
+  const graph: DenoInfoGraph = {
+    modules: [{ kind: "npm", npmPackage: "a@1.0.0_peer@9.9.9" }],
+    npmPackages: {
+      "a@1.0.0_peer@9.9.9": {
+        dependencies: [],
+        localPath: "/p/node_modules/.deno/a@1.0.0/node_modules/a",
+      },
+      "b@2.0.0": { dependencies: [] },
+    },
+  };
+  // On disk the directory is `a@1.0.0`, NOT `a@1.0.0_peer@9.9.9` — the old
+  // `id.replaceAll("/", "+")` could never match it and bailed to "embed
+  // everything" on every real Deno 2.9.7 graph.
+  assertEquals(
+    unreachableNpmEntries([graph], entries(["a@1.0.0", "b@2.0.0"])),
+    ["b@2.0.0"],
+  );
+});
+
+Deno.test("npm graph: an uninstalled platform variant still maps (§1b, §6)", () => {
+  const graph: DenoInfoGraph = {
+    modules: [{ kind: "npm", npmPackage: "@typescript/typescript@7.0.2" }],
+    npmPackages: {
+      "@typescript/typescript@7.0.2": {
+        dependencies: [],
+        localPath:
+          "/p/node_modules/.deno/@typescript+typescript@7.0.2/node_modules/@typescript/typescript",
+      },
+      "@typescript/typescript-darwin-arm64@7.0.2": {
+        dependencies: [],
+        localPath:
+          "/p/node_modules/.deno/@typescript+typescript-darwin-arm64@7.0.2/node_modules/@typescript/typescript-darwin-arm64",
+      },
+    },
+  };
+  // Only the host package is on disk. The cross target's binary is linked
+  // DURING the compile, so its predicted entry must already be excluded.
+  const out = unreachableNpmEntries(
+    [graph],
+    entries(["@typescript/typescript@7.0.2"]),
+  )!;
+  assert(out.includes("@typescript+typescript-darwin-arm64@7.0.2"));
+  assert(out.includes("@typescript+typescript@7.0.2"));
+});
+
+Deno.test("npm graph: keepPackages keeps a tool's whole platform family", () => {
+  const keep = new Set(["esbuild", "typescript"]);
+  assert(keptByFamily("esbuild", keep));
+  assert(keptByFamily("@esbuild/linux-x64", keep));
+  assert(keptByFamily("typescript", keep));
+  assert(keptByFamily("@typescript/typescript-darwin-arm64", keep));
+  // Keeping one tool does not keep the other's platform package.
+  assertEquals(
+    keptByFamily("@esbuild/linux-x64", new Set(["typescript"])),
+    false,
+  );
+  // The by-name classifier covers both families, and nothing unrelated.
+  assertEquals(devOnlyPackageByName("@esbuild/linux-x64"), true);
+  assertEquals(
+    devOnlyPackageByName("@typescript/typescript-darwin-arm64"),
+    true,
+  );
+  assertEquals(devOnlyPackageByName("typescript"), true);
+  assertEquals(devOnlyPackageByName("three"), false);
+  assertEquals(devOnlyPackageByName("@typescript-eslint/parser"), false);
 });
 
 Deno.test("npm graph: module roots are the entry plus every included module file", () => {

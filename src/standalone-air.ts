@@ -452,6 +452,7 @@ export function _adoptShellPath(
   if (dir.origin !== location.origin) return;
   const base = dir.pathname.slice(0, -1);
   if (
+    // aio-ok: path-split — a route path (browser/WebView runtime)
     base && base !== _getRouteBase() && (p === base || p.startsWith(base + "/"))
   ) _setRouteBase(base);
 }
@@ -1360,6 +1361,10 @@ function _restoreOrQuarantine(
   }
 }
 
+/** How long the lazy store (localStorage) waits before writing. `aio.run`
+ *  may ask for less, never more — see `StandaloneRunConfig.persistDebounceMs`. */
+const STORE_DEBOUNCE_MS = 100;
+
 /** Initializes standalone runtime — call before AIR mounts */
 export function initStandalone<S, A, E>(
   initialState: S,
@@ -1682,7 +1687,7 @@ export function initStandalone<S, A, E>(
   };
 
   // Persistence. A DURABLE store writes on the spot; a lazy one is debounced.
-  const persistMs = config.persistDebounceMs ?? 100;
+  const persistMs = config.persistDebounceMs ?? STORE_DEBOUNCE_MS;
   let persistTimer: ReturnType<typeof setTimeout> | null = null;
   let slowWriteWarned = false;
   /** Set once close() has written the final snapshot — see schedulePersist. */
@@ -2184,9 +2189,7 @@ function bootStandalone(
      *  passes its own (via `_HARNESS_PERSIST_KEY`), so a test never reads or
      *  writes an app's real key; an app's `persistKey` never reaches here. */
     persistKey?: string;
-    /** Lazy-store write debounce. The harness passes a long window for
-     *  `{ persist: true }` so continuity across mounts is the dispose flush,
-     *  not a race with the default 100 ms timer. */
+    /** Lazy-store write debounce — see `StandaloneRunConfig`. */
     persistDebounceMs?: number;
     onRestore?: (s: Record<string, unknown>) => Record<string, unknown>;
     /** See `_HARNESS_SHAPE_GUARD`. */
@@ -2421,6 +2424,10 @@ function bootStandalone(
   // (abort → settle → destroyAll).
   const innerClose = app.close;
   app.close = async () => {
+    // Schedules stop BEFORE dispatch closes, as on the server (shutdown.ts
+    // "stop schedules"): a tick landing inside the drain reached a closed
+    // dispatch. Cancelled again below for anything the drain armed.
+    _sched?.cancelAll();
     await innerClose();
     _destroyCells?.();
     // …then what the cells held for their lifetime, in the server's Phase 7
@@ -2507,7 +2514,13 @@ type StandaloneRunConfig = {
   appVersion?: string;
   cells?: CellDef[];
   persist?: boolean | string;
-  /** Forwarded to the lazy store — see `bootStandalone`. */
+  /** May SHORTEN this runtime's lazy-store (localStorage) write window, never
+   *  widen it past the 100 ms default. It is the server's SQLite debounce,
+   *  set in the one `aio.run` config an app shares with its server build — and
+   *  a phone kills a backgrounded WebView without notice, so a window tuned
+   *  for a server's disk (seconds) would be that many seconds of lost writes.
+   *  It was forwarded as given for two releases (1.0.15–1.0.16), undeclared;
+   *  an app that asked for LESS than the default there (`0`) still gets it. */
   persistDebounceMs?: number;
   onRestore?: (state: Record<string, unknown>) => Record<string, unknown>;
   circuitBreaker?: import("./state/cell-compose.ts").CircuitBreakerConfig;
@@ -2627,7 +2640,7 @@ function runStandalone(
         ? cfg[_HARNESS_PERSIST_KEY]
         : undefined,
       persistDebounceMs: typeof cfg.persistDebounceMs === "number"
-        ? cfg.persistDebounceMs
+        ? Math.min(cfg.persistDebounceMs, STORE_DEBOUNCE_MS)
         : undefined,
       onRestore: cfg.onRestore,
       shapeGuard: cfg[_HARNESS_SHAPE_GUARD] === true,

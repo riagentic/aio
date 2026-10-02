@@ -1,3 +1,5 @@
+import { isOsFolderLitter } from "../server/app-dirs.ts";
+
 /** Pure checks on a deno.json `build` block and on the build's `out`
  *  directory — kept out of `src/build-all.ts` so they stay internal (that file
  *  is a public entry). @internal */
@@ -166,8 +168,18 @@ export function foreignOutEntries(
     if (!isManifest) return false;
     if (e === "manifest.json" || artifacts.has(e) || shipOutput(e)) return true;
     const inside = Object.hasOwn(dirs, e) ? dirs[e] : undefined;
-    return inside !== undefined && inside.length > 0 &&
-      inside.every((f) => artifacts.has(f) || SHIP_PLATFORM_JSON.test(f));
+    const files = inside?.filter((f) => !isOsFolderLitter(f));
+    return files !== undefined && files.length > 0 &&
+      files.every((f) => artifacts.has(f) || SHIP_PLATFORM_JSON.test(f));
   };
-  return entries.filter((e) => !ours(e)).sort();
+  // What the desktop drops into a folder a person opens (`.DS_Store`,
+  // `Thumbs.db`) is nobody's file: a release looked at in Finder is still a
+  // release, and nothing of the user's is lost when it goes.
+  return entries.filter((e) => !ours(e) && !isOsFolderLitter(e)).sort();
+}
+
+/** Is `name` an update manifest as `am publish` / `aio ship` names it
+ *  (`<os>-<arch>.json`)? The one file a channel directory always holds. Pure. */
+export function isShipManifestName(name: string): boolean {
+  return SHIP_PLATFORM_JSON.test(name);
 }

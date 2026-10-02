@@ -111,7 +111,8 @@ Deno.test("aiol upgrade: an object method named `call` is not aio's call()", asy
     {
       "src/app.ts": APP,
       "src/cell.ts": `
-import { cell } from "aio";
+import { call, cell } from "aio";
+export const one = call({ retries: 1 }, () => Promise.resolve(1));
 const helpers = {
   call({ timeout: 1 }) { return timeout; },
 };

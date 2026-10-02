@@ -44,6 +44,7 @@ const boot = (
     persist: false,
     port: freePort(),
     ...extra,
+    watch: false,
   } as never) as unknown as Promise<App>;
 
 async function sfnCall(

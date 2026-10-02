@@ -1,9 +1,9 @@
 // src/graph-validator.ts
 import { fromFileUrl, join, resolve, toFileUrl } from "@std/path";
+import * as hostPath from "@std/path";
 import { locateDenoJsonAbove } from "./deno-json.ts";
 import { resolveShare, type ShareRoot } from "./app-dirs.ts";
-import { ESBUILD_SPEC } from "../build/esbuild-shared.ts";
-import { importOutsideApp } from "./outside-app.ts";
+import { esbuildWork, loadEsbuild } from "./server-transpile.ts";
 import {
   isBrowserEntry,
   isFrameworkEntry,
@@ -111,12 +111,28 @@ export type Resolution =
 const EXTENSIONS = [".ts", ".tsx", ".js", ".jsx"];
 const INDEX_FILES = ["index.ts", "index.tsx"];
 
-/** Resolve an import specifier to a file path, external URL, or error. */
+/** The path operations a resolution needs — this host's by default. ONE set
+ *  for every path the check builds, so the folder of the importer, the file
+ *  it names and the file tested for are the same shape. It is a parameter so
+ *  a test can drive Windows shapes (`C:\app\src\App.tsx`) through this
+ *  very function on any host. */
+export type PathOps = Pick<
+  typeof hostPath,
+  "dirname" | "resolve" | "join" | "fromFileUrl"
+>;
+
+/** Resolve an import specifier to a file path, external URL, or error.
+ *
+ *  The importer's folder is `path.dirname`, not "everything before the last
+ *  `/`": a Windows path has no `/`, so that took the whole file path as the
+ *  folder and looked for `App.tsx\cell.ts` — every relative import of every
+ *  Windows dev app was "not found", and the browser got the diagnostic page. */
 export function resolveSpecifier(
   spec: string,
   importerPath: string,
   importMap: Record<string, string>,
   fileExists?: (path: string) => boolean,
+  path: PathOps = hostPath,
 ): Resolution {
   const _exists = fileExists ?? ((p: string) => {
     try {
@@ -128,15 +144,14 @@ export function resolveSpecifier(
   });
 
   if (spec.startsWith("./") || spec.startsWith("../")) {
-    const dir = importerPath.replace(/\/[^/]+$/, "");
-    const base = resolve(dir, spec);
+    const base = path.resolve(path.dirname(importerPath), spec);
 
     if (_exists(base)) return { kind: "local", path: base };
     for (const ext of EXTENSIONS) {
       if (_exists(base + ext)) return { kind: "local", path: base + ext };
     }
     for (const idx of INDEX_FILES) {
-      const indexPath = base + "/" + idx;
+      const indexPath = path.join(base, idx);
       if (_exists(indexPath)) return { kind: "local", path: indexPath };
     }
 
@@ -225,7 +240,7 @@ export function resolveSpecifier(
   // A local alias the app's deno.json declares, already resolved against
   // THAT deno.json's folder (readAppLocalAliases) — walked like any module.
   if (mapped.startsWith("file:")) {
-    const file = fromFileUrl(mapped);
+    const file = path.fromFileUrl(mapped);
     for (const p of [file, ...EXTENSIONS.map((e) => file + e)]) {
       if (_exists(p)) return { kind: "local", path: p };
     }
@@ -245,8 +260,7 @@ export function resolveSpecifier(
   }
   // Local path alias (e.g. "../lib/foo.ts") — resolve and walk it
   if (mapped.startsWith("./") || mapped.startsWith("../")) {
-    const dir = importerPath.replace(/\/[^/]+$/, "");
-    const resolved = resolve(dir, mapped);
+    const resolved = path.resolve(path.dirname(importerPath), mapped);
     if (_exists(resolved)) return { kind: "local", path: resolved };
     for (const ext of EXTENSIONS) {
       if (_exists(resolved + ext)) {
@@ -287,6 +301,7 @@ export function appImportFixLine(
   if (tail) {
     for (const [k, v] of entries) {
       const kt = AIO_LIBRARY_ENTRIES[k]!;
+      // aio-ok: path-split — an import-map value (a specifier), not an OS path
       if (v.endsWith("/" + kt)) {
         return `"${spec}": "${v.slice(0, v.length - kt.length)}${tail}"`;
       }
@@ -584,18 +599,20 @@ async function prodGraphErrors(opts: {
       "the build refuses the same declaration — fix it in deno.json.",
     );
   }
-  const esbuild = await importOutsideApp<EsbuildModule>(ESBUILD_SPEC);
-  const bundle = await bundleClient({
-    esbuild,
-    root,
-    appDir: absBaseDir,
-    uiEntry,
-    standalone: false,
-    imports: (config as { imports?: Record<string, string> }).imports ?? {},
-    shares,
-    frameworkSrcDir,
-    frameworkBase,
-  });
+  // esbuild from THE server loader, and the build declared as work in flight:
+  // `stopEsbuild()` then holds this service's stop and waits for this build.
+  const bundle = await esbuildWork((async () =>
+    bundleClient({
+      esbuild: await loadEsbuild<EsbuildModule>(),
+      root,
+      appDir: absBaseDir,
+      uiEntry,
+      standalone: false,
+      imports: (config as { imports?: Record<string, string> }).imports ?? {},
+      shares,
+      frameworkSrcDir,
+      frameworkBase,
+    }))());
   opts.debug?.(
     `graph: prod bundle ${bundle.ok ? "built" : "FAILED"} in memory (${
       bundle.ms.toFixed(0)

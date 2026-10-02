@@ -84,7 +84,8 @@ export async function build(cfg?: BuildConfig): Promise<void> {
   // this project refuses everywhere else.
 
   // Before anything resolves a package: a build killed mid-compile may have
-  // left node_modules links aside (see recoverInterruptedLinks).
+  // left node_modules links aside and package files in its trim mirror (see
+  // recoverInterruptedLinks).
   await recoverInterruptedLinks(join(root, "node_modules"));
 
   // ── Step 1: Bundle dist/app.js ───────────────────────────────────────────

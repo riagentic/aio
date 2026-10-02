@@ -13,7 +13,8 @@ import type { WirePatch as Patch } from "../protocol/patch-ops.ts";
 import type { CellDef, Msg } from "../state/cell-types.ts";
 import { WORKER_PATCH_ACTION } from "../state/cell-compose-reduce.ts";
 import { markInflight } from "../state/dispatch.ts";
-import { _dispatchUnsaved, _noteUnsaved } from "./action-ack.ts";
+import { _dispatchUnsaved, _noteUnsaved, _verdictLost } from "./action-ack.ts";
+import { _onCallSettle } from "../state/cell-impl.ts";
 import {
   _cancelTargetPrefixes,
   notifyMethodCancel,
@@ -110,6 +111,50 @@ function hostableEntry(entry: string | undefined): boolean {
   return !!entry && entry.startsWith("file:");
 }
 
+/** What one call collects of its cell's patch batches: the ones still
+ *  SAVING, and the failure sentences of the ones that settled — folded as
+ *  they go. A set the batches simply left as they settled lost the verdict
+ *  of any batch whose save finished before a loaded main isolate handled the
+ *  `done` (a refused write acked `ok`); one that kept every batch grew
+ *  without bound under a `long` method that writes forever.
+ *  @internal exported for its test */
+export type Collector = {
+  pending: Set<Promise<string | undefined>>;
+  why: Set<string>;
+};
+/** @internal */
+export const _collector = (): Collector => ({
+  pending: new Set(),
+  why: new Set(),
+});
+/** Hand batch `p` (resolving with its failure sentence, if any) to every
+ *  collector running now; each lets go of it the moment it settles.
+ *  @internal */
+export function _collect(
+  running: Iterable<Collector> | undefined,
+  p: Promise<string | undefined>,
+): void {
+  const into = [...(running ?? [])];
+  if (into.length === 0) return;
+  for (const c of into) c.pending.add(p);
+  void p.then((why) => {
+    for (const c of into) {
+      c.pending.delete(p);
+      if (why !== undefined) c.why.add(why);
+    }
+  });
+}
+/** Stop collecting (`calls` is the cell's running set), wait for what is
+ *  still saving, and give the verdict. @internal */
+export async function _verdictOf(
+  calls: Set<Collector>,
+  c: Collector,
+): Promise<string | undefined> {
+  calls.delete(c);
+  await Promise.all(c.pending);
+  return c.why.size > 0 ? [...c.why].join("; ") : undefined;
+}
+
 /** Will this boot run its `worker: true` cells on real threads? ONE decider,
  *  asked by the pool (below) and by the cells bridge, which skips those cells'
  *  `onInit`/`onDestroy` on the main isolate exactly when their worker runs
@@ -203,11 +248,26 @@ export function createCellWorkerPool(opts: {
   }
 
   const byCell = new Map<string, CellWorker>();
-  /** Per worker cell: its patch batches still being dispatched on main —
-   *  a call's own batches arrive before its `done` (FIFO), and each resolves
+  /** Per worker cell: one collector per call in flight (`Collector`). A
+   *  call's own batches arrive before its `done` (FIFO), and each resolves
    *  only once what its commit owes is durable (aio.ts `_durableFor`), so
    *  the call is answered after them, with their `unsaved` verdict. */
-  const patching = new Map<string, Set<Promise<string | undefined>>>();
+  const collecting = new Map<string, Set<Collector>>();
+  /** An ASYNC call's collector, by call id. Its caller is answered by the
+   *  call registry (the worker's `done` settles it before this pool's own
+   *  continuation runs), so the registry's settle hook is where its
+   *  batches' saves are waited for and their verdict noted — the hook takes
+   *  the entry. Capped like the other per-call maps, and never silently: a
+   *  live entry pushed out is answered `unsaved` (`_verdictLost`). */
+  const byCall = new Map<string, [Set<Collector>, Collector]>();
+  const offCallSettle = _onCallSettle((callId) => {
+    const entry = byCall.get(callId);
+    if (entry === undefined) return undefined;
+    byCall.delete(callId);
+    return _verdictOf(...entry).then((why) => {
+      if (why !== undefined) _noteUnsaved(undefined, callId, why);
+    });
+  });
   for (const f of cells) {
     const name = f.__aio.id;
     byCell.set(
@@ -236,8 +296,6 @@ export function createCellWorkerPool(opts: {
             payload: { cell, ops },
             _source: "Effect",
           }) as unknown as Msg;
-          const set = patching.get(cell) ?? new Set();
-          patching.set(cell, set);
           const p: Promise<string | undefined> = Promise.resolve(
             dispatch(batch),
           ).then(
@@ -245,8 +303,8 @@ export function createCellWorkerPool(opts: {
             // Refused or thrown: reported by dispatch itself; the call's own
             // answer is the worker's `done`/`fail`.
             () => undefined,
-          ).finally(() => set.delete(p));
-          set.add(p);
+          );
+          _collect(collecting.get(cell), p);
         },
         runEffect,
       }),
@@ -397,21 +455,36 @@ export function createCellWorkerPool(opts: {
           opts.breaker?.note?.(cell, action.type);
         }
       };
-      const settle = async (): Promise<void> => {
-        const why = (await Promise.all([...(patching.get(cell) ?? [])]))
-          .filter((v) => v !== undefined);
-        if (why.length > 0) {
-          _noteUnsaved(
-            action as object,
-            undefined,
-            [...new Set(why)].join("; "),
-          );
+      const mine = _collector();
+      const calls = collecting.get(cell) ?? new Set();
+      collecting.set(cell, calls.add(mine));
+      const callId = (action as { payload?: { _callId?: unknown } }).payload
+        ?._callId;
+      if (typeof callId === "string") {
+        if (byCall.size >= 1024) {
+          const [lost, [lostCalls, lostC]] = byCall.entries().next().value!;
+          byCall.delete(lost);
+          lostCalls.delete(lostC);
+          _verdictLost(lost);
         }
+        byCall.set(callId, [calls, mine]);
+      }
+      const settle = async (): Promise<void> => {
+        const why = await _verdictOf(calls, mine);
+        if (why !== undefined) _noteUnsaved(action as object, undefined, why);
       };
       return counted(
         action.type,
-        (onAdopted) =>
-          owner.call(action, onAdopted).then(
+        (onAdopted) => {
+          let call: Promise<unknown>;
+          try {
+            call = owner.call(action, onAdopted);
+          } catch (e) {
+            calls.delete(mine); // never posted: no batch can be its
+            if (typeof callId === "string") byCall.delete(callId);
+            throw e;
+          }
+          return call.then(
             async (v) => {
               note();
               await settle();
@@ -422,7 +495,8 @@ export function createCellWorkerPool(opts: {
               await settle();
               throw e;
             },
-          ),
+          );
+        },
       );
     },
     ready: async () => {
@@ -441,7 +515,14 @@ export function createCellWorkerPool(opts: {
       // whose composed reduce runs the cell's methods ON THE MAIN ISOLATE —
       // away from the resources its worker owned, and admitted whenever
       // dispatch was still open.
-      await Promise.all([...byCell.values()].map((w) => w.close()));
+      // The settle hook goes only AFTER the drain: an async call that ends
+      // inside it is still answered on an open socket, and without the hook
+      // it was answered at once — `ok`, no verdict, its save not waited for.
+      try {
+        await Promise.all([...byCell.values()].map((w) => w.close()));
+      } finally {
+        offCallSettle();
+      }
     },
     closedBy: () => {
       const out: Record<string, string | null> = {};

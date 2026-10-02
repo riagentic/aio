@@ -23,14 +23,13 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { VERSION } from "../src/server/aio-cli.ts";
+import { freePort } from "../src/testing/server-test.ts";
 
 const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
 /** Serve the repo read-only over loopback — stands in for the JSR registry. */
 function serveFramework(): { base: string; stop: () => Promise<void> } {
-  const listener = Deno.listen({ port: 0, hostname: "127.0.0.1" });
-  const port = (listener.addr as Deno.NetAddr).port;
-  listener.close();
+  const port = freePort();
   const server = Deno.serve(
     { port, hostname: "127.0.0.1", onListen: () => {} },
     async (req) => {

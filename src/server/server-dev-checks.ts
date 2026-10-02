@@ -9,7 +9,7 @@ import {
   type ProdGraphCheck,
   validateGraph,
 } from "./graph-validator.ts";
-import { transpile } from "./server-transpile.ts";
+import { esbuildWork, transpile } from "./server-transpile.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { count } from "../diagnostics/fmt.ts";
 
@@ -115,8 +115,16 @@ export function startGraphValidation(
     };
   }
 
-  const graphTranspile = (s: string, f: string) => transpile(s, f);
   const stopper = new AbortController();
+  // The boot validation is esbuild work the server's close waits for — and
+  // ends: `stop()` refuses every module the walk has not reached yet, so the
+  // close pays for the transpile in flight and nothing after it. It used to
+  // be awaited blind: with an esbuild that had stopped answering, the server
+  // phase of the teardown waited on this promise until the budget cut it.
+  const graphTranspile = (s: string, f: string) =>
+    stopper.signal.aborted
+      ? Promise.reject(new Error("the server closed"))
+      : transpile(s, f);
   const prodGraph = createProdGraphCheck({
     absBaseDir,
     uiEntry,
@@ -124,14 +132,17 @@ export function startGraphValidation(
     debug,
     signal: stopper.signal,
   });
-  const done = validateGraph(
+  const done = esbuildWork(validateGraph(
     entrypoint,
     importMapObj,
     graphTranspile,
     undefined,
     prodGraph,
-  )
+  ))
     .then((result) => {
+      // Landed after the close: a verdict on a walk the close cut short is
+      // not a verdict, and a closed server says nothing.
+      if (stopper.signal.aborted) return;
       graphResult = result;
       // server-only-import is a GUARANTEED client break (sandboxed renderer
       // can't load node:/omitted-aio-symbols) → blocking. server-only-api

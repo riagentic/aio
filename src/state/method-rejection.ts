@@ -7,7 +7,7 @@
 // refusal as a red ERROR box — `[REDUCE_ERROR] … fix: check action payload
 // shape and inspect state at crash` — each time a user mistyped an email.
 // Advice for a crash, on correct code: a warning that cries wolf, which teaches
-// people to ignore the next one (feedback/frustration.md F4). Found by
+// people to ignore the next one (a field report). Found by
 // tests/correct-code-is-silent.test.ts crawling the contacts example.
 //
 // So the REPORT distinguishes the two. What is NOT changed: the caller still

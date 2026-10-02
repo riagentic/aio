@@ -554,6 +554,17 @@ function _sendRaw(msg: string): boolean {
             `serverFn calls, forwarded console lines. Further drops are not ` +
             `repeated.`,
         );
+        // The bus too, as the WS branch does: a console line is all a
+        // packaged window has, and nobody is reading it.
+        diagEmit({
+          type: "browser-air-transport:raw-send-failed",
+          severity: "error",
+          source: "browser-air-transport",
+          message: "IPC bridge refused a write while open — frame dropped",
+          detail: { kind: msg.slice(0, 40) },
+          hint: "The main process end of the bridge is gone or closing. " +
+            "Unqueued frames (sync ops, serverFn, log) are lost, not retried.",
+        });
       }
       return false;
     }

@@ -31,6 +31,7 @@ export const typedMain = cell("typedMain", { state: { n: 0 }, methods });
 
 if (isCellWorker()) {
   await aio.run({
+    watch: false,
     appId: "worker-type-guard-probe",
     cells: [typedWorker, typedMain],
     client: "server-only",

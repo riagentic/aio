@@ -15,7 +15,10 @@ import {
   buildVersionNotes,
 } from "./build-version.ts";
 import { projectAppId } from "../server/single-instance-lock.ts";
-import { bakedServerUrl, resolveEntryPath } from "../server/paths.ts";
+import { bakedServerUrl } from "../server/paths.ts";
+import { isStandalone, resolveAppDir, resolveEntry } from "./config-rules.ts";
+// Their home moved; every importer of this module keeps finding them here.
+export { isStandalone, resolveAppDir, resolveEntry };
 import { resolveMacHost } from "./dmg.ts";
 import { isValidBundleId } from "./build-ios.ts";
 // The bundle-id shape rule is Apple's, and iOS already owns its one copy.
@@ -35,38 +38,6 @@ import {
   PLATFORMS,
   resolvePlatforms,
 } from "./platforms.ts";
-
-/** The entry an app declares in `deno.json`, and the scaffold's default when
- *  it declares none. THE entry decider: every tool that needs to know which
- *  module IS the app — the build, `dev:android`'s server child, the app dir
- *  rule below — reads it from here. A hardcoded `"src/app.ts"` elsewhere is a
- *  second decider, and it breaks the moment an app puts its entry anywhere
- *  else (WYSIDIWYSIP).
- *
- *  `override` is a per-BUILD entry (`--entry=`, which `build-all` passes for a
- *  target that declares its own `entry`) — one repo can hold two apps, a relay
- *  and a client, and each target must compile its own module. It flows through
- *  the same decider so `appDir` and everything derived from it follow for free;
- *  a target-specific app-dir rule would be exactly the second decider this
- *  function exists to prevent. */
-export function resolveEntry(
-  mainConfig: Record<string, unknown>,
-  override?: string,
-): string {
-  // Delegates: `am` needs the same answer and cannot import the build.
-  return resolveEntryPath(mainConfig, override);
-}
-
-/** THE app-dir decider (WYSIDIWYSIP), as one named rule rather than an
- *  expression inlined at its single call site: the app dir is the ENTRY'S
- *  DIRECTORY — exactly what the runtime resolves as `baseDir`
- *  (`aio.ts _inferBaseDir`: the main module's directory). Dev serving and prod
- *  packaging must never resolve an app asset from two different places, so
- *  anything that needs the app dir without a full `loadBuildConfig()` (a test,
- *  a tool) calls THIS instead of re-deriving it. */
-export function resolveAppDir(root: string, configEntry: string): string {
-  return resolve(root, dirname(configEntry));
-}
 
 /** THE macOS bundle-identifier decider — one place, because the outer bundle
  *  and the nested Electron runtime MUST agree on it (matching identifiers are
@@ -358,15 +329,6 @@ export function refuseBadBuildArgs(args: readonly string[]): void {
     );
     Deno.exit(1);
   }
-}
-
-/** Does this build make the standalone bundle? `standalone` when set, else
- *  what it means — so a hand-built config that says only `doAndroid: true`
- *  still gets the APK's bundle, never a silent browser one. */
-export function isStandalone(
-  cfg: Pick<BuildConfig, "standalone" | "doAndroid" | "doWeb">,
-): boolean {
-  return cfg.standalone ?? (cfg.doAndroid || cfg.doWeb === true);
 }
 
 /** Load and validate build configuration from CLI flags + deno.json */

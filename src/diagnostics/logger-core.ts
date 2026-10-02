@@ -21,6 +21,7 @@ import {
   enforceBudget,
   KINDS,
   type LogKind,
+  oncePerStart,
   rotateOnStart,
   wipeOnStart,
 } from "./logger-rotate.ts";
@@ -74,6 +75,17 @@ let _unloadArmed = false;
  *  `--help` run that never inits writes none of its early lines, even at
  *  exit). Module state, not a member: the class is frozen public surface. */
 const _initStarted = new WeakSet<AioLogger>();
+/** Loggers of a launch that does not own its log directory (`guestLogger`) —
+ *  a set, not a member: the class is frozen public surface. */
+const _guestLoggers = new WeakSet<AioLogger>();
+/** Loggers of an app that has STOPPED (`closeLogger`). A stopped app owns no
+ *  directory any more — a test dropped its sandbox, an embedder removed the
+ *  app's tree — so its logger writes NOTHING to disk and never creates a
+ *  directory again. A line that still reaches it (a late callback holding the
+ *  instance) goes to stderr, once; the rest are counted out loud there too.
+ *  A running app's vanished directory is still recreated (`write`'s NotFound
+ *  path): that is an operator's cleanup, not the app's end. */
+const _closedLoggers = new WeakMap<AioLogger, { late: number }>();
 function armUnloadFlush(): void {
   if (_unloadArmed || typeof addEventListener !== "function") return;
   _unloadArmed = true;
@@ -132,6 +144,7 @@ export class AioLogger {
    *   already closed for `--help`/`--version`; the far more common case, a
    *   duplicate start, was left in. */
   async init(opts: { rotate?: boolean } = {}): Promise<void> {
+    _guestLoggers.delete(this);
     const wantRotate = opts.rotate !== false;
     _initStarted.add(this);
     armUnloadFlush();
@@ -142,11 +155,21 @@ export class AioLogger {
       // file names, sizes and write times of the app's whole diagnostic trail.
       await Deno.mkdir(this.dir, { recursive: true, mode: 0o700 });
       const pathFn = this.path.bind(this);
-      const rotated = !wantRotate
-        ? []
-        : this.cfg.backupLogs
-        ? await rotateOnStart(pathFn, this.cfg.backupKeep)
-        : (await wipeOnStart(pathFn), []);
+      // Once for starts that overlap: a second launch in the same moment
+      // must not rotate (or wipe) the files the first has just begun.
+      const rotated = !wantRotate ? [] : await oncePerStart(
+        this.dir,
+        async () =>
+          this.cfg.backupLogs
+            ? await rotateOnStart(
+              pathFn,
+              this.cfg.backupKeep,
+              // Held until the files are ready, then this run's first lines.
+              (m) => this.emit("warn", "logger", m),
+            )
+            : (await wipeOnStart(pathFn), []),
+        [],
+      );
       // AFTER rotation, so the run that just ended is inside the bound like
       // every other, and BEFORE `ready` — the first line of this run must not
       // be written into a directory that is still over budget.
@@ -454,6 +477,18 @@ export class AioLogger {
   private static readonly MAX_PREINIT = 256;
 
   private write(path: string, entry: LogEntry): void {
+    const closed = _closedLoggers.get(this);
+    if (closed) {
+      // One stderr line for the first late entry, whatever its kind — the
+      // record is closed, and saying so once is the loud part.
+      if (closed.late++ === 0) {
+        console.error(
+          `[logger] the app logging to ${this.dir} has stopped; this line ` +
+            `and any after it are not written: ${formatText(entry)}`,
+        );
+      }
+      return;
+    }
     if (!this.ready) {
       // Dropping these outright is a silent failure in the subsystem whose job
       // is to leave a record: `init()` is async (rotation, budget enforcement),
@@ -466,7 +501,9 @@ export class AioLogger {
       // was short.)
       if (this._preInit.length < AioLogger.MAX_PREINIT) {
         this._preInit.push({ path, entry });
-        if (_initStarted.has(this)) _unflushed.add(this);
+        if (_initStarted.has(this) || _guestLoggers.has(this)) {
+          _unflushed.add(this);
+        }
       } else {
         this._preInitDropped++;
       }
@@ -562,7 +599,7 @@ export class AioLogger {
           // start emitting an endless error stream because LOGGING broke, and
           // an operator who deletes a log directory expects it to reappear, not
           // to lose the app's voice until restart. Recreate once, then retry.
-          if (e instanceof Deno.errors.NotFound) {
+          if (e instanceof Deno.errors.NotFound && !_closedLoggers.has(this)) {
             try {
               await Deno.mkdir(dirname(path), { recursive: true, mode: 0o700 });
               await Deno.writeTextFile(path, lines.join("\n") + "\n", {
@@ -802,6 +839,35 @@ function tightenOnce(fixed: Set<string>, path: string): Promise<void> {
   return Deno.chmod(path, 0o600).catch(() => {});
 }
 
+/** A process whose log directory belongs to ANOTHER live instance (a
+ *  second launch of a running app): it does not open the files. Its lines
+ *  wait in memory — written properly if it becomes the app after all
+ *  (`init`), and otherwise dropped at exit except ONE: its first error, the
+ *  refusal, appended to `app.log`, which is where a user who double-clicked
+ *  and got no window looks for why. No `debug.log`/`error.log` line, no
+ *  file created but that one. A launch that hands over (window to the
+ *  front) says only info, so it leaves nothing at all. A function, not a
+ *  member: the class is frozen public surface. @internal */
+export function guestLogger(l: AioLogger): void {
+  _guestLoggers.add(l);
+  armUnloadFlush();
+  if (l["_preInit"].length > 0) _unflushed.add(l);
+}
+
+/** The app `l` served has stopped and its last lines are flushed: from here
+ *  `l` writes no file and creates no directory (see `_closedLoggers`). Call
+ *  it after the final `flush()`. A function, not a member: the class is
+ *  frozen public surface. @internal */
+export function closeLogger(l: AioLogger): void {
+  if (_closedLoggers.has(l)) return;
+  // Lines handed over before the stop still go out now (into the directory
+  // as it is — a gone one is reported, not recreated), and no timer of
+  // this logger outlives its app.
+  l["_flushBuffers"]();
+  _closedLoggers.set(l, { late: 0 });
+  clearInterval(l["heartbeatTimer"]);
+}
+
 /** Write every line `l` holds NOW, synchronously — the process is exiting and
  *  no timer or promise will run again. Lines held before `init()` finished go
  *  to their files as they are (an exit mid-init never rotates). Reaches the
@@ -813,8 +879,9 @@ function tightenOnce(fixed: Set<string>, path: string): Promise<void> {
  *  reads, and a GUI exe or a service has no stderr to catch them. A test that
  *  drops its sandbox stops its logger first. An async write already handed to the OS when
  *  the process exits is not waited for: it lands, or it does not, before
- *  these lines (Deno.exit does not drain it). */
-function flushAtExit(l: AioLogger): void {
+ *  these lines (Deno.exit does not drain it). Exported for its test.
+ *  @internal */
+export function flushAtExit(l: AioLogger): void {
   const timer = l["_flushTimer"];
   if (timer !== null) {
     clearTimeout(timer);
@@ -823,7 +890,14 @@ function flushAtExit(l: AioLogger): void {
   _unflushed.delete(l);
   queueRepeatSummaries(l["_lastLine"], l["_buffers"]);
   const out = new Map<string, string[]>();
-  if (!l["ready"] && _initStarted.has(l)) {
+  if (!l["ready"] && _guestLoggers.has(l)) {
+    const app = l.path("app");
+    const refusal = l["_preInit"].find((h) =>
+      h.path === app && h.entry.lvl === "error"
+    );
+    if (refusal) out.set(app, [l["_capLine"](formatText(refusal.entry))]);
+    l["_preInit"] = [];
+  } else if (!l["ready"] && _initStarted.has(l)) {
     for (const h of l["_preInit"]) {
       const lines = out.get(h.path) ?? [];
       lines.push(l["_capLine"](formatText(h.entry)));
@@ -837,7 +911,10 @@ function flushAtExit(l: AioLogger): void {
   l["_buffers"].clear();
   for (const [path, lines] of out) {
     try {
-      Deno.mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+      // A stopped app's directory is not this logger's to create again.
+      if (!_closedLoggers.has(l)) {
+        Deno.mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+      }
       Deno.writeTextFileSync(path, lines.join("\n") + "\n", {
         append: true,
         mode: 0o600,

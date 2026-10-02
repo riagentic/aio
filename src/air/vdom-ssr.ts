@@ -927,16 +927,18 @@ function _rts(
     } else if (areaText !== null) {
       html += areaText;
     } else if (RAW_TEXT_ELEMENTS.has(tag)) {
-      // <script>/<style> hold RAW text — see `rawTextContent`.
+      // <script>/<style> hold RAW text, judged whole — see `rawTextContent`.
       const inner: SsrNodes = { n: 0 };
+      let text = "";
       for (const child of vnode.children) {
         if (typeof child === "string" || typeof child === "number") {
           inner.n++;
-          html += rawTextContent(tag, String(child), isDevMode());
+          text += String(child);
         } else {
-          html += dropSlotMarkers(_rts(child, inner, scope));
+          text += dropSlotMarkers(_rts(child, inner, scope));
         }
       }
+      html += rawTextContent(tag, text, isDevMode());
     } else {
       const inner: SsrNodes = { n: 0 };
       const text = TEXT_CONTENT_ELEMENTS.has(tag);

@@ -63,6 +63,7 @@ export function groupOf(path: string): string | null {
   const last = p.lastIndexOf("node_modules/");
   if (last >= 0) {
     const after = p.slice(last + "node_modules/".length);
+    // aio-ok: path-split — an esbuild metafile input path — esbuild writes `/` on every host
     const parts = after.split("/");
     let name = parts[0] ?? "";
     if (name.startsWith("@") && parts.length > 1) name += `/${parts[1]}`;

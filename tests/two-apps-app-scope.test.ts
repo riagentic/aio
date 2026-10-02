@@ -61,6 +61,7 @@ async function boot(
       setTimeout(() => log.warn(`ONSTART-TIMER-${id}`), 30);
     },
     ...extra,
+    watch: false,
   } as never) as unknown as App;
   return {
     app,

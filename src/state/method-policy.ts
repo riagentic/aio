@@ -145,18 +145,11 @@ function _sweepCache(cache: PolicyStore["cache"]): void {
  *  `scan(new Set(["/b"]))` with `scan:/a`. */
 const UNDEF = "\u0000aio:undefined";
 
-/** Whether `v` is inside the domain `argsKey` can key faithfully.
- *
- *  `toJSON` widens it for a KEY built from a value (see {@linkcode
- *  isJsonKeyable}): an object JSON will replace via `toJSON` before the
- *  replacer sees it (a `Date`, a class with a `toJSON`) is keyed by that
- *  replacement, so it does not collide. It is OFF for a call's arguments,
- *  where the receiver gets the replacement rather than the value. */
-function isKeyableData(
-  v: unknown,
-  stack: Set<object>,
-  toJSON = false,
-): boolean {
+/** Whether `v` is inside the domain `argsKey` can key faithfully. (A key
+ *  built from a VALUE rather than a call — a user record — is
+ *  `userMemoKey`'s, in auth-context.ts, with a walk of its own: its domain
+ *  is wider, and a `toJSON` there is never trusted.) */
+function isKeyableData(v: unknown, stack: Set<object>): boolean {
   switch (typeof v) {
     case "boolean":
       return true;
@@ -182,27 +175,8 @@ function isKeyableData(
           : proto !== Object.prototype && proto !== null
       ) {
         // Set, Map, RegExp, a typed array, or a class instance: none is
-        // faithfully described by its enumerable own keys. A `toJSON` DOES
-        // describe the value the JSON carries — but only if the REPLACEMENT is
-        // itself faithfully keyable. Answering true for "has a toJSON" was
-        // wrong when that method returns a `Map`/`Set`/`RegExp`/typed array (or
-        // `undefined`): JSON then carries an unfaithful replacement, and two
-        // DIFFERENT records collided on `"{}"` — the very aliasing this
-        // widening was meant to prevent.
-        if (!toJSON) return false;
-        const tj = (v as { toJSON?: unknown }).toJSON;
-        if (typeof tj !== "function") return false;
-        stack.add(v);
-        let replaced: unknown;
-        try {
-          replaced = (tj as () => unknown).call(v);
-        } catch {
-          return false; // a throwing toJSON is no key (JSON.stringify throws too)
-        } finally {
-          stack.delete(v);
-        }
-        if (replaced === undefined) return false; // JSON drops it: no identity
-        return isKeyableData(replaced, stack, true);
+        // faithfully described by its enumerable own keys.
+        return false;
       }
       if (Object.getOwnPropertySymbols(v).length > 0) return false;
       const keys = Object.keys(v);
@@ -212,9 +186,7 @@ function isKeyableData(
       stack.add(v);
       try {
         for (const k of keys) {
-          if (
-            !isKeyableData((v as Record<string, unknown>)[k], stack, toJSON)
-          ) {
+          if (!isKeyableData((v as Record<string, unknown>)[k], stack)) {
             return false;
           }
         }
@@ -226,19 +198,6 @@ function isKeyableData(
     default:
       return false; // function, symbol, bigint
   }
-}
-
-/** Whether `v`'s JSON is a faithful KEY for it — the domain a cache keyed on a
- *  VALUE needs (e.g. `userMemoKey`, which keyed a `Map`/`Set`/class field to
- *  `{}` and so aliased two different callers into one slot; and the `ttl` /
- *  `"first"` caller cache that shares the key).
- *
- *  Same walk as {@linkcode argsKey}'s, plus: an object JSON replaces via
- *  `toJSON` is keyed by that replacement, so a `Date` field in a user record
- *  remains keyed instead of silently disabling the cache. `false` means
- *  "produce no key and recompute", never "guess". @internal */
-export function isJsonKeyable(v: unknown): boolean {
-  return isKeyableData(v, new Set(), true);
 }
 
 export function argsKey(args: readonly unknown[]): string | null {

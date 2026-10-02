@@ -598,9 +598,12 @@ export function bindCellReactive(
     // READ, so a selector that never touches a hidden field stays silent (and
     // a deps-form selector over other cells keeps working).
     for (const [key, selectorFn] of Object.entries(selectors)) {
-      const isDeps = key in
-        ((def.__aio as { selectorDeps?: Record<string, unknown> })
-          .selectorDeps ?? {});
+      // OWN keys — see the same test in cell-catalog.ts.
+      const isDeps = Object.hasOwn(
+        (def.__aio as { selectorDeps?: Record<string, unknown> })
+          .selectorDeps ?? {},
+        key,
+      );
       Object.defineProperty(def, key, {
         value: (...args: unknown[]) => {
           trackCell(def);

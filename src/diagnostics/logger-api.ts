@@ -73,6 +73,12 @@ export function releaseAppLogger(l: LogSink): void {
   _retired.add(l);
 }
 
+/** Is this app's logger still attached (installed, and not yet released by
+ *  its app's stop)? */
+export function appLoggerInstalled(l: LogSink): boolean {
+  return _apps.some((a) => a.sink === l);
+}
+
 /** How to ask "whose app is running this code?". Installed once by the
  *  server side (an AsyncLocalStorage, which this client-reachable module must
  *  not import). */

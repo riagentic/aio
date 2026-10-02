@@ -249,11 +249,27 @@ dispatch, SQL, whole-state replace. That endpoint is same-machine-only and
 dev-only, and on an app running `auth: true` / `users:` / `resolveUser` it also
 requires authority, because it is `/__aio/snapshot`'s power and more.
 
-The authority is **owning the machine**, not membership in the app. At boot a
-dev app mints `<data>/control.key` — 256 bits, mode `0600` inside the `0700`
-data dir, fresh every boot and deleted at shutdown. `am` reads it and presents
-it as a header on control-plane calls only; it never travels to `/ws`, to your
-app's routes, or to `/__aio/snapshot`.
+The authority is **owning the machine**, not membership in the app. At boot an
+app mints `<data>/control.key` — 256 bits, mode `0600` inside the `0700` data
+dir (on Windows, where a mode means nothing: created with an owner-only DACL,
+read back and checked — needs `--allow-ffi`; a DACL that is not owner-only, in
+any directory `AIO_APPS_DIR` points at, is refused and the app says why), fresh
+every boot and deleted at shutdown. A production build mints it too, and answers
+it exactly one request: the stop (`POST /__aio/trojan/shutdown`) — so `am stop`
+ends a production app cleanly on every OS instead of by a signal, which on
+Windows is a hard kill (no `onStop`, no final flush). Any `am` since
+1.0.0-alpha46 already presents it; an app built before 1.0.17-beta has no stop
+to answer, and gets the signal. `am` reads it and presents it as a header on
+control-plane calls only; it never travels to `/ws`, to your app's routes, or to
+`/__aio/snapshot`.
+
+A stop the app REFUSES (a stale or hand-edited `control.key`) is logged in
+`app.log` before the app answers, and `am stop` says so on stderr ("the app
+refused the stop credential — … ending it without a clean shutdown") before it
+falls back to the signal. `am stop --json` reports how the app ended:
+`"how":
+"graceful"` (it ran its own shutdown), `"signal"`, or `"killed"`
+(Windows, where a signal is `TerminateProcess`).
 
 Nothing to configure. If `am` cannot read it you get a refusal that names the
 file and distinguishes "no credential" from "a stale one", instead of a bare
@@ -367,20 +383,29 @@ deno task am open                 # open THIS app in a browser (--print writes t
 In a repo that declares COMPONENTS (below), `start`, `stop`, `restart` and
 `status` mean the whole project, and take a component label to mean one of it.
 
+`start --json` and `status --json` name the app's door:
+`{ appId, pid, port, status, url }`. `url` is the link for THIS machine —
+`http://localhost:<port>`, `https://` when the app serves TLS — so a script
+opens it without assembling one. A socket-only desktop app bound no port and has
+no `url`; it carries `transport: "uds"` and `socketPath` instead.
+
 Exit codes: `started` -> 0, `stopped` -> 1, `starting`/`stopping`/`maintenance`
 -> 2. `maintenance` is `am backup` / `am restore` holding the app's lock
 (`--json`: `{ appId, status, op, pid }`); `start`, `stop` and the app verbs
 refuse while it lasts, naming it. `am instances` lists the hold the same way
-(`status: "maintenance"`, `op`, no `stopWith`). `am kill` is the one verb that
-acts on it: it interrupts the op (SIGTERM), which removes its partial copy and
-exits 143 with `data/` as it was. A holder that is wedged and ignores even that
-(a hung disk, a stopped process) is ended with `kill -9 <pid>`: the lock names a
-dead pid from then on, and whatever finds it next — `am start`, `am status`,
-`am instances`, or the app's own boot — reclaims it, saying which op was killed
-and naming the partial copy it left. A killed backup leaves `<dest>.partial`
-(refused by name, never reused); a killed restore leaves `data/` old or restored
-(killed between the swap's two renames: missing, with the previous data in
-`data.replaced-*`), plus a `data.restoring-*` that the next restore names.
+(`status: "maintenance"`, `op`, no `stopWith`). A hold is not a running app to a
+command about any OTHER app: it is not offered as "the one app that is running",
+not listed under "N apps are running", and `--port=0` does not name it.
+`am kill` is the one verb that acts on it: it interrupts the op (SIGTERM), which
+removes its partial copy and exits 143 with `data/` as it was. A holder that is
+wedged and ignores even that (a hung disk, a stopped process) is ended with
+`kill -9 <pid>`: the lock names a dead pid from then on, and whatever finds it
+next — `am start`, `am status`, `am instances`, or the app's own boot — reclaims
+it, saying which op was killed and naming the partial copy it left. A killed
+backup leaves `<dest>.partial` (refused by name, never reused); a killed restore
+leaves `data/` old or restored (killed between the swap's two renames: missing,
+with the previous data in `data.replaced-*`), plus a `data.restoring-*` that the
+next restore names.
 
 A global flag given to a verb that does not read it is warned about on stderr
 and ignored — the verb still runs, with its own exit code — and the warning
@@ -477,7 +502,9 @@ Two rules make this predictable:
 `--client=server-only`, a browser kind `--client=browser`, `"cli"`
 `--client=cli` — not the project's default client. An `"electron"` component
 keeps the project's client (a GUI client is never forced). An explicit
-`--client=` (or `--headless`/`--service`) on the command line wins.
+`--client=` (or `--headless`/`--service`, which `am` passes to the app as
+`--client=server-only` — the app itself refuses the build words) on the command
+line wins.
 
 **`am` never invents a port.** A component that declares none gets a free one
 from the runtime — the same `findFreePort()` behind `deno task dev` — and
@@ -1422,7 +1449,44 @@ variable). `am restart` replays it from `launch.json`.
   for the life of the app (`.aio-instance.json` beside it names the holder), so
   two processes in different lock scopes (`--instance`, `AIO_APPS_DIR`) still
   cannot open one `state.db`: the second is refused with
-  `already running from …`.
+  `already running from …`. The same holds in ONE scope when the lock file is
+  gone or names someone else: a live holder of the folder refuses the start
+  (`… is already running (pid N): it holds the data folder …`; a desktop launch
+  brings that window to the front and exits 0).
+- **A live process loses its lock only on sustained evidence — and is ended
+  first.** A holder whose pid is alive is called a zombie only when its record
+  has not changed for 10 s and six connection attempts over 2.5 s all found
+  nothing listening on its socket or port. One refused connect, a busy pipe, or
+  a record written a moment ago never is. The launch then ENDS that process
+  (asks, waits, forces) and takes over once it is gone; if it cannot be ended,
+  the start is refused, exit 1, naming the pid
+  (`… answers nothing, and could not be ended`). `am start` applies the same
+  verdict before it ends an instance that does not answer.
+- **Probed where the app said it listens.** The lock records the address the app
+  binds (`host`) with its port; the verdict connects there (`0.0.0.0` on
+  `127.0.0.1`; `::` on `::1` and `127.0.0.1` — any accept is alive, and an
+  address this machine cannot reach counts for nothing), or to the socket the
+  record names. A record that names a port but no address — written by
+  1.0.16-beta or older — proves nothing about reachability: such a holder is
+  never judged a zombie, and the launch is refused (`Already running`, with the
+  pid and how to stop it).
+- **A listener is never ended by `am`.** An instance that is alive and has
+  something listening where its record says, but does not answer — `starting`
+  past its grace or `started` — is refused by `am start` with
+  `not answering: <app> (pid N, port P) … am stop --app=<app> asks it to quit;
+  am kill --app=<app> ends it.`;
+  `am status` says the same sentence with the record's own status (`--json`:
+  `answering: false`, exit 2). Only a boot with nothing bound and no log
+  progress for `STUCK_STARTING_MS`, or the zombie verdict above, ends a process.
+- **A socket file removed under a running app is said.** The running app checks
+  on its slow tick that the socket file its record names is still there; when a
+  cleaner removed it, the app's log says so once, loudly — nothing new can
+  connect, and a second launch would end it as a zombie (its line then says
+  `the socket file is gone`). Restart the app to listen there again.
+- **A running app keeps its lock file filed.** If the file is removed under it
+  (a temp cleaner), the app files its record again within 5 s
+  (`the lock file … was gone while this app ran — filed again`), so `am` finds
+  it again.
 - **Ports do not change**: a free port unless the app fixes one (a packaged
   Electron app binds none). Two copies of an app with a fixed `port` clash; the
   refusal names the aio app holding the port and suggests `--port=0`.
@@ -1720,16 +1784,16 @@ curl -X POST localhost:$PORT/__aio/trojan/trigger/0 \
 
 ## HTTP endpoints
 
-| Endpoint               | Availability | Purpose                                    |
-| ---------------------- | ------------ | ------------------------------------------ |
-| `/`                    | always       | HTML shell — entry point                   |
-| `/ws`                  | always       | WebSocket — state sync, actions, deltas    |
-| `/__aio/ui.js`         | dev only     | Live-transpiled browser code               |
-| `/__aio/error`         | dev only     | Error overlay                              |
-| `/__aio/snapshot` GET  | always       | Full raw state dump                        |
-| `/__aio/snapshot` POST | always       | Load state from JSON                       |
-| `/app.js` `/style.css` | prod only    | Pre-bundled dist assets                    |
-| `/__aio/trojan/*`      | always       | Control REST API (dev-only -> 403 in prod) |
+| Endpoint               | Availability | Purpose                                                                          |
+| ---------------------- | ------------ | -------------------------------------------------------------------------------- |
+| `/`                    | always       | HTML shell — entry point                                                         |
+| `/ws`                  | always       | WebSocket — state sync, actions, deltas                                          |
+| `/__aio/ui.js`         | dev only     | Live-transpiled browser code                                                     |
+| `/__aio/error`         | dev only     | Error overlay                                                                    |
+| `/__aio/snapshot` GET  | always       | Full raw state dump                                                              |
+| `/__aio/snapshot` POST | always       | Load state from JSON                                                             |
+| `/app.js` `/style.css` | prod only    | Pre-bundled dist assets                                                          |
+| `/__aio/trojan/*`      | always       | Control REST API (dev-only -> 404 in prod; the stop alone answers `control.key`) |
 
 ## For AI agents
 

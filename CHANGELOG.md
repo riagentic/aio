@@ -1,5 +1,1853 @@
 # Changelog
 
+## v1.0.17-beta — the size repair, and what an audit of 1.0.15 and 1.0.16 found shipped broken (2026-10-03)
+
+> **The public surface only grows: one optional key,
+> `electron: { allowLocalPeers }`. Nothing is removed or renamed.** Behaviour
+> does change in places an existing app can see — they are listed first, below,
+> and in [the upgrade guide](docs/upgrade/from-1.0.16-beta-to-1.0.17-beta.md).
+
+Two things are in this release.
+
+**The size repair.** 1.0.16-beta made a compiled binary smaller, but on a real
+host the TypeScript compiler and several other packages were still embedded, and
+the audit meant to catch that read the artifact wrong — so it reported a clean
+binary that was not one. A field report measured it on a live app (a 545.7 MB
+binary; 32,432 VFS files).
+
+**An audit of 1.0.15-beta and 1.0.16-beta.** It found defects that had already
+shipped: a minified desktop build whose window never reconnected, a `blocking()`
+function that failed in every compiled build, a local-peer lockdown with a
+second socket it did not gate, a Windows one-click `.exe` that could destroy its
+own install, a version read that refused ordinary projects, and three
+environment variables that started refusing a boot. They are repaired here; each
+section heading says which release shipped its defects, and a bullet names the
+test that pins the repair where one exists. A few defects older than both
+releases were met on the way and are repaired too; their bullets say since when.
+The 1.0.16-beta and 1.0.15-beta entries below carry a correction note where
+their text claimed more than the code did.
+
+### What an existing app can notice
+
+#### Desktop apps
+
+- **`--prod --client=electron` run from source needs `--allow-ffi`** on Linux
+  and macOS (`-A` includes it; a compiled build already has it). Without it the
+  app refuses to start and names the flag. In 1.0.16 it started and showed a
+  blank window.
+- **A production desktop app tells other local processes less.** A process that
+  is not the app's own window may ask `GET /__aio/health` over `ctl` and is told
+  `{ status, appId }`; `am stop`'s `POST /__aio/trojan/shutdown` passes on to
+  the check of the app's control credential; any other `ctl` request is
+  answered 404. On the HTTP socket it is answered 403 within 2 s, whether it
+  sent a request or nothing. 1.0.16 ran the whole HTTP handler for it there —
+  the app's `routes`, `/__aio/vitals`, `/__aio/metrics`, the full health
+  document.
+- **A same-user companion process** that connects to a production desktop app's
+  local socket needs `electron: { allowLocalPeers: true }`. It has been refused
+  a session since 1.0.16; the opt-out is new. Only the boolean `true` turns the
+  lockdown off — any other value leaves it on, with a warning.
+- **A wrapper named by `$ELECTRON_PATH` must `exec` Electron.** The window has
+  to be the process the server launched; a wrapper that starts Electron as a
+  child gets an ERROR naming both pids instead of a silent blank window.
+- **aio starts the Electron binary itself**, in dev and in production, instead
+  of the `node_modules/.bin/electron` shim. `$ELECTRON_OVERRIDE_DIST_PATH` is
+  honoured as the shim honours it, a package without a `path.txt` included
+  (`<override>/electron`).
+- **A window that is told nothing for 5 s after connecting** says why once, as a
+  warning, appends `— no answer from its server yet (reconnecting)` to its title
+  until the server answers, drops the connection and reconnects with a backoff
+  of up to 8 s.
+- **Under `--keep-server`, a production app closes the window's open sessions
+  and HTTP connections when the window exits.**
+- **An app started from a directory that is not a project** (no `deno.json`,
+  `deno.jsonc` or `package.json` — a login item starts in the home directory) no
+  longer runs `deno install` there. It uses the cached Electron runtime and says
+  so in one info line.
+- **The macOS bundle has a new layout.** `Contents/MacOS/` gains `app_window`, a
+  relative link to the nested runtime that the window is started through;
+  `Contents/Resources/` gains the runtime's kept `.lproj` stubs; `Info.plist`
+  gains the runtime's `NS…` and `Electron…` keys. `ps` shows the window as
+  `…/Contents/MacOS/app_window`.
+- **macOS: opening a running app again** shows a window that was hidden to the
+  tray.
+- **The window's generated main script and its preload live in the app's profile
+  directory** (`<profile>/aio-main/`, `<profile>/aio-preload/`, one file per
+  process), not in the temp directory. The main script removes itself once the
+  window has loaded it, and a launch removes the files of processes that are
+  gone.
+- **A window no longer survives its server.** `am stop`, a signal to the app or
+  the window, the server dying, or a crash of the window's main process ends it
+  whatever the page's `beforeunload` answers — the process ends itself if the
+  quit has not finished in 3 s. A close or quit by the user still honours
+  `beforeunload`.
+- **A packaged desktop app whose window cannot be started stops, exit 1**, with
+  the reason in its log, where it ran on with no window. `--keep-server` and a
+  run from source keep serving.
+- **Started from a checkout of the framework itself** (`deno task amui` reaches
+  it), the dev launcher no longer runs `deno install npm:electron` there either;
+  it uses the cached runtime, and so does a build.
+- **The WebSocket desktop shell logs `ui mounted`**, as the local-socket shell
+  does.
+- **The boot line `launching Electron (…)`** says `packaged` for a macOS bundle
+  and a double-clicked Windows exe, where it said `$ELECTRON_PATH`.
+- **A page that calls `window.close()`** goes through the window's close, on
+  every desktop OS: with `closeToTray` the window hides, where the app ended;
+  without it the app ends as before.
+- **macOS: the app has an application menu** — the app's Hide and Quit, Edit,
+  Window — which carries Cmd+Q, Cmd+H, Cmd+C/V/X/A/Z, Cmd+W and Cmd+M. Cmd+W
+  closes the window the way the close button does. Linux and Windows have no
+  menu, as before.
+- **`window.__aioWindow`** (minimize, maximize, close) also exists in the
+  WebSocket shell; it was in the local-socket shell only.
+- **Starting an app that is already running** (and an `am` liveness check)
+  writes no lockdown warning into the running app's log: a peer that connects
+  and hangs up without sending anything is a debug note, at most one a minute
+  per socket, and more than 20 of them inside a minute is one warning. A refused
+  peer that sent nothing but stays connected is reported after 1 s.
+- **Double-clicking an app that is still starting**: the second launch waits for
+  the first window (up to 13 s) and exits 0 once that window has mounted its
+  page, where it exited 1 at once. `Already running` for an instance still
+  starting prints no URL and says `(pid N, still starting)`. If the first
+  instance dies during the wait, the second starts.
+- **Windows: an installed app's window, and what `openExternal` or an external
+  link starts, run from the Windows directory**, not the install folder. A
+  relative path given to `openExternal` still resolves against the app's
+  directory; the window's main script reads the app's directory from
+  `AIO_APP_CWD`. The start-up console helper is `PING.EXE`, started there too.
+- **The macOS bundle's `LSMinimumSystemVersion`** follows the bundled runtime:
+  13.0 with the Electron it carries now, where the bundle said 12.0.
+
+#### The local HTTP socket
+
+- **`<app>.http.sock` is served by aio's own HTTP server, in dev and in
+  production.** 1.0.16 used `Deno.serve` there. What a route sees is held equal
+  to `Deno.serve` by a test — `req.url` (still `http+unix://<Host>/…`), header
+  bytes, `req.signal`, streamed bodies, `Content-Length` for a body that is
+  already whole, a connection kept for the next request. What differs on
+  purpose: **no WebSocket upgrade on that socket** (`Upgrade: websocket` is
+  answered 501; the window speaks NDJSON on the state socket); a connection is
+  closed after a request whose body is still on the connection when the answer
+  is written (an unread chunked body, a body the route cancelled, a body on a
+  `GET` or `HEAD`), and for an HTTP/1.0 client (the answer then says
+  `Connection: close`); the HTTP/2 preface, a head line ended by a bare LF, a
+  `Content-Length` or a chunk size above 2^53 − 1 and an absolute target no URL
+  can be made of are answered 400; response header names are written lowercase,
+  the route's in sorted order and then the server's own; a request head that has
+  begun and is not complete within 30 s is answered 408; and a shutdown waits 2
+  s for requests in flight (an upload still arriving when it begins is let
+  finish inside them). The full list is in `docs/clients/transports.md`.
+  `curl --unix-socket` keeps working.
+- **A request on the local HTTP socket costs more:** compared with 1.0.16, which
+  used `Deno.serve` there, a request takes about 1.4–1.5× the time (on the order
+  of 50–60 µs instead of 30 µs of server CPU per request in a real app), and the
+  process's RSS grows about 40 MB more over the first 5000 requests (about 16–21
+  MB more at 20,000; flat over 400,000 — no leak). A JavaScript server pays for
+  a `Request` and its abort signal per request through public API.
+- **In production, the window process no longer holds the server's listening
+  sockets.** They are close-on-exec; a process the server spawns does not
+  inherit them.
+- **The Windows `-http` pipe**, which that server already served, now answers as
+  `Deno.serve` does in the places the comparison found it did not: header bytes
+  are latin1, `req.signal` aborts and a response stream is cancelled when the
+  client leaves, a body that is already whole carries its `Content-Length` (it
+  was sent chunked), a 500 says `Internal Server Error`, a `Date` header is
+  added, `Expect: 100-continue` is answered, `CONNECT`/`TRACE` get 501 instead
+  of a closed connection. It also keeps a connection for the next request, where
+  it closed each after one.
+
+#### Builds
+
+- **A library that loads a build-only package at runtime but lists it only as a
+  peer** (`typescript`, usually) worked in a 1.0.16 binary because the package
+  was embedded by mistake. It is now really left out; the build prints a `!`
+  warning naming the package, the library and the line that puts it back,
+  `"build": { "keepPackages": ["typescript"] }`.
+- **A name in `build.keepPackages` now wins over every rule that leaves a
+  package out, and brings what the package needs.** In 1.0.16 a named package
+  could still be left out without a word (one linked only from a build-only
+  package), or kept without its own dependencies. Such a binary grows by those
+  packages. A build-only package on the way (`esbuild` under `tsx`) must be
+  named too, and the build says so; a name that matches no installed package is
+  warned about.
+- **A server module the minifier cannot handle safely ships as written, named in
+  a `!` warning** — its comments are then in the binary. That is a module with a
+  decorator, one whose minified text TypeScript or deno would read differently
+  (`[(a < b), c > (d ?? 0)]`), and one that uses the name `__aioName` itself. In
+  1.0.16 the first got the minified class name (or stopped the build, for a
+  legacy parameter decorator) and the second crashed the compiled build.
+- **A minified build defines one global, `__aioName`.** An app that sends a
+  function's source (`fn.toString()`) to a realm aio does not run may see
+  `__aioName is not defined` there; `docs/build/targets.md` gives the one-line
+  definition.
+- **A `blocking()` function reads its written `.name`** in a minified build; it
+  read the minifier's.
+- **An invalid `build.chromiumExtras`** is now named on a macOS build and on a
+  build run with `AIO_STRIP_CHROMIUM=1`: a warning that says which setting
+  decides, and the build goes on, as it did on 1.0.16. A Windows or Linux build
+  without the env form refuses the value, as before.
+- **An interrupted compile exits 130 (Ctrl-C) or 143 (`SIGTERM`)** after putting
+  `node_modules` back.
+- **The second and every later Windows or macOS build of a project is about 10
+  MB smaller** and no longer prints "still embeds build-tool files"; no compiled
+  binary carries aio's builder any more.
+- **A cross-built binary embeds the target's native packages only**, so it is
+  smaller where a kept package has per-platform binaries. A cross build runs one
+  `deno install` for the target before the compile, against a temporary copy of
+  the lock: the project's `deno.lock` and tracked files are not written by a
+  build. The target's packages stay in `node_modules/.deno` afterwards; each
+  compile leaves the ones for another system out. If that install fails
+  (offline, a package not cached) the build stops and says which package.
+- **The version of a project that builds to `--out` dirs stops moving.** A
+  project without git that got a new version on every build now gets the same
+  one for the same sources (it changes once, to that value). A build or publish
+  records the directories it wrote to in `.aio/outputs.json`; a recorded
+  directory is left out of the version only while it holds what was put there,
+  so a stray file in one makes it count as source for as long as the file is
+  there.
+- **`am publish --dir=<a source dir>` stops**, exit 1, before the build, with
+  nothing written: the project root, `src/`, an app dir, `.git`, `.aio`, a
+  directory inside or around one of them, or inside `dist/`. `--out` and `--dir`
+  at a link to such a directory, or at `src.` / `src` (which Windows reads as
+  `src`), are refused the same way.
+- **A build into an out dir that holds only a release and a desktop's own files
+  (`.DS_Store`, `Thumbs.db`, `desktop.ini`) proceeds**; it was refused. Those
+  files do not move the version either.
+- **`am publish` twice from unchanged sources gives the same version**, and the
+  second publish of a clean git project is no longer refused as dirty.
+- **A cross build warns when the app itself imports a package built for another
+  system.**
+- **A binary asked for its data contract (`--aio-data-contract`) prints one more
+  line, `[aio] data-contract: …` (`[aio:<nonce>] …` when `ship` or `am publish`
+  asks), on stderr.** Stdout is unchanged.
+- **Files inside a package are 0755 (directories, executables) or 0644**,
+  whatever the builder's umask — a builder with umask 002 gets 0644/0755 where
+  it had 0664/0775. The `<name>-web` folder and the iOS project folder get the
+  same modes.
+
+#### The Windows one-click `.exe`
+
+- **A second double-click during the first extraction** waits for it and starts
+  the app; opening a different version's `.exe` while the app runs changes
+  nothing and says to close the app first. Either could destroy the install in
+  1.0.16.
+- **A symlink in the staged app is packed as a copy of its target**, and the
+  build says so with the size. One that points outside the app, at nothing, or
+  at a folder it is inside stops the build, naming the path.
+- **A stub that cannot be read, fetched or verified** gives the legacy fat exe
+  with a warning, not a failed build; a registry that does not answer is given
+  up on after 60 s. The same staged package packs to the same payload.
+- **A leftover `win-<arch>.replaced` or `.incoming` folder** beside a good
+  install is removed on the next launch.
+- **A file of the app that changes while the `.exe` is being packed** is named
+  by the build, which then uses the zip payload; a pipe in place of a listed
+  file no longer hangs it.
+
+#### Versions, memory, updates
+
+- **A large project keeps a version.** Past 20,000 files or 128 MB the
+  `-dirty`/`-nogit` hash is taken from path, size and mtime (it differs per
+  checkout and moves on `touch`) where 1.0.16 reported `unknown (…)`; past
+  50,000 files, 50,000 directories or 64 levels it is still `unknown (…)`. A
+  pinned `"version"` reads no tree at all. `unknown (…)` is now one line with no
+  path.
+- **Memory reports.** A native-leak report needs a second climbing window —
+  within ten windows of the first, or a third when they are further apart; the
+  windows need not touch while RSS keeps what it gained. Within one climb it is
+  said again only when RSS stands a bar (256 MB, or a quarter of where the climb
+  began) above where it was last said. A `machine` report is said once and again
+  per further tenth of RAM, prints RSS, and does not set `nativeLeak`. A budget
+  error's message contains `MEMORY_UNBOUNDED`. The tip under a native or a
+  `machine` report no longer sends its reader to cell state.
+- **`AIO_MAX_HEAP_MB` always says what it did.** `0x2000`, `1e4`, `4096.0` and
+  `+4096` cap the heap at the number they were read as, as in 1.0.16, and now
+  warn that the spelling is not plain digits. `4g`, `0` and `-5` are no cap, as
+  in 1.0.16, and now warn. A value below the floor is raised, with a warning.
+- **A directory install's `installed.json` follows in-app updates.** It is
+  written when an update is confirmed healthy. A record found wrong at boot with
+  no update in flight is corrected with one `WARN updates` line
+  (`… named X while Y is running — corrected`) — an install that updated itself
+  under an older aio sees that line once.
+- **A directory install that a 1.0.17 app updates to a release built with an
+  older aio records no digest of what it runs**: a re-published build of the
+  same version is not offered to it until the next version. Build releases with
+  1.0.17 or later.
+- **A rollback that failed once and worked on the next boot** is reported as
+  rolled back, not as `ROLLBACK FAILED … Put … back at … by hand`. On a Windows
+  directory install whose rollback the update helper could not make, the start
+  after the old version is put back by hand says `was rolled back by hand`;
+  every other install kind keeps the `ROLLBACK FAILED` line.
+- **A release whose install could not be put in place is offered again**, up to
+  three failures in a row; `update-trust.json` gains an optional `failedSwaps`
+  while that is counted, and its `installedSha256`/`installedReleasedAt` are
+  written at the confirm on a directory install. On Windows the old version
+  comes back up to 30 s later than before (the swap waits that long for the
+  folder), and the error line carries what the system said.
+- **A start with no update in flight removes what an unfinished update left
+  beside the install — only what the updater itself made.** Everything an update
+  makes there (`<install>.staged-<version>`, `.zip-<version>`, `.new-<version>`,
+  `.old-<version>`, `.failed-<time>`, the download folder `.aio-update-…`) is
+  written down in a new file, `update-artifacts.json` in the data directory,
+  before it is made, with what the file system says it is (and, for a file, its
+  size and SHA-256), and removed or pruned only while that very object is still
+  at that name; one info line names what went. A hand-made look-alike is no
+  longer removed: it is left where it is and named in one info line
+  (`left alone beside …: not made by this app's updater — …`). On a file system
+  that gives no creation time nothing is removed or pruned; each start warns
+  with the path and size.
+- **An update is refused when a name it needs is taken by something it did not
+  make**:
+  `<path> is in the way of the update, and it was not made by this app's updater — nothing was changed. Move it or remove it, then update again.`
+  — before anything is downloaded. Earlier releases removed whatever was there.
+- **What 1.0.16 and older left beside the install is taken onto the record by
+  exact name and content.** At the first start on 1.0.17, and at any start that
+  finds no record or one without its mark, the app looks at the exact names
+  those builds used and takes what is also, by content, a copy of the app, its
+  download or its old download folder (leftovers only when untouched for an
+  hour); each look logs one info line naming what it took
+  (`looked for what an earlier version's updater left beside … (…): took over …`,
+  or `nothing to take over`). That look is the one place a name and a content
+  check stand in for proof: a copy of the app somebody made by hand under
+  exactly such a name (`<install>.old-1.2.3`) is taken for the updater's and
+  pruned like an old version. What the record already names is not taken twice,
+  and a run from source does not look. Otherwise only the record counts.
+- **A kept copy cut off half-way is not treated as a version.** The copy of a
+  single-file artifact an update keeps is on the record as unfinished until
+  every byte is on disk, and recorded as whole before the new build goes in; a
+  copy that comes out short stops the update with nothing changed. One cut off
+  by a kill is not counted among the three kept, a rollback refuses it
+  (`… was cut off while it was being written …`), and the next start removes it.
+
+#### Core and server rendering
+
+- **`AIO_CDP`, `AIO_PORT` and `AIO_DEFAULT_PORT` no longer refuse a boot they
+  allowed in 1.0.14** — see "Core" below.
+- **A stop says why.** One INFO line stands above `stopped uptime=…` in the
+  console and `app.log`: `SIGINT received — stopping` (or `SIGTERM`, `SIGHUP`),
+  or `stop requested over the control API (am stop) — stopping`
+  (`takeover by a new launch` when a `--takeover` launch asked).
+- **`am stop` stops a production app gracefully, on every OS** — its `onStop`
+  and final save run — for an app built with 1.0.17; on Windows it was a hard
+  kill. The app writes a per-boot, owner-only `<data>/control.key` in production
+  too. An app built before 1.0.17 still gets the signal. When the app refuses
+  the credential, `am stop` says so before it falls back to the signal, and
+  `am stop --json` reports `how` (`graceful`, `signal` or `killed`).
+  `am status --json` names the instance's `client`.
+- **`--takeover` asks the previous instance to stop** the way `am stop` does and
+  waits for it before forcing anything.
+- **A second launch of a running app writes at most one line into its logs.** A
+  launch that brings the window to the front writes nothing; one that is refused
+  adds its one reason line to `app.log` only.
+- **`am start --headless` and `--service` start the app**, passed on as
+  `--client=server-only`. `am start` hands the app a one-time secret in
+  `AIO_LOCK_HANDOFF`, which the app removes from its environment.
+- **A journal held by another program is one warning**, and one line when writes
+  land again; a journal that cannot be compacted warns once, and says when it
+  compacts again.
+- **A server-rendered `<script>` or `<style>` is judged as a whole.** Children
+  that join into the element's closing tag (`"</scr"`, `"ipt>"`), and a
+  `<script>` that leaves `<!--` and a later `<script` open, throw in dev and are
+  escaped in production — the whole content, not one child. `</sscript>`, which
+  the guard refused by mistake, passes. `renderToStream` sends such an element's
+  content as one chunk.
+- **A user record that is a class instance or a `Proxy`** has no per-user cache
+  key (a class with `toJSON` had one in 1.0.15–1.0.16), nor has one holding an
+  array with a hole and a named property: its `forUser` view is recomputed per
+  client, and `ttl`/`"first"` do not cache for it.
+- **`"x" in s` inside an async method** answers for the prototype chain again,
+  as a sync method does.
+- **`testUI({ persist: true })` writes about 100 ms after a change**, not only
+  at dispose.
+- **A refused boot writes `ERROR boot refused — the app did not start: …`** to
+  `app.log` and `error.log`, and `stopped` once; a launch refused because the
+  app is already running writes its one line to `app.log` only.
+- **`logs/.rotate`** is a new file, a few bytes, outside the log budget; a
+  process that starts under 3 s after another's start does not rotate the logs.
+- **`duration` in `perf.log` may be fractional** (`5.4`, where it was rounded to
+  `5`), and a budget line reads `5.4ms > 5ms`.
+- **New warnings where there was silence:** `… was not updated` (`meta.json`),
+  `… was not archived` (a log), and a lock file that could not be removed at
+  quit. On Windows a state-file replace may take up to 1.3 s longer when the
+  file is held; a file that stays held is then tried once per write for 30 s
+  instead of waited for again.
+- **`am` does not end an instance that still listens.** `am start` onto an
+  instance that listens but does not answer is refused, and `am status` says the
+  same (`answering: false`, exit 2): "running and listening, but does not
+  answer", naming `am stop --app=…` and `am kill --app=…`. `am start` used to
+  end such an instance.
+- **A stuck instance is ended before its lock is taken.** A launch (or
+  `am start`, `am backup`, `am restore`) that finds a process alive with nothing
+  listening for 2.5 s at the address its record names, and a record unchanged
+  for 10 s, ends it first, where it started beside it; if it cannot be ended the
+  start exits 1 and names the pid. The lock record now carries the address the
+  app bound (`host`); a record written by 1.0.16 or older has none and is never
+  judged stuck — the launch is refused `Already running`, naming the pid and
+  `am stop`.
+- **A start onto a live process that holds the data folder is refused even when
+  its lock file is gone**; a desktop launch brings that window to the front and
+  exits 0. A running app whose lock file was removed files it again within 5 s.
+- **The lock file of a running app ends in a line of spaces and tabs** — a check
+  for readers; `JSON.parse` ignores it.
+- **New log lines:** `the lock file … was gone while this app ran — filed again`
+  and `stale instance: … Ending it to take over`; a warning when the app's
+  socket file is removed while it runs; one warning when the data folder cannot
+  be claimed. Two apps pointed at one folder: the refusal names the app that
+  holds it.
+- **A teardown whose phase overran may take up to 5.2 s instead of 5.** The
+  databases get 200 ms of their own in that case; a stop that fits its budget is
+  unchanged. A supervisor that waits exactly the 8 s shutdown budget before it
+  kills cuts only that floor.
+- **Closing a dev server ends a CSS step (`build.css`) that is still running**,
+  asked to end, killed after half a second, with one log line; it waited for the
+  boot's step and left a save's running.
+- **A closed dev server waits for esbuild's process to exit.** A test suite that
+  boots dev servers saw Deno's "A child process was started during the test, but
+  not closed" from it, under load.
+- **Standalone/Android: `persistDebounceMs` may shorten the local store's 100 ms
+  write window, not widen it.** 1.0.15 and 1.0.16 applied a larger value as
+  written; it is 100 ms now.
+- **The aio client says when a pinned certificate changed** (log and connect
+  page). It still connects.
+
+#### Tooling
+
+- **While `am backup` or `am restore` holds an app, `am` commands about other
+  apps no longer list it as running.**
+- **Tooling exits that were 0 are 1:** a lock dir still held after a test shard,
+  a test file that ran no test, `AIO_TEST_FREE_CORES` that is not a whole
+  number, `am prune --days=`, `am timetravel goto ""`, `am eval --window=`,
+  `am shot --threshold 3` (space form), `check:mutations --jobs=0`.
+- **`aiol --safe-fix` fixes fewer things by itself than in 1.0.16, and gives
+  more `[manual]` hints.** It rewrites a name only when the file proves it is
+  aio's: one static import of it from aio (by specifier, by the import map, or
+  through your own barrel that passes it on from aio and nowhere else), with
+  every other mention of the name in the file reading as a use. No longer
+  rewritten, now a `[manual]` hint that names the line: a name taken by
+  `await import("aio")`; a name used without an import; a name that comes
+  through a barrel which also exports its own; `schedule.blocking` when
+  `schedule` came from a sub-entry of aio; a file where one mention of a renamed
+  word cannot be renamed. Your own `useCell`, `schedule`, `call` or renamed type
+  is left alone.
+- **`aiol` finds `call({ timeout })`, `schedule.blocking(` and
+  `schedule.poll({ backoff })` in more spellings**: under an import alias, with
+  type arguments, across a two-line member access, as a shorthand or a quoted or
+  computed key, inside a template, on `aio!.call`. A use no rule reads
+  (`schedule?.blocking?.(`, `call.apply(…)`) gets a new hint, one per name per
+  file.
+- **`aiol` in `.tsx` files reads what an element shows as text.** A use that
+  follows an apostrophe, a URL or a backtick in an element's text is now
+  reported, or fixed; your own callback parameter after such text is no longer
+  rewritten as aio's. An element after a comment, with type arguments on its
+  tag, with a comment in the tag, or after `+` or `!` is read as an element.
+- **Fewer automatic fixes than 1.0.16 in a file that holds JSX**, each left as
+  `[manual]`, naming the line: a name that is also written inside a comment, a
+  string or element text is not rewritten, and a file that writes an identifier
+  with a `\u` escape, or a closing tag that closes no element aiol read, gets no
+  fix at all. A `.ts` file that holds a closing tag in a string (`"</p>"`) is
+  one of them.
+- **`aiol` on a directory with no `deno.json`**: uses of a bare `aio` import are
+  `[manual]`, where they were fixed.
+- **`aiol --safe-fix` removes an import only when the name is written nowhere
+  else in the file.** A finding it will not act on is labelled `[manual]`, not
+  `[fixable]`, and says what to do by hand. A `useCell(c).state.x` inside a
+  template's `${…}` is now reported and rewritten.
+- **`deno task test` writes `.aio/test-shards/<n>.log` while the shard runs**,
+  and names a shard that has printed nothing for 5 minutes, with the file it is
+  in (`--quiet-ms=<n>` changes the interval; digits only, 1 to 2147483647). A
+  directory argument is judged file by file. `--shards` and `AIO_TEST_SHARDS`
+  take digits only, 1 to 256.
+
+### Minified builds — defects shipped in 1.0.16
+
+- **The Electron window reconnects again in a minified build.** `build.minify`
+  went on by default in 1.0.16, and the reconnect curve pasted into the Electron
+  main script read two module constants the minifier renames — a dropped socket
+  raised `… is not defined` and the window never came back. The emitted function
+  now takes both numbers as arguments. `tests/emitted-source-minified.test.ts`
+  evaluates each function source `src/` emits from a minified copy, and fails on
+  an emission site it does not list.
+- **A `blocking()` function may declare helpers, arrows and classes in a
+  compiled build.** Kept names went through a helper each minified module
+  declared for itself, which the worker that receives the function's source did
+  not have (`t is not defined` — in every compiled build, never in dev or
+  tests). Names now go through one global, `__aioName`, which the worker
+  defines; a function that is not self-contained says so by name. The helper is
+  also recognised in the form esbuild prints for a module with a top-level
+  `value` or `target`. `tests/emitted-source-minified.test.ts`,
+  `tests/build-e2e-minify.test.ts`.
+- **A `blocking()` function that reads its own `.name` got the minified one in
+  the worker.** The name is sent with the source and applied again there.
+  `tests/emitted-source-minified.test.ts`.
+- **A comparison whose parentheses matter to TypeScript crashed the compiled
+  build.** `[(a < b), c > (d ?? 0)]` was minified to `a<b,c>(d??0)` and written
+  to a `.ts` path, where it is a generic call: `a is not a function` in the
+  binary, correct in dev. The minified text is now read both as TypeScript and
+  as JavaScript, and deno reads the whole staged graph before it compiles. A
+  module whose minified form reads differently, or that TypeScript or deno
+  cannot read back at all (`c > /x/.test(s)` or `c > {}` after a parenthesised
+  `<`), ships as written with a warning that names it, and the build goes on.
+  `tests/build-minify-fallback.test.ts`.
+- **A module with a decorator ships as written.** Minified, a decorated class
+  was renamed (`K.name` and the decorator's `context.name` were the minifier's
+  letter), and a legacy parameter decorator stopped the build. The same warning
+  names a module that uses the name `__aioName` itself, and one whose name
+  helper the build does not recognise. `tests/build-minify-fallback.test.ts`,
+  `tests/emitted-source-minified.test.ts`.
+- **`build.keepPackages` and `build.chromiumExtras` are known keys.** Both were
+  documented and honoured in 1.0.16 while the build said "aio never reads
+  build.keepPackages — it does nothing" and `aiol` reported an error. The key
+  list is now checked against every reader in `src/`.
+  `tests/build-block-shape-and-typos.test.ts`.
+- **`build.chromiumExtras` is read before the platform test**, so a value that
+  is neither `"keep"` nor `"strip"` is named on a macOS build too. There, and on
+  a build run with `AIO_STRIP_CHROMIUM=1`, it is a warning that says which
+  setting decides, and the build goes on — both built on 1.0.16. A Windows or
+  Linux build without the env form refuses the value. A macOS build with
+  `"strip"` says it does not apply, and the strip line names where the request
+  came from (`build.chromiumExtras: "strip"` or `AIO_STRIP_CHROMIUM=1`).
+  `tests/build-electron-extras.test.ts`,
+  `tests/build-electron-extras-frozen.test.ts`.
+
+### The local-peer lockdown and the local HTTP socket — repaired from 1.0.16
+
+- **The HTTP socket is gated too.** 1.0.16 checked the peer on `<app>.sock`
+  only. `<app>.http.sock` (present with custom `routes`, or with no on-disk
+  `dist/`) had no check: a foreign same-user process could upgrade to a
+  WebSocket there, read full state and dispatch a method. Both doors, and their
+  Windows pipe twins, now ask one gate, and that door performs no protocol
+  upgrade at all. The gate is asked at accept, so a refused peer is answered 403
+  within 2 s and closed, whether it sent a request or nothing; its bytes are not
+  read, and the handler never sees it. `tests/local-peer-lockdown-e2e.test.ts`,
+  `tests/local-peer-http.test.ts`.
+- **`ctl` for a foreign peer is an allow-list of two.** `GET /__aio/health`,
+  reduced to `{ status, appId }`, and `am stop`'s `POST /__aio/trojan/shutdown`,
+  which only passes the door — the server answers it solely to this boot's
+  control credential; everything else is 404. 1.0.16 ran the whole handler: the
+  app's `routes` answered 200, and health/vitals/metrics gave away the pid, cell
+  names and the last action type. `tests/local-peer-gate.test.ts`.
+- **`--prod` from source shows its window.** The server armed the pid of npm's
+  `electron` shim (a `node` process); the real Electron was its child and was
+  refused forever. aio now spawns the binary the shim would start, under
+  `$ELECTRON_OVERRIDE_DIST_PATH` too. `tests/local-peer-lockdown-e2e.test.ts`.
+- **The log claims only what is covered.** "only this app's own window may
+  connect" was printed with `--port` or `--cdp` open. It is now printed only for
+  an app with neither; with either, the socket is still gated and one warning
+  says what the port leaves open. `tests/local-peer-lockdown-e2e.test.ts`.
+- **The gate is disarmed when the window exits**, and the sessions and HTTP
+  connections it had accepted are closed. On Linux the trusted identity is pid
+  plus process start time, so a pid reused under `--keep-server` is not the
+  window. `tests/local-peer.test.ts`, `tests/local-peer-gate.test.ts`,
+  `tests/local-peer-http.test.ts`.
+- **A process that cannot read peer credentials refuses to boot.** Without
+  `--allow-ffi` 1.0.16 logged "the pid gate still applies" and then refused
+  everyone, its own window included. `tests/local-peer-lockdown-e2e.test.ts`.
+- **A refusal has a reason and a reader.** The server logs who was refused and
+  why, at most once a minute per door and reason, as an ERROR with the remedy
+  when the refused process is a child of the launched one. The window notices
+  five seconds without the server's first frame: it says so once as a warning
+  and in its title, reconnects with a backoff, and takes its title note back at
+  that first frame. `tests/local-peer.test.ts`,
+  `tests/electron-handshake-watch.test.ts`.
+- **A liveness probe is not logged as a refusal.** Starting an app that is
+  already running, and `am` asking whether it is alive, connect and hang up
+  without sending anything; that is refused like any other peer and written as a
+  debug note, at most one a minute per socket, and more than 20 of them inside a
+  minute is one warning. A refused peer that sends anything, or is still
+  connected after 1 s, is logged as a warning; nothing about who is served
+  differs. A pid that cannot be read is said as "no pid could be read for it (it
+  had already disconnected, or this platform reports none)".
+  `tests/local-peer-probe-quiet.test.ts`.
+- **The per-frame guard has a test.** Removing it left the 1.0.16 suite green
+  while a foreign `action` was dispatched. `tests/local-peer-gate.test.ts`.
+- **New: `electron: { allowLocalPeers: true }`** turns the lockdown off for an
+  app with a same-user companion process, and says so in the boot log. Only the
+  boolean `true` does; another value leaves the socket gated and is warned
+  about. The lockdown is documented for good in `docs/auth/auth.md` ("Local-peer
+  lockdown"), `docs/clients/transports.md` and `docs/clients/electron.md` — in
+  1.0.16 it existed only in an upgrade guide.
+  `tests/local-peer-lockdown-e2e.test.ts`.
+- **Dev and production serve `<app>.http.sock` through one HTTP server.**
+  `Deno.serve` on a Unix socket cannot tell a handler which process is
+  connected, which the gate needs, so production had to leave it — and dev
+  follows, so that a route meets the same server in both. It is the server the
+  Windows pipe already used, and it is held equal to `Deno.serve` by a
+  differential test that runs one handler under both and compares `req.url`,
+  header bytes, `req.signal`, bodies streamed both ways, `Content-Length`, a
+  connection kept for the next request, which request heads are refused as
+  malformed (whitespace before a header's colon, a control byte in a value or
+  the target, a `Transfer-Encoding` that is not one final `chunked`, a 129th
+  header line), the answer to a client that half-closes behind its request, and
+  requests in flight at shutdown. `tests/http-over-conn-differential.test.ts`,
+  `tests/local-peer-server-door.test.ts`.
+- **What differs from `Deno.serve` on that socket, on purpose.** The ones a
+  client can meet: a connection is closed where `Deno.serve` keeps it in two
+  cases — after a request whose body is still on the connection when the answer
+  is written and that `Deno.serve` would read away (an unread chunked body, a
+  body the route cancelled, a body on a `GET` or `HEAD`), and for an HTTP/1.0
+  client, even one that asks for `Connection: keep-alive` (the answer says
+  `Connection: close`); no WebSocket upgrade (`Upgrade: websocket` → 501, any
+  other offer ignored); HTTP/1.1 only — the HTTP/2 preface is a 400; a head line
+  ended by a bare LF is a 400, and so are a `Content-Length` or a chunk size
+  above 2^53 − 1 and an absolute (`scheme://…`) target no URL can be made of; a
+  request head that has begun and is not complete within 30 s → 408 (a
+  connection's first head counted from the connect, a later one from its first
+  byte; an idle kept connection has no deadline); shutdown finishes a request in
+  flight for at most 2 s — one whose upload is still arriving when the shutdown
+  begins is let finish inside them, where `Deno.serve` fails the route's read —
+  and does not wait for a connection that is answered or idle. Each difference
+  is an `EXCEPTION` case of the differential test, and the full list (twelve
+  entries) is in `docs/clients/transports.md`.
+- **The Windows pipe gains what the comparison repaired** (it has used this
+  server since before 1.0.15). Header bytes were read and written as UTF-8, so a
+  request header byte ≥ 0x80 was a 400; `req.signal` never aborted and an idle
+  response stream was never cancelled when the client left; a chunked upload was
+  collected whole per chunk; a response without a declared `Content-Length` was
+  sent chunked, so a `HEAD` size probe got none; `CONNECT`/`TRACE` closed the
+  connection without an answer; a handler returning a non-`Response` wrote
+  `HTTP/1.1 undefined`; `Content-Length: +3` and a non-hex chunk size were
+  accepted; `Expect: 100-continue` was ignored; a request header value lost more
+  than its spaces and tabs at the edges (JavaScript's `trim()` — a no-break
+  space, VT, FF; also in 1.0.16), where only space and tab are cut now. And it
+  closed every connection after one request (`Connection: close`); it keeps one
+  for the next now, by the same rules as the Unix socket.
+  `tests/http-over-conn-differential.test.ts`, `tests/http-over-conn.test.ts`.
+- A route's body stream is cancelled when its local peer leaves, and closing the
+  peer listener wakes a parked accept loop. `tests/local-peer-http.test.ts`.
+- **Under the lockdown, a connection the client ended is released (since
+  1.0.16).** The peer-checked listener — in 1.0.16 it served the state socket —
+  kept every connection a client ended in memory for the life of the process,
+  about 4 KB each (measured on the 1.0.16 listener: 3.96 KB of heap per
+  connection; one the server closed itself was freed). The runtime does not let
+  go of a socket whose handle is closed while its shutdown is in flight; the
+  listener no longer closes one then. `tests/local-peer-conn-gc.test.ts`.
+- **What the change costs.** On the local HTTP socket, compared with 1.0.16,
+  which used `Deno.serve` there, a request takes about 1.4–1.5× the time (on the
+  order of 50–60 µs instead of 30 µs of server CPU per request in a real app),
+  and the process's RSS grows about 40 MB more over the first 5000 requests
+  (about 16–21 MB more at 20,000; flat over 400,000 — no leak). A JavaScript
+  server pays for a `Request` and its abort signal per request through public
+  API, which `Deno.serve` does not. Measured on Linux.
+- **The app's listening sockets are close-on-exec (since 1.0.16).** The
+  lockdown's listener is built on `node:net`, which created its listening socket
+  without close-on-exec, so in production every process the server spawned — its
+  own window first — inherited it, and it stayed held after the server died. A
+  spawned process now inherits neither a listening socket nor an accepted
+  connection. `tests/local-peer-http.test.ts`.
+
+### The Windows one-click `.exe` — repaired from 1.0.16
+
+- **A second double-click during the first extraction, or a different version's
+  `.exe` while the app runs, no longer destroys the install.** The stub deleted
+  the install folder before the new tree was in place, with no lock. It now
+  takes a per-install mutex, moves the old folder aside, extracts, renames in,
+  deletes the old one last, and restores on failure; while the app runs it
+  changes nothing and says to close it. The stub stays on one OS thread, because
+  Windows lets only the thread that took a mutex release it — so a second launch
+  waits for the extraction, not for the first app to exit. A
+  `win-<arch>.replaced` or `.incoming` folder a killed stub left beside a good
+  install is removed on the next launch.
+  `src/build/windows-sfx-stub/install.go`, `install_test.go`, `main.go`.
+- **An app installed by the `.exe` keeps its self-update.** The updater swapped
+  in a folder without the stub's stamp, so the next launch of the old `.exe`
+  extracted the old version over the update. Opening the `.exe` again undid
+  every update (also in 1.0.16: its updater dropped the stamp at every update).
+  The updater now carries the stamp into each folder it swaps in, update and
+  rollback alike, and each start and each update gives the install back the
+  stamp from the newest copy the updater kept that has one; when none has one, a
+  warning says that opening the `.exe` will reinstall the version it carries.
+  `tests/updates-sfx-stamp.test.ts`.
+- **A symlink in the staged app no longer builds an `.exe` that cannot
+  install.** A Windows install has no symlinks and the stub refuses a link
+  entry. A link is now packed as a copy of its target, in the tar and the zip
+  payload, and the build says so with the size; one pointing outside the app, at
+  nothing, or at a folder it is inside stops the build, naming the path.
+  `tests/build-windows-sfx.test.ts`, `extract_test.go`.
+- **The stub is found from any checkout.** A path with a space or a non-ASCII
+  character, a Windows build host, or aio imported remotely made the build exit
+  1 ("stub missing"). The path goes through `fromFileUrl`; a remote aio fetches
+  the stub from its own origin, gives up after 60 s, and keeps the fetched copy
+  in the build's own `.aio/build/` — removed on every way out the build takes
+  itself; a killed build leaves it there, and the next build writes over it. A
+  stub that cannot be read, fetched or verified gives the legacy fat exe with a
+  warning. `tests/build-windows-sfx.test.ts`.
+- **The committed stub carries nothing of the machine that built it, and is
+  pinned.** The 1.0.16 PE was built without `-trimpath` and held build-machine
+  paths. It is rebuilt reproducibly (`-trimpath -buildvcs=false`, go1.27.1) and
+  used only when its SHA-256 is the one in aio's source
+  (`e9bee8d42ef71032400fb36bc1f4cffdf932af8e7895cf1965d5c2873af17263`, 3,712,000
+  bytes). The stub's sources are pinned beside it, so a `.go` edit without a
+  rebuild fails a test on a machine without Go.
+  `tests/build-windows-sfx-stub.test.ts`.
+- **An Authenticode-signed `.exe` starts.** The stub read its trailer at the end
+  of the file only, where a signature appends a certificate table; it now finds
+  the trailer through the PE security directory. Signing is documented in
+  `docs/build/targets.md`. `src/build/windows-sfx-stub/format_test.go`.
+- **A pack that stopped early closes the file it was reading.** A path over 100
+  bytes, or an output that could not be written, left it open until garbage
+  collection in 1.0.16. `tests/build-windows-sfx.test.ts`.
+- **A file that changes while the payload is packed stops the pack, by name.**
+  One that grew, shrank, or became a folder or a pipe after the app was listed
+  got the tar library's size message, or hung the build (a pipe). The zstd pack
+  now stops with a line that names the file, and the build falls back to the zip
+  payload as before. A pack that fails never returns with a file open, or with
+  an open still under way. `tests/build-windows-sfx.test.ts`.
+- The payload is deterministic (sorted entries, fixed mtime), tar names use `/`
+  on any build host, packing streams, a failed pack leaves no `.incoming`, and
+  an unknown archive entry fails the extraction.
+  `tests/build-windows-sfx.test.ts`.
+- `THIRD_PARTY_NOTICES` ships beside the stub; `*.exe` is marked binary in
+  `.gitattributes`.
+
+### Packages
+
+- **A dev-only package reached only as a PEER of a real dependency is now
+  dropped.** `devOnlyClosure` keyed off the `node_modules` tree, and a peer
+  (`typescript` pulled in by a scoped SDK, say) has no top-level symlink, so the
+  compiler shipped anyway — `tsc`, `tsc.exe`, `typescript.js`, `_tsc.js`, the
+  `@typescript/*` platform packages. It is left out by NAME, platform packages
+  included, and the dependent's own `.deno/<dependent>/node_modules/<pkg>` link
+  is held aside for the compile — deno follows that link and re-embeds the
+  target otherwise. `tests/build-trim-excludes.test.ts`,
+  `tests/build-tool-audit.test.ts`.
+- **`build.keepPackages` wins over every rule that leaves a package out.** In
+  1.0.16 the names were checked on some of those rules only: a named package
+  linked only from a build-only one (no top-level link) was still left out, in
+  silence. The names are now applied once, after every rule has spoken. A name
+  that matches no installed package is warned about.
+  `tests/build-trim-excludes.test.ts`, `tests/build-compile-wiring.test.ts`.
+- **A kept package ships with what it needs to run.** In 1.0.16 only the named
+  package was kept, so one loaded by a computed `import(name)` failed with
+  `Could not find package` for its first dependency. Its installed dependency
+  closure is kept now. A build-only package on the way (`esbuild` under `tsx`)
+  stays out until it is named too, and the build warns with the line to add; a
+  `@types/*` package stays out as well, since nothing loads one at run time.
+  Only the package kept by name is exempt from the source-map/docs/fixture trim.
+  `tests/build-trim-excludes.test.ts`, `tests/build-compile-wiring.test.ts`.
+- **The graph-to-directory mapping uses deno's own `localPath`.** A
+  peer-resolved id carries a suffix the directory does not
+  (`@scope/pkg@5.5.1_typescript@6.0.3` lives in `@scope+pkg@5.5.1`), and
+  `deno info` lists optional/platform variants that are not installed. The old
+  derivation matched neither, so on a real Deno 2.9.7 graph it bailed to "embed
+  everything". `tests/build-npm-graph-exclude.test.ts`.
+- **A cross target's platform binary is excluded before it exists.** deno
+  installs `@typescript/typescript-darwin-arm64` (or `@esbuild/*`) DURING a
+  cross compile, after a list built from the tree on disk was already made, and
+  follows the link it writes for it. `localPath` names the directory even when
+  it is absent, and that link's own path is excluded too — a Windows build made
+  on Linux embedded the target's esbuild binary otherwise (about 10 MB on the
+  one build measured). `tests/build-trim-excludes.test.ts`,
+  `tests/build-compile-wiring.test.ts`.
+- **The second and every later cross build of a project no longer carries the
+  target's esbuild binary (about 10 MB).** The first Windows or macOS build
+  leaves the target's platform package installed, and the link was excluded only
+  for a package not yet on disk — so each build after the first embedded it and
+  printed "still embeds build-tool files" (the warning came with 1.0.16). The
+  link of every excluded package is now excluded, installed or not; it is any
+  excluded package that is installed per target, not esbuild alone.
+  `tests/build-trim-excludes.test.ts`, `tests/build-compile-wiring.test.ts`,
+  `tests/build-e2e.test.ts`.
+- **And what a cross build does embed is the target's.** A Windows or macOS
+  build also carried the host's native binary of a package it keeps, and other
+  systems' left in `node_modules` by earlier builds. Each package's own `os`,
+  `cpu` and `libc` now decide: only the target system's native packages are
+  embedded. Before the compile the build runs one
+  `deno install --entrypoint … --os … --arch …` against a copy of the project's
+  lock: the target's packages are added, nothing is removed, and the project's
+  lock, config and host packages are left as they were — so the first cross
+  build of a project embeds the same files as every later one (the docs and maps
+  of a target-only package are trimmed on the first build too), and `git status`
+  is clean after it. If that install fails (offline, a package not cached) the
+  build stops and says which package. A package kept through
+  `build.keepPackages` ships with the target's binary; name the exact package to
+  ship another system's. A package the app itself imports that is built for
+  another system is named in a warning, with the target, instead of being left
+  out without a word; the warning says when the import is static. The audit that
+  ends a compile names any embedded package built for another system.
+  `tests/build-foreign-natives.test.ts`, `tests/build-compile-wiring.test.ts`,
+  `tests/build-e2e.test.ts`.
+- **The build says when a dropped package looks needed.** Your own code imports
+  it; a dependency lists it under `dependencies`; or a dependency lists it as a
+  required peer — a library that loads its peer `typescript` at runtime fails at
+  first use in the binary. Each is a `!` warning naming the package, the
+  dependent and the `keepPackages` line. A dependent is asked only when the
+  binary loads it: its module graph reaches it, or `keepPackages` keeps it — by
+  name, or because a named package needs it; the graph cannot see a computed
+  `import(name)`, so such a package is asked what it needs too. A package that
+  is merely installed (a `cli` build embeds those) is not asked.
+  `tests/build-trim-excludes.test.ts`, `tests/build-compile-wiring.test.ts`.
+
+### Whole-package weight
+
+- **Source maps, docs and test fixtures are held aside for the compile.** Of a
+  real 485.5 MB VFS payload, ~124 MB was `*.map`/`.d.ts.map`/`*.md` and ~37 MB
+  was `test`/`tests`/`__tests__` fixtures. `--exclude` cannot take thousands of
+  individual files (argv limits), so they are moved out and put back afterwards.
+  `.d.ts` is deliberately kept: the compile type-checks with it.
+- **The rule is narrow, because a directory's name is not evidence.**
+  `__tests__` at any depth; `test`/`tests` only directly under a package root;
+  never a package's own directory (a package named `test`); never a file the
+  module graph loads; nothing inside a `build.keepPackages` package; never a
+  `LICENSE`, `NOTICE`, `COPYING`, `AUTHORS` or `PATENTS` file, whatever its
+  extension. `tests/build-trim-rules.test.ts`.
+- **`node_modules` comes back.** An interrupted build (Ctrl-C, `SIGTERM`)
+  restores trimmed files, links and the lock before it exits; a killed one is
+  repaired by the next compile or by `deno task build`'s first step, even after
+  `node_modules` was reinstalled in between. A restore that fails keeps what it
+  could not put back journalled, and the mirror is never deleted while it holds
+  a file. Overlapping builds keep separate journals (`.aio/trim.<build>/`).
+  `tests/build-trim-recovery.test.ts`.
+- **Compiled apps no longer carry the builder.** Every binary embedded 23 build
+  modules it cannot run — the build fleet, the Android and iOS builders and
+  their templates, the compile step — because the update check and the dev
+  bundler imported three small rules from the build's config module. The rules
+  have a module of their own. `tests/app-graph-no-builder.test.ts`.
+- **Binaries no longer carry deno's own install state.** The `node_modules/.bin`
+  launchers — and through them `electron/cli.js`, `electron/install.js` and
+  esbuild's launch script, out of packages the build had left out — and the
+  installer's cache and lock were embedded: about 21 KB in every binary, on
+  every target. They are excluded, and the audit at the end of a compile names
+  them if they come back. `tests/build-compile-wiring.test.ts`,
+  `tests/build-tool-audit.test.ts`.
+- **aio's own `node_modules/.cache` is excluded**, and the legacy bare
+  `appimagetool` an older aio cached there is removed on sight (~14 MB of a
+  stale tool). The build's own lock and link journal are excluded too.
+- `AIO_SKIP_TRIM=1` disables the whole-package trim for a build you are
+  debugging.
+
+### The audit
+
+- **`artifact-audit` reads the VFS TREE, not path fragments.** A `File` record
+  stores a BASENAME, so `name.includes("/typescript/lib/tsc.js")` was always
+  false and the 1.0.16 gate reported NONE on a binary carrying ~165 MB of `tsc`,
+  `esbuild` and `appimagetool`. It walks the tree, matches the basename, and
+  attributes each hit to the enclosing `.deno` entry's package.
+- **The tree is identified by its length prefix.** A text marker alone is only a
+  candidate — text that looks like the tree (the audit's own embedded source,
+  when aio is imported remotely) would otherwise be found first and read as
+  "clean". `tests/build-tool-audit.test.ts`.
+- **An artifact it cannot read is unreadable, never clean.** No tree, a
+  truncated one and an unparseable one each raise a build warning naming the
+  file. `tests/build-tool-audit.test.ts`.
+- **Deno's tiny `bin` shims are not tools.** deno writes a 45-byte
+  `typescript/bin/tsc` for every import-map package and embeds it even when the
+  package directory is excluded. A match under 64 KB is ignored.
+- The audit runs on `cli` targets as well, and the `test:build` E2E asserts both
+  directions on a real binary: the compiler is absent by default, and the audit
+  sees it when `build.keepPackages` asks for it. `tests/build-e2e.test.ts`. The
+  audit calls of the app and `cli` builders are pinned by running the real
+  builders. `tests/build-compile-wiring.test.ts`.
+
+### Version identity, memory and updates — repaired from 1.0.16
+
+- **A version no longer costs a read of your largest file.** The 1.0.16 cap was
+  checked after the file was read. Both tree readers take a file's size from
+  `stat` first, so the file that would cross the 128 MB cap is never opened;
+  directories (50,000), depth (64) and git's answer (30 s, 32 MB) are bounded
+  too. `tests/app-version-tree-bounds.test.ts`.
+- **A pinned version reads no tree (regression in 1.0.16).** An app at
+  `"version": "0.1.0"` with one large asset reported `unknown (…)` and its
+  `deno task build` exited 1. A pinned source run reads nothing; a pinned build
+  reads only its commit and dirty flag. `tests/app-version-tree-bounds.test.ts`.
+- **The derived version no longer moves between builds of the same sources.**
+  With `--out=<dir>` the staging a build leaves in `dist/` was hashed as source,
+  and so was every release an earlier build had assembled in another out dir: in
+  a project without git each build got a new version, and a few releases in the
+  tree were refused with "refusing to hash". `dist/` and the build's own `--out`
+  are now left out of the tree hash by name, and every out or publish directory
+  a build or publish wrote down in `.aio/outputs.json` by that record — while
+  the directory itself proves it. An entry counts only if the build would take
+  that directory as `--out`, and only while it holds what was put there: a
+  release and nothing else (the rule by which a build refuses an `--out` holding
+  other files), or a publish channel directory with its update manifest
+  (`<os>-<arch>.json`); a publish's `--dir` counts while it holds channel
+  directories and nothing else. An out dir later reused for source, a stray file
+  beside a release, or a folder written into the record by hand counts as source
+  for as long as that is so; remove the stray file and the directory is an
+  output again, the record unchanged. Only an entry the out-dir guard refuses is
+  dropped from the record. In a git project a recorded directory is left out
+  only while it is untracked — a path git tracks is source.
+  `docs/build/versioning.md` lists what is left out.
+  `tests/build-version-outputs.test.ts`, `tests/build-e2e.test.ts`.
+- **The out-dir guard compares directories, not spellings, and
+  `am publish --dir` answers to it.** `--out` at a link to `src`, or at `src.` /
+  `src` (which Windows reads as `src`), is refused like `--out=src`: one guard
+  compares what a path is — links resolved, case folded, trailing dots and
+  spaces dropped — for a build's `--out`, a publish's `--dir` and the reader of
+  the record. `am publish --dir` at the project root, `src/`, an app dir,
+  `.git`, `.aio`, a directory inside or around one of them, or inside `dist/`,
+  is refused with exit 1 before anything is built or written; a directory
+  outside the project is not asked. `tests/am-publish.test.ts`,
+  `tests/build-out-dir-case-folded.test.ts`,
+  `tests/build-out-never-deletes-user-files.test.ts`.
+- **Files a desktop drops into a folder are nobody's.** `.DS_Store`,
+  `Thumbs.db`, `ehthumbs.db`, `desktop.ini`, `.directory` and `.localized` in an
+  out dir made the build refuse it ("would be DELETED"); a release opened in
+  Finder or Explorer no longer does that, nor does it make the version `-dirty`.
+  Such a file elsewhere in the project counts as before.
+  `tests/build-out-never-deletes-user-files.test.ts`,
+  `tests/build-version-outputs.test.ts`.
+- **`am publish` twice from unchanged sources gives the same version (also in
+  1.0.16).** The publish directory (`release/`) was hashed as source, so each
+  publish got a new version and, in a clean git project, the second was refused
+  as a dirty tree. The publish records its `--dir` and the channel directory in
+  it before the build, and `am create` adds `release/` to the scaffold's
+  `.gitignore`. `tests/build-e2e.test.ts`.
+- **Publishing an app that prints to stdout while loading.** `deno task publish`
+  read the binary's `--aio-data-contract` answer from stdout and refused it as
+  "not JSON" when the app's own top-level output was in front of it. The
+  contract is now also printed as one `[aio] data-contract:` line on stderr, and
+  `ship`, `am publish` and the git update source read that line; a binary built
+  by an older aio is still read from stdout. The three facts a probe reads
+  (`data-contract`, `persisting-cells`, `app-id`) are read off the line that
+  carries the reader's own per-probe value (`AIO_PROBE_NONCE`,
+  `docs/build/environment.md`), so the app's own output is not taken for one.
+  `tests/data-contract-marker.test.ts`, `tests/updates-rebuild.test.ts`.
+- **A large tree is identified, not refused.** Past 20,000 files or 128 MB the
+  hash is taken from path, size and mtime; only past 50,000 files, 50,000
+  directories or 64 levels is the version `unknown (…)` — a bound low enough
+  that a stray `deno.json` above a very large directory is still refused in
+  under a second. A nested `node_modules/` counts toward no refusal. Hashes of
+  trees inside the caps are unchanged from 1.0.14 (golden values in the test).
+  The numbers are in `docs/build/versioning.md`, and a test holds the doc to the
+  constants. `tests/app-version-tree-bounds.test.ts`,
+  `tests/build-version.test.ts`.
+- **`unknown (…)` is one line with no path.** It was three lines carrying the
+  absolute project root, and reached `--version`, `/__aio/health` and the WS
+  hello. The full reason is logged once.
+- **Native-leak detection works on a heap that moves.** "Heap flat" was a
+  threshold a heap growing one byte per tick counted as "rising", so no native
+  leak was reported. It is now judged against the RSS climb (under 5% of it),
+  and takes a second climbing window, so a warm-up is not a leak; each window of
+  a climb is measured against the RSS the climb began at, so a leak that adds
+  the same bytes per window is confirmed by its second.
+  `tests/memory-monitor.test.ts`.
+- **The climbing windows of a native leak do not have to touch.** A leak that
+  grows in bursts with a flat stretch between them is one leak while RSS keeps
+  what it gained: confirmed by the second climbing window when it comes within
+  ten windows of the first, by the third otherwise. A one-off step, and two
+  steps hours apart, say nothing — 1.0.16 reported every single climbing window,
+  one-off steps included. `tests/memory-monitor.test.ts`.
+- **Native memory that climbs and is given back is not reported every window.**
+  1.0.16 reported a climb-and-release in step with the sampling window (a
+  sawtooth) as a leak each time. Within one climb a report is repeated only when
+  RSS stands a bar — 256 MB, or a quarter of the RSS the climb began at,
+  whichever is larger — above where it was last said, so a sawtooth is said
+  while it reaches a new high; a steady leak clears that bar every window.
+  `tests/memory-monitor.test.ts`.
+- **A `machine` report prints RSS and is said once.** It printed "heap at N%"
+  for an RSS condition and repeated every interval on a small host. It repeats
+  per further tenth of RAM. It does not set `nativeLeak`: that field means the
+  confirmed native climb only. `tests/memory-monitor.test.ts`.
+- **The tip under a memory report matches the report.** A native-leak and a
+  `machine` report both got the heap advice ("check per-cell state sizes"). Each
+  has its own now, and the native tip does not say the message names a fastest
+  series when it names none. `tests/memory-report-tip.test.ts`.
+- **The journal replay ceiling counts re-entries within one boot.** It was a
+  process-lifetime total, so in-process restarts accumulated toward it. The
+  error's message now contains `MEMORY_UNBOUNDED` (the docs named it; the text
+  did not), and `spend(NaN)` is refused instead of disabling the ceiling.
+  `tests/memory-ledger.test.ts`, `tests/journal-replay-session.test.ts`.
+- **`AIO_MAX_HEAP_MB` is never silent, and an odd spelling still caps.** New in
+  1.0.16 and missing from its notes: a cap in megabytes for an app's heap,
+  documented in `docs/build/environment.md`. `4g` quietly meant "no cap", and
+  still means it — with a warning. A spelling `Number()` reads (`4096.0`, `1e4`,
+  `0x2000`, `+4096`) caps at the number read, as in 1.0.16, and is warned about
+  once; so is a value raised to the floor. The warnings go through the logger.
+  `tests/heap-policy.test.ts`.
+- **`broadcast.bufferedBytes` sums the live broadcasters**, not the first one
+  the process made. `tests/broadcast-buffered-gauge-live.test.ts`.
+- **A directory install's `installed.json` follows in-app updates.** The helper
+  that swaps a directory install never wrote the record, so `am installed` and
+  `am upgrade` kept reporting the version before the update (also in 1.0.16).
+  The record is written when the update is confirmed healthy — only over the
+  version the update replaced, so an install made in between keeps its record.
+  One found wrong at boot with no update in flight — a hand restore, an install
+  updated by an older aio — is corrected, with one warning once it has been
+  rewritten; a record that cannot be written gets the writer's one warning (path
+  and reason) and nothing else.
+  `tests/updates-rollback-directory-record.test.ts`.
+- **A failed directory rollback says what happened, and the record stays true.**
+  On a Windows directory install the rollback is handed to the update helper,
+  which moves the folders once the app has exited. When it could not, and the
+  old version was put back by hand, later boots kept announcing
+  `ROLLBACK FAILED … this is still <new>` (also in 1.0.16). The boot after a
+  hand restore now says `update A → B was rolled back by hand … this is A`, and
+  `installed.json` names the version that is running — the failed build again
+  while it is the one that starts. Every other install kind keeps the
+  `ROLLBACK FAILED … Put … back at … by hand` line as before.
+  `tests/updates-rollback-directory-record.test.ts`.
+- **A rollback that failed once and worked on the next boot is reported as
+  rolled back.** It stayed announced as
+  `ROLLBACK FAILED … Put … back at … by hand` (also in 1.0.15 and 1.0.16).
+  `tests/updates-rollback-retry-record.test.ts`.
+- **Updates, Windows desktop: the start-up helper no longer starts in the
+  install folder.** An update taken within about 30 s of the app's start failed
+  with `the running version could not be moved aside`: a helper process left
+  from start-up still had the install folder as its working directory, and
+  Windows does not move a folder that is one. The helper is now `PING.EXE`
+  started directly from the Windows directory and ended by its handle, so it
+  leaves no process behind; the swap helper waits up to 30 s for the folder; and
+  a test walks the spawn sites of the server, the window and the media code for
+  a child that would start inside the install. `tests/no-console.test.ts`,
+  `tests/spawn-cwd-outside-install.test.ts`,
+  `tests/updates-swap-windows.test.ts`.
+- **Updates: a release whose install could not be put in place is offered
+  again.** It was dismissed after one try (a file in use, a blocked helper)
+  although the new version never ran. It now stays on offer and is dismissed
+  after three failures in a row, with a line that says what to close; the count
+  is `failedSwaps` in `update-trust.json`, cleared by a confirmed update. With
+  `auto: true` it is tried again at the next check, not in the boot that follows
+  the failure. A rollback still dismisses the release at once.
+  `tests/updates-failed-swap-retry.test.ts`.
+- **Updates, Windows: the swap helper counts one running process as one.** It
+  stopped waiting while exactly one process of the old version still ran —
+  Windows PowerShell 5.1 gives a single object no `.Count`.
+  `tests/powershell-scripts-wellformed.test.ts`.
+- **Updates, directory installs: a failed swap no longer leaves the unpacked new
+  version beside the install.** It stayed there, one whole copy of the app each
+  time. The helper removes it, and a start with no update in flight removes the
+  leftovers the updater has on record and logs their names.
+  `tests/updates-orphaned-staged-trees.test.ts`.
+- **Updates, directory installs: the trust record is written at the confirm.**
+  After a failed swap `update-trust.json` kept the failed release's
+  `installedReleasedAt` while the old version ran. The digest and the release
+  time are now recorded when the update is confirmed healthy, and cleared
+  together when an update is put back.
+  `tests/updates-directory-digest-at-confirm.test.ts`.
+- **Updates, zip installs: one request per check.** Every check asked the
+  channel for the kind manifest twice. `tests/updates-kind-manifest.test.ts`.
+- **Updates: a download that was cut off is cleaned up.** An app killed
+  mid-download left `.aio-update-<hex>/artifact` beside the install for good.
+  The staging folder is now written down in the data directory before it is
+  made, and a later start removes it, with its name in the log; a folder of the
+  old name is taken only by the one-time look at what older builds left, and
+  only when it holds nothing but that file and has been untouched for an hour.
+  `tests/updates-abandoned-downloads.test.ts`.
+- **Updates: the updater deletes only what it can prove it made (since
+  1.0.0-alpha69).** After a confirmed update every `<install>.staged-*`,
+  `.zip-*`, `.new-*`, `.failed-*` and `.rollback*` beside the install that was
+  older than an hour was deleted by its name, and every `<install>.old-*` was
+  counted and pruned — a folder or file of the user's with such a name went with
+  them. Each thing the updater makes is now written to
+  `<data>/update-artifacts.json` before it is made, with its file-system
+  identity (device, file number and creation time) once it exists — and a file
+  with its size and SHA-256, because on NTFS a file made again under a deleted
+  one's name inherits its creation time, and Deno reports file numbers there
+  rounded — and a path is removed or pruned only while that record names it and
+  the object there is still the recorded one; with no creation time nothing is
+  removed, and each start warns with the path and size. A look-alike with no
+  record is left and named; a name the update needs that something else has
+  taken refuses the update before the download; a record that cannot be read
+  removes nothing and warns. What older builds left is taken onto the record
+  once — at the first start on 1.0.17, or a start that finds no record or one
+  without its mark — by its exact name, its kind and its content, leftovers only
+  when untouched for an hour, with one info line; afterwards only the record
+  counts. `docs/deploy/updates.md`,
+  `tests/updates-orphaned-staged-trees.test.ts`, `tests/updates-e2e.test.ts`.
+- **Updates: the record follows what is deleted.** Pruning an old version takes
+  it off `update-artifacts.json` in the same step, and so does deleting the
+  failed build a rollback set aside; one that cannot be deleted stays on it and
+  is tried again. A name the update needs that cannot even be looked at (access
+  denied) refuses the update before the download, naming the path and the error,
+  and is reported as exactly that — never as "not made by this app's updater".
+  An update that could not even begin — the copy kept aside could not be looked
+  at, or a policy refused the update helper — counts as a failed attempt (three,
+  then dismissed) instead of dismissing the release at once. A kept copy
+  replaced by hand leaves the record at the next start, and is named once
+  (`off the record of what the updater made (something else has the name now)`)
+  — only when what is there is not the updater's own copy.
+  `tests/updates-orphaned-staged-trees.test.ts`.
+- **Updates, macOS and Linux: a directory update whose swap helper could not be
+  started no longer leaves its script in the system temp directory.** The update
+  removes it when the helper cannot be started; a started helper removes it
+  itself. `tests/updates-apply.test.ts`.
+- **Updates: an old kept copy that could not be deleted no longer locks out
+  every later update.** The record wrote the install's identity on that name
+  before the move had happened, so the copy that stayed there (a file in it held
+  open) was "not made by this app's updater" from then on, and every retry was
+  refused at once with no attempt counted. The move is now recorded as an
+  intent, the copy that is there stays the updater's, and the next try goes
+  ahead. A refused try leaves no record entry for a download or tree it never
+  made. `tests/updates-orphaned-staged-trees.test.ts`.
+- **Updates: a launch refused for a flag its client cannot honour is no longer
+  counted as a boot attempt of a fresh update.** `--keep-server` (or
+  `--connect`, `--cdp`, a window size) typed on a browser or server-only client
+  was refused after the attempt had been counted — three such launches rolled a
+  healthy update back. The refusal gives its attempt back; a boot that fails on
+  its own still counts. `tests/updates-boot-attempt-returned.test.ts`.
+- **Updates, Windows: removing an old copy no longer goes through a junction.**
+  The swap helper removed trees with `Remove-Item -Recurse`, which on Windows
+  PowerShell 5.1 follows a junction or directory link and deletes what it points
+  at. The helper now removes a link as the link it is.
+  `tests/updates-swap-windows.test.ts`.
+- **Updates, Windows: the swap helper starts an app on every way out.** An error
+  it did not expect (an old copy it may not read) ended it with nothing running;
+  each exit in the script now comes after a start of the version that is in
+  place. An old copy that cannot be removed is named with what the system said.
+  `tests/updates-swap-windows.test.ts`.
+- **Updates, Windows: the line for a held install names every process found**
+  (the first eight, then a count), and says that a program holding it only
+  through its working directory is on no list.
+  `tests/updates-swap-windows.test.ts`.
+- **Updates, single-file installs: a kill between the swap and its record no
+  longer makes the new version offer itself.** The digest and release time ride
+  on the pending marker and are written at the confirm, as on directory
+  installs; a record's temp file left by the kill, and a download that was never
+  swapped in (`<artifact>.new-<version>`), are removed at the next start.
+  `tests/updates-directory-digest-at-confirm.test.ts`.
+- **Updates, Linux with coreutils 9.5 or later: a swap whose old copy cannot be
+  set aside is undone once and says why (since 1.0.14-beta).** It exchanged the
+  two versions back and forth for ten seconds and recorded the wrong move with
+  no reason. `tests/updates-first-boot-rollback.test.ts`.
+- **Updates: a dismissal after three failed installs names the path that was
+  held, in the words of the OS it runs on, and `undismiss()` gives the release
+  three tries again** — one more failure used to dismiss at once, "4 times in a
+  row". `tests/updates-failed-swap-retry.test.ts`.
+- **Updates, macOS and Linux: a swap that is given up says why.** The record and
+  the next boot's line carry what the failing `mv` or `rm` said.
+  `tests/updates-first-boot-rollback.test.ts`.
+- **Windows: a typographic apostrophe in a path** (`Owner’s PC`) cut a
+  PowerShell string short in the update's unpack step and in the native file
+  dialog's title and start folder. Each value now reads back as one string.
+  `tests/powershell-scripts-wellformed.test.ts`.
+- **Windows: what an installed app opens no longer starts in the install
+  folder.** A program opened from the app — `openExternal`, an external link in
+  the window — inherited the install folder as its working directory, and
+  Windows does not move a folder that is one, so the next update's swap could
+  not move it while that program stayed open. An installed app's window, and
+  what `openExternal` starts, now run from the Windows directory. A relative
+  path given to `openExternal` still resolves against the app's directory, and
+  the window is told that directory in a new variable, `AIO_APP_CWD` (set by the
+  launcher; `docs/build/environment.md`). A run from source, macOS and Linux are
+  unchanged. `tests/spawn-cwd-outside-install.test.ts`.
+- **Docs: how many old versions an install keeps** — the three newest, deleted
+  when a later update is confirmed — and what that costs in disk.
+  `docs/deploy/updates.md`.
+
+### Core — repaired from 1.0.15, and older defects met on the way
+
+- **A `worker: true` cell's call whose write could not be saved says so, every
+  time.** Since 1.0.10 the reply waited for its write's stand-in save only if
+  that save was still running when the worker's answer was handled: under load
+  it often finished first, and a refused save was acked `ok` with no `unsaved`.
+  An async worker method's reply never waited at all — not for the verdict, and
+  not for the save (a kill right after the reply could lose a write it
+  confirmed). Every call now holds the saves still running for it, and the
+  verdicts of the ones that ended, until it is answered — also when it ends
+  while the app shuts down — and nothing more, so a method that writes forever
+  holds no memory for it. A call whose verdict is pushed out by more than 1024
+  waiting at once is answered `unsaved` ("verdict lost"), never plain `ok`.
+  `tests/journal-worker-owed-saves.test.ts`,
+  `tests/worker-ack-verdicts.test.ts`.
+- **Windows: every relative UI import was "not found" in dev (also in 1.0.16).**
+  The dev import-graph check cut the importer's folder at the last `/`; a
+  Windows path has none, so `./cell.ts` was looked for under `…\App.tsx\` and
+  the diagnostic page came up. It now uses the OS's path rules, for relative
+  imports and relative import-map targets alike.
+  `tests/graph-validator.test.ts`.
+- **A few more places read an OS path by its `/`.** `ui.entry: "./App.tsx"` no
+  longer gives a false `style.css … exists but is NOT served` warning (every
+  OS); on Windows the dev `reloaded …` line, the build's printed paths and
+  `am testgen`'s name files relative to the project again. On Windows `am theme`
+  takes the app's colour from its folder name, as on other systems, when the app
+  has no `appId` or `title`, and UI test video recording serves the app's own
+  assets. A test holds `src/` to the OS's path rules.
+  `tests/no-hand-split-paths.test.ts`.
+- **A `worker: true` cell's call whose write could not be saved says so, every
+  time (also in 1.0.16, since 1.0.10).** Each batch of patches left the pool's
+  per-cell set once its save finished; when a busy main isolate handled the
+  worker's `done` after that, the failed save's verdict was gone and the call
+  was answered `ok` without `unsaved`. An `async` worker method's reply also
+  waited for no save at all, so a kill right after the reply could lose a write
+  it had confirmed. Every call now keeps the batches that arrive while it runs
+  until it is answered. `tests/journal-worker-owed-saves.test.ts`.
+- **Nothing an app scheduled fires into or after its `close()`.** Schedules were
+  cancelled only after dispatch closed, the final persist and `onStop`, so an
+  `every` tick in between reached the closed dispatch ("dispatch after close() —
+  '…' ignored") — in tests, `libraryMode` and every shutdown. They stop as soon
+  as the app is marked stopping, and one armed later (by a method still
+  draining) is refused with one warning. A stopped app's logger writes no file
+  and never recreates its directory; a late line goes to stderr, once.
+  `tests/app-stop-quiets-schedules-and-logs.test.ts`.
+- **An ambient `AIO_CDP` no longer refuses the boot of a non-Electron app.**
+  1.0.15 refused it like the flag, which failed every server-only app and test
+  server under an environment that exports it. It is ignored with one warning
+  and opens no port; `--cdp` typed on such an app is still refused.
+  `tests/env-cdp-ambient-boots.test.ts`.
+- **`AIO_PORT` and `AIO_DEFAULT_PORT` in a non-decimal spelling are read as they
+  were before 1.0.15.** `0x1F90`, `1e3` and `+3000` bind the port they always
+  did and are warned about once, through the logger; 1.0.15 and 1.0.16 refused
+  the boot. Only a value that is not a port is refused ("want an integer
+  0-65535").
+- **aio client: `AIO_DISCOVERY_PORT` is honoured.** The digit test 1.0.15 added
+  was written `\d` inside a template literal and reached the generated script as
+  `/^d+$/`, so each value fell back to 8099.
+  `tests/electron-client-generated-eval.test.ts` runs the generated script.
+- **aio client: the certificate pin matches, and a changed one is said.** A pin
+  carries the served file (leaf, then the app's root) and was compared whole
+  with the single certificate presented, so it matched no current server and
+  each connect rode the looser host list — the "strict" path 1.0.15 described
+  did not exist. A pin is now met by the pinned certificate or by one whose
+  signature verifies under a pinned certificate's key. A pinned host presenting
+  anything else is warned about in the log and on the connect page; it is not
+  refused. `tests/electron-client-generated-eval.test.ts`.
+- **aio client: a `.aioapp` whose host is not a URL authority** opens the
+  connect page with the reason instead of a blank window.
+- **The per-user cache key is its own serializer.** The 1.0.15 key left a record
+  holding a `bigint` with no key at all (its view recomputed per broadcast), and
+  let distinct records collapse: `Date(NaN)` against `null`, a class whose
+  `toJSON` omits a field, an array with a hole and a named property. A class
+  instance, a `Proxy` and such an array are never keyed now.
+  `tests/user-memo-key-injective.test.ts`, `tests/foruser-leak.test.ts`.
+- **Revoking scopes on a live socket re-sends its view** when the user record
+  has no cache key (a `Set` of scopes, a class instance). It compared id and
+  role only. `tests/user-memo-key-injective.test.ts`.
+- **`"x" in s` answers the same in sync and async methods.** 1.0.15 made the
+  async proxy own-keys-only (`"push" in s.items` was false there);
+  `Symbol.iterator in s.items` agrees now too, and answers `false` for a held
+  reference whose slot has become a primitive. The parity fuzzer gained both
+  ops. `tests/fuzz-ops.ts`, `tests/live-proxy.test.ts`,
+  `tests/proxy-symbol-in-stale-slot.test.ts`.
+- **`testUI({ persist: true })` uses the production 100 ms debounce.** Since
+  1.0.15 the harness held every write until dispose — more lenient than
+  production. `tests/testui-persist-key-flush.test.tsx`.
+- **Standalone/Android: `aio.run({ persistDebounceMs })` may shorten the local
+  store's write window, never widen it.** 1.0.14 did not apply the key; 1.0.15
+  began forwarding it, undeclared and without a bound. A value below 100 ms is
+  applied; a larger one is 100 ms.
+  `tests/standalone-persist-debounce-fixed.test.ts`.
+- **A selector named like an `Object.prototype` member** (`toString`,
+  `isPrototypeOf`, …) is no longer bound as a deps-form selector — four more
+  `in`-on-data sites use `Object.hasOwn`.
+  `tests/parameterized-selectors.test.ts`,
+  `tests/parameterized-selectors-bindings.test.ts`.
+- **TOTP: a secret stored in a pre-1.0.15 spelling** keeps its one-code-one-use
+  record when it is re-staged. `tests/totp-reenrol-fresh-replay.test.ts`.
+- **Electron IPC: a refused unqueued write is reported on the diagnostic bus**,
+  like its WebSocket twin; a refused re-send is pinned as well.
+  `tests/air-transport-ipc-raw-refused.test.ts`,
+  `tests/air-transport-retry-push-refused.test.ts`.
+- **SSR: a `<script>` or `<style>` is judged as a whole (1.0.14 or earlier).**
+  The raw-text guard looked at each child separately, so a closing tag split
+  over two children (`"</scr"`, `"ipt>"`), or completed by a component child,
+  ended the element and the rest became page markup, in dev and production. The
+  element's joined content is judged, in `renderToString` and in both
+  `renderToStream` writers; the stream holds a raw-text element's content until
+  it is judged and sends it as one chunk. In production the whole content is
+  escaped, not the offending child alone. `tests/ssr-raw-text-end-tag.test.ts`.
+- **SSR: a `<script>` that leaves `<!--` and a later `<script` open is refused
+  (1.0.14 or earlier).** That text puts the HTML parser in its double-escaped
+  state, where the element's own `</script>` no longer ends it and the script
+  swallows the rest of the page. Dev throws and production escapes, with a hint
+  (`<\!--` or `\x3C!--` in a JS string, `<!--` in JSON); a `-->` that closes it
+  again passes. `tests/ssr-raw-text-end-tag.test.ts`.
+- **SSR: the closing-tag guard is `</` and the tag name, in any case.** Its
+  pattern was written `\s` inside a template literal and reached the regular
+  expression as `</s*script`, so `</sscript>` — text to a parser — was refused.
+  It passes, as `</ script>` does; `</script`, `</SCRIPT` and `</scriptx` are
+  refused as before. The refusal's hint printed the text it forbids; it prints
+  `<\/script`. `tests/ssr-raw-text-end-tag.test.ts`.
+- **A stop says why.** A signal or a control-API stop left `stopped uptime=…` in
+  the log with nothing above it. One INFO line now names the cause, in the
+  console and `app.log`: `SIGTERM received — stopping` (`SIGINT`, `SIGHUP`), or
+  `stop requested over the control API (am stop) — stopping` —
+  `(takeover by a new launch)` when a `--takeover` launch asked, from the
+  optional `X-Aio-Stop-By` header an older `am` does not send. An embedded app
+  (`libraryMode`) logs `… — closing this app`, and its host does not exit.
+  `tests/shutdown-signal-says-why.test.ts`,
+  `tests/shutdown-signal-says-why-e2e.test.ts`.
+- **Closing a dev server could leave esbuild's native process running (since
+  1.0.5-beta).** The wait for its exit reads each thread's child list, and one
+  thread exiting during that read made it conclude there was nothing to wait
+  for. Each thread is now read on its own, and a service still alive when the
+  wait for it ends (2 s at most) is named in a `note:` line on stderr. Where
+  there is no `/proc` (macOS, Windows) the kill is sent and the exit is not
+  awaited. `tests/esbuild-child-pids.test.ts`.
+- **Closing a dev server while a save was being re-validated stopped esbuild
+  under the import-graph walk.** The walk then hung, or started esbuild again
+  with nothing left to stop it, and a closed server could still broadcast a
+  reload. Close now waits for that walk, which stops transpiling once the
+  watcher is shut down. `tests/watcher-close-mid-validation.test.ts`.
+- **Closing a dev server while a file was still being transpiled.** The stop did
+  nothing when a transpile was still loading esbuild, so the service started
+  after the stop and was not ended; a transform pending at the stop never
+  settled; and a second stop asked at the same time returned before the process
+  had exited. The stop now waits for work in flight, stops run one at a time,
+  and the wait and the wait for the process to exit together take at most two
+  fifths of the teardown budget (2 s); work that has not settled by then is
+  given up on with a warning in the log (category `esbuild`) before close
+  returns. `tests/esbuild-stop-in-flight.test.ts`,
+  `tests/dev-close-bounded.test.ts`.
+- **Closing a dev server whose esbuild had stopped answering before the boot's
+  import-graph verdict ran until the teardown budget cut it (5 s).** The boot
+  validation is now ended by the close and waited for inside the stop's bound,
+  and a verdict that lands after the close is not printed.
+  `tests/dev-close-bounded.test.ts`.
+- **Closing a dev server no longer waits for, or names, an esbuild service that
+  another esbuild instance in the same process owns** (a worker's): the stop
+  waits only for the service it ended. `tests/dev-close-bounded.test.ts`,
+  `tests/esbuild-stop-in-flight.test.ts`.
+- **Closing a dev server no longer lets one slow part skip the rest:** the
+  listeners close and esbuild stops whatever the CSS step or a pending response
+  does. `tests/dev-close-bounded.test.ts`.
+- **Closing a dev server while the app's CSS step (`build.css`) was running**
+  waited for the whole step if the boot had started it, and not at all if a save
+  had: that process outlived close, and when it finished the closed server
+  broadcast a reload and printed `reloaded …`. Close now asks the step — either
+  one — to end, kills it if it has not exited half a second later, waits for
+  that exit and never for its output, and says in one log line what was done:
+  ended, killed, or a process it started left running; a watcher that has been
+  shut down sends and says nothing more. The kill reaches the step's own
+  process: a shell wrapper that does not `exec` its tool leaves the tool
+  running, and a tool that writes its output in place may leave that file
+  half-written until the next start runs the step again. A build never stops the
+  step. `tests/dev-close-bounded.test.ts`, `tests/build-css-step.test.ts`,
+  `tests/watcher-close-mid-validation.test.ts`.
+- **A teardown phase that overran could leave the databases 1 ms to close (since
+  1.0.0-alpha50).** Every phase was handed whatever remained of the one 5 s
+  budget, so a server close that hung was followed by
+  `sqlite did not finish inside the 5000ms teardown budget`. The stores now
+  always get at least 200 ms: when an earlier phase overran and less than that
+  is left, the teardown runs that much longer — 5.2 s at most — and a stop whose
+  phases fit the budget is unchanged. `onStop` is still cut at 4.5 s. The 200 ms
+  is a floor for the close, not a promise of a finished checkpoint; a close that
+  is cut loses nothing that was written. A store whose close is cut now says so
+  truthfully —
+  `sqlite did not finish inside the 200ms stores' budget — continuing without it (its checkpoint is left for the next start; nothing that was written is lost)`
+  — where it said its writes were lost. This is every app's shutdown, not only a
+  dev server's. `tests/shutdown-orchestrator.test.ts`.
+- **A second `aio.run()` on the same directory in one process left esbuild
+  running after close.** The transpile cache answered the whole graph, so the
+  prod-bundle check started a service the stop had not been told about. The dev
+  transpiler and the prod-bundle check now load esbuild through one loader that
+  records the stop. `tests/esbuild-one-owner-two-boots.test.ts`.
+- **Electron: no `deno install` in a directory that is not a project (1.0.13 or
+  earlier).** Run from source with no local Electron, aio installed it into the
+  current directory — and `deno install` creates a `deno.json` and a lock where
+  it runs. An app started elsewhere (a login item starts in the home directory)
+  left a config there on each launch, which made that directory "a project" for
+  whatever looks upward for one. Without a `deno.json`, `deno.jsonc` or
+  `package.json` in the current directory aio now uses the cached runtime and
+  says so. `tests/electron-runtime-fetch.test.ts`.
+
+### Tooling — repaired from 1.0.15
+
+- **Test harness:** one `freePort`, a port range per end-to-end task, and test
+  servers that do not watch the repository. `tests/test-ports-are-free.test.ts`,
+  `tests/test-servers-do-not-watch-the-repo.test.ts`.
+- **Test harness: no temp dir outlives its run.** A test browser's helpers are
+  found and stopped before its profile is removed (they were never found: the
+  lookup could not read Chromium's rewritten process title), also when the
+  process exits without `close()`; `testUI` video claims live in the process
+  environment instead of files; the app sandbox (`apps-*`) is one per process,
+  removed by the last test file that used it. `check:orphans` names the test
+  root, `apps-*` included, in its count.
+  `tests/chromium-profile-dropped.test.ts`,
+  `tests/apps-sandbox-one-per-process.test.ts`.
+- **`deno task test` fails on a leaked process again.** 1.0.15 downgraded "a
+  lock dir still held after a shard exits" to a log-file warning on a green
+  suite. It fails the shard and is named on the console; the `✓/✗` beside a
+  shard and the run's last line are one verdict; `AIO_TEST_FREE_CORES` must be a
+  whole number (`abc` used to mean "all but one core"). The real-window shard —
+  the one the Electron and Chromium tests run in — was never checked (since
+  1.0.14); it is judged by the lock dirs of its own test home only, so apps
+  running on the machine are neither counted nor touched.
+  `tests/test-shards-leftover.test.ts`, `tests/test-shards.test.ts`.
+- **A test file that runs no test fails its shard.** One that called
+  `Deno.exit(0)` at top level, or registered no test, passed under a green
+  summary. An empty file is excepted, and a file may be named by an absolute or
+  un-normalised path, or one with a space in it. A directory argument is judged
+  file by file — a file with no test under it passed.
+  `tests/test-shards.test.ts`, `tests/test-shards-leftover.test.ts`.
+- **Test runner: a shard's log is written as the shard runs, and a silent shard
+  is named.** `.aio/test-shards/<n>.log` was written only when the shard ended,
+  so a hung run left nothing. It now holds the output so far, and a shard with
+  no output for 5 minutes is named with the file it is in, every 5 minutes; it
+  is not stopped. `--quiet-ms=<n>` changes the interval. `--shards`,
+  `AIO_TEST_SHARDS` and `--quiet-ms` take digits only (`--shards` 1 to 256,
+  `--quiet-ms` 1 to 2147483647 milliseconds); every occurrence is checked and
+  the last one counts. `--shards=abc` was read with `Number()`, as in 1.0.16,
+  and crashed with a TypeError; it is refused by name. The log holds whole
+  characters only — one is not split between stdout and stderr.
+  `tests/test-shards.test.ts`, `tests/test-shards-leftover.test.ts`.
+- **`aiol --safe-fix` leaves code that is not aio's alone.** It still rewrote a
+  user's own `call` method when it had a return type, and the result failed
+  `deno check`. It skips definitions, `this.#call(…)`, a method of the app's own
+  object, an action payload written `{ type, backoff }`, and JSX text; a `call`
+  the file imports from aio and also declares itself is a `[manual]` hint, not a
+  rewrite. `tests/aiol-safe-fix-own-code.test.ts`.
+- **`aiol --safe-fix` rewrites a name only when the file proves it is aio's.**
+  1.0.16 and earlier rewrote an app's own `useCell`, `schedule`, `call`,
+  `ExtractState`, `CellAccess`, `ServerFnAccess` or `connectDevTools` as aio's
+  removed API. The proof is one static `import { name }` from aio — by
+  specifier, by the import map (`imports`, `scopes`, an `importMap` file), or
+  through the app's own barrel when the barrel passes the name on from aio and
+  nowhere else — with every other mention of the name in the file reading as a
+  use; a member of a static `import * as ns` of aio is proven the same way.
+  Without that proof the file is left byte for byte, with a `[manual]` hint: a
+  name taken by `await import(…)`, a name used with no import, a name the file
+  also declares or passes along, a module the run does not hold, a bare
+  specifier the map does not list, a config that cannot be read. A name the file
+  declares, or takes from another package, without importing it from aio is left
+  alone and not reported; `cell("name", { ui })` and a returned effect follow
+  the same proof, and there a `cell` that is not aio's is still reported, as
+  `[manual]`. The fix set is smaller than 1.0.16's on purpose. Its property test
+  pins, over every generated file: a file whose name is not aio's is
+  byte-identical after the run, the fixed tree has no type error the original
+  lacks, and a second `--safe-fix` changes nothing.
+  `tests/aiol-safe-fix-property.test.ts`,
+  `tests/aiol-safe-fix-own-code.test.ts`.
+- **`aiol --safe-fix`: a rename is whole or not at all.** If one mention of a
+  renamed word (`CellAccess`, `ServerFnAccess`, `ExtractState`,
+  `connectDevTools`, `disconnectDevTools`) in a file cannot be renamed — a
+  property key, the new name already taken, a source that cannot give the new
+  name — none is, and the hint names the line. A re-export list
+  (`export { connectDevTools } from "aio"`) is not renamed, and the files that
+  import through it get a `[manual]` hint.
+  `tests/aiol-safe-fix-property.test.ts`.
+- **`aiol --safe-fix`: the `schedule.blocking` fix writes an import that
+  resolves.** `blocking` is added to the import `schedule` came from; no import
+  is added for `ns.schedule.blocking`; the fix declines when `blocking` already
+  means something in the file, or `schedule` came from a sub-entry of aio.
+  `tests/aiol-safe-fix-property.test.ts`.
+- **`aiol` finds `call({ timeout })`, `schedule.blocking(` and
+  `schedule.poll({ backoff })` under the name the file gives them, and in more
+  spellings**: an import alias (`import { call as c }`), a call with type
+  arguments, a member access written over two lines, a shorthand, a quoted or
+  computed key, a call inside a template, `aio!.call`. `[manual]`, not
+  rewritten: `call({ timeout, timeoutMs })` (a rewrite would write the key
+  twice), a typed `schedule.blocking<A, B>(`, a `useCell` alias, and the
+  shorthand, quoted, computed, template and `aio!.call` spellings. A use no rule
+  reads (`schedule?.blocking?.(`, `call.apply(…)`) gets a hint.
+  `tests/aiol-safe-fix-names.test.ts`, `tests/aiol-safe-fix-own-code.test.ts`,
+  `tests/aiol-safe-fix-property.test.ts`.
+- **`aiol --safe-fix` no longer rewrites a callback parameter that follows text
+  in JSX (also in 1.0.16).** An apostrophe, a URL or a backtick in what an
+  element shows was read as the start of a string or a comment, so the parameter
+  declared after it on the line went unseen and its uses were rewritten as if
+  they were aio's; a real use after such text went unreported. The linter now
+  reads element text as text, and an element after a comment, with type
+  arguments on its tag, with a comment in the tag, or after `+` or `!` as an
+  element. In a file that holds JSX, a name that also appears inside a comment,
+  a string or element text is not rewritten: `[manual]`. Two things leave a
+  whole file to you, with the line named: an identifier written with a `\u`
+  escape, and a `</` that closes no element aiol read — in code, a string, a
+  regex or a comment — because an element it did not read would have its text
+  taken for code. Tag names in any script are read (`<Élément>`).
+  `tests/code-mask-jsx.test.ts`, `tests/aiol-safe-fix-property.test.ts`.
+- **`aiol` reads import-map `scopes`**, per importing file, and treats a map
+  target that is not a string as unusable. `aio` mapped to the app's own file is
+  the app's code, and with no `deno.json` in the linted directory nothing is
+  rewritten on the strength of a bare `aio` import.
+  `tests/aiol-safe-fix-property.test.ts`.
+- **`aiol --safe-fix` removes an import only when the name is written nowhere
+  else in the file (also in 1.0.16).** A tag spelled in a comment or a string
+  made the next `useCell(c).state.x` read as JSX text — not reported, not fixed,
+  and its import removed when another use was (`TS2304`); a use inside a
+  template's `${…}` lost its import the same way. Opening tags are read in code
+  only (a closing tag in a comment or a string leaves the file to you, as
+  above), a call in `${…}` is reported and rewritten, text shown after a tag
+  whose attribute holds a `>` is left as text, and a kept `useCell` import is
+  named by a hint. `tests/aiol-safe-fix-own-code.test.ts`,
+  `tests/aiol-safe-fix-property.test.ts`.
+- **`aiol`: a hint says `[manual]` when `--safe-fix` will not act.** The
+  React-import and `createRoot` hints stayed `[fixable]` after every run. A
+  finding `--safe-fix` leaves says why, and what to do by hand — it ended "aiol
+  --safe-fix does it". `tests/aiol-safe-fix-own-code.test.ts`.
+- **`aiol` reports an effect returned through a namespace**
+  (`return aio.schedule.after(…)`), as `[manual]`.
+  `tests/aiol-safe-fix-own-code.test.ts`.
+- **`aiol`: the "useCell() without loading/fallback state" hint is about a call
+  of aio's `useCell`.** It fired on the spelling in a comment, a string or shown
+  text, and on an app's own hook. `tests/aiol-safe-fix-own-code.test.ts`.
+- **`am` run from the registry inside a path-pinned app** no longer dies with
+  `URL must be a file URL` (the 1.0.15 `fromFileUrl` fix threw for `https:`).
+  `tests/am-path-pin-once.test.ts`.
+- **`install.sh` no longer exports `DENO_INSTALL_ROOT`.** Since 1.0.15 a
+  `DENO_INSTALL` in a read-only directory (`/opt/deno`) failed the `am` install,
+  and a writable one put the shim outside `~/.deno/bin`. A `DENO_INSTALL_ROOT`
+  you set is honoured. `tests/install-sh-shim-root.test.ts`.
+- **Empty and unreadable numbers are refused, not read as 0:**
+  `am prune --days=`, `am timetravel goto ""`, `am eval --window=`,
+  `am shot --threshold <n>` (space form). `am timetravel goto` with no id prints
+  `usage: am timetravel goto <id>`. `tests/electron-cache-prune.test.ts`,
+  `tests/am.test.ts`, `tests/am-eval-cdp.test.ts`, `tests/am-shot.test.ts`,
+  `tests/am-timetravel-usage.test.ts`.
+- **`check:mutations` exits 0 only when every selected row was killed**, and
+  refuses `--jobs=0`; the exit code is one tested function.
+  `tests/check-mutations-exit.test.ts`.
+- **`check:env` sees a variable named in any argument position** and in an array
+  of names; `AIO_VIDEO`, `AIO_VIDEO_PACE` and `AIO_VIDEO_SCHEME` are documented.
+  `tests/check-env-gate.test.ts`.
+- `am start` on Windows escapes typographic single quotes; `am create`'s undo
+  restores a directory link as a junction; `am pin` lists a file's findings in
+  line order; `url` in `am start/status --json` is documented.
+  `tests/am-detached-spawn.test.ts`, `tests/am-pin-preflight.test.ts`.
+
+### Start-up and state files — older defects met on a real machine
+
+- **Windows: a start could be refused right after an install or an update, with
+  nothing on screen.** The boot was refused with
+  `could not replace …\<app>.lock`; after an update the app closed and did not
+  come back. The lock file is published through a hard link, and Windows can
+  refuse a rename over a file published that way: measured over 2,000 tries a
+  cell with the virus scanner on, 1.4–4.1 % of such renames failed with "access
+  denied", clearing after 0.5–1.3 s on a quiet machine and not within 10 s right
+  after an install or an update — while a rename over an ordinary file failed 0
+  times in 20,000 and a write in place 0 times in 8,000. Every change to a lock
+  record is now a write in place, through a handle the app keeps open; nothing
+  renames over a file published by link, and a guard test holds that for `src/`.
+  `tests/lock-rewrite-in-place.test.ts`,
+  `tests/rename-goes-through-the-helper.test.ts`.
+- **Two quick double-clicks could run the app twice on one database.** The
+  second launch took the first one's lock after one refused connection — the
+  first says `started` a moment before its socket is bound — opened the same
+  `state.db`, failed on its endpoint and removed the lock on its way out,
+  leaving the running app without one. A live process is now called stuck only
+  when its record has not changed for 10 s and six connection attempts over 2.5
+  s all find nothing listening. Such a process is ended before its lock is
+  taken, and if it cannot be ended the start is refused, exit 1, naming the pid.
+  A process that holds the data folder's OS lock refuses every other start,
+  whatever the lock file says. `am start` uses the same verdict, and does not
+  end an instance that still listens; `am backup` and `am restore` acquire the
+  same way, so a stuck instance is ended before the copy.
+  `docs/clients/app-manager.md`, `tests/lock-zombie-verdict.test.ts`.
+- **A healthy app bound to an address other than 127.0.0.1 could be ended by a
+  second launch (also in 1.0.16, in a worse form).** The lock recorded the port
+  but not the address, so the check "is anything still listening?" connected to
+  127.0.0.1; an app on `host: "127.0.0.2"`, a LAN address or `::1` answered
+  "refused" there, and once its record was 10 s old a second launch ended it —
+  1.0.16 took its lock and started beside it instead, two processes on one
+  `state.db`. The lock now records the address it binds and the check connects
+  exactly there (`0.0.0.0` is checked on 127.0.0.1; `::` on both `::1` and
+  127.0.0.1, where any answer means alive, and a loopback the machine does not
+  have counts for nothing). A record without an address — written by 1.0.16 or
+  older — is never judged: the launch is refused `Already running`, naming the
+  pid and `am stop`. `tests/lock-zombie-verdict.test.ts`.
+- **`am` no longer ends an instance that is still listening.** `am start` killed
+  a `starting` instance past its grace when something accepted on its port
+  without answering — which does not show the listener is the app's. A
+  `starting` or `started` instance that listens but does not answer is now
+  refused with
+  ``not answering: … `am stop --app=…` asks it to quit; `am kill --app=…` ends it``,
+  and `am status` says the same and reports the record's own status
+  (`answering: false`, exit 2). `tests/am-cmd.test.ts`,
+  `tests/am-start-grace.test.ts`.
+- **A socket file removed under a running app is said.** The app's log warns
+  once per loss — nothing new can connect, and a second launch would take the
+  app for one whose listener died — and a launch that ends it says the socket
+  file is gone. `tests/lock-zombie-verdict.test.ts`.
+- **Two apps pointed at one data folder:** the refusal names the app that holds
+  it. **A data folder that cannot be claimed** (its claim file cannot be opened,
+  or the file system cannot lock) is said once instead of silently going on.
+  `tests/lock-zombie-verdict.test.ts`.
+- **Windows: a crashed app could not be started again while another program held
+  its lock file.** The next start said "Already running", naming the dead
+  process. A dead owner is not a running app: the start now goes on under the
+  data folder's own lock, says so in one warning, and files its lock record as
+  soon as the file frees; only where the folder cannot be locked is it refused,
+  saying why. A launch that finds the data folder held while the lock file
+  cannot be read says
+  `another start of it holds its data folder (…), and its lock file cannot be read yet — another program has it open. Try again in a moment.`
+  instead of "Already running". `tests/lock-zombie-verdict.test.ts`.
+- **A losing second launch no longer archives the running app's logs** when the
+  running app's lock file is missing. `tests/lock-zombie-verdict.test.ts`.
+- **`am stop` on a production app was a hard kill on Windows (since
+  1.0.0-alpha30).** No `onStop`, no final save, no clean lock release:
+  production answered no stop request on any wire, and `am` fell back to a
+  signal, which is `TerminateProcess` there; the 1.0.16 lockdown refused the
+  request too. A production build now writes the per-boot, owner-only
+  `<data>/control.key` and answers it exactly one request, the stop; the
+  local-peer lockdown lets that request through to the credential check and
+  nothing else. On Windows the file is created with an owner-and-SYSTEM,
+  protected ACL that is read back and checked; one that is not owner-only, or an
+  app without `--allow-ffi`, gets no key and says so at boot, and `am stop` ends
+  it by a signal as before. A refused stop is logged — missing or wrong
+  credential, never the value — at most 20 lines a minute. That line is written
+  to `app.log` before the app answers — on Windows it was lost to the kill that
+  followed — and the answer says the stop was refused; `am stop` then says the
+  app refused its credential before it falls back to the signal, and
+  `am stop --json` reports `how` (`graceful`, `signal` or `killed`). Any `am`
+  since 1.0.0-alpha46 presents the key; an app built before 1.0.17 still gets
+  the signal. `docs/clients/app-manager.md`,
+  `tests/local-peer-lockdown-e2e.test.ts`, `tests/local-control.test.ts`.
+- **`--takeover` stops the previous instance gracefully.** It asks it the way
+  `am stop` does and waits for its `onStop` and final save before forcing
+  anything; on Windows it was `TerminateProcess`. An instance that does not
+  answer is ended as before. `tests/lock-zombie-verdict.test.ts`.
+- **A second launch of a running app writes at most one line into its logs.** A
+  launch that brings the window to the front writes nothing; one that is refused
+  adds its one reason line to `app.log` — no `debug.log` or `error.log` copies,
+  no new files. `tests/lock-zombie-verdict.test.ts`,
+  `tests/second-launch-states.test.ts`.
+- **Windows: `am start` could not start an app from source (also in 1.0.16).**
+  `am` held the app's lock under its own pid until its launcher returned;
+  PowerShell's launcher is slow enough that the app got there first and refused
+  itself ("Already running … still starting"). `am` now hands the app a one-time
+  secret (`AIO_LOCK_HANDOFF`) with which it takes the lock over — nothing else
+  can — and the app removes it from its environment.
+  `tests/am-start-launch.test.ts`.
+- **`am start --headless` works**, and `--service`: passed to the app as
+  `--client=server-only`, as the app-manager docs say; the app itself refuses
+  the build word. `tests/am-start-launch.test.ts`.
+- **Windows: `am start` and `am ui` no longer wait for the app's whole
+  lifetime.** The app inherited PowerShell's stdout pipe, which `am` read for
+  the pid; the pid now comes back through a file, and the launcher is given 30 s
+  before `am` fails loudly. `tests/am-start-launch.test.ts`.
+- **A start waiting on a lock file another program holds open says so** in one
+  line, instead of waiting silently. `tests/lock-zombie-verdict.test.ts`.
+- **`am status --json` names the instance's `client`** (additive), on started,
+  starting and not-answering rows. `tests/am-cmd.test.ts`.
+- **Windows: when `am start` fails, it shows the reason from `stdout.log.err`**
+  (where Windows puts the app's errors) and names that file, instead of "it
+  wrote nothing to stdout.log". `tests/am-start-launch.test.ts`.
+- **`am start` no longer reports "started" when another app answers on the
+  port** while its own app is still booting. `tests/am-start-launch.test.ts`.
+- **A journal held by another program is one warning, not a flood.** Every
+  refused append logged two errors claiming changes "will be lost on restart" —
+  not true: each change is saved by an immediate snapshot. Now one warning when
+  it starts and one line when writes land again, with the count; "will be lost"
+  appears only when the snapshot itself fails. A journal that cannot be
+  compacted warns once, not on every save, and says when it compacts again.
+  `tests/journal-refused-episode.test.ts`,
+  `tests/journal-compact-nothing.test.ts`.
+- **A running app whose lock file was removed was invisible to `am`.** It files
+  its record again within 5 s
+  (`the lock file … was gone while this app ran — filed again`).
+  `tests/lock-zombie-verdict.test.ts`.
+- **`am`: a backup or restore in progress was treated as a running app by
+  commands about other apps (also in 1.0.16).** While `am backup` or
+  `am restore` held one app, a command naming an app that was not running listed
+  the held one as "1 app is running: <app> @ :0", `am status` put it under
+  `running`, `--port=0` answered about it, and from a directory with no project
+  `am` took it for the one app that is running and answered about that app. A
+  hold is now only what `am status`, `am instances` and the held app's own verbs
+  say it is. `tests/am-maintenance-hold.test.ts`.
+- **State files on Windows: a replace waits for a held file.** Every "temp, then
+  rename over" write — the journal, the crash checkpoint, the database snapshot
+  and integrity records, blobs, `meta.json`, log rotation, and the update's
+  trust store, rollback record, first-boot token and downloaded artifact —
+  failed outright when the target was open elsewhere. Each now waits up to 1.3
+  s, says so when it still fails, and leaves no temp file behind; the two that
+  failed without a word (`meta.json`, log rotation) now warn. A file that stays
+  held past the wait is remembered: later writes to it make one attempt and fail
+  at once for 30 s instead of waiting again, with one warning, one more per 30 s
+  with a count, and `replaced again after N failed attempts` when it frees. On
+  macOS and Linux a replace is one rename, as before.
+  `tests/rename-over.test.ts`, `tests/rename-goes-through-the-helper.test.ts`,
+  `tests/replace-sites-are-loud.test.ts`,
+  `tests/replace-sites-fail-clean.test.ts`, `tests/journal-held-file.test.ts`,
+  `tests/updates-file-replace-retries.test.ts`.
+- **A boot that is refused leaves its reason in `app.log`.** It was on stderr
+  only, which a double-clicked desktop app does not have. A boot refused after
+  its configuration was accepted writes one
+  `ERROR boot refused — the app did not start: …` line to `app.log` and
+  `error.log`, and `stopped` once instead of twice. That includes a refusal from
+  before the logger starts (cells that cannot be composed) when the app's home
+  already exists; a refused start does not create a home. On the console only: a
+  command line or `aio.run()` configuration that is refused (`port: "abc"`), a
+  refused data folder, a first start, and an embedded (`libraryMode`) app, whose
+  host gets the exception and no line. A launch refused because the app is
+  already running adds that one line to the running app's `app.log` and nothing
+  else. `tests/boot-refusal-reaches-log.test.ts`.
+- **Double-clicking a desktop app twice.** The second launch, meeting an
+  instance that was still starting, printed
+  `Already running: <app> at http://localhost:<port>` where nothing listened,
+  and exited 1. It now says
+  `<app> is starting (pid N) — waiting for its window…`, waits for the first
+  window (the rest of that instance's 10 s start-up grace plus 3 s) and exits 0.
+  The running window answers only once its page has mounted; if the first
+  instance dies before that, this launch takes its lock and starts — before, a
+  launch 300 ms after the first exited at once, and if the first then died there
+  was no app at all. An instance started by an older aio answers early, as
+  before. One still starting after the wait is refused, exit 1, with
+  `(pid N, still starting)`; a URL is printed only for an instance that serves
+  one. `tests/second-launch-states.test.ts`.
+- **Two launches in the same moment rotate the logs once.** Both rotated, which
+  left `debug.log.2` with no `debug.log.1`. A start that follows another
+  process's by under 3 s does not rotate; the claim is a new file,
+  `logs/.rotate`, outside the log budget.
+  `tests/logger-rotate-two-starts.test.ts`.
+- **A clean quit whose lock file could not be removed is reported as a clean
+  quit.** The next start said the previous run "did not shut down cleanly".
+  Removal now waits like a replace; if the file is still held the quit warns and
+  leaves a `<key>.quit` mark, and the next start that finds it logs
+  `quit cleanly but could not remove its lock file` instead.
+  `tests/lock-release-held-open.test.ts`.
+- **A perf line could read `exceeded budget: 5ms > 5ms`.** The printed duration
+  now keeps enough digits to read as over its budget — in `perf.log` (whose
+  `duration` may be fractional), the budget warning and its tip.
+  `tests/perf-budget-text-is-true.test.ts`.
+
+### Desktop packages and macOS — older defects met on a real machine
+
+- **Packages no longer depend on the builder's umask.** Built under umask 077, a
+  macOS app was installed with owner-only directories and `Info.plist`, so
+  another account on the Mac could not open it (the macOS bundle since
+  1.0.4-beta), and an AppImage's inner directories were the same. Directories
+  and executables are now 0755 and other files 0644 inside the `.dmg`, the
+  `.app.tar.gz`, the macOS and Windows zips, the Windows exe payload, the
+  AppImage, the web folder and the iOS project; in the Windows exe payload what
+  counts as executable is decided by name (`.exe`, `.bat`, `.cmd`, `.com`), the
+  same on every build host. The artifact files in `dist/` themselves still
+  follow the builder's umask. `tests/build-artifact-modes.test.ts`.
+- **A web folder or iOS project placed in a `dist/` on another filesystem than
+  the project no longer comes out owner-only under a restrictive umask.** The
+  copy made its directories under the umask; a copied artifact now matches a
+  renamed one in modes, exec bits and links.
+  `tests/build-artifact-modes.test.ts`.
+- **A second build into an out dir on another filesystem sets the previous
+  release aside.** The move failed with an "Invalid cross-device link" warning,
+  so a build that produced nothing had no release to put back. Each entry is now
+  renamed, or copied and removed across filesystems; a failed build leaves the
+  previous out dir as it was and says so. `tests/build-out-dir-inode.test.ts`.
+- **macOS: an app opened a second time can be quit by its bundle id (since
+  1.0.4-beta).** The window ran as a second bundle nested inside the app, so the
+  system had no running app at the installed path; a second open registered the
+  server process, which takes no Apple events, and a quit by bundle id
+  (AppleScript, or anything else that asks the system to quit the app) failed
+  with every process still alive. The window is now started through a link in
+  the bundle's own `Contents/MacOS/` (`app_window`), so it is the installed app.
+  The bundle also carries the runtime's language stubs and `Info.plist` keys, so
+  the app's language and its privacy and graphics declarations are unchanged;
+  the DMG, the update tarball (`.app.tar.gz`) and the no-Mac zip all carry the
+  link and the language stubs. A bundle unpacked by a tool that does not keep
+  symbolic links starts its window from the runtime inside the bundle and says
+  so in one ERROR line. `tests/electron-mac-bundle-window.test.ts`.
+- **macOS: opening a running app again brings back a window hidden to the
+  tray.** Finder, the Dock or `open` did nothing for it before.
+  `tests/electron-mac-bundle-window.test.ts`.
+- **The window's generated main script and preload no longer pile up in the temp
+  directory.** The main script (about 120 KB, carrying the launch URL) stayed
+  there after a `SIGKILL`, the OOM killer or a crash, one more per crash, and
+  when the window could not be spawned; a killed window left its private preload
+  directory there too, one per kill (the preload since 1.0.7-beta). Both are now
+  written into the app's profile directory — `<profile>/aio-main/` and
+  `<profile>/aio-preload/`, owner-only, one file per process. The main script
+  removes its own file as soon as Electron has loaded it, a failed spawn removes
+  it, and a launch removes every file there whose process is gone. With no home
+  or a profile directory that cannot be written, the main script goes to the
+  temp directory as before, with one warning.
+  `tests/electron-main-script-litter.test.ts`,
+  `tests/electron-preload-file.test.ts`.
+- **A desktop window no longer outlives its app (the server-death watch since
+  1.0.0-alpha65, the crash guard since 1.0.0-alpha32).** With a page that
+  cancels `beforeunload`, stopping the app (`am stop`, `SIGTERM`, Ctrl-C) or its
+  server dying left the window and its helper processes running: the quit the
+  window was asked to make is one a page may refuse, and nothing retried. An
+  exit the app decides now ignores the page's veto, and the process ends itself
+  if the quit has not finished in 3 s. An uncaught exception in the window's
+  main process takes the same exit, in the app shells and in the aio client,
+  with exit code 1. Closing or quitting by the user still honours
+  `beforeunload`. `tests/electron-parent-watch.test.ts`,
+  `tests/electron-server-gone-e2e.test.ts`.
+- **A packaged desktop app whose window cannot be started stops.** It kept
+  running with no window, holding the single-instance lock, so the next launch
+  answered "already running" and showed nothing. It now stops with exit 1 and
+  the reason in its log; `--keep-server` and a run from source keep serving.
+  `tests/electron-mac-bundle-window.test.ts`.
+- **The dev launcher installs Electron only into an app project (since
+  1.0.0-alpha26).** Started with the current directory in a checkout of the
+  framework itself (`deno task amui` reaches it), it ran
+  `deno install npm:electron` there and edited the checkout's tracked
+  `deno.json` and `deno.lock`. It now uses the cached runtime there, and so does
+  a build; `deno task install:electron` says when it writes to the checkout.
+  `tests/electron-runtime-fetch.test.ts`.
+- **The WebSocket desktop shell writes `ui mounted` (missing since
+  1.0.0-alpha71).** The docs name that line as the renderer's positive signal,
+  and only the local-socket shell wrote it.
+  `tests/electron-renderer-log.test.ts`.
+- **Docs: what `closeToTray` covers, and what `beforeunload` has no say in.**
+  `closeToTray` covers every close the user or the page makes; a debugger's
+  `Page.close` destroys the page; an exit the app decides ignores
+  `beforeunload`; a packaged app stops when its window cannot start.
+  `docs/clients/electron.md`.
+- **A page's `window.close()` hides a `closeToTray` window (since 1.0.0-beta).**
+  It ended the app: Electron closes a window on that call without the
+  cancellable `close` event the tray relies on. The page's `window.close()` is
+  now the window's own close verb on every desktop OS, so the title bar, Cmd+W,
+  `__aioWindow.close()` and `window.close()` take one path — the window hides
+  with `closeToTray` and the app ends without it. Quitting (tray Quit, Cmd+Q,
+  `am stop`, `SIGTERM`) is unchanged. `__aioWindow` now exists in the WebSocket
+  shell too. `tests/electron-window-close-and-menu.test.ts`,
+  `tests/electron-second-launch-show-e2e.test.ts`.
+- **macOS: a desktop app has an application menu.** It had no Edit and no Window
+  menu, and on macOS the standard shortcuts are menu items: Cmd+C, Cmd+V, Cmd+X,
+  Cmd+A, Cmd+Z, Cmd+W, Cmd+M and Cmd+H had nothing to act on. macOS now gets a
+  minimal menu — the app's Hide, Hide Others, Show All and Quit; the standard
+  Edit items; Minimize, Zoom, Close and Bring All to Front. Linux and Windows
+  still have none. The keys themselves were not pressed on a real Mac: the menu
+  items and their key equivalents were read there, and Quit was triggered
+  through the menu. `tests/electron-window-close-and-menu.test.ts`.
+- **macOS: the bundle's minimum system version follows the bundled runtime.**
+  The bundle declared a fixed 12.0 while the Electron it carries declares 13.0.
+  `LSMinimumSystemVersion` is now derived at build time: the higher of aio's
+  floor (12.0) and the bundled runtime's own. What macOS 12 does with either
+  value was not run. `tests/electron-mac-bundle-window.test.ts`.
+- **Building the Electron zip on a Windows host without `zip`.** The PowerShell
+  fallback put both paths into the script's text, where `$`, a backtick or a
+  quote expands and `[` `]` read as a pattern. The paths are now passed in the
+  environment and the archive is made by `ZipFile.CreateFromDirectory`.
+  `tests/powershell-scripts-wellformed.test.ts`.
+- **The boot line `launching Electron (…)` names where the binary came from.**
+  It said `$ELECTRON_PATH` for a macOS bundle and a double-clicked Windows exe,
+  which set no such variable and run the runtime they ship, and `packaged` for
+  any runtime under a directory called `dist`.
+  `tests/electron-runtime-fetch.test.ts`.
+
+### Android
+
+- **Whitespace inside a placeholder is normalised before substitution.** A
+  formatter rewrote `{{APP_NAME}}` as `{{ APP_NAME }}`; the substitution matched
+  nothing, the placeholder reached `AndroidManifest.xml`, and gradle failed with
+  an opaque `ManifestMerger2$MergeFailureException`. `_fillTemplate` now accepts
+  `{{ APP_NAME }}` (and tabs/newlines) as the token.
+  `tests/build-android-names.test.ts`.
+
+### Run on real machines
+
+Every artifact below was built from this release and run on its own system.
+
+- **Windows 11 (x64, Defender on).** A one-click install and its first start;
+  five updates with a kill at each of the six stages; a file held open in a kept
+  copy (attempts 1, 2, then the update installs once the file is free); a kept
+  copy the app may not read (counted as an attempt, not dismissed); a 1.0.16
+  one-click install updated twice by 1.0.16 and then by 1.0.17, reopened through
+  its old `.exe` (it stays on the new version); 150 relaunches; 60 simultaneous
+  double-starts sampled on `state.db` (never two holders, 103 353 samples); a
+  second launch 0.3 s after the first (it waits for the window, and starts
+  itself when the first dies before it); a suspended app; a crashed app whose
+  lock file another program held; a held journal; this release and an older one
+  side by side; `am start` ×10; `am stop` (a clean stop; a wrong or missing
+  `control.key` refused and reported); `--takeover`; the `control.key` ACL
+  (owner and SYSTEM only); a dev app with relative imports.
+- **Measured on Windows:** a rename over a file published by hard link was
+  refused in 1.4–4.1 % of 2 000 tries per cell, and for more than 10 s under
+  scanner load; a rename over an ordinary file, 0 of 20 000; a write in place, 0
+  of 8 000. NTFS file ids as Deno reports them are rounded, and a re-created
+  file keeps the old creation time — so file entries are proven by their bytes.
+- **Linux (x64).** A build run from a foreign directory, offline; a second
+  launch; 1.5 MB and 4 MB uploads over the local socket; 30 kills during
+  start-up (no files left in `/tmp`, the profile swept at the next start); a
+  page with a `beforeunload` handler while its server is stopped and killed (no
+  process left); an app bound to `0.0.0.0` met by a second launch (the first
+  stays up).
+- **macOS 14 (x64).** The `.app` and its zip; open, re-open and quit by bundle
+  id ×5 (one launch record); an update swap, a refused release and a rollback;
+  kept copies pruned to three; the update record's identities on APFS; the
+  bundle link replaced by a plain file (the app opens, one error line); a nested
+  runtime that cannot run (a loud stop, no process left).
+
+### Not verified on a real machine yet
+
+- Apple Silicon; macOS 12 and 13; Gatekeeper on a downloaded build.
+- Real key presses, and a window actually coming to the front (the Mac screen
+  was locked; the Linux display had no window manager).
+- The Linux AppImage without FUSE; linux-arm64; Windows on ARM.
+- `am ui` on Windows; the cost of hashing a large kept copy while Defender scans
+  it.
+- `mv --exchange` from coreutils 9.5 or later (stand-ins only).
+
 ## v1.0.16-beta — desktop downloads shrink: the compiler leaves the binary, a zstd exe, and minify on by default (2026-10-01)
 
 > **Nothing is removed and nothing changes shape; no app needs a code change.**
@@ -9,7 +1857,7 @@
 > TypeScript compiler or the other build-only npm packages unless
 > `build.keepPackages` names them.
 
-### The size round (feedback/optimal-builds.md Task2)
+### The size round (a field report)
 
 - **The TypeScript compiler no longer ships inside a compiled binary.**
   `deno compile` embedded the whole `typescript` package a host's graph could
@@ -107,6 +1955,82 @@
   given no state and no methods) or by reading the process's memory (denied
   where the OS allows). This denies **other processes** — it does not sandbox
   code running inside the window itself.
+
+### Correction (1.0.17-beta, 2026-10-02)
+
+An audit after this release found statements above that the code did not meet.
+The text above is left as published; this is what was true, and 1.0.17-beta
+repairs each item (see its entry).
+
+- **"No app needs a code change."** Not for every app: the lockdown had no
+  opt-out, so a production desktop app with a same-user companion process lost
+  that process's session, and `--prod --client=electron` run from source showed
+  a blank window (the server armed the pid of npm's `electron` shim, not of the
+  window).
+- **`build.minify` on by default** shipped defects: in a minified desktop build
+  the window did not reconnect after a dropped socket; a `blocking()` function
+  with a nested helper, arrow or class failed in every compiled build; a
+  decorated class got the minifier's name, and a legacy parameter decorator
+  stopped the build; a comparison whose parentheses matter to TypeScript
+  (`[(a < b), c > (d ?? 0)]`) crashed the compiled build.
+- **"A release gate reads a real artifact's VFS file table."** The gate matched
+  full paths against records that store a basename, so it could not fire and
+  reported a clean binary. The compiler was also still embedded when it was
+  reached as a peer of another dependency. And while the build honoured
+  `build.keepPackages` and `build.chromiumExtras`, it called both unknown keys
+  ("aio never reads build.keepPackages — it does nothing"). A `keepPackages`
+  name could also still be left out without a word (a package linked only from a
+  build-only one), and a kept package shipped without the packages it needs.
+- **The Windows one-click `.exe`, "larger, never broken".** A second
+  double-click during the first extraction, or a different version's `.exe`
+  opened while the app ran, could destroy the install; after a self-update the
+  old `.exe` extracted the old version over the new one; an Authenticode-signed
+  `.exe` could not start; the build exited 1 from a checkout path with a space
+  or non-ASCII character, on a Windows host, or with aio imported remotely; and
+  the committed stub PE carried paths of the machine that built it.
+- **Chromium extras, "and nothing else".** `dxcompiler.dll`/`dxil.dll`, the
+  software Vulkan implementation (`vk_swiftshader*`) and the Vulkan loader
+  (`vulkan-1.dll`, `libvulkan.so.1`) are kept exactly as Electron shipped them;
+  `"strip"` removes all of Vulkan — hardware and software, since the loader is
+  how Chromium reaches any Vulkan driver — and the DXIL compiler, leaving the
+  OpenGL/Direct3D paths.
+- **The freeze fix, "bounded and refuse by name past the cap".** The byte cap
+  was checked after a file had been read, so one very large file was read whole
+  before the refusal; and the tree was read even for a pinned `"version"`, so an
+  ordinary app with one large asset reported `unknown (…)` and its
+  `deno task build` exited 1. From 1.0.17-beta a tree past the cap is identified
+  by path, size and mtime, and refused only past 50,000 files, 50,000
+  directories or 64 levels.
+- **Native memory.** The native-leak report did not fire for a heap that grows
+  at all (the usual case), and where it did fire it repeated every window for
+  memory that climbs and is given back; a `machine` report printed "heap at N%"
+  for an RSS condition; the budget error's text did not contain
+  `MEMORY_UNBOUNDED`. This release also added `AIO_MAX_HEAP_MB` (a heap cap in
+  megabytes) without listing it here.
+- **The lockdown — "now serves ONLY the window it spawned".** It gives a session
+  only to the window process it spawned: on the state socket and, from
+  1.0.17-beta, on the HTTP socket beside it (1.0.16 left `<app>.http.sock`
+  ungated — a same-user process could upgrade to a WebSocket there).
+- **"The `ctl` control plane still answers it … it carries its own gates."**
+  Over `ctl` such a process may ask `GET /__aio/health` only, and is told
+  `{status, appId}`. (1.0.16 ran the whole HTTP handler for it: custom routes,
+  vitals, metrics.)
+- **"On by default whenever `prod && electron && uds && !expose`."** The log
+  line "only this app's own window may connect" is printed only for an app with
+  no TCP and no `--cdp` port; with either, the socket is still gated and a
+  warning says what the port leaves open. (1.0.16 printed the line with a port
+  open.) Opt out with `electron: { allowLocalPeers: true }`.
+- **"On Linux the process is made non-dumpable."** On Linux the **server**
+  process is made non-dumpable; the Electron window process is not.
+- **"The boundary, stated."** A foreign process cannot open a session. It can
+  still read the app's `state.db` and logs on disk and, unless the OS forbids
+  it, the window process's memory. This stops other programs connecting; it is
+  not a boundary against code running as the same user. `$ELECTRON_PATH` names
+  the process that is trusted.
+- **Requirements the entry did not state.** The lockdown requires `--allow-ffi`
+  when run from source (from 1.0.17-beta the boot refuses without it; 1.0.16
+  started and refused its own window). The trusted pid was never disarmed when
+  the window exited, and the per-frame guard had no test.
 
 ## v1.0.15-beta — the audit round: one cross-caller key, one fail-open gate, and four smaller repairs (2026-09-30)
 
@@ -254,6 +2178,48 @@
   that promises every `AIO_*` variable; **`check-doc-coverage`** fails when it
   checked nothing. `tests/check-env-gate.test.ts`,
   `tests/doc-coverage-gate.test.ts`.
+
+### Correction (1.0.17-beta, 2026-10-02)
+
+An audit after this release found statements above that the code did not meet,
+and regressions this release introduced. The text above is left as published;
+1.0.17-beta repairs each item (see its entry).
+
+- **"No app needs a code change", and `AIO_CDP` / `AIO_PORT` "refused".**
+  Refusing them was a compatibility break: an ambient `AIO_CDP` stopped the boot
+  of every non-Electron app under it, and `AIO_PORT`/`AIO_DEFAULT_PORT` written
+  `0x1F90`, `1e3` or `+3000` stopped a boot that 1.0.14 allowed. From
+  1.0.17-beta an ambient `AIO_CDP` on a non-Electron client is ignored with one
+  warning (`--cdp` is still refused there), and those port spellings are read as
+  before 1.0.15 and warned about once; only a value that is not a port is
+  refused.
+- **"The strict pinned-cert path fires."** There was no strict path. The pin
+  compared the whole served file (leaf and root) with the one certificate
+  presented, so it matched no current server, and a mismatch fell through to the
+  looser host list in silence. From 1.0.17-beta the pin matches and a changed
+  certificate is a loud warning; it is still not a refusal.
+- **The per-user cache key.** It was not injective (a class whose `toJSON` omits
+  a field, `Date(NaN)` against `null`), and a record holding a `bigint` had no
+  key at all; revoking scopes on a live socket whose record has no key did not
+  re-send the view.
+- **"`--safe-fix` no longer rewrites a user's own method named `call`."** It
+  still did when the method had a return type, and for a call written
+  `this.#call(…)`; it also rewrote a `useCell` the file declared for itself.
+- **"A path-pinned `am` … now uses `fromFileUrl`."** That call threw for an `am`
+  run from the registry (`https:`).
+- **"A successful in-app rollback updates `installed.json`"** — not for a
+  directory-layout install, where an in-app update did not write it either.
+- **"A re-staged TOTP secret …"** — a row stored before this release, in its raw
+  spelling, still reopened a spent code once.
+- **"Two browser-transport write guards"** had no test.
+- **Regressions introduced here**, not mentioned above: the `in`-on-data change
+  made `"x" in s` own-keys-only inside async methods (sync methods kept the
+  prototype chain); the aio client ignored `AIO_DISCOVERY_PORT`; `testUI` with
+  `persist: true` wrote nothing until dispose; a standalone build began applying
+  `persistDebounceMs` to its local store, without a bound (from 1.0.17-beta the
+  key may shorten the 100 ms write window, not widen it); `deno task test`
+  stopped failing on a process that outlived its test; `install.sh` failed the
+  `am` install under a read-only `DENO_INSTALL`.
 
 ## v1.0.14-beta — the web target, a strict harness, and three hunt rounds (2026-09-27)
 

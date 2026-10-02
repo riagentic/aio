@@ -61,6 +61,35 @@ Deno.test({
         { append: true },
       );
 
+      // A `blocking()` function with helpers of its own — an arrow const, a
+      // function declaration, a class. Its SOURCE is what reaches the worker,
+      // and the minifier's name-keeping used to call a helper declared at the
+      // module's scope from inside it: `t is not defined`, in every compiled
+      // build and in no test.
+      await Deno.writeTextFile(
+        join(dir, "src", "heavy.ts"),
+        `import { blocking } from "aio";
+blocking("sum", (n) => {
+  const square = (x: number) => x * x;
+  function total(k: number) {
+    let t = 0;
+    for (let i = 0; i < k; i++) t += square(i);
+    return t;
+  }
+  class Tally { constructor(public v: number) {} }
+  return [new Tally(total(n as number)).v, square.name, total.name, Tally.name];
+}, 10).then(
+  (v) => console.log("BLOCKING " + JSON.stringify(v)),
+  (e) => console.log("BLOCKING FAILED " + e.message),
+);
+`,
+      );
+      await Deno.writeTextFile(
+        join(dir, "src", "app.ts"),
+        `import "./heavy.ts";\n`,
+        { append: true },
+      );
+
       // Control: with minify explicitly OFF the marker IS in the binary.
       // (The default is ON now, so the control states its intent.)
       const cfgPath = join(dir, "deno.json");
@@ -171,6 +200,11 @@ Deno.exit(0);
           const o = await out;
           const err = new TextDecoder().decode(o.stderr);
           assert(!/Module not found|ERROR/.test(err), err);
+          // Minified or not, the worker ran the function and kept its names.
+          assertStringIncludes(
+            new TextDecoder().decode(o.stdout) + err,
+            'BLOCKING [285,"square","total","Tally"]',
+          );
         }
       };
       // Turning minify ON keeps the app's identity, so its data: the state the

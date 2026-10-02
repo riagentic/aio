@@ -217,11 +217,52 @@ while the JS heap stayed flat at 210 MB; fastest series: broadcast.bufferedBytes
 (broadcast) +2891 MB
 ```
 
+"Flat" is relative: the heap counts as flat when it explains under 5% of what
+RSS gained over the same window, so the ordinary upward drift of a live heap
+does not hide a native climb. It takes **two climbing windows** (10 samples each
+at the default `trendWindow`) before it is called a leak — one window of climb
+that then stops is a warm-up, and says nothing. Each window's climb must clear
+256 MB and a quarter of the RSS the first of them started at, so a leak that
+adds the same amount every window is confirmed by its second window and reported
+again for each one after it.
+
+The two windows need not touch. A leak that grows in bursts with a flat stretch
+between them keeps what it gained, and that is what makes the bursts one leak:
+the run ends only when RSS falls back to within that 256 MB / quarter of where
+it started. Two bursts up to ten windows apart confirm it; further apart (a
+second cache loaded hours after the first) it takes a third. Within a run it is
+said again only once RSS stands that much above where it was last said — so
+memory that climbs and is given back, over and over (a sawtooth), is reported
+while it reaches somewhere new and not again each time it returns there.
+
+A process that holds a large share of the **machine**
+(`memory.machineWarnFraction`, default half of physical RAM) is reported by its
+RSS, the number that crossed:
+
+```
+MEMORY_PRESSURE -- RSS 280 MB is 55% of this machine's memory (JS heap 40 MB)
+```
+
+It is said **once**, and again only after RSS has grown by another tenth of RAM
+(or has dropped a tenth below the threshold and come back). On a small host an
+app that simply fills half the machine is a fact, not a new event every interval
+— raise `machineWarnFraction` if that share is expected. The line carries the
+heap figure so the two can be compared, but a `machine` report never sets
+`nativeLeak`: a heap that is the smaller part of RSS is what any idle process
+looks like. `nativeLeak` means the confirmed climb above, and nothing else.
+
 `am heap` shows the same picture on demand: `rss`, `external`, and a `gauges`
 list of every named series with its **owner** — the answer to "which subsystem",
 not just "memory grew". A `level` gauge is a current size that should return to
-its baseline; a `counter` only rises and carries the ceiling that fails loud
-(`MEMORY_UNBOUNDED`) if a loop would run it forever.
+its baseline; a `counter` only rises and carries the ceiling that fails loud —
+an error whose message contains `MEMORY_UNBOUNDED` — if a loop would run it
+forever.
+
+`journal.replay.entries` is such a counter: journal entries replayed **again**
+within one boot (ceiling 2,000,000). A boot's first replay is never charged, so
+a journal of any size boots; passing the ceiling means a recovery path keeps
+re-entering replay — a control-flow bug whose stack trace names the caller, not
+a journal to shrink or a setting to raise.
 
 Supervised deployments can scrape the same numbers from `/__aio/metrics`:
 `aio_memory_rss_bytes`, `aio_memory_external_bytes`, and one

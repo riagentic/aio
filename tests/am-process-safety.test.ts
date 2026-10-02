@@ -41,6 +41,7 @@ import {
 } from "../src/server/single-instance-lock.ts";
 import {
   detachedSpawnSpec,
+  launchDetached,
   lockedPidsEverywhere,
   stalePidRefusal,
 } from "../src/am/am-cmd-process.ts";
@@ -146,14 +147,7 @@ Deno.test({
       log,
       "/nonexistent/deno",
     );
-    const proc = new Deno.Command(spec.cmd, {
-      args: spec.args,
-      stdin: "null",
-      stdout: "piped",
-      stderr: "null",
-    }).spawn();
-    const out = await proc.output();
-    const pid = parseInt(new TextDecoder().decode(out.stdout).trim(), 10);
+    const pid = await launchDetached(spec, log);
     assert(Number.isFinite(pid) && pid > 0, "a pid comes back even so");
     await new Promise((r) => setTimeout(r, 300));
     assertEquals(

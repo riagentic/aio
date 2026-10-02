@@ -450,6 +450,20 @@ export function dur(ms: number): string {
   return `${Math.floor(h / 24)}d ${h % 24}h`;
 }
 
+/** A measured `value` that EXCEEDED `limit`, as text that still reads as
+ *  over it. The comparison is exact and the text was rounded, so 5.4 against
+ *  a budget of 5 printed "5ms > 5ms" — a statement that is false as written.
+ *  `digits` is the precision the line normally has; it grows (to 3) only
+ *  until the printed number is itself above the limit, and past that the
+ *  exact value is printed. Pure. */
+export function overLimit(value: number, limit: number, digits = 0): string {
+  for (let d = digits; d <= 3; d++) {
+    const text = value.toFixed(d);
+    if (Number(text) > limit) return text;
+  }
+  return String(value);
+}
+
 /** `1 app` / `4 apps` — the plural is derived, never a `(s)` suffix. */
 export function count(n: number, one: string, many = one + "s"): string {
   return `${n} ${n === 1 ? one : many}`;

@@ -463,7 +463,7 @@ function _checkEveryMs(id: string, ms: unknown): void {
  *  `<input type="datetime-local">` yields. `new Date()` reads that shape in
  *  the MACHINE's zone (a bare date is UTC, a `Z`/`±hh:mm` one is explicit),
  *  and `at` keeps that reading: v1.0.11 armed it so, and existing apps rely
- *  on it. Reading it as UTC is a breaking fix, parked in `untracked/v2.md`. */
+ *  on it. Reading it as UTC is a breaking fix, parked as major-version material. */
 const ISO_NO_OFFSET = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/;
 
 /** Is `time` an offset-less date-time — read in this machine's zone? */
@@ -1058,6 +1058,7 @@ function parseField(
       for (let i = min; i <= max; i += step) values.push(i);
     } else if (trimmed.includes("-")) {
       // Range: "1-5" or "1-5/2"
+      // aio-ok: path-split — a cron step (`*/5`)
       const [rangePart, stepPart] = trimmed.split("/");
       const ends = (rangePart ?? "").split("-");
       const [startStr, endStr] = ends;
@@ -1254,6 +1255,10 @@ export function createScheduleManager(
   handle: (effect: ScheduleEffect) => void;
   start: (defs: ScheduleDef[]) => void;
   cancelAll: () => void;
+  /** The app is stopping: cancel every schedule AND arm none again. Shutdown
+   *  calls it as soon as the app is marked stopping, before dispatch closes —
+   *  nothing an app scheduled may fire after (or into) its `close()`. */
+  close: () => void;
   cancelByPrefix: (prefix: string) => void;
   active: () => string[];
   /** @internal Total per-id bookkeeping entries, across every map. Exists so
@@ -1287,6 +1292,18 @@ export function createScheduleManager(
   // dropped by every cancel/replace, so a pending retry can tell.
   const epochs = new Map<string, number>();
   let epochSeq = 0;
+  // Set by `close()`: the app is stopping, and a schedule armed now (by a
+  // method still draining) could only fire into the teardown or after it.
+  let closed = false;
+  const refusedClosed = new Set<string>();
+  function refuseClosed(id: string): void {
+    if (refusedClosed.has(id)) return;
+    refusedClosed.add(id);
+    log.warn(
+      `schedule: '${id}' was not armed — the app is stopping, and nothing ` +
+        `it schedules may fire after close()`,
+    );
+  }
 
   const validateId = _checkId;
 
@@ -1914,6 +1931,10 @@ export function createScheduleManager(
 
   function handle(effect: ScheduleEffect): void {
     validateId(effect.id);
+    if (closed) {
+      if (effect.kind !== "cancel") refuseClosed(effect.id);
+      return;
+    }
     if (effect.kind !== "cancel") {
       _checkAction(effect.kind, effect.id, effect.action);
       rejectUnresolvedSelf(effect.id, effect.action);
@@ -1969,6 +1990,10 @@ export function createScheduleManager(
 
   function start(defs: ScheduleDef[]): void {
     for (const def of defs) {
+      if (closed) {
+        refuseClosed(def.id);
+        continue;
+      }
       validateId(def.id); // AIO-251: validate config-level schedule IDs
       rejectUnresolvedSelf(def.id, def.action); // no owning cell here — refuse
       staticIds.add(def.id);
@@ -2029,6 +2054,10 @@ export function createScheduleManager(
     handle,
     start,
     cancelAll,
+    close: () => {
+      closed = true;
+      cancelAll();
+    },
     cancelByPrefix,
     active,
     _bookkeepingSize: () =>

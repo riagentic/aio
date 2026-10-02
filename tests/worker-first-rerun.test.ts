@@ -48,6 +48,7 @@ export const viaW = cell("viaW", {
 
 if (isCellWorker()) {
   await aio.run({
+    watch: false,
     appId: "worker-first-rerun",
     cells: [rerunW],
     client: "server-only",

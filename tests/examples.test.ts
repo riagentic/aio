@@ -5,6 +5,7 @@ import { assert, assertEquals } from "@std/assert";
 import { connectCli } from "aio/server";
 import { stopChild } from "./stop-child.ts";
 import { childCoverageDir } from "../src/testing/temp-dir.ts";
+import { freePort } from "../src/testing/server-test.ts";
 const _childCovDir = childCoverageDir();
 
 const ROOT = new URL("..", import.meta.url).pathname;
@@ -13,13 +14,6 @@ function stripAnsi(s: string): string {
   return s.replace(/\x1b\[[0-9;]*m/g, "");
 }
 const dir = (t: string) => `${ROOT}examples/${t}`;
-
-function freePort(): number {
-  const l = Deno.listen({ port: 0 });
-  const port = (l.addr as Deno.NetAddr).port;
-  l.close();
-  return port;
-}
 
 /** Wait for a spawned example to answer.
  *

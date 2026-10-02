@@ -128,13 +128,18 @@ async function withWindow(
     pid: number;
     port: number;
   }) => Promise<void>,
+  body?: string,
 ) {
   const dir = await tempDir("el-show-");
   const title = `aio-show-${crypto.randomUUID().slice(0, 8)}`;
   const page = join(dir, "index.html");
+  // Mounted (`#root` has a child) — the window answers a show request only
+  // then. `body`: a page that mounts later, when the test says so.
   await Deno.writeTextFile(
     page,
-    `<!doctype html><title>${title}</title><p>hi</p>`,
+    `<!doctype html><title>${title}</title>${
+      body ?? `<div id="root"><p>hi</p></div>`
+    }`,
   );
   const showFile = join(dir, "app.show");
   let main = electronMainScriptUDS(`file://${page}`, join(dir, "no.sock"), {
@@ -251,6 +256,37 @@ Deno.test({
 });
 
 Deno.test({
+  name:
+    "electron: the page's own window.close() hides a close-to-tray window, it does not end the app",
+  ignore: shouldSkip() !== null,
+  // aio-ok: a real Electron binary driven over CDP; its sockets outlive the test body
+  sanitizeOps: false,
+  sanitizeResources: false, // aio-ok: see above
+  fn: () =>
+    withWindow(true, async ({ session, showFile, title, display, log }) => {
+      // Measured before the route existed (Electron 44, Linux and macOS):
+      // window.close() destroyed the page, then the window, with no 'close'
+      // event to turn into a hide — destroyed, closed, window-all-closed, and
+      // the app was gone while its config said closeToTray.
+      await session.eval("window.close()");
+      await until(
+        "window.close() to hide the window",
+        () => mapState(display, title) === "IsUnMapped",
+      );
+      // Hidden, not gone: the page still answers, and comes back.
+      assertEquals(await session.eval("document.body.innerText"), "hi");
+      assert(
+        await askRunningToShow(showFile),
+        `the window did not survive window.close():\n${log()}`,
+      );
+      await until(
+        "the window to show again",
+        () => mapState(display, title) === "IsViewable",
+      );
+    }),
+});
+
+Deno.test({
   name: "electron: close-to-tray with no tray host minimizes and says so",
   ignore: shouldSkip() !== null,
   // aio-ok: a real Electron binary driven over CDP; its sockets outlive the test body
@@ -332,4 +368,37 @@ Deno.test({
         "reloaded 3 times, then left",
       );
     }),
+});
+
+Deno.test({
+  name:
+    "electron: a second launch's request is answered only once the page has MOUNTED — a window still loading does not take it",
+  ignore: shouldSkip() !== null,
+  // aio-ok: a real Electron binary driven over CDP; its sockets outlive the test body
+  sanitizeOps: false,
+  sanitizeResources: false, // aio-ok: see above
+  fn: () =>
+    withWindow(false, async ({ session, showFile, log }) => {
+      // The window is mapped, its page loaded — and not mounted yet.
+      Deno.writeTextFileSync(showFile, String(Deno.pid));
+      const taken = () => {
+        try {
+          Deno.statSync(showFile);
+          return false;
+        } catch {
+          return true; // aio-ok: removed = taken
+        }
+      };
+      // Bounded look, not a sleep-as-sync: a window that answers early does
+      // so within its watch's first event.
+      const until0 = Date.now() + 1500;
+      while (Date.now() < until0 && !taken()) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      assert(!taken(), `taken before the page mounted:\n${log()}`);
+      await session.eval(
+        "document.getElementById('root').appendChild(document.createElement('p'))",
+      );
+      await until("the request to be taken after the mount", taken);
+    }, `<div id="root"></div>`),
 });

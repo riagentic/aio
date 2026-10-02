@@ -69,6 +69,9 @@ names it. Measured on Deno 2.9.6: under `--sanitize-ops` a per-test
 `sanitizeOps: false` is NOT honoured (the flag wins), while
 `sanitizeResources: false` is — so an op leak has to be fixed, and only a
 resource the test genuinely cannot close (esbuild's service child) is opted out.
+Closing a dev server stops that child and, on Linux, returns only once it is
+reaped; where there is no `/proc` (macOS, Windows) the kill is sent and the exit
+is not awaited.
 
 ## Driving the app you are running
 

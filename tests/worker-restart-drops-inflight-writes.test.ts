@@ -29,6 +29,7 @@ export const restartW = cell("restartW", {
 
 if (isCellWorker()) {
   await aio.run({
+    watch: false,
     appId: "worker-restart-inflight",
     cells: [restartW],
     client: "server-only",

@@ -21,16 +21,10 @@ import { assert, assertEquals } from "@std/assert";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { freePort } from "../src/testing/server-test.ts";
 
 const REPO = new URL("..", import.meta.url).pathname;
 const MOD = new URL("../mod.ts", import.meta.url).href;
-
-function freePort(): number {
-  const l = Deno.listen({ port: 0 });
-  const port = (l.addr as Deno.NetAddr).port;
-  l.close();
-  return port;
-}
 
 /** Write one runnable "build" of an app against `dir`. */
 async function phaseFile(

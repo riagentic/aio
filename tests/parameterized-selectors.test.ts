@@ -37,3 +37,34 @@ Deno.test("parameterized selector: cell.byId(id) receives the arg", () => {
   assertEquals(b?.n, 2);
   assertEquals(miss, null);
 });
+
+// "Is this selector the deps form?" was asked with `key in selectorDeps` — and
+// `in` answers yes for every name Object.prototype carries, on an EMPTY
+// object. A plain selector that happens to be named `valueOf` / `toString` /
+// `constructor` was bound as a deps-form one: its first argument arrived as
+// the full state, shifted.
+Deno.test("parameterized selector: one named like an Object.prototype member is still a plain selector", () => {
+  type Item = { id: string; n: number };
+  const shelf = cell("shelf_proto_name", {
+    state: { items: [{ id: "a", n: 1 }, { id: "b", n: 2 }] as Item[] },
+    methods: { noop(_s) {} },
+    selectors: {
+      isPrototypeOf: (s: { items: Item[] }, id: string) =>
+        s.items.find((x) => x.id === id)?.n ?? -1,
+    },
+  });
+  const composed = composeCells([shelf]);
+  let state = composed.initialState;
+  bindCell(
+    shelf,
+    (a) => {
+      state = composed.reduce(state, a as never).state;
+      return Promise.resolve();
+    },
+    () => state as Record<string, unknown>,
+  );
+  const pick = (shelf as unknown as { isPrototypeOf(id: string): number })
+    .isPrototypeOf;
+  assertEquals(pick("b"), 2);
+  assertEquals(pick("z"), -1);
+});

@@ -8,6 +8,8 @@ import {
   assertThrows,
 } from "@std/assert";
 import {
+  _resetParsedCli,
+  cdpPort,
   cdpRequest,
   electronOnlyFlagRefusal,
   envDefaultPort,
@@ -15,6 +17,8 @@ import {
   portWasRequested,
 } from "../src/server/aio-cli.ts";
 import { isLoopbackBind, parentPidOf } from "../src/server/aio-lifecycle.ts";
+import { getLogger, setLogger } from "../src/diagnostics/logger-api.ts";
+import type { LogSink } from "../src/diagnostics/logger-types.ts";
 import { envPort } from "../src/server/paths.ts";
 import { exportedBindingFor } from "../src/am/record.ts";
 import {
@@ -24,7 +28,7 @@ import {
   tmplSocketFetch,
 } from "../src/electron/electron-shared.ts";
 
-// ── AIO_CDP is the env spelling of --cdp (refused like the flag) ──────────
+// ── AIO_CDP is the env spelling of --cdp ──────────────────────────────────
 Deno.test("cdp: an env request is resolved, an invalid one is absent", () => {
   assertEquals(cdpRequest(undefined, "1"), true);
   assertEquals(cdpRequest(undefined, "true"), true);
@@ -35,30 +39,47 @@ Deno.test("cdp: an env request is resolved, an invalid one is absent", () => {
   assertEquals(cdpRequest(9333, "1"), 9333); // flag beats env
 });
 
-Deno.test("electron-only: AIO_CDP is refused on a non-electron client, by name", () => {
-  const fromEnv = electronOnlyFlagRefusal(
-    parseCli([]),
-    "browser",
-    {},
-    cdpRequest(undefined, "1"),
+Deno.test("electron-only: an ambient AIO_CDP is never a refusal — ignored once, by name; --cdp still is", () => {
+  // 1.0.15 refused the env spelling "exactly like the flag". A flag is typed
+  // for this run; `AIO_CDP=1` sits in a CI/compose/shell environment and then
+  // failed the boot of every server-only app and every testServer under it.
+  const prev = Deno.env.get("AIO_CDP");
+  const prevLogger = getLogger();
+  const warned: string[] = [];
+  setLogger(
+    {
+      logDir: "/tmp",
+      pub: (lvl: string, _cat: string, msg: string) => {
+        if (lvl === "warn") warned.push(msg);
+      },
+    } as unknown as LogSink,
   );
-  assert(fromEnv, "an AIO_CDP request on a browser client must be refused");
-  assertStringIncludes(fromEnv!.message, "AIO_CDP");
-  assertStringIncludes(fromEnv!.message, "electron");
-  // …and the flag spelling still names the flag.
+  try {
+    Deno.env.set("AIO_CDP", "1");
+    _resetParsedCli();
+    assertEquals(electronOnlyFlagRefusal(parseCli([]), "browser"), null);
+    for (const client of ["browser", "none", "cli"]) {
+      assertEquals(cdpPort(client), undefined, client);
+    }
+    // …and it stays absent for every later reader: no lock entry, no `cdp`
+    // boot line, no port.
+    assertEquals(cdpPort(), undefined);
+    const said = warned.filter((m) => m.includes("AIO_CDP"));
+    assertEquals(said.length, 1, "said once per process, not per reader");
+    assertStringIncludes(said[0]!, "ignored");
+    // An Electron client keeps it.
+    _resetParsedCli();
+    assert(cdpPort("electron") !== undefined);
+  } finally {
+    setLogger(prevLogger);
+    _resetParsedCli();
+    if (prev === undefined) Deno.env.delete("AIO_CDP");
+    else Deno.env.set("AIO_CDP", prev);
+  }
+  // The flag is a request made for THIS run: still refused, by name.
   assertStringIncludes(
     electronOnlyFlagRefusal(parseCli(["--cdp"]), "browser")!.message,
     "--cdp",
-  );
-  // A cdp request on an electron client is refused nothing.
-  assertEquals(
-    electronOnlyFlagRefusal(
-      parseCli([]),
-      "electron",
-      {},
-      cdpRequest(undefined, "1"),
-    ),
-    null,
   );
 });
 
@@ -82,16 +103,63 @@ Deno.test("bind: a host name is loopback in any case", () => {
 });
 
 // ── envPort / envDefaultPort: decimal digits only, like --port ────────────
-Deno.test("env ports: hexadecimal/exponent/signed spellings are refused, not coerced", () => {
+Deno.test("env ports: a non-port is refused; a non-decimal spelling of a port is read as before, and said", () => {
   const prev = Deno.env.get("AIO_PORT");
   const prevDef = Deno.env.get("AIO_DEFAULT_PORT");
+  const prevLogger = getLogger();
+  const warned: string[] = [];
+  setLogger(
+    {
+      logDir: "/tmp",
+      pub: (lvl: string, _cat: string, msg: string) => {
+        if (lvl === "warn") warned.push(msg);
+      },
+    } as unknown as LogSink,
+  );
   try {
-    for (const bad of ["0x1F90", "1e3", "+3000", "-1", "havoc"]) {
+    for (const bad of ["-1", "havoc", "70000", "80.5", "0x"]) {
       Deno.env.set("AIO_PORT", bad);
-      assertThrows(() => envPort(), Error, undefined, `AIO_PORT=${bad}`);
-      Deno.env.set("AIO_DEFAULT_PORT", bad);
-      assertThrows(() => envDefaultPort(), Error, undefined, `DEFAULT=${bad}`);
+      // The refusal names what IS read — not "decimal digits", which the
+      // spellings below are not.
+      assertThrows(() => envPort(), Error, "an integer 0-65535", bad);
     }
+    assertEquals(warned, [], "a refusal is thrown, not also warned");
+    // The same ambient-variable rule as AIO_DEFAULT_PORT below.
+    for (
+      const [spelled, port] of [["0x1F90", 8080], ["1e3", 1000], [
+        "+3000",
+        3000,
+      ]] as const
+    ) {
+      Deno.env.set("AIO_PORT", spelled);
+      assertEquals(envPort(), port, spelled);
+    }
+    // …and SAID, through the logger (a level, a timestamp, app.log) — once
+    // per process, not once per reader: boot and `am` both call this.
+    assertEquals(warned.length, 1, warned.join("\n"));
+    assertStringIncludes(warned[0]!, "AIO_PORT=0x1F90 is read as port 8080");
+    assertStringIncludes(warned[0]!, "Write AIO_PORT=8080");
+    // Never a port, in any spelling: refused, as in every release.
+    for (const bad of ["-1", "havoc", "70000", "80.5", "0x"]) {
+      Deno.env.set("AIO_DEFAULT_PORT", bad);
+      assertThrows(() => envDefaultPort(), Error, "an integer 0-65535", bad);
+    }
+    // A port in a spelling `Number()` reads: it booted the app through
+    // 1.0.14, was refused from 1.0.15, and an environment variable must not
+    // be what turns yesterday's boot into today's refusal.
+    for (
+      const [spelled, port] of [["0x1F90", 8080], ["1e3", 1000], [
+        "+3000",
+        3000,
+      ]] as const
+    ) {
+      Deno.env.set("AIO_DEFAULT_PORT", spelled);
+      assertEquals(envDefaultPort(), port, spelled);
+    }
+    assertEquals(warned.length, 2, warned.join("\n"));
+    assertStringIncludes(warned[1]!, "AIO_DEFAULT_PORT=0x1F90 is read as");
+    Deno.env.set("AIO_DEFAULT_PORT", "8123");
+    assertEquals(envDefaultPort(), 8123);
     Deno.env.set("AIO_PORT", "3000");
     assertEquals(envPort(), 3000);
     Deno.env.set("AIO_PORT", "0");
@@ -99,6 +167,7 @@ Deno.test("env ports: hexadecimal/exponent/signed spellings are refused, not coe
     Deno.env.delete("AIO_PORT");
     assertEquals(envPort(), undefined);
   } finally {
+    setLogger(prevLogger);
     if (prev === undefined) Deno.env.delete("AIO_PORT");
     else Deno.env.set("AIO_PORT", prev);
     if (prevDef === undefined) Deno.env.delete("AIO_DEFAULT_PORT");

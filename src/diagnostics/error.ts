@@ -3,7 +3,7 @@
 import type { DiagnosticEvent } from "./diagnostic-bus.ts";
 import { randomUuid } from "../rand.ts";
 import { log } from "./logger-api.ts";
-import { describeThrown } from "./fmt.ts";
+import { describeThrown, overLimit } from "./fmt.ts";
 import {
   indent,
   mark,
@@ -455,6 +455,15 @@ export function extractUserFrames(stack: string | undefined): string[] {
  *  at its single source: the dispatcher states facts (and the per-method
  *  hatch, which only it knows), and everything about what to DO is here.
  *  @internal */
+/** The duration a budget violation carries, printed so it still reads as
+ *  over the budget beside it ("took 5ms (budget: 5ms)" was 5.4). */
+function tookMs(err: AioError, defaultBudget: number): string {
+  const d = err.context.duration;
+  return d === undefined
+    ? "?"
+    : overLimit(d, err.context.budget ?? defaultBudget);
+}
+
 /** The per-CELL answer, offered only once the per-CALL one has stopped fitting.
  *
  *  Field report: "`worker: true` is unambiguously the best thing I adopted this
@@ -623,13 +632,20 @@ export function generateTip(err: AioError): string | undefined {
     case "DISPATCH_ABORTED":
       return `Tip: The drain loop threw outside every per-action guard, so these actions were never applied and dispatch was reset. The preceding error names the cause — a common one is a non-plain value (typed array, Map/Set) in cell state under freezeState. Retry the actions once the cause is fixed. \`am logs\` shows the preceding error.`;
     case "MEMORY_PRESSURE":
+      // Two of the reports under this code are not about the heap, and the
+      // heap advice sends their reader to the wrong place. Their own words
+      // (`describeMemoryReport`) are what tells them apart.
+      if (err.message.startsWith("native memory rising")) {
+        return `Tip: The JS heap is flat — the growth is outside it, so cell state is not where to look. If the message names a fastest series, start with its owner; \`am heap\` lists every one. See docs/debugging/troubleshooting.md (S5, native memory).`;
+      }
+      if (err.message.includes("of this machine's memory")) {
+        return `Tip: This process holds a large share of this machine's RAM — a fact about the host, not a leak. If the share is expected, raise memory.machineWarnFraction; if not, \`am heap\` shows what holds it. See docs/debugging/troubleshooting.md (S5).`;
+      }
       return `Tip: Heap usage rising. Check per-cell state sizes — prune unbounded arrays or move large data to SQLite. See docs/debugging/troubleshooting.md (S5).`;
     case "MEMORY_CRITICAL":
       return `Tip: Heap critically high — OOM imminent. Emergency prune large state or increase memory limit with --v8-flags=--max-old-space-size=N.`;
     case "BUDGET_REDUCE":
-      return `Tip: Reducer took ${
-        err.context.duration?.toFixed(0) ?? "?"
-      }ms (budget: ${
+      return `Tip: Reducer took ${tookMs(err, 100)}ms (budget: ${
         err.context.budget ?? 100
       }ms) — every client's actions waited that long. If it's I/O, make the ` +
         `method async so it suspends at the await; if it's COMPUTE, an await ` +
@@ -640,9 +656,7 @@ export function generateTip(err: AioError): string | undefined {
       // THE remedy for this code. The dispatcher states the facts and the
       // per-method escape hatch (it is the only thing that knows the method
       // key); everything about what to DO about it is here, once.
-      return `Tip: Sync effect took ${
-        err.context.duration?.toFixed(0) ?? "?"
-      }ms (budget: ${
+      return `Tip: Sync effect took ${tookMs(err, 5)}ms (budget: ${
         err.context.budget ?? 5
       }ms). An effect must return immediately: kick off async I/O without ` +
         `awaiting it here, or hand CPU work to blocking("id", fn, arg). ` +

@@ -4,6 +4,7 @@
  */
 
 import { dirname, resolve } from "@std/path";
+import { renameOverSync } from "../diagnostics/rename-over.ts";
 import { CELL_METHOD_SEP } from "../state/cell-helpers.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import {
@@ -1109,9 +1110,11 @@ export async function cmdTT(args: string[], flags: GlobalFlags): Promise<void> {
     );
     Deno.exit(1);
   }
-  const arg = cmd === "goto" ? Number(args[1]) : undefined;
+  // An EMPTY id is no id: `Number("")` is 0, so `am timetravel goto "$ID"`
+  // with an unset variable rewound the app to entry 0.
+  const arg = cmd === "goto" && args[1]?.trim() ? Number(args[1]) : undefined;
   if (cmd === "goto" && (arg === undefined || isNaN(arg))) {
-    outError("usage: am tt goto <index>", mode);
+    outError("usage: am timetravel goto <id>", mode);
     Deno.exit(1);
   }
   if (cmd === "goto" && (!Number.isInteger(arg) || (arg as number) < 0)) {
@@ -1340,7 +1343,7 @@ export async function cmdSnapshot(
     });
     try {
       Deno.writeTextFileSync(tmp, result.data as string);
-      Deno.renameSync(tmp, file);
+      renameOverSync(tmp, file);
     } catch (e) {
       try {
         Deno.removeSync(tmp);

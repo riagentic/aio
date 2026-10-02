@@ -42,6 +42,7 @@ async function assertQueuedCallsLand(
     } as Any) as Any;
   const boot = (c: unknown) =>
     aio.run({
+      watch: false,
       cells: [c],
       appId: `queued-land-${id}`,
       appDir: dir,
@@ -147,6 +148,7 @@ async function standDown(
     },
   } as Any) as Any;
   const app = await aio.run({
+    watch: false,
     cells: [c],
     appId: `queued-standdown-${id}`,
     appDir: dir,
@@ -228,6 +230,7 @@ Deno.test("shutdown: a queued transaction that read $signal and stood down commi
     } as Any) as Any;
   const boot = (c: unknown) =>
     aio.run({
+      watch: false,
       cells: [c],
       appId: "queued-standdown-tx",
       appDir: dir,

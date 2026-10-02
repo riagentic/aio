@@ -17,7 +17,7 @@
  * what a test can address, and a `t=` prop inside a branch that never renders
  * is not a locator anyone can use.
  */
-import { dirname, resolve } from "@std/path";
+import { dirname, relative, resolve } from "@std/path";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
 import { projectRoot } from "./am-cmd-process.ts";
@@ -98,9 +98,13 @@ export async function cmdTestgen(
   await Deno.mkdir(dirname(outPath), { recursive: true });
   await Deno.writeTextFile(outPath, src);
 
-  const rel = outPath.startsWith(root + "/")
-    ? outPath.slice(root.length + 1)
-    : outPath;
+  // Project-relative when it is inside the project — by path SEGMENTS, so a
+  // Windows path (no `/`) is shown relative too.
+  const inProject = relative(root, outPath);
+  const rel =
+    inProject && !/^\.\.(?:[\\/]|$)/.test(inProject) && !isAbsolute(inProject)
+      ? inProject
+      : outPath;
   const components = countComponents(root0);
   out(
     { file: rel, components, bytes: src.length },

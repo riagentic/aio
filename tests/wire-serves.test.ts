@@ -83,9 +83,9 @@ Deno.test("SERVES.browser matches the client router's case labels", async () => 
 // `ctlr` from being a reply the catalog claims exists and nobody reads.
 Deno.test("SERVES.am matches the control client's handled kinds", async () => {
   assertEquals(
-    sorted(await fileKinds("src/am/am-uds.ts")),
+    sorted(await fileKinds("src/server/local-request.ts")),
     sorted(SERVES.am),
-    "am-uds.ts names a different kind set than SERVES.am records — the " +
+    "local-request.ts names a different kind set than SERVES.am records — the " +
       "control client sends `ctl` and reads `ctlr`, nothing else",
   );
 });

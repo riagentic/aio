@@ -349,20 +349,35 @@ Counter.app/Contents/
   PkgInfo
   MacOS/
     counter             the Deno server binary IS the bundle executable
-    electron/Electron.app/   the runtime (where the launcher looks)
-  Resources/AppIcon.icns
+    app_window          a link to electron/…/MacOS/Electron — the window is started through it
+    electron/Electron.app/   the runtime
+  Resources/
+    AppIcon.icns
+    en.lproj/ …         the runtime's kept language stubs (the app's language is chosen from these)
 ```
 
-Three details are load-bearing and were measured on a real macOS 14 guest:
+Four details are load-bearing and were measured on a real macOS 14 guest:
 
 - **The Deno binary is `CFBundleExecutable`.** aio is a two-process app — the
   binary owns the server and spawns Electron as its window. Its identity is the
   app's, so there is one Dock entry and one lifetime.
-- **`Contents/MacOS/` holds only the executable.** `codesign` treats that
-  directory as code-only; a `dist/` there fails the seal with "code object is
-  not signed at all / In subcomponent: …/dist/icon.png". None is needed — the
-  compiled binary embeds `dist/` in its Deno VFS and serves it to Electron over
-  the app's own socket.
+- **`Contents/MacOS/` holds only code: the executable, the runtime, and the
+  window's link to it.** `codesign` treats that directory as code-only; a
+  `dist/` there fails the seal with "code object is not signed at all / In
+  subcomponent: …/dist/icon.png". None is needed — the compiled binary embeds
+  `dist/` in its Deno VFS and serves it to Electron over the app's own socket.
+- **The window is started through `Contents/MacOS/app_window`,** a relative link
+  to the runtime's executable. macOS decides which app a process is from the
+  path it was started by, so the window IS `Counter.app` — the one entry the
+  system re-opens and quits — and not a second bundle nested inside it. (Started
+  by its nested path, a second `open` of the running app registered the server
+  process instead, and "quit" then reached nothing.) The link is sealed with the
+  bundle and survives the `.dmg`, the `.app.tar.gz` and the `.zip`; a bundle
+  unpacked by a tool that drops symbolic links still starts — from the nested
+  path, with a log line saying what that costs. Because the bundle is now the
+  window's main bundle, its `Info.plist` also carries the runtime's own
+  `NS…`/`Electron…` keys, and its `LSMinimumSystemVersion` is the bundled
+  Electron's (13.0 for Electron 44), never lower than aio's floor of 12.0.
 - **The nested Electron carries the same `CFBundleIdentifier` and icon.** macOS
   merges processes by identifier; matching them is what shows **Counter** in the
   menu bar and Dock instead of **Electron**.
@@ -500,6 +515,15 @@ the something was unshippable and looked fine.
 units, and `manifest.json`. Flat — no nested directories. The build's own
 scaffolding (the AppImage `AppDir`, the generated Gradle project) lives in
 `.aio/build/`, where it is kept between runs so Gradle stays incremental.
+
+File modes: everything INSIDE a package — the `.dmg`, the `.app.tar.gz`, a zip,
+an AppImage, the Windows exe's payload, the `<bin>-web/` folder, the iOS project
+— is `0755` for directories and executables and `0644` for other files, whatever
+the builder's umask. The files in `dist/` themselves (the `.zip`, the `.exe`,
+the `.dmg`, `manifest.json`) are the builder's own and follow its umask;
+compiled binaries and the AppImage are executable. In the Windows exe's payload,
+where no exec bit exists, "executable" is what Windows runs by its name: `.exe`,
+`.bat`, `.cmd`, `.com`.
 
 | Flag                                      | Effect                                                                                                                                               |
 | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -754,8 +778,68 @@ deno compile -A --node-modules-dir=none --exclude-unused-npm \
   one. Print it with `dbWorkerInclude()` rather than typing it.
 
 `deno task build` already excludes the dev-only packages (electron, esbuild,
-happy-dom, `typescript`) and every npm package the binary's graph cannot reach,
-for every target — which is why its binaries are small without either flag.
+happy-dom, `typescript`) for every target, and — for every target except `cli`
+and `cli-client` — every npm package the binary's graph cannot reach, which is
+why its binaries are small without either flag. A CLI binary embeds the rest of
+`node_modules` as installed. When the target is another platform (a Windows
+build on Linux), the build tools' packages for THAT platform are left out too.
+
+A binary runs on one system, so it carries **native packages for that system
+only**. Which system a package is built for is the package's own statement — the
+`os`, `cpu` and `libc` fields of its `package.json`, the rule npm installs by (a
+package that states nothing runs everywhere). For a build of another platform,
+the target's packages are installed first:
+`deno install --entrypoint
+<the binary's modules> --os … --arch …` in the
+project. That install only **adds** — the host's packages stay installed through
+the whole build, however it ends. The target's packages **stay in
+`node_modules/.deno` after a cross build**; nothing prunes them, and every
+compile leaves out each package that is not its own system's, so the first
+Windows build on Linux and the tenth embed the same files. It resolves against a
+**copy** of the project's lock: a build never writes `deno.lock`, and leaves no
+tracked file changed. If the install cannot run (offline, with the target's
+packages not yet in deno's cache), the build stops and says so. The audit that
+ends every compile reads each embedded `package.json` and names any package
+built for another system.
+
+A package your own modules **import** that cannot run on the target is left out
+like any other — and the build says so, by name: the binary would fail where it
+loads it. Import such a package only on the system it runs on (a dynamic
+`import()` behind a check of `Deno.build.os`).
+
+It also drops the weight that is not a package at all: every source map
+(`*.map`), every docs file (`*.md` — never a `LICENSE`, `NOTICE`, `COPYING`,
+`AUTHORS` or `PATENTS` file, whatever its extension), and the test-fixture
+directories inside an embedded package — none of which any runtime path reads.
+On a large app those are hundreds of megabytes of the compiled binary. A
+directory's name alone is not evidence that it holds fixtures, so the rule is
+narrow:
+
+- `__tests__` at any depth;
+- `test` / `tests` only **directly under a package's root** — a library's
+  `_esm/actions/test/` is runtime code and stays;
+- never a package's own directory (a package _named_ `test`, `@scope/test`);
+- never a non-npm module the binary's graph loads from there. (The graph does
+  not list the files INSIDE an npm package, so for those the name rules above
+  are the whole protection, and `build.keepPackages` the way out.)
+- nothing inside a package named in
+  [`build.keepPackages`](#keep-a-build-only-package-buildkeeppackages) — a
+  package that really does load code from its own `test/` directory at runtime
+  is kept whole by naming it there.
+
+They are **held aside for the compile and put back afterwards**, so your
+`node_modules` is unchanged. A build that is interrupted (Ctrl-C, `SIGTERM`)
+puts them back before it exits; one that is killed outright is repaired by the
+next `deno task build`, even after a reinstall of `node_modules` in between.
+While a build is running they sit under `.aio/trim.<build>/` beside the project.
+`.d.ts` files are deliberately kept — the compile type-checks with them.
+`AIO_SKIP_TRIM=1` disables this for a build you are debugging.
+
+aio's own tool cache (`node_modules/.cache`, where an older aio left a bare
+`appimagetool`) is excluded from the binary and the legacy copy is removed. So
+is deno's own install state: `node_modules/.bin` and, under
+`node_modules/.deno`, `.setup-cache.bin` and `.deno.lock`. A binary runs none of
+it, and the audit that ends every compile names any of them it still finds.
 
 ### Keep a build-only package: `build.keepPackages`
 
@@ -770,16 +854,55 @@ app that genuinely **loads one at runtime** (a code playground that `import`s
 "build": { "keepPackages": ["typescript"] }
 ```
 
-The build otherwise warns when a package it is about to drop is still reachable
-from the binary's graph, so the surprise arrives at build time, with the exact
-line above, not as a `Module not found` on a user's machine.
+The build otherwise tells you when a package it is about to drop looks needed,
+so the surprise arrives at build time, with the exact line above, not as a
+`Module not found` on a user's machine:
+
+- your own code imports it → a warning;
+- a dependency you ship lists it under its `dependencies` → a warning naming
+  that dependency;
+- a dependency you ship lists it as a required **peer** (the common case:
+  `typescript` pulled in by a library) → a warning naming that dependency. It is
+  left out by name whether or not the tree has a top-level link for it. A
+  library that only reads its types is unaffected and there is nothing to do;
+  one that loads it at runtime fails in the binary at first use — add the line
+  above.
+
+On every target, the last two are said only for a dependency the binary loads:
+one its module graph reaches, or one you named in `keepPackages` (the graph
+cannot see a computed `import(name)`, so a package kept by name is asked what it
+needs too). A package that is merely installed — a `cli` build embeds those — is
+not asked.
+
+**A name in `keepPackages` wins over every rule that leaves a package out** —
+build-only by name, linked only from a build-only package, reached by no module,
+or a platform package deno links during a cross build. One rule it does not
+override by family: a package built for another system than the target stays out
+even under a kept package (`esbuild` kept ships the TARGET's `@esbuild/<system>`
+binary, not the host's) — name that exact package to ship it anyway. Any package
+can be named, not only a build-only one — the usual reason is a package the app
+loads by a computed `import(name)`, which the module graph cannot see. A name
+that no installed package answers to keeps nothing, and the build says so. A
+kept package ships **with everything it needs to run**: every package its
+installed links lead to (its `dependencies`, its peers, the optional ones deno
+installed), all the way down, even though no module reaches them — except
+`@types/*` packages, which nothing loads at run time (name one to keep it). The
+other exception is a build-only package on the way (`esbuild` under `tsx`): that
+stays out unless you name it too, and the warning above says so with the line to
+add — `"keepPackages": ["tsx", "esbuild"]`. On the machine that builds, a binary
+that cannot start is refused; a cross-built one is not run, so read the warning.
+
+A name in `keepPackages` also exempts that package from the source-map / docs /
+test-fixture trim described above. Only the named package: the packages kept
+because it needs them are trimmed like any other embedded package.
 
 ### Optional Chromium extras: `build.chromiumExtras`
 
 Electron ships a DXIL shader compiler (`dxcompiler.dll`/`dxil.dll`, ~27 MB on
-Windows) and a software Vulkan fallback (`vk_swiftshader*`, `vulkan-1.dll`; ~9
-MB on Linux) because _some_ app uses each. aio keeps them by default: a 3D app
-must keep hardware acceleration, and a GPU-less VM must keep its software
+Windows), a software Vulkan implementation (`vk_swiftshader*`) and the Vulkan
+loader itself (`vulkan-1.dll` on Windows, `libvulkan.so.1` on Linux) — ~9 MB of
+Vulkan on Linux — because _some_ app uses each. aio keeps them by default: a 3D
+app must keep hardware acceleration, and a GPU-less VM must keep its software
 fallback. An owner who knows the app renders no GPU content can opt in:
 
 ```jsonc
@@ -787,9 +910,19 @@ fallback. An owner who knows the app renders no GPU content can opt in:
 "build": { "chromiumExtras": "strip" }
 ```
 
-Only those files are removed — WebGL (`d3dcompiler_47.dll`), media (`ffmpeg`),
-ICU data and every license file are never touched. `"keep"` (the default) does
-nothing.
+Stripping removes **all of Vulkan, not only the software fallback**: the loader
+is how Chromium reaches any Vulkan driver, the machine's own GPU included, so
+without it there is no Vulkan path at all — and WebGPU on Windows loses its
+shader compiler (DXIL). Chromium's OpenGL/Direct3D paths are untouched: WebGL
+(`d3dcompiler_47.dll`), media (`ffmpeg`), ICU data and every license file are
+never removed. `"keep"` (the default) does nothing.
+
+The value is checked on every desktop build, on every platform, and anything
+other than `"keep"` or `"strip"` is named. It stops a Windows or Linux build.
+Two builds do not depend on it and go on with a warning that says which setting
+wins: a macOS build (the files are Windows and Linux ones; a macOS bundle keeps
+its runtime whole, and the build says so) and a build run with
+`AIO_STRIP_CHROMIUM=1` (the env form decides: the extras are stripped).
 
 ### Hide the server source: `build.minify` (on by default)
 
@@ -817,6 +950,34 @@ client bundle, which is always minified, and never its map.
   found by `new URL(…, import.meta.url)` (the SQLite worker) still load.
 - **Names of functions and classes are kept**, so code reading `fn.name` or
   `constructor.name` works the same as unminified.
+- **A module that cannot be minified safely ships as written**, and the build
+  names it in a warning (`… ships UN-minified — <why>`) — its comments are then
+  in the binary. Every reason, as the warning words it:
+  - _its minified form reads differently as TypeScript_ — a comparison whose
+    parentheses matter to TypeScript, `(a < b) > (c ? d : e)` or
+    `[(a < b), c > (d ?? 0)]`: minified, a `.ts` file reads `a<b>(…)` as a
+    generic call, or (`c > /x/.test(s)`) cannot read it at all. Rewrite the
+    expression (`b > a`, a named constant).
+  - _deno cannot read its minified form_ — the same family, one deno's parser
+    alone trips on: `[(a < b), c > {}]`. deno reads the whole staged graph
+    before it compiles, and a module it cannot parse goes back as written.
+    Rewrite the expression.
+  - _it uses decorators_ — any decorator, standard or `experimentalDecorators`.
+    A decorator is handed names (`@d class K` gets `"K"`, `@d #secret` gets
+    `"#secret"`), and those are exactly what minifying changes; legacy decorator
+    metadata needs the types. Keep decorated classes in a module of their own if
+    the rest should be minified.
+  - _it uses the name `__aioName` itself_ — rename the binding.
+  - _esbuild's name helper was not recognised_ — nothing in your code; aio's
+    pinned esbuild printed something this version does not know. Report it.
+- **A function's source can still leave its module.** Names are kept through one
+  global, `__aioName(fn, "name")`, which every minified module defines — so the
+  text of a minified function (`fn.toString()`) may call it. `blocking()`'s
+  worker defines it too, so a `blocking()` function may declare helpers, arrows
+  and classes of its own. If your app sends a function's source somewhere aio
+  does not run — a page through `executeJavaScript`, a worker built from a
+  string — and gets `__aioName is not defined`, define it there first:
+  `globalThis.__aioName ??= (f, name) => Object.defineProperty(f, "name", { value: name, configurable: true });`
 - **The client source map is left out** (`dist/.app.js.map` — it holds every UI
   name and path).
 - **Stack traces** from the server keep function names, but their `line:column`
@@ -850,17 +1011,51 @@ package is packed into a **zstd-compressed tar** and appended to a small stub
 (~3.5 MB), so the download is smaller than the zip (zstd beats deflate by ~15%
 and decompresses faster), and it is not a second `deno compile` with
 `electron-runtime.zip` inside the PE. First double-click extracts to
-`%LOCALAPPDATA%\aio-sfx\…`; later launches skip extract when the payload stamp
-matches. The `.zip` stays a plain zip (Windows Explorer can open it).
+`%LOCALAPPDATA%\aio-sfx\<name>\win-<arch>\`; later launches skip extract when
+the payload stamp matches. The `.zip` stays a plain zip (Windows Explorer can
+open it).
+
+What the `.exe` does when it is opened:
+
+- **Twice at once** (a second double-click while the first is still extracting):
+  the second waits for the first, then only starts the app — one install, never
+  two extractions into one folder.
+- **A different version is installed**: the installed folder is moved aside, the
+  new one extracted and moved in, the old one deleted last; a failed extraction
+  (a full disk) puts the old folder back.
+- **The app is running** and the `.exe` carries a different version: nothing is
+  changed, and a message says to close the app and open the file again.
+- **The app updated itself**: the `.exe` starts the updated app — see
+  [Updates](../deploy/updates.md).
+
+**Signing the `.exe` (Authenticode).** Sign the finished `<name>-win-x64.exe`
+with your own tool —
+`signtool sign /fd SHA256 /tr <timestamp-url> /td SHA256
+<name>-win-x64.exe`, or
+`osslsigncode` on Linux — after the build and **before** `deno task ship`, whose
+manifest hashes the file as it will be downloaded. A signature appends a
+certificate table after the SFX trailer; the stub finds its payload through the
+PE security directory, so a signed `.exe` runs like an unsigned one. The
+signature covers the whole download, payload included; the `<name>.exe` and
+Electron that it extracts are not signed individually. aio does not sign for
+you.
 
 Building that one-click `.exe` needs **no Go toolchain**: the extractor stub is
 a committed **prebuilt PE** (`src/build/windows-sfx-stub/prebuilt/`, rebuilt
 only when its source changes — see that directory's README), and the zstd
-payload is packed by aio itself, in Deno (`@std/tar` through `node:zlib`). If
-packing ever fails, the payload falls back to the same zip (`format: "zip"`) —
-larger, still one-click. `AIO_WINDOWS_FAT_EXE=1` restores the legacy
-`deno compile` PE instead. The intermediate `dist/app.js` does not survive into
-the finished `dist/`.
+payload is packed by aio itself, in Deno (`@std/tar` through `node:zlib`). The
+stub is used only when its SHA-256 is the one pinned in aio's source, and its
+build is reproducible (`-trimpath`, no VCS stamp), so the bytes at the start of
+your `.exe` are checkable against the stub's source; the licenses of what it
+links are in `THIRD_PARTY_NOTICES` beside it. The payload is deterministic too:
+the same staged package packs to the same bytes. If packing ever fails, the
+payload falls back to the same zip (`format: "zip"`) — larger, still one-click.
+A symlink in the staged package ships as a copy of its target (the build says
+so, with the size); one that points outside the package, at nothing, or at a
+folder it is inside stops the build, naming the path. `AIO_WINDOWS_FAT_EXE=1`
+restores the legacy `deno compile` PE instead, and the build falls back to it by
+itself, with a warning, when the stub cannot be read, fetched or verified. The
+intermediate `dist/app.js` does not survive into the finished `dist/`.
 
 On Linux and Windows the launcher sets `$ELECTRON_PATH` before starting the Deno
 binary; on macOS the `.app` bundles the runtime where the binary looks for it

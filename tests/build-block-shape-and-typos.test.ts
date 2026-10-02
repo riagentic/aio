@@ -15,7 +15,9 @@ import {
   buildBlockShapeProblems,
   buildBlockShapeWarnings,
 } from "../src/build/build-shape.ts";
-import { unknownBuildKeys } from "../src/server/config.ts";
+import { walk } from "@std/fs/walk";
+import { codeText } from "../src/diagnostics/code-mask.ts";
+import { unknownBuildKeys, VALID_BUILD_KEYS } from "../src/server/config.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const BUILD_ALL = new URL("../src/build-all.ts", import.meta.url).pathname;
@@ -84,6 +86,71 @@ Deno.test("build block shape: what built on 1.0.11 is warned, never refused", ()
 Deno.test("build block keys: the documented build.macos is a known key", () => {
   assertEquals(
     unknownBuildKeys({ macos: { bundleId: "com.example.app", host: "mac" } }),
+    [],
+  );
+});
+
+/** Names that follow a `build` in src/ and are NOT a deno.json key — each
+ *  with what it is. A name that is neither here nor in `VALID_BUILD_KEYS`
+ *  fails the test below: decide which it is. */
+const NOT_A_BUILD_KEY: Record<string, string> = {
+  os: "Deno.build, passed as a `build` parameter",
+  arch: "Deno.build, passed as a `build` parameter",
+  onLoad: "esbuild's plugin API — `setup(build)`",
+  onResolve: "esbuild's plugin API — `setup(build)`",
+  code: "dev-android's `build` is a finished child process",
+  err: "dev-android's `build` is a finished child process",
+};
+
+Deno.test("build block keys: every key src/ READS from the build block is a known key, and every known key is read", async () => {
+  // `keepPackages` and `chromiumExtras` shipped, documented and honoured —
+  // and the same build said "aio never reads build.keepPackages — it does
+  // nothing", and the linter called both an ERROR, because the list is
+  // hand-kept and each reader is its own little cast. So the readers are
+  // derived from the source: the three shapes a build key is read in.
+  const READS = [
+    // cfg.build?.minify · build.css
+    /(?<!Deno\??\.)(?<![\w$])build\??\.([A-Za-z_]\w*)/g,
+    // { build?: { minify?: unknown } } · (cfg.build as { out?: string })
+    /\bbuild(?:\??:|\s+as)\s*\{([^{}]*)/g,
+  ];
+  const read = new Map<string, string>();
+  const src = new URL("../src/", import.meta.url);
+  for await (
+    const e of walk(src, {
+      includeDirs: false,
+      exts: [".ts", ".tsx"],
+      skip: [/node_modules/],
+    })
+  ) {
+    // Code only: `build.gradle` in a string and `build.ts` in a comment are
+    // not reads.
+    const code = codeText(await Deno.readTextFile(e.path));
+    for (const m of code.matchAll(READS[0]!)) read.set(m[1]!, e.path);
+    for (const m of code.matchAll(READS[1]!)) {
+      for (const k of m[1]!.matchAll(/([A-Za-z_]\w*)\??:/g)) {
+        read.set(k[1]!, e.path);
+      }
+    }
+  }
+  const unknown = [...read].filter(([k]) =>
+    !VALID_BUILD_KEYS.has(k) && !(k in NOT_A_BUILD_KEY)
+  );
+  assertEquals(
+    unknown,
+    [],
+    "src/ reads a build key that VALID_BUILD_KEYS (src/server/config.ts) " +
+      "does not list — the build would call it a key aio never reads",
+  );
+  // …and the other way: a listed key nothing reads is a typo gate that
+  // accepts a key doing nothing (and proves the scan sees every reader).
+  assertEquals(
+    [...VALID_BUILD_KEYS].filter((k) => !read.has(k)),
+    [],
+    "a key in VALID_BUILD_KEYS is read nowhere in src/",
+  );
+  assertEquals(
+    unknownBuildKeys({ keepPackages: ["typescript"], chromiumExtras: "strip" }),
     [],
   );
 });

@@ -20,6 +20,7 @@
  *       PkgInfo                 ← APPL????
  *       MacOS/
  *         <binary>              ← the Deno server binary IS the bundle executable
+ *         app_window            ← a link to electron/…/MacOS/Electron: the window is started through it
  *         electron/             ← the runtime, where packagedElectronCandidates looks
  *           Electron.app/
  *       Resources/
@@ -54,8 +55,12 @@
  */
 import { join } from "@std/path";
 import { appIconPng, pngSize } from "./app-icon.ts";
-import { copyDir } from "./build-helpers.ts";
+import { copyDir, normalizeArtifactModes } from "./build-helpers.ts";
 import { DEFAULT_KEPT_LOCALES, trimLprojLocales } from "./electron-locales.ts";
+import {
+  MAC_WINDOW_LINK,
+  MAC_WINDOW_LINK_TARGET,
+} from "../electron/electron-runtime-fetch.ts";
 import { NO, OK } from "../diagnostics/fmt.ts";
 
 /** ICNS element OSTypes for PNG-encoded images, by pixel dimension.
@@ -174,7 +179,7 @@ export interface MacAppPlist {
   version: string;
   /** Build number; falls back to {@link version}. */
   buildVersion?: string;
-  /** `LSMinimumSystemVersion`. Electron 43 needs 12.0. */
+  /** `LSMinimumSystemVersion` — see {@link macMinimumSystemVersion}. */
   minimumSystemVersion?: string;
   /** Extra `<key>/<string|true>` pairs (e.g. `NS*UsageDescription`). */
   extra?: Record<string, string | boolean>;
@@ -206,7 +211,10 @@ export function macAppPlist(p: MacAppPlist): string {
   str("CFBundlePackageType", "APPL");
   str("CFBundleShortVersionString", p.version);
   str("CFBundleVersion", p.buildVersion ?? p.version);
-  str("LSMinimumSystemVersion", p.minimumSystemVersion ?? "12.0");
+  str(
+    "LSMinimumSystemVersion",
+    p.minimumSystemVersion ?? MAC_MINIMUM_SYSTEM_FLOOR,
+  );
   bool("NSHighResolutionCapable", true);
   for (const [k, v] of Object.entries(p.extra ?? {})) {
     typeof v === "boolean" ? bool(k, v) : str(k, v);
@@ -353,6 +361,103 @@ export async function stripElectronBranding(
   });
 }
 
+/** Every top-level `<key>` of an XML plist with the raw text of its value —
+ *  a string, a boolean, or a whole nested `<dict>`/`<array>`. Pure; depth is
+ *  counted, so a key INSIDE a nested dict is never taken for a top-level one. */
+export function plistTopLevelRows(
+  plist: string,
+): Array<{ key: string; value: string }> {
+  const rows: Array<{ key: string; value: string }> = [];
+  const tok =
+    /<(\/?)(dict|array)>|<(dict|array)\/>|<key>([^<]*)<\/key>|<(string|integer|real|date|data)>[\s\S]*?<\/\5>|<(?:string|data)\/>|<(?:true|false)\/>/g;
+  let depth = 0;
+  let key: string | null = null;
+  let open = -1; // where the pending key's container value began
+  for (const m of plist.matchAll(tok)) {
+    const container = m[2] !== undefined;
+    if (container && m[1] === "") {
+      if (depth === 1 && key !== null && open < 0) open = m.index;
+      depth++;
+      continue;
+    }
+    if (container) {
+      depth--;
+      if (depth === 1 && key !== null && open >= 0) {
+        rows.push({ key, value: plist.slice(open, m.index + m[0].length) });
+        key = null;
+        open = -1;
+      }
+      continue;
+    }
+    if (depth !== 1) continue;
+    if (m[4] !== undefined) key = m[4];
+    else if (key !== null) {
+      rows.push({ key, value: m[0] });
+      key = null;
+    }
+  }
+  return rows;
+}
+
+/** The bundle's `Info.plist` plus every `NS…`/`Electron…` key the window's
+ *  runtime declares and the bundle does not.
+ *
+ *  The window runs with the BUNDLE as its main bundle (it is started through
+ *  `MAC_WINDOW_LINK`), so this plist is the one macOS and Electron read for
+ *  it: automatic graphics switching, the privacy usage descriptions a camera
+ *  or microphone prompt needs, the principal class. They are taken from the
+ *  runtime's own plist rather than listed here, so a key a later Electron adds
+ *  arrives without anyone remembering to copy it. A key the bundle already
+ *  states is the bundle's. Pure. */
+export function inheritWindowPlistKeys(
+  bundlePlist: string,
+  electronPlist: string,
+): string {
+  const have = new Set(plistTopLevelRows(bundlePlist).map((r) => r.key));
+  const rows = plistTopLevelRows(electronPlist).filter((r) =>
+    /^(NS|Electron)/.test(r.key) && !have.has(r.key)
+  );
+  const at = bundlePlist.lastIndexOf("</dict>");
+  if (rows.length === 0 || at < 0) return bundlePlist;
+  return bundlePlist.slice(0, at) +
+    rows.map((r) => `  <key>${r.key}</key>\n  ${r.value}\n`).join("") +
+    bundlePlist.slice(at);
+}
+
+/** The oldest macOS this aio supports a bundle on, whatever runtime it
+ *  carries. */
+export const MAC_MINIMUM_SYSTEM_FLOOR = "12.0";
+
+/** The bundle's `LSMinimumSystemVersion`: the HIGHER of aio's floor and the
+ *  one the bundled runtime declares for itself.
+ *
+ *  The bundle said a fixed 12.0 while Electron 44's own plist says 13.0, so on
+ *  macOS 12 the system would have started the app — the server came up — and
+ *  then its window could not: a launch that half-works instead of the
+ *  system's own "this app needs macOS 13". Read from the runtime at build
+ *  time, so the next Electron that raises it is followed without an edit
+ *  here. A runtime that states none (or something unreadable) leaves the
+ *  floor. Pure. */
+export function macMinimumSystemVersion(
+  runtimePlist: string,
+  floor = MAC_MINIMUM_SYSTEM_FLOOR,
+): string {
+  const declared = plistTopLevelRows(runtimePlist)
+    .find((r) => r.key === "LSMinimumSystemVersion")?.value;
+  const v = /^<string>\s*(\d+(?:\.\d+){0,2})\s*<\/string>$/.exec(
+    declared ?? "",
+  )?.[1];
+  if (!v) return floor;
+  const a = v.split(".").map(Number);
+  const b = floor.split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((a[i] ?? 0) !== (b[i] ?? 0)) {
+      return (a[i] ?? 0) > (b[i] ?? 0) ? v : floor;
+    }
+  }
+  return floor;
+}
+
 /** The `.app` FILE name for a display title. The title is prose ("AC/DC",
  *  "Notes: Work"), and a path segment is not: joined raw, "/" nested the
  *  bundle in directories and a title like "../../x" put it — and the
@@ -476,18 +581,52 @@ export async function assembleMacApp(opts: {
   // The top-level Resources also carries empty per-language stubs.
   trimLprojLocales(join(electronDst, "Contents", "Resources"), keep);
 
-  // 5. The bundle's own identity.
+  // The window is started THROUGH the bundle: a link in its own
+  // `Contents/MacOS/` to the nested runtime, so the process the user sees is
+  // the app they installed and not a second bundle inside it (see
+  // MAC_WINDOW_LINK — without it, "quit" after the app was opened twice
+  // reached nothing). Relative, so the bundle can be moved; `codesign` seals
+  // it as a link.
+  await Deno.symlink(MAC_WINDOW_LINK_TARGET, join(macos, MAC_WINDOW_LINK));
+  // The window's main bundle is now THIS bundle, and macOS picks the app's
+  // language from the `.lproj` directories of the main bundle: without them
+  // the page falls back to English whatever the user chose (measured: an
+  // `en-GB` preference became `en-US`). Mirror the runtime's kept stubs.
+  for await (
+    const e of Deno.readDir(join(electronDst, "Contents", "Resources"))
+  ) {
+    if (e.isDirectory && e.name.endsWith(".lproj")) {
+      await copyDir(
+        join(electronDst, "Contents", "Resources", e.name),
+        join(resources, e.name),
+      );
+    }
+  }
+
+  // 5. The bundle's own identity — plus what the window's runtime declares
+  //    for itself, since this is the plist the window is now read by.
+  const runtimePlist = await Deno.readTextFile(
+    join(electronDst, "Contents", "Info.plist"),
+  );
   await Deno.writeTextFile(
     join(app, "Contents", "Info.plist"),
-    macAppPlist({
-      name,
-      executable: binaryName,
-      identifier,
-      iconFile: iconName,
-      version,
-    }),
+    inheritWindowPlistKeys(
+      macAppPlist({
+        name,
+        executable: binaryName,
+        identifier,
+        iconFile: iconName,
+        version,
+        minimumSystemVersion: macMinimumSystemVersion(runtimePlist),
+      }),
+      runtimePlist,
+    ),
   );
   await Deno.writeFile(join(app, "Contents", "PkgInfo"), pkgInfo());
+
+  // The bundle is what the .dmg, the update tarball and the zip all pack:
+  // its modes are the installed app's, so they are stated, not inherited.
+  await normalizeArtifactModes(app);
 
   if (removed > 0) {
     console.log(

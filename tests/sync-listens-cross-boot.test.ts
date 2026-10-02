@@ -111,6 +111,7 @@ Deno.test({
         const cells = defineCells();
         const port = freePort();
         const app = await aio.run({
+          watch: false,
           cells: Object.values(cells),
           appId: "xsync-probe",
           appDir: dir,

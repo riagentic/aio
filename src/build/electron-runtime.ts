@@ -195,11 +195,19 @@ export async function ensureHostElectronDist(
   root: string,
   log: { warn: (m: string) => void; error: (m: string) => void } = console,
 ): Promise<string | null> {
-  const { autoInstallElectron, electronDistDir } = await import(
+  const { autoInstallElectron, electronDistDir, installRefusal } = await import(
     "../electron/electron-spawn.ts"
   );
   const found = await electronDistDir(root);
   if (found !== null) return found;
+  // Never INTO a directory the launcher would not install into either: the
+  // framework's own checkout (an install edits its tracked deno.json and
+  // deno.lock) or a directory with no config. ONE decider with the launcher.
+  const refused = await installRefusal(root);
+  if (refused !== null) {
+    log.error(`electron: ${root} ${refused} — not installing into it`);
+    return null;
+  }
 
   // The rewrite is REPORTED by the installer itself (`electronConfigNotes`),
   // for every caller and not just this one: `deno task install:electron` and

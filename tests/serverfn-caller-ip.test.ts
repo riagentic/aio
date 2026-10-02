@@ -55,6 +55,7 @@ async function seen(trustProxyHeader?: string) {
     baseDir: dir,
     port,
     ...(trustProxyHeader ? { trustProxyHeader } : {}),
+    watch: false,
     onStart: () => {
       serverFns(ns, { whereFrom: () => serverRequest()?.ip }, {
         access: () => {

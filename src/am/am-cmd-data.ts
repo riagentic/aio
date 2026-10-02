@@ -39,6 +39,7 @@ import type { AppMeta } from "../server/app-dirs.ts";
 import {
   AppLock,
   claimHome,
+  heldLockLine,
   isLockOwnerAlive,
   lockDir,
   STARTUP_GRACE_MS,
@@ -415,8 +416,11 @@ async function holdForMaintenance(
   const lock = new AppLock(appId, home, registeredProfile(appId));
   const r = await lock.acquire(0);
   if (!r.ok) {
+    lock.release();
     fail(
-      maintenanceOp(r.existing)
+      r.held !== undefined
+        ? heldLockLine(appId, r.existing, r.held)
+        : maintenanceOp(r.existing)
         ? maintenanceMessage(appId, r.existing)
         : `"${appId}" is running (pid ${r.existing.pid}) — run ` +
           `"am stop ${targetArgs(appId)}" first`,
@@ -426,13 +430,18 @@ async function holdForMaintenance(
   // The data folder's own OS lock too: an instance of this app booted from
   // ANOTHER lock scope (--instance, an appDir app) holds it, and copying or
   // swapping data/ under it is the torn copy the lock exists to prevent.
-  const claim = claimHome(home, { appId, port: 0, key: lock.key });
+  const who = { appId, port: 0, key: lock.key };
+  const claim = claimHome(home, who);
   if (!claim.ok) {
     lock.release();
+    const h = claim.holder;
     fail(
-      `"${appId}" is running from ${home}${
-        claim.holder?.pid ? ` (pid ${claim.holder.pid})` : ""
-      } under another lock scope — stop it first`,
+      `"${appId}" is running from ${home}${h?.pid ? ` (pid ${h.pid})` : ""}` +
+        (h?.lockDir !== undefined && h.lockDir === lockDir()
+          // Filed in THIS scope, and the lock file did not name it.
+          ? ` — it holds the data folder, though its lock file is gone — ` +
+            `stop it first`
+          : ` under another lock scope — stop it first`),
       mode,
     );
   }

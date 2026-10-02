@@ -23,6 +23,8 @@ import {
 import {
   DRAIN_TIMEOUT_MS,
   SHUTDOWN_BUDGET_MS,
+  STORES_RESERVE_MS,
+  TEARDOWN_TIMEOUT_MS,
 } from "../src/server/shutdown-budget.ts";
 
 const never = () => new Promise<void>(() => {});
@@ -439,5 +441,215 @@ Deno.test("shutdown: a hung onStop that ignores its cut still leaves the closes 
   assert(
     !warns.some((w) => w.includes("sqlite did not finish")),
     `sqlite starved by the hung hook — ${warns}`,
+  );
+});
+
+Deno.test("shutdown: the stores always get their floor, and a healthy stop is never charged for it", async () => {
+  // Every phase is handed what is left of the ONE teardown budget. A server
+  // close that hung spent all of it, and SQLite, the KV store and the auth
+  // stores each got the 1ms floor — "sqlite did not finish inside the 5000ms
+  // teardown budget" on a stop where the database was never the slow part.
+  // The stores now get STORES_RESERVE_MS whatever came before — ADDED when a
+  // phase overran, and only then: a stop that fits the budget is untouched.
+  assertEquals(STORES_RESERVE_MS, 200, "the floor the docs state");
+  assertEquals(TEARDOWN_TIMEOUT_MS, 5000);
+  // Every timer a close starts, so a close that was CUT is still waited out
+  // before the test ends (its timer is this test's, not the next one's).
+  const timers: Promise<void>[] = [];
+  const takes = (ms: number, name: string, done: string[]) => () => {
+    const p = new Promise<void>((r) =>
+      setTimeout(() => {
+        done.push(name);
+        r();
+      }, ms)
+    );
+    timers.push(p);
+    return p;
+  };
+  const run = async (over: (done: string[]) => Partial<ShutdownRefs>) => {
+    const done: string[] = [];
+    const { refs, warns } = stubRefs(over(done));
+    const t0 = Date.now();
+    const r = await within(
+      createShutdownOrchestrator(refs).shutdown(),
+      BOUND_MS,
+    );
+    assertEquals(r, undefined);
+    const cut = warns.filter((w) => w.includes("did not finish"));
+    return { done, cut, took: Date.now() - t0 };
+  };
+  // Fixed times, NOT sized from the constant: four closes of 40 ms need 160 ms
+  // of the 200; one of 300 ms does not fit it.
+  const stores = (done: string[], sqliteMs: number) => ({
+    asyncDb: { close: takes(sqliteMs, "sqlite", done) },
+    kvDb: { close: takes(40, "kv", done) },
+    sessionStore: { close: takes(40, "sessions", done) },
+    userStore: { close: takes(40, "users", done) },
+  });
+  const mark = (name: string, done: string[]) => () => void done.push(name);
+  const [hung, tooSlow, healthy, slowStore, short, late] = await Promise
+    .all([
+      // A server close that never returns: the stores still close.
+      run((d) => ({
+        getServer: () => ({ shutdown: never }),
+        ...stores(d, 40),
+      })),
+      // …inside their floor and no further: a 300 ms close is cut at 200, and
+      // the stores after it still get their turn.
+      run((d) => ({
+        getServer: () => ({ shutdown: never }),
+        asyncDb: { close: takes(300, "sqlite", d) },
+        kvDb: { close: mark("kv", d) },
+        sessionStore: { close: mark("sessions", d) },
+        userStore: { close: mark("users", d) },
+      })),
+      // A slow but healthy stop — 4.9 s of server close, inside the budget —
+      // finishes as it always did: nothing is cut, nothing is added.
+      run((d) => ({
+        getServer: () => ({ shutdown: takes(4900, "server", d) }),
+        ...stores(d, 40),
+      })),
+      // The floor is a FLOOR: a store that needs longer, on a stop with the
+      // budget still in hand, has the budget.
+      run((d) => stores(d, 400)),
+      // …and it is the floor even when a little is left: a hook that ignored
+      // its cut leaves 250 ms, a 150 ms server close leaves 100 — the stores
+      // get 200, so a 150 ms close finishes.
+      run((d) => ({
+        onStop: never,
+        getServer: () => ({ shutdown: takes(150, "server", d) }),
+        asyncDb: { close: takes(150, "sqlite", d) },
+      })),
+      // …counted from the stores' turn, not from the old deadline: with 150 ms
+      // left the floor is 200, not 350, so a 275 ms close is cut.
+      run((d) => ({
+        onStop: never,
+        getServer: () => ({ shutdown: takes(100, "server", d) }),
+        asyncDb: { close: takes(275, "sqlite", d) },
+      })),
+    ]);
+  try {
+    assertEquals(
+      hung.done,
+      ["sqlite", "kv", "sessions", "users"],
+      `${hung.cut}`,
+    );
+    assertEquals(
+      hung.cut.map((w) => w.replace(/ did not finish.*/s, "")),
+      ["shutdown: server"],
+      "the phase that overran is named, once, and no other",
+    );
+    assert(
+      hung.cut[0]!.includes(`${TEARDOWN_TIMEOUT_MS}ms teardown`),
+      `the server's cap was the whole teardown — ${hung.cut[0]}`,
+    );
+    // A timer never fires early: the server had the WHOLE budget before it was
+    // cut, and the floor came on top of it.
+    assert(hung.took >= TEARDOWN_TIMEOUT_MS + 160, `took ${hung.took}ms`);
+    assert(
+      hung.took <= TEARDOWN_TIMEOUT_MS + STORES_RESERVE_MS + 150,
+      `an overrun stop took ${hung.took}ms`,
+    );
+
+    assertEquals(
+      tooSlow.cut.map((w) => w.replace(/ did not finish.*/s, "")),
+      ["shutdown: server", "shutdown: sqlite"],
+    );
+    assert(
+      tooSlow.cut[1]!.includes("200ms stores'"),
+      `a store cut inside the floor is told the cap it had — ${tooSlow.cut[1]}`,
+    );
+    // What a cut costs is said truthfully: a store's data is in its WAL — only
+    // its checkpoint waits; any other phase's unfinished work is gone.
+    assert(
+      tooSlow.cut[1]!.endsWith(
+        "(its checkpoint is left for the next start; nothing that was " +
+          "written is lost)",
+      ),
+      tooSlow.cut[1],
+    );
+    assert(
+      tooSlow.cut[0]!.endsWith(
+        "(whatever it still had to write or release is lost)",
+      ),
+      tooSlow.cut[0],
+    );
+    assert(
+      tooSlow.took >= TEARDOWN_TIMEOUT_MS + STORES_RESERVE_MS,
+      `sqlite was cut after ${tooSlow.took}ms — before the floor was spent`,
+    );
+    assert(
+      tooSlow.took <= TEARDOWN_TIMEOUT_MS + STORES_RESERVE_MS + 150,
+      `an overrun stop took ${tooSlow.took}ms`,
+    );
+    assertEquals(
+      tooSlow.done,
+      ["kv", "sessions", "users"],
+      "the stores after a cut one still close",
+    );
+
+    assertEquals(healthy.cut, [], "a stop inside the budget was cut");
+    assertEquals(healthy.done, ["server", "sqlite", "kv", "sessions", "users"]);
+    assert(
+      healthy.took < TEARDOWN_TIMEOUT_MS + 150,
+      `a healthy stop took ${healthy.took}ms`,
+    );
+
+    assertEquals(slowStore.cut, [], "a store was cut with the budget in hand");
+    assertEquals(slowStore.done, ["sqlite", "kv", "sessions", "users"]);
+
+    assertEquals(
+      short.cut.map((w) => w.replace(/ did not finish.*/s, "")),
+      ["shutdown: hook onStop"],
+      "only the hook overran",
+    );
+    assertEquals(short.done.slice(0, 2), ["server", "sqlite"]);
+
+    assertEquals(late.cut.length, 2, late.cut.join("\n"));
+    assert(late.cut[1]!.startsWith("shutdown: sqlite did not"), late.cut[1]);
+    assert(
+      late.cut[1]!.includes(`${STORES_RESERVE_MS}ms stores'`),
+      late.cut[1],
+    );
+    assert(
+      late.took <= TEARDOWN_TIMEOUT_MS + STORES_RESERVE_MS + 150,
+      `took ${late.took}ms`,
+    );
+  } finally {
+    // Whatever a cut left running ends before the next test starts.
+    await Promise.all(timers);
+  }
+});
+
+Deno.test("shutdown: onStop is cut where the docs say — 0.5 s before the end of the teardown", async () => {
+  // The documented cut: an `onStop` is told to stop 0.5 s before the end of
+  // the teardown, and given up on 0.25 s after that. The stores' floor is not
+  // taken out of either.
+  let cutAt = -1;
+  let leftAt = -1;
+  const t0 = Date.now();
+  const { refs } = stubRefs({
+    onStop: ((signal: AbortSignal) => {
+      signal.addEventListener("abort", () => cutAt = Date.now() - t0);
+      return never();
+    }) as ShutdownRefs["onStop"],
+    // The first phase after the hook: when the wait for it was given up.
+    appLock: {
+      release: () => {
+        leftAt = Date.now() - t0;
+      },
+    },
+  });
+  const { shutdown } = createShutdownOrchestrator(refs);
+  assertEquals(await within(shutdown(), BOUND_MS), undefined);
+  // A timer never fires early, so the lower bounds are exact; the phases
+  // before the hook are no-ops here.
+  assert(
+    cutAt >= TEARDOWN_TIMEOUT_MS - 500 - 50,
+    `onStop was cut after ${cutAt}ms`,
+  );
+  assert(
+    leftAt >= TEARDOWN_TIMEOUT_MS - 250 - 50,
+    `a hook that ignored its cut was left after ${leftAt}ms`,
   );
 });

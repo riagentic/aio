@@ -34,10 +34,95 @@
 // `node:async_hooks` exposes no AsyncLocalStorage; on Deno it always does.
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { types } from "node:util";
 import type { AioUser } from "./aio-types.ts";
 import type { UserStore } from "./auth-users.ts";
 import { parseCookies } from "./route.ts";
-import { _installCallerScope, isJsonKeyable } from "../state/method-policy.ts";
+import { _installCallerScope } from "../state/method-policy.ts";
+
+const NO_KEY = new Error("no key");
+
+/** One value of a user record as key text. Throws {@linkcode NO_KEY} for a
+ *  value with no faithful key.
+ *
+ *  NOT `JSON.stringify` plus a replacer, which is what stood here: JSON has
+ *  one spelling for several values, and every tag a replacer can emit is
+ *  itself a value some other record may hold —
+ *
+ *    `{x: undefined}`  and  `{x: {__aioUndefined: true}}`   one key
+ *    `{d: new Date(0)}`  and  `{d: "1970-01-01T00:00:00.000Z"}`   one key
+ *    `{d: new Date(NaN)}`  and  `{d: null}`   one key
+ *    a class whose `toJSON` leaves `role` out, as admin and as viewer   one key
+ *
+ *  — and a record holding a `bigint` (an ORM row's `int8` id) had no key at
+ *  all. Here every STRING is quoted, so the bare tokens (`u`, `12n`, `D0`,
+ *  `NaN`, `N{`) are spellings no field value can produce: two records share a
+ *  key only when a view cannot tell them apart. */
+function keyPart(v: unknown, stack: Set<object>): string {
+  switch (typeof v) {
+    case "string":
+      return JSON.stringify(v);
+    case "number":
+      return Object.is(v, -0) ? "-0" : String(v);
+    case "boolean":
+      return String(v);
+    case "undefined":
+      return "u";
+    case "bigint":
+      return `${v}n`;
+    case "object":
+      break;
+    default:
+      throw NO_KEY; // function, symbol: nothing to compare two of by
+  }
+  if (v === null) return "null";
+  // A cycle has no finite key (a value reached twice WITHOUT one is fine, so
+  // this is a stack). A Proxy answers reads its own keys do not announce.
+  if (stack.has(v) || types.isProxy(v)) throw NO_KEY;
+  const proto = Object.getPrototypeOf(v);
+  const own = Reflect.ownKeys(v);
+  // The ONE object keyed by its own conversion. A `toJSON` on anything else
+  // is that class's choice of what to PRINT, not a statement of everything a
+  // view can read off it.
+  if (proto === Date.prototype && own.length === 0) {
+    return `D${Date.prototype.getTime.call(v)}`;
+  }
+  stack.add(v);
+  try {
+    if (Array.isArray(v)) {
+      // Exactly its indices and `length`: a hole, a named property or a
+      // symbol on an array is a different array with the same elements. The
+      // count alone does not say so — one hole plus one named property has as
+      // many own keys as a dense array — hence every index is checked too.
+      if (proto !== Array.prototype || own.length !== v.length + 1) {
+        throw NO_KEY;
+      }
+      const items: string[] = [];
+      for (let i = 0; i < v.length; i++) {
+        if (!Object.hasOwn(v, i)) throw NO_KEY;
+        items.push(keyPart(v[i], stack));
+      }
+      return `[${items.join(",")}]`;
+    }
+    // Set, Map, RegExp, a typed array, a class instance: none is described by
+    // its own properties (private state, prototype getters).
+    if (proto !== Object.prototype && proto !== null) throw NO_KEY;
+    if (own.some((k) => typeof k !== "string")) throw NO_KEY;
+    const parts: string[] = [];
+    // Non-enumerable ones too — a view reads `user.role` however it was
+    // defined. Sorted, so two structurally-equal users share a slot.
+    for (const k of (own as string[]).sort()) {
+      parts.push(
+        `${JSON.stringify(k)}:${
+          keyPart((v as Record<string, unknown>)[k], stack)
+        }`,
+      );
+    }
+    return `${proto === null ? "N" : ""}{${parts.join(",")}}`;
+  } finally {
+    stack.delete(v);
+  }
+}
 
 /** Cache key for a user — a STABLE serialization of everything `ui.forUser`
  *  can observe, not just the id.
@@ -55,53 +140,28 @@ import { _installCallerScope, isJsonKeyable } from "../state/method-policy.ts";
  *  and the key is recomputed per call so an IN-PLACE mutation of a
  *  connection's user object (a role change on a live socket) invalidates it.
  *
- *  Cost: one JSON pass over a user record (a handful of small fields) per
+ *  Cost: one pass over a user record (a handful of small fields) per
  *  client per broadcast, against a `forUser` call that structuredClones and
  *  rewrites the whole cell slice — two to three orders of magnitude apart on
  *  any state worth memoizing. The memo keeps its purpose; it just can no
  *  longer answer a question it was not asked.
  *
- *  Returns null when the user cannot be serialized (cycles, exotic values) —
- *  the caller then SKIPS the cache entirely and recomputes. A cache miss costs
- *  time; a wrong cache hit costs someone else's data. */
+ *  The keyed domain is plain data: primitives (`bigint` and `undefined`
+ *  included), arrays, plain objects and `Date` — see {@linkcode keyPart}.
+ *  Returns null for anything else (a `Map`, `Set`, class instance, function,
+ *  Proxy, cycle, a getter that throws) — the caller then SKIPS the cache
+ *  entirely and recomputes. A cache miss costs time; a wrong cache hit costs
+ *  someone else's data. */
 export function userMemoKey(user?: AioUser): string | null {
   // "no user" is its OWN bucket, and cannot be spelled by any serialized user:
-  // every JSON.stringify of an object starts with "{".
+  // a string user is quoted, and `keyPart` has no such bare token.
   if (user === undefined || user === null) return "no-user";
-  // Key ONLY the JSON-faithful domain. The replacer below turns every
-  // non-array object into its enumerable own keys, so a `Map`, `Set`,
-  // `RegExp`, typed array or class instance collapsed to `{}` (or dropped its
-  // private state) and two DIFFERENT users produced one key — the second was
-  // served the first's `forUser` view, and a `ttl`/`"first"` result computed
-  // for one caller was reused for another. `isJsonKeyable` is the decider for
-  // "this value's JSON is its identity"; outside it there is NO key, and the
-  // caller recomputes (a miss costs time, a wrong hit costs data). A `Date`
-  // field stays keyable — JSON replaces it via `toJSON`.
-  //
-  // INSIDE the try: the walk (and `JSON.stringify` below) read the user's own
-  // values, so a getter that throws must land on "no key", not escape into the
-  // broadcast.
+  // The walk reads the user's own values, so a getter that throws must land
+  // on "no key", not escape into the broadcast.
   try {
-    if (!isJsonKeyable(user)) return null;
-    const key = JSON.stringify(user, (_k, v) => {
-      // Values JSON drops or mangles become OBJECTS, never marker strings — a
-      // marker string could be forged by a user field holding that exact text,
-      // which would alias two different users into one cache slot.
-      if (v === undefined) return { __aioUndefined: true };
-      if (typeof v === "function") return { __aioFunction: true };
-      if (typeof v === "bigint") return { __aioBigInt: String(v) };
-      if (v && typeof v === "object" && !Array.isArray(v)) {
-        const sorted: Record<string, unknown> = {};
-        for (const k of Object.keys(v as Record<string, unknown>).sort()) {
-          sorted[k] = (v as Record<string, unknown>)[k];
-        }
-        return sorted;
-      }
-      return v;
-    });
-    return typeof key === "string" ? key : null;
+    return keyPart(user, new Set());
   } catch {
-    return null; // cyclic / unserializable → no caching, ever
+    return null; // aio-ok: unkeyable → no caching, ever
   }
 }
 
@@ -251,8 +311,8 @@ export function _readsSink():
   };
 }
 
-/** One caller fact's value as a key. Every value is JSON (a user key starts
- *  "{", "no-user" is not JSON), so "none" — no request at all — is its own. */
+/** One caller fact's value as a key. A user key is `userMemoKey`'s; every
+ *  other value is JSON, so "none" — no request at all — is its own. */
 function factKey(
   fact: string,
   user: AioUser | undefined,

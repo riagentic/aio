@@ -405,6 +405,9 @@ export function findFreePort(): number {
   );
 }
 
+/** `AIO_PORT`'s non-decimal spelling is said once per process. */
+let _envPortSpellingSaid = false;
+
 /** The port an OPERATOR set in the environment — `AIO_PORT`.
  *
  *  It sits between `--port` and the app's own config: a systemd unit, a
@@ -431,16 +434,24 @@ export function envPort(): number | undefined {
     return undefined; // no --allow-env here: the environment is not readable
   }
   if (raw === undefined || raw.trim() === "") return undefined;
-  // DECIMAL DIGITS, the same rule `--port` uses (`intArg`): `Number()` also
-  // accepts `0x1F90`, `1e3`, `+3000` and `0b101`, four spellings nobody types
-  // on purpose and each of which the flag REFUSES — one port vocabulary, both
-  // rungs. A non-decimal value is refused, never coerced.
+  // An integer 0-65535, as before 1.0.15. `Number()` also accepts `0x1F90`,
+  // `1e3` and `+3000`, spellings `--port` REFUSES — but an AMBIENT variable
+  // that booted an app yesterday must not refuse its boot today, so those are
+  // read as they always were and said once. Only a non-port is refused.
   const s = raw.trim();
   const n = Number(s);
-  if (!/^\d+$/.test(s) || n > 65535) {
+  if (!Number.isInteger(n) || n < 0 || n > 65535) {
     throw new Error(
-      `AIO_PORT=${raw} is not a port (want decimal digits 0-65535; 0 means ` +
+      `AIO_PORT=${raw} is not a port (want an integer 0-65535; 0 means ` +
         `"pick a free one"). Fix or unset it — it will not be ignored.`,
+    );
+  }
+  if (!/^[0-9]+$/.test(s) && !_envPortSpellingSaid) {
+    _envPortSpellingSaid = true;
+    log.warn(
+      `AIO_PORT=${raw} is read as port ${n}, as before — but it is not ` +
+        `written in decimal digits, which is the only spelling --port ` +
+        `accepts. Write AIO_PORT=${n}.`,
     );
   }
   return n;

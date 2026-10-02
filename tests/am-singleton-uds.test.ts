@@ -11,7 +11,10 @@ import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { ensureSingleton } from "../src/am/am-cmd-process.ts";
 import { writePid } from "../src/am/am-utils.ts";
-import { isProcessAlive } from "../src/server/single-instance-lock.ts";
+import {
+  _zombieDeps,
+  isProcessAlive,
+} from "../src/server/single-instance-lock.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropFixtureLock } from "./fixture-lock-helper.ts";
 
@@ -50,7 +53,9 @@ async function withExitStub(
 /** A process that stays alive until killed — stands in for the running app. */
 function spawnChild(): Deno.ChildProcess {
   return new Deno.Command(Deno.execPath(), {
-    args: ["eval", "await new Promise(() => {})"],
+    // A timer: a top-level await that can never resolve ENDS the process
+    // (about 150 ms in), and "reaped" then held by itself.
+    args: ["eval", "setInterval(() => {}, 2 ** 30)"],
     stdin: "null",
     stdout: "null",
     stderr: "null",
@@ -129,10 +134,16 @@ Deno.test({
       // exactly what a crashed UDS app leaves behind.
       socketPath: join(dir, "gone.sock"),
     });
+    // Its record has not changed for longer than the startup grace.
+    const recordAge = _zombieDeps.recordAge, delay = _zombieDeps.delay;
+    _zombieDeps.recordAge = () => 3_600_000;
+    _zombieDeps.delay = () => Promise.resolve();
     try {
       const { code, logs } = await withExitStub(() =>
         ensureSingleton(appId, "json")
-      );
+      ).finally(() => {
+        Object.assign(_zombieDeps, { recordAge, delay });
+      });
       assertEquals(code, null, "no refusal: nothing is actually serving");
       assert(
         logs.some((l) => l.includes("unresponsive")),

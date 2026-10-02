@@ -267,6 +267,7 @@ export function blockerDirCounts(
   const counts = new Map<string, number>();
   for (const b of blockers) {
     const path = b.where.replace(/:\d+$/, "").replaceAll("\\", "/");
+    // aio-ok: path-split — `\\` normalised to `/` on the line above
     const slash = path.indexOf("/");
     const dir = slash < 0 ? "." : path.slice(0, slash + 1);
     counts.set(dir, (counts.get(dir) ?? 0) + 1);
@@ -374,8 +375,11 @@ export async function preflight(
   // Stable order: real refusals first, then fixture warnings, then by path.
   // Readdir order is filesystem-dependent; the CLI and the gate must not
   // flicker between runs.
+  // `numeric`: `where` is `file:line`, and a plain compare puts line 10
+  // before line 9.
   blocking.sort((a, b) =>
-    Number(a.fixture) - Number(b.fixture) || a.where.localeCompare(b.where)
+    Number(a.fixture) - Number(b.fixture) ||
+    a.where.localeCompare(b.where, undefined, { numeric: true })
   );
   return blocking;
 }

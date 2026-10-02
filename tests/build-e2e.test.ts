@@ -39,7 +39,12 @@ import {
 import { versionStamp } from "../src/build/build-bundle.ts";
 import { VERSION } from "../src/server/aio-cli.ts";
 import { MOUNT_LINE } from "../src/electron/electron-renderer-log.ts";
-import { scanArtifactForBuildTools } from "../src/build/artifact-audit.ts";
+import {
+  embeddedFilesOf,
+  needlePackage,
+  scanArtifactForBuildTools,
+  scanArtifactForForeignPackages,
+} from "../src/build/artifact-audit.ts";
 
 const GATE = Deno.env.get("AIO_BUILD_E2E") === "1";
 const ELECTRON = Deno.env.get("AIO_BUILD_ELECTRON") === "1";
@@ -329,6 +334,136 @@ Deno.test({
         "dist/app.js is not reproducible — rebuilding the same sources " +
           "changed the bytes",
       );
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+// The version is an identity of the SOURCES, so building is not a change.
+// With `--out=<dir>` a build writes to two places — the release dir and its
+// staging in dist/ — and only the first was left out of the tree hash: in a
+// project with no repository (nothing is ignored there) every build of the
+// same sources carried a new version.
+Deno.test({
+  name:
+    "artifact: a second build to `--out=<dir in the project>` of a project with no repository carries the same version",
+  ignore: !GATE,
+  fn: async () => {
+    const dir = await makeApp("counter", "build-e2e-out-version-");
+    try {
+      // The project DECLARES an out dir; the flag names another.
+      const cfgPath = join(dir, "deno.json");
+      const cfg = JSON.parse(await Deno.readTextFile(cfgPath));
+      cfg.build = { ...cfg.build, out: "kept" };
+      await Deno.writeTextFile(cfgPath, JSON.stringify(cfg, null, 2) + "\n");
+      const build = async (out: string, ...flags: string[]) => {
+        const b = await buildFlags(dir, "--web", ...flags);
+        assertEquals(b.code, 0, `web build failed:\n${b.out}\n${b.err}`);
+        return JSON.parse(
+          await Deno.readTextFile(join(dir, out, "manifest.json")),
+        ).version as string;
+      };
+      const first = await build("kept");
+      assertMatch(
+        first,
+        /-nogit\.[0-9a-f]{8}$/,
+        "a project with no repository",
+      );
+      // What that build left in the project: its release, and its staging.
+      const left = (d: string) =>
+        [...Deno.readDirSync(join(dir, d))].map((e) => e.name);
+      assert(left("dist").includes("app.js"), `no staging: ${left("dist")}`);
+      assert(left("kept").length > 1, `no release: ${left("kept")}`);
+      // The flag's dir, with the declared one's release still in the project…
+      assertEquals(await build("release", "--out=release"), first);
+      // …and again, with the flag's own previous release there too.
+      assert(left("kept").length > 1 && left("release").length > 1);
+      assertEquals(await build("release", "--out=release"), first);
+      // …and to a third dir: `release/` is now a release in the project
+      // that neither this build's flag nor deno.json names.
+      assertEquals(await build("other", "--out=other"), first);
+      assert(left("release").length > 1, "the unnamed release is still there");
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+// `am publish` stages the release into `release/` — a directory of the
+// project, and one a scaffold made before this version does not ignore. It
+// was read as a change: every publish named a new version from unchanged
+// sources, and in a clean checkout the SECOND publish was refused as a
+// dirty-tree build. What a command of the project wrote is output — by the
+// record that command left, not by what the directory looks like.
+Deno.test({
+  name:
+    "artifact: publishing unchanged sources again — from a clean checkout that does not ignore release/ — is the same version, never a dirty tree",
+  ignore: !GATE,
+  fn: async () => {
+    const dir = await makeApp("counter", "build-e2e-publish-again-");
+    try {
+      // The new scaffold ignores it…
+      const ignore = join(dir, ".gitignore");
+      const ignored = await Deno.readTextFile(ignore);
+      assertMatch(ignored, /^release\/$/m);
+      // …an app made before does not.
+      await Deno.writeTextFile(ignore, ignored.replace(/^release\/\n/m, ""));
+      const run = async (cmd: string, ...args: string[]) => {
+        const r = await new Deno.Command(cmd, {
+          args,
+          cwd: dir,
+          stdout: "piped",
+          stderr: "piped",
+        }).output();
+        const text = new TextDecoder().decode(r.stdout) +
+          new TextDecoder().decode(r.stderr);
+        return { code: r.code, text, out: new TextDecoder().decode(r.stdout) };
+      };
+      const git = async (...args: string[]) => {
+        const r = await run(
+          "git",
+          "-c",
+          "user.name=t",
+          "-c",
+          "user.email=t@e.x",
+          ...args,
+        );
+        assertEquals(r.code, 0, r.text);
+        return r.out;
+      };
+      assertEquals((await run("deno", "cache", "src/app.ts")).code, 0);
+      await git("init", "-q", "-b", "main");
+      await git("add", "-A");
+      await git("commit", "-q", "-m", "app");
+      const versions: string[] = [];
+      for (const nth of ["first", "second", "third"]) {
+        const r = await run("deno", "task", "publish");
+        assertEquals(r.code, 0, `the ${nth} publish failed:\n${r.text}`);
+        assertEquals(r.text.includes("dirty"), false, r.text);
+        const channel = join(dir, "release", "prod");
+        const manifests = [...Deno.readDirSync(channel)]
+          .filter((e) => e.name.endsWith(".json"));
+        assert(manifests.length > 0, `no manifest in ${channel}`);
+        versions.push(
+          JSON.parse(
+            await Deno.readTextFile(join(channel, manifests[0]!.name)),
+          ).version,
+        );
+        // The staged release is the only thing git sees — and it is not
+        // what the version is made of.
+        assertEquals(await git("status", "--porcelain"), "?? release/\n");
+      }
+      assertMatch(versions[0]!, /^\d+\.\d+\.\d+$/);
+      assertEquals(versions, [versions[0], versions[0], versions[0]]);
+      // A file of the project's own that git tracks there IS source.
+      await Deno.writeTextFile(join(dir, "release", "NOTES.md"), "v1\n");
+      await git("add", "-f", "release/NOTES.md");
+      await git("commit", "-q", "-m", "notes");
+      await Deno.writeTextFile(join(dir, "release", "NOTES.md"), "v2\n");
+      const refused = await run("deno", "task", "publish");
+      assertEquals(refused.code, 1, refused.text);
+      assertStringIncludes(refused.text, "dirty-tree build");
     } finally {
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }
@@ -974,7 +1109,7 @@ Deno.test("build-e2e: the electron target is wired to AppImage packaging", async
     join(import.meta.dirname ?? ".", "..", "src", "build", "build-electron.ts"),
   );
   assertStringIncludes(src, "ensureAppimagetool");
-  assertStringIncludes(src, "appimageEnv(arch)");
+  assertStringIncludes(src, "runAppimagetool(");
 });
 
 // ── worker cells survive compilation ─────────────────────────────────────────
@@ -1296,6 +1431,172 @@ Deno.test({
         e.name.includes(foreign)
       );
       assertEquals(leaked, false, "no artifact wearing the foreign platform");
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+// ── a cross build is the same on every run ──────────────────────────────────
+//
+// The first cross build of a project installs the target's platform packages
+// (`@esbuild/win32-x64` on a Linux host). Every build after it found that
+// package on disk, held its link aside — and `deno compile` wrote the link
+// again and followed it: each Windows and macOS binary after the first
+// carried 10 MB of esbuild. One build can never show it.
+//
+// The app has a native dependency (`@node-rs/crc32`: one optional package per
+// system) because that is where "what is installed" and "what the target
+// needs" part ways: the host's `.node` is on disk, the target's is not, and a
+// later build finds whatever the earlier ones installed. The binary must hold
+// the target's native and no other, and the same list on every build.
+Deno.test({
+  name:
+    "artifact: a cross build carries the target's native package only, and the SECOND build carries what the first did",
+  ignore: !GATE,
+  fn: async () => {
+    const dir = await makeApp("counter", "build-e2e-xplat-twice-");
+    try {
+      const { hostPlatform, npmSystemOf, PLATFORMS } = await import(
+        "../src/build/platforms.ts"
+      );
+      const cfgPath = join(dir, "deno.json");
+      const cfg = JSON.parse(await Deno.readTextFile(cfgPath));
+      cfg.imports = {
+        ...(cfg.imports ?? {}),
+        "@node-rs/crc32": "npm:@node-rs/crc32@1.10.6",
+      };
+      await Deno.writeTextFile(cfgPath, JSON.stringify(cfg, null, 2));
+      // Loaded and CALLED at start: a binary without its native never serves.
+      const entry = join(dir, "src", "app.ts");
+      await Deno.writeTextFile(
+        entry,
+        `import { crc32 } from "@node-rs/crc32";\n` +
+          `if (crc32("hello") !== 907060870) throw new Error("crc32");\n` +
+          await Deno.readTextFile(entry),
+      );
+
+      const foreign = hostPlatform() === "windows" ? "linux" : "windows";
+      const built = async (platform: string, nth: string) => {
+        const r = await task(
+          dir,
+          "build",
+          "--targets=browser",
+          `--platforms=${platform}`,
+        );
+        assertEquals(r.code, 0, `${nth} build failed:\n${r.out}\n${r.err}`);
+        const manifest = JSON.parse(
+          await Deno.readTextFile(join(dir, "dist", "manifest.json")),
+        ) as {
+          version: string;
+          targets: Array<{ artifacts: Array<{ file: string }> }>;
+        };
+        const bin = join(dir, "dist", manifest.targets[0]!.artifacts[0]!.file);
+        // A build writes its outputs and NOTHING the project tracks: the lock
+        // is the bytes it was, whatever was installed for the target.
+        assertEquals(
+          await Deno.readTextFile(join(dir, "deno.lock")),
+          lock,
+          `the ${nth} ${platform} build rewrote the project's deno.lock`,
+        );
+        assertEquals(
+          await scanArtifactForBuildTools(bin),
+          [],
+          `the ${nth} ${platform} build embeds a build tool`,
+        );
+        assertEquals(
+          await scanArtifactForForeignPackages(
+            bin,
+            npmSystemOf(PLATFORMS[platform]!),
+          ),
+          [],
+          `the ${nth} ${platform} build embeds another system's package`,
+        );
+        const noise = r.out + r.err;
+        for (const said of ["still embeds", "built for another system"]) {
+          assertEquals(noise.includes(said), false, `${nth} build:\n${noise}`);
+        }
+        const files = await embeddedFilesOf(bin);
+        return {
+          bin,
+          files,
+          version: manifest.version,
+          natives: files.filter((f) => f.endsWith(".node")),
+        };
+      };
+      // The project as a first `deno task dev` leaves it: its lock complete,
+      // the HOST's packages installed.
+      const warm = await new Deno.Command("deno", {
+        args: ["cache", "src/app.ts"],
+        cwd: dir,
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      assertEquals(warm.code, 0, new TextDecoder().decode(warm.stderr));
+      const lock = await Deno.readTextFile(join(dir, "deno.lock"));
+      const hostNative = () =>
+        [...Deno.readDirSync(join(dir, "node_modules", ".deno"))]
+          .map((e) => e.name).filter((n) => n.includes("crc32-")).sort();
+      const installed = hostNative();
+      assert(installed.length > 0, "the host's native package is installed");
+      const first = await built(foreign, "first");
+      // No repository yet: the version says so, and the lock did not move.
+      assertMatch(first.version, /-nogit\.[0-9a-f]{8}$/);
+      // The host's packages are still there — the target's were ADDED.
+      assertEquals(
+        hostNative().filter((n) => installed.includes(n)),
+        installed,
+      );
+      // From here on, a clean checkout with one commit: every build must
+      // leave it clean, or the next one is `-dirty` and cannot be published.
+      const git = async (...args: string[]) => {
+        const r = await new Deno.Command("git", {
+          args: ["-c", "user.name=t", "-c", "user.email=t@e.x", ...args],
+          cwd: dir,
+          stdout: "piped",
+          stderr: "piped",
+        }).output();
+        assertEquals(r.code, 0, new TextDecoder().decode(r.stderr));
+        return new TextDecoder().decode(r.stdout);
+      };
+      await git("init", "-q", "-b", "main");
+      await git("add", "-A");
+      await git("commit", "-q", "-m", "app");
+      const clean = async (after: string) =>
+        assertEquals(
+          await git("status", "--porcelain"),
+          "",
+          `the tree is dirty after the ${after} build`,
+        );
+      await clean("first");
+      assertEquals(first.natives.length, 1, first.natives.join("\n"));
+      assertStringIncludes(
+        first.natives[0]!,
+        foreign === "windows" ? "win32-x64" : "linux-x64-gnu",
+      );
+      const second = await built(foreign, "second");
+      assertEquals(second.files, first.files);
+      await clean("second");
+      assertMatch(second.version, /^\d+\.\d+\.\d+$/, "publishable");
+
+      // The host build after them: its own native only, and it LOADS it.
+      const host = await built(hostPlatform(), "host");
+      await clean("host");
+      assertEquals(host.version, second.version);
+      assertEquals(host.natives.length, 1, host.natives.join("\n"));
+      // Not even a link to the one the earlier builds installed.
+      const other = foreign === "windows" ? "win32" : "linux-x64";
+      assertEquals(host.files.filter((f) => f.includes(`crc32-${other}`)), []);
+      const { health } = await bootFromForeignCwd(host.bin, []);
+      assertStringIncludes(health, "ok");
+      // …and a cross build after the host one is still the first one's list.
+      const third = await built(foreign, "third");
+      assertEquals(third.files, first.files);
+      await clean("third");
+      assertEquals(third.version, second.version);
+      // Nothing embedded is an empty directory left by the excludes.
+      assertEquals(first.files.filter((f) => f.endsWith("/")), []);
+      assertEquals(host.files.filter((f) => f.endsWith("/")), []);
     } finally {
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }
@@ -1766,6 +2067,23 @@ Deno.test({
         await scanArtifactForBuildTools(findBinary(dir)),
         [],
         "the TypeScript compiler must not be in the artifact",
+      );
+
+      // The other half of the audit, and the one a field report was
+      // about: the reader found NOTHING even when the tools WERE embedded, so
+      // the gate above meant nothing. Ask for `typescript` back by name and the
+      // same reader must now SEE it.
+      const cfg2 = JSON.parse(await Deno.readTextFile(cfgPath));
+      cfg2.build = { ...(cfg2.build ?? {}), keepPackages: ["typescript"] };
+      await Deno.writeTextFile(cfgPath, JSON.stringify(cfg2, null, 2));
+      const kept = await task(dir, "build", "--targets=browser");
+      assert(kept.code === 0, `kept build failed:\n${kept.out}${kept.err}`);
+      const hits = await scanArtifactForBuildTools(findBinary(dir));
+      assert(
+        hits.some((h) => needlePackage(h) === "typescript"),
+        `the audit must SEE a kept compiler (it read the VFS tree); got: ${
+          hits.join(", ") || "(none)"
+        }`,
       );
     } finally {
       await Deno.remove(dir, { recursive: true }).catch(() => {});

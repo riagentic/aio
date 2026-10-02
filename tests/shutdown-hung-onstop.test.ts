@@ -24,6 +24,9 @@ Deno.test("shutdown: a hung onStop still leaves the closes and the stopped line 
       client: "server-only",
       libraryMode: true,
       appDir: dir,
+      // Its own directory, not the live `tests/`: a file saved there by
+      // anything else during the 5 s close would start a reload under it.
+      baseDir: dir,
       port: freePort(),
       onStop: () => new Promise<void>(() => {}),
       // deno-lint-ignore no-explicit-any
@@ -59,6 +62,9 @@ Deno.test("shutdown: a slow onStop that finishes inside 4 s is awaited to the en
       client: "server-only",
       libraryMode: true,
       appDir: dir,
+      // Its own directory, not the live `tests/`: a file saved there by
+      // anything else during the 5 s close would start a reload under it.
+      baseDir: dir,
       port: freePort(),
       onStop: () =>
         new Promise<void>((r) =>

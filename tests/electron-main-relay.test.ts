@@ -10,8 +10,14 @@
 
 import { assert, assertEquals } from "@std/assert";
 import { electronMainScriptUDS } from "../src/electron/electron.ts";
+import { serveHttpOverLocal } from "../src/server/http-over-conn.ts";
+import { listenLocal } from "../src/server/local-listen.ts";
+import { requireLocalPeer } from "../src/server/local-peer.ts";
 import { join } from "@std/path";
 import { fuzzEnvInt } from "./fuzz-seed.ts";
+
+// Opened before any case — the sanitizer counts an FFI library per test.
+requireLocalPeer();
 
 // ── The stub `electron` module ────────────────────────────────────────────
 // Records what main.cjs does to the window/IPC, and lets the test drive the
@@ -1236,6 +1242,73 @@ Deno.test("electron aio://: a route response streams through the socket, headers
   }, { httpSocket: true });
 });
 
+// The same requests against the server a PACKAGED app's window actually
+// talks to: under the local-peer lockdown the app's handler is served by
+// `serveHttpOverLocal` over the peer-credential listener, not `Deno.serve`.
+// The window's send path is Node's `http.request` with a piped (chunked)
+// upload — a client no raw-socket test imitates exactly.
+Deno.test("electron aio://: through the lockdown's HTTP server — an unread upload keeps its answer, uploads arrive, the URL is the route's own", async () => {
+  await withHarness(async (_srv, main, dir) => {
+    const path = join(dir, "http.sock");
+    const http = serveHttpOverLocal(
+      listenLocal(path, { peer: true }),
+      async (req) => {
+        const u = new URL(req.url);
+        // Answers WITHOUT reading the body.
+        if (u.pathname === "/early") {
+          return new Response("early", { status: 401 });
+        }
+        if (u.pathname === "/count") {
+          return new Response(String((await req.arrayBuffer()).byteLength));
+        }
+        return new Response(req.url);
+      },
+      undefined,
+      { unixUrls: true },
+    );
+    try {
+      for (let i = 0; i < 300; i++) {
+        try {
+          if (Deno.lstatSync(path).isSocket) break;
+        } catch { /* not bound yet */ }
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      // ~200 KB is where a unix socket's buffers stop hiding an unread body:
+      // the server used to close with the upload unread, the window's writer
+      // got EPIPE, and the app's 401 reached the page as a 502.
+      for (const size of [400_000, 4_000_000]) {
+        const r = await main.proto(
+          "aio://app/early",
+          "POST",
+          "x".repeat(size),
+        );
+        assertEquals(
+          [r.status, new TextDecoder().decode(r.bytes)],
+          [401, "early"],
+          `${size}-byte upload the route never read`,
+        );
+      }
+      const n = await main.proto(
+        "aio://app/count",
+        "POST",
+        "y".repeat(400_000),
+      );
+      assertEquals(
+        [n.status, new TextDecoder().decode(n.bytes)],
+        [200, "400000"],
+      );
+      const u = await main.proto("aio://app/url?x=1");
+      assertEquals(
+        new TextDecoder().decode(u.bytes),
+        "http+unix://localhost/url?x=1",
+        "the URL a route on the unix socket has always been handed",
+      );
+    } finally {
+      await http.close();
+    }
+  }, { httpSocket: true });
+});
+
 // ── Prod: page from dist/, routes through the socket ─────────────────────
 //
 // A packaged app's window reads the bundle off disk and needs no server for
@@ -1417,6 +1490,11 @@ Deno.test({
   sanitizeResources: false, // aio-ok: see above
   fn: async () => {
     await withHarness(async (srv, main) => {
+      // Greeted, as a real server greets every connection it accepts: this
+      // case waits out 5 s of server silence, and a connection that was never
+      // greeted at all is what the handshake watch reports and drops
+      // (tests/electron-handshake-watch.test.ts).
+      await srv.writeLine('{"v":2,"t":"proto","d":{"v":3,"min":3,"ver":"0"}}');
       await main.rendererReady();
       await main.finishLoad();
       await main.didNavigate("http://127.0.0.1:1/");

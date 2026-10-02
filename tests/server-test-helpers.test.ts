@@ -5,6 +5,7 @@ import { cell } from "../src/state/cell-create.ts";
 import { route } from "../src/server/route.ts";
 import {
   findChromium,
+  freePort,
   testBrowser,
   testServer,
 } from "../src/testing/server-test.ts";
@@ -40,10 +41,7 @@ Deno.test("testServer: boots on a free port with defaults; fetch + state + dispo
 
 Deno.test("testServer: honors an explicit port + persist override", async () => {
   const c = cell("c", { state: { x: 1 }, methods: {} });
-  // a guaranteed-free port (bind :0 then release) — no cross-file collision
-  const l = Deno.listen({ port: 0 });
-  const port = (l.addr as Deno.NetAddr).port;
-  l.close();
+  const port = freePort();
   await using srv = await testServer({ cells: [c], port });
   assertEquals(srv.port, port);
   const res = await srv.fetch("/__aio/trojan/state");

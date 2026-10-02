@@ -125,15 +125,20 @@ export function codecCandidates(
  *  stretched, and centred.
  *
  *  Runs in the page too (its source is inlined into the encoder script), so
- *  it must stay self-contained. */
+ *  it must stay self-contained — and declare no named function, arrow or
+ *  class of its own: a minified build names those through a helper the page
+ *  does not have. */
 export function fitFrame(
   sw: number,
   sh: number,
   dw: number,
   dh: number,
 ): { x: number; y: number; w: number; h: number } {
-  const over = (s: number, d: number) => s - d === 0 || s - d === 1;
-  if (over(sw, dw) && over(sh, dh)) return { x: 0, y: 0, w: sw, h: sh };
+  const ox = sw - dw;
+  const oy = sh - dh;
+  if ((ox === 0 || ox === 1) && (oy === 0 || oy === 1)) {
+    return { x: 0, y: 0, w: sw, h: sh };
+  }
   const k = Math.min(dw / sw, dh / sh);
   const w = Math.round(sw * k);
   const h = Math.round(sh * k);

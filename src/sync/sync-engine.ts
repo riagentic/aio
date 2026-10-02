@@ -720,7 +720,7 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
   // forked for good with nothing said anywhere.
   //
   // The engine cannot make such a method deterministic (the value would have to
-  // travel with the op, which is a wire change — untracked/v2.md). What it can do
+  // travel with the op, which is a wire change — major-version material). What it can do
   // is SEE it: a pure reducer run twice on one input must return one answer,
   // so a second run that disagrees is proof. Then it says so, once per method,
   // at error level with the fix, and asks the server for the cell's real state

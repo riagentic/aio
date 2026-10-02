@@ -400,14 +400,21 @@ Deno.test("alpha70 renames: schedule.blocking( → blocking( and the import is a
       'import { cell, schedule } from "aio";\nexport const e = schedule.blocking("id", () => 1, 0);\nexport const f = schedule.blocking("id2", () => 2, 0);\nexport { cell };\n',
     "src/y.ts": 'export const e = schedule.blocking("id", () => 1, 0);\n',
   });
-  assertEquals(issues.filter((i) => i.area === "upgrade").length, 2);
+  const upgrade = issues.filter((i) => i.area === "upgrade");
+  assertEquals(upgrade.length, 2);
   assertEquals(
     fixed["src/x.ts"],
     'import { cell, schedule, blocking } from "aio";\nexport const e = blocking("id", () => 1, 0);\nexport const f = blocking("id2", () => 2, 0);\nexport { cell };\n',
   );
-  assertEquals(
-    fixed["src/y.ts"],
-    'import { blocking } from "aio";\nexport const e = blocking("id", () => 1, 0);\n',
+  // Nothing in y.ts imports `schedule`: nothing says it is aio's, so the
+  // use is named for a look and the file is left as written.
+  const Y = 'export const e = schedule.blocking("id", () => 1, 0);\n';
+  assertEquals(fixed["src/y.ts"] ?? Y, Y);
+  const y = upgrade.find((i) => i.file === "src/y.ts");
+  assertEquals(y?.severity, "hint");
+  assert(
+    y?.manual?.includes("nothing in this file imports `schedule`"),
+    y?.manual,
   );
 });
 

@@ -479,7 +479,8 @@ function installClientView(
 
   const deps = a.selectorDeps ?? {};
   for (const [key, selectorFn] of Object.entries(a.selectors)) {
-    const isDeps = key in deps;
+    // OWN keys — see the same test in state/cell-catalog.ts.
+    const isDeps = Object.hasOwn(deps, key);
     swap(key, {
       value: (...args: unknown[]) => {
         const own = guarded(def);

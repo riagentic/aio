@@ -11,6 +11,7 @@ import {
   BUNDLE_MAP,
 } from "../server/app-files.ts";
 import { ELECTRON_VERSION_FILE } from "../electron/electron-runtime-fetch.ts";
+import { moveArtifact } from "./build-helpers.ts";
 
 /** Which `dist/` entries survive the staging clean that runs before
  *  `deno compile`.
@@ -105,6 +106,31 @@ export async function foreignArtifactRefusal(
     `DELETED.\n  fix: move or rename that directory first.`;
 }
 
+/** What to say about the release that was in the out dir, at the two moments
+ *  it is at risk. `aside`: it could not be set aside before the build.
+ *  `failed`: the build produced nothing to put in its place.
+ *
+ *  Whether it survives depends on whose directory `out` is. `dist/` is the
+ *  builds' own staging, emptied by every one of them, so a release that was
+ *  not set aside is gone. Any other out dir is written only when there are
+ *  artifacts to place: it is as it was — and the build used to say "holds no
+ *  release" about a directory with the last good release still in it. Pure. */
+export function previousReleaseNote(
+  when: "aside" | "failed",
+  rel: string,
+  o: { preserved: boolean; outIsStaging: boolean },
+): string {
+  if (when === "aside") {
+    return `It is still there and still intact` +
+      (o.outIsStaging
+        ? `, but this build will overwrite it: if it fails, there is no ` +
+          `release to put back.`
+        : `, and stays so until this build has artifacts to replace it with.`);
+  }
+  if (o.preserved) return `the previous ${rel}/ is intact`;
+  return o.outIsStaging ? `${rel}/ holds no release` : `${rel}/ is as it was`;
+}
+
 // ── the directory itself ────────────────────────────────────────────────────
 
 /** Empty `dir` — remove everything INSIDE it and leave the directory itself,
@@ -153,6 +179,7 @@ async function clearExcept(
 ): Promise<string[]> {
   const held = new Map<string, string[]>();
   for (const p of keep) {
+    // aio-ok: path-split — `keep` is documented relative and `/`-separated (emptyDir)
     const [head = "", ...rest] = p.split("/");
     held.set(head, [
       ...(held.get(head) ?? []),
@@ -178,6 +205,13 @@ async function clearExcept(
  *  in place (`to` is created). Same filesystem: each entry is a rename, so
  *  nothing is copied and a 700 MB artifact costs what a rename costs.
  *
+ *  Another filesystem (an out dir on its own mount, a bind-mounted `dist/`):
+ *  each entry is copied and removed instead ({@link moveArtifact}). It used
+ *  to throw there, so on such a project NO build ever set its previous
+ *  release aside: a failed build had nothing to put back, and a narrower one
+ *  could not say which targets it had dropped. `rename` is injectable so that
+ *  path runs on one filesystem.
+ *
  *  Returns false when `from` does not exist — the caller's "there was no
  *  previous release to protect", said once rather than inferred from a catch.
  *
@@ -185,17 +219,16 @@ async function clearExcept(
  *  the filesystem made atomic for free; N renames are not, and the caller
  *  treats a throw as "there was nothing to protect" and carries on. Half a
  *  release left in the directory and the other half discarded with the staging
- *  tree is worse than either outcome, and it is reachable: `.aio/` on a
- *  different mount from `dist/` makes even the first rename throw EXDEV (the
- *  build's own `moveFile` exists for exactly that). So a failure rolls every
- *  moved entry back before rethrowing, and the caller's catch then means what
- *  it always meant.
+ *  tree is worse than either outcome, and it is reachable: a copy that runs
+ *  out of space half way. So a failure rolls every moved entry back before
+ *  rethrowing, and the caller's catch then means what it always meant.
  *
  *  This is the inode-preserving half of what the rename used to do; see
  *  {@link emptyDir} for why the directory must not move. */
 export async function moveDirContents(
   from: string,
   to: string,
+  rename: (from: string, to: string) => Promise<void> = Deno.rename,
 ): Promise<boolean> {
   let names: string[];
   try {
@@ -209,7 +242,7 @@ export async function moveDirContents(
   const moved: string[] = [];
   try {
     for (const n of names) {
-      await Deno.rename(`${from}/${n}`, `${to}/${n}`);
+      await moveArtifact(`${from}/${n}`, `${to}/${n}`, rename);
       moved.push(n);
     }
   } catch (e) {
@@ -217,7 +250,7 @@ export async function moveDirContents(
     // must not replace the original error — that one says what went wrong.
     for (const n of moved) {
       try {
-        await Deno.rename(`${to}/${n}`, `${from}/${n}`);
+        await moveArtifact(`${to}/${n}`, `${from}/${n}`, rename);
       } catch { /* aio-ok: the original error below is the one to report */ }
     }
     throw e;

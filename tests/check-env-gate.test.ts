@@ -120,3 +120,96 @@ Deno.test("check:env: the repo's own motivating case is actually seen", async ()
     "the safeEnv() wrapper read must be seen too",
   );
 });
+
+Deno.test("check:env sees a variable named in ANY argument position", () => {
+  // `pick("--video", "AIO_VIDEO")` names its variable second. "The first
+  // argument only" left `AIO_VIDEO`, `AIO_VIDEO_PACE` and `AIO_VIDEO_SCHEME`
+  // (src/testing/ui-video.ts) undocumented while the gate printed ✓.
+  assertEquals(envNamesIn(`const path = pick("--video", "AIO_VIDEO");`), [
+    "AIO_VIDEO",
+  ]);
+  assertEquals(envNamesIn(`read(a, b, 'AIO_VIDEO_PACE', c)`), [
+    "AIO_VIDEO_PACE",
+  ]);
+  // Literal after literal: the comma between two is the end of one and the
+  // start of the next, and reading it as the first's skipped every other.
+  assertEquals(envNamesIn(`f("AIO_A", "AIO_B", "AIO_C")`), [
+    "AIO_A",
+    "AIO_B",
+    "AIO_C",
+  ]);
+  assertEquals(envNamesIn(`f(x, 'AIO_B', "AIO_C" , "AIO_D",\n  "AIO_E")`), [
+    "AIO_B",
+    "AIO_C",
+    "AIO_D",
+    "AIO_E",
+  ]);
+  // An array of names is read whole — not just what sits between two commas.
+  assertEquals(envNamesIn(`const l = ["AIO_X", "AIO_Y", "AIO_Z"];`), [
+    "AIO_X",
+    "AIO_Y",
+    "AIO_Z",
+  ]);
+  assertEquals(envNamesIn(`for (const k of ['AIO_X', "AIO_Y"]) get(k);`), [
+    "AIO_X",
+    "AIO_Y",
+  ]);
+  assertEquals(envNamesIn(`const l = [\n  "AIO_X",\n  "AIO_Y",\n];`), [
+    "AIO_X",
+    "AIO_Y",
+  ]);
+  // Still a whole argument only: a message is not a name.
+  assertEquals(envNamesIn(`log(a, "AIO_X" + b, "AIO_Y is not set")`), []);
+  // …and so is a constant, typed or not.
+  const consts = envConstants(
+    new Map([
+      ["a.ts", `const SCHEME_ENV: string = "AIO_VIDEO_SCHEME";`],
+      ["b.ts", `export const PACE_ENV = "AIO_VIDEO_PACE" as const;`],
+    ]),
+  );
+  assertEquals(envNamesIn(`pick("--video-scheme", SCHEME_ENV)`, consts), [
+    "AIO_VIDEO_SCHEME",
+  ]);
+  assertEquals(envNamesIn(`pick(flag, PACE_ENV, fallback)`, consts), [
+    "AIO_VIDEO_PACE",
+  ]);
+  // The whole environment as an object is the same read.
+  assertEquals(envNamesIn(`const v = Deno.env.toObject().AIO_VIDEO;`), [
+    "AIO_VIDEO",
+  ]);
+  assertEquals(envNamesIn(`Deno.env.toObject()["AIO_VIDEO"]`), ["AIO_VIDEO"]);
+  // Still not prose, and still not a SET: an env object's own key.
+  assertEquals(envNamesIn(`spawn(cmd, { env: { AIO_NO_OPEN: "1" } })`), []);
+});
+
+Deno.test("check:env: a FIRST argument is a read whatever follows the literal", () => {
+  // Seeing later positions must not cost the first one: requiring `,` or `)`
+  // right after the literal lost every read that goes on past it.
+  assertEquals(envNamesIn(`Deno.env.get("AIO_A" + suffix)`), ["AIO_A"]);
+  assertEquals(envNamesIn(`read("AIO_B" as const)`), ["AIO_B"]);
+  assertEquals(envNamesIn(`read("AIO_H" ?? fallback)`), ["AIO_H"]);
+  assertEquals(envNamesIn(`read( 'AIO_I'\n  , fallback)`), ["AIO_I"]);
+  // A LATER position counts only as a whole argument or a whole array
+  // element: a comma before a literal is also every list in a message.
+  assertEquals(envNamesIn(`const all = [x, "AIO_J" + y, "AIO_K"];`), [
+    "AIO_K",
+  ]);
+  assertEquals(envNamesIn(`pick(flag, "AIO_L" + y)`), []);
+  assertEquals(envNamesIn(`pick(flag, "AIO_M")`), ["AIO_M"]);
+});
+
+Deno.test("check:env: the video variables are read, and a row deleted from the page is missed", async () => {
+  const vars = await readVars();
+  for (const name of ["AIO_VIDEO", "AIO_VIDEO_PACE", "AIO_VIDEO_SCHEME"]) {
+    assert(vars.has(name), `${name} is read by src/ and was not seen`);
+  }
+  const page = await Deno.readTextFile(
+    new URL("../docs/build/environment.md", import.meta.url),
+  );
+  assertEquals(missingFrom(vars, page), []);
+  // `AIO_VIDEO` must be named as itself: the rows for `AIO_VIDEO_PACE` and
+  // `AIO_VIDEO_SCHEME` do not excuse it.
+  const without = page.split("\n").filter((l) => !l.startsWith("| `AIO_VIDEO`"))
+    .join("\n");
+  assertEquals(missingFrom(vars, without).map(([n]) => n), ["AIO_VIDEO"]);
+});

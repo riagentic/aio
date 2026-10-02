@@ -54,6 +54,7 @@ Deno.test("TT pause during an async method: a WARN naming the method, never an e
   const port = freePort();
   const dir = await Deno.makeTempDir({ prefix: "aio-tt-inflight-" });
   const app = await aio.run({
+    watch: false,
     cells: [jobs],
     appId: "test-tt-inflight-warn",
     client: "server-only",

@@ -40,9 +40,12 @@ async function fakeAio(root: string, version: string): Promise<void> {
   );
 }
 
-/** Run `fn` with cwd = a fresh temp dir (the launcher reads relative paths). */
+/** Run `fn` with cwd = a fresh temp dir (the launcher reads relative paths)
+ *  that is an app PROJECT — the launcher installs into nothing else (a
+ *  directory with no config, or the framework's own checkout: `installRefusal`). */
 async function inTmp(fn: (tmp: string) => Promise<void>): Promise<void> {
   const tmp = await tempDir("electron-decides-");
+  await Deno.writeTextFile(`${tmp}/deno.json`, "{}");
   const cwd = Deno.cwd();
   const ep = Deno.env.get("ELECTRON_PATH");
   Deno.env.delete("ELECTRON_PATH");

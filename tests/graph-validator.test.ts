@@ -6,6 +6,7 @@ import {
   resolveSpecifier,
   validateGraph,
 } from "../src/server/graph-validator.ts";
+import * as win from "@std/path/windows";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 Deno.test("extractImports finds static imports", () => {
@@ -1037,3 +1038,76 @@ Deno.test("validateGraph: a complete app map is silent, and no map means no chec
     await dropTempDir(dir);
   }
 });
+
+// ── Windows path shapes, on any host ───────────────────────────────────────
+// A Windows importer has no `/`: "everything before the last `/`" took the
+// whole FILE as the folder, looked for `App.tsx\cell.ts`, and every relative
+// import of every Windows dev app was "not found" — the browser got the
+// diagnostic page while the server ran the same module fine. The resolver
+// takes its path operations as a parameter, so Windows semantics run here.
+
+/** A Windows disk: separators and drive-letter case do not matter. */
+function windowsDisk(files: string[]): (p: string) => boolean {
+  const key = (p: string) => p.replaceAll("/", "\\").toLowerCase();
+  const all = new Set(files.map(key));
+  return (p) => all.has(key(p));
+}
+
+const WIN_APP = "C:\\aio-test\\amproj\\src\\App.tsx";
+const winDisk = windowsDisk([
+  "C:\\aio-test\\amproj\\src\\App.tsx",
+  "C:\\aio-test\\amproj\\src\\cell.ts",
+  "C:\\aio-test\\amproj\\src\\comp\\index.tsx",
+  "C:\\aio-test\\amproj\\lib\\util.ts",
+]);
+
+Deno.test("resolveSpecifier: Windows — a relative import is found beside its importer", () => {
+  for (
+    const [spec, importer, want] of [
+      ["./cell.ts", WIN_APP, "C:\\aio-test\\amproj\\src\\cell.ts"],
+      ["./cell", WIN_APP, "C:\\aio-test\\amproj\\src\\cell.ts"],
+      ["../lib/util", WIN_APP, "C:\\aio-test\\amproj\\lib\\util.ts"],
+      ["./comp", WIN_APP, "C:\\aio-test\\amproj\\src\\comp\\index.tsx"],
+      // mixed separators and a lower-case drive, as tools hand them over
+      [
+        "./cell.ts",
+        "C:/aio-test/amproj/src/App.tsx",
+        "C:\\aio-test\\amproj\\src\\cell.ts",
+      ],
+      [
+        "./cell.ts",
+        "c:\\aio-test\\amproj\\src\\App.tsx",
+        "c:\\aio-test\\amproj\\src\\cell.ts",
+      ],
+    ] as const
+  ) {
+    assertEquals(
+      resolveSpecifier(spec, importer, {}, winDisk, win),
+      { kind: "local", path: want },
+      `${spec} from ${importer}`,
+    );
+  }
+});
+
+Deno.test("resolveSpecifier: Windows — an import-map alias, relative or a file: URL", () => {
+  assertEquals(
+    resolveSpecifier("util", WIN_APP, { util: "../lib/util.ts" }, winDisk, win),
+    { kind: "local", path: "C:\\aio-test\\amproj\\lib\\util.ts" },
+  );
+  assertEquals(
+    resolveSpecifier(
+      "util",
+      WIN_APP,
+      { util: "file:///C:/aio-test/amproj/lib/util.ts" },
+      winDisk,
+      win,
+    ),
+    { kind: "local", path: "C:\\aio-test\\amproj\\lib\\util.ts" },
+  );
+  // …and a file that really is missing is still reported, by its spec.
+  const miss = resolveSpecifier("./nope.ts", WIN_APP, {}, winDisk, win);
+  assertEquals(miss.kind, "error");
+});
+
+// …and the shape that caused it cannot come back anywhere in src/:
+// tests/no-hand-split-paths.test.ts.

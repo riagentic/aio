@@ -20,7 +20,13 @@ looks for (in order):
    downloading a second one. On macOS this is inside the bundle:
    `Counter.app/Contents/MacOS/electron/Electron.app`, which is exactly what
    `dirname(execPath)/electron/` resolves to once the binary is the
-   `CFBundleExecutable`.
+   `CFBundleExecutable`. The window is started through
+   `Counter.app/Contents/MacOS/app_window`, a link to that runtime's executable:
+   macOS decides which app a process belongs to from the path it was started by,
+   so the window is `Counter.app` itself — one entry for the system to re-open
+   and to quit — rather than a second bundle inside it. (A macOS bundle has no
+   launcher script and sets no `$ELECTRON_PATH`; the boot line reads
+   `launching Electron (packaged, …)`.)
 3. `node_modules/.bin/electron` — dev binary
 4. in dev: auto-install via `deno install` (the npm package, with a fallback to
    its own `install.js` when the lifecycle script is skipped)
@@ -30,6 +36,17 @@ looks for (in order):
    **compiled binary** (which has no `node_modules` and no `deno`), and the last
    resort for dev. The version is the one the build baked into
    `dist/electron.json` — always the Electron this aio is tested with.
+
+**When the window cannot be started.** Run from source, the app keeps serving
+and the log says where (`The server is still running at …`) — there is a
+terminal, and you can install Electron or open the URL. A **packaged** desktop
+app has no other way to show itself, so it stops instead, with the reason in
+`logs/app.log` (`the desktop window could not be started — …` followed by
+`stopping`): it does not run on unseen and answer the next double-click with
+"already running". `--keep-server` keeps the server, as it says. On macOS, a
+bundle unpacked by a tool that does not keep symbolic links has `app_window` as
+a small text file; the window is then started from the nested runtime, with one
+log line saying so and how to repair it.
 
 aio ships **one** Electron version across the whole framework — the launcher's
 fallback, `am create`'s scaffold pin, the examples and the framework's own
@@ -394,11 +411,12 @@ INFO   renderer    ui mounted 42 element(s)
 ```
 
 The `ui mounted` line is the renderer's own positive signal (the preload watches
-`#root`); the artifact e2e (`deno task test:electron`) and the onboarding lab
-assert on it, so "the AppImage started" now means "the AppImage painted". Only
-Electron's GPU device-probe chatter (`KMS: DRM_IOCTL_MODE_CREATE_DUMB`,
-`MESA-LOADER`, `pci id for fd`, `failed to load driver`) is dropped — counted
-and announced once — nothing else.
+`#root`), written by both window shells; the artifact e2e
+(`deno task test:electron`) and the onboarding lab assert on it, so "the
+AppImage started" now means "the AppImage painted". Only Electron's GPU
+device-probe chatter (`KMS: DRM_IOCTL_MODE_CREATE_DUMB`, `MESA-LOADER`,
+`pci id for fd`, `failed to load driver`) is dropped — counted and announced
+once — nothing else.
 
 A caveat the pipe made visible: `deno task dev` evaluates the browser bundle in
 a Deno worker and REFUSES a module that throws at load, so a throw that happens
@@ -569,6 +587,23 @@ attacked this feature's own first version.)
 One launch path cannot honour the key: `--client=electron` in CONNECT mode,
 where the window belongs to no app config and there is nothing to read it from.
 Declare `requireSandbox` in the app that opens its own window.
+
+## Other local processes (`electron: { allowLocalPeers }`)
+
+In production the app's local socket serves a session only to the window process
+the app launched; any other process of the same user is refused (see
+[Local-peer lockdown](../auth/auth.md#local-peer-lockdown-production-desktop-apps)).
+An app that ships a same-user companion process which connects to that socket
+opts out:
+
+```ts
+await aio.run({ electron: { allowLocalPeers: true } });
+```
+
+Two things follow from the lockdown for the window itself: a wrapper named by
+`$ELECTRON_PATH` must `exec` Electron (the window has to BE the process that was
+launched), and running `--prod --client=electron` from source needs
+`--allow-ffi`.
 
 ## Permissions (`electron: { permissions }`)
 
@@ -796,6 +831,26 @@ hand-built bar uses the same bridge aio's does:
 <button onClick={() => window.__aioWindow?.close()}>✕</button>;
 ```
 
+The page's own `window.close()` is the same verb: it closes through the window
+(so a `closeToTray` app hides and the window's size is saved) instead of
+destroying the page under it.
+
+**`beforeunload`.** A page that cancels `beforeunload` keeps its window when the
+_user_ closes it or quits the app — Electron's behaviour, with no "Leave site?"
+dialog. It has no say when the _server_ ends the window: on `am stop`, a signal
+to the app, or the server process dying, the window closes whatever the page
+answers (it would have nothing left to talk to), within about 2 s of the
+server's death and 5 s at the latest.
+
+**The menu.** A desktop window has no application menu — on Linux and Windows
+there is no menu bar at all. macOS always draws one, and its standard shortcuts
+are menu items rather than key handlers, so there the app gets the smallest menu
+that makes the keyboard work: the app menu (Hide, Hide Others, Show All, Quit —
+Cmd+H, Cmd+Q), **Edit** (undo, redo, cut, copy, paste, select all) and
+**Window** (minimize, zoom, close — Cmd+M, Cmd+W). They are the system's own
+roles; nothing is configurable and nothing of Electron's default menu (File,
+View, Help, DevTools items) appears.
+
 **Browser target:** `ui.chrome` is ignored — there is no window to own. The
 themed bar checks for `window.__aioWindow` and does not mount without it, so the
 same page serves a browser tab with no dead buttons and no build-time branch.
@@ -821,8 +876,12 @@ await aio.run({
 `tray: true` is the icon with Show / Hide / Quit. Your items go above them: a
 `method` (`"cell:method"`, with `args`) is dispatched by the page through the
 same door a button uses — acks, validation, the offline queue — and a `route`
-shows the window and navigates. `closeToTray` turns the window's close button
-into hide; the tray's Quit, Cmd+Q and `app.quit()` still quit. Left-clicking the
+shows the window and navigates. `closeToTray` turns every close the user or the
+page makes into hide — the close button, Cmd+W, `__aioWindow.close()` and the
+page's own `window.close()` all take the same path; the tray's Quit, Cmd+Q, a
+system quit (AppleScript, log-out), `am stop` and `app.quit()` still quit. (A
+debugger is neither: with `--cdp`, `Page.close` / `Target.closeTarget` destroy
+the page with no close to turn into a hide, and the app ends.) Left-clicking the
 icon toggles the window where the desktop delivers a click (macOS shows the menu
 instead when one is set). The icon is the app's own — `icon.png`, or the
 generated monogram — so the tray shows the same identity as the taskbar.
@@ -833,7 +892,9 @@ Linux needs the desktop's status-notifier support (GNOME: the AppIndicator
 extension); without it the icon is simply absent — and a `closeToTray` window is
 then minimized instead of hidden (with one warning), since there would be no
 icon to bring it back from. Launching the app again always brings a hidden or
-minimized window back to the front.
+minimized window back to the front — on macOS that includes opening the running
+app from Finder, the Dock or `open`, which starts no second process: the window
+answers the system's re-open itself.
 
 ## Window size and persistence
 

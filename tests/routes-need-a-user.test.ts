@@ -51,6 +51,7 @@ async function bootApp(
     ...(mode === "users"
       ? { users: { "tok-admin": { id: "admin", role: "admin" } } }
       : { auth: true }),
+    watch: false,
   } as never);
   return { base: `http://127.0.0.1:${port}`, close: () => app.close() };
 }

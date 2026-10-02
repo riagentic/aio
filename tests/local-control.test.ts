@@ -12,6 +12,7 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
   _controlDirRefusal,
+  _ownerOnlyDaclRefusal,
   appKeyPath,
   controlKeyPath,
   mintControlKey,
@@ -23,6 +24,7 @@ import {
   disarmLocalControl,
   LOCAL_CONTROL_HEADER,
   localControlAuthorized,
+  stopRequester,
   trojanDenialForUserMode,
 } from "../src/server/server-auth.ts";
 import {
@@ -38,6 +40,9 @@ import {
   trojanPost,
 } from "../src/am/am-http.ts";
 import { freePort } from "../src/testing/server-test.ts";
+import { _stopRefusalLog } from "../src/server/server-static.ts";
+import { stopRefusalNote } from "../src/am/am-cmd-process.ts";
+import { PROBE_FLOOD } from "../src/server/local-peer.ts";
 import { permissiveUmask } from "./permissive-umask.ts";
 
 const WINDOWS = Deno.build.os === "windows";
@@ -144,27 +149,28 @@ Deno.test("control key: a leaked or foreign file is refused, loudly", async () =
     const missing = readControlKey(appId);
     assertStringIncludes(missing.error!, "no local control credential");
     assertStringIncludes(missing.error!, controlKeyPath(appId));
-    assertStringIncludes(missing.error!, "Restart the app in dev");
+    assertStringIncludes(missing.error!, "Restart the app to get one");
     return;
   });
 });
 
-Deno.test("control key: a production build mints nothing", async () => {
-  await withAppsDir(async () => {
-    const appId = "ctl-prod";
-    armLocalControl({ appId, prod: true });
-    let exists = true;
-    try {
-      Deno.statSync(controlKeyPath(appId));
-    } catch {
-      exists = false;
-    }
-    assertEquals(exists, false, "no control secret exists in a prod build");
-    // …and nothing is armed, so no header can open the control plane.
-    assertEquals(localControlAuthorized(trojanReq("anything")), false);
-    return;
-  });
-});
+// A production build mints it too: there it authorizes the stop alone (the
+// server routes nothing else of `/__aio/trojan/*` in prod — pinned end to end
+// in local-peer-lockdown-e2e.test.ts). Without it `am stop` on Windows was a
+// `TerminateProcess`: no onStop, no final flush.
+Deno.test("control key: a production build mints it — the stop's credential", () =>
+  permissiveUmask(() =>
+    withAppsDir(async () => {
+      const appId = "ctl-prod";
+      armLocalControl({ appId, prod: true });
+      const r = readControlKey(appId);
+      assert(r.key, `a prod build must mint its stop credential: ${r.error}`);
+      if (!WINDOWS) assertEquals(Deno.statSync(r.path!).mode! & 0o077, 0);
+      assertEquals(localControlAuthorized(trojanReq(r.key)), true);
+      assertEquals(localControlAuthorized(trojanReq("anything")), false);
+      return;
+    })
+  ));
 
 // ── The gate ─────────────────────────────────────────────────────────────────
 
@@ -415,7 +421,7 @@ Deno.test("am: a control-plane refusal explains itself", async () => {
       assert(!r.ok);
       assertStringIncludes(r.error, "machine owner");
       assertStringIncludes(r.error, controlKeyPath(appId));
-      assertStringIncludes(r.error, "Restart the app in dev");
+      assertStringIncludes(r.error, "Restart the app to get one");
 
       // A credential that the app rejects: say THAT, not the same thing.
       mintControlKey(appId);
@@ -558,4 +564,97 @@ Deno.test("am: reaches the control plane of a key-gated app", async () => {
     }
     return;
   });
+});
+
+// ── Windows: the FILE keeps the secret, whatever directory it is in ─────────
+// A Windows mode carries no permission bits, so `AIO_APPS_DIR` pointing at a
+// directory other users can read used to get the key written with whatever
+// ACEs it inherited. The file is now created with an owner-only DACL and the
+// DACL Windows reports back is judged here (the FFI half runs on Windows).
+
+Deno.test("control key (Windows): only a protected, owner/SYSTEM-only DACL keeps it", () => {
+  for (
+    const ok of [
+      "D:P(A;;FA;;;OW)(A;;FA;;;SY)",
+      "D:PAI(A;;FA;;;OW)",
+      "D:P(D;;FA;;;WD)(A;;FA;;;OW)",
+    ]
+  ) assertEquals(_ownerOnlyDaclRefusal("k", ok), null, ok);
+  const refused = [
+    ["D:AI(A;;FA;;;OW)(A;;FA;;;SY)", "not protected"],
+    ["D:(A;;FA;;;OW)", "not protected"],
+    ["D:P(A;;FA;;;OW)(A;;FR;;;WD)", "grants (A;;FR;;;WD)"],
+    ["D:P(A;;FA;;;OW)(A;OICI;FA;;;BU)", "BU"],
+    ["D:P(A;;FA;;;OW)(A;;FA;;;AU)", "AU"],
+    ["D:P(A;;FA;;;S-1-5-21-1-2-3-1001)", "S-1-5-21"],
+    ["D:P(OA;;FA;;;OW)", "OA"],
+    ["D:NO_ACCESS_CONTROL", "unparsable"],
+    ["", "unparsable"],
+  ] as const;
+  const said = refused.map(([d, why]) => {
+    const r = _ownerOnlyDaclRefusal("C:\\x\\control.key", d);
+    assert(r, `${d} must be refused`);
+    assertStringIncludes(r, why);
+    assertStringIncludes(r, "not owner-only");
+    return r;
+  });
+  assertEquals(said.length, refused.length);
+});
+
+Deno.test("prod stop: a refused stop is said — which kind, never the key, bounded", () => {
+  const lines: string[] = [];
+  let t = 1_000_000;
+  const refused = _stopRefusalLog((m) => lines.push(m), () => t);
+  refused(true);
+  refused(false);
+  assertStringIncludes(lines[0]!, "wrong control credential");
+  assertStringIncludes(lines[1]!, "no control credential");
+  for (const l of lines) assertStringIncludes(l, "/__aio/trojan/shutdown");
+  for (let i = 0; i < PROBE_FLOOD + 5; i++) refused(true);
+  assertEquals(lines.length, PROBE_FLOOD, "a flood is bounded per minute");
+  t += 60_000;
+  refused(false);
+  assertEquals(lines.length, PROBE_FLOOD + 2);
+  assertStringIncludes(lines[PROBE_FLOOD]!, "7 more refused stops");
+  assertStringIncludes(lines[PROBE_FLOOD + 1]!, "no control credential");
+});
+
+Deno.test("stop requester: a whitelist read from X-Aio-Stop-By, never its text", () => {
+  const by = (v?: string) =>
+    stopRequester(
+      new Request("http://x/", {
+        method: "POST",
+        headers: v === undefined ? {} : { "X-Aio-Stop-By": v },
+      }),
+    );
+  assertEquals(by("takeover"), "takeover");
+  for (
+    const v of [undefined, "am-stop", "", "Takeover", "x) evil"]
+  ) {
+    assertEquals(by(v), "am stop", JSON.stringify(v));
+  }
+  assertEquals(stopRequester(undefined), "am stop");
+});
+
+Deno.test("am stop: only the app's own refusal is called one — an app with no stop is not", () => {
+  const note = (e: string) => stopRefusalNote("a", "/d/control.key", e);
+  const said = note(
+    "stop refused: wrong control credential — not this boot's control.key",
+  );
+  assert(said);
+  assertStringIncludes(said, "the app refused the stop credential");
+  assertStringIncludes(said, "/d/control.key");
+  assertStringIncludes(said, "wrong control credential");
+  assertStringIncludes(said, "ending it without a clean shutdown");
+  // What an app before 1.0.17-beta answers: a bare 404 (TCP, or the dev
+  // trojan's backstop), or the 1.0.16 lockdown door's refusal.
+  for (
+    const old of [
+      "Not Found",
+      "trojan is disabled in production",
+      "Not Found — local-peer lockdown: a process that is not this app's " +
+      "window may ask only GET /__aio/health",
+      "app not running on port 1",
+    ]
+  ) assertEquals(note(old), null, old);
 });

@@ -229,6 +229,14 @@ Deno.test("prune flags: --yes is the only one that deletes, bad values refuse", 
   assert(parsePruneArgs(["--days=x"]).error);
   assert(parsePruneArgs(["--days=-1"]).error);
   assert(parsePruneArgs(["--days=1.5"]).error);
+  // An EMPTY value is not zero days: `Number("")` is 0, and 0 is "no age
+  // floor" — `am prune --days=$UNSET --yes` took every unprotected runtime.
+  for (const empty of ["--days=", "--days= ", "--days=Infinity"]) {
+    const r = parsePruneArgs([empty, "--yes"]);
+    assert(r.error?.includes("--days"), `${empty} was read as ${r.days} days`);
+    assertEquals(r.days, PRUNE_DEFAULT_MIN_AGE_DAYS);
+  }
+  assertEquals(parsePruneArgs(["--days=0"]).days, 0); // zero, when SAID
 });
 
 Deno.test("the report names every entry it would remove, with its reason", () => {

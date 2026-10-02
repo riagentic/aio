@@ -296,6 +296,22 @@ Deno.test("am shot: an unreadable --threshold is refused, never read as NaN (fai
       `the refusal must name the flag: ${bad}`,
     );
   }
+  // The space form is not read at all — so it was the default tolerance
+  // under a flag that said otherwise. Refused, naming the spelling that works.
+  for (
+    const [args, flag] of [
+      [["--threshold", "abc"], "--threshold="],
+      [["--threshold", "3"], "--threshold="],
+      [["--check=base.png", "--max-diff", "0.5"], "--max-diff="],
+      [["--threshold"], "--threshold="],
+    ] as const
+  ) {
+    const r = shotDiffOptions(args);
+    assert(
+      r.ok === false && r.error.includes(flag),
+      `${args.join(" ")} must be refused: ${JSON.stringify(r)}`,
+    );
+  }
 });
 
 Deno.test("noCdpMessage: an electron app still gets the --cdp remedy; an old lock hedges honestly", () => {

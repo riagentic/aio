@@ -9,6 +9,7 @@
 import {
   assert,
   assertEquals,
+  assertMatch,
   assertRejects,
   assertStringIncludes,
 } from "@std/assert";
@@ -30,10 +31,14 @@ import {
   toolCacheDir,
 } from "../src/electron/electron-runtime-fetch.ts";
 import {
+  electronSource,
   findElectronBin,
+  FRAMEWORK_CHECKOUT,
+  installRefusal,
   isInvalidHandleError,
   packagedElectronCandidates,
 } from "../src/electron/electron-spawn.ts";
+import { MAC_WINDOW_LINK } from "../src/electron/electron-runtime-fetch.ts";
 import {
   electronCacheDir,
   electronDrift,
@@ -631,6 +636,7 @@ Deno.test("findElectronBin (dev): deno install first, the fetched runtime as the
     const runtime = join(tmp, "runtime");
     await Deno.mkdir(runtime);
     await Deno.writeTextFile(electronBinIn(runtime), "");
+    await Deno.writeTextFile(join(tmp, "deno.json"), "{}");
     const order: string[] = [];
     const bin = await findElectronBin(silent, {
       compiled: false,
@@ -661,7 +667,10 @@ Deno.test("findElectronBin: a shipped package finds the Electron it ALREADY carr
   assertEquals(packagedElectronCandidates("/opt/myapp/myapp", "linux"), [
     join("/opt/myapp", "electron", "electron"),
   ]);
+  // macOS: the bundle's own link first (tests/electron-mac-bundle-window.test.ts
+  // says why), then the runtime it points at.
   assertEquals(packagedElectronCandidates("/opt/myapp/myapp", "darwin"), [
+    join("/opt/myapp", MAC_WINDOW_LINK),
     join(
       "/opt/myapp",
       "electron",
@@ -689,6 +698,62 @@ Deno.test("findElectronBin: a shipped package finds the Electron it ALREADY carr
     });
     assertEquals(found, bin);
   });
+});
+
+Deno.test("launch label: names the rung the binary came from, not what its path looks like", () => {
+  // A macOS bundle and a double-clicked Windows exe set no $ELECTRON_PATH and
+  // run the runtime they ship. Both used to log "$ELECTRON_PATH", because the
+  // label was read off the path: no "dist" in it, so not "packaged".
+  const mac = "/Applications/Counter.app/Contents/MacOS/counter";
+  const macBin = packagedElectronCandidates(mac, "darwin")[0]!;
+  assertEquals(
+    electronSource(
+      macBin,
+      undefined,
+      packagedElectronCandidates(mac, "darwin"),
+    ),
+    "packaged",
+  );
+  const win = join("C:", "Apps", "counter", "counter.exe");
+  const winBin = packagedElectronCandidates(win, "windows")[0]!;
+  assertEquals(
+    electronSource(
+      winBin,
+      undefined,
+      packagedElectronCandidates(win, "windows"),
+    ),
+    "packaged",
+  );
+  // The Linux AppRun really does export the variable — at the same file.
+  const lin = packagedElectronCandidates("/tmp/.mount_x/counter", "linux");
+  assertEquals(electronSource(lin[0]!, lin[0], lin), "$ELECTRON_PATH");
+  // An override somewhere else entirely — a directory called dist included,
+  // which used to read as "packaged".
+  assertEquals(
+    electronSource("/srv/dist/electron", "/srv/dist/electron", lin),
+    "$ELECTRON_PATH",
+  );
+  // A variable that is set but was NOT the binary taken names nothing.
+  assertEquals(electronSource(lin[0]!, "/missing/electron", lin), "packaged");
+  // Dev: the npm shim, both spellings.
+  assertEquals(
+    electronSource("node_modules/.bin/electron", undefined, lin),
+    "dev",
+  );
+  assertEquals(
+    electronSource("node_modules\\.bin\\electron.cmd", undefined, []),
+    "dev",
+  );
+  // The per-user cache — a fetched or carried runtime; a path with "dist" or
+  // "node_modules" above it changes nothing.
+  assertEquals(
+    electronSource(
+      "/home/u/dist/node_modules/.cache/aio/tools/electron/44.4.1-linux-x64/electron",
+      undefined,
+      lin,
+    ),
+    "cache",
+  );
 });
 
 // ── the CROSS-PLATFORM runtime: whose executable name? ───────────────────────
@@ -1249,4 +1314,180 @@ Deno.test("ensureElectronRuntime: a long unpack heartbeats its stage", async () 
       Object.assign(_lockTiming, was);
     }
   });
+});
+
+Deno.test("findElectronBin (dev): a directory that is not a project is never installed into — the cached runtime, and it says so", async () => {
+  // `deno install npm:electron` creates a deno.json where it runs. An app
+  // started from a directory that is not its project (a login item starts in
+  // the home directory) left one there on every launch.
+  for (const config of ["deno.json", "deno.jsonc", "package.json", null]) {
+    await isolated(async (tmp) => {
+      const runtime = join(tmp, "runtime");
+      await Deno.mkdir(runtime);
+      await Deno.writeTextFile(electronBinIn(runtime), "");
+      if (config) await Deno.writeTextFile(join(tmp, config), "{}");
+      const order: string[] = [];
+      const said: string[] = [];
+      const bin = await findElectronBin(
+        { info: (m) => said.push(m), error: () => {} },
+        {
+          compiled: false,
+          denoInstall: () => {
+            order.push("deno-install");
+            return Promise.resolve(false);
+          },
+          fetchRuntime: () => {
+            order.push("fetch");
+            return Promise.resolve(runtime);
+          },
+        },
+      );
+      assertEquals(bin, electronBinIn(runtime));
+      assertEquals(
+        order,
+        config ? ["deno-install", "fetch"] : ["fetch"],
+        `${config}`,
+      );
+      assertEquals(
+        said.some((m) => m.includes("is not a project")),
+        config === null,
+        `${config}`,
+      );
+    });
+  }
+});
+
+// ── The launcher never installs into the framework's own checkout ───────────
+//
+// `deno install npm:electron@…` run with the cwd in a clean checkout of the
+// framework added an `electron` import to its tracked deno.json and rewrote
+// deno.lock — reached by `deno task amui` or an Electron test from the
+// checkout — and a dirty tree is what `am upgrade` refuses to run over.
+
+Deno.test("installRefusal: an app project installs; a non-project and the framework's own checkout do not — and an app that vendors the framework still does", async () => {
+  const tmp = await tempDir("install-refusal-");
+  try {
+    const dir = async (name: string, files: Record<string, string>) => {
+      const d = join(tmp, name);
+      await Deno.mkdir(d, { recursive: true });
+      for (const [f, text] of Object.entries(files)) {
+        await Deno.mkdir(dirname(join(d, f)), { recursive: true });
+        await Deno.writeTextFile(join(d, f), text);
+      }
+      return d;
+    };
+    const elsewhere = await dir("elsewhere", {});
+    const FRAMEWORK = /^is the aio framework's own checkout/;
+    const NOT_PROJECT = "is not a project (no deno.json or package.json)";
+    // An app: any of the configs `deno install` adds a dependency to.
+    for (const cfg of ["deno.json", "deno.jsonc", "package.json"]) {
+      const app = await dir(`app-${cfg}`, { [cfg]: '{ "name": "my-app" }' });
+      assertEquals(await installRefusal(app, elsewhere), null, cfg);
+    }
+    // A config that cannot be parsed is still a project (the install says so).
+    const broken = await dir("broken", { "deno.json": "{ not json" });
+    assertEquals(await installRefusal(broken, elsewhere), null);
+    // No config at all.
+    assertEquals(await installRefusal(elsewhere, null), NOT_PROJECT);
+    // The framework's own checkout, known by its package name — whichever
+    // copy of the framework is doing the asking…
+    const named = await dir("checkout", {
+      "deno.jsonc": '{\n  // the framework\n  "name": "@riagentic/aio"\n}',
+    });
+    assertMatch((await installRefusal(named, elsewhere))!, FRAMEWORK);
+    assertMatch((await installRefusal(named, null))!, FRAMEWORK);
+    // …and by being the directory this module was loaded from, whatever its
+    // config is called (a fork that renamed the package) — through a link too.
+    const fork = await dir("fork", { "deno.json": '{ "name": "@me/fork" }' });
+    assertMatch((await installRefusal(fork, fork))!, FRAMEWORK);
+    if (Deno.build.os !== "windows") {
+      await Deno.symlink(fork, join(tmp, "fork-link"));
+      assertMatch(
+        (await installRefusal(join(tmp, "fork-link"), fork))!,
+        FRAMEWORK,
+      );
+    }
+    // An app that VENDORS the framework under dep/aio, started from the app:
+    // the cwd is the app's — it installs into the app as before.
+    const vendoring = await dir("vendoring", {
+      "deno.json": '{ "name": "my-app" }',
+      "dep/aio/deno.json": '{ "name": "@riagentic/aio" }',
+    });
+    assertEquals(
+      await installRefusal(vendoring, join(vendoring, "dep", "aio")),
+      null,
+    );
+    // …and the real thing: this very checkout is refused.
+    assertEquals(
+      await installRefusal(new URL("../", import.meta.url).pathname),
+      FRAMEWORK_CHECKOUT,
+    );
+    // A BUILD asks about the root it builds, whatever the cwd is (this test
+    // runs with its cwd in the framework's checkout): root = the checkout is
+    // refused, root = an app is not.
+    assertEquals(await installRefusal(named, null), FRAMEWORK_CHECKOUT);
+    assertEquals(await installRefusal(vendoring, null), null);
+  } finally {
+    await dropTempDir(tmp);
+  }
+});
+
+Deno.test("findElectronBin (dev): from the framework's own checkout nothing is installed — the cached runtime, and the line says which case it is", async () => {
+  // Both install rungs: no node_modules at all, and a node_modules that
+  // holds another Electron than the tested one.
+  for (const stale of [false, true]) {
+    await isolated(async (tmp) => {
+      await Deno.writeTextFile(
+        join(tmp, "deno.json"),
+        '{ "name": "@riagentic/aio" }',
+      );
+      if (stale) {
+        const pkg = join(tmp, "node_modules", "electron");
+        await Deno.mkdir(join(pkg, "dist"), { recursive: true });
+        await Deno.mkdir(join(tmp, "node_modules", ".bin"));
+        await Deno.writeTextFile(join(pkg, "dist", "electron"), "");
+        await Deno.writeTextFile(join(pkg, "dist", "version"), "1.2.3");
+        await Deno.writeTextFile(join(pkg, "path.txt"), "electron");
+        await Deno.writeTextFile(
+          join(pkg, "package.json"),
+          '{ "name": "electron", "version": "1.2.3" }',
+        );
+        await Deno.writeTextFile(
+          join(tmp, "node_modules", ".bin", "electron"),
+          "",
+        );
+      }
+      const runtime = join(tmp, "runtime");
+      await Deno.mkdir(runtime);
+      await Deno.writeTextFile(electronBinIn(runtime), "");
+      const order: string[] = [];
+      const said: string[] = [];
+      const bin = await findElectronBin(
+        { info: (m) => said.push(m), error: (m) => said.push(m) },
+        {
+          compiled: false,
+          denoInstall: () => {
+            order.push("deno-install");
+            return Promise.resolve(false);
+          },
+          fetchRuntime: () => {
+            order.push("fetch");
+            return Promise.resolve(runtime);
+          },
+        },
+      );
+      assertEquals(order, ["fetch"], `stale=${stale}: ${said.join(" | ")}`);
+      assertEquals(bin, electronBinIn(runtime));
+      const line = said.find((m) => m.includes("not installing into it"));
+      assert(line, said.join(" | "));
+      assertStringIncludes(line, "is the aio framework's own checkout");
+      assert(!line.includes("is not a project"), line);
+      assertEquals(
+        [...Deno.readDirSync(tmp)].map((e) => e.name).filter((n) =>
+          n !== "runtime" && n !== "cache" && n !== "node_modules"
+        ),
+        ["deno.json"],
+      );
+    });
+  }
 });

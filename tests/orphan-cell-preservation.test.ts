@@ -28,6 +28,7 @@ async function boot(
     port: freePort(),
     appDir: dir,
     ...(onRestore ? { onRestore } : {}),
+    watch: false,
   } as any);
 }
 

@@ -298,6 +298,14 @@ function _evictForNewName(incoming: string): void {
   }
 }
 
+/** Trackers whose episodes are said by their caller, not here — the health
+ *  record (`degradedReport`, `/__aio/health`) is kept as for any other. */
+const _quiet = new Set<string>();
+/** @internal — mark `name` as said by its caller (see `_quiet`). */
+export function _quietDegraded(name: string): void {
+  _quiet.add(name.slice(0, NAME_CAP));
+}
+
 /** Watch a best-effort operation. Same name ⇒ same tracker, so a module-level
  *  `const cache = degraded("nft-cache")` and a per-call lookup agree.
  *
@@ -365,6 +373,10 @@ export function degraded(
     const msg = `${key}: degraded — ${e.failures} consecutive failures, ` +
       `last: ${e.lastError}. This operation is best-effort, so each failure ` +
       `alone is survivable; repeating means the feature behind it is off.`;
+    if (_quiet.has(key)) {
+      relayChange(e, "down"); // health only: its caller says the episode
+      return;
+    }
     log.error(`[aio] ${msg}`);
     diagEmit({
       // Per-subsystem type: the bus dedups by TYPE, so a shared "degraded" key
@@ -383,17 +395,20 @@ export function degraded(
     const e = resolve();
     if (e.escalated) {
       const held = Date.now() - e.since;
-      log.info(
-        `[aio] ${key}: recovered after ${e.failures} failures (${held}ms)`,
-      );
-      diagEmit({
-        type: `degraded-recovered:${key}`,
-        severity: "info",
-        source: key,
-        message: `${key}: recovered after ${e.failures} failures`,
-        detail: { failures: e.failures, durationMs: held },
-      });
-      relayChange(e, "up");
+      if (_quiet.has(key)) relayChange(e, "up");
+      else {
+        log.info(
+          `[aio] ${key}: recovered after ${e.failures} failures (${held}ms)`,
+        );
+        diagEmit({
+          type: `degraded-recovered:${key}`,
+          severity: "info",
+          source: key,
+          message: `${key}: recovered after ${e.failures} failures`,
+          detail: { failures: e.failures, durationMs: held },
+        });
+        relayChange(e, "up");
+      }
     }
     e.failures = 0;
     e.escalated = false;

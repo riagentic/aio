@@ -15,6 +15,7 @@ import { readDenoJson } from "./deno-json.ts";
 import type { DataContract } from "../build/ship.ts";
 import type { Log } from "../diagnostics/logger-api.ts";
 import { runBackgroundGit } from "./updates-check.ts";
+import { PROBE_NONCE_ENV, probedFact } from "./updates-core.ts";
 import { gitOwnRepoEnv } from "./git-noninteractive.ts";
 
 /** A clone may be big and slow, never stuck: it is given up after this long
@@ -56,6 +57,7 @@ async function run(
   cmd: string,
   args: string[],
   cwd?: string,
+  env: Record<string, string> = {},
 ): Promise<{ ok: boolean; out: string; err: string }> {
   try {
     const p = await new Deno.Command(cmd, {
@@ -66,7 +68,7 @@ async function run(
       // The build (and the binary it made) runs git on the CLONE — the
       // version stamp counts its commits. An inherited GIT_DIR (an app
       // started from a git hook) pointed that at the hook's repo.
-      ...gitOwnRepoEnv(),
+      ...gitOwnRepoEnv(env),
     }).output();
     return {
       ok: p.success,
@@ -256,10 +258,17 @@ export async function rebuildFromGit(opts: {
   // because there is no manifest to sign it into.
   let contract: DataContract | undefined;
   let contractError: string | undefined;
-  const probed = await run(artifact, ["--aio-data-contract"]);
+  const nonce = crypto.randomUUID();
+  const probed = await run(artifact, ["--aio-data-contract"], undefined, {
+    [PROBE_NONCE_ENV]: nonce,
+  });
   if (probed.ok) {
     try {
-      contract = JSON.parse(probed.out) as DataContract;
+      // The marker line when the build prints one (found whatever else the
+      // app printed); an older build's stdout is the contract.
+      contract = JSON.parse(
+        probedFact(probed.err, "data-contract", nonce) ?? probed.out,
+      ) as DataContract;
     } catch (e) {
       // Was swallowed. The gate then reported "not declared", whose standard
       // advice is "re-publish with `aio ship`" — nonsense for a repository,
@@ -269,8 +278,9 @@ export async function rebuildFromGit(opts: {
         `${probed.out.length} bytes that are not JSON (${
           e instanceof Error ? e.message : String(e)
         }): ${JSON.stringify(probed.out.slice(0, 120))}. Run it by hand in a ` +
-        `clone of ${opts.source} @ ${opts.ref} — anything the app prints ` +
-        `before aio boots (a banner, a warning) lands on stdout and breaks it.`;
+        `clone of ${opts.source} @ ${opts.ref} — a build older than the ` +
+        `"[aio] data-contract:" line is read from stdout, where anything ` +
+        `the app prints before aio boots (a banner, a warning) breaks it.`;
       log.warn("updates", contractError);
     }
   } else if (probed.err || probed.out) {

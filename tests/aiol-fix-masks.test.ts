@@ -16,7 +16,7 @@ import {
   fixSelectorDepsTuple,
   fixUseCellStateReads,
   moveImports,
-  pollBackoffSites,
+  pollBackoffCalls,
 } from "../aiol/fixes.ts";
 
 /** Apply a file fix to `src` in a scratch file; return the result. */
@@ -63,26 +63,34 @@ Deno.test("fixPollBackoffKey: an action payload's `backoff` field is DATA", asyn
   const src =
     `s.$do(schedule.poll("sync", s.attempt, syncAction({ every: "day", backoff: 3 }), { every: 5000, factor: 2 }));
 `;
-  assertEquals(pollBackoffSites(src), [], "the payload is not the opts");
+  assertEquals(pollBackoffCalls(src), [], "the payload is not the opts");
   const { out, changed } = await fixedWith(fixPollBackoffKey, src);
   assertEquals(changed, false);
   assertEquals(out, src);
 });
 
 Deno.test("fixPollBackoffKey: the opts key IS renamed, in either arg order", async () => {
+  // aio's `schedule`: only a name the file imports from aio is rewritten.
+  const AIO = `import { schedule } from "aio";\n`;
   // New order: opts is the 4th argument.
-  const now =
+  const now = AIO +
     `return schedule.poll("id", s.attempt, { type: "t" }, { every: 5000, backoff: 2 });`;
   assertStringIncludes(
     (await fixedWith(fixPollBackoffKey, now)).out,
     "{ every: 5000, factor: 2 }",
   );
   // Old order: opts is the 3rd.
-  const old =
+  const old = AIO +
     `return schedule.poll("id", s.attempt, { every: 5000, backoff: 2 }, { type: "t" });`;
   const r = await fixedWith(fixPollBackoffKey, old);
   assertStringIncludes(r.out, "{ every: 5000, factor: 2 }");
   assertStringIncludes(r.out, `{ type: "t" }`);
+  // The same call with nothing that binds `schedule`: left as written.
+  const bare = old.slice(AIO.length);
+  assertEquals(await fixedWith(fixPollBackoffKey, bare), {
+    out: bare,
+    changed: false,
+  });
 });
 
 Deno.test("fixPollBackoffKey: a comment or string spelling is not rewritten", async () => {

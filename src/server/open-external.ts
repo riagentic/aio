@@ -4,7 +4,9 @@
 // dev-server fallback) each re-derived the darwin/windows/linux ternary; the
 // framework itself carried two more copies. One exported helper, fail-loud.
 
+import { resolve } from "@std/path";
 import { log } from "../diagnostics/logger-api.ts";
+import { neutralCwd } from "./no-console.ts";
 
 /** Open a file, folder or URL with the OS default handler (`open` /
  *  `Start-Process` / `xdg-open`) — the desktop app pattern "reveal in file manager" /
@@ -20,6 +22,8 @@ export async function openExternal(target: string): Promise<void> {
   const child = new Deno.Command(spec.cmd, {
     args: spec.args,
     ...(spec.env ? { env: spec.env } : {}),
+    // What it opens starts where the launcher runs — and stays open.
+    cwd: neutralCwd(),
     stdout: "null",
     stderr: "null",
   }).spawn();
@@ -40,10 +44,15 @@ export async function openExternal(target: string): Promise<void> {
  *  named `x&calc.exe` the hostile one. PowerShell's `Start-Process` is the
  *  same ShellExecute, and the target reaches it through an ENVIRONMENT
  *  VARIABLE, which nothing parses. A missing target exits 1, so the
- *  rejection below still fires. @internal */
+ *  rejection below still fires.
+ *
+ *  The launcher runs from `neutralCwd()`, so on Windows a target that is a
+ *  path goes out ABSOLUTE (`_fromHere`): what it names is decided here, in
+ *  the app's working directory, as before. @internal */
 export function _openSpec(
   os: typeof Deno.build.os,
   target: string,
+  fromHere: (target: string) => string = _fromHere,
 ): { cmd: string; args: string[]; env?: Record<string, string> } {
   if (os === "darwin") return { cmd: "open", args: [target] };
   if (os === "windows") {
@@ -55,10 +64,34 @@ export function _openSpec(
         "-Command",
         "Start-Process -FilePath $env:AIO_OPEN_TARGET",
       ],
-      env: { AIO_OPEN_TARGET: target },
+      env: { AIO_OPEN_TARGET: fromHere(target) },
     };
   }
   return { cmd: "xdg-open", args: [target] };
+}
+
+/** `target` as an absolute path when it names something that EXISTS relative
+ *  to the app's working directory; otherwise as it is — a URL (`https:`,
+ *  `mailto:`, `ms-settings:`; a drive letter is not a scheme), an absolute
+ *  path, or a bare program name (`notepad`) the shell finds on its own.
+ *  @internal */
+export function _fromHere(
+  target: string,
+  absolute: (t: string) => string = resolve,
+  exists: (path: string) => boolean = isThere,
+): string {
+  if (/^[a-z][a-z0-9+.-]+:/i.test(target)) return target;
+  const at = absolute(target);
+  return at !== target && exists(at) ? at : target;
+}
+
+function isThere(path: string): boolean {
+  try {
+    Deno.lstatSync(path);
+    return true;
+  } catch {
+    return false; // aio-ok: not there — the target goes out as it was given
+  }
 }
 
 /** Is there a desktop for a window to appear on?

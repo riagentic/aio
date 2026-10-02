@@ -63,7 +63,8 @@ export function envConstants(
   for (const text of files.values()) {
     for (
       const m of text.matchAll(
-        /\b([A-Za-z_$][\w$]*)\s*=\s*["'`](AIO_[A-Z0-9_]*)["'`]/g,
+        // `: string` between the name and the `=` is the same constant.
+        /\b([A-Za-z_$][\w$]*)\s*(?::\s*[\w$.]+\s*)?=\s*["'`](AIO_[A-Z0-9_]*)["'`]/g,
       )
     ) consts.set(m[1]!, m[2]!);
   }
@@ -87,11 +88,28 @@ export function envNamesIn(
   //     Quoted with ' or " only: a comment writing prose about a variable
   //     spells it as a backtick code span — (`AIO_DDL_STEPS`) in a doc
   //     comment is not a read, and a gate that cries about one gets ignored.
-  for (const m of text.matchAll(/\(\s*["'](AIO_[A-Z0-9_]*)["']/g)) hit(m[1]!);
+  //     In ANY argument position: `pick("--video", "AIO_VIDEO")` names its
+  //     variable second, and "the first argument only" left `AIO_VIDEO`,
+  //     `AIO_VIDEO_PACE` and `AIO_VIDEO_SCHEME` undocumented under a green ✓.
+  //     FIRST, whatever follows it (`get("AIO_A" + suffix)`,
+  //     `f("AIO_B" as const)`); later, only as a whole argument — a comma
+  //     before a literal is also every message. The `,` or `)` that ends
+  //     it is only looked at: it is the next one's start.
+  //     An ARRAY of names is read whole (`["AIO_A", "AIO_B", "AIO_C"]` — the
+  //     list a loop reads the environment by): of three it used to take the
+  //     middle one only, the one that happens to sit between two commas.
+  for (
+    const m of text.matchAll(
+      /[(\[]\s*["'](AIO_[A-Z0-9_]*)["']|,\s*["'](AIO_[A-Z0-9_]*)["'](?=\s*[,)\]])/g,
+    )
+  ) hit(m[1] ?? m[2]!);
   // (b) `process.env.AIO_FOO` / `process.env["AIO_FOO"]` — the Electron main
   //     script is Node.
+  //     `Deno.env.toObject().AIO_FOO` is the same read, spelled for Deno.
   for (
-    const m of text.matchAll(/process\.env(?:\.|\[\s*["'`])([A-Z][A-Z0-9_]*)/g)
+    const m of text.matchAll(
+      /(?:process\.env|\.toObject\(\))\s*(?:\.|\[\s*["'`])([A-Z][A-Z0-9_]*)/g,
+    )
   ) hit(m[1]!);
   // (c) An identifier in a BRACKET access, resolved through the constants
   //     above (`process.env[IDENT]`). An identifier that resolves to nothing is
@@ -109,8 +127,8 @@ export function envNamesIn(
   //     named" — the motivating case for this file, one spelling further out.
   //     The identifier must RESOLVE; `env(name)` (a parameter) resolves to
   //     nothing and stays invisible, and its callers pass literals, which rule
-  //     (a) catches.
-  for (const m of text.matchAll(/\(\s*([A-Za-z_$][\w$]*)\s*[,)]/g)) {
+  //     (a) catches. Any argument position, as in (a): `env(x, CONST)`.
+  for (const m of text.matchAll(/[(,]\s*([A-Za-z_$][\w$]*)\s*(?=[,)])/g)) {
     const resolved = consts.get(m[1]!);
     if (resolved) hit(resolved);
   }

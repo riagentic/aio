@@ -42,6 +42,7 @@ async function boot(
     persist: false,
     port: freePort(),
     ...extra,
+    watch: false,
     // deno-lint-ignore no-explicit-any
   } as any);
 }

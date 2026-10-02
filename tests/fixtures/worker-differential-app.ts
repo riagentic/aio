@@ -123,6 +123,7 @@ export const wdiff = cell("wdiff", {
 
 if (isCellWorker()) {
   await aio.run({
+    watch: false,
     appId: "r6-worker-diff-probe",
     cells: [wdiff],
     client: "server-only",

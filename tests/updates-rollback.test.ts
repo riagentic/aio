@@ -555,24 +555,47 @@ Deno.test("boot: confirming a directory update keeps only the newest KEEP_OLD ro
   const dir = await tmp();
   const data = await tmp();
   try {
+    // As 1.0.16 left them, on no record: the first confirm takes them over
+    // (the exact old names, and this app by its bundle identifier) — and
+    // only then are they counted.
+    const bundle = async (p: string) => {
+      await Deno.mkdir(join(p, "Contents"), { recursive: true });
+      await Deno.writeTextFile(
+        join(p, "Contents", "Info.plist"),
+        "<key>CFBundleIdentifier</key>\n<string>test.counter</string>",
+      );
+    };
     const current = join(dir, "Counter.app");
-    await Deno.mkdir(join(current, "Contents"), { recursive: true });
+    await bundle(current);
     const olds = ["1.0.0", "1.0.1", "1.0.2", "1.0.3", "1.0.4"];
     for (const [i, v] of olds.entries()) {
       const p = join(dir, `Counter.app.old-${v}`);
-      await Deno.mkdir(join(p, "Contents"), { recursive: true });
+      await bundle(p);
       const t = new Date(Date.UTC(2026, 0, 1 + i));
       await Deno.utime(p, t, t);
     }
+    // Another app's bundle under one of our names — the oldest — is not.
+    const other = join(dir, "Counter.app.old-0.0.1");
+    await Deno.mkdir(join(other, "Contents"), { recursive: true });
+    await Deno.writeTextFile(
+      join(other, "Contents", "Info.plist"),
+      "<key>CFBundleIdentifier</key>\n<string>test.other</string>",
+    );
+    await Deno.utime(other, new Date(2025, 0, 1), new Date(2025, 0, 1));
+    // …and a tree an earlier try unpacked and never swapped in, hours ago.
+    await bundle(join(dir, "Counter.app.staged-0.9.9"));
+    const ago = new Date(Date.now() - 2 * 3_600_000);
+    await Deno.utime(join(dir, "Counter.app.staged-0.9.9"), ago, ago);
     writePending(data, mark({ artifact: current, attempts: 1 }));
     confirmPendingUpdate(data, recorder());
     const left = async () =>
       (await Array.fromAsync(Deno.readDir(dir))).map((e) => e.name).sort();
-    for (let i = 0; i < 100 && (await left()).length > 4; i++) {
+    for (let i = 0; i < 100 && (await left()).length > 5; i++) {
       await new Promise((r) => setTimeout(r, 20));
     }
     assertEquals(await left(), [
       "Counter.app",
+      "Counter.app.old-0.0.1",
       "Counter.app.old-1.0.2",
       "Counter.app.old-1.0.3",
       "Counter.app.old-1.0.4",

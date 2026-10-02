@@ -13,6 +13,8 @@ import { redactUrlToken, redactUrlTokenSource } from "../diagnostics/redact.ts";
 import {
   type AioMeta,
   type ShellConfig,
+  shellProfileName,
+  tmplAppMenu,
   tmplBounds,
   tmplBoundsTracking,
   tmplCrashGuard,
@@ -27,7 +29,6 @@ import {
   tmplTray,
   tmplWillNavigate,
   tmplWindowShape,
-  toSlug,
   udsPreloadScript,
   udsProdHTML,
 } from "./electron-shared.ts";
@@ -70,8 +71,7 @@ export function electronMainScriptUDS(url: string, socketPath: string, opts: {
   const h = opts.meta?.height ?? 600;
   // The userData directory — the title's slug, or the profile the
   // lifecycle derived from this run's HOME (electronProfileName).
-  const slug = opts.meta?.profileName ??
-    toSlug(opts.meta?.title ?? opts.title ?? "aio-app");
+  const slug = shellProfileName(opts.meta, opts.title);
   const title = opts.title ?? "aio";
   const hasCSS = opts.hasCSS ?? false;
   // The window is sized from `meta`; the shell metas must agree with it, so
@@ -94,7 +94,7 @@ const path = require('path');
 const fs = require('fs');
 // Electron 41 + Linux: CloudPrintEnable triggers mDNS discovery that blocks window.print() dialog via Avahi timeout
 app.commandLine.appendSwitch('disable-features', 'CloudPrintEnable');
-Menu.setApplicationMenu(null);
+${tmplAppMenu(opts.meta?.title ?? opts.title)}
 app.name = ${JSON.stringify(slug)};
 ${tmplCrashGuard()}
 ${tmplPermissionGuard(opts.meta?.permissions)}
@@ -239,7 +239,7 @@ ${tmplWindowShape(opts.meta, { preload: "preloadFile" })}
       ? path.join(BASE_DIR, 'icon.png')
       : path.join(${
     JSON.stringify(opts.iconDir ?? "")
-  } || path.join(process.cwd(), 'src'), 'icon.png');
+  } || path.join((process.env.AIO_APP_CWD || process.cwd()), 'src'), 'icon.png');
     // The app's own icon.png wins; otherwise the generated monogram, so an
     // app nobody has drawn an icon for is still tellable apart in a taskbar
     // from the other three aio apps running beside it.
@@ -266,8 +266,14 @@ ${tmplRendererDiagnostics(true)}
   // bare exponential curve. Emitting the function's own source means a change
   // to the shared curve reaches this generated script by construction, and a
   // copy that cannot drift is worth more than a copy that is correct today.
+  //
+  // Both constants are PASSED, never read by the emitted body: the body is
+  // whatever the build made of the function, and build.minify renames a
+  // module constant (the copy then asked for a variable that existed nowhere,
+  // and a dropped socket was never reconnected).
   const BACKOFF_BASE_MS = ${BACKOFF_BASE_MS}, BACKOFF_MAX_MS = ${BACKOFF_MAX_MS};
-  const backoffDelay = ${backoffDelay.toString()};
+  const _backoffCurve = ${backoffDelay.toString()};
+  const backoffDelay = (retry) => _backoffCurve(retry, undefined, BACKOFF_BASE_MS, BACKOFF_MAX_MS);
   const SOCK = ${JSON.stringify(socketPath)};
   // The socket's line reader — linear in the bytes read, however a frame is
   // chunked (\`buf += chunk; buf.split\` rescanned the whole carried frame on
@@ -597,6 +603,48 @@ ${tmplRendererDiagnostics(true)}
     }
   }
 
+  // ── Handshake watch ──
+  // The server speaks first: \`proto\` arrives the moment a connection is
+  // accepted. A connection that is accepted and then told NOTHING is either a
+  // server too busy to greet it yet (a large state to restore) or one whose
+  // local-peer gate refused this process (production: only the window process
+  // the server launched is served) — and this side used to wait on it forever,
+  // a blank window with no line anywhere saying why. Say it once, drop the
+  // connection, and let the reconnect loop try again on its normal backoff: a
+  // window that connected before the server armed its pid is served on the
+  // next attempt, and a busy server is asked again later, not harder.
+  const HANDSHAKE_MS = 5000;
+  const HS_SUFFIX = " — no answer from its server yet (reconnecting)";
+  let hsTimer = null, hsSaid = false, hsTitle = null;
+  function _handshakeWatch(s) {
+    clearTimeout(hsTimer);
+    hsTimer = setTimeout(() => {
+      hsTimer = null;
+      if (closing || s.destroyed) return;
+      if (!hsSaid) {
+        hsSaid = true;
+        console.warn("[aio:electron] connected to " + SOCK + " and no answer from the server in " + (HANDSHAKE_MS / 1000) + "s — reconnecting. The server greets every connection it serves, so it is either busy (a large state to restore: this clears by itself) or it does not serve this process. A production app serves its socket only to the window process it launched (local-peer lockdown): if this process (pid " + process.pid + ") is not that one — a window launched through a wrapper that does not exec Electron — the server's own log names the pid it refused.");
+        // …and where the person looking at the blank window can see it.
+        try { if (!win.isDestroyed()) { hsTitle = win.getTitle(); win.setTitle(hsTitle + HS_SUFFIX); } } catch {}
+      }
+      lastErrCode = 'no handshake';
+      s.destroy();
+    }, HANDSHAKE_MS);
+  }
+  // The server's first frame on a connection: THIS is a restored backend — a
+  // connection it accepted and never greeted was not one, so the outage
+  // report and the backoff both stand until here.
+  function _handshakeDone() {
+    clearTimeout(hsTimer); hsTimer = null; hsSaid = false;
+    if (down) { console.info("[aio:electron] backend connection restored (" + SOCK + ")"); down = false; }
+    retry = 0;
+    if (hsTitle !== null) {
+      // Take back OUR title only: one the page set meanwhile is the page's.
+      try { if (!win.isDestroyed() && win.getTitle() === hsTitle + HS_SUFFIX) win.setTitle(hsTitle); } catch {}
+      hsTitle = null;
+    }
+  }
+
   function connectUDS() {
     // A connection that died mid-frame leaves half a line here. Carrying it
     // into the NEXT connection glued it onto that connection's first frame —
@@ -607,16 +655,17 @@ ${tmplRendererDiagnostics(true)}
     sock = connect(SOCK);
     sock.setEncoding('utf8');
     sock.on('connect', () => {
-      if (down) { console.info("[aio:electron] backend connection restored (" + SOCK + ")"); down = false; }
-      retry = 0; lastErrCode = null; lastFullState = null;
+      lastErrCode = null; lastFullState = null;
       lastProto = null; lastCfg = null; // a new connection speaks its own hello
       // What this main process can do for the server, said first on every
       // connection: open native dialogs owned by the window (see _openDialog).
       sock.write('{"v":2,"t":"type","d":{"kind":"electron","caps":["dialog"]}}\\n');
       while (_ipcQueue.length > 0 && sock && !sock.destroyed) sock.write(_ipcQueue.shift() + '\\n');
       if (!closing && rendererReady) { win.webContents.send('__aio:open'); _pump(); }
+      _handshakeWatch(sock);
     });
     sock.on('data', (chunk) => {
+      if (hsTimer) _handshakeDone();
       for (const line of lineBuf.push(chunk)) {
         if (!line || closing) continue;
         // v2 envelope: cache the latest full-state frame for late renderers.
@@ -641,6 +690,7 @@ ${tmplRendererDiagnostics(true)}
     sock.on('error', (err) => { lastErrCode = (err && (err.code || err.message)) || 'error'; });
     sock.on('close', () => {
       sock = null;
+      clearTimeout(hsTimer); hsTimer = null;
       if (closing) return;
       if (rendererReady) win.webContents.send('__aio:close');
       if (!down) {
@@ -656,15 +706,6 @@ ${tmplRendererDiagnostics(true)}
     });
   }
   connectUDS();
-
-  // Window controls for a frameless window (ui.chrome). One channel, one
-  // switch: a renderer can ask for exactly these three verbs and nothing else.
-  ipcMain.on('__aio:win', (_event, verb) => {
-    if (win.isDestroyed()) return;
-    if (verb === 'minimize') win.minimize();
-    else if (verb === 'maximize') win.isMaximized() ? win.unmaximize() : win.maximize();
-    else if (verb === 'close') win.close();
-  });
 
   ipcMain.on('__aio:print', () => {
     if (!win.isDestroyed()) win.webContents.print({ silent: false, printBackground: true });
@@ -733,7 +774,7 @@ ${tmplRendererDiagnostics(true)}
       if (u.protocol !== 'http:' && u.protocol !== 'https:') {
         return refuseWindow('only http/https pages open in a child window, got ' + u.protocol);
       }
-      const root = fs.realpathSync(BASE_DIR || process.cwd());
+      const root = fs.realpathSync(BASE_DIR || (process.env.AIO_APP_CWD || process.cwd()));
       const pfx = root.endsWith(path.sep) ? root: root + path.sep;
       if (typeof preload !== 'string' || !preload) {
         return refuseWindow('no preload given — pass { preload: <a file inside the app directory ' + root + '> }');

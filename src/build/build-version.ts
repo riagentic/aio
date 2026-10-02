@@ -21,6 +21,7 @@ export {
   DEFAULT_BASE,
   installArtifactName,
   outDirExclude,
+  outputExcludes,
   parseDeclaredVersion,
   readBuildStamp,
   readTreeFacts,

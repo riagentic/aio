@@ -18,6 +18,11 @@ import { runWithUser } from "./auth-context.ts";
 import type { AioUser } from "./aio-types.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import {
+  HeldOpenError,
+  moveFileSync,
+  renameOverSync,
+} from "../diagnostics/rename-over.ts";
+import {
   exactName,
   sweepStaleTmps,
   uuidTmpBefore,
@@ -29,12 +34,20 @@ import type { PersistIssue } from "./persist-guard.ts";
 import { WORKER_PATCH_ACTION } from "../state/cell-compose-reduce.ts";
 import { budget } from "../diagnostics/memory-ledger.ts";
 
-/** A ceiling on how many journal entries ONE PROCESS may replay, across every
- *  replay it performs. The loop inside `replayJournal` is bounded by the array
- *  it is handed — this catches the case where the ARRAY is not: a recovery
- *  path that re-enters replay and feeds it the tail again, which is a
- *  boot that never returns and (in native memory) never stops growing. A large
- *  honest journal is 10^5 lines, so 2×10^6 is room to be wrong once, not twice.
+/** A ceiling on how many journal entries one BOOT may replay AGAIN.
+ *
+ *  The loop inside `replayJournal` is bounded by the array it is handed — this
+ *  catches the case where the ARRAY is not: a recovery path that re-enters
+ *  replay and feeds it the tail again, which is a boot that never returns and
+ *  (in native memory) never stops growing.
+ *
+ *  So it counts RE-ENTRIES, and only those. The first replay of a boot is the
+ *  journal's honest tail and is never charged, whatever its size: a journal
+ *  of three million lines is a large journal, not a loop, and it boots. Every
+ *  later replay in the same boot is charged in full. (It used to charge every
+ *  entry, for the life of the PROCESS: one legitimately large tail — or a few
+ *  ordinary replays in one process, which is every in-process restart —
+ *  threw "control-flow bug" at an app that had none.)
  *
  *  Worth stating plainly: this is a COUNTER, not a heap size. It exists to stop
  *  a loop by NAME, not to be raised when it trips — raising it only moves the
@@ -44,6 +57,37 @@ import { budget } from "../diagnostics/memory-ledger.ts";
  *  a runtime reset — which is what keeps the gauge visible to a test that
  *  boots an app cold. */
 const REPLAY_ENTRY_CEILING = 2_000_000;
+
+const replayBudget = () =>
+  budget("journal.replay.entries", REPLAY_ENTRY_CEILING, {
+    unit: "count",
+    owner: "journal",
+    why:
+      `This series counts journal entries replayed AGAIN within one boot — ` +
+      `the first replay is free, so a journal of any size boots. Passing ` +
+      `the ceiling means a recovery path keeps re-entering replay with the ` +
+      `tail (the size of this call is the tail it was handed): a ` +
+      `control-flow bug, not a journal that is too large and not a setting ` +
+      `to raise.`,
+    fix: `The stack trace names the caller that replays a second time. The ` +
+      `journal file itself is untouched. \`am heap\` and /__aio/metrics ` +
+      `show the counter as "journal.replay.entries".`,
+  });
+
+/** Replays since {@linkcode beginReplaySession} — the first is free. */
+let _replaysThisBoot = 0;
+
+/** A boot starts: a new replay session, with nothing charged. Without it the
+ *  count carried from boot to boot for the life of the process, and the
+ *  second in-process boot was already "re-entering".
+ *
+ *  Called once per boot, before any of its phases — never beside the replay:
+ *  a session opened there is opened again by whatever reaches the replay a
+ *  second time, and the ceiling can then never fire. */
+export function beginReplaySession(): void {
+  _replaysThisBoot = 0;
+  replayBudget().reset();
+}
 
 /** The cell a `worker: true` cell's patch batch belongs to, when `type` is one.
  *
@@ -838,14 +882,13 @@ export function replayJournal<S, A>(
     live: Record<string, unknown>,
   ) => Record<string, unknown>,
 ): ReplayResult<S> {
-  // Every entry this call is asked to fold is spent against the process-wide
-  // replay ceiling. A recovery that re-enters replay trips it — by name, with
-  // a stack — instead of folding forever while native memory climbs. Resolved
-  // per call so a reset re-registers the series (see REPLAY_ENTRY_CEILING).
-  budget("journal.replay.entries", REPLAY_ENTRY_CEILING, {
-    unit: "count",
-    owner: "journal",
-  }).spend(entries.length);
+  // A RE-ENTRY is spent against the boot's replay ceiling; the first replay
+  // is the journal's own tail and is free (see REPLAY_ENTRY_CEILING). A
+  // recovery that keeps re-entering trips it — by name, with a stack —
+  // instead of folding forever while native memory climbs. Resolved per call
+  // so a reset re-registers the series.
+  const spent = replayBudget();
+  if (_replaysThisBoot++ > 0) spent.spend(entries.length);
   let s = state;
   let replayed = 0;
   const skipped: SkippedEntry[] = [];
@@ -1195,7 +1238,7 @@ function replaceFileSync(target: string, text: string): void {
   const tmp = `${target}.${crypto.randomUUID()}.tmp`;
   try {
     Deno.writeTextFileSync(tmp, text, { createNew: true, mode: 0o600 });
-    Deno.renameSync(tmp, target);
+    renameOverSync(tmp, target);
   } catch (e) {
     // A write that failed AFTER creating the tmp (a full disk, a file-size
     // limit) left it behind — one per compaction. Only an `AlreadyExists`
@@ -1255,6 +1298,8 @@ export function createJournal(
   const storeOwnsWatermark = opts.storedWatermark !== undefined;
   let seq = 0;
   let wm = 0;
+  /** A run of failed compactions: said once, and once when it ends. */
+  let compactFails: { since: number; n: number } | null = null;
   // Recover prior state on open. When the store owns the watermark a `.wm`
   // file may still exist — written by a build from before the move — so take
   // the HIGHER of the two: replaying what is already in the snapshot is the
@@ -1440,7 +1485,11 @@ export function createJournal(
       if (end < bytes.length) Deno.truncateSync(path, end);
     } catch (e) {
       if (e instanceof Deno.errors.NotFound) return; // nothing was written
+      // Once until a line lands again: a journal held for 40 s refused every
+      // append, and this said so for each.
+      const said = sealOwed;
       sealOwed = true;
+      if (said) return;
       log.warn(
         "journal",
         `journal: could not cut a refused append's partial line from ${path} ` +
@@ -1540,9 +1589,21 @@ export function createJournal(
       if (baseOwed) {
         try {
           recordBase();
-        } catch {
-          // aio-ok: the append below meets the same directory and reports a
-          // refusal loudly (PERSIST_ERROR); the next compaction writes it.
+        } catch (e) {
+          // The append below meets the same directory and reports a refusal
+          // loudly (PERSIST_ERROR); the next compaction writes it. The one
+          // failure the append does NOT meet is this file held open by
+          // another program (Windows) — said here, the first time; the
+          // rename helper counts and reports the repeats.
+          if (e instanceof HeldOpenError && !e.repeat) {
+            log.warn(
+              "journal",
+              `could not write ${basePath} — ${e}. Nothing is lost: it is ` +
+                `written again with the next entry, and until then a ` +
+                `rolled-back database is checked by the journal's first ` +
+                `seq instead.`,
+            );
+          }
         }
       }
       if (held !== null) held.push(json);
@@ -1573,16 +1634,20 @@ export function createJournal(
         } catch (e) {
           // NEVER swallowed. A watermark that cannot be written means every
           // later boot replays an already-applied tail — silently, and growing.
-          log.error(
-            "journal",
-            `could not record the journal watermark at ${wmPath} — ${e}. ` +
-              `Until this succeeds, every restart REPLAYS actions that are ` +
-              `already in the persisted snapshot (replay re-reduces; it is ` +
-              `not idempotent). fix: make ${wmPath} writable (check disk ` +
-              `space and permissions), or run the journal under an app, ` +
-              `where the watermark is a row in state.db written inside the ` +
-              `snapshot transaction.`,
-          );
+          // (Said once per failure the helper has not already reported: a
+          // file held open for minutes fails on every persist.)
+          if (!(e instanceof HeldOpenError && e.repeat)) {
+            log.error(
+              "journal",
+              `could not record the journal watermark at ${wmPath} — ${e}. ` +
+                `Until this succeeds, every restart REPLAYS actions that ` +
+                `are already in the persisted snapshot (replay re-reduces; ` +
+                `it is not idempotent). fix: make ${wmPath} writable (check ` +
+                `disk space and permissions), or run the journal under an ` +
+                `app, where the watermark is a row in state.db written ` +
+                `inside the snapshot transaction.`,
+            );
+          }
         }
       }
       // Compact: keep only the unpersisted tail (seq > wm). Atomic via rename.
@@ -1641,16 +1706,35 @@ export function createJournal(
           keep.map((e) => JSON.stringify(e)).join("\n") +
             (keep.length ? "\n" : ""),
         );
+        if (compactFails !== null) {
+          log.info(
+            "journal",
+            `${path} compacts again — ${compactFails.n} compaction(s) ` +
+              `failed over ${
+                Math.round((Date.now() - compactFails.since) / 1000)
+              } s`,
+          );
+          compactFails = null;
+        }
       } catch (e) {
         // Compaction is an optimization — the watermark alone decides what is
         // replayed — but a journal that can never be compacted grows without
-        // bound, so it is said once rather than never.
-        log.warn(
-          "journal",
-          `could not compact ${path} — ${e}. Nothing is replayed twice ` +
-            `(the watermark decides that), but the file keeps growing until ` +
-            `this succeeds.`,
-        );
+        // bound, so it is said once rather than never: ONE warning per run of
+        // failures (every persist compacts — a read error said itself 50
+        // times in 5 s), and one line with the count when it works again. (A
+        // repeat of a failure the rename helper is already counting is its
+        // line to say, once per cool-down.)
+        const first = compactFails === null;
+        if (first) compactFails = { since: Date.now(), n: 0 };
+        compactFails!.n++;
+        if (first && !(e instanceof HeldOpenError && e.repeat)) {
+          log.warn(
+            "journal",
+            `could not compact ${path} — ${e}. Nothing is replayed twice ` +
+              `(the watermark decides that), but the file keeps growing until ` +
+              `this succeeds.`,
+          );
+        }
       }
     },
     readTail() {
@@ -1713,14 +1797,14 @@ export function createJournal(
     },
     quarantine(to) {
       try {
-        Deno.renameSync(path, to);
+        moveFileSync(path, to);
       } catch (e) {
         // A base whose journal was compacted away entirely still names the
         // hole; there is simply no journal to keep.
         if (!(e instanceof Deno.errors.NotFound)) throw e;
       }
       try {
-        Deno.renameSync(basePath, to + ".base");
+        moveFileSync(basePath, to + ".base");
       } catch (e) {
         if (!(e instanceof Deno.errors.NotFound)) throw e;
       }
@@ -1742,4 +1826,69 @@ export function createJournal(
     close() {/* writes are synchronous — nothing buffered */},
   };
   return api;
+}
+
+/** How long appends must keep landing before a refusal episode is over: a
+ *  program holding the journal can let go and take it again between two
+ *  writes, and each of those is the same episode, not a new one. */
+export const JOURNAL_SETTLE_MS = { value: 5_000 };
+
+/** A refused journal append, said once per EPISODE.
+ *
+ *  A program holding the journal (measured on Windows: share=Read for 10 s
+ *  and 40 s) refused every append; each refusal was logged twice — as a
+ *  `PERSIST_ERROR` saying "changes are in memory but will be lost on
+ *  restart", and as `journal: degraded` — 23 and 119 ERROR lines. Both were
+ *  false: every refused append is saved at once by a snapshot (the caller's
+ *  compensating save), and the counters after a restart were equal. "Will be
+ *  lost" is true only when that snapshot is refused too, and the persistence
+ *  layer says it then, itself.
+ *
+ *  So: one WARN when an episode starts, and one line — with the count and
+ *  how long — from the first append that lands {@linkcode JOURNAL_SETTLE_MS}
+ *  after the last refusal. The
+ *  `health` tracker follows every append, so `/__aio/health` is down exactly
+ *  while appends are refused. */
+export function journalRefusals(o: {
+  /** Where the journal is — read when it is said. */
+  path: () => string;
+  warn: (msg: string) => void;
+  info: (msg: string) => void;
+  health: { fail(e: unknown): void; ok(): void };
+  settleMs?: number;
+  now?: () => number;
+}): { refused(e: unknown): void; landed(): void } {
+  const now = o.now ?? Date.now;
+  let refused = 0, since = 0, last = 0;
+  return {
+    refused(e) {
+      if (refused === 0) {
+        since = now();
+        o.warn(
+          `journal: writes to ${o.path()} are refused (${
+            e instanceof Error ? e.message : String(e)
+          }) — each change is saved by an immediate snapshot instead, so ` +
+            `nothing is lost; until it frees, the journal cannot replay a ` +
+            `crash. Said once; the count follows when writes land again.`,
+        );
+      }
+      refused++;
+      last = now();
+      o.health.fail(e);
+    },
+    landed() {
+      o.health.ok(); // health follows each append; only the line waits
+      // Over once an append lands that long after the last refusal: a
+      // refusal in between is the same episode. No timer — the next append
+      // says it, so nothing outlives the app.
+      if (refused === 0) return;
+      if (now() - last < (o.settleMs ?? JOURNAL_SETTLE_MS.value)) return;
+      o.info(
+        `journal: writes to ${o.path()} land again — ${refused} refused ` +
+          `over ${Math.round((last - since) / 1000)} s, each saved by a ` +
+          `snapshot instead`,
+      );
+      refused = 0;
+    },
+  };
 }

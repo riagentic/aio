@@ -14,6 +14,7 @@
  *  (NOT `Contents/MacOS/Electron`). Changing it invalidates a macOS code
  *  signature; the `.app` is re-signed after assembly anyway. */
 import { join } from "@std/path";
+import { renameOver } from "../diagnostics/rename-over.ts";
 
 export const FUSE_SENTINEL = "dL7pKGdnNz796PbbjQWNKmHXBZaB9tsX";
 
@@ -104,5 +105,5 @@ export async function fuseElectronFile(path: string): Promise<void> {
   const { mode } = await Deno.stat(path);
   const tmp = `${path}.fusing`;
   await Deno.writeFile(tmp, bytes, mode === null ? {} : { mode });
-  await Deno.rename(tmp, path);
+  await renameOver(tmp, path);
 }

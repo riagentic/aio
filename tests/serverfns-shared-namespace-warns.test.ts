@@ -20,6 +20,7 @@ serverFns(NS, { read: () => "SECRET" });
 type App = { close(): Promise<void> };
 const boot = (id: string, dir: string) =>
   aio.run({
+    watch: false,
     cells: [
       cell("c", {
         state: { n: 0 },

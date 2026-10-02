@@ -345,14 +345,15 @@ const fewRetries = (s: string) => {
  *  `cond` (sh, over `$src` and `$dst`) names — the rest reach the real one.
  *  `mv -T --exchange A B` relocates BOTH names, so `cond` is tried as (A→B)
  *  and as (B→A): a refuse of "src is the install" must catch the exchange that
- *  moves the install out, not only the non-exchange `mv "$cur" …` path. */
-const refuseMv = (cond: string) => (s: string) => {
+ *  moves the install out, not only the non-exchange `mv "$cur" …` path.
+ *  `say` (sh) runs before a refusal: what the refused move prints. */
+const refuseMv = (cond: string, say = ":") => (s: string) => {
   const head = "swap_in() {";
   assert(s.includes(head), "swap_in moved");
   return fewRetries(s.replace(
     head,
     () =>
-      `mv() {\n  for dst; do :; done\n  for src; do case "$src" in -*) ;; *) break ;; esac; done\n  if [ "$1" = "-T" ] && [ "$2" = "--exchange" ]; then\n    ${cond} && return 1\n    t="$src"; src="$dst"; dst="$t"\n    ${cond} && return 1\n  else\n    ${cond} && return 1\n  fi\n  command mv "$@"\n}\n${head}`,
+      `mv() {\n  for dst; do :; done\n  for src; do case "$src" in -*) ;; *) break ;; esac; done\n  if [ "$1" = "-T" ] && [ "$2" = "--exchange" ]; then\n    ${cond} && { ${say}; return 1; }\n    t="$src"; src="$dst"; dst="$t"\n    ${cond} && { ${say}; return 1; }\n  else\n    ${cond} && { ${say}; return 1; }\n  fi\n  command mv "$@"\n}\n${head}`,
   ));
 };
 
@@ -374,9 +375,12 @@ Deno.test("swap failure: the new version cannot be moved into place — the old 
     assertEquals(await version(current), "1.0.0");
     assertEquals((await Deno.readTextFile(ran)).trim(), "1.0.0");
     const rec = JSON.parse(await Deno.readTextFile(failedUpdatePath(data)));
-    assertEquals(
-      [rec.swapFailed, rec.from, rec.to],
-      ["the new version could not be moved into place", "1.0.0", "2.0.0"],
+    assertEquals([rec.from, rec.to], ["1.0.0", "2.0.0"]);
+    // The sentence, and what the move itself said — it names the tree that
+    // was not there.
+    assertMatch(
+      rec.swapFailed,
+      /^the new version could not be moved into place \(mv: .*My App\.staged-2\.0\.0.*\)$/,
     );
     assertEquals(await exists(pendingPath(data)), false);
     assertEquals(await exists(firstBootPath(data)), false);
@@ -408,9 +412,10 @@ Deno.test("swap failure: an earlier copy that cannot be removed — nothing move
     assertEquals(await version(current), "1.0.0");
     assertEquals((await Deno.readTextFile(ran)).trim(), "1.0.0");
     const rec = JSON.parse(await Deno.readTextFile(failedUpdatePath(data)));
-    assertEquals(
+    // What could not be removed is named: the reason nothing was moved.
+    assertMatch(
       rec.swapFailed,
-      "the running version could not be moved aside",
+      /^an earlier copy of the app \(.*\/My App\.old-1\.0\.0\) could not be removed \(rm: .*My App\.old-1\.0\.0\/locked.*\)$/,
     );
     assertEquals(await exists(pendingPath(data)), false);
     assertEquals(
@@ -418,10 +423,96 @@ Deno.test("swap failure: an earlier copy that cannot be removed — nothing move
       false,
       "moved INTO the leftover copy",
     );
+    // The update is not happening: its staged tree — a whole copy of the app
+    // — does not stay beside the install.
+    assertEquals(await exists(join(dir, "My App.staged-2.0.0")), false);
   } finally {
     // Wherever a broken swap moved it (the ledger's mutants move it INTO the
     // current version): every directory writable again, or it stays behind.
     await openAll(dir);
+    await dropTempDir(dir);
+  }
+});
+
+// A swap given up used to record a fixed sentence: which move, never why.
+// What the failing command printed now rides along — as ONE line of bounded
+// length that cannot end the JSON string it is written into.
+Deno.test("swap failure: the record carries what the failing move said — one line, bounded, still JSON", async () => {
+  if (Deno.build.os === "windows") return;
+  const dir = await tempDir("aio-swapfail-why-");
+  try {
+    const said = String.raw`printf 'mv: "%s" is\held
+by	X%s' "$src" ` +
+      `"$(printf '%400s' '' | tr ' ' 'e')" >&2`;
+    const { current, data, ran, out } = await swapWith(
+      dir,
+      () => "exit 0",
+      60,
+      { seam: refuseMv('[ "$src" = "$cur" ]', said) },
+    );
+    assert(out.success, err(out));
+    assertEquals((await Deno.readTextFile(ran)).trim(), "1.0.0");
+    const rec = JSON.parse(await Deno.readTextFile(failedUpdatePath(data)));
+    const head = `mv: '${current}' is/held by X`;
+    assertEquals(
+      rec.swapFailed,
+      "the running version could not be moved aside (" + head +
+        "e".repeat(300 - head.length) + ")",
+    );
+    assertEquals([rec.from, rec.to], ["1.0.0", "2.0.0"]);
+    assertEquals(await exists(join(dir, "My App.staged-2.0.0")), false);
+  } finally {
+    await dropTempDir(dir);
+  }
+});
+
+// Where `mv` can exchange two names (GNU coreutils >= 9.5), the swap is an
+// exchange and then a move of the old copy to `.old-<v>`. When that second
+// move failed, the helper exchanged back and tried again — fifty times: the
+// install's name held the old and the new version in turn for ten seconds,
+// and the record named the wrong move, with no reason. A stand-in `mv` that
+// exchanges (this host's may not) drives it.
+const exchanging = (log: string) => (s: string) => {
+  const head = "swap_in() {";
+  assert(s.includes(head), "swap_in moved");
+  return s.replace(
+    head,
+    () =>
+      `mv() {\n  if [ "$1" = "-T" ] && [ "$2" = "--exchange" ]; then\n` +
+      `    echo x >> '${log}'\n` +
+      `    command mv "$3" "$3.x" && command mv "$4" "$3" && command mv "$3.x" "$4"\n` +
+      `    return\n  fi\n` +
+      `  for dst; do :; done\n` +
+      `  if [ "$dst" = "$prev" ]; then echo "mv: cannot move to '$dst': Permission denied" >&2; return 1; fi\n` +
+      `  command mv "$@"\n}\n${head}`,
+  );
+};
+
+Deno.test("swap failure: after an exchange, a copy that cannot be set aside is exchanged back ONCE — the record names that move and why", async () => {
+  if (Deno.build.os === "windows") return;
+  const dir = await tempDir("aio-swapfail-xchg-");
+  try {
+    const log = join(dir, "exchanges");
+    const { current, data, ran, out } = await swapWith(
+      dir,
+      () => "exit 0",
+      60,
+      { seam: exchanging(log) },
+    );
+    assert(out.success, err(out));
+    assertEquals(await version(current), "1.0.0");
+    assertEquals((await Deno.readTextFile(ran)).trim(), "1.0.0");
+    // There and back: the install's name never flips again.
+    assertEquals((await Deno.readTextFile(log)).trim().split("\n").length, 2);
+    const rec = JSON.parse(await Deno.readTextFile(failedUpdatePath(data)));
+    assertEquals(
+      rec.swapFailed,
+      "the version it replaces could not be set aside (mv: cannot move to '" +
+        join(dir, "My App.old-1.0.0") + "': Permission denied)",
+    );
+    assertEquals(await exists(join(dir, "My App.staged-2.0.0")), false);
+    assertEquals(await exists(pendingPath(data)), false);
+  } finally {
     await dropTempDir(dir);
   }
 });
@@ -463,7 +554,10 @@ for (
         () => "exit 1",
         1,
         {
-          seam: refuseMv(`[ -e "$failed" ] && ${refuse}`),
+          seam: refuseMv(
+            `[ -e "$failed" ] && ${refuse}`,
+            "echo 'mv: held' >&2",
+          ),
         },
       );
       assertEquals(await version(current), "2.0.0");
@@ -473,8 +567,9 @@ for (
         "the version in place is started again",
       );
       const rec = JSON.parse(await Deno.readTextFile(failedUpdatePath(data)));
+      // The sentence, and what the refused move said.
       assertEquals([rec.rollbackFailed, rec.from, rec.to], [
-        why,
+        `${why} (mv: held)`,
         "1.0.0",
         "2.0.0",
       ]);

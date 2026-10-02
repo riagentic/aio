@@ -29,7 +29,7 @@ import { devWsScript } from "./server-html-scripts.ts";
 function _safeUiEntry(uiEntry: string): string {
   if (!/^[\w./-]+\.(ts|tsx)$/.test(uiEntry)) {
     throw new Error(
-      `invalid ui.entry "${uiEntry}" — must match /^[\w./-]+\.(ts|tsx)$/ (alphanumerics, ".", "/", "-", "_" + .ts/.tsx). ` +
+      `invalid ui.entry "${uiEntry}" — must match /^[\\w./-]+\\.(ts|tsx)$/ (alphanumerics, ".", "/", "-", "_" + .ts/.tsx). ` +
         `This is interpolated into the dev HTML import path and must be a safe filename.`,
     );
   }

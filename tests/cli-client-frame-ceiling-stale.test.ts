@@ -143,6 +143,7 @@ Deno.test({
     });
     const port = freePort();
     const app = await aio.run({
+      watch: false,
       cells: [big],
       appId: "ceiling-twice",
       appDir: dir,

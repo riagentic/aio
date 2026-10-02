@@ -1193,6 +1193,17 @@ Deno.test("am-cli: timetravel goto — missing N exits with error", async () => 
   });
 });
 
+Deno.test("am-cli: timetravel goto — an EMPTY id is refused, not read as 0", async () => {
+  // `Number("")` is 0: `am timetravel goto "$ID"` with an unset variable
+  // rewound the app to entry 0 and exited 0.
+  await withTTServer(async (_url, port) => {
+    for (const empty of ["", " "]) {
+      const r = await runAmOnPort(port, ["timetravel", "goto", empty]);
+      assertAmCode(r, 1, "am");
+    }
+  });
+});
+
 // ── am dispatch — input validation ───────────────────────────
 
 Deno.test("am-cli: dispatch — no args exits with error", async () => {

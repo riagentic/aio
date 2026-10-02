@@ -3,9 +3,14 @@
 //. The spec builder is pure so BOTH
 // shapes are pinned on any OS; the POSIX contract is additionally proven by
 // executing it for real.
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "@std/assert";
 import { join } from "@std/path";
-import { detachedSpawnSpec } from "../src/am/am-cmd-process.ts";
+import { detachedSpawnSpec, launchDetached } from "../src/am/am-cmd-process.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 Deno.test("windows spec: PowerShell Start-Process, one pre-quoted command line", () => {
@@ -18,7 +23,7 @@ Deno.test("windows spec: PowerShell Start-Process, one pre-quoted command line",
   const ps = spec.args.join(" ");
   assert(!ps.includes("nohup"), "no POSIX-isms");
   assertStringIncludes(ps, "Start-Process");
-  assertStringIncludes(ps, "-PassThru"); // the PID comes back on stdout
+  assertStringIncludes(ps, "-PassThru"); // the PID comes back in a file
   // ONE string, already MSVC-quoted. `-ArgumentList @(…)` joins the elements
   // with spaces and does not quote them, so a value with a space was split by
   // the child — the app never booted.
@@ -38,13 +43,42 @@ Deno.test("windows spec: PowerShell Start-Process, one pre-quoted command line",
   );
   assertStringIncludes(ps, "-RedirectStandardOutput 'C:\\logs\\out.log'");
   assertStringIncludes(ps, "-RedirectStandardError 'C:\\logs\\out.log.err'");
-  assertStringIncludes(ps, "Write-Output $p.Id");
+  // A FILE, never stdout: the child inherits PowerShell's handles, and a
+  // stdout pipe held by the app kept `am start` waiting for its lifetime.
+  assertStringIncludes(
+    ps,
+    "[IO.File]::WriteAllText('C:\\logs\\out.log.pid', [string]$p.Id)",
+  );
+  assert(!ps.includes("Write-Output"), ps);
   // Embedded single quotes are doubled (PowerShell escaping), never raw.
   const evil = detachedSpawnSpec("windows", ["--title=o'brien"], "l.log");
   assertStringIncludes(evil.args.join(" "), "'--title=o''brien'");
+  // …and so are the TYPOGRAPHIC ones: PowerShell closes a single-quoted
+  // string at U+2018/2019/201A/201B as well, so `Don’t; calc` in a title or a
+  // path ended the string and ran the rest.
+  for (const quote of ["\u2018", "\u2019", "\u201A", "\u201B"]) {
+    const spec = detachedSpawnSpec(
+      "windows",
+      [`--title=a${quote}; calc #`],
+      `C:\\l${quote}g\\out.log`,
+      `C:\\d${quote}no.exe`,
+    );
+    const line = spec.args.join(" ");
+    assertStringIncludes(line, `'"--title=a${quote}${quote}; calc #"'`);
+    assertStringIncludes(line, `'C:\\l${quote}${quote}g\\out.log'`);
+    assertStringIncludes(line, `-FilePath 'C:\\d${quote}${quote}no.exe'`);
+    // No quote character of any kind is left undoubled inside a string.
+    assertEquals(
+      line.replace(/(['\u2018\u2019\u201A\u201B])\1/g, "").match(
+        /[\u2018\u2019\u201A\u201B]/g,
+      ),
+      null,
+      line,
+    );
+  }
 });
 
-Deno.test("posix spec: sh -c nohup … & echo $! (detached, log-merged)", () => {
+Deno.test("posix spec: sh -c nohup … & echo $! >pid file (detached, log-merged)", () => {
   const spec = detachedSpawnSpec(
     "linux",
     ["run", "-A", "app.ts"],
@@ -57,7 +91,11 @@ Deno.test("posix spec: sh -c nohup … & echo $! (detached, log-merged)", () => 
   // never execs (see am-process-safety.test.ts).
   assertStringIncludes(cmd, `nohup '${Deno.execPath()}' 'run' '-A' 'app.ts'`);
   assertStringIncludes(cmd, ">'/tmp/o.log' 2>&1 &");
-  assert(cmd.trimEnd().endsWith("; echo $!"), "the PID is the last word");
+  // The PID goes to a FILE, last — never to the launcher's stdout.
+  assert(
+    cmd.trimEnd().endsWith("; echo $! >'/tmp/o.log.pid'"),
+    "the PID is the last word, into <log>.pid",
+  );
   // Its OWN session where the box has setsid (cc §7: a runner that kills its
   // process group when a command ends killed the app with it), and plain
   // nohup where it does not (macOS ships no setsid binary).
@@ -92,15 +130,17 @@ Deno.test({
         }; sleep 20`,
       ],
       stdin: "null",
-      stdout: "piped",
+      stdout: "null",
       stderr: "null",
     }).spawn();
-    const reader = runner.stdout.getReader();
-    const first = await reader.read();
-    // Not read past the PID: cancel so the pipe is closed when the runner dies.
-    await reader.cancel();
-    const pid = parseInt(new TextDecoder().decode(first.value).trim(), 10);
-    assert(Number.isFinite(pid) && pid > 0, "child PID came back on stdout");
+    let pid = NaN;
+    for (let i = 0; i < 250 && !(pid > 0); i++) {
+      try {
+        pid = parseInt(Deno.readTextFileSync(`${log}.pid`).trim(), 10);
+      } catch { /* not yet written */ }
+      if (!(pid > 0)) await new Promise((r) => setTimeout(r, 20));
+    }
+    assert(Number.isFinite(pid) && pid > 0, "child PID came back in the file");
     const stat = (p: number) => {
       // /proc/<pid>/stat: `pid (comm) state ppid pgrp session …` — comm may
       // hold spaces, so split after the last `)`.
@@ -147,7 +187,8 @@ Deno.test({
 });
 
 Deno.test({
-  name: "posix spec EXECUTES: detached child, real PID on stdout, log written",
+  name:
+    "posix spec EXECUTES: detached child, real PID in <log>.pid, log written",
   ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("am-detached-");
@@ -159,15 +200,8 @@ Deno.test({
       ["eval", "console.log('alive'); await new Promise(r=>setTimeout(r,300))"],
       log,
     );
-    const proc = new Deno.Command(spec.cmd, {
-      args: spec.args,
-      stdin: "null",
-      stdout: "piped",
-      stderr: "null",
-    }).spawn();
-    const out = await proc.output(); // "am" is done here — child keeps running
-    const pid = parseInt(new TextDecoder().decode(out.stdout).trim(), 10);
-    assert(Number.isFinite(pid) && pid > 0, "child PID came back on stdout");
+    const pid = await launchDetached(spec, log); // "am" is done here
+    assert(Number.isFinite(pid) && pid > 0, "child PID came back");
     // The child is alive after the spawner exited (detachment contract)…
     let alive = true;
     try {
@@ -188,5 +222,59 @@ Deno.test({
       Deno.kill(pid, "SIGKILL");
     } catch { /* already exited */ }
     await dropTempDir(dir);
+  },
+});
+
+// ── am never waits on the app's lifetime ────────────────────────────────────
+// Measured on Windows: `Start-Process` creates the app with handle
+// inheritance on, so the app held PowerShell's stdout — am's pipe — and `am
+// start` (reading it to EOF for the pid) ran for as long as the app did.
+
+Deno.test({
+  name:
+    "launchDetached: a child that would hold the launcher's stdout does not hold am",
+  ignore: Deno.build.os === "windows",
+  async fn() {
+    const dir = await tempDir("am-detached-");
+    const log = join(dir, "out.log");
+    // The stand-in: the child keeps every handle the launcher had, for 20 s.
+    const spec = {
+      cmd: "sh",
+      args: ["-c", `sleep 20 & echo $! >'${log}.pid'`],
+    };
+    const t0 = performance.now();
+    const pid = await launchDetached(spec, log, {}, 10_000);
+    const took = performance.now() - t0;
+    try {
+      assert(took < 5_000, `am waited on the child: ${took} ms`);
+      assert(pid > 0);
+      Deno.kill(pid, "SIGCONT"); // the child is alive — it was not waited for
+    } finally {
+      try {
+        Deno.kill(pid, "SIGKILL");
+      } catch { /* gone */ }
+      await dropTempDir(dir);
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "launchDetached: a launcher that never returns is bounded — killed, and said",
+  ignore: Deno.build.os === "windows",
+  async fn() {
+    const dir = await tempDir("am-detached-");
+    const log = join(dir, "out.log");
+    try {
+      const t0 = performance.now();
+      const e = await assertRejects(() =>
+        launchDetached({ cmd: "sleep", args: ["20"] }, log, {}, 300)
+      );
+      assert(performance.now() - t0 < 5_000);
+      assertStringIncludes(String(e), "did not return within 0.3 s");
+      assertStringIncludes(String(e), log);
+    } finally {
+      await dropTempDir(dir);
+    }
   },
 });

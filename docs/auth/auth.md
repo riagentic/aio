@@ -1020,15 +1020,16 @@ A summary of aio's security posture and known limitations:
 
 ### What aio protects
 
-| Threat                                           | Protection                                                                                       |
-| ------------------------------------------------ | ------------------------------------------------------------------------------------------------ |
-| Unauthorized WebSocket/HTTP access               | Token auth (`--expose`, `users`, or `resolveUser`) — timing-safe comparison for static tokens    |
-| Cross-origin browser requests (localhost)        | `Origin` header validation — only same-origin allowed when not exposed                           |
-| State leakage per user                           | Cell-level `ui: { include, forUser }` — server-side filtering per client                         |
-| Trojan API abuse from web                        | `/__aio/trojan/*` bound to `127.0.0.1` HTTP-only — unreachable from browser even with TLS        |
-| Reducer/effect crashes taking down server        | All errors caught and logged, dispatch loop continues                                            |
-| XSS in error overlay                             | `escHtml()` sanitizes filenames, paths, and error text                                           |
-| Clickjacking, `<base>` hijack, form exfiltration | Security headers on every response — see [Response security headers](#response-security-headers) |
+| Threat                                           | Protection                                                                                                                                           |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Unauthorized WebSocket/HTTP access               | Token auth (`--expose`, `users`, or `resolveUser`) — timing-safe comparison for static tokens                                                        |
+| Cross-origin browser requests (localhost)        | `Origin` header validation — only same-origin allowed when not exposed                                                                               |
+| State leakage per user                           | Cell-level `ui: { include, forUser }` — server-side filtering per client                                                                             |
+| Trojan API abuse from web                        | `/__aio/trojan/*` bound to `127.0.0.1` HTTP-only — unreachable from browser even with TLS                                                            |
+| Reducer/effect crashes taking down server        | All errors caught and logged, dispatch loop continues                                                                                                |
+| XSS in error overlay                             | `escHtml()` sanitizes filenames, paths, and error text                                                                                               |
+| Clickjacking, `<base>` hijack, form exfiltration | Security headers on every response — see [Response security headers](#response-security-headers)                                                     |
+| Another local app reading a desktop app's state  | Production Electron apps serve their local socket only to their own window — see [Local-peer lockdown](#local-peer-lockdown-production-desktop-apps) |
 
 ### Response security headers
 
@@ -1155,6 +1156,112 @@ request carrying `X-Forwarded-For`, `Forwarded`, `X-Real-IP`,
 `CF-Connecting-IP`, `True-Client-IP` or your `trustProxyHeader` is treated as
 remote even when it arrives from `127.0.0.1` — behind nginx on the same host,
 every internet client does. The same rule gates `/__aio/trojan/*`.
+
+### Local-peer lockdown (production desktop apps)
+
+A desktop app talks to its window over a local socket — a Unix socket in a
+`0700` directory, a named pipe with an owner-only DACL on Windows. That keeps
+other **users** out. It does nothing about another **process of the same user**:
+the owner may open the socket, and an app on a single-user desktop has no caller
+identity to check.
+
+In production (`--prod` / a built app), an Electron app on its local socket
+therefore serves a session **only to the window process it launched**. The
+kernel reports who is on the other end of each connection — `SO_PEERCRED`
+(Linux), `LOCAL_PEERPID` (macOS), `GetNamedPipeClientProcessId` (Windows) — and
+a same-user process cannot forge that answer. On Linux the check is pid **and**
+process start time, so a pid the kernel reuses after the window exits is not the
+window; everywhere, the gate is disarmed the moment the window exits.
+
+What is gated — every local door, by one gate:
+
+| door                                           | the app's window                  | any other process of the user                                                                                                                                                   |
+| ---------------------------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| state socket `<appId>.sock` / the pipe         | the session: state, methods, sync | nothing is sent, every session frame is dropped                                                                                                                                 |
+| `ctl` frames on that socket (what `am` sends)  | the whole HTTP handler            | `GET /__aio/health`, reduced to `{ status, appId }`, and the stop (`POST /__aio/trojan/shutdown`) — answered only to this boot's `control.key`; everything else is answered 404 |
+| HTTP socket `<appId>.http.sock` / `-http` pipe | page, `routes`, `/__aio/*`        | 403 — the handler never sees the request; no WebSocket upgrade exists on this door at all                                                                                       |
+
+`am health` keeps working against a production app (it asks exactly the allowed
+question). `am stop` stops it cleanly — `onStop`, the final flush, the lock
+released: it presents the app's per-boot `<data>/control.key` (owner-only, see
+[Reaching an app that has auth](../clients/app-manager.md#reaching-an-app-that-has-auth-controlkey)),
+and a production build answers that credential exactly one request, the stop. A
+process of the same user can read the file — and could already kill the app; the
+stop gives it nothing more, and state, actions and the page stay the window's.
+The rest of the control API (`/__aio/trojan/*`) is dev-only on every wire, as
+before. (An app built before 1.0.17-beta has no stop to ask, so `am` falls back
+to a signal — on Windows that is `TerminateProcess`: a hard kill.)
+
+The boot log says what is covered, and only what is covered:
+
+```
+local-peer lockdown: only this app's own window may connect
+```
+
+is printed for an app whose local socket is its **only** door. An app that also
+named a TCP port (`--port`, `AIO_PORT`, `port:`) or asked for the DevTools port
+(`--cdp`) gets a warning instead: the socket is still gated, but that port
+serves — or drives the window for — every process on the machine.
+
+A refusal is logged with its reason (the peer's pid, the pid expected, "another
+user", "unreadable") when the connection is accepted — whether or not the peer
+ever sends a request. The same reason on the same door is logged at most once a
+minute, so a process that keeps trying costs one line a minute, not one per
+attempt: not every refused connection has a line of its own.
+
+A refused process cannot hold the HTTP socket open either. It is given two
+seconds to send a request, answered `403` with the reason, and closed. Every
+connection on that socket — the window's included — has 30 seconds to send its
+first request head (the window sends it with the connect); a connection that has
+been served may then stay open between requests — a later request head has the
+same 30 seconds from its first byte — and is closed when the window exits.
+
+**What this is not.** State it plainly before relying on it:
+
+- **The renderer is trusted.** Code running inside the window is the window.
+  This is not a sandbox for the page; CSP, `electron.permissions` and
+  `childWindows: false` are.
+- **It is not a boundary against the same user in general.** A process of the
+  same user can still read the app's `state.db` and logs on disk, and — unless
+  the OS forbids it — the memory of the window process. On Linux the **server**
+  process is made non-dumpable (`PR_SET_DUMPABLE`); the Electron process is not.
+  It denies _connecting as a session_, which is what a stray local tool, another
+  app's helper or a script does; it does not stop malware running as you.
+- **A named port is out of scope.** Loopback TCP gives the server an address,
+  not a process. Keep the app portless for the lockdown to mean anything.
+- **Dev is open.** `am` and amui are legitimate second processes in dev, and the
+  gate is production-only.
+- **`$ELECTRON_PATH` is the app's own input.** Whatever it names is launched as
+  the window, and is the process that is trusted.
+
+Requirements and failure modes:
+
+- Reading peer credentials needs FFI. A compiled app has it. Run from source,
+  `--prod --client=electron` needs `--allow-ffi` (`-A` includes it); without it
+  the app **refuses to start** and names the flag, rather than run with a gate
+  that would refuse its own window.
+- The window must BE the process the server launched. The dev launcher
+  `node_modules/.bin/electron` is a shim that starts Electron as a child, so aio
+  resolves it to the binary it would start — `dist/<path.txt>` of the electron
+  package, or `$ELECTRON_OVERRIDE_DIST_PATH/<path.txt, default electron>` — and
+  spawns that. Only when no such file exists (an install that never downloaded
+  the binary) is the shim itself spawned, and Electron is then its child. If you
+  point `$ELECTRON_PATH` at a wrapper script, the wrapper must `exec` Electron.
+  In both cases a window that is not the launched process is refused: the server
+  logs an ERROR naming both pids, and the window's title says its server has not
+  answered.
+
+**Opting out.** An app that ships a same-user companion process — a helper or a
+CLI that connects to the app's socket as a client — would lose it. It says so:
+
+```ts
+await aio.run({ cells, electron: { allowLocalPeers: true } });
+```
+
+The local socket is then open to every process of the user in production, as it
+is in dev, and the boot log says that instead. Default: `false`. Only the
+boolean `true` opens it: any other value (`"true"`, `"yes"`, `1`) is read as
+`false`, with a warning.
 
 ### Known limitations
 

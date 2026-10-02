@@ -36,6 +36,7 @@ Deno.test({
         },
       });
       const a = await aio.run({
+        watch: false,
         cells: [v1],
         appId: "boot-err-probe",
         client: "server-only",
@@ -71,6 +72,7 @@ Deno.test({
       let booted = false;
       try {
         const b = await aio.run({
+          watch: false,
           cells: [v2],
           appId: "boot-err-probe",
           client: "server-only",

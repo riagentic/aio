@@ -6,9 +6,14 @@
 // Found while building the multi-client harness, which boots seven servers in one
 // process: each teardown deleted a directory the (process-wide) logger still had
 // buffered writes for. The harness made it visible; the behaviour was always wrong.
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
-import { AioLogger } from "../src/diagnostics/logger-core.ts";
+import {
+  AioLogger,
+  flushAtExit,
+  guestLogger,
+} from "../src/diagnostics/logger-core.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -77,5 +82,24 @@ Deno.test("logger: a genuinely unwritable path still reports (bounded)", async (
     );
   } finally {
     console.error = origError;
+  }
+});
+
+Deno.test("a guest logger (another live instance owns the folder) leaves only its FIRST error, in app.log, at exit — nothing else, no other file", async () => {
+  const dir = await tempDir("logger-guest-");
+  try {
+    const logger = new AioLogger({ dir, console: false, level: "debug" });
+    guestLogger(logger);
+    logger.pub("info", "app", "found the running app");
+    logger.pub("warn", "lock", "a warning");
+    logger.pub("error", "boot", "refused: the first");
+    logger.pub("error", "boot", "refused: a second");
+    flushAtExit(logger); // what the process's `unload` runs
+    assertEquals([...Deno.readDirSync(dir)].map((e) => e.name), ["app.log"]);
+    const text = Deno.readTextFileSync(join(dir, "app.log"));
+    assertEquals(text.trim().split("\n").length, 1, text);
+    assertStringIncludes(text, "refused: the first");
+  } finally {
+    await dropTempDir(dir);
   }
 });

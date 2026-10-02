@@ -28,6 +28,7 @@ import { basename, dirname } from "@std/path";
 import type { DB } from "../db/types.ts";
 import { createDB } from "../db/async-db.ts";
 import { syncDir, syncFile } from "../db/durable.ts";
+import { moveFile, renameOver } from "../diagnostics/rename-over.ts";
 
 /** How many `.corrupt-<timestamp>` copies are kept beside a database.
  *
@@ -187,7 +188,7 @@ async function writeDurable(path: string, text: string): Promise<void> {
   const tmp = `${path}.tmp`;
   await Deno.writeTextFile(tmp, text, { mode: 0o600 });
   await syncFile(tmp);
-  await Deno.rename(tmp, path);
+  await renameOver(tmp, path);
   await syncDir(dirname(path));
 }
 
@@ -228,7 +229,7 @@ export async function finishInterruptedRestore(opts: {
   log: { error: (msg: string) => void; warn: (msg: string) => void };
   fs?: RecoverFs;
 }): Promise<IntegrityOutcome | null> {
-  const fs = opts.fs ?? { rename: Deno.rename, remove: (p) => Deno.remove(p) };
+  const fs = opts.fs ?? { rename: moveFile, remove: (p) => Deno.remove(p) };
   const staged = restoringPathFor(opts.dbPath);
   const present = (p: string) =>
     Deno.lstat(p).then(() => true, (e) => {
@@ -397,7 +398,9 @@ export async function checkAndRecover(opts: {
   busyWaitMs?: number;
 }): Promise<IntegrityOutcome> {
   const fs = opts.fs ?? {
-    rename: Deno.rename,
+    // Every rename here moves DATA (a damaged file aside, a staged copy in):
+    // retried on Windows, and the source stays put when it fails.
+    rename: moveFile,
     copyFile: Deno.copyFile,
     stat: async (p: string) => ({ size: (await Deno.stat(p)).size }),
     remove: (p: string) => Deno.remove(p),

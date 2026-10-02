@@ -42,7 +42,7 @@ Deno.test("electron client: the baked address is a DEFAULT, not a lock", () => {
   // Precedence: an explicit flag and an imported profile are someone choosing
   // THIS run, so both are checked before the baked default.
   const bakedAt = script.indexOf("__AIO_BAKED_URL &&");
-  const directAt = script.indexOf("if (directUrl)");
+  const directAt = script.indexOf("if (!bootErr && directUrl)");
   const profileAt = script.indexOf("if (profileFile)");
   assert(directAt > 0 && profileAt > 0 && bakedAt > 0);
   assert(directAt < bakedAt, "--server-url outranks the baked default");

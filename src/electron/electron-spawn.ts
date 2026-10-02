@@ -1,17 +1,26 @@
 // Electron binary resolution and process spawning
 
-import { dirname, join } from "@std/path";
-import type { AioMeta, Log, ShellConfig } from "./electron-shared.ts";
+import { basename, dirname, fromFileUrl, join } from "@std/path";
+import {
+  type AioMeta,
+  type Log,
+  type ShellConfig,
+  shellProfileName,
+} from "./electron-shared.ts";
 import { electronMainScript } from "./electron-scripts.ts";
-import { electronClientScript } from "./electron-client-script.ts";
+import {
+  CLIENT_PROFILE,
+  electronClientScript,
+} from "./electron-client-script.ts";
 import { electronMainScriptUDS } from "./electron-uds.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { classifyElectronLine } from "./electron-renderer-log.ts";
 import { appImageOwner, isCompiled } from "../server/paths.ts";
+import { isProcessAlive } from "../server/single-instance-lock.ts";
 import { DENO_JSON_NAMES, parseDenoJson } from "../server/deno-json.ts";
 import { HEY } from "../diagnostics/fmt.ts";
 import { redactUrlToken } from "../diagnostics/redact.ts";
-import { spawnInheritingOrNull } from "../server/no-console.ts";
+import { neutralCwd, spawnInheritingOrNull } from "../server/no-console.ts";
 import {
   bakedElectronVersion,
   bakedEmbeddedRuntime,
@@ -20,6 +29,7 @@ import {
   electronSlug,
   electronZipName,
   ensureElectronRuntime,
+  MAC_WINDOW_LINK,
 } from "./electron-runtime-fetch.ts";
 
 /** The runtime a SHIPPED package carries beside its executable.
@@ -46,11 +56,39 @@ export function packagedElectronCandidates(
   os: string = Deno.build.os,
 ): string[] {
   try {
+    const dir = dirname(execPath ?? Deno.execPath());
     return [
-      electronBinIn(join(dirname(execPath ?? Deno.execPath()), "electron"), os),
+      // A macOS bundle's own link to that runtime FIRST: the window must be
+      // started through it to be the app the user installed (see
+      // MAC_WINDOW_LINK). A bundle assembled before the link existed has
+      // none, and falls through to the nested path it always used.
+      ...(os === "darwin" ? [join(dir, MAC_WINDOW_LINK)] : []),
+      electronBinIn(join(dir, "electron"), os),
     ];
   } catch {
     return [];
+  }
+}
+
+/** What is at the macOS bundle's window link.
+ *
+ *  `usable`: the link with its target in place, or an executable file.
+ *  `flattened`: a plain file that cannot be executed — what an archive tool
+ *  that does not keep symbolic links leaves (the target's path, as text).
+ *  `absent`: nothing there (a bundle assembled before the link existed), or a
+ *  link whose target is gone — the runtime itself is missing, and the nested
+ *  candidate says so by not being there either. */
+export async function macWindowLinkState(
+  path: string,
+): Promise<"absent" | "usable" | "flattened"> {
+  try {
+    const at = await Deno.lstat(path);
+    const s = at.isSymlink ? await Deno.stat(path) : at; // dangling: throws
+    if (!s.isFile) return "absent";
+    if (at.isSymlink || ((s.mode ?? 0o111) & 0o111) !== 0) return "usable";
+    return "flattened";
+  } catch {
+    return "absent"; // aio-ok: the answer IS the result — nothing to start here
   }
 }
 
@@ -65,6 +103,8 @@ export type FindElectronOpts = {
   /** The executable to resolve the shipped-runtime candidate against.
    *  Injected in tests; defaults to `Deno.execPath()`. */
   execPath?: string;
+  /** The OS whose package layout is looked for (tests); the host's. */
+  os?: string;
   /** The fetch-into-cache step (`ensureElectronRuntime`). */
   fetchRuntime?: (
     version: string,
@@ -102,6 +142,7 @@ export async function findElectronBin(
   // the HOST's Electron, from a mount that vanishes when the host exits.
   const appDir = Deno.env.get("APPDIR");
   if (
+    // aio-ok: path-split — APPDIR is an AppImage mount — Linux only
     envPath && appDir && envPath.startsWith(appDir + "/") &&
     appImageOwner(
         opts.execPath ?? Deno.execPath(),
@@ -125,7 +166,29 @@ export async function findElectronBin(
   }
 
   // 2. The runtime this package SHIPS, beside the executable.
-  for (const cand of packagedElectronCandidates(opts.execPath)) {
+  const os = opts.os ?? Deno.build.os;
+  for (const cand of packagedElectronCandidates(opts.execPath, os)) {
+    // The macOS bundle's link is taken only when it can be STARTED. An
+    // archive tool that does not keep symbolic links writes it as a small
+    // text file holding the target: a file, so it used to be taken, the
+    // spawn failed with PermissionDenied and the app ran on with no window.
+    // The runtime it pointed at is still there — one candidate further.
+    if (os === "darwin" && basename(cand) === MAC_WINDOW_LINK) {
+      const link = await macWindowLinkState(cand);
+      if (link === "usable") return cand;
+      if (link === "flattened") {
+        log.error(
+          `electron: ${cand} is not the link this app was built with — the ` +
+            `bundle was unpacked by a tool that does not keep symbolic ` +
+            `links. Starting the window from the runtime inside the bundle ` +
+            `instead: the app works, but macOS will not see a re-opened app ` +
+            `as this one (quitting it by its id can then fail). Unpack the ` +
+            `download again with Archive Utility, \`ditto\` or \`unzip\` ` +
+            `to repair it.`,
+        );
+      }
+      continue;
+    }
     try {
       if ((await Deno.stat(cand)).isFile) return cand;
     } catch { /* not this layout */ }
@@ -151,6 +214,7 @@ export async function findElectronBin(
   // A compiled binary never takes it: started from inside a dev tree it used
   // to run THAT tree's Electron instead of the one it was built with (review
   // pass, 2026-09-18). node_modules is a dev-time thing.
+  const noInstall = compiled ? null : await installRefusal();
   if (!compiled && await electronBinReady(electronBin)) {
     // aio decides the Electron, not whatever node_modules happens to hold: the
     // build ships DEFAULT_ELECTRON_VERSION (the one this aio is tested with),
@@ -160,20 +224,28 @@ export async function findElectronBin(
     // Moved once, loudly; offline, the old runtime still runs (said so).
     const have = await installedRuntimeVersion();
     if (have === null || have === DEFAULT_ELECTRON_VERSION) return electronBin;
+    if (noInstall === null) {
+      log.error(
+        `electron: node_modules has Electron ${have}; this aio is tested ` +
+          `with ${DEFAULT_ELECTRON_VERSION} (the one a build ships) — ` +
+          `installing it`,
+      );
+      if (
+        await denoInstall(log) &&
+        await installedRuntimeVersion() === DEFAULT_ELECTRON_VERSION
+      ) return electronBin;
+      log.error(
+        `electron: could not install ${DEFAULT_ELECTRON_VERSION} — running ` +
+          `${have} for now. \`am fix\` retries; a build ships ` +
+          `${DEFAULT_ELECTRON_VERSION} regardless.`,
+      );
+      return electronBin;
+    }
+    // Nowhere to install the tested one: it comes from the cache (below).
     log.error(
       `electron: node_modules has Electron ${have}; this aio is tested with ` +
-        `${DEFAULT_ELECTRON_VERSION} (the one a build ships) — installing it`,
+        `${DEFAULT_ELECTRON_VERSION} (the one a build ships)`,
     );
-    if (
-      await denoInstall(log) &&
-      await installedRuntimeVersion() === DEFAULT_ELECTRON_VERSION
-    ) return electronBin;
-    log.error(
-      `electron: could not install ${DEFAULT_ELECTRON_VERSION} — running ` +
-        `${have} for now. \`am fix\` retries; a build ships ` +
-        `${DEFAULT_ELECTRON_VERSION} regardless.`,
-    );
-    return electronBin;
   }
 
   const fetchRuntime = opts.fetchRuntime ??
@@ -186,8 +258,22 @@ export async function findElectronBin(
   //    `--allow-scripts=npm:electron` runs the postinstall that downloads the
   //    real binary. Loud progress. Skipped in a compiled binary: there is no
   //    deno to run and no project to install into.
-  if (!compiled && await denoInstall(log)) {
-    if (await electronBinReady(electronBin)) return electronBin;
+  //    Skipped, too, when the current directory is not a project: `deno
+  //    install` CREATES a `deno.json` (and a lock) wherever it runs, so an
+  //    app started from somewhere else — a login item starts in the home
+  //    directory — left a config there on every launch, installed nothing it
+  //    could find afterwards, and turned that directory into "a project" for
+  //    every tool that looks upward for one.
+  //    And never into the framework's own checkout — `installRefusal`.
+  if (!compiled) {
+    if (noInstall !== null) {
+      log.info(
+        `electron: ${Deno.cwd()} ${noInstall} — not installing into it; ` +
+          `using the cached runtime`,
+      );
+    } else if (await denoInstall(log)) {
+      if (await electronBinReady(electronBin)) return electronBin;
+    }
   }
   // Stopping: no 100 MB fetch for a window nobody will see.
   if (opts.signal?.aborted) return null;
@@ -390,6 +476,70 @@ async function readDenoConfigTexts(root: string): Promise<Map<string, string>> {
     if (text !== null) out.set(name, text);
   }
   return out;
+}
+
+/** The framework's own package name — what its `deno.json` is called. */
+const FRAMEWORK_PACKAGE = "@riagentic/aio";
+
+/** {@linkcode installRefusal}'s answer for the framework's own checkout. */
+export const FRAMEWORK_CHECKOUT =
+  "is the aio framework's own checkout (an install would edit its " +
+  "deno.json and deno.lock)";
+
+/** The directory THIS copy of the framework lives in, when it is on disk
+ *  (a checkout, or an app's `dep/aio`); null when it was loaded over the
+ *  network. `src/electron/` is two levels below it. */
+function frameworkRoot(): string | null {
+  try {
+    return fromFileUrl(new URL("../../", import.meta.url));
+  } catch {
+    return null; // aio-ok: not a file: URL — there is no checkout to protect
+  }
+}
+
+/** Why `deno install` must NOT run in `root` — the words the log line
+ *  carries — or null when it may. ONE decider for "is this a place to install
+ *  Electron into":
+ *
+ *  - not a project: no deno config and no `package.json`. `deno install`
+ *    would CREATE them there.
+ *  - the framework's own checkout: an install EDITS its tracked `deno.json`
+ *    (an `electron` import) and `deno.lock` — a clean clone was dirty after
+ *    one `deno task amui`, which is what `am upgrade` refuses to run over.
+ *    Known by identity, not by guess: `root` IS the directory this module was
+ *    loaded from, or its config carries the framework's package name (one
+ *    checkout run from inside another). An app that vendors the framework
+ *    under `dep/aio` is neither — its cwd is the app — and installs as before.
+ */
+export async function installRefusal(
+  root = ".",
+  own: string | null = frameworkRoot(),
+): Promise<string | null> {
+  if (own !== null) {
+    try {
+      if (await Deno.realPath(root) === await Deno.realPath(own)) {
+        return FRAMEWORK_CHECKOUT;
+      }
+    } catch { /* aio-ok: a root that cannot be resolved is not the checkout */ }
+  }
+  let project = false;
+  for (const name of [...DENO_JSON_NAMES, "package.json"]) {
+    let text: string;
+    try {
+      text = await Deno.readTextFile(join(root, name));
+    } catch {
+      continue; // aio-ok: absent is the answer being asked for
+    }
+    project = true;
+    try {
+      if (parseDenoJson(text, name).name === FRAMEWORK_PACKAGE) {
+        return FRAMEWORK_CHECKOUT;
+      }
+    } catch {
+      /* aio-ok: unreadable is still a project — the install says so */
+    }
+  }
+  return project ? null : "is not a project (no deno.json or package.json)";
 }
 
 /** `imports.electron` as a config TEXT spells it, or null. Pure; tolerant —
@@ -795,14 +945,25 @@ export function electronShimRoot(bin: string): string | null {
  *  its neighbours (the sandbox helper, below) has to look there, not beside
  *  the shim. A real binary, or a shim whose package names no binary, is
  *  returned as given. */
-export async function realElectronBin(bin: string): Promise<string> {
+export async function realElectronBin(
+  bin: string,
+  overrideDist = Deno.env.get("ELECTRON_OVERRIDE_DIST_PATH"),
+): Promise<string> {
   const root = electronShimRoot(bin);
   if (root === null) return bin;
   for (const pkg of await electronPkgDirs(root)) {
     try {
-      const rel = (await Deno.readTextFile(`${pkg}/path.txt`)).trim();
-      const real = `${pkg}/dist/${rel}`;
-      if ((await Deno.stat(real)).isFile) return real;
+      // path.txt names the binary inside dist/; a package without one names
+      // none.
+      const named = (await Deno.readTextFile(`${pkg}/path.txt`)
+        .catch(() => "")).trim();
+      // The shim's own rule (electron/index.js): `$ELECTRON_OVERRIDE_DIST_PATH`
+      // replaces the package's dist/ and keeps path.txt's file name —
+      // `electron` when there is no path.txt, the layout an override is for.
+      const real = overrideDist
+        ? join(overrideDist, named || "electron")
+        : named && `${pkg}/dist/${named}`;
+      if (real && (await Deno.stat(real)).isFile) return real;
     } catch { /* not this layout — try the next */ }
   }
   return bin;
@@ -810,6 +971,7 @@ export async function realElectronBin(bin: string): Promise<string> {
 
 /** Chromium's SUID helper lives beside the REAL binary. Pure. */
 export function chromeSandboxPath(realBin: string): string {
+  // aio-ok: path-split — chrome-sandbox exists on Linux only
   return realBin.replace(/\/[^/]+$/, "/chrome-sandbox");
 }
 
@@ -1230,20 +1392,144 @@ export async function sandboxSwitches(
   };
 }
 
-/** Writes script to temp file, spawns Electron, cleans up after exit or process unload */
+/** The first line of every main script this module writes: the script
+ *  removes its own file as soon as Electron has loaded it.
+ *
+ *  The file is needed for the instant between its write and that load, and
+ *  it used to stay for the whole run, removed by THIS process when the window
+ *  exited — so a run that was SIGKILLed (the OOM killer, a crash, a forced
+ *  stop) left ~120 KB in the temp directory for good, one more per crash,
+ *  each holding the app's launch URL. Nothing can sweep them safely from
+ *  outside: the names are random, in a directory shared with everything else
+ *  on the machine. Removed from the inside there is nothing left to sweep —
+ *  and no file of another app or another running instance is ever looked at.
+ *  The removals below (window exit, unload) stay for a window that never got
+ *  as far as running its script. */
+export const MAIN_SCRIPT_SELF_REMOVE =
+  "try { require('fs').unlinkSync(__filename); } catch {}\n";
+
+/** The working directory of an installed app's window: `neutral`
+ *  (`neutralCwd()`), and the inherited one for a run from source.
+ *
+ *  Windows cannot move a folder that is some process's working directory, and
+ *  an installed app's is its install folder. The window inherited it — and so
+ *  did every program the window opened (a browser for an external link, the
+ *  viewer of a file): one of those left open made the next update fail with
+ *  "the running version could not be moved aside". The main script never
+ *  reads its own working directory; it is told the app's (AIO_APP_CWD).
+ *  A source run keeps its directory: nothing is installed there to move.
+ *  Pure. */
+export function packagedCwd(
+  neutral: string | undefined,
+  compiled: boolean = isCompiled(),
+): string | undefined {
+  return compiled ? neutral : undefined;
+}
+
+/** Electron's `userData` directory for a window whose `app.name` is
+ *  `profile` — where the window keeps its own files (`aio-preload/`, the
+ *  window state) — or null where the platform's base directory is not known
+ *  from the environment. Mirrors Electron's rule: `$XDG_CONFIG_HOME` or
+ *  `~/.config` on Linux, `~/Library/Application Support` on macOS, `%APPDATA%`
+ *  on Windows. Pure. */
+export function electronProfileDir(
+  profile: string,
+  os: string = Deno.build.os,
+  env: (k: string) => string | undefined = (k) => Deno.env.get(k),
+): string | null {
+  const base = os === "windows"
+    ? env("APPDATA")
+    : os === "darwin"
+    ? env("HOME") && join(env("HOME")!, "Library", "Application Support")
+    : env("XDG_CONFIG_HOME") || (env("HOME") && join(env("HOME")!, ".config"));
+  return base ? join(base, profile) : null;
+}
+
+/** The directory, inside the window's profile, its main script is written to. */
+export const MAIN_SCRIPT_DIR = "aio-main";
+
+/** Write the generated main script where Electron will load it from, and
+ *  answer its path.
+ *
+ *  The script removes its own file as soon as it is loaded
+ *  ({@linkcode MAIN_SCRIPT_SELF_REMOVE}) and the launcher removes it when the
+ *  window exits — but a run whose server AND window are both SIGKILLed before
+ *  Electron has loaded it leaves the file (measured: 2 in 60 random kills),
+ *  and it carries the launch URL. In the temp directory under a random name
+ *  nothing ever came back for it. So it lives in the window's own profile, in
+ *  `aio-main/` (0700), as `<pid>-<random>.cjs` (0600) — the pid is the
+ *  launcher's — and every launch first removes the files there whose process
+ *  is gone: the same home and the same rule as the preload.
+ *
+ *  Where the profile directory is not known or cannot be written (no HOME /
+ *  APPDATA, a read-only home), the temp directory is used as before, and that
+ *  is said: there the residual stands. */
+export async function writeMainScript(
+  profile: string | undefined,
+  text: string,
+): Promise<string> {
+  const dir = profile ? electronProfileDir(profile) : null;
+  // Twice: another launch on this profile may prune the directory (below)
+  // between this one's mkdir and its write.
+  for (let attempt = 0; dir !== null && attempt < 2; attempt++) {
+    try {
+      const home = join(dir, MAIN_SCRIPT_DIR);
+      await Deno.mkdir(home, { recursive: true, mode: 0o700 });
+      for await (const e of Deno.readDir(home)) {
+        const pid = Number(e.name.split("-")[0]);
+        if (Number.isInteger(pid) && pid > 0 && isProcessAlive(pid)) continue;
+        await Deno.remove(join(home, e.name), { recursive: true });
+      }
+      const file = join(
+        home,
+        `${Deno.pid}-${crypto.randomUUID().slice(0, 8)}.cjs`,
+      );
+      await Deno.writeTextFile(file, text, { mode: 0o600, createNew: true });
+      return file;
+    } catch (e) {
+      if (attempt === 0 && e instanceof Deno.errors.NotFound) continue;
+      log.warn(
+        "electron",
+        `the window's main script could not be written into the app's ` +
+          `profile (${dir}) — ${e}. Using the temp directory instead; a run ` +
+          `killed before Electron has loaded it leaves that file behind.`,
+      );
+      break;
+    }
+  }
+  const tmpFile = await Deno.makeTempFile({ suffix: ".cjs" });
+  await Deno.writeTextFile(tmpFile, text);
+  return tmpFile;
+}
+
+/** Writes the main script, spawns Electron, cleans up after exit or process unload */
 async function spawnElectron(
-  bin: string,
+  launcher: string,
   script: string,
   extraArgs: string[] = [],
-  opts: { requireSandbox?: boolean } = {},
+  opts: {
+    requireSandbox?: boolean;
+    /** The window's `app.name` — where its main script is written. */
+    profile?: string;
+  } = {},
 ): Promise<Deno.ChildProcess> {
+  // Spawn ELECTRON, not the thing that spawns it. `node_modules/.bin/electron`
+  // is npm's shim — a `node` process whose CHILD is the window — so the pid
+  // this returns was the shim's: a signal sent to it went to node, and the
+  // production local-peer gate, armed with it, refused the app's own window
+  // forever (a blank window on every `--prod` run from source). The shim adds
+  // nothing aio needs; the binary it would start is started directly. A real
+  // binary ($ELECTRON_PATH, a packaged or fetched runtime) is returned as is.
+  const bin = await realElectronBin(launcher);
   // DECIDED BEFORE the temp file exists: a refusal must not leave the script
   // it would have run behind in /tmp.
   const sandbox = await sandboxSwitches(bin, !!opts.requireSandbox);
   if (sandbox.warn) log.warn(sandbox.warn);
   const sandboxArgs = sandbox.args;
-  const tmpFile = await Deno.makeTempFile({ suffix: ".cjs" });
-  await Deno.writeTextFile(tmpFile, script);
+  const tmpFile = await writeMainScript(
+    opts.profile,
+    MAIN_SCRIPT_SELF_REMOVE + script,
+  );
   // The caller's switches go LAST: Chromium takes the last occurrence of a
   // repeated switch, so an operator who has to override one of aio's own can.
   const envArgs = electronArgsFromEnv(Deno.env.get("AIO_ELECTRON_ARGS"));
@@ -1280,14 +1566,15 @@ async function spawnElectron(
       args: [tmpFile, ...sandboxArgs, ...extraArgs, ...envArgs.args],
       // The window dies with this process — see tmplParentWatch. Merged into
       // the inherited environment, so the shim passes it through to Electron.
-      env: childEnv.env,
+      // AIO_APP_CWD: the app's working directory, for the main script — the
+      // window's own may be another one (`packagedCwd`).
+      env: { ...childEnv.env, AIO_APP_CWD: Deno.cwd() },
+      cwd: packagedCwd(neutralCwd()),
       ...(stdio === "inherit"
         ? { stdout: "inherit" as const }
         : { stdin: "null" as const, stdout: "null" as const }),
       stderr: "piped",
     });
-  const proc = spawnInheritingOrNull(command);
-  forwardStderr(proc);
   // SYNC on purpose: an `unload` listener cannot await, so an async remove
   // there never finished — the file outlived the process it belonged to.
   const cleanup = () => {
@@ -1296,11 +1583,35 @@ async function spawnElectron(
     } catch {
       // aio-ok: the other path (exit / unload) already removed it
     }
+    // …and the directories made for it, when nothing else is in them: a
+    // window that never ran (no Electron, a stub in a test) must not leave an
+    // empty profile behind. A real profile is not empty and stays.
+    if (basename(dirname(tmpFile)) === MAIN_SCRIPT_DIR) {
+      for (const d of [dirname(tmpFile), dirname(dirname(tmpFile))]) {
+        try {
+          Deno.removeSync(d);
+        } catch {
+          break; // aio-ok: not empty (in use) or already gone — both fine
+        }
+      }
+    }
   };
+  // Backup cleanup: covers SIGKILL / host process crash where proc.status
+  // never resolves. Registered BEFORE the spawn: a spawn that throws (a
+  // binary that cannot be executed) must not leave the script — the launch
+  // URL is in it — behind.
+  addEventListener("unload", cleanup);
+  let proc: Deno.ChildProcess;
+  try {
+    proc = spawnInheritingOrNull(command);
+  } catch (e) {
+    cleanup();
+    removeEventListener("unload", cleanup);
+    throw e;
+  }
+  forwardStderr(proc);
   // Primary cleanup: after Electron exits normally
   proc.status.then(cleanup);
-  // Backup cleanup: covers SIGKILL / host process crash where proc.status never resolves
-  addEventListener("unload", cleanup);
   proc.status.then(() => removeEventListener("unload", cleanup));
   return proc;
 }
@@ -1313,6 +1624,26 @@ async function spawnElectron(
  *  `--remote-debugging-port` to 127.0.0.1 only. */
 export function cdpSwitches(port: number | undefined): string[] {
   return port ? [`--remote-debugging-port=${port}`] : [];
+}
+
+/** WHICH rung of {@linkcode findElectronBin} the binary came from — what the
+ *  "launching Electron (…)" line names.
+ *
+ *  Decided from what was actually consulted, never from how the path looks.
+ *  It used to be read off the path — "has `dist` in it" meant packaged, and
+ *  whatever matched nothing was called `$ELECTRON_PATH` — so a macOS bundle
+ *  and a double-clicked Windows exe, which set no such variable and run the
+ *  runtime they ship, logged `$ELECTRON_PATH`; and any runtime under a
+ *  directory that happened to be called `dist` logged "packaged". Pure. */
+export function electronSource(
+  bin: string,
+  envPath: string | undefined,
+  packaged: readonly string[],
+): "$ELECTRON_PATH" | "packaged" | "dev" | "cache" {
+  if (envPath && bin === envPath) return "$ELECTRON_PATH";
+  if (packaged.includes(bin)) return "packaged";
+  if (electronShimRoot(bin) !== null) return "dev";
+  return "cache";
 }
 
 /** Spawns Electron with the main app script */
@@ -1362,15 +1693,16 @@ export async function launchElectron(
   // The cache holds both a downloaded runtime and one unpacked from the exe
   // itself (under a `-fused` name); whether this binary CARRIES one is the
   // decider, not the path.
-  const mode = bin.includes("node_modules")
-    ? "dev"
-    : bin.includes(join("aio", "tools", "electron"))
-    ? (await bakedEmbeddedRuntime(distDir).catch(() => null)
-      ? "runtime carried by this app"
-      : "fetched runtime")
-    : bin.includes("dist")
-    ? "packaged"
-    : "$ELECTRON_PATH";
+  const source = electronSource(
+    bin,
+    Deno.env.get("ELECTRON_PATH"),
+    packagedElectronCandidates(),
+  );
+  const mode = source !== "cache"
+    ? source
+    : await bakedEmbeddedRuntime(distDir).catch(() => null)
+    ? "runtime carried by this app"
+    : "fetched runtime";
   const transport = uds ? "UDS" : "WS";
   log.info(
     `launching Electron (${mode}, ${transport}${
@@ -1403,6 +1735,7 @@ export async function launchElectron(
   // said it, and this is where the app's window is actually launched.
   return spawnElectron(bin, script, cdpSwitches(cdpPort), {
     requireSandbox: meta?.requireSandbox,
+    profile: shellProfileName(meta, uds?.title),
   });
 }
 
@@ -1417,5 +1750,7 @@ export async function launchElectronClient(
   // argv carries the URL as given (it is the user's own input, and the client
   // needs it); the LOG line does not carry its token.
   log.info(`launching aio client${url ? ` → ${redactUrlToken(url)}` : ""}`);
-  return spawnElectron(bin, electronClientScript(), args);
+  return spawnElectron(bin, electronClientScript(), args, {
+    profile: CLIENT_PROFILE,
+  });
 }

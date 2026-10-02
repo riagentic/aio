@@ -3,6 +3,7 @@
 import type { LogEntry } from "./logger-types.ts";
 import { now } from "./logger-types.ts";
 import { printConsole } from "./logger-format.ts";
+import { overLimit } from "./fmt.ts";
 
 type WriteFn = (path: string, entry: LogEntry) => void;
 type PathFn = (kind: "app" | "debug" | "error" | "warning" | "perf") => string;
@@ -24,22 +25,25 @@ export function logPerf(
   pathFn: PathFn,
   consoleEnabled: boolean,
 ): void {
+  // Never "5ms > 5ms": the caller compared the exact value, so the printed
+  // one keeps enough digits to be over the budget too.
+  const took = overLimit(duration, budget);
   const entry: LogEntry = {
     ts: now(),
     lvl: "perf",
     cat: `perf:${source}`,
     msg: breakdown
-      ? `${type} exceeded budget: ${
-        Math.round(duration)
-      }ms > ${budget}ms (produce=${Math.round(breakdown.produce)}ms clone=${
-        Math.round(breakdown.clone)
-      }ms spread=${Math.round(breakdown.spread)}ms routing=${
-        Math.round(breakdown.routing)
-      }ms listeners=${Math.round(breakdown.listeners)}ms)`
-      : `${type} exceeded budget: ${Math.round(duration)}ms > ${budget}ms`,
+      ? `${type} exceeded budget: ${took}ms > ${budget}ms (produce=${
+        Math.round(breakdown.produce)
+      }ms clone=${Math.round(breakdown.clone)}ms spread=${
+        Math.round(breakdown.spread)
+      }ms routing=${Math.round(breakdown.routing)}ms listeners=${
+        Math.round(breakdown.listeners)
+      }ms)`
+      : `${type} exceeded budget: ${took}ms > ${budget}ms`,
     data: {
       type,
-      duration: Math.round(duration),
+      duration: Number(took),
       budget,
       ...(breakdown ? { breakdown } : {}),
     },

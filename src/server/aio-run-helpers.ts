@@ -21,12 +21,19 @@ import {
   claimHome,
   instances,
   isHold,
+  isLockOwnerAlive,
   isOwnLock,
+  isProcessAlive,
+  type LockData,
   lockDir,
   type LockMeta,
+  lockPath,
   printable,
+  readLock,
   showRequestPath,
+  STARTUP_GRACE_MS,
 } from "./single-instance-lock.ts";
+import { isPipePath } from "./local-listen.ts";
 import { resolve } from "@std/path";
 import { appDirs, homeOwnerError, homeRequested } from "./app-dirs.ts";
 import { runtimeCount } from "./shutdown.ts";
@@ -366,6 +373,7 @@ export function buildOnPerf<S>(
       // "cell:method" / "cell/ACTION" → cell. An action with no separator is
       // its own bucket rather than being dropped.
       const at = timing.actionType ?? "";
+      // aio-ok: path-split — an action type ("cell/ACTION"), not a path
       const cut = at.indexOf(":") >= 0 ? at.indexOf(":") : at.indexOf("/");
       costMeter.recordReduce(cut > 0 ? at.slice(0, cut) : at, timing.reduce);
     }
@@ -526,6 +534,17 @@ export function createUdsBroadcastController(refs: {
  *  caller asked for a different home, and the other instance's coordinates
  *  are not its business (a field report, §2.1 — a harness killed the
  *  user's wallet with the pid the old refusal had just printed). */
+/** How a URL names a bound address: `localhost` for loopback and wildcard
+ *  binds (and when none is recorded), else the address — bracketed for
+ *  IPv6. Pure. */
+function urlHost(host: string | undefined): string {
+  const h = (host ?? "").replace(/^\[|\]$/g, "");
+  if (!h || ["127.0.0.1", "::1", "0.0.0.0", "::"].includes(h)) {
+    return "localhost";
+  }
+  return h.includes(":") ? `[${h}]` : h;
+}
+
 /** The refusal when the single-instance lock is already held.
  *
  *  It used to state the fact and stop — true, and a dead end for the person
@@ -546,6 +565,14 @@ export function _alreadyRunningMessage(o: {
   /** The `am` op holding the lock (`LockData.maintenance`), when it is one:
    *  then there is no app to stop — only an operation to wait for. */
   maintenanceOp?: string;
+  /** The holder's `LockData.status`. While it is "starting" the lock's port
+   *  is the CONFIGURED one — nothing listens there yet, and for a desktop app
+   *  on its local socket nothing ever will — so no URL is printed. */
+  status?: LockData["status"];
+  /** The holder was starting and its process is gone by now. */
+  gone?: boolean;
+  /** The address its port is bound on (`LockData.host`), when recorded. */
+  host?: string;
 }): string {
   if (o.maintenanceOp !== undefined) {
     return `[AIO] ${o.maintenanceOp} is running on ${o.appId}${
@@ -554,8 +581,25 @@ export function _alreadyRunningMessage(o: {
       `so the app cannot start while its data is copied or swapped` +
       `${o.takeover ? "; --takeover does not interrupt it" : ""}.`;
   }
-  const where = o.port > 0 ? ` at http://localhost:${o.port}` : "";
-  const who = o.pid > 0 ? ` (pid ${o.pid})` : "";
+  if (o.gone) {
+    return `[AIO] ${o.appId} was starting${
+      o.pid > 0 ? ` (pid ${o.pid})` : ""
+    } and exited before it was up — start it again.`;
+  }
+  // No pid: the lock file could not be READ (another program holds it open)
+  // — nothing says a live app is there, so never "Already running".
+  if (!(o.pid > 0) && !o.takeover) {
+    return `[AIO] ${o.appId} did not start: another start of it holds its ` +
+      `data folder (${o.otherHome ?? o.home}), and its lock file cannot be ` +
+      `read yet — another program has it open. Try again in a moment.`;
+  }
+  const starting = o.status === "starting";
+  const where = o.port > 0 && !starting
+    ? ` at http://${urlHost(o.host)}:${o.port}`
+    : "";
+  const who = o.pid > 0
+    ? ` (pid ${o.pid}${starting ? ", still starting" : ""})`
+    : "";
   // The home of the instance that HOLDS the lock, which is the one the reader
   // has to go and find. It used to print the caller's own, on the belief that
   // a cross-home refusal cannot happen; it can — `lockDir()` scopes on
@@ -600,17 +644,120 @@ export function _alreadyRunningMessage(o: {
     `one database. Rename this one: \`aio.run({ appId: "…" })\`.`;
 }
 
+/** One look of a running app's slow tick ({@linkcode LOCK_REFILE_MS}): its
+ *  lock file still names it — filed again if not ({@linkcode AppLock.reassert})
+ *  — and the socket file its record names is still there.
+ *
+ *  A socket FILE removed under a running app (a cleaner sweeping the runtime
+ *  directory the lock lives in) leaves the listener open and unreachable:
+ *  what is connected stays connected, nothing new can connect, and a second
+ *  launch finds no socket there six times over and ENDS this app as one
+ *  whose listener died. Binding the path again would mean the transport
+ *  listening anew and handing its accept loop over — not done here. It is
+ *  said, loudly, once per loss (`said.gone`: the path last warned about). */
+export function lockTick(appLock: AppLock, said: { gone?: string }): void {
+  try {
+    appLock.reassert();
+  } catch (e) {
+    log.debug("lock", `could not look at the lock file: ${e}`);
+  }
+  const mine = readLock(appLock.key);
+  const sock = mine && isOwnLock(mine) ? mine.socketPath : undefined;
+  let gone: string | undefined;
+  if (sock && !isPipePath(sock)) {
+    try {
+      if (!Deno.lstatSync(sock).isSocket) gone = sock;
+    } catch (e) {
+      if (e instanceof Deno.errors.NotFound) gone = sock;
+      else log.debug("lock", `could not look at ${printable(sock)}: ${e}`);
+    }
+  }
+  if (gone && said.gone !== gone) {
+    log.warn(
+      "lock",
+      `${printable(appLock.appId)}: its socket file ${printable(gone)} was ` +
+        `removed while the app ran — what is connected stays connected, but ` +
+        `nothing new can connect, and a second launch will take this app ` +
+        `for one whose listener died and END it. Restart the app to listen ` +
+        `there again, and keep cleaners out of ${printable(lockDir())}.`,
+    );
+  }
+  said.gone = gone;
+}
+
+/** How often a running app checks that its lock file still names it — the
+ *  bound within which `am` finds an app whose lock file was removed.
+ *  `value`: replaced by its test. */
+export const LOCK_REFILE_MS = { value: 5_000 };
+
+/** How long a running window gets to take a show request. */
+const SHOW_WAIT_MS = 3000;
+
+/** How long a second launch waits for the holder's window to take its show
+ *  request, or null when it does not ask at all. Pure.
+ *
+ *  Asked only when both are desktop windows, the holder is an app (not a
+ *  maintenance hold) and this launch is not a takeover. Every holder gets
+ *  {@linkcode SHOW_WAIT_MS}, and one inside its startup grace — STARTING, or
+ *  `started` (server up) with its window still loading; the loser of two
+ *  double-clicks meets exactly that — gets what is left of the grace on top:
+ *  its window takes a request made before it opened (once its page has
+ *  mounted), so the launch that lost ends as quietly as one that came a
+ *  minute later. A holder that
+ *  is stopping is not asked: its window is closing. */
+export function showWaitMs(o: {
+  mine: string | undefined;
+  theirs: Pick<LockData, "client" | "status" | "startedAt" | "maintenance">;
+  takeover: boolean;
+  now?: number;
+}): number | null {
+  if (o.mine !== "electron" || o.theirs.client !== "electron") return null;
+  if (o.takeover || isHold(o.theirs)) return null;
+  if (o.theirs.status !== "started" && o.theirs.status !== "starting") {
+    return null;
+  }
+  // `started` is the SERVER up, not the window: a desktop window answers
+  // only once its page has mounted (measured on Windows: 2–3 s after
+  // `started`), so a young `started` holder gets the rest of its grace too.
+  const age = (o.now ?? Date.now()) - o.theirs.startedAt;
+  // Clamped both ways: a `startedAt` from a skewed clock must not stretch it.
+  const left = Math.min(Math.max(STARTUP_GRACE_MS - age, 0), STARTUP_GRACE_MS);
+  return SHOW_WAIT_MS + left;
+}
+
+/** After a running instance's window took a show request: wait until the
+ *  record under `key` says that instance (`pid`) is `started` — "up" — or
+ *  the process is gone — "gone", and the asking launch starts in its place
+ *  — or `ms` pass while it is still starting — "starting", left to it. */
+export async function awaitUp(
+  key: string,
+  pid: number,
+  ms: number,
+): Promise<"up" | "gone" | "starting"> {
+  const until = Date.now() + ms;
+  for (;;) {
+    if (!isProcessAlive(pid)) return "gone";
+    const rec = readLock(key);
+    if (rec?.pid === pid && rec.status === "started") return "up";
+    if (Date.now() >= until) return "starting";
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
 /** Ask the running window to show itself: write the request, wait for the
  *  window to take it (it removes the file). True once it has; false — the
  *  request withdrawn — when nothing answered within `timeoutMs` (a window not
  *  up yet, an instance on an aio without the watch). */
 export async function askRunningToShow(
   path: string,
-  timeoutMs = 3000,
+  timeoutMs = SHOW_WAIT_MS,
+  /** Is the instance asked still there? A long wait (a holder that is still
+   *  starting) ends as soon as it is not. */
+  alive: () => boolean = () => true,
 ): Promise<boolean> {
   Deno.writeTextFileSync(path, String(Deno.pid), { mode: 0o600 });
   const until = Date.now() + timeoutMs;
-  while (Date.now() < until) {
+  while (Date.now() < until && alive()) {
     await new Promise((r) => setTimeout(r, 50));
     try {
       Deno.statSync(path);
@@ -639,36 +786,95 @@ export async function acquireSingletonLock(
 ): Promise<AppLock | null> {
   if (singletonMode === false) return null;
   const appLock = new AppLock(appId, home, meta.profile);
-  const result = await appLock.acquire(port, takeover, meta);
-  if (!result.ok) {
+  let result = await appLock.acquire(port, takeover, meta);
+  // At most two looks: a holder that was still STARTING is looked at again
+  // once the wait for its window has run out.
+  // A DEAD owner whose file cannot be removed (`held`) leaves the loop: it is
+  // not a running app, and is settled below, under the folder's own lock.
+  for (let look = 0; !result.ok && result.held === undefined; look++) {
     const ex = result.existing;
     // A desktop app launched again: the running one shows its window (from
     // the tray, a minimize, behind others) and this launch ends quietly —
     // exit 0, the convention every desktop has. Only when both are desktop
     // windows, the holder is up, and this process runs nothing else.
-    if (
-      meta.client === "electron" && ex.client === "electron" &&
-      ex.status === "started" && !isHold(ex) && !takeover &&
-      runtimeCount() === 0 &&
-      await askRunningToShow(showRequestPath(appLock.key))
-    ) {
+    const wait = runtimeCount() === 0
+      ? showWaitMs({ mine: meta.client, theirs: ex, takeover })
+      : null;
+    const starting = wait !== null && ex.status === "starting";
+    // Still starting on the second look: it was asked already — refuse.
+    const ask = wait !== null && !(starting && look > 0);
+    if (ask && starting) {
+      // Said BEFORE the wait: up to 13 s of nothing reads as a hang.
       log.info(
-        `${appId} is already running (pid ${ex.pid}) — brought its window ` +
-          `to the front`,
+        `${appId} is starting (pid ${ex.pid}) — waiting for its window…`,
+      );
+    }
+    const t0 = Date.now();
+    if (
+      ask &&
+      await askRunningToShow(
+        showRequestPath(appLock.key),
+        wait,
+        // The pid, not the full identity: this is asked every 50 ms, and on
+        // macOS identity costs a `ps` each time.
+        () => isProcessAlive(ex.pid),
+      )
+    ) {
+      // Its window took the request — but a holder still STARTING can die
+      // before it is up (measured on Windows: the request taken at +290 ms,
+      // the first killed at +760 ms, no app at all). Ended only once it is up;
+      // if it dies first, this launch starts instead.
+      const up = await awaitUp(
+        appLock.key,
+        ex.pid,
+        Math.max(wait! - (Date.now() - t0), 0),
+      );
+      if (up === "gone") {
+        result = await appLock.acquire(port, takeover, meta);
+        continue;
+      }
+      log.info(
+        up === "up"
+          ? `${appId} is already running (pid ${ex.pid}) — brought its ` +
+            `window to the front`
+          : `${appId} is still starting (pid ${ex.pid}) — its window took ` +
+            `the request; this launch ends`,
       );
       Deno.exit(0);
     }
-    const msg = _alreadyRunningMessage({
-      appId: ex.appId,
-      port: ex.port,
-      pid: ex.pid,
-      home: appLock.home,
-      otherHome: ex.home,
-      takeover,
-      maintenanceOp: isHold(ex)
-        ? (typeof ex.maintenance === "object" && ex.maintenance?.op) || "am"
-        : undefined,
-    });
+    if (ask && (starting || !isProcessAlive(ex.pid))) {
+      // The wait ran out, or the holder went away — `started` or not: its
+      // window never took the request, so there was no app to hand over to. What a launch made NOW
+      // would do is the answer: a holder that has died is reclaimed and this
+      // launch starts; one past its startup grace with nothing listening is
+      // reclaimed the same way; one that came up is asked for its window;
+      // anything else is refused below, as it would be for a fresh launch.
+      result = await appLock.acquire(port, takeover, meta);
+      continue;
+    }
+    const msg = result.unendable
+      // A zombie that would not end: not "already running" — nothing serves.
+      ? `${appId} did not start: pid ${ex.pid} holds its lock and its data ` +
+        `folder (${appLock.home}) but answers nothing, and could not be ` +
+        `ended. Two processes would write one database, so this one does ` +
+        `not start.\n  fix: end pid ${ex.pid} (\`kill -9 ${ex.pid}\`; on ` +
+        `Windows, Task Manager → End task) and start again.`
+      : _alreadyRunningMessage({
+        appId: ex.appId,
+        port: ex.port,
+        pid: ex.pid,
+        home: appLock.home,
+        otherHome: ex.home,
+        takeover,
+        status: ex.status,
+        host: ex.host,
+        // Was starting, and went away after the last look at it.
+        gone: wait !== null && ex.status === "starting" &&
+          !isLockOwnerAlive(ex),
+        maintenanceOp: isHold(ex)
+          ? (typeof ex.maintenance === "object" && ex.maintenance?.op) || "am"
+          : undefined,
+      });
     // Alone in the process: the refusal IS the exit, and a clean one-line
     // error beats a stack trace. With a sibling app already running (D2 —
     // an app plus its admin panel), `Deno.exit(1)` would take THAT app down
@@ -682,7 +888,8 @@ export async function acquireSingletonLock(
   // The lock dir is scoped by AIO_APPS_DIR; the DATA is not always (an app
   // that names its folder). The claim in the home itself is what makes one
   // home one process, whichever scope each was started in.
-  const claim = claimHome(appLock.home, { appId, port, key: appLock.key });
+  const who = { appId, port, key: appLock.key };
+  const claim = claimHome(appLock.home, who);
   // …and, holding it, who the folder belongs to: resolveAppDirs read
   // meta.json before the lock, and a racing first boot could stamp it since.
   const owner = claim.ok
@@ -697,25 +904,93 @@ export async function acquireSingletonLock(
     if (claim.ok) claim.close();
     appLock.release();
     const h = claim.ok ? undefined : claim.holder;
-    const msg = owner ?? (
-      `${appId} is already running from ${appLock.home}` +
-      (h?.pid
-        ? ` (pid ${h.pid}${h.lockDir ? `, its lock in ${h.lockDir}` : ""})`
-        : "") +
-      (h?.lockDir && h.lockDir !== lockDir()
-        ? ` — under a different AIO_APPS_DIR scope (--instance) than this ` +
-          `one, which cannot isolate an app whose folder is fixed ` +
-          `(aio.run({ appDir })).`
-        : ` — another process holds this data folder.`) +
-      ` Two processes would write one database, so this one does not ` +
-      `start.\n  fix: stop that instance, or give this one its own folder ` +
-      `(--profile=<name> or --home=<dir>).`
-    );
+    // The holder is THIS app, filed under this very lock — and the lock file
+    // did not name it (removed by a cleaner, or taken by a launch that judged
+    // it wrongly). The claim it holds is the truth: this is a second launch,
+    // and it ends like one.
+    const same = !owner && h?.pid !== undefined &&
+      h.lock === lockPath(appLock.key);
+    if (
+      same && meta.client === "electron" && !takeover &&
+      runtimeCount() === 0 &&
+      await askRunningToShow(
+        showRequestPath(appLock.key),
+        SHOW_WAIT_MS,
+        () => isProcessAlive(h!.pid!),
+      )
+    ) {
+      log.info(
+        `${appId} is already running (pid ${h!.pid}) — brought its window ` +
+          `to the front`,
+      );
+      Deno.exit(0);
+    }
+    const msg = owner ??
+      (same
+        ? `${appId} is already running (pid ${h!.pid}): it holds the data ` +
+          `folder ${appLock.home}, though the lock file ` +
+          `${lockPath(appLock.key)} did not name it — the file was removed ` +
+          `or replaced while the app ran, or still names a previous run ` +
+          `another program holds open. Two processes would write one ` +
+          `database, so this one does not start.\n  fix: stop that instance ` +
+          `(\`kill ${h!.pid}\`) and start it again.`
+        : (h?.appId && h.appId !== appId
+          // Another APP on this folder: name the one that holds it.
+          ? `${appId} did not start: ${printable(h.appId)} is running from ` +
+            `${appLock.home}`
+          : `${appId} is already running from ${appLock.home}`) +
+          (h?.pid
+            ? ` (pid ${h.pid}${h.lockDir ? `, its lock in ${h.lockDir}` : ""})`
+            : "") +
+          (h?.lockDir && h.lockDir !== lockDir()
+            ? ` — under a different AIO_APPS_DIR scope (--instance) than this ` +
+              `one, which cannot isolate an app whose folder is fixed ` +
+              `(aio.run({ appDir })).`
+            : ` — another process holds this data folder.`) +
+          ` Two processes would write one database, so this one does not ` +
+          `start.\n  fix: stop that instance, or give this one its own ` +
+          `folder (--profile=<name> or --home=<dir>).`);
     if (runtimeCount() > 0) throw new Error(printable(msg, true));
     log.error(printable(msg, true));
     Deno.exit(1);
   }
+  const held = result.ok ? null : result;
+  if (held) {
+    const was =
+      `the lock file ${
+        printable(lockPath(appLock.key))
+      } of its previous run (pid ${held.existing.pid}, no longer running) ` +
+      `cannot be replaced (${printable(held.held ?? "")})`;
+    if (!claim.guarded) {
+      claim.close();
+      appLock.release();
+      const msg = `${appId} did not start: ${was}, and this data folder ` +
+        `cannot be locked either — with neither, a second instance could ` +
+        `open the same database. Close the program that has that file ` +
+        `open, or start again in a moment.`;
+      if (runtimeCount() > 0) throw new Error(msg);
+      log.error(msg);
+      Deno.exit(1);
+    }
+    appLock.adoptUnfiled();
+    log.warn(
+      "lock",
+      `${appId}: ${was} — another program has it open. Starting without ` +
+        `it: this app holds its data folder's own lock, which keeps a ` +
+        `second instance out, and files its lock record as soon as that ` +
+        `file can be replaced.`,
+    );
+  }
   appLock.attach(claim.close);
+  // The owner keeps its record filed (see `AppLock.reassert`). Its own slow
+  // tick: the vitals tick is optional, and this must hold without it.
+  const said: { gone?: string } = {};
+  const refile = setInterval(
+    () => lockTick(appLock, said),
+    LOCK_REFILE_MS.value,
+  );
+  Deno.unrefTimer(refile);
+  appLock.attach(() => clearInterval(refile));
   const foreign = instances(appId).filter((i) =>
     !isOwnLock(i) && resolve(i.home ?? "") !== appLock.home
   );

@@ -33,6 +33,7 @@ export const reseedProbe = cell("reseedProbe", {
 
 if (isCellWorker()) {
   await aio.run({
+    watch: false,
     appId: "worker-reseed-probe",
     cells: [reseedProbe],
     client: "server-only",

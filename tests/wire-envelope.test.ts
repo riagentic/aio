@@ -96,6 +96,7 @@ Deno.test("envelope: no v1 wire prefixes outside the one proto shim", async () =
     "__esModule", // CJS interop marker (esbuild plugin)
     "__effects", // internal draft-meta key
     "__versions", // the standalone store's per-cell version stamp (a key in its saved bytes)
+    "__tests__", // a directory name aio trims from a package, not a frame
   ];
   const shim = Object.values(WIRE) as string[]; // __proto: / __proto-err:
   const speaks = /["'](__[a-zA-Z:_-]+:?)["']/g;

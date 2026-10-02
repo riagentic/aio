@@ -1,7 +1,7 @@
 // `schedule.at` with an ISO date-time WITHOUT an offset (`"2026-01-01T09:00"`,
 // what `<input type="datetime-local">` yields) is read the way `new Date()`
 // reads it — in the MACHINE's zone. v1.0.11 armed it so and apps rely on it
-// (compat is absolute; reading it as UTC is parked in untracked/v2.md). What
+// (compat is absolute; reading it as UTC is parked as major-version material). What
 // changed: it is no longer SILENT — hosts in different zones fire the same
 // schedule at different instants, so the scheduler warns once per id, naming
 // the fix, identically in dev and prod.

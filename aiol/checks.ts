@@ -1301,6 +1301,10 @@ export const checkUI: Checker = (ctx) => {
       const tag = m[1] ?? m[3]!;
       const attrs = m[2] ?? m[4] ?? "";
       if (NAMED_ATTR.test(attrs)) continue;
+      // The text an element shows is blank on the scanned line too: the body
+      // is empty only if the RAW line says so.
+      const raw = (lines[i] ?? "").slice(m.index, m.index + m[0].length);
+      if (!EMPTY_INTERACTIVE.test(raw)) continue;
       // An `id` on an <input> can be paired with a <label htmlFor>, which this
       // cannot see. Treated as named — a false NEGATIVE is cheap here and a
       // false positive is not.
@@ -1490,10 +1494,17 @@ export const checkUI: Checker = (ctx) => {
       "hint",
       "ui",
       "App.tsx uses createRoot — remove it, aio handles mounting",
-      {
-        file: appTsx.relative,
-        safeFix: fix.fixRemoveCreateRootImport(appTsx.path),
-      },
+      fix.withoutCreateRootImport(appTsx.content) !== null
+        ? {
+          file: appTsx.relative,
+          safeFix: fix.fixRemoveCreateRootImport(appTsx.path),
+        }
+        : {
+          file: appTsx.relative,
+          manual: "the safe fix declines: remove the mounting code first — " +
+            "the import goes only when nothing in the file names what it " +
+            "binds",
+        },
     );
   }
 
@@ -1503,7 +1514,17 @@ export const checkUI: Checker = (ctx) => {
       "hint",
       "ui",
       'App.tsx imports React — not needed with jsx: "react-jsx" transform',
-      { file: appTsx.relative, safeFix: fix.fixRemoveImportReact(appTsx.path) },
+      fix.withoutReactImport(appTsx.content) !== null
+        ? {
+          file: appTsx.relative,
+          safeFix: fix.fixRemoveImportReact(appTsx.path),
+        }
+        : {
+          file: appTsx.relative,
+          manual: "the safe fix declines: `React` is still written elsewhere " +
+            "in this file (`React.Fragment`, a comment) — or the import is " +
+            'not a plain `import React from "react"` line',
+        },
     );
   }
 
@@ -1771,8 +1792,20 @@ export const checkUI: Checker = (ctx) => {
   }
 
   // useCell without loading state
+  let uiKinds: ReturnType<typeof fix.runKinds> | undefined;
   for (const file of tsxFiles) {
-    const useCellCalls = file.content.match(/useCell\(/g);
+    if (!file.content.includes("useCell")) continue;
+    // A CALL of aio's `useCell` — the question the removal rule asks, with
+    // the same answer: not the spelling in a comment, a string or shown
+    // text, and not the file's own.
+    uiKinds ??= fix.runKinds(ctx.projectDir, ctx.denoJson, [
+      ...ctx.tsFiles,
+      ...tsxFiles,
+    ]);
+    const kinds = uiKinds(file.path);
+    const whose = fix.whose(file.content, kinds);
+    const useCellCalls = fix.useCellCalls(file.relative, file.content, kinds)
+      .filter((m) => whose(m.index!, "useCell").who !== "maybe").length;
     if (
       useCellCalls && !file.content.includes("fallback") &&
       !file.content.includes("Loading") && !file.content.includes("Connecting")
@@ -2969,6 +3002,10 @@ export const checkImports: Checker = (ctx) => {
 
 export const checkUpgrade: Checker = (ctx) => {
   const { denoJson, tsFiles, tsxFiles, appEntry, report, pass } = ctx;
+  const kindsOf = fix.runKinds(ctx.projectDir, ctx.denoJson, [
+    ...ctx.tsFiles,
+    ...ctx.tsxFiles,
+  ]);
   let found = 0;
 
   // call({ timeout }) → call({ timeoutMs }) — the alias still works.
@@ -2980,9 +3017,35 @@ export const checkUpgrade: Checker = (ctx) => {
   // object means. `topLevelKeyOffsets` is the shared decider (scan.ts): the
   // rule and the fix ask the same question and cannot disagree.
   for (const file of [...tsFiles, ...tsxFiles]) {
-    const offsets = fix.callTimeoutSites(file.content);
-    if (offsets.length === 0) continue;
+    const kinds = kindsOf(file.path);
+    const { sites, fix: offsets, why, sure } = fix.callTimeoutScan(
+      file.content,
+      kinds,
+    );
+    if (sites.length === 0) continue;
     found++;
+    const lineOf = (at: number) => file.content.slice(0, at).split("\n").length;
+    // The file declares a `call` of its own (a parameter, a local), or
+    // imports it from its own module: this may be its own function's option.
+    // Named for a look, not rewritten.
+    if (why) {
+      report(
+        sure ? "error" : "hint",
+        "upgrade",
+        sure
+          ? `${file.relative}: \`call({ timeout })\` was REMOVED in alpha52 ` +
+            `— call() now throws on the old key; use \`timeoutMs\``
+          : `${file.relative}: \`call({ timeout })\` — if this is aio's ` +
+            `\`call\`, the key was REMOVED in alpha52 (call() throws on ` +
+            `it); use \`timeoutMs\``,
+        {
+          file: file.relative,
+          line: lineOf(sites.find((at) => !offsets.includes(at))!),
+          manual: why,
+        },
+      );
+    }
+    if (offsets.length === 0) continue;
     report(
       "error",
       "upgrade",
@@ -2990,9 +3053,9 @@ export const checkUpgrade: Checker = (ctx) => {
         `call() now throws on the old key; use \`timeoutMs\``,
       {
         file: file.relative,
-        line: file.content.slice(0, offsets[0]).split("\n").length,
+        line: lineOf(offsets[0]!),
         fix: "call({ timeoutMs: 5000 }, () => other.method())",
-        safeFix: fix.fixCallTimeoutMs(file.path),
+        safeFix: fix.fixCallTimeoutMs(file.path, kinds),
       },
     );
   }
@@ -3712,24 +3775,106 @@ export const checkWorkerPeerReads: Checker = (ctx) => {
   }
 };
 
+/** For a rule keyed on a NAME aio exports: of the uses it found, the one to
+ *  report, and how — the table at `fix.Owner`, which the fix follows too. A
+ *  use the fix will rewrite comes first (so one fixable use is never hidden
+ *  behind a declined one); the app's own are not findings. Null: nothing. */
+function aiosUse(
+  uses: readonly { at: number; use: fix.Use }[],
+): { at: number; severity: "error" | "hint"; manual?: string } | null {
+  const live = uses.filter((u) => u.use.who !== "other");
+  const hit = live.find((u) => fix.fixable(u.use)) ?? live[0];
+  // Proven aio's (or imported from aio and written ambiguously): an error.
+  // Nothing proves whose it is: a hint.
+  return hit
+    ? {
+      at: hit.at,
+      severity: hit.use.who === "maybe" || hit.use.who === "none"
+        ? "hint"
+        : "error",
+      manual: hit.use.why || undefined,
+    }
+    : null;
+}
+
+/** A removal's message for a finding `--safe-fix` will NOT rewrite: without
+ *  the "aiol --safe-fix does it" it ends on. What is left is the change to
+ *  make by hand; the `[manual]` line under it says why. */
+function byHand(message: string, manual: string | undefined): string {
+  return manual
+    ? message.replace(/\s*[—;,]\s*aiol --safe-fix (?:does|rewrites) it/, "")
+    : message;
+}
+
 // `useCell(...)`.state is a LIVE proxy — the stash-and-diff idiom compares
 // state against itself, silently (a field report). Deprecated at
 // the source; named here at lint time, before it runs.
 export const checkUseCell: Checker = (ctx) => {
   const { tsFiles, tsxFiles, report } = ctx;
+  const kindsOf = fix.runKinds(ctx.projectDir, ctx.denoJson, [
+    ...ctx.tsFiles,
+    ...ctx.tsxFiles,
+  ]);
   for (const file of [...tsFiles, ...tsxFiles]) {
+    const kinds = kindsOf(file.path);
     // Code only — a migration note that NAMES useCell( in a comment is the
     // opposite of a use of it, and it was warned about anyway. A DECLARATION
     // (`function useCell(` — the framework's own compat shim) is not a use.
-    const [m] = codeMatches(
-      file.content,
-      /(?<!function\s)\buseCell\s*\(/g,
+    // JSX TEXT is not code either: `<code>useCell(c).state.x</code>` is the
+    // app showing the old spelling, and the fix would have rewritten its copy.
+    // …and the app's own `useCell` (declared, another package's, a method of
+    // its own object) is not aio's.
+    const whose = fix.whose(file.content, kinds);
+    const m = aiosUse(
+      fix.useCellCalls(file.relative, file.content, kinds).map((m) => {
+        const use = whose(m.index!, m[0], "useCell");
+        // The fix rewrites the plain name only.
+        return {
+          at: m.index!,
+          use: m[0] !== "useCell" && fix.fixable(use)
+            ? {
+              ...use,
+              who: "shadowed" as const,
+              why: `the safe fix declines: aio's \`useCell\` is imported ` +
+                `here as \`${m[0]}\`, and the fix rewrites only the plain ` +
+                `name — make the change by hand`,
+            }
+            : use,
+        };
+      }),
     );
-    if (!m) continue;
-    const line = file.content.slice(0, m.index).split("\n").length;
+    if (!m) {
+      // No call, but the import is still there: the app's own type-check
+      // rejects it (aio exports no `useCell`), and nothing here said so.
+      const left = fix.useCellImport(file.content, kinds);
+      if (!left) continue;
+      const line = file.content.slice(0, left.at).split("\n").length;
+      if (isSuppressed(file.lines, line - 1)) continue;
+      report(
+        "hint",
+        "patterns",
+        `${file.relative}: imports useCell, which aio no longer ` +
+          `exports (alpha52) and nothing here calls: delete the import`,
+        left.fixable
+          ? {
+            file: file.relative,
+            line,
+            safeFix: fix.fixUseCellStateReads(file.path, kinds),
+          }
+          : {
+            file: file.relative,
+            line,
+            manual: "the safe fix declines: `useCell` is still written " +
+              "elsewhere in this file (a comment, a string, shown text), and " +
+              "an import is only removed when nothing names it",
+          },
+      );
+      continue;
+    }
+    const line = file.content.slice(0, m.at).split("\n").length;
     if (isSuppressed(file.lines, line - 1)) continue;
     report(
-      "error",
+      m.severity,
       "patterns",
       `${file.relative}:${line} — useCell() was REMOVED in alpha52 ` +
         `(deprecated since alpha41): use direct cell access (cell.field / ` +
@@ -3739,7 +3884,9 @@ export const checkUseCell: Checker = (ctx) => {
         file: file.relative,
         line,
         fix: "useCell(c).state.x → c.x (direct read, reactive)",
-        safeFix: fix.fixUseCellStateReads(file.path),
+        ...(m.manual
+          ? { manual: m.manual }
+          : { safeFix: fix.fixUseCellStateReads(file.path, kinds) }),
       },
     );
   }
@@ -3761,10 +3908,15 @@ export const checkUseCell: Checker = (ctx) => {
  *  • schedule.backoff/poll old arg order + poll `backoff` key → `factor` */
 export const checkAlpha52: Checker = (ctx) => {
   const { tsFiles, tsxFiles, report, pass } = ctx;
+  const kindsOf = fix.runKinds(ctx.projectDir, ctx.denoJson, [
+    ...ctx.tsFiles,
+    ...ctx.tsxFiles,
+  ]);
   let found = 0;
   const files = [...tsFiles, ...tsxFiles];
 
   for (const file of files) {
+    const kinds = kindsOf(file.path);
     const code = codeText(file.content);
     const lineOf = (idx: number) => code.slice(0, idx).split("\n").length;
 
@@ -3775,46 +3927,64 @@ export const checkAlpha52: Checker = (ctx) => {
     // code: each is a deliberate decline, and each used to render `[fixable]`
     // and survive every run, which is indistinguishable from a broken tool.
     // One planner, so the label and the behaviour cannot drift apart.
-    const effectSiteOpts = (at: number, line: number) => {
-      const declined = fix.returnEffectDecline(file.content, at);
+    const effectSiteOpts = (at: number, line: number, through = "") => {
+      // `return aio.schedule.after(…)` is aio's effect all the same; the fix
+      // knows only the bare spelling.
+      const declined = through
+        ? `the safe fix declines: the effect is written through the ` +
+          `namespace \`${through}\` — move it into s.$do(…) by hand`
+        : fix.returnEffectDecline(file.content, at, kinds);
       if (declined === null) {
         return {
           file: file.relative,
           line,
           fix: "s.$do(schedule.after(...)); return;",
-          safeFix: fix.fixReturnEffectsToDo(file.path),
+          safeFix: fix.fixReturnEffectsToDo(file.path, kinds),
         };
       }
       const param = fix.enclosingMethodParam(file.content, at);
+      // A rerun helps only when the draft's name is what stopped the fix.
+      const renamable = declined.includes("the draft param is");
       return {
         file: file.relative,
         line,
-        fix: param === null || param === "s"
-          ? "rewrite by hand: s.$do(effect); return;"
+        fix: param === null || param === "s" || !renamable
+          ? `rewrite by hand: ${param ?? "s"}.$do(effect); return;`
           : `rename the draft param '${param}' to 's' and rerun ` +
             `--safe-fix, or rewrite by hand: ${param}.$do(effect); return;`,
         manual: declined,
       };
     };
 
+    // An effect reached through a namespace import of aio (or of the app's
+    // own barrel over it) is the same removed spelling.
+    const spaces = fix.aioNamespaces(file.content, kinds)
+      .map((n) => n.replace(/\$/g, "\\$")).join("|");
+    const effect = `(${spaces ? `(?:${spaces})\\s*\\.\\s*` : ""})` +
+      `(?:schedule|own)\\.\\w+\\s*\\(`;
+
     // return-ed effects → s.$do
     for (
       const m of codeMatches(
         file.content,
-        /\breturn\s+(?:schedule|own)\.\w+\s*\(/g,
+        new RegExp(`\\breturn\\s+${effect}`, "g"),
       )
     ) {
       const line = lineOf(m.index!);
       if (isSuppressed(file.lines, line - 1)) continue;
       found++;
+      const opts = effectSiteOpts(m.index! + m[0].length, line, m[1]);
       report(
         "error",
         "alpha52",
-        removalMessage(
-          removalOf("return effect(s) from a method"),
-          `${file.relative}:${line}`,
+        byHand(
+          removalMessage(
+            removalOf("return effect(s) from a method"),
+            `${file.relative}:${line}`,
+          ),
+          opts.manual,
         ),
-        effectSiteOpts(m.index! + m[0].length, line),
+        opts,
       );
     }
 
@@ -3852,24 +4022,27 @@ export const checkAlpha52: Checker = (ctx) => {
         }
       }
       parts.push(inner.slice(start));
-      if (
-        !parts.every((p) =>
-          /^\s*(schedule|own)\.\w+\s*\(/.test(p) && p.trim().length > 0
-        )
-      ) {
-        continue;
-      }
+      const heads = parts.map((p) => new RegExp(`^\\s*${effect}`).exec(p));
+      if (!heads.every((h) => h)) continue;
       const line = lineOf(m.index!);
       if (isSuppressed(file.lines, line - 1)) continue;
       found++;
+      const opts = effectSiteOpts(
+        m.index! + m[0].length,
+        line,
+        heads.find((h) => h![1])?.[1],
+      );
       report(
         "error",
         "alpha52",
-        removalMessage(
-          removalOf("return effect(s) from a method"),
-          `${file.relative}:${line} (an effects ARRAY)`,
+        byHand(
+          removalMessage(
+            removalOf("return effect(s) from a method"),
+            `${file.relative}:${line} (an effects ARRAY)`,
+          ),
+          opts.manual,
         ),
-        effectSiteOpts(m.index! + m[0].length, line),
+        opts,
       );
     }
 
@@ -4005,26 +4178,36 @@ export const checkAlpha52: Checker = (ctx) => {
     // `every:` and `backoff:`", which an action payload matches: the rule
     // reported data as the option, and `--safe-fix` renamed it.
     const backoffLines = new Set<number>();
-    for (const at of fix.pollBackoffSites(file.content)) {
-      const line = lineOf(at);
-      if (backoffLines.has(line)) continue;
-      backoffLines.add(line);
-      if (isSuppressed(file.lines, line - 1)) continue;
-      found++;
-      report(
-        "error",
-        "alpha52",
-        removalMessage(
-          removalOf("schedule.poll({ backoff })"),
-          `${file.relative}:${line}`,
-        ),
-        {
-          file: file.relative,
-          line,
-          fix: "{ every: 5000, factor: 2, max: 60000 }",
-          safeFix: fix.fixPollBackoffKey(file.path),
-        },
-      );
+    // …of aio's `schedule`: one the file declares, or a member of its own
+    // object (`this.schedule.poll(`), has its own `poll`.
+    for (const c of fix.pollBackoffCalls(file.content, kinds)) {
+      const hit = aiosUse([c]);
+      for (const at of hit ? c.keys : []) {
+        const line = lineOf(at);
+        if (backoffLines.has(line)) continue;
+        backoffLines.add(line);
+        if (isSuppressed(file.lines, line - 1)) continue;
+        found++;
+        report(
+          hit!.severity,
+          "alpha52",
+          byHand(
+            removalMessage(
+              removalOf("schedule.poll({ backoff })"),
+              `${file.relative}:${line}`,
+            ),
+            hit!.manual,
+          ),
+          {
+            file: file.relative,
+            line,
+            fix: "{ every: 5000, factor: 2, max: 60000 }",
+            ...(hit!.manual
+              ? { manual: hit!.manual }
+              : { safeFix: fix.fixPollBackoffKey(file.path, kinds) }),
+          },
+        );
+      }
     }
   }
 
@@ -4090,6 +4273,10 @@ function _topLevelKeys(body: string): Set<string> {
 export const checkAlpha52Surface: Checker = (ctx) => {
   const { sourceFiles, tsFiles, tsxFiles, appEntry, denoJson, report, pass } =
     ctx;
+  const kindsOf = fix.runKinds(ctx.projectDir, ctx.denoJson, [
+    ...ctx.tsFiles,
+    ...ctx.tsxFiles,
+  ]);
   let found = 0;
   const files = [...tsFiles, ...tsxFiles];
 
@@ -4109,6 +4296,8 @@ export const checkAlpha52Surface: Checker = (ctx) => {
     const code = codeText(file.content);
     const lineOf = (idx: number) => code.slice(0, idx).split("\n").length;
 
+    const kinds = kindsOf(file.path);
+    const whose = fix.whose(file.content, kinds);
     // cell `ui:` → `visible:` (and cellDefaults.ui) — key rename, aliased.
     // NOTE the block regex runs on RAW content (the cell NAME is a string —
     // stripping would blank it) with codeMatches filtering comment mentions;
@@ -4121,6 +4310,10 @@ export const checkAlpha52Surface: Checker = (ctx) => {
       if (end === -1) continue;
       const keys = _topLevelKeys(code.slice(open, end + 1));
       const isCell = !m[0].startsWith("cellDefaults");
+      // Whose `cell(` it is: null for a method of the app's own object
+      // (`grid.cell("a1", {…})`) — not a cell, so not a finding.
+      const declined = isCell ? fix.cellUse(whose(m.index!, "cell")) : "";
+      if (declined === null) continue;
       if (!keys.has("ui")) {
         // access-without-visible: only meaningful on cell blocks, and only
         // when the audience is real — mirrors aio.run()'s boot refusal.
@@ -4157,15 +4350,21 @@ export const checkAlpha52Surface: Checker = (ctx) => {
       report(
         "error",
         "alpha52",
-        removalMessage(
-          removalOf(isCell ? "cell({ ui })" : "cellDefaults.ui"),
-          `${file.relative}:${line}`,
+        byHand(
+          removalMessage(
+            removalOf(isCell ? "cell({ ui })" : "cellDefaults.ui"),
+            `${file.relative}:${line}`,
+          ),
+          declined,
         ),
         {
           file: file.relative,
           line,
           fix: "visible: { exclude: [...] }  // was ui:",
-          safeFix: fix.fixUiKeyToVisible(file.path),
+          // The fix's own question: a `cell(` that is not aio's is not renamed.
+          ...(declined
+            ? { manual: declined }
+            : { safeFix: fix.fixUiKeyToVisible(file.path, kinds) }),
         },
       );
     }
@@ -5803,68 +6002,79 @@ export const checkAlpha70Removals: Checker = (ctx) => {
  *  replace is the whole migration. `Action` is not here: it is an app's own
  *  word too, so its import specifier is aliased instead (below). */
 const ALPHA70_WORDS: ReadonlyArray<
-  { key: string; from: string; to: string; pattern: RegExp }
+  { key: string; from: string; to: string }
 > = [
   {
     key: "CellAccess",
     from: "CellAccess",
     to: "Access",
-    pattern: /\bCellAccess\b/,
   },
   {
     key: "ServerFnAccess",
     from: "ServerFnAccess",
     to: "Access",
-    pattern: /\bServerFnAccess\b/,
   },
   {
     key: "ExtractState",
     from: "ExtractState",
     to: "StateOf",
-    pattern: /\bExtractState\b/,
   },
   {
     key: "connectDevTools()",
     from: "connectDevTools",
     to: "connectReduxDevTools",
-    pattern: /\bconnectDevTools\b/,
   },
   {
     key: "connectDevTools()",
     from: "disconnectDevTools",
     to: "disconnectReduxDevTools",
-    pattern: /\bdisconnectDevTools\b/,
   },
 ];
 
 export const checkAlpha70Renames: Checker = (ctx) => {
   const { tsFiles, tsxFiles, report, pass } = ctx;
+  const kindsOf = fix.runKinds(ctx.projectDir, ctx.denoJson, [
+    ...ctx.tsFiles,
+    ...ctx.tsxFiles,
+  ]);
   let found = 0;
   for (const file of [...tsFiles, ...tsxFiles]) {
+    const kinds = kindsOf(file.path);
     const code = codeText(file.content);
     const lineOf = (idx: number) => code.slice(0, idx).split("\n").length;
     const seen = new Set<string>();
     for (const w of ALPHA70_WORDS) {
-      const m = w.pattern.exec(code);
-      if (!m || seen.has(w.key)) continue;
-      const line = lineOf(m.index);
+      if (seen.has(w.key)) continue;
+      // Every occurrence of every word of this key, each with whose it is:
+      // the app's own `ExtractState` (declared here, another package's, a
+      // property of its own object) is not the one aio renamed.
+      const group = ALPHA70_WORDS.filter((x) => x.key === w.key);
+      const m = aiosUse(
+        group.flatMap((x) => fix.wordUses(file.content, x.from, x.to, kinds)),
+      );
+      if (!m) continue;
+      const line = lineOf(m.at);
       if (isSuppressed(file.lines, line - 1)) continue;
       seen.add(w.key);
       found++;
       report(
-        "error",
+        m.severity,
         "upgrade",
-        removalMessage(removalOf(w.key), `${file.relative}:${line}`),
+        byHand(
+          removalMessage(removalOf(w.key), `${file.relative}:${line}`),
+          m.manual,
+        ),
         {
           file: file.relative,
           line,
-          fix: `${w.from} → ${w.to}`,
-          safeFix: fix.fixRenameWords(
-            file.path,
-            ALPHA70_WORDS.filter((x) => x.key === w.key).map((
-              x,
-            ) => [x.from, x.to] as const),
-          ),
+          fix: group.map((x) => `${x.from} → ${x.to}`).join(", "),
+          ...(m.manual ? { manual: m.manual } : {
+            safeFix: fix.fixRenameWords(
+              file.path,
+              group.map((x) => [x.from, x.to] as const),
+              kinds,
+            ),
+          }),
         },
       );
     }
@@ -5898,26 +6108,56 @@ export const checkAlpha70Renames: Checker = (ctx) => {
       );
     }
     // `schedule.blocking(` → `blocking(` (+ the import).
-    const b = /\bschedule\.blocking\s*\(/.exec(code);
+    const b = aiosUse(fix.blockingUses(file.content, kinds));
     if (b) {
-      const line = lineOf(b.index);
+      const line = lineOf(b.at);
       if (!isSuppressed(file.lines, line - 1)) {
         found++;
         report(
-          "error",
+          b.severity,
           "upgrade",
-          removalMessage(
-            removalOf("schedule.blocking"),
-            `${file.relative}:${line}`,
+          byHand(
+            removalMessage(
+              removalOf("schedule.blocking"),
+              `${file.relative}:${line}`,
+            ),
+            b.manual,
           ),
           {
             file: file.relative,
             line,
             fix: 'import { blocking } from "aio"; blocking("id", fn, arg)',
-            safeFix: fix.fixScheduleBlocking(file.path),
+            ...(b.manual
+              ? { manual: b.manual }
+              : { safeFix: fix.fixScheduleBlocking(file.path, kinds) }),
           },
         );
       }
+    }
+    // aio's `call` / `schedule` used in a way no rule above reads: said, so
+    // a removed spelling behind it is not passed over in silence.
+    for (const u of fix.unreadUses(file.content, kinds)) {
+      const line = lineOf(u.at);
+      if (isSuppressed(file.lines, line - 1)) continue;
+      found++;
+      const what = u.exported === "call"
+        ? "the removed `timeout` option of `call` (now `timeoutMs`)"
+        : "`schedule.blocking` (removed in alpha70: `blocking(id, fn, " +
+          "arg)`) or the `backoff` option of `schedule.poll` (now `factor`)";
+      report(
+        "hint",
+        "upgrade",
+        `${file.relative}:${line} — aio's \`${u.exported}\`` +
+          (u.name === u.exported ? "" : ` (here \`${u.name}\`)`) +
+          ` is used in a way aiol does not read, so this use was not ` +
+          `checked for ${what}`,
+        {
+          file: file.relative,
+          line,
+          manual: "the safe fix declines: aiol reads only a direct call " +
+            "and a direct member access — check this use by hand",
+        },
+      );
     }
   }
   if (found === 0) pass("no alpha70-renamed symbol in use");

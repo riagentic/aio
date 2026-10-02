@@ -24,6 +24,7 @@ export const wcb = cell("wcb", {
 
 if ((globalThis as { name?: string }).name?.startsWith("aio-cell:")) {
   await aio.run({
+    watch: false,
     appId: "worker-circuit-breaker-probe",
     cells: [wcb],
     client: "server-only",

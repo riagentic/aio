@@ -50,6 +50,7 @@ async function bootWith(
       baseDir: await Deno.makeTempDir(),
       onError: (e: Reported) => void reported.push(e),
       ...hooks,
+      watch: false,
     } as Parameters<typeof aio.run>[0],
   );
   return {

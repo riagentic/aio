@@ -61,7 +61,40 @@ export function dropSlotMarkers(html: string): string {
   return html.replaceAll("<!---->", "");
 }
 
+/** Whether `text`, as the content of a `<script>`, leaves the HTML tokenizer
+ *  in its "script data double escaped" state — where the element's own
+ *  `</script>` no longer ends it, and the script swallows the rest of the page.
+ *
+ *  The standard's rule, for a text with no `</script` in it (the caller has
+ *  refused that already): `<!--` opens the escaped state; there, `<script`
+ *  followed by whitespace, `/` or `>` opens the double-escaped one; `-->`
+ *  closes either (and may reuse the opener's dashes: `<!-->`). Only where the
+ *  text ENDS matters — `<!--<script>-->` is back out and parses fine. */
+function endsScriptDoubleEscaped(text: string): boolean {
+  const next = /-->|<script[\t\n\f\r />]/gi;
+  let state: "data" | "escaped" | "double" = "data";
+  for (let i = 0;;) {
+    if (state === "data") {
+      const at = text.indexOf("<!--", i);
+      if (at < 0) return false;
+      state = "escaped";
+      i = at + 2; // the two dashes may already be the closer's
+      continue;
+    }
+    next.lastIndex = i;
+    const m = next.exec(text);
+    if (!m) return state === "double";
+    state = m[0] === "-->" ? "data" : "double";
+    i = next.lastIndex;
+  }
+}
+
 /** The text to emit inside a raw-text element.
+ *
+ *  `text` is the element's WHOLE content — every child joined, a component
+ *  child's markup included. The parser reads one run of characters, so a
+ *  closing tag split over two children (`"</scr"`, `"ipt>"`) ends the element
+ *  as surely as one written whole, and judging child by child let it through.
  *
  *  SSR escaped it like any other child, so a server-rendered
  *  `<style>{".a > .b { color: red }"}</style>` shipped `.a &gt; .b` — a
@@ -73,24 +106,34 @@ export function dropSlotMarkers(html: string): string {
  *
  *  The one thing raw text cannot contain is its own closing tag, because
  *  nothing can escape it — `</style` inside a `<style>` ENDS the element and
- *  the rest of the stylesheet becomes page content. That is a real defect in
- *  the caller's data, so dev THROWS and names it; production falls back to
- *  escaping, which produces the wrong text but a page that still parses,
- *  rather than markup that breaks out of the element. */
+ *  the rest of the stylesheet becomes page content. A `<script>` has a second
+ *  such shape, see {@linkcode endsScriptDoubleEscaped}. Either is a real
+ *  defect in the caller's data, so dev THROWS and names it; production falls
+ *  back to escaping, which produces the wrong text but a page that still
+ *  parses, rather than markup that breaks out of the element. */
 export function rawTextContent(
   tag: string,
   text: string,
   dev: boolean,
 ): string {
-  if (new RegExp(`</\s*${tag}`, "i").test(text)) {
-    const msg = `[aio] <${tag}> content contains a literal "</${tag}", which ` +
+  // The HTML tokenizer ends raw text at `</` IMMEDIATELY followed by the tag
+  // name (any case) and then whitespace, `/` or `>`. `</ script>` is therefore
+  // plain text and passes. The character after the name is deliberately not
+  // looked at: `</scriptx`, though harmless, stays refused as it always was.
+  const msg = new RegExp(`</${tag}`, "i").test(text)
+    ? `[aio] <${tag}> content contains a literal "</${tag}", which ` +
       `ends the element — raw text has no escape for it. Split the string ` +
-      `(e.g. "<\/${tag}") or move it out of the ${tag} tag.`;
-    if (dev) throw new Error(msg);
-    console.error(msg + " Falling back to escaping it.");
-    return escapeHtml(text);
-  }
-  return text;
+      `(e.g. "<\\/${tag}") or move it out of the ${tag} tag.`
+    : tag === "script" && endsScriptDoubleEscaped(text)
+    ? `[aio] <script> content contains "<!--" and then "<script", after ` +
+      `which the HTML parser no longer ends the element at its closing tag ` +
+      `— the script swallows the rest of the page. Write the first as ` +
+      `"<\\!--" or "\\x3C!--" inside a JS string, "\\u003C!--" in JSON.`
+    : null;
+  if (msg === null) return text;
+  if (dev) throw new Error(msg);
+  console.error(msg + " Falling back to escaping it.");
+  return escapeHtml(text);
 }
 
 export function escapeAttr(s: string): string {

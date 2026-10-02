@@ -45,6 +45,8 @@
     "tests/air-transport-send-throw-queue.test.ts",
     "tests/air-transport-stale-close.test.ts",
     "tests/air-transport-terminal-mismatch.test.ts",
+    "tests/air-transport-ipc-raw-refused.test.ts",
+    "tests/air-transport-retry-push-refused.test.ts",
     "tests/am-exit-code-sweep.test.ts",
     "tests/am-maintenance-hold.test.ts",
     "tests/am-starting-lock-has-no-door.test.ts",
@@ -84,7 +86,8 @@
     "tests/wire-patch-differential.test.ts",
     "tests/ws-burst-no-lost-writes.test.ts",
     "tests/ws-dropped-frame-settles-call.test.ts",
-    "tests/ws-origin-one-decider.test.ts"
+    "tests/ws-origin-one-decider.test.ts",
+    "tests/http-over-conn-differential.test.ts"
   ],
   "demoted": [
     {

@@ -6,6 +6,7 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
   denoNmPackageName,
   devOnlyClosure,
+  packageNameOfNpmId,
 } from "../src/build/build-compile.ts";
 import {
   extractSourceImports,
@@ -43,6 +44,18 @@ Deno.test("denoNmPackageName: a .deno entry name is a package name + version", (
   );
   assertEquals(denoNmPackageName("@types+node@24.13.3"), "@types/node");
   // The flat `.deno/node_modules` fallback dir is not a package.
+  // A peer-suffixed entry carries a second `@`; the name ends at the first.
+  assertEquals(
+    denoNmPackageName("@scope+tool@1.0.0_typescript@6.0.3"),
+    "@scope/tool",
+  );
+  assertEquals(denoNmPackageName("string_decoder@1.3.0"), "string_decoder");
+  assertEquals(packageNameOfNpmId("string_decoder@1.3.0"), "string_decoder");
+  assertEquals(
+    packageNameOfNpmId("@scope/pkg@5.5.1_typescript@6.0.3"),
+    "@scope/pkg",
+  );
+  assertEquals(packageNameOfNpmId("@types/lodash_x@1.0.0"), "@types/lodash_x");
   assertEquals(denoNmPackageName("node_modules"), null);
   assertEquals(denoNmPackageName(".bin"), null);
 });

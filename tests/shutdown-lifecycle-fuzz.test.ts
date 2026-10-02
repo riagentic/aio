@@ -45,6 +45,7 @@ type Doc = { applied: string[]; n: number };
 async function boot(name: string, dir: string, defs: unknown[]) {
   const { aio } = await import("../mod.ts");
   return await aio.run({
+    watch: false,
     cells: defs,
     appId: name,
     client: "server-only",

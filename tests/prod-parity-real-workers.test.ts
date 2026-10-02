@@ -241,6 +241,7 @@ Deno.test("real workers: the option fails loud rather than degrading", async () 
   await assertRejects(
     () =>
       aio.run({
+        watch: false,
         cells: [w],
         client: "server-only",
         persist: false,

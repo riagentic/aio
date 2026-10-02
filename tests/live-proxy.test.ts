@@ -89,17 +89,26 @@ Deno.test("liveProxy: 'in' operator returns false for missing key", () => {
   assertEquals("missing" in proxy, false);
 });
 
-Deno.test("liveProxy: 'in' does not answer for Object.prototype names", () => {
-  // `prop in fresh` is true for every Object.prototype name, so
-  // `"toString" in s` was true on a cell with no such field — the same class
-  // the useAio state-proxy pin closed.
-  const { proxy } = makeProxy({ name: "test" });
-  assertEquals("toString" in proxy, false);
-  assertEquals("constructor" in proxy, false);
-  assertEquals("valueOf" in proxy, false);
-  assertEquals("hasOwnProperty" in proxy, false);
-  assertEquals("name" in proxy, true);
-  // An OWN prototype-named field still answers true.
+Deno.test("liveProxy: 'in' answers like the sync draft — prototype names included", () => {
+  // This pinned the opposite for one release ("'in' does not answer for
+  // Object.prototype names"): the better rule in isolation, but the sync twin
+  // of the same method body is an Immer draft, whose `in` walks the prototype
+  // chain — so `"push" in s.items` was true in a sync method and false in an
+  // async one. Parity is the contract (tests/proxy-differential.test.ts runs
+  // `in` on both); `Object.hasOwn` is the own-key question, answered alike.
+  const { proxy } = makeProxy({ name: "test", items: [1] });
+  const plain = { name: "test", items: [1] };
+  for (const k of ["toString", "constructor", "valueOf", "name", "missing"]) {
+    assertEquals(k in proxy, k in plain, k);
+  }
+  const items = (proxy as { items: number[] }).items;
+  for (const k of ["push", "length", "map", "0", "1", "nope"]) {
+    assertEquals(k in items, k in plain.items, k);
+  }
+  assertEquals(Symbol.iterator in items, true);
+  assertEquals(Symbol.iterator in proxy, false);
+  // The own-key question keeps its own answer.
+  assertEquals(Object.hasOwn(proxy, "toString"), false);
   const { proxy: owned } = makeProxy(
     { toString: "USER" } as Record<string, unknown>,
   );

@@ -528,8 +528,8 @@ function credentialDiagnosis(
         appId ? controlKeyPath(appId) : "this app's control credential"
       } and the app refused it — it is minted fresh at every boot, so this app ` +
         `is either older than the file, running from a different data dir ` +
-        `(AIO_APPS_DIR / appDir), or a production build (which has no control ` +
-        `plane at all).`,
+        `(AIO_APPS_DIR / appDir), or a production build (whose control plane ` +
+        `is the stop alone).`,
     );
   }
   if (creds.appKeyPath) {

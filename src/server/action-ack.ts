@@ -14,6 +14,7 @@
 // the sync handler ever read it. This is the same read on the ack path.
 
 import { takeRejectionFor } from "../state/rejection-tracker.ts";
+import { _callPending, _onCallSettle } from "../state/cell-impl.ts";
 import { type AioError, createAioError } from "../diagnostics/error.ts";
 
 /** Why this action was refused, or `null` when it really ran.
@@ -99,7 +100,32 @@ export function _dispatchShort(action: unknown): string | undefined {
 // carries (`PERSIST_REFUSED`). One note per action (or per async call, whose
 // ack comes at the method's end), read by every door.
 const _unsavedNotes = new WeakMap<object, string>();
-const _unsavedCalls = new Map<string, string>();
+/** callId → [sentence, when noted]. A note is read by its call's ack once
+ *  the call settles, and taken by that read; one nobody reads (an
+ *  in-process caller, a closed socket) must not stay forever. Bounded two
+ *  ways, and neither may turn an unread verdict into a plain `ok`:
+ *  · a note older than `NOTE_DEAD_MS` is gone (its ack has long been sent);
+ *  · past `MAX_NOTES` sentences, the oldest still-young one keeps only its
+ *    id (`_lostNotes`), and its ack reads `VERDICT_LOST` — `unsaved`, with
+ *    the reason dropped, never `ok`. Sentences are capped hard; the ids are
+ *    bounded by their age. */
+const _unsavedCalls = new Map<string, [string, number]>();
+const _lostNotes = new Map<string, number>();
+/** Older than this, a note's ack has long been sent: the call ceiling is a
+ *  minute at most, and the note is written at the call's end. */
+const NOTE_DEAD_MS = 120_000;
+const MAX_NOTES = 16_384;
+const VERDICT_LOST = "persist failed: verdict lost — too many calls were " +
+  "waiting for their saves at once, so whether this write landed is " +
+  "unknown; ask `am persist`";
+
+function trimDead(m: Map<string, unknown>, at: (v: unknown) => number): void {
+  const now = Date.now();
+  for (const [id, v] of m) {
+    if (now - at(v) < NOTE_DEAD_MS) break; // insertion order: the rest are younger
+    m.delete(id);
+  }
+}
 
 /** Record that what `action` (or async call `callId`) owes did not land.
  *  @internal */
@@ -109,12 +135,42 @@ export function _noteUnsaved(
   sentence: string,
 ): void {
   if (action) _unsavedNotes.set(action, sentence);
-  if (callId !== undefined) {
-    if (_unsavedCalls.size >= 1024) {
-      _unsavedCalls.delete(_unsavedCalls.keys().next().value!);
-    }
-    _unsavedCalls.set(callId, sentence);
+  if (callId === undefined) return;
+  const now = Date.now();
+  _unsavedCalls.delete(callId); // re-noted: its age restarts
+  _lostNotes.delete(callId);
+  if (_unsavedCalls.size >= MAX_NOTES) {
+    trimDead(_unsavedCalls, (v) => (v as [string, number])[1]);
+    trimDead(_lostNotes, (v) => v as number);
   }
+  while (_unsavedCalls.size >= MAX_NOTES) {
+    const [id, [, at]] = _unsavedCalls.entries().next().value!;
+    _unsavedCalls.delete(id);
+    _lostNotes.set(id, at);
+  }
+  _unsavedCalls.set(callId, [sentence, now]);
+}
+
+/** Sentences held for unread acks — the bound `MAX_NOTES` caps. @internal */
+// aio-ok: a test seam — the product never reads its own note count
+export const _notesHeld = (): number => _unsavedCalls.size;
+
+/** Calls whose owed saves were pushed out of a capped per-call map while
+ *  they still ran: answered `VERDICT_LOST` when they SETTLE — a note written
+ *  at the eviction could age out before a long call's ack read it. Only
+ *  live calls are held, so this is bounded by the calls in flight. */
+const _lostLive = new Set<string>();
+_onCallSettle((callId) => {
+  if (_lostLive.delete(callId)) _noteUnsaved(undefined, callId, VERDICT_LOST);
+  return undefined;
+});
+
+/** A call whose owed saves were pushed out of a capped per-call map before
+ *  it was answered: its verdict is unknown, so it is answered `unsaved` —
+ *  never a plain `ok` it cannot vouch for. @internal */
+export function _verdictLost(callId: string): void {
+  if (_callPending(callId)) _lostLive.add(callId);
+  else _noteUnsaved(undefined, callId, VERDICT_LOST);
 }
 
 /** The `unsaved` sentence for `action`'s ack, if its stand-in save failed —
@@ -129,7 +185,8 @@ export function _dispatchUnsaved(action: unknown): string | undefined {
   if (typeof call !== "string") return undefined;
   const v = _unsavedCalls.get(call);
   _unsavedCalls.delete(call);
-  return v;
+  if (v !== undefined) return v[0];
+  return _lostNotes.delete(call) ? VERDICT_LOST : undefined;
 }
 
 // ── What an ack waits for ────────────────────────────────────────────────

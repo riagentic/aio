@@ -25,6 +25,7 @@
  */
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, fail, out, outError, sayErr } from "./am-output.ts";
+import { parseNumArg } from "./am-utils.ts";
 import {
   applyElectronPrune,
   type CacheEntry,
@@ -52,18 +53,15 @@ export function parsePruneArgs(args: readonly string[]): {
   for (const a of args) {
     if (a === "--yes" || a === "-y") apply = true;
     else if (a.startsWith("--days=")) {
-      const n = Number(a.slice("--days=".length));
-      if (!Number.isInteger(n) || n < 0) {
-        return {
-          apply,
-          days,
-          keep,
-          error: `--days must be a whole number of days (got "${
-            a.slice("--days=".length)
-          }")`,
-        };
-      }
-      days = n;
+      // `parseNumArg`, not `Number(…)`: `Number("")` is 0, so `--days=` (a
+      // script's empty variable) meant "no age floor" — every unprotected
+      // runtime, however recently used, went with `--yes`.
+      const n = parseNumArg(a.slice("--days=".length), "--days", {
+        min: 0,
+        integer: true,
+      });
+      if (!n.ok) return { apply, days, keep, error: n.error };
+      days = n.value;
     } else if (a.startsWith("--keep=")) {
       for (const v of a.slice("--keep=".length).split(",")) {
         if (v.trim()) keep.push(v.trim());

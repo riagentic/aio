@@ -33,9 +33,13 @@ import {
   cmdTrigger,
 } from "../src/am/am-cmd-inspect.ts";
 import { readPid, writePid } from "../src/am/am-utils.ts";
-import { isProcessAlive } from "../src/server/single-instance-lock.ts";
+import {
+  _zombieDeps,
+  isProcessAlive,
+} from "../src/server/single-instance-lock.ts";
 import type { LockData } from "../src/server/single-instance-lock.ts";
 import type { GlobalFlags } from "../src/am/am-types.ts";
+import { freePort } from "../src/testing/server-test.ts";
 
 // ── Harness ──────────────────────────────────────────────────
 
@@ -164,7 +168,9 @@ function makePf(
 function spawnChild(ms?: number): Deno.ChildProcess {
   const code = ms
     ? `await new Promise((r) => setTimeout(r, ${ms}))`
-    : `await new Promise(() => {})`;
+    // A timer: a top-level await that can never resolve ENDS the process
+    // (about 150 ms in), and "the zombie was killed" then held by itself.
+    : `setInterval(() => {}, 2 ** 30)`;
   return new Deno.Command(Deno.execPath(), {
     args: ["eval", code],
     stdin: "null",
@@ -243,20 +249,171 @@ Deno.test("am: ensureSingleton — responding instance refuses with exit 1", asy
   }
 });
 
+// An app's record says `started` a moment before its listener is bound.
+// `am start` looked once, found no answer, and killed a healthy app that had
+// just come up.
+Deno.test("am: ensureSingleton — a 'started' record that just changed is a running app, not a zombie to kill on one look", async () => {
+  const app = `am-cmd-young-${Deno.pid}`;
+  const child = spawnChild();
+  // The door it is about to open: nothing listens on it yet.
+  const port = freePort();
+  writePid(makePf(app, { pid: child.pid, port }));
+  // (The record's real age: written just now.)
+  try {
+    let code: number | null = null;
+    const { logs } = await capture(async () => {
+      code = await withExitStub(() => ensureSingleton(app, "json"));
+    });
+    assertEquals(code, 1, "refused: it is running");
+    assert(logs.some((l) => l.includes("already running")), logs.join("\n"));
+    assert(!logs.some((l) => l.includes("unresponsive")), logs.join("\n"));
+    assertEquals(isProcessAlive(child.pid), true, "the app was not killed");
+  } finally {
+    dropFixtureLock(app);
+    try {
+      child.kill("SIGKILL");
+    } catch { /* aio-ok: ended by the code under test — asserted above */ }
+    await child.status;
+  }
+});
+
 Deno.test("am: ensureSingleton — unresponsive 'started' zombie is killed", async () => {
   const app = `am-cmd-zombie-${Deno.pid}`;
   const child = spawnChild();
   // Port nothing listens on — health probe fails fast (connection refused).
-  writePid(makePf(app, { pid: child.pid, port: 1 }));
+  writePid(makePf(app, { pid: child.pid, port: 1, host: "127.0.0.1" }));
+  // Its record has not changed for longer than the startup grace, and the
+  // gaps between the probes are skipped.
+  const recordAge = _zombieDeps.recordAge, delay = _zombieDeps.delay;
+  _zombieDeps.recordAge = () => 3_600_000;
+  _zombieDeps.delay = () => Promise.resolve();
   try {
     const { logs } = await capture(() => ensureSingleton(app, "json"));
     assertEquals(isProcessAlive(child.pid), false, "zombie killed");
     assertEquals(readPid(app), null, "lock removed");
     assert(logs.some((l) => l.includes("unresponsive")));
   } finally {
+    Object.assign(_zombieDeps, { recordAge, delay });
     dropFixtureLock(app);
     await child.status;
   }
+});
+
+Deno.test("am: start and status tell ONE story about a 'started' instance that listens and does not answer — not answering, how to end it, never killed", async () => {
+  const app = `am-cmd-deaf-${Deno.pid}`;
+  const child = spawnChild();
+  const ac = new AbortController();
+  const srv = Deno.serve(
+    { port: 0, hostname: "127.0.0.1", signal: ac.signal, onListen() {} },
+    () => new Response("wedged", { status: 503 }),
+  );
+  const port = srv.addr.port;
+  writePid(makePf(app, { pid: child.pid, port, host: "127.0.0.1" }));
+  // Settled past the grace, probes un-paused: the verdict is what decides.
+  const recordAge = _zombieDeps.recordAge, delay = _zombieDeps.delay;
+  _zombieDeps.recordAge = () => 3_600_000;
+  _zombieDeps.delay = () => Promise.resolve();
+  try {
+    const start = await capture(async () => {
+      assertEquals(await withExitStub(() => ensureSingleton(app, "json")), 1);
+    });
+    const said = [...start.logs, ...start.errors].join("\n");
+    assertStringIncludes(said, "not answering");
+    assertStringIncludes(said, `am stop --app=${app}`);
+    assertStringIncludes(said, `am kill --app=${app}`);
+    assert(!said.includes("killing"), said);
+    assertEquals(isProcessAlive(child.pid), true, "never killed");
+    assertEquals(readPid(app)?.pid, child.pid);
+    const st = await capture(async () => {
+      assertEquals(
+        await withExitStub(() => cmdStatus([], flagsFor(port, app))),
+        2,
+      );
+    });
+    const doc = JSON.parse(st.logs[0]!);
+    assertEquals([doc.status, doc.answering], ["started", false]);
+    assertStringIncludes(said, doc.said, "the same sentence from both");
+    // A `starting` record that listens and does not answer: the same
+    // sentence, its own status.
+    writePid({ ...readPid(app)!, status: "starting" });
+    const st2 = await capture(async () => {
+      assertEquals(
+        await withExitStub(() => cmdStatus([], flagsFor(port, app))),
+        2,
+      );
+    });
+    const doc2 = JSON.parse(st2.logs[0]!);
+    assertEquals([doc2.status, doc2.answering], ["starting", false]);
+    assertEquals(doc2.said, doc.said);
+    // Nothing listening at its address: plainly starting, no such claim.
+    writePid({ ...readPid(app)!, port: 1 });
+    const st3 = await capture(async () => {
+      assertEquals(
+        await withExitStub(() => cmdStatus([], flagsFor(1, app))),
+        2,
+      );
+    });
+    const doc3 = JSON.parse(st3.logs[0]!);
+    assertEquals([doc3.status, "answering" in doc3], ["starting", false]);
+  } finally {
+    Object.assign(_zombieDeps, { recordAge, delay });
+    dropFixtureLock(app);
+    ac.abort();
+    await srv.finished;
+    child.kill("SIGKILL");
+    await child.status;
+  }
+});
+
+Deno.test("am: ensureSingleton — a record that CHANGES while it is judged is not killed on the old evidence", async () => {
+  const app = `am-cmd-moved-${Deno.pid}`;
+  const child = spawnChild();
+  // How the child ended, if it did before the teardown: a signal means
+  // something killed it (the defect this test exists to catch); it never
+  // exits on its own.
+  let ended: Deno.CommandStatus | null = null;
+  void child.status.then((s) => (ended = s));
+  writePid(makePf(app, { pid: child.pid, port: 1, host: "127.0.0.1" }));
+  const real = { ..._zombieDeps };
+  _zombieDeps.recordAge = () => 3_600_000;
+  _zombieDeps.delay = () => Promise.resolve();
+  let n = 0;
+  let same = false;
+  _zombieDeps.probe = async (l) => {
+    // The holder writes its record while the probes run.
+    if (++n === 2) {
+      const was = JSON.stringify(readPid(app));
+      // +1, not Date.now(): inside the same millisecond as the fixture that
+      // rewrote identical bytes — no change at all, and the zombie verdict
+      // was right to end it (seen under load).
+      writePid({ ...readPid(app)!, startedAt: readPid(app)!.startedAt + 1 });
+      same = JSON.stringify(readPid(app)) === was;
+    }
+    return await real.probe(l);
+  };
+  try {
+    let code: number | null = null;
+    const { logs, errors } = await capture(async () => {
+      code = await withExitStub(() => ensureSingleton(app, "json"));
+    });
+    const said = [...logs, ...errors].join("\n");
+    assert(!same, "the fixture's write must change the record");
+    assertEquals(code, 1, `probes: ${n}\n${said}`);
+    assert(!said.includes("unresponsive"), said);
+    assertEquals(isProcessAlive(child.pid), true, "killed on old evidence");
+  } finally {
+    Object.assign(_zombieDeps, real);
+    dropFixtureLock(app);
+    if (ended === null) child.kill("SIGKILL");
+  }
+  const early = ended as Deno.CommandStatus | null;
+  await child.status;
+  // Ended by itself is tolerated; ended by a signal means it was killed.
+  assertEquals(
+    early?.signal ?? null,
+    null,
+    `the child was killed before the teardown: ${JSON.stringify(early)}`,
+  );
 });
 
 // ── cmdStatus ────────────────────────────────────────────────
@@ -300,13 +457,16 @@ Deno.test("am: cmdStatus — stopping instance reports exit 2", async () => {
 Deno.test("am: cmdStatus — responding instance reports started + metrics", async () => {
   const app = `am-cmd-status-up-${Deno.pid}`;
   const server = fakeControlServer({ errorsBody: "null" });
-  writePid(makePf(app, { pid: Deno.pid, port: server.addr.port }));
+  writePid(
+    makePf(app, { pid: Deno.pid, port: server.addr.port, client: "electron" }),
+  );
   try {
     const { logs } = await capture(() =>
       cmdStatus([], flagsFor(server.addr.port, app))
     );
     const st = JSON.parse(logs[0]!);
     assertEquals(st.status, "started");
+    assertEquals(st.client, "electron", "the client it runs");
     assertEquals(st.uptime, 65);
     assertEquals(st.connections, 2);
     assertEquals(st.transport, "ws");

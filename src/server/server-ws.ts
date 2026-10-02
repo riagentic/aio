@@ -1003,13 +1003,15 @@ export function createWsManager(deps: WsDeps): WsManager {
     const prev = meta.user;
     meta.user = fresh;
     const a = userMemoKey(prev), b = userMemoKey(fresh);
-    // An unserializable record cannot be compared whole; its id and role are
-    // what a view is decided on in practice. Never "assume changed" there —
-    // `_revalidate` runs on every inbound frame, and a full view per frame
-    // is a cost, not a safeguard.
-    const same = a !== null && b !== null
-      ? a === b
-      : prev?.id === fresh.id && prev?.role === fresh.role;
+    // A record with no key (a `Set` of scopes, a class instance) cannot be
+    // compared whole, and "its id and role are what a view is decided on" was
+    // a guess: revoking `scopes` on such a record left the socket showing the
+    // old view with no frame sent. So no key means CHANGED, unless it is the
+    // very object this socket already holds (what a session store hands back
+    // on every frame — `_revalidate` runs per inbound frame). Re-sending a
+    // view is always safe, and costs one `getUIState` when it turns out
+    // equal (the `lastFullJson` check below); skipping one is not.
+    const same = a !== null && b !== null ? a === b : prev === fresh;
     if (same) return;
     deps.debug(
       `ws: ${meta.id.slice(0, 8)} user changed (${prev?.id ?? "anon"}/${

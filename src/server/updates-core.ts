@@ -196,6 +196,7 @@ export function classifySource(
   // A forge URL with exactly owner/repo is a repository; anything deeper is a
   // path someone is publishing artifacts under.
   const forge = /(^|\.)(github\.com|gitlab\.com|bitbucket\.org|codeberg\.org)$/;
+  // aio-ok: path-split — a URL pathname
   const segments = url.pathname.split("/").filter(Boolean);
   if (forge.test(url.hostname)) {
     if (segments.length === 2) return "git";
@@ -650,6 +651,78 @@ export function deriveDataContract(
     };
   }
   return { schema, cells: out };
+}
+
+// ── what a probe reads off `<binary> --aio-data-contract` ───────────────────
+//
+// stdout is the contract "and nothing else" only as far as aio decides it: an
+// app's own module-level `console.log` lands there too, before aio runs a
+// line, and a reader that parsed stdout whole refused that app's every publish
+// with "is not JSON". So each fact is ALSO printed on a marked line of its own
+// (stderr), found whatever else was printed. stdout keeps the bare JSON, for
+// whoever reads that.
+//
+// A fixed marker can be printed by anyone — a line of that shape in the app's
+// own output read as the framework's. The reader therefore hands the binary a
+// value nobody else has (`AIO_PROBE_NONCE`), and the lines that carry it are
+// the framework's: `[aio:<nonce>] app-id: notes`. Without one (a person at a
+// terminal, a reader older than this) the plain `[aio] …` lines are printed.
+
+/** The env var a probing reader sets to a value of its own. */
+export const PROBE_NONCE_ENV = "AIO_PROBE_NONCE";
+
+/** The facts a probe line can carry. */
+export type ProbeFact = "data-contract" | "persisting-cells" | "app-id";
+
+/** A probe nonce as the binary accepts it, or undefined — a value that could
+ *  not be told from line content (a space, a bracket) is no nonce. Pure. */
+export function probeNonce(value: string | undefined): string | undefined {
+  return value && /^[A-Za-z0-9-]{8,64}$/.test(value) ? value : undefined;
+}
+
+/** What opens the line that carries `fact`. */
+const probeMark = (fact: ProbeFact, nonce?: string) =>
+  `[aio${nonce ? `:${nonce}` : ""}] ${fact}: `;
+
+/** The one line `fact` is printed on. Pure. */
+export function probeLine(
+  fact: ProbeFact,
+  value: string,
+  nonce?: string,
+): string {
+  return probeMark(fact, nonce) + value;
+}
+
+/** What the binary said about `fact`, or null when it said nothing.
+ *
+ *  ONE rule for every fact. With `nonce`: the line that carries it — and once
+ *  ANY line of the output carries it, the binary speaks it, so a plain line is
+ *  never the answer (a fact it left out is left out). Otherwise the plain
+ *  line, and the LAST one: aio prints its lines at the end of the boot, after
+ *  anything the app's own modules printed. Pure. */
+export function probedFact(
+  output: string,
+  fact: ProbeFact,
+  nonce?: string,
+): string | null {
+  const lines = output.split("\n");
+  const speaks = nonce !== undefined &&
+    lines.some((l) => l.startsWith(`[aio:${nonce}] `));
+  const mark = probeMark(fact, speaks ? nonce : undefined);
+  let found: string | null = null;
+  for (const line of lines) {
+    if (line.startsWith(mark)) found = line.slice(mark.length).trim();
+  }
+  return found;
+}
+
+/** What opens the plain data-contract line. */
+export const DATA_CONTRACT_MARK = probeMark("data-contract");
+
+/** The contract text a plain marker line in `output` carries, or null when
+ *  there is none (a build older than the marker: its stdout is the contract). */
+export function markedDataContract(output: string): string | null {
+  return probedFact(output, "data-contract");
 }
 
 // ── the decision ────────────────────────────────────────────────────────────

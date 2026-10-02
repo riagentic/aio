@@ -156,6 +156,17 @@ export type ElectronConfig = {
    *  }
    *  ``` */
   permissions?: ElectronPermissions;
+  /** Let OTHER processes of the same OS user open this app's local socket in
+   *  production — the opt-out of the local-peer lockdown.
+   *
+   *  A production Electron app serves its local socket (Unix socket / Windows
+   *  named pipe) only to the window process it launched, checked against the
+   *  kernel's peer credentials; any other process is given no state and no
+   *  methods. `true` turns that check off — for an app that ships a same-user
+   *  companion process (a helper, a CLI) which connects to that socket as a
+   *  client. It is then open to EVERY process of the user, as it is in dev.
+   *  Says so in the boot log. Default: false. See docs/auth/auth.md. */
+  allowLocalPeers?: boolean;
 };
 
 /** One Electron permission name (Electron's own spelling). */
@@ -647,8 +658,9 @@ export type AioConfig<S, A, E> = {
    *  child-window-to-arbitrary-URL is real attack surface no app should carry
    *  unless it asked for it (maintainer decision, a field report openWindow thread). */
   childWindows?: boolean;
-  /** The Electron process's own security decisions (sandbox policy) — see
-   *  {@linkcode ElectronConfig}.
+  /** The Electron process's own security decisions (sandbox policy,
+   *  permissions, and `allowLocalPeers` — the opt-out of the production
+   *  local-peer lockdown) — see {@linkcode ElectronConfig}.
    *
    *  @example A wallet: never open a window Chromium cannot sandbox, and let
    *  no child window ask for an unsandboxed one.
@@ -1219,8 +1231,9 @@ export type CellsConfig = {
    *  child-window-to-arbitrary-URL is real attack surface no app should carry
    *  unless it asked for it (maintainer decision, a field report openWindow thread). */
   childWindows?: boolean;
-  /** The Electron process's own security decisions (sandbox policy) — see
-   *  {@linkcode ElectronConfig}.
+  /** The Electron process's own security decisions (sandbox policy,
+   *  permissions, and `allowLocalPeers` — the opt-out of the production
+   *  local-peer lockdown) — see {@linkcode ElectronConfig}.
    *
    *  @example A wallet: never open a window Chromium cannot sandbox, and let
    *  no child window ask for an unsandboxed one.

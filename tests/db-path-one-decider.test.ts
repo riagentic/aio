@@ -1,4 +1,4 @@
-// `--db-path` has ONE decider (feedback/frustration.md F6 — two deciders).
+// `--db-path` has ONE decider (a field report — two deciders).
 //
 // Storage opened `config.dbPath ?? cli.dbPath`, while the shutdown "database
 // is GONE" check and the boot report read `config.dbPath` alone. A run with only `--db-path=x.db`

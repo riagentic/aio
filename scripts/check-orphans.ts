@@ -510,7 +510,7 @@ if (clean) {
   }
   console.log(
     `clean: ${orphans.length} orphan(s) signalled, ${removed} stale lock ` +
-      `dir(s) and ${homes} ownerless /tmp/aio-* dir(s) removed`,
+      `dir(s) and ${homes} ownerless temp dir(s) (/tmp/aio-*, every dir under the test root) removed`,
   );
   // Never a silent "0 removed": say which ones resisted, and why.
   for (const k of kept) console.error(`  could not remove ${k}`);
@@ -585,7 +585,7 @@ if (orphans.length) {
 }
 console.log(
   `no orphaned aio processes (${staleDirs.length} stale lock dir(s), ` +
-    `${tmpDirs.length} ownerless /tmp/aio-* dir(s) — deno task clean:tmp removes them)`,
+    `${tmpDirs.length} ownerless temp dir(s): /tmp/aio-* and every dir under the test root, apps-* included — deno task clean:tmp removes them)`,
 );
 
 // ── The leak nobody was failing on ──
@@ -625,7 +625,7 @@ if (leftovers > LEFTOVER_CEILING) {
       `owner is gone. A suite boots hundreds of apps, and \`deno task test\` ` +
       `resets that home each run — so roughly one run's worth is expected, ` +
       `and a number far above that is the signal.\n` +
-      `  ${tmpDirs.length} ownerless /tmp/aio-*: a test made a temp dir and ` +
+      `  ${tmpDirs.length} ownerless temp dir(s) (/tmp/aio-*, the test root's apps-*/aio-*/…): a test made a temp dir and ` +
       `did not remove it. THIS is the one to fix at the source — find the ` +
       `test and give it an \`await using\` or a finally.\n` +
       `  \`deno task clean:tmp\` removes both.`,

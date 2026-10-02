@@ -16,7 +16,11 @@
 // not report a pass.
 import { assert, assertEquals } from "@std/assert";
 import { cdpConnect, cdpTargets } from "../src/am/am-cdp.ts";
-import { evalOutcome, wrapExpression } from "../src/am/am-cmd-eval.ts";
+import {
+  evalOutcome,
+  evalWindowIndex,
+  wrapExpression,
+} from "../src/am/am-cmd-eval.ts";
 import { findChromium, freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
@@ -205,4 +209,17 @@ Deno.test({
       );
       assert("__aio_unserializable" in (r.value as object));
     }),
+});
+
+Deno.test("am eval: --window= with no value is refused, not read as window 0", () => {
+  assertEquals(evalWindowIndex([]), { ok: true, value: 0 });
+  assertEquals(evalWindowIndex(["1+1", "--window=2"]), { ok: true, value: 2 });
+  // `Number("")` is 0 — an empty variable evaluated in the FIRST window.
+  for (const bad of ["--window=", "--window= ", "--window=x", "--window=-1"]) {
+    const r = evalWindowIndex([bad]);
+    assert(
+      r.ok === false && r.error.includes("--window"),
+      `${bad} → ${JSON.stringify(r)}`,
+    );
+  }
 });

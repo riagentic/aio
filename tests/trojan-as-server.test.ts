@@ -31,6 +31,7 @@ Deno.test({
   async fn() {
     const port = freePort();
     const app = await aio.run({
+      watch: false,
       appId: "as-server-app",
       cells: [news],
       dbPath: ":memory:",

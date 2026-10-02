@@ -1,23 +1,27 @@
-// HTTP/1.1 over a LocalListener — the handler-on-a-socket path Windows uses
-// (a named pipe), proven here on Linux over a unix LocalListener with the SAME
-// code. Request parsing (Content-Length, chunked), response framing (status,
+// HTTP/1.1 over a LocalListener — the handler-on-a-socket path every local
+// HTTP door uses (a Windows named pipe, a unix socket, in dev and production),
+// proven here on Linux over a unix LocalListener with the SAME code. Request parsing (Content-Length, chunked), response framing (status,
 // headers, Content-Length vs chunked, 204/304/HEAD), STREAMING (the handler's
 // ReadableStream is written chunk by chunk, never buffered), a 20 MB body,
 // malformed → 400 + close, handler throw → 500.
 
-import { assert, assertEquals, assertMatch } from "@std/assert";
+import { assert, assertEquals, assertMatch, assertThrows } from "@std/assert";
 import { join } from "@std/path";
 import {
+  bodyFraming,
   chunkFrame,
   parseRequestHead,
   responseHeadBytes,
   serveHttpOverLocal,
   statusHasNoBody,
+  targetFormOk,
+  trimOws,
 } from "../src/server/http-over-conn.ts";
 import {
   connectLocal,
   listenLocal,
   type LocalConn,
+  type LocalListener,
 } from "../src/server/local-listen.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
@@ -54,8 +58,10 @@ function findSeq(buf: Uint8Array, seq: string, from = 0): number {
 }
 
 /** Parse a full response (Content-Length or chunked), with a body-framing
- *  check: chunked responses must end in the terminating `0\r\n\r\n`. */
-function parseReply(raw: Uint8Array): Reply {
+ *  check: chunked responses must end in the terminating `0\r\n\r\n`, and a
+ *  Content-Length is the body's length — unless the reply is to a `HEAD`,
+ *  whose length is that of the body it does not carry. */
+function parseReply(raw: Uint8Array, toHead = false): Reply {
   const end = findSeq(raw, "\r\n\r\n");
   assert(end >= 0, "no response head");
   const head = dec.decode(raw.subarray(0, end)).split("\r\n");
@@ -87,9 +93,33 @@ function parseReply(raw: Uint8Array): Reply {
   } else {
     body = rest;
     const cl = headers.get("content-length");
-    if (cl !== null) assertEquals(body.length, Number(cl), "content-length");
+    if (cl !== null && !toHead) {
+      assertEquals(body.length, Number(cl), "content-length");
+    }
   }
   return { status: Number(m[1]), headers, body };
+}
+
+/** A listener whose connections have only their streams — what the Windows
+ *  pipe backend offers. The unix backends also read and write directly, and
+ *  `tests/http-over-conn-differential.test.ts` runs the server over those;
+ *  the cases here keep the stream path honest. */
+function streamsOnly(inner: LocalListener): LocalListener {
+  return {
+    path: inner.path,
+    close: () => inner.close(),
+    async *[Symbol.asyncIterator]() {
+      for await (const c of inner) {
+        yield {
+          readable: c.readable,
+          writable: c.writable,
+          remoteAddr: c.remoteAddr,
+          drain: () => c.drain!(),
+          close: () => c.close(),
+        };
+      }
+    },
+  };
 }
 
 async function withServer(
@@ -98,7 +128,7 @@ async function withServer(
 ): Promise<void> {
   const dir = await tempDir("aio-hoc-");
   const path = join(dir, "h.sock");
-  const srv = serveHttpOverLocal(listenLocal(path), handler);
+  const srv = serveHttpOverLocal(streamsOnly(listenLocal(path)), handler);
   try {
     await f(path);
   } finally {
@@ -113,12 +143,27 @@ async function roundtrip(
 ): Promise<Reply> {
   const conn = await connectLocal(path);
   const w = conn.writable.getWriter();
-  await w.write(typeof raw === "string" ? enc.encode(raw) : raw);
+  await w.write(closing(typeof raw === "string" ? enc.encode(raw) : raw));
   w.releaseLock();
   const out = await readAll(conn);
   conn.close();
-  return parseReply(out);
+  return parseReply(out, isHead(raw));
 }
+
+/** `raw` with `Connection: close` after its request line: the reply is read
+ *  to the end of the connection, which the server otherwise keeps. */
+function closing(raw: Uint8Array): Uint8Array {
+  const at = findSeq(raw, "\r\n");
+  return at < 0 ? raw : concat([
+    raw.subarray(0, at + 2),
+    enc.encode("Connection: close\r\n"),
+    raw.subarray(at + 2),
+  ]);
+}
+
+const isHead = (raw: string | Uint8Array) =>
+  (typeof raw === "string" ? raw : dec.decode(raw.subarray(0, 5)))
+    .startsWith("HEAD ");
 
 // ── Pure parts ────────────────────────────────────────────────────────────
 
@@ -132,6 +177,99 @@ Deno.test("parseRequestHead: request line + headers, folded values kept as-is", 
   assertEquals(h.headers.get("host"), "app");
   assertEquals(h.headers.get("x-two"), "a, b");
   assertEquals(h.headers.get("content-length"), "3");
+  // A method is any token without a lowercase letter, not only letters.
+  assertEquals(parseRequestHead("M-SEARCH /x HTTP/1.1").method, "M-SEARCH");
+});
+
+Deno.test("trimOws: the spaces and tabs at the edges, and no other byte JS calls whitespace", () => {
+  assertEquals(trimOws(" \t v \t "), "v");
+  assertEquals(trimOws("a b\tc"), "a b\tc");
+  assertEquals(trimOws(""), "");
+  assertEquals(trimOws(" \t "), "");
+  // NBSP, VT, FF, NEL, the bytes of U+2028, a BOM: all of them `.trim()` cuts.
+  const kept = ["\xa0", "\x0b", "\x0c", "\x85", "\xe2\x80\xa8", "\ufeff"];
+  assertEquals(
+    kept.map((w) => trimOws(` ${w}v${w}\t`)),
+    kept.map((w) => `${w}v${w}`),
+  );
+  // …and so a header value keeps them, at both edges.
+  const h = parseRequestHead(
+    "GET / HTTP/1.1\r\nX: \t voil\xc3\xa0 \r\nY:\xa0y",
+  );
+  assertEquals(h.headers.get("x"), "voil\xc3\xa0");
+  assertEquals(h.headers.get("y"), "\xa0y");
+});
+
+Deno.test("bodyFraming: chunked is the last coding, once, and HTTP/1.1's", () => {
+  const f = (te: string, version?: string) =>
+    bodyFraming(new Headers({ "transfer-encoding": te }), version);
+  assertEquals(f("chunked"), "chunked");
+  assertEquals(f("gzip,\tCHUNKED "), "chunked");
+  const refused = ([te, version]: [string, string?]) => {
+    try {
+      f(te, version);
+      return false;
+    } catch {
+      return true;
+    }
+  };
+  const bad: [string, string?][] = [
+    ["chunked, chunked"],
+    ["chunked, gzip"],
+    ["gzip,\xa0chunked"],
+    ["\x0bchunked"],
+    ["chunked,"],
+    [",chunked"],
+    ["gzip,,chunked"],
+    ["gzip, , chunked"],
+    ["identity, chunked"],
+    ["gzip, Identity, chunked"],
+    [""],
+    ["chunked", "1.0"],
+  ];
+  assertEquals(bad.map(refused), bad.map(() => true), JSON.stringify(bad));
+});
+
+Deno.test("targetFormOk: origin- or absolute-form; * for OPTIONS alone; the authority-form for CONNECT alone", () => {
+  const ok: [string, string][] = [
+    ["GET", "/"],
+    ["GET", "//a/b"],
+    ["GET", "/*"],
+    ["GET", "http://a/b"],
+    ["POST", "x+y.z-1://a"],
+    ["GET", "http:///x"],
+    ["OPTIONS", "*"],
+    ["OPTIONS", "/x"],
+    ["CONNECT", "a:443"],
+    ["CONNECT", "[::1]:80"],
+    ["CONNECT", "a"],
+  ];
+  const bad: [string, string][] = [
+    ["GET", "*"],
+    ["POST", "*"],
+    ["M-SEARCH", "*"],
+    ["OPTIONS", "**"],
+    ["OPTIONS", "a:80"],
+    ["GET", "a:80"],
+    ["GET", "a"],
+    ["GET", "?q"],
+    ["GET", "#f"],
+    ["GET", "./a"],
+    ["GET", "http:/a"],
+    ["GET", "http://"],
+    ["GET", "mailto:a@b"],
+    ["GET", "1x://a"],
+    ["GET", "a_b://c"],
+    ["GET", "://a"],
+    ["CONNECT", "/a"],
+    ["CONNECT", "*"],
+    ["CONNECT", "http://a/"],
+    ["CONNECTX", "a:443"],
+  ];
+  assertEquals(ok.map((a) => targetFormOk(...a)), ok.map(() => true));
+  assertEquals(bad.map((a) => targetFormOk(...a)), bad.map(() => false));
+  // …and a head whose target is in no form is not a request.
+  assertThrows(() => parseRequestHead("GET a:80 HTTP/1.1\r\nHost: h"));
 });
 
 Deno.test("parseRequestHead: refuses what is not HTTP/1.x", () => {
@@ -141,6 +279,8 @@ Deno.test("parseRequestHead: refuses what is not HTTP/1.x", () => {
       "GET /",
       "GET / HTTP/2.0",
       "get / HTTP/1.1",
+      "Get / HTTP/1.1",
+      "G(T / HTTP/1.1",
       "GET / HTTP/1.1\r\nno-colon",
       "GET / HTTP/1.1\r\n: empty",
       "GET / HTTP/1.1\r\nBad Name: x",
@@ -244,7 +384,9 @@ Deno.test("request body split across many writes still arrives whole", async () 
       const conn = await connectLocal(path);
       const w = conn.writable.getWriter();
       await w.write(
-        enc.encode("POST /x HTTP/1.1\r\nContent-Length: 3000\r\n\r\n"),
+        enc.encode(
+          "POST /x HTTP/1.1\r\nConnection: close\r\nContent-Length: 3000\r\n\r\n",
+        ),
       );
       for (let i = 0; i < 30; i++) await w.write(new Uint8Array(100).fill(65));
       w.releaseLock();
@@ -276,7 +418,7 @@ Deno.test("response stream is written chunk by chunk — not buffered", async ()
     async (path) => {
       const conn = await connectLocal(path);
       const w = conn.writable.getWriter();
-      await w.write(enc.encode("GET / HTTP/1.1\r\n\r\n"));
+      await w.write(enc.encode("GET / HTTP/1.1\r\nConnection: close\r\n\r\n"));
       w.releaseLock();
       const reader = conn.readable.getReader();
       let got: Uint8Array = new Uint8Array(0);
@@ -366,6 +508,8 @@ Deno.test("204 / 304 / HEAD carry no body", async () => {
       assertEquals(c.status, 200);
       assertEquals(c.headers.get("x-h"), "kept");
       assertEquals(c.body.length, 0);
+      // …and the length its GET would carry.
+      assertEquals(c.headers.get("content-length"), "28");
       const d = await roundtrip(path, "GET /empty-null HTTP/1.1\r\n\r\n");
       assertEquals(d.status, 200); // a null-body 200 → Content-Length: 0
     },
@@ -516,3 +660,143 @@ Deno.test("a server pipe is DRAINED before it is closed (real Windows: EPIPE)", 
     `drain must precede close: ${order}`,
   );
 });
+
+Deno.test("a connection's read buffer starts small and grows only for a connection that fills it", async () => {
+  // Every connection used to get 64 KB to read into, whatever it sent: a
+  // process that opened connections and sent half a head held 64 KB of this
+  // one each. The buffer now starts at 4 KB and grows after a read that
+  // filled it — a page request never needs more, an upload gets there in
+  // three reads.
+  const run = async (input: Uint8Array) => {
+    const asked: number[] = [];
+    let off = 0, got = 0;
+    const closed = Promise.withResolvers<void>();
+    const conn: LocalConn = {
+      // (Never used: a connection that can be read raw is read raw.)
+      readable: new ReadableStream<Uint8Array>(),
+      writable: new WritableStream<Uint8Array>(),
+      remoteAddr: { transport: "unix", path: "/fake" },
+      read(buf) {
+        asked.push(buf.length);
+        if (off === input.length) return Promise.resolve(null);
+        const n = Math.min(buf.length, input.length - off);
+        buf.set(input.subarray(off, off + n));
+        off += n;
+        return Promise.resolve(n);
+      },
+      write: () => Promise.resolve(),
+      close: () => closed.resolve(),
+    };
+    const listener = {
+      path: "/fake",
+      close() {},
+      async *[Symbol.asyncIterator]() {
+        yield conn;
+      },
+    };
+    void serveHttpOverLocal(listener, async (req) => {
+      got = (await req.arrayBuffer()).byteLength;
+      return new Response("ok");
+    });
+    await closed.promise;
+    return { asked, got };
+  };
+  const page = await run(enc.encode("GET / HTTP/1.1\r\nHost: x\r\n\r\n"));
+  assertEquals(page.asked.every((n) => n === 4096), true, `${page.asked}`);
+  assert(page.asked.length >= 1);
+
+  const size = 1 << 20;
+  const head = enc.encode(
+    `POST / HTTP/1.1\r\nHost: x\r\nContent-Length: ${size}\r\n\r\n`,
+  );
+  const upload = new Uint8Array(head.length + size);
+  upload.set(head);
+  const up = await run(upload);
+  assertEquals(up.got, size, "the upload did not reach the route whole");
+  assertEquals(up.asked.slice(0, 3), [4096, 16384, 65536]);
+  assertEquals(Math.max(...up.asked), 65536);
+});
+
+Deno.test("a head or a chunk line that arrives in pieces is read whole — what is left of one read survives the next", async () => {
+  // The connection is read into ONE buffer, again and again. Bytes of the
+  // last read that are still waiting (half a head, half a chunk-size line)
+  // must be moved out before the next read lands on them.
+  const pieces = [
+    "POST /split?x=1 HT",
+    "TP/1.1\r\nHost: x\r\nTransfer-Encod",
+    "ing: chunked\r\n\r\n",
+    "000",
+    "5\r\nhel",
+    "lo\r",
+    "\n0\r\n\r\n",
+  ].map((p) => enc.encode(p));
+  const seen: string[] = [];
+  const wrote: string[] = [];
+  const closed = Promise.withResolvers<void>();
+  const conn: LocalConn = {
+    // (Never used: a connection that can be read raw is read raw.)
+    readable: new ReadableStream<Uint8Array>(),
+    writable: new WritableStream<Uint8Array>(),
+    remoteAddr: { transport: "unix", path: "/fake" },
+    read(buf) {
+      const p = pieces.shift();
+      if (!p) return Promise.resolve(null);
+      buf.set(p);
+      return Promise.resolve(p.length);
+    },
+    write(bytes) {
+      wrote.push(new TextDecoder().decode(bytes));
+      return Promise.resolve();
+    },
+    close: () => closed.resolve(),
+  };
+  const listener = {
+    path: "/fake",
+    close() {},
+    async *[Symbol.asyncIterator]() {
+      yield conn;
+    },
+  };
+  void serveHttpOverLocal(listener, async (req) => {
+    const u = new URL(req.url);
+    seen.push(`${req.method} ${u.pathname}${u.search} ${await req.text()}`);
+    return new Response("ok");
+  });
+  await closed.promise;
+  assertEquals(seen, ["POST /split?x=1 hello"]);
+  assertEquals(wrote.join("").slice(0, 15), "HTTP/1.1 200 OK");
+});
+
+for (const how of ["close", "dropConnections"] as const) {
+  Deno.test(`${how}(): nothing new is started on the connection — a request pipelined behind the one just answered never reaches the handler`, async () => {
+    // The moment that can go wrong: the answer is written, the next head is
+    // already in the buffer, and the connection is ended before it is taken.
+    // `completed` settles exactly there.
+    const dir = await tempDir("aio-hoc-");
+    const path = `${dir}/h.sock`;
+    const seen: string[] = [];
+    const srv = serveHttpOverLocal(listenLocal(path), (req, info) => {
+      seen.push(new URL(req.url).pathname);
+      if (seen.length === 1) info.completed.then(() => void srv[how]());
+      return new Response("x");
+    });
+    try {
+      const conn = await connectLocal(path);
+      const w = conn.writable.getWriter();
+      await w.write(enc.encode(
+        ["/a", "/b", "/c"].map((p) => `GET ${p} HTTP/1.1\r\nHost: x\r\n\r\n`)
+          .join(""),
+      ));
+      w.releaseLock();
+      const got = dec.decode(await readAll(conn));
+      conn.close();
+      assertEquals(
+        { seen, answers: got.split("HTTP/1.1 200").length - 1 },
+        { seen: ["/a"], answers: 1 },
+      );
+    } finally {
+      await srv.close();
+      await dropTempDir(dir);
+    }
+  });
+}

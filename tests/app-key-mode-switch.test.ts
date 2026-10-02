@@ -44,6 +44,7 @@ async function boot(
     baseDir,
     appDir,
     ...extra,
+    watch: false,
   });
   await app.close();
 }

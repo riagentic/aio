@@ -9,7 +9,19 @@
 > Shipped work lives in `CHANGELOG.md`; what was fixed or refused from field
 > reports lives in `feedback/resolved.md` and `feedback/refused.md`.
 
-## Next: 1.0.15-beta — close the external review list as far as v1 allows
+## Current: 1.0.17-beta (2026-10-02) — 1.0.15-beta and 1.0.16-beta shipped
+
+- **1.0.15-beta** (2026-09-30) and **1.0.16-beta** (2026-10-01) are published.
+- **1.0.17-beta** is the current release: the size repair, plus the repair of
+  what an audit found shipped broken in 1.0.15/1.0.16 (minified builds, the
+  local-peer lockdown, the Windows one-click `.exe`, the version read, env
+  refusals). What it changed is in `CHANGELOG.md`; what it left open is under
+  [Open work](#open-work) → "Left open by the 1.0.17-beta audit round".
+- Still owed on real machines (Windows, macOS): the lockdown's pipe and
+  `LOCAL_PEERPID` paths, and a real app updating itself from the one-click
+  `.exe`.
+
+### The 1.0.15-beta list — close the external review list as far as v1 allows (shipped; two items still open)
 
 Agreed with the external reviewer 2026-09-27. Pins and additive options only; no
 new targets. Rule: a Must item whose planted bug a test already catches needs
@@ -1083,6 +1095,114 @@ They are temporary; the findings are summarised above.
 bundle are not inside it. GitHub releases exist: `deno task ship github`.
 
 ## Open work
+
+### Left open by the 1.0.17-beta audit round (2026-10-02) — accepted, not yet built
+
+Skipped or left open by the fixes that went into 1.0.17-beta. One line each.
+
+Found late in the round, deliberately not built in 1.0.17:
+
+- [ ] Per-call attribution of a worker cell's patch batches: tag each batch with
+      the call id(s) whose actions produced it and attribute `unsaved` by tag,
+      as the main isolate does (today every call in flight on the cell shares a
+      failed save's verdict). Audit every async write path in the worker first —
+      each must carry its call id.
+- [ ] Keep a verified download across update retries (recorded with its signed
+      digest, re-verified before reuse, removed on dismiss or install) — today a
+      refused release is downloaded again on every retry.
+- [ ] aiol: give the code mask the file's path so a `.ts` file gets the plain
+      (non-JSX) rules; today a `.ts` holding `"</p>"` in a string is left
+      `[manual]` (~130 mask call sites to thread).
+- [ ] A production build started with `--host=0.0.0.0` prints a `trojan` row;
+      the listener is keyed (401 without it), but the row name reads as the dev
+      API.
+- [ ] A tree an older updater left half-made under another version
+      (`<install>.staged-<v>`) cannot be proven the updater's and is named at
+      every start; find a sound proof or a one-time prompt.
+
+Build / trim:
+
+- [ ] Recover an interrupted trim at dev boot too (today: Ctrl-C, the next
+      compile, and `deno task build`'s first step).
+- [ ] A directory in `compile.include` is not a module-graph root.
+- [ ] The "graph loads it" trim guard sees one entry per npm package, not its
+      files: a CJS package that `require`s from its own root-level `test/` is
+      not detected (`build.keepPackages` is the escape).
+- [ ] `cli` targets keep unreached packages (`keepUnreached`) while
+      `docs/build/targets.md` says they are dropped "for every target" — make
+      the doc or the build agree.
+- [ ] `build.chromiumExtras` is validated only by Electron builds; a server-only
+      build never reads it.
+- [ ] Minify: esbuild refuses TS parameter decorators ("could not minify"), and
+      a nested function declared after a `return` loses its name.
+- [ ] `docs/build/environment.md` (`AIO_STRIP_CHROMIUM`) still says "software
+      Vulkan fallback"; it could also mention the automatic fat-exe fallback.
+
+Windows one-click `.exe`:
+
+- [x] Run a real app's self-update on Windows end to end (build → publish →
+      update → reopen the old `.exe`) — done on Windows 11 for 1.0.17-beta,
+      including a 1.0.16 install updated by 1.0.16 and then 1.0.17.
+- [ ] The stub always exits 0 — it does not propagate the app's exit code.
+- [ ] An older `.exe` opened over a newer install downgrades it ("the exe you
+      open wins"); preventing it needs a version in the SFX header and stamp.
+- [ ] A channel that publishes only the `.exe` offers SFX installs a release
+      they refuse; nothing gates "publish the zip with every release".
+- [ ] No progress UI during the first extraction.
+- [ ] The Deno-side `readSfxTrailer` does not parse a signed `.exe`.
+- [ ] Untested: the remote stub fetch against the real registry, a Windows build
+      host, the 10-minute lock timeout and an abandoned mutex.
+
+Local-peer lockdown:
+
+- [ ] Run it on Windows (`-http` pipe gate, `electron.cmd` resolution) and macOS
+      (`LOCAL_PEERPID`, direct spawn of the app bundle's binary). Identity there
+      is pid only — no start time — plus disarm-on-exit.
+- [ ] The window's "refused by its server" surface is log + title only, no
+      dialog; it was run against a stub `electron`.
+- [ ] Prod is stricter than dev here (dev is open for `am`/amui), so only the
+      new e2e exercises the prod gate.
+- [ ] Add the lockdown guards to `check:mutations` / the proof matrix; the
+      identity-read-at-accept change has no test.
+- [ ] `tests/electron-main-relay.test.ts`: cases whose server never greets could
+      see a reconnect if stretched past 5 s under load.
+
+Version / memory / updates:
+
+- [ ] Directory rollback writes `installed.json` before the helper moves the
+      folders; the forward directory swap never reconciles it.
+- [ ] The replay ceiling catches re-entry within one boot only; a loop that
+      re-runs the whole boot block starts a fresh session each time.
+- [ ] `pressure` memory reports still repeat every interval;
+      `docs/debugging/production.md` does not mention the said-once rule.
+- [ ] The budget error carries no `.code`.
+
+Core:
+
+- [ ] `_adoptUser` misses an in-place mutation of the same user object (store
+      the key on the client's meta at connect).
+- [ ] aio client pin: the warning has no durable surface once the app page
+      loads; a CA-valid certificate that differs from the pin raises no
+      `certificate-error`; the token is still sent after the warning. Refusing a
+      changed pin is major-version material.
+- [ ] The server's `AIO_DISCOVERY_PORT` falls back to 8099 in silence for a
+      non-decimal value — add the one-line warning.
+- [ ] The pin handler was exercised through the evaluated script, not a real
+      Electron window.
+
+Tooling:
+
+- [ ] `am create --css=tailwind`'s refusal (`tailwindRefusal`) is undocumented.
+- [ ] The typographic-quote PowerShell escape fixed in `am start` is still open
+      in `src/server/pick-path.ts` (`_psEscape`).
+- [ ] `aiol --safe-fix`: a nested function that shadows an imported `call` is
+      still rewritten; JSX prose next to a `{…}` child is read as code;
+      `codeMask` is not JSX-aware.
+- [ ] No root cause was found for the lock dirs the shard runner used to see
+      held; the gate is back, the cause is not known.
+- [ ] `check:orphans` does not sweep stale `/tmp/xdg-shard-*` dirs.
+- [ ] Ledger rows to add: `shardPassed`, `pollBackoffSites`' `every` guard,
+      `runsFrom`'s `file:` check, the new minify/audit guards.
 
 ### Android / iOS — after the first real run (2026-09-18, 1.0.5-beta)
 

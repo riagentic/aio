@@ -21,6 +21,7 @@ import {
   pickUpdateArtifact,
 } from "../src/am/am-cmd-publish.ts";
 import { hostPlatform } from "../src/build/platforms.ts";
+import { buildVersionFor } from "../src/server/app-version.ts";
 
 /** Capture stdout (am writes its JSON document to console.log). */
 async function capture(fn: () => Promise<void>): Promise<string[]> {
@@ -1046,6 +1047,123 @@ Deno.test("am publish: one target recorded twice for a platform says rebuild, no
   } finally {
     Deno.chdir(orig);
     await Deno.remove(dir, { recursive: true });
+  }
+});
+
+// What publish stages is left out of the app's version, by a record it writes.
+// `--dir=src` staged INTO the sources and recorded `src/`: from then on no
+// edit to the app changed its version. Inside the project, `--dir` answers to
+// the guard the build's `--out` answers to.
+Deno.test("am publish: --dir at a source dir is refused before anything is written or recorded — and a source edit still moves the version", async () => {
+  const orig = Deno.cwd();
+  const dir = await project([{ target: "browser", file: "notes" }]);
+  const elsewhere = await tempDir("am-publish-elsewhere-");
+  const version = async () =>
+    (await buildVersionFor(dir, "2.1", { env: "" })).bv.version;
+  const exists = (rel: string) =>
+    Deno.stat(join(dir, rel)).then(() => true, () => false);
+  const base = dir.slice(dir.lastIndexOf("/") + 1);
+  try {
+    Deno.chdir(dir);
+    const refused: string[][] = [
+      ["--dir=src"],
+      ["--dir=src/sub"],
+      ["--dir=."],
+      ["--dir=.."],
+      [`--dir=../${base}/src`],
+      ["--dir=.aio"],
+      ["--dir=dist/x"],
+      ["--dir=SRC"],
+      // …and the sources under a name that only reads differently: what
+      // Windows drops from a name, and a link — inside the project or not.
+      ["--dir=src "],
+      ["--dir=src."],
+      ["--dir=srclink"],
+      [`--dir=${join(elsewhere, "in")}`],
+    ];
+    await Deno.symlink("src", join(dir, "srclink"));
+    await Deno.symlink(join(dir, "src"), join(elsewhere, "in"));
+    for (const args of refused) {
+      const r = await publishExit(["--no-build", ...args]);
+      assertEquals(r.code, 1, args.join(" "));
+      const err = (JSON.parse(r.out.at(-1)!) as { error: string }).error;
+      assertStringIncludes(err, "refusing to publish into", args.join(" "));
+      assertStringIncludes(err, "Nothing was built or written");
+    }
+    // A target's own app dir is the app's source too.
+    const config = await Deno.readTextFile(join(dir, "deno.json"));
+    await Deno.writeTextFile(
+      join(dir, "deno.json"),
+      JSON.stringify({
+        ...JSON.parse(config),
+        build: { targets: { browser: { entry: "apps/web/main.ts" } } },
+      }),
+    );
+    for (const d of ["apps", "apps/web", "apps/web/out"]) {
+      const r = await publishExit(["--no-build", `--dir=${d}`]);
+      assertEquals(r.code, 1, d);
+    }
+    assertEquals(await exists("apps"), false);
+    await Deno.writeTextFile(join(dir, "deno.json"), config);
+    assertEquals(
+      await Promise.all(
+        ["src/prod", "src/sub", "prod", "release", ".aio/outputs.json"].map(
+          exists,
+        ),
+      ),
+      [false, false, false, false, false],
+    );
+    assertEquals(
+      [...Deno.readDirSync(join(dir, "src"))].map((e) => e.name),
+      ["app.ts"],
+    );
+    await Deno.remove(join(elsewhere, "in"));
+    // A channel is a name, never a path: it cannot move the staging dir.
+    const r = await publishExit(["--no-build", "--channel=../src"]);
+    assertEquals(r.code, 1);
+    assertEquals(
+      [await exists("src/prod"), await exists("release")],
+      [false, false],
+    );
+    assertEquals(
+      JSON.parse(await Deno.readTextFile(join(dir, ".aio/outputs.json"))),
+      ["release/"],
+    );
+    const before = await version();
+    await Deno.writeTextFile(join(dir, "src", "app.ts"), `fetch("y");`);
+    const edited = await version();
+    assert(edited !== before, "an edit in src/ is a new version");
+
+    // The good cases: the default dir, a dir that also holds the user's files
+    // (only the channel directory is recorded), a dir outside the project.
+    for (const d of ["release", "tests", elsewhere]) {
+      if (d === "tests") {
+        await Deno.mkdir(join(dir, "tests"));
+        await Deno.writeTextFile(join(dir, "tests", "a.test.ts"), "// 1\n");
+      }
+      const r = await publishExit(["--no-build", `--dir=${d}`]);
+      assertEquals(r.code, undefined, r.out.join("\n"));
+    }
+    assertEquals(
+      JSON.parse(await Deno.readTextFile(join(dir, ".aio/outputs.json"))),
+      ["release/", "release/prod/", "tests/", "tests/prod/"],
+    );
+    assert(await exists("tests/prod/notes"), "staged in the channel dir");
+    const published = await version();
+    // What was staged does not count…
+    await Deno.writeTextFile(join(dir, "release/prod/notes"), "another\n");
+    await Deno.writeTextFile(join(dir, "tests/prod/notes"), "another\n");
+    // Neither does what Finder leaves behind after a look at the release.
+    await Deno.writeTextFile(join(dir, "release/.DS_Store"), "finder\n");
+    await Deno.writeTextFile(join(dir, "release/prod/.DS_Store"), "finder\n");
+    assertEquals(await version(), published);
+    // …and the user's file beside it does.
+    await Deno.writeTextFile(join(dir, "tests", "a.test.ts"), "// 2\n");
+    assert(await version() !== published, "an edit in tests/ counts");
+  } finally {
+    Deno.chdir(orig);
+    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(elsewhere);
   }
 });
 

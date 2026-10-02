@@ -175,6 +175,7 @@ Deno.test("electron config: every key of the block reaches the window's meta", (
     requireSandbox: true,
     unsandboxedChildWindows: true,
     permissions: { "clipboard-sanitized-write": ["app"] },
+    allowLocalPeers: true,
   };
   const on = electronMetaPolicy(set) as Record<string, unknown>;
   const off = electronMetaPolicy(undefined) as Record<string, unknown>;

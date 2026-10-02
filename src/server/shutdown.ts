@@ -15,6 +15,7 @@ import {
 import {
   DRAIN_TIMEOUT_MS,
   EXIT_WATCHDOG_MS,
+  STORES_RESERVE_MS,
   TEARDOWN_TIMEOUT_MS,
 } from "./shutdown-budget.ts";
 import { log as rootLog } from "../diagnostics/logger-api.ts";
@@ -57,6 +58,11 @@ const STOP_HOOK_RESERVE_MS = 500;
 /** Distinguishes "the phase timed out" from any value it could return. */
 const TIMED_OUT = Symbol("shutdown-phase-timeout");
 
+/** What a STORE's close costs when it is cut: its checkpoint, not its data —
+ *  every store is a WAL database, and the WAL is replayed at the next open. */
+const STORE_CUT = "its checkpoint is left for the next start; nothing that " +
+  "was written is lost";
+
 /** Run ONE shutdown phase.
  *
  *  THE single decider for what a misbehaving phase may cost. A phase can throw
@@ -71,6 +77,7 @@ async function phase(
   left: () => number,
   fn: () => unknown,
   budget = `${TEARDOWN_TIMEOUT_MS}ms teardown`,
+  cost = "whatever it still had to write or release is lost",
 ): Promise<void> {
   let r: unknown;
   try {
@@ -95,8 +102,7 @@ async function phase(
     if (out === TIMED_OUT) {
       log.warn(
         `shutdown: ${name} did not finish inside the ${budget} ` +
-          `budget — continuing without it (whatever it still had to ` +
-          `write or release is lost)`,
+          `budget — continuing without it (${cost})`,
       );
     }
   } catch (e) {
@@ -243,7 +249,7 @@ export function installProcessSignals(): void {
     // EVERY app in the process, not just this one — see
     // `shutdownAllRuntimes`. One handler for all of them: each app's
     // shutdown is memoised, and so is the exit.
-    installProcessListener(sig, () => void stopProcess(0));
+    installProcessListener(sig, () => void stopProcess(0, `${sig} received`));
   }
 }
 
@@ -305,8 +311,14 @@ export function _setWatchdogMs(ms: number): () => void {
  *  healthy process lingers — and the whole call is memoised, so N signal
  *  listeners are one exit.
  *
+ *  `reason` is WHO asked ("SIGTERM received"), said before anything stops: a
+ *  stop that arrives from outside otherwise leaves a log that ends in
+ *  `stopped uptime=…` with nothing above it saying why. The line goes through
+ *  the logger ahead of the shutdown that flushes it, so it is in `app.log`.
+ *
  *  Dev and prod behave identically; the watchdog firing is always an error. */
-export function stopProcess(code = 0): Promise<never> {
+export function stopProcess(code = 0, reason?: string): Promise<never> {
+  if (reason) rootLog.info(`${reason} — stopping`);
   if (_exiting) return _exiting;
   const started = Date.now();
   let done = false;
@@ -381,7 +393,9 @@ export interface ShutdownRefs {
    *  Refcounted, so releasing it here cannot un-protect a sibling app (D2)
    *  that is still running in this process. */
   releaseFileSizeGuard?: () => void;
-  scheduleManager: { cancelAll: () => void };
+  /** `close` cancels every schedule and refuses new ones; optional so a
+   *  hand-built refs object with only `cancelAll` still works. */
+  scheduleManager: { cancelAll: () => void; close?: () => void };
   ownManager: { disposeAll: () => void };
   dispatch: { close: () => void; drain: (timeoutMs?: number) => Promise<void> };
   /** THIS app's cell names — late-bound, the cells bridge fills them in after
@@ -470,6 +484,15 @@ export function createShutdownOrchestrator(
       await drainPhase("close worker cells", () => refs.closeWorkers!());
     }
     await phase(log, "mark shutting down", gate, () => refs.setShuttingDown());
+    // Schedules stop BEFORE dispatch closes: a tick landing between "close
+    // dispatch" and Phase 7 reached a closed app (a refused dispatch and its
+    // warning, written into a log the app was about to give up), and a method
+    // draining below could arm a new one. `close()` cancels and refuses both.
+    await phase(log, "stop schedules", gate, () => {
+      const m = refs.scheduleManager;
+      if (m.close) m.close();
+      else m.cancelAll();
+    });
     await phase(log, "close dispatch", gate, () => refs.dispatch.close());
     // Abort BEFORE draining. A streaming method (an SSE reply, a subprocess
     // pipe) has no reason of its own to stop, so an un-aborted drain either
@@ -657,18 +680,32 @@ export function createShutdownOrchestrator(
     // Phase 7: Server + DB
     const srv = refs.getServer();
     if (srv) await phase(log, "server", tLeft, () => srv.shutdown());
-    await phase(log, "sqlite", tLeft, () => refs.asyncDb?.close());
-    await phase(log, "kv", tLeft, () => refs.kvDb?.close());
-    await phase(log, "sessions", tLeft, () => refs.sessionStore?.close());
-    await phase(log, "users", tLeft, () => refs.userStore?.close());
+    // The stores' turn. Whatever is left of the teardown is theirs — and
+    // never less than STORES_RESERVE_MS: a phase before them that overran
+    // spent the budget, and each store used to be left the 1ms floor ("sqlite
+    // did not finish…" on a stop where the database was never the slow part).
+    // The share is ADDED in that case only, so a stop whose phases finish
+    // inside the budget runs exactly as it always did, and one that overran
+    // ends at most STORES_RESERVE_MS later.
+    const overran = tDeadline - Date.now() < STORES_RESERVE_MS;
+    const sDeadline = overran ? Date.now() + STORES_RESERVE_MS : tDeadline;
+    const sLeft = () => Math.max(1, sDeadline - Date.now());
+    // …and a store cut inside that share is told the cap it really had.
+    const sBudget = overran ? `${STORES_RESERVE_MS}ms stores'` : undefined;
+    const store = (name: string, close: () => unknown) =>
+      phase(log, name, sLeft, close, sBudget, STORE_CUT);
+    await store("sqlite", () => refs.asyncDb?.close());
+    await store("kv", () => refs.kvDb?.close());
+    await store("sessions", () => refs.sessionStore?.close());
+    await store("users", () => refs.userStore?.close());
 
-    await phase(log, "mark stopped", tLeft, () => refs.setRunning(false));
+    await phase(log, "mark stopped", sLeft, () => refs.setRunning(false));
 
     // Last, after the server (whose watcher owns the reload sentinel in the
     // same directory): a per-AIO_APPS_DIR lock dir that is now empty goes
     // away with its last app. `lockDir()` created one for every temp home the
     // suite ever used and nothing removed them — 675 on one machine, one day.
-    await phase(log, "lock dir", tLeft, () => pruneLockDir());
+    await phase(log, "lock dir", sLeft, () => pruneLockDir());
   }
 
   function shutdown(): Promise<void> {

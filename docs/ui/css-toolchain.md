@@ -118,6 +118,15 @@ value that reaches a shell can do whatever a shell can.
 - **Dev keeps serving.** A typo in a class must not kill the dev server you are
   using to fix it. The error is logged, the previous stylesheet keeps serving,
   and the next save tries again.
+- **Closing the dev server ends a step still running.** Its process is asked to
+  end, killed if it has not exited half a second later, and the close waits for
+  that exit — never for the step's output. A log line says what was done, one
+  per step: the boot's run and a save's can both be running. The stop reaches
+  the step's own process only: a shell wrapper has to `exec` its tool
+  (`["sh", "-c", "exec tool …"]`), or the tool keeps running after the wrapper
+  is gone, and the line says so. A tool that writes its output in place may
+  leave that file half-written — the next start runs the step again at boot,
+  which rewrites it whole. A build is never interrupted this way.
 
 That split is the only direction aio allows: dev is never more permissive about
 what _ships_.

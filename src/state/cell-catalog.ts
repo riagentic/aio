@@ -268,7 +268,9 @@ export function bindCell(
   // selector called WITH args is parameterized (`cell.byId(id)`); with NO args
   // it gets full state as arg 2 (`(s, fullState)` cross-cell plain selectors).
   for (const [key, selectorFn] of Object.entries(f.__aio.selectors)) {
-    const isDeps = key in (f.__aio.selectorDeps ?? {});
+    // OWN keys: a selector NAMED `toString`/`constructor`/… is "in" every
+    // plain object, so it was bound as a deps-form selector it is not.
+    const isDeps = Object.hasOwn(f.__aio.selectorDeps ?? {}, key);
     (f as Record<string, unknown>)[key] = (...args: unknown[]) => {
       const state = getState();
       const own = state[f.__aio.id];
@@ -334,6 +336,9 @@ export function installDefaultStateGetters(def: CellDef): void {
   }
   const state = def.__aio.state as Record<string, unknown>;
   for (const key of Object.keys(state)) {
+    // `def` is the cell itself, not data: a state field must not shadow what
+    // it inherits either (`toString`, `bind`, `call`).
+    // aio-ok(proto-in): a callable's inherited names are reserved too
     if (key in def) continue; // defensive — a callable already owns the name
     Object.defineProperty(def, key, {
       get() {

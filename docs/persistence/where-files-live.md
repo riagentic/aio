@@ -14,6 +14,7 @@ the part you back up is one subdirectory of it.
     files/          whatever your app writes
     app.key         the persisted access token (key: true)  🔒 secret
     backups/        pre-update store snapshots (3 kept) — see updates
+    update-*.json   the updater's own records (a self-updating app) — see below
   logs/     ← ② regenerable: app.log, error.log, client.log, stdout.log …
   cache/    ← ② regenerable BULK your app writes: downloads, build trees, thumbnails
   app/      ← ② the unpacked binaries a packaged app RUNS from (AppImage) 🔒 0700
@@ -55,6 +56,25 @@ to remember it.
 
 `data/` is created `0700` — it holds the auth store and a TLS private key, so
 the mode assumes the worst file in the tree.
+
+An app that updates itself keeps the updater's records in `data/` too:
+`update-trust.json` (the signing key it trusts and what is installed),
+`update-pending.json` and `update-first-boot.json` (an update that has not yet
+proven itself), `update-failed.json` (one that was put back), and
+`update-artifacts.json` — the list of everything the updater made BESIDE the
+install (a download, an unpacked tree, the version it replaced), written by the
+app before each of those is made. That list is the only thing that lets the
+updater remove them later
+([What the updater may remove](../deploy/updates.md#what-the-updater-may-remove)).
+`am backup` copies it with the rest of `data/`. Deleting it, or restoring an
+older copy, loses no app data: what is no longer on the list is left beside the
+install and named in the log at each start until you delete it. A list that is
+gone, or has lost its mark of the one-time look (edited by hand, restored from
+before 1.0.17), is filled again at the next start from the exact names the
+updater uses, for what passes a content check (a copy of this app, an archive) —
+the look the first start on 1.0.17 takes, said in one info line, with the same
+caveat: a copy of the app you made by hand under exactly such a name counts as
+the updater's.
 
 `cache/` is where an app puts regenerable bulk — a 20 GB source tree, extracted
 downloads, generated thumbnails. It is deliberately OUTSIDE `data/` so it never
@@ -100,7 +120,10 @@ the whole directory (`logBudget`, 200 MB) — enforced during the run as well as
 at start — which evicts the oldest run first and says so in `app.log`.
 `--no-backup-logs` restores the old wipe-on-start. `stdout.log` rotates too —
 done by `am` just before it spawns the app, because the shell redirect that
-writes it holds the fd for the life of the run.
+writes it holds the fd for the life of the run. Two launches in the same moment
+(a double double-click) rotate once: `logs/.rotate` names the process that last
+did, and another process starting within 3 seconds of it appends to the live
+files instead of archiving them.
 
 ## The program vs its data
 

@@ -79,6 +79,7 @@ Deno.test("app onRestore: an async hook is refused — the app state never becom
   } as D);
   try {
     const app = await aio.run({
+      watch: false,
       cells: [c],
       appId: "onrestore-async-refused",
       persist: false,

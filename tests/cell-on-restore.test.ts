@@ -22,6 +22,7 @@ async function boot(
   fn: (app: any) => void | Promise<void>,
 ) {
   const app = await aio.run({
+    watch: false,
     appId: `restore-${crypto.randomUUID().slice(0, 8)}`,
     cells: [c],
     dbPath,

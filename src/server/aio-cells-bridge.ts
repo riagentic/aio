@@ -15,6 +15,7 @@ import {
 } from "../state/cell-compose.ts";
 import {
   createMemoryMonitor,
+  describeMemoryReport,
   MEMORY_INTERVAL_MS,
 } from "../diagnostics/memory-monitor.ts";
 import { readGauges } from "../diagnostics/memory-ledger.ts";
@@ -28,6 +29,7 @@ import { nearestOf } from "../state/cell-helpers.ts";
 import { parseRetention } from "../sync/op-buffer.ts";
 import { resolveOptions } from "../diagnostics/types.ts";
 import {
+  homeInUse,
   isLockOwnerAlive,
   isOwnLock,
   lockKey,
@@ -35,6 +37,7 @@ import {
 } from "./single-instance-lock.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { AioLogger, log } from "../diagnostics/logger.ts";
+import { closeLogger, guestLogger } from "../diagnostics/logger-core.ts";
 import { guardHookResult } from "./aio-dispatch.ts";
 import { _setStartSocket } from "../diagnostics/logger-core.ts";
 import {
@@ -572,7 +575,13 @@ export function buildLegacyConfig(
           // THIS app's logger, and only it. `setLogger(null)` emptied the one
           // process-wide slot, so closing app B left a still-running app A
           // logging to nothing ("reportError failed" on its next error).
-          if (logger) releaseAppLogger(logger);
+          if (logger) {
+            releaseAppLogger(logger);
+            // …and its files are closed: a late line from this app (a
+            // callback still holding the logger) goes to stderr, never
+            // into a directory the app no longer owns.
+            closeLogger(logger);
+          }
         }
       }),
     onRestore: onRestore as AioConfig<
@@ -801,6 +810,18 @@ export function buildLegacyConfig(
  *  `wrapAppWithCells` receive the same `fc`, and the second needs the first's
  *  answer to scope the cell methods it binds. */
 const _loggerOf = new WeakMap<CellsConfig, AioLogger>();
+/** Loggers started as guests (`guestLogger`), waiting for the lock — by
+ *  the home whose logs they would write. */
+const _guests = new Map<string, AioLogger>();
+
+/** This launch holds `home`'s lock now: its guest logger opens its files
+ *  (without archiving the logs of the instance it replaced or outlived). */
+export async function ownLogFiles(home: string): Promise<void> {
+  const logger = _guests.get(home);
+  if (!logger) return;
+  _guests.delete(home);
+  await logger.init({ rotate: false });
+}
 
 /** Initialize structured logger from CellsConfig */
 export async function initLogger(
@@ -861,7 +882,15 @@ export async function initLogger(
     const held = readLock(lockKey(appId, dirs.home, registeredProfile(appId)));
     const live = held !== null && isLockOwnerAlive(held) &&
       !isOwnLock(held);
-    await logger.init({ rotate: !live });
+    // …and when the lock FILE is gone (a cleaner removed it under a running
+    // app), the data folder's own OS lock still says who is there: a second
+    // launch inside the owner's re-file window rotated the running app's logs.
+    // Another live instance's logs are not this launch's to write: it is a
+    // GUEST until it holds the lock (`ownLogFiles`) — see `guestLogger`.
+    if (live || homeInUse(dirs.home)) {
+      guestLogger(logger);
+      _guests.set(dirs.home, logger);
+    } else await logger.init();
   }
   // Installed, not "set": another app in this process keeps its own.
   if (logger) {
@@ -933,21 +962,7 @@ export async function wrapAppWithCells(
           fmt(grower.delta, grower.unit)
         }`
         : "";
-      const detail = (report.nativeLeak && report.native)
-        ? `native memory rising — RSS ${
-          (report.native.rss / 1e6).toFixed(0)
-        } MB (+${
-          (report.native.rssGrowth / 1e6).toFixed(0)
-        } MB this window) while the JS heap stayed flat at ${
-          (report.heapUsed / 1e6).toFixed(0)
-        } MB`
-        : `heap at ${
-          report.heapPct < 0.01
-            ? (report.heapPct * 100).toFixed(2)
-            : (report.heapPct * 100).toFixed(0)
-        }% (${(report.heapUsed / 1e6).toFixed(0)} MB / ${
-          (report.heapLimit / 1e6).toFixed(0)
-        } MB)`;
+      const detail = describeMemoryReport(report);
       const err = createAioError(
         code as import("../diagnostics/error.ts").AioErrorCode,
         detail + named,

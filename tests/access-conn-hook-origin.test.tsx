@@ -28,6 +28,7 @@ Deno.test({
     });
     const port = freePort();
     const app = await aio.run({
+      watch: false,
       appId: `conn-hook-origin-${port}`,
       cells: [presence],
       port,

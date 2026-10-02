@@ -71,11 +71,46 @@ which is the single build it is: that commit, plus your uncommitted edits. It is
 below every other clean build, and it cannot reach a channel anyway — publishing
 a dirty build is refused outright.
 
-The build's own outputs (`.aio/`, `dist/` or `build.out`, `node_modules/`,
-`dep/`) are never counted as dirty — the stamp a build writes cannot dirty the
-next build. An **untracked** `deno.lock` is the toolchain's (the first
-`deno task` writes it) and does not count either; once committed, a changed lock
-is a real change.
+What a build writes is never part of the hash — with or without a repository, so
+building or publishing the same sources twice gives the same version. An output
+is told apart by **where a command of the project put it**, never by what a
+directory looks like:
+
+- by name: `.aio/`, `.aio-integrity.json`, `dist/` (the build always stages
+  there), the out dir of the build that is running (`--out=<dir>`, else
+  `build.out`, when it is inside the project), `node_modules/` and `dep/`;
+- by record: every directory a build (`--out`) or a publish (`--dir`, default
+  `release/`, and the channel directory in it, `release/prod/`) of this project
+  has written to. The command writes the name into `.aio/outputs.json`; a
+  release under an out dir you built to last week does not count, and neither
+  does the staged release of the last publish.
+
+The record is a claim; the directory is the proof. An entry counts only if the
+build would take that directory as its `--out` — a plain `<dir>/` inside the
+project that is not the project, `src/`, an app dir (the directory of `entry`,
+or of a target's own `entry`), `.git` or `.aio`, nor inside or around one of
+them, compared as the directory it **is** (links resolved; case, and the
+trailing dots and spaces Windows drops, ignored) — **and** only while it holds
+what was put there: a build's out dir nothing but its release (the rule by which
+a build refuses an `--out` holding other files), a publish channel dir its
+update manifest (`<os>-<arch>.json`). A recorded directory that is gone or empty
+hides nothing. One that holds anything else — an out dir reused for source, a
+stray file beside a release, a folder written into the record by hand — counts
+as source for as long as it does: remove the stray file and the directory is an
+output again, with no build needed. What a desktop drops into a folder you open
+(`.DS_Store`, `Thumbs.db`, `desktop.ini`) is nobody's file: it neither makes a
+release count nor makes a folder a release. Only an entry the guard refuses is
+dropped from the record, at the next build or publish.
+
+In a repository a recorded directory is left out only where git does **not**
+track the path: a file git tracks is source wherever it lies, and editing it
+makes the build `-dirty`. A folder that merely looks like a release (a
+`manifest.json` and the files it lists) is source. To make a recorded directory
+part of the project again without a repository, remove its line from
+`.aio/outputs.json`. A source run (`deno task dev`) reads the same record.
+
+An **untracked** `deno.lock` is the toolchain's (the first `deno task` writes
+it) and does not count either; once committed, a changed lock is a real change.
 
 ## What is refused, what is noted
 
@@ -89,6 +124,40 @@ is a real change.
   `am fix` offers the rewrite.
 - No repository: one line —
   `no git repository: the build number cannot be derived — git init; builds are numbered from commits`.
+
+## What a version may cost
+
+A `-dirty.<hash8>` / `-nogit.<hash8>` version is an identity of files, and
+reading files is the one part of versioning that can be expensive. It is
+bounded, in three tiers:
+
+| The dirty set / the repository-less tree is…                                                | Identity                                                                        |
+| ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| up to **20,000 files** and **128 MB**                                                       | sha256 of paths **and contents** — every normal project                         |
+| past either                                                                                 | sha256 of path, size and mtime — nothing more is read, the tree is still named  |
+| past **50,000 files**, **50,000 directories** or **64 levels** deep, or git does not answer | **refused** by name: the version is `unknown (<one-line reason> — see the log)` |
+
+- A file's size is read from `stat` **before** it is opened, so the file that
+  would cross the 128 MB cap is never read.
+- git is given **30 s** to answer and **32 MB** of output
+  (`git status --untracked-files=all` lists every untracked file); past either
+  it is stopped and the identity refused.
+- The past-the-cap identity includes mtimes, so it names _this_ checkout: two
+  machines with the same large tree get different `<hash8>`s. Both are
+  unpublishable builds either way.
+- A **pinned** version (`"version": "1.0.0"`) prints no hash, so it costs none:
+  a source run reads nothing, and a build reads only the commit and whether the
+  tree is dirty — no file is opened, and a tree past every cap still builds.
+- A nested `node_modules/` (`web/node_modules/`) is part of the content hash, as
+  it always was — only the project root's own is excluded. Past the caps it is
+  left out: it is not in the path-size-mtime identity and counts toward none of
+  the refusal bounds, so what `npm install` unpacked never costs a project its
+  version.
+
+A refusal almost always means the directory is not the app's project: the
+project root is the nearest `deno.json` above the app's entry, so a stray one in
+an ancestor (a home directory, say) makes everything under it "the project". The
+log line names the root it tried to read.
 
 ## Bumping major / minor
 

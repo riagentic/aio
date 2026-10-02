@@ -169,13 +169,19 @@ MIN_DENO=$(sed -n 's/.*MIN_DENO = "\([^"]*\)".*/\1/p' \
   "$AIO_HOME/src/server/deno-version.ts" 2>/dev/null | head -1)
 [ -n "$MIN_DENO" ] || MIN_DENO="2.9.0"   # clone unreadable: still refuse to guess low
 
-# DENO_INSTALL: where a private deno binary may be fetched.
-# DENO_INSTALL_ROOT: where `deno install -g` writes shims (am). Deno's own
-# default is $HOME/.deno; tests sandbox via DENO_INSTALL_ROOT alone. Keep both
-# aligned so the post-install "am exists" check looks where the shim landed.
-export DENO_INSTALL="${DENO_INSTALL:-${DENO_INSTALL_ROOT:-$HOME/.deno}}"
-export DENO_INSTALL_ROOT="${DENO_INSTALL_ROOT:-$DENO_INSTALL}"
-export PATH="$DENO_INSTALL/bin:$DENO_INSTALL_ROOT/bin:$HOME/.deno/bin:$PATH"
+# Two directories, and they are NOT the same thing:
+#   DENO_INSTALL       where a private deno binary may be fetched;
+#   DENO_INSTALL_ROOT  where `deno install -g` writes the `am` shim. Deno reads
+#                      it itself and defaults to $HOME/.deno — the one bin dir
+#                      persist_path puts on PATH.
+# So the second is only READ here (AM_ROOT), never exported: deriving it from
+# DENO_INSTALL moved the shim into wherever the deno binary lives — a
+# read-only system dir (`DENO_INSTALL=/opt/deno`) failed the install outright,
+# and anywhere else `am` landed in a bin dir no new shell has on PATH. A
+# DENO_INSTALL_ROOT the user did set is honoured, by deno and by the check.
+export DENO_INSTALL="${DENO_INSTALL:-$HOME/.deno}"
+AM_ROOT="${DENO_INSTALL_ROOT:-$HOME/.deno}"
+export PATH="$DENO_INSTALL/bin:$AM_ROOT/bin:$HOME/.deno/bin:$PATH"
 
 deno_version() { deno --version 2>/dev/null | head -1 | awk '{print $2}'; }
 
@@ -264,7 +270,7 @@ install_deno_no_unzip() {
   ' "$_tmp/deno.zip" "$DENO_INSTALL/bin/deno" || { rm -rf "$_tmp"; return 1; }
   chmod +x "$DENO_INSTALL/bin/deno" || { rm -rf "$_tmp"; return 1; }
   rm -rf "$_tmp"
-  export PATH="$DENO_INSTALL/bin:$DENO_INSTALL_ROOT/bin:$PATH"
+  export PATH="$DENO_INSTALL/bin:$PATH"
   hash -r 2>/dev/null || :
   deno_ok
 }
@@ -276,7 +282,7 @@ install_deno() {
      || command -v 7zz >/dev/null 2>&1; then
     curl -fsSL https://deno.land/install.sh | sh -s -- -y >/dev/null 2>&1 || \
       curl -fsSL https://deno.land/install.sh | sh -s -- -y || return 1
-    export PATH="$DENO_INSTALL/bin:$DENO_INSTALL_ROOT/bin:$PATH"
+    export PATH="$DENO_INSTALL/bin:$PATH"
     hash -r 2>/dev/null || :
     deno_ok && return 0
     return 1
@@ -329,11 +335,12 @@ info "installing am..."
 deno install -gAf --config "$AIO_HOME/deno.json" -n am "$AIO_HOME/src/am.ts" \
   || fail "installing am failed — the output above says why"
 
-export PATH="$DENO_INSTALL/bin:$DENO_INSTALL_ROOT/bin:$PATH"
+export PATH="$DENO_INSTALL/bin:$AM_ROOT/bin:$PATH"
 hash -r 2>/dev/null || :
 
-AM_BIN="$DENO_INSTALL_ROOT/bin/am"
-[ -x "$AM_BIN" ] || AM_BIN=$(command -v am 2>/dev/null || echo "$DENO_INSTALL_ROOT/bin/am")
+# Where the shim really landed: deno's install root, not the deno binary's dir.
+AM_BIN="$AM_ROOT/bin/am"
+[ -x "$AM_BIN" ] || AM_BIN=$(command -v am 2>/dev/null || echo "$AM_ROOT/bin/am")
 
 # `deno install` writes a shim whose body is `exec deno run …` — deno BY NAME.
 # So `am` works only where `deno` is already on PATH, and when it isn't the

@@ -157,7 +157,9 @@ export function matchRoute(
   if (!pattern.includes(":") && !pattern.includes("*")) {
     return pattern === pathname ? {} : null;
   }
+  // aio-ok: path-split — a route pattern and a URL pathname
   const pSegs = pattern.split("/");
+  // aio-ok: path-split — a URL pathname
   const uSegs = pathname.split("/");
   const params: Record<string, string> = {};
   for (let i = 0; i < pSegs.length; i++) {

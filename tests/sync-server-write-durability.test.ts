@@ -30,6 +30,7 @@ async function bootApp(dir: string) {
     },
   });
   const app = await aio.run({
+    watch: false,
     cells: [notes],
     appId: "swd-app",
     client: "server-only",

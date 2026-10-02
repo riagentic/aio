@@ -7,11 +7,11 @@ import { installProcessSignals, stopProcess } from "./shutdown.ts";
 import { restartForCellChange } from "./dev-restart.ts";
 import { loadOrCreateCert, type TlsCert } from "./tls.ts";
 import { createServer } from "./server.ts";
-import { parseCli, VERSION } from "./aio-cli.ts";
+import { cdpPort, parseCli, VERSION } from "./aio-cli.ts";
 import type { ServerHandle } from "./server-types.ts";
 import type { UiTheme } from "./aio-types.ts";
 import { _getCallTimeouts, dispatchTracked } from "../state/cell-impl.ts";
-import { createUDSListener, type UDSHandle } from "./uds.ts";
+import { createAppPeerGate, createUDSListener, type UDSHandle } from "./uds.ts";
 import { hardenLocalPeer } from "./local-peer.ts";
 import { flushAllUrgent } from "./broadcast-coalescer.ts";
 import { appDirs } from "./app-dirs.ts";
@@ -95,6 +95,9 @@ export interface TransportConfig {
   onConnect?: (user?: AioUser) => void;
   onDisconnect?: (user?: AioUser) => void;
   libraryMode?: boolean;
+  /** `electron: { allowLocalPeers }` — the local-peer lockdown's opt-out,
+   *  decided here, where the local doors are built. */
+  electron?: import("./aio-types.ts").ElectronConfig;
 }
 
 /** Inputs needed for server & transport setup */
@@ -379,6 +382,80 @@ export function resolveZeroPort(i: {
   return { zeroPort, skipHttp, useHttpSocket: zeroPort && !skipHttp };
 }
 
+/** The local-peer lockdown — whether the local doors are gated, and what the
+ *  boot log may CLAIM about it. Pure (tested as a table).
+ *
+ *  The gate and the claim are separate facts. The sockets are gated whenever
+ *  this is a production Electron app on a local socket that did not opt out.
+ *  "Only this app's own window may connect" is true only when those sockets
+ *  are the app's ONLY doors: a named TCP port serves every process on the
+ *  machine, and a DevTools port lets any of them drive the window — the line
+ *  used to be printed beside both. */
+export function localPeerLockdownPlan(i: {
+  prod: boolean;
+  localElectronUds: boolean;
+  /** `electron: { allowLocalPeers }` AS CONFIGURED. Only the boolean `true`
+   *  opens the doors: a security key read by truthiness fails OPEN on
+   *  `"false"`, `"0"` or `"yes"` — what an env var or a JSON file hands over. */
+  allowLocalPeers: unknown;
+  zeroPort: boolean;
+  port: number;
+  /** `--cdp` / `AIO_CDP`, when asked for. */
+  cdp: number | undefined;
+}): { gated: boolean; info: string[]; warn: string[] } {
+  const mistyped =
+    i.allowLocalPeers === undefined || typeof i.allowLocalPeers === "boolean"
+      ? []
+      : [
+        `electron.allowLocalPeers is ${JSON.stringify(i.allowLocalPeers)}, ` +
+        `which is not a boolean — read as false: the local-peer lockdown ` +
+        `stays ON. Use \`electron: { allowLocalPeers: true }\` to turn it off.`,
+      ];
+  if (!i.prod || !i.localElectronUds) {
+    return { gated: false, info: [], warn: mistyped };
+  }
+  if (i.allowLocalPeers === true) {
+    return {
+      gated: false,
+      info: [],
+      warn: [
+        "local-peer lockdown is OFF (electron: { allowLocalPeers: true }) — " +
+        "every process of this OS user can open this app's local socket, " +
+        "read its state and call its methods.",
+      ],
+    };
+  }
+  const open = [
+    ...(i.zeroPort ? [] : [
+      `TCP port ${i.port} (named with --port / AIO_PORT / config.port) ` +
+      `serves every process on this machine`,
+    ]),
+    ...(i.cdp
+      ? [
+        `the DevTools port ${i.cdp} (--cdp / AIO_CDP) lets any local ` +
+        `process drive this app's window`,
+      ]
+      : []),
+  ];
+  if (open.length === 0) {
+    return {
+      gated: true,
+      info: ["local-peer lockdown: only this app's own window may connect"],
+      warn: mistyped,
+    };
+  }
+  return {
+    gated: true,
+    info: [],
+    warn: [
+      `local-peer lockdown covers this app's local socket ONLY — ` +
+      `${open.join(", and ")}. Other processes of this user are not locked ` +
+      `out while that is open; drop it for the full lockdown.`,
+      ...mistyped,
+    ],
+  };
+}
+
 export async function setupTransport<S, A>(
   deps: ServerSetupDeps<S, A>,
 ): Promise<ServerSetupResult> {
@@ -574,6 +651,22 @@ export async function setupTransport<S, A>(
   const httpSocketPath = zp.useHttpSocket
     ? resolveSocketPath(appId, "http")
     : undefined;
+  // THE local-peer lockdown. Production, Electron, local socket: the app's
+  // window is the only legitimate session, so every local door — the NDJSON
+  // socket and the HTTP socket beside it — asks ONE gate who is connecting
+  // (local-peer.ts). Dev keeps the doors open for `am`/`amui`; an app that
+  // has a same-user companion process says so (`allowLocalPeers`). Built
+  // BEFORE the HTTP server, which needs it — and throws here when this
+  // process cannot read peer credentials at all.
+  const lockdown = localPeerLockdownPlan({
+    prod,
+    localElectronUds,
+    allowLocalPeers: config.electron?.allowLocalPeers,
+    zeroPort,
+    port,
+    cdp: localElectronUds && prod ? cdpPort() : undefined,
+  });
+  const peerGate = lockdown.gated ? createAppPeerGate() : undefined;
   /** How long a client holds a call refused at the shutdown door before it
    *  re-sends it — the socket closes well inside it, so the call goes to the
    *  client's offline queue and lands on the restarted server. */
@@ -782,6 +875,7 @@ export async function setupTransport<S, A>(
       // TCP port (`Deno.serve({ path })`). `port` above is then unused — the
       // boot report says so rather than printing a number nothing bound.
       ...(httpSocketPath ? { socketPath: httpSocketPath } : {}),
+      ...(httpSocketPath && peerGate ? { localPeerGate: peerGate } : {}),
       appId,
       clientCounter,
       title,
@@ -1001,7 +1095,17 @@ export async function setupTransport<S, A>(
         // down — including one that is still writing. Stop them all first
         // (shutdownAllRuntimes), or `am stop app-a` silently truncates app-b's
         // final snapshot.
-        shutdown: () => config.libraryMode ? shutdown() : stopProcess(0),
+        //
+        // Either way the log says who asked, above the `stopped uptime=…`
+        // line that would otherwise stand alone.
+        shutdown: (by = "am stop") => {
+          const why = `stop requested over the control API (${
+            by === "takeover" ? "takeover by a new launch" : "am stop"
+          })`;
+          if (!config.libraryMode) return stopProcess(0, why);
+          log.info(`${why} — closing this app`);
+          return shutdown();
+        },
         startedAt: Date.now(),
         udsClients: () =>
           udsRef.current
@@ -1040,27 +1144,24 @@ export async function setupTransport<S, A>(
   // without going through it.
   if (!config.libraryMode) installProcessSignals();
 
-  // UDS listener
-  // Production, Electron, zero-port: the app's window is the only legitimate
-  // local client, so the transport may serve no one else. Dev keeps the door
-  // open for `am`/`amui`, and an app that opened a port is out of scope here.
-  // See local-peer.ts.
-  const localPeerLockdown = localElectronUds && prod;
-  if (localPeerLockdown) {
+  // UDS listener — under the lockdown decided above (`lockdown`, `peerGate`).
+  // What is said here is exactly what is covered: the "only this app's own
+  // window" line is printed for an app with NO other door, and an app that
+  // also has a TCP or DevTools port is told what that port leaves open.
+  if (lockdown.gated) {
     const hardened = hardenLocalPeer();
-    log.info(
-      `local-peer lockdown: only this app's own window may connect` +
-        (hardened ? " (this process is non-dumpable)" : ""),
-    );
-    if (!hardened) {
+    for (const line of lockdown.info) {
+      log.info(line + (hardened ? " (this process is non-dumpable)" : ""));
+    }
+    if (!hardened && Deno.build.os === "linux") {
       log.warn(
-        "local-peer: could not make this process non-dumpable — the pid gate " +
-          "still applies, but a same-user process may be able to read this " +
-          "process's memory (Linux needs `--allow-ffi`; macOS uses Hardened " +
-          "Runtime, Windows a restricted process DACL).",
+        "local-peer: could not make this process non-dumpable (prctl " +
+          "refused) — the socket gate still applies, but another process of " +
+          "this user may be able to read this process's memory.",
       );
     }
   }
+  for (const line of lockdown.warn) log.warn(line);
   let uds: UDSHandle | null = null;
   if (transport === "uds") {
     const socketPath = resolveSocketPath(appId);
@@ -1099,7 +1200,7 @@ export async function setupTransport<S, A>(
       // Armed later, from the Electron spawn (`armPeerPid`). Until then a
       // required gate refuses everyone, and the client's reconnect loop covers
       // the gap.
-      localPeerLockdown ? { required: true } : undefined,
+      peerGate ? { required: true, gate: peerGate } : undefined,
     );
     udsRef.current = uds;
     const u = uds;
@@ -1126,7 +1227,11 @@ export async function setupTransport<S, A>(
   const shareUrl = `${_scheme}://${_advertiseHost}:${livePort}`;
   const localUrl = `${_scheme}://${_selfHost}:${livePort}`;
 
-  // Update lock file with runtime info
+  // Update lock file with runtime info. A write that cannot land REFUSES the
+  // boot (the caller logs it and unwinds): the lock would stay at "starting"
+  // with the configured port, and past the startup grace the next launch
+  // takes a "starting" owner whose port does not answer for a stuck boot and
+  // reclaims its lock — single instance would no longer hold.
   if (appLock) {
     appLock.update({
       status: "started",

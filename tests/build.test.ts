@@ -1484,15 +1484,17 @@ Deno.test("appimageEnv: the tool unpacks somewhere private, never /tmp", () =>
 Deno.test("appimageEnv: every appimagetool invocation uses it", async () => {
   // A second packaging site that hand-rolled its env would silently lose the
   // flag — and only break on a FUSE-less machine. Assert the shared helper is
-  // the ONLY way appimagetool is spawned.
+  // the ONLY way appimagetool is spawned: both sites go through
+  // `runAppimagetool`, which passes it (what the tool actually receives is
+  // observed in tests/build-artifact-modes.test.ts).
   for (const f of ["build-electron.ts", "build-client.ts"]) {
     const src = await Deno.readTextFile(
       join(import.meta.dirname ?? ".", "..", "src", "build", f),
     );
-    assertStringIncludes(src, "appimageEnv(arch)", `${f} uses the shared env`);
+    assertStringIncludes(src, "runAppimagetool(", `${f} uses the shared run`);
     assert(
-      !/APPIMAGE_EXTRACT_AND_RUN/.test(src),
-      `${f} must not hand-roll the appimage env`,
+      !/APPIMAGE_EXTRACT_AND_RUN|new Deno\.Command\(toolPath/.test(src),
+      `${f} must not spawn appimagetool or hand-roll its env`,
     );
   }
 });

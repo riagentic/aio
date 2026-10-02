@@ -48,6 +48,7 @@ export const wpHeavy = cell("wpHeavy", {
 
 if (isCellWorker()) {
   await aio.run({
+    watch: false,
     appId: "worker-peer-access-probe",
     cells: [wpPeer, wpHeavy],
     client: "server-only",

@@ -167,6 +167,7 @@ Deno.test("boot: checkIntegrityOnBoot recovers a corrupt app database", async ()
   const appId = `integ-${crypto.randomUUID().slice(0, 8)}`;
   const boot = () =>
     aio.run({
+      watch: false,
       cells: [cell("notes", { state: { n: 0 }, methods: {} })],
       appId,
       client: "server-only",

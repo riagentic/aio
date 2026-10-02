@@ -38,7 +38,12 @@ import { createScheduleManager } from "../state/schedule.ts";
 import { createOwnManager } from "../state/own.ts";
 import { routeEffect } from "../state/route-effect.ts";
 import { notifyCrossUserGate, showNotifyEffect } from "./aio-dispatch.ts";
-import { getLogger, log, setLogger } from "../diagnostics/logger-api.ts";
+import {
+  appLoggerInstalled,
+  getLogger,
+  log,
+  setLogger,
+} from "../diagnostics/logger-api.ts";
 import type { LogSink } from "../diagnostics/logger-types.ts";
 import { timeTravelEnabled } from "../diagnostics/types.ts";
 import {
@@ -73,9 +78,11 @@ import { deepMerge } from "../state/deep-merge.ts";
 import { unpersistedFromBase } from "../state/cell-persist-filter.ts";
 import {
   type ActionCause,
+  beginReplaySession,
   isLegacyTail,
   type JournalEntry,
   type JournalGap,
+  journalRefusals,
   journalWatermarkKey,
   LEGACY_RECOVERED_TYPE,
   LISTENS_TO_CMD,
@@ -97,7 +104,7 @@ import {
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createTimeline } from "./timeline.ts";
 import { makeRedactor } from "../diagnostics/redact.ts";
-import { degraded } from "../diagnostics/degraded.ts";
+import { _quietDegraded, degraded } from "../diagnostics/degraded.ts";
 import { actionOrigin, isWriteSetAction } from "../diagnostics/action-kind.ts";
 import { setupDispatch } from "./aio-dispatch.ts";
 import { hostedCellName, startCellWorkerHost } from "./cell-worker-host.ts";
@@ -168,10 +175,10 @@ import {
 } from "./aio-run-helpers.ts";
 import { appDenoJsonLocated } from "./aio-run-helpers.ts";
 import {
-  outDirExclude,
   readBuildStamp,
-  readTreeFacts,
   resolveRuntimeVersion,
+  runtimeTreeFacts,
+  unresolvedTreeVersion,
 } from "./app-version.ts";
 
 // Cells-based API modules
@@ -186,6 +193,7 @@ import {
   _durableFor as _durableForOwed,
   _noteUnsaved,
   _owedVerdict,
+  _verdictLost,
 } from "./action-ack.ts";
 import { PERSIST_REFUSED } from "./server-trojan.ts";
 import { _moveRejections } from "../state/rejection-tracker.ts";
@@ -193,6 +201,7 @@ import {
   buildLegacyConfig,
   filterCellsByIsolate,
   initLogger,
+  ownLogFiles,
   runAsApp,
   wrapAppWithCells,
 } from "./aio-cells-bridge.ts";
@@ -213,7 +222,6 @@ import { DEFAULT_HEARTBEAT_INTERVAL } from "../vitals/types.ts";
 // CLI + path resolution
 import {
   cdpPort,
-  cdpRequest,
   declareAppFlags,
   electronOnlyFlagRefusal,
   envDefaultPort,
@@ -230,11 +238,17 @@ import {
   beginUpdates,
   judgePendingUpdate,
   pendingConfirmer,
+  returnBootAttempt,
   startUpdates,
   ttyPrompt,
 } from "./updates-boot.ts";
 import { PERSIST_SCHEMA_VERSION } from "./persist-schema.ts";
-import { deriveDataContract } from "./updates-core.ts";
+import {
+  deriveDataContract,
+  PROBE_NONCE_ENV,
+  probeLine,
+  probeNonce,
+} from "./updates-core.ts";
 import {
   baseDirCandidates,
   distCandidates,
@@ -310,7 +324,7 @@ import {
   validateCallableConfig,
   validateConfig,
 } from "./config.ts";
-import { count } from "../diagnostics/fmt.ts";
+import { count, describeThrown } from "../diagnostics/fmt.ts";
 import { isDiagnosticsOptOut } from "../diagnostics/diagnostics-optout.ts";
 import { resolveBudgets, setBudgets } from "../state/budgets.ts";
 
@@ -594,21 +608,16 @@ export function _appVersion(): Promise<string> {
     if (!compiled && located && located.dir.protocol === "file:") {
       const root = fromFileUrl(located.dir);
       try {
-        tree = await readTreeFacts(root, {
-          excludes: [
-            outDirExclude(
-              root,
-              (located.config.build as { out?: string } | undefined)?.out,
-            ),
-          ],
-        });
+        tree = await runtimeTreeFacts(root, located.config);
       } catch (e) {
-        // `readTreeFacts` REFUSES a non-repo tree past its read cap (a stray
-        // deno.json made an ancestor — `$HOME`, in one measured case — look
-        // like the project, and hashing it was an unbounded read). The version
-        // is then UNKNOWN with the refusal's own words, never a wrong hash.
-        const why = e instanceof Error ? e.message : String(e);
-        return `unknown (${why.replace(/^\[version\] . /, "")})`;
+        // The tree read REFUSES a tree past its caps (a stray deno.json made
+        // an ancestor — `$HOME`, in one measured case — look like the project,
+        // and hashing it was an unbounded read). The version is then UNKNOWN,
+        // never a wrong hash: one short line in the string every surface
+        // prints, and the full teachable text — which names the root — here,
+        // once (this resolves once per process).
+        log.warn(e instanceof Error ? e.message : String(e));
+        return unresolvedTreeVersion(e);
       }
     }
     return resolveRuntimeVersion({
@@ -1049,6 +1058,56 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
   // back once this boot has bound them or refused (see `_feedbackForApp`).
   let _updatesSlot: UpdatesSlot | undefined;
   let _feedbackSlot: FeedbackSlot | undefined;
+  // The app's data home — planned and registered ONCE per boot, by whichever
+  // comes first: the boot itself, or a refusal thrown before it got there
+  // (which needs the log directory to say why). Throws when the folder itself
+  // is refused.
+  let homeReady = false;
+  /** Where the home would be — reads the disk, writes nothing. */
+  const planHome = () => {
+    const appId = resolveAppId(fc.appId);
+    // `--profile` / `--home` (+ AIO_PROFILE): the RUNNER's say.
+    const request = fc.libraryMode ? undefined : homeRequest();
+    const plan = planAppDirs({
+      appId,
+      appDir: fc.appDir,
+      libraryMode: fc.libraryMode,
+      baseDir: fc.baseDir,
+      request,
+      profiles: fc.profiles,
+    });
+    return { appId, request, plan };
+  };
+  const readyHome = (): void => {
+    if (homeReady) return;
+    const { appId: _earlyAppId, request, plan } = planHome();
+    // A zero-config id whose inference rule changed under an app that
+    // already has data: the resolver kept the OLD id (never a silent fresh
+    // start, never a refused boot) — said once per boot, with both paths
+    // and both fixes (see legacyIdFallback). Only a DERIVED home moves.
+    if (!fc.appId && !fc.appDir && !fc.libraryMode && !plan.requested) {
+      const fallback = inferredIdFallbackWarning();
+      if (fallback) log.warn(fallback);
+    }
+    // An explicit dbPath outside the requested home opens the DEFAULT
+    // home's database under a profile's lock and logs — refused BEFORE the
+    // plan is recorded, so a caught refusal leaves no profile behind.
+    const split = plan.requested
+      ? dbPathOutsideHomeError(
+        dbPathOf(parseCli(), fc)?.value,
+        plan.dirs.home,
+        request?.source,
+      )
+      : null;
+    if (split) throw new Error(split);
+    const _earlyDirs = recordAppDirs(_earlyAppId, plan);
+    registerAppDirs(_earlyAppId, _earlyDirs);
+    // A requested home IS the appDir from here on: many readers call
+    // `appDirs(appId, cfg.appDir)` with the author's value, which would name
+    // the base home instead of the profile's.
+    if (homeRequested(_earlyAppId)) fc = { ...fc, appDir: _earlyDirs.home };
+    homeReady = true;
+  };
   try {
     // Configuring `updates` registers the built-in cell — BEFORE the registry
     // is read below, because a cell that registers afterwards is never composed
@@ -1367,39 +1426,8 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
     // Data directories FIRST: initLogger() resolves `~/.<appId>/logs` through
     // the same registry, so registering after it would send a libraryMode app's
     // logs into the user's home (the inner _run() registers again, harmlessly).
-    const _earlyAppId = resolveAppId(fc.appId);
-    let _earlyDirs: ReturnType<typeof resolveAppDirs>;
     try {
-      // `--profile` / `--home` (+ AIO_PROFILE): the RUNNER's say.
-      const request = fc.libraryMode ? undefined : homeRequest();
-      const plan = planAppDirs({
-        appId: _earlyAppId,
-        appDir: fc.appDir,
-        libraryMode: fc.libraryMode,
-        baseDir: fc.baseDir,
-        request,
-        profiles: fc.profiles,
-      });
-      // A zero-config id whose inference rule changed under an app that
-      // already has data: the resolver kept the OLD id (never a silent fresh
-      // start, never a refused boot) — said once per boot, with both paths
-      // and both fixes (see legacyIdFallback). Only a DERIVED home moves.
-      if (!fc.appId && !fc.appDir && !fc.libraryMode && !plan.requested) {
-        const fallback = inferredIdFallbackWarning();
-        if (fallback) log.warn(fallback);
-      }
-      // An explicit dbPath outside the requested home opens the DEFAULT
-      // home's database under a profile's lock and logs — refused BEFORE the
-      // plan is recorded, so a caught refusal leaves no profile behind.
-      const split = plan.requested
-        ? dbPathOutsideHomeError(
-          dbPathOf(parseCli(), fc)?.value,
-          plan.dirs.home,
-          request?.source,
-        )
-        : null;
-      if (split) throw new Error(split);
-      _earlyDirs = recordAppDirs(_earlyAppId, plan);
+      readyHome();
     } catch (e) {
       // A refused data folder (profiles: false, another app's, a foreign
       // one) is an operator's answer, not a crash: one line, exit 1.
@@ -1407,11 +1435,6 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
       log.error(e instanceof Error ? e.message : String(e));
       Deno.exit(1);
     }
-    registerAppDirs(_earlyAppId, _earlyDirs);
-    // A requested home IS the appDir from here on: many readers call
-    // `appDirs(appId, cfg.appDir)` with the author's value, which would name
-    // the base home instead of the profile's.
-    if (homeRequested(_earlyAppId)) fc = { ...fc, appDir: _earlyDirs.home };
 
     // Logger — skipped in `--aio-data-contract` mode: installing it would
     // replace the stderr-only sink (putting boot lines back on the parsed
@@ -1529,9 +1552,44 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
     // that did come up before the throw (a hook after `_run`) closes fully.
     // The refusal itself is what the caller sees; a teardown fault is said
     // out loud beside it, never instead of it.
+    // Refused BEFORE the logger existed (a cell that cannot be composed, a
+    // read side left undecided): the log directory depends on neither, so
+    // the logger is brought up for this one line — in a home that ALREADY
+    // EXISTS. A refused start must not be what creates an app's home: with
+    // `--home=<a typo>` that left a folder of log files wherever the typo
+    // pointed. No home yet (a first start, a mistyped one) = the console
+    // only, as before. Not for an embedded app or a query (their output is
+    // the caller's), and not when the data folder itself is what was refused
+    // — then there is no log directory at all.
+    //
+    // What is NOT covered: a refusal raised before this `try` — the command
+    // line, the Deno version, the shape and keys of the `aio.run()` config,
+    // its schedules, its plugins. The config is not accepted yet at that
+    // point, so there is no app to plan a home for; those answer on the
+    // console only.
+    if (
+      !logger && !_contractMode && !fc.libraryMode && runtimeCount() === 0
+    ) {
+      try {
+        // `statSync` throws for a home that is not there: the same answer.
+        if (homeReady || Deno.statSync(planHome().plan.dirs.home).isDirectory) {
+          readyHome();
+          logger = await initLogger(fc);
+        }
+      } catch {
+        // aio-ok: no home yet, a refused data folder, no log directory — the
+        // refusal below goes to the console, which is where it went before.
+      }
+    }
+    // An embedded app's refusal is the exception its host catches: the host
+    // decides whether that is an error at all, so nothing is printed for it.
+    if (!fc.libraryMode) sayBootRefused(e);
     try {
       if (appRef.current) await appRef.current.close();
-      else if (logger) {
+      // Still installed = no shutdown ran (a refusal inside `_run` after the
+      // app's own shutdown existed has stopped and released it already; a
+      // second stop here wrote a second "stopped" line).
+      else if (logger && appLoggerInstalled(logger)) {
         logger.onStop();
         await logger.flush();
         setLogger(null);
@@ -1617,12 +1675,41 @@ async function _run<S, A, E>(
   config: AioConfig<S, A, E>,
 ): Promise<AioApp<S, A>> {
   const bootUndo = createBootUndo();
+  // One boot is one replay session, opened HERE — outside everything the boot
+  // does — and nowhere else. Opened beside the replay itself, every pass
+  // through that code began a new session, so the re-entry the replay ceiling
+  // exists to stop was never counted (see `beginReplaySession`).
+  beginReplaySession();
   try {
     return await _runPhases(initialState, config, bootUndo);
   } catch (e) {
+    // BEFORE the unwind: it may run the app's shutdown, which stops the logger.
+    // (Not for an embedded app: its host catches the throw — see `run`.)
+    if (!config.libraryMode) sayBootRefused(e);
     await bootUndo.unwind();
     throw e;
   }
+}
+
+/** Refusals already written to the log, so one refusal is one line whichever
+ *  catch saw it first. */
+const _saidRefused = new WeakSet<object>();
+
+/** A BOOT THAT REFUSES SAYS WHY IN THE LOG.
+ *
+ *  The refusal is thrown to the caller, and an app's entry lets it end the
+ *  process: the reason reached stderr only. A desktop app started by a
+ *  double-click has no stderr — its window never opened and `app.log` held
+ *  "stopped" and nothing else. Written at ERROR while the logger is still up
+ *  (the teardown that follows flushes it), on every OS, for every refusal. */
+function sayBootRefused(e: unknown): void {
+  if (typeof e === "object" && e !== null) {
+    if (_saidRefused.has(e)) return;
+    _saidRefused.add(e);
+  }
+  log.error("boot", `refused — the app did not start: ${describeThrown(e)}`);
+  // The stack beside it, for the file only: the caller prints its own.
+  if (e instanceof Error && e.stack) log.debug("boot", e.stack);
 }
 
 async function _runPhases<S, A, E>(
@@ -1654,7 +1741,10 @@ async function _runPhases<S, A, E>(
     // What this build promises about data already on disk. Derived from the
     // very same cell versions and onMigrate hooks the boot path uses, so a
     // published contract cannot drift from what the binary actually does.
-    //
+    const contract = deriveDataContract(
+      config._cellMigrations ?? new Map(),
+      PERSIST_SCHEMA_VERSION,
+    );
     // `console.log`, NOT `log.info`: this stdout is parsed (`aio ship`,
     // `updates-rebuild`). The logger stamps every line with a timestamp and a
     // category, which prefixed the JSON's first line and made every published
@@ -1663,14 +1753,13 @@ async function _runPhases<S, A, E>(
     // aio-ok: the machine-readable answer itself. `log.info` would prefix it
     // with a timestamp and a category and make it unparseable — which is the
     // exact defect this mode was fixed for.
-    console.log(JSON.stringify(
-      deriveDataContract(
-        config._cellMigrations ?? new Map(),
-        PERSIST_SCHEMA_VERSION,
-      ),
-      null,
-      2,
-    ));
+    console.log(JSON.stringify(contract, null, 2));
+    // …and once more on a line of its own: the app's modules may have printed
+    // to stdout before this ran, and a reader finds this line regardless —
+    // by the value it handed over, when it handed one.
+    const nonce = probeNonce(Deno.env.get(PROBE_NONCE_ENV));
+    // aio-ok: a marker `aio ship` parses off stderr, beside the JSON on stdout.
+    console.error(probeLine("data-contract", JSON.stringify(contract), nonce));
     // …and ONE fact about what the contract could not say, on stderr, where
     // this mode already routes every framework line.
     //
@@ -1686,7 +1775,11 @@ async function _runPhases<S, A, E>(
     // runs this binary already, so the two numbers meet where the decision is.
     // aio-ok: a marker `aio ship` parses off stderr, beside the JSON on stdout.
     console.error(
-      `[aio] persisting-cells: ${(config._persistingCellIds ?? []).length}`,
+      probeLine(
+        "persisting-cells",
+        String((config._persistingCellIds ?? []).length),
+        nonce,
+      ),
     );
     // …and the identity this build RUNS as — the name every install compares a
     // manifest's signed `name` against. `ship` names a release from deno.json;
@@ -1700,7 +1793,7 @@ async function _runPhases<S, A, E>(
       // aio-ok: no id to report; the boot path throws the teaching error.
     }
     // aio-ok: a marker `aio ship` parses off stderr, beside the JSON on stdout.
-    if (runsAs) console.error(`[aio] app-id: ${runsAs}`);
+    if (runsAs) console.error(probeLine("app-id", runsAs, nonce));
     Deno.exit(0);
   }
 
@@ -1901,7 +1994,7 @@ async function _runPhases<S, A, E>(
     {
       aioVersion: VERSION,
       profile: registeredProfile(appId),
-      cdpPort: cdpPort(),
+      cdpPort: cdpPort(clientOf(cli, config).value),
       // What `am doctor` shows: each multi-home setting and who decided it.
       settings: Object.fromEntries(_settings),
       // The CLIENT, so `am` can answer "is there a window here at all?"
@@ -1914,9 +2007,18 @@ async function _runPhases<S, A, E>(
       // LockData.dataDir. `am instances` prints it so "why is my data not
       // where I think it is" stops being answered by reading source.
       dataDir: appDirs(appId, config.appDir).data,
+      // Where the port it is about to bind will be: a record that names a
+      // port and not its address sends whoever checks on it to 127.0.0.1.
+      // The server writes the address it really bound once it is up.
+      host: hostOf(cli, config)?.value ??
+        (_exposeOf(cli, config) ? "0.0.0.0" : "127.0.0.1"),
     },
   );
   bootUndo.push("lock", () => appLock?.release());
+  // This launch goes on as the app: its logs are its own now (one that found
+  // another instance there wrote nothing into them until here — see
+  // `guestLogger`; with `singleton: false` that is every launch).
+  await ownLogFiles(appDirs(appId, config.appDir).home);
   // Did the last boot install something? Count this attempt, or — having spent
   // them — put the old artifact back and let the supervisor start it. Runs in
   // the NEW build, because it is the only thing present to judge itself.
@@ -1944,24 +2046,18 @@ async function _runPhases<S, A, E>(
   // `--keep-server` was refused only after the banner. The client is resolved
   // by the same rule as below (flag > config > deno.json > electron); one
   // pure decider (aio-cli.ts) names what was typed and the client it needs.
-  // `AIO_CDP` is the env spelling of `--cdp` (see `--help`), so an env request
-  // must be refused exactly like the flag — otherwise a browser app advertises
-  // a debugger port nothing listens on. Resolve it WITHOUT the invalid-value
-  // warning: `cdpPort()` is the warn site, and it runs later.
-  const _cdpEnv = (() => {
-    try {
-      return Deno.env.get("AIO_CDP") ?? undefined;
-    } catch {
-      return undefined; // no --allow-env: no env request
-    }
-  })();
+  // The FLAGS only. An ambient `AIO_CDP` is not refused: on a client with no
+  // window it is ignored, said once, and advertises nothing — `cdpPort(client)`
+  // at the lock above settles it. Refusing it (1.0.15–1.0.16) failed the boot
+  // of every server-only app under a CI/compose environment that exports it.
   const _electronOnly = electronOnlyFlagRefusal(
     cli,
     clientOf(cli, config).value,
     config,
-    cdpRequest(cli.cdp, _cdpEnv),
   );
   if (_electronOnly) {
+    // What was typed, not the build: this launch is no boot attempt.
+    returnBootAttempt(_dirs.data, log);
     appLock?.release();
     throw _electronOnly;
   }
@@ -3778,11 +3874,7 @@ async function _runPhases<S, A, E>(
       else fn();
     } catch (e) {
       _appendOk = false;
-      _journalHealth.fail(e);
-      reportAioError(
-        createAioError("PERSIST_ERROR", e, { actionType: "journal batch" }),
-        _reportOpts,
-      );
+      _journalSaid.refused(e); // the owed saves below stand in for the lines
       _reactionChain.clear();
       _kvChain.clear();
       for (const w of owed) _saveNow(w);
@@ -4022,8 +4114,17 @@ async function _runPhases<S, A, E>(
   // through it. `after: 1` because there is no retry here — each refusal IS
   // a missing line, and the first one already broke the promise. Recovers
   // (and says so) on the next append that lands.
-  const _journalHealth = degraded(`journal:${resolveAppId(config.appId)}`, {
-    after: 1,
+  const _journalKey = `journal:${resolveAppId(config.appId)}`;
+  _quietDegraded(_journalKey); // its episodes are said by `_journalSaid`
+  const _journalHealth = degraded(_journalKey, { after: 1 });
+  // A refused append, said once per episode (`journalRefusals`): a program
+  // holding the journal made every click two ERROR lines saying changes
+  // "will be lost on restart" — while each was saved by the snapshot below.
+  const _journalSaid = journalRefusals({
+    path: () => journal?.path ?? "the journal",
+    warn: (m) => log.warn(m),
+    info: (m) => log.info(m),
+    health: _journalHealth,
   });
   /** Journal what `listensTo` reactions WROTE, as data — never the action
    *  (re-running it on replay throws in an idempotency guard, and a build that
@@ -4143,9 +4244,9 @@ async function _runPhases<S, A, E>(
         },
         Date.now(),
       );
-      _journalHealth.ok();
+      _journalSaid.landed();
     } catch (e) {
-      _journalHealth.fail(e);
+      _journalSaid.refused(e);
       reportAioError(
         createAioError("PERSIST_ERROR", e, { actionType: SYNC_INTENT_TYPE }),
         _reportOpts,
@@ -4385,8 +4486,12 @@ async function _runPhases<S, A, E>(
       _owedByAction.set(a, owed.add(p));
       const call = _callOf(a as A);
       if (call !== undefined) {
-        if (_owedByCall.size >= 1024) {
-          _owedByCall.delete(_owedByCall.keys().next().value!);
+        if (_owedByCall.size >= 1024 && !_owedByCall.has(call)) {
+          // Never silently: a call still waiting to be answered is told
+          // its verdict is lost (action-ack.ts `_verdictLost`).
+          const lost = _owedByCall.keys().next().value!;
+          _owedByCall.delete(lost);
+          _verdictLost(lost);
         }
         const byCall = _owedByCall.get(call) ?? new Set();
         _owedByCall.set(call, byCall.add(p));
@@ -4434,15 +4539,13 @@ async function _runPhases<S, A, E>(
       const v = _journalVersions(entry.type, entry.payload, entry.origin);
       _atomicOwed?.push(save);
       const seq = journal!.append(v ? { ...entry, v } : entry, ts);
-      _journalHealth.ok();
+      _journalSaid.landed();
       return seq;
     } catch (e) {
       _appendOk = false;
-      _journalHealth.fail(e);
-      reportAioError(
-        createAioError("PERSIST_ERROR", e, { actionType: entry.type }),
-        _reportOpts,
-      );
+      // Not a PERSIST_ERROR: the snapshot below saves this change now. Only
+      // if THAT is refused is anything at risk — and persistence says so.
+      _journalSaid.refused(e);
       _saveNow(save);
       // The counter already advanced; the timeline keeps the same seq so its
       // entries and the journal's lines stay aligned for replay.
@@ -5280,7 +5383,10 @@ async function _runPhases<S, A, E>(
     const was = _legacyBoot as Record<string, unknown>;
     const now = state as Record<string, unknown>;
     const changed = Object.keys(now).filter((k) =>
-      k in (initialState as Record<string, unknown>) && now[k] !== was[k]
+      // OWN keys: an undeclared slice named `constructor`/`toString` is
+      // "in" every plain object, and was replayed as a declared cell.
+      Object.hasOwn(initialState as Record<string, unknown>, k) &&
+      now[k] !== was[k]
     );
     for (const c of syncCellIds) {
       const { rows } = await asyncDb.query<{ ts: number | null }>(

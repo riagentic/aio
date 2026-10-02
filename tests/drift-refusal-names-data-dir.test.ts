@@ -49,6 +49,7 @@ Deno.test("drift refusal: a real dev boot under AIO_APPS_DIR names the data dir 
     return {
       counter,
       app: aio.run({
+        watch: false,
         cells: [counter],
         appId,
         client: "server-only",

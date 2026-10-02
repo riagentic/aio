@@ -137,6 +137,7 @@ async function bootLikeTheUnit(
       persist: false,
       baseDir: dir,
       ...(declared !== undefined ? { port: declared } : {}),
+      watch: false,
     });
     try {
       return app.port!;

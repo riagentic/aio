@@ -62,6 +62,8 @@ async function _projectRootOf(dir: string): Promise<string> {
 /** Run the app's declared CSS step. Returns the files it wrote. */
 export async function _runAppCssStep(
   absBaseDir: string,
+  /** The server's close: ends a step still running. */
+  signal?: AbortSignal,
 ): Promise<readonly string[]> {
   // NOTHING happens for an app that declares no step — checked FIRST, before
   // any directory read. Stamping the app dir up front cost every dev server a
@@ -91,6 +93,7 @@ export async function _runAppCssStep(
   const before = await cssStamps(root);
   const res = await runCssBuild(root, {
     throwOnFail: false,
+    signal,
     log: (msg) => {
       // Repeated on every save while the stylesheet is broken, which is
       // exactly the situation where you want to see it — but the first one
@@ -109,6 +112,30 @@ export async function _runAppCssStep(
     },
   });
   if (!res.ran) return [];
+  if (res.stopped) {
+    // Not a failure of the command. A tool that writes its output in place
+    // may have left it half-written; the next boot runs the step again
+    // (server.ts, `_cssBootRun`), which rewrites it whole.
+    // (`ms` is absent when the close came before the step had started.)
+    if (res.ms !== undefined) {
+      const what = res.killed
+        ? `did not end when asked and was killed after ${res.ms}ms`
+        : `was ended after ${res.ms}ms`;
+      const line =
+        `build.css (\`${res.command}\`) was still running when the server ` +
+        `closed — it ${what}; the next start runs it again.`;
+      if (res.left) {
+        log.warn(
+          "css",
+          `${line} A process it started is STILL RUNNING: the stop reaches ` +
+            `the step's own process only — a shell wrapper has to \`exec\` ` +
+            `its tool.`,
+        );
+      } else if (res.killed) log.warn("css", line);
+      else log.info("css", line);
+    }
+    return [];
+  }
   if (res.ok) {
     _saidFailure = false;
     log.debug("css", `${res.command} (${res.ms}ms)`);

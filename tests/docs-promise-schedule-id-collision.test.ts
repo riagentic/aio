@@ -27,6 +27,7 @@ Deno.test("docs promise: a dynamic schedule reusing a static id warns, naming it
   let app: Awaited<ReturnType<typeof aio.run>> | null = null;
   try {
     app = await aio.run({
+      watch: false,
       cells: [poller],
       appId: "docs-promise-sched-coll",
       client: "server-only",

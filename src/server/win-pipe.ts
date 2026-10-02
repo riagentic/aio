@@ -294,6 +294,24 @@ const ADVAPI_SYMBOLS = {
     parameters: ["buffer", "u32", "buffer", "buffer"],
     result: "i32",
   },
+  // Read back what a secret file was actually given (`writeOwnerOnlyFile`).
+  GetNamedSecurityInfoW: {
+    parameters: [
+      "buffer",
+      "u32",
+      "u32",
+      "buffer",
+      "buffer",
+      "buffer",
+      "buffer",
+      "buffer",
+    ],
+    result: "u32",
+  },
+  ConvertSecurityDescriptorToStringSecurityDescriptorW: {
+    parameters: ["pointer", "u32", "u32", "buffer", "buffer"],
+    result: "i32",
+  },
 } as const;
 
 let _k32: Deno.DynamicLibrary<typeof K32_SYMBOLS>["symbols"] | null = null;
@@ -897,6 +915,97 @@ export function listenPipe(path: string): LocalListener {
       }
     },
   };
+}
+
+// ── Secret files ──────────────────────────────────────────────────────────
+
+const CREATE_NEW = 1;
+const FILE_ATTRIBUTE_NORMAL = 0x80;
+const SE_FILE_OBJECT = 1;
+const DACL_SECURITY_INFORMATION = 4;
+
+/** Create `path` (it must not exist) with {@linkcode PIPE_SDDL}'s owner-only,
+ *  protected DACL — given AT CREATION, so the file is never, at any instant,
+ *  readable through an inherited ACE of a shared directory — write
+ *  `contents`, and return the DACL Windows actually holds for it, as SDDL,
+ *  for the caller to judge (`_ownerOnlyDaclRefusal` in app-key.ts). Windows'
+ *  `Deno.stat().mode` says nothing about who can read a file; this does.
+ *  Throws, naming the call, on any failure (no `--allow-ffi` included). */
+export function writeOwnerOnlyFile(path: string, contents: string): string {
+  const name = wstr(path);
+  const h = withSecurityAttributes(path, (sa) =>
+    k32().CreateFileW(
+      name,
+      u32(GENERIC_WRITE),
+      0,
+      Deno.UnsafePointer.of(sa),
+      CREATE_NEW,
+      FILE_ATTRIBUTE_NORMAL,
+      null,
+    ));
+  if (isInvalidHandle(h)) {
+    throw winError("CreateFileW", k32().GetLastError(), path);
+  }
+  const o = own(h, `secret file ${path}`);
+  try {
+    const bytes = new TextEncoder().encode(contents);
+    const written = new Uint8Array(4);
+    if (
+      !k32().WriteFile(h, bytes, bytes.length, written, null) ||
+      readU32(written) !== bytes.length
+    ) {
+      throw winError("WriteFile", k32().GetLastError(), path);
+    }
+  } finally {
+    closeOwned(o);
+  }
+  const sdOut = new Uint8Array(8);
+  const rc = advapi().GetNamedSecurityInfoW(
+    name,
+    SE_FILE_OBJECT,
+    DACL_SECURITY_INFORMATION,
+    null,
+    null,
+    null,
+    null,
+    sdOut,
+  );
+  if (rc !== 0) throw winError("GetNamedSecurityInfoW", rc, path);
+  const sd = Deno.UnsafePointer.create(readU64(sdOut));
+  try {
+    const strOut = new Uint8Array(8);
+    const lenOut = new Uint8Array(4);
+    if (
+      !advapi().ConvertSecurityDescriptorToStringSecurityDescriptorW(
+        sd,
+        SDDL_REVISION_1,
+        DACL_SECURITY_INFORMATION,
+        strOut,
+        lenOut,
+      )
+    ) {
+      throw winError(
+        "ConvertSecurityDescriptorToStringSecurityDescriptorW",
+        k32().GetLastError(),
+        path,
+      );
+    }
+    const str = Deno.UnsafePointer.create(readU64(strOut));
+    try {
+      const view = new Deno.UnsafePointerView(str!);
+      let out = "";
+      for (let i = 0;; i += 2) {
+        const c = view.getUint16(i);
+        if (c === 0) break;
+        out += String.fromCharCode(c);
+      }
+      return out;
+    } finally {
+      k32().LocalFree(str);
+    }
+  } finally {
+    k32().LocalFree(sd);
+  }
 }
 
 // ── Client ────────────────────────────────────────────────────────────────

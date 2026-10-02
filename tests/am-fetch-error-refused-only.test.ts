@@ -9,6 +9,7 @@
 // not by hand-written error strings.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fetchError } from "../src/am/am-http.ts";
+import { freePort } from "../src/testing/server-test.ts";
 
 async function fetchFailure(url: string): Promise<unknown> {
   try {
@@ -43,9 +44,7 @@ Deno.test("fetchError: a connection dropped mid-request is NOT 'not running'", a
 
 Deno.test("fetchError: a refused connection IS 'not running on port N'", async () => {
   // Bind, learn the port, close: nothing listens there now.
-  const l = Deno.listen({ hostname: "127.0.0.1", port: 0 });
-  const port = (l.addr as Deno.NetAddr).port;
-  l.close();
+  const port = freePort();
   const e = await fetchFailure(`http://127.0.0.1:${port}/`);
   const r = fetchError(e, port);
   assertEquals(r.ok, false);

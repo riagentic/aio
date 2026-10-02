@@ -49,7 +49,9 @@
 import { join, relative, resolve } from "@std/path";
 import { GIT_NO_PROMPT_ENV } from "./git-noninteractive.ts";
 import { DENO_JSON_NAMES } from "./deno-json.ts";
+import { recordedOutputs } from "./build-outputs.ts";
 import { teachableError } from "../diagnostics/error.ts";
+import { log } from "../diagnostics/logger-api.ts";
 
 /** The `major.minor` an app has before it writes one. */
 export const DEFAULT_BASE = "0.1";
@@ -327,9 +329,27 @@ export async function contentHash8(
     buf.set(p, off);
     off += p.length;
   }
+  return await sha256Hex8(buf);
+}
+
+async function sha256Hex8(buf: BufferSource): Promise<string> {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", buf));
   return [...digest.slice(0, 4)].map((b) => b.toString(16).padStart(2, "0"))
     .join("");
+}
+
+/** The CHEAP identity of a tree too large to read: 8 hex chars of sha256 over
+ *  `path \0 size \0 mtime` (or `path \0 deleted`) for every entry, sorted — no
+ *  file is opened. Used only past {@linkcode TREE_WALK_MAX_FILES} /
+ *  `…_MAX_BYTES`, and when nothing prints the hash at all (a pinned version):
+ *  below the caps the identity is {@linkcode contentHash8}, byte for byte what
+ *  it always was. The leading tag keeps the two from ever hashing one input. */
+function metaHash8(lines: readonly string[]): Promise<string> {
+  return sha256Hex8(
+    new TextEncoder().encode(
+      "aio-tree-meta\n" + JSON.stringify([...lines].sort()),
+    ),
+  );
 }
 
 // ── the impure reader ───────────────────────────────────────────────────────
@@ -346,9 +366,124 @@ export const TREE_EXCLUDES: readonly string[] = [
   ".git/",
 ];
 
-async function git(root: string, args: string[]): Promise<string | null> {
+/** The caps on a tree read. A version string must never cost an unbounded
+ *  read, and it has TWO costs to bound: the bytes it reads, and the paths it
+ *  lists.
+ *
+ *  Why they exist. The non-repo walk runs when the project root is not a git
+ *  work tree; the root comes from the nearest `deno.json` ancestor of the
+ *  app's main module, so a STRAY one makes an unrelated, enormous directory
+ *  look like the project. Measured: a leftover `deno.json` in a home directory
+ *  made the whole home the "project", and the walk read and hashed all of it
+ *  — ~0.5 GB of RSS per 5 s, four busy GC threads, a boot that never returned,
+ *  and (with several at once) whole-machine freezes.
+ *
+ *  • Up to `TREE_WALK_MAX_FILES` files and `TREE_WALK_MAX_BYTES` bytes the
+ *    identity is the CONTENT hash ({@linkcode contentHash8}) — every normal
+ *    project, byte for byte what it always was.
+ *  • Past either, nothing more is read: the identity is the cheap one
+ *    ({@linkcode metaHash8} — path, size, mtime). A project with one large
+ *    asset still has a version; it just did not cost a read of the asset. The
+ *    size is taken from `stat` BEFORE the read, so the file that would cross
+ *    the cap is never opened. A nested `node_modules/` is left out of the
+ *    cheap identity and of every bound below.
+ *  • Past `TREE_LIST_MAX_FILES` files, `TREE_WALK_MAX_DIRS` directories or
+ *    `TREE_WALK_MAX_DEPTH` levels, or when git does not answer inside
+ *    `GIT_TIMEOUT_MS` / `GIT_STDOUT_MAX_BYTES`, the identity is REFUSED by
+ *    name, never guessed: a hash of part of a tree is the same class of
+ *    confident wrong number this module already refuses elsewhere.
+ *
+ *  The listing bound is what the STRAY `deno.json` pays before it is refused,
+ *  on every boot: a `stat` per path, ~10 µs each. Measured on a 206,000-file
+ *  tree, refusing at 200,000 took 2.2–2.5 s and 200 MB; at 50,000 it takes
+ *  0.65 s and 144 MB. It is far above the content cap, so it changes the
+ *  identity of no tree that is read. */
+export const TREE_WALK_MAX_FILES = 20_000;
+export const TREE_WALK_MAX_BYTES = 128 * 1024 * 1024;
+export const TREE_LIST_MAX_FILES = 50_000;
+export const TREE_WALK_MAX_DIRS = 50_000;
+export const TREE_WALK_MAX_DEPTH = 64;
+export const GIT_TIMEOUT_MS = 30_000;
+export const GIT_STDOUT_MAX_BYTES = 32 * 1024 * 1024;
+
+/** Override the caps (tests; production uses the consts above). */
+export type TreeLimits = {
+  /** {@linkcode TREE_WALK_MAX_FILES} */
+  files?: number;
+  /** {@linkcode TREE_WALK_MAX_BYTES} */
+  bytes?: number;
+  /** {@linkcode TREE_LIST_MAX_FILES} */
+  listed?: number;
+  /** {@linkcode TREE_WALK_MAX_DIRS} */
+  dirs?: number;
+  /** {@linkcode TREE_WALK_MAX_DEPTH} */
+  depth?: number;
+  /** {@linkcode GIT_TIMEOUT_MS} */
+  gitMs?: number;
+  /** {@linkcode GIT_STDOUT_MAX_BYTES} */
+  gitBytes?: number;
+};
+
+/** The disk reads a tree identity makes — injected so a test can prove WHICH
+ *  files were opened, rather than infer it from a clock or from RSS. */
+export type TreeIo = {
+  stat: (
+    path: string,
+  ) => Promise<{ size: number; mtime: Date | null; isDirectory: boolean }>;
+  readFile: (path: string) => Promise<Uint8Array>;
+  /** Open and close, reading nothing: rejects exactly when `readFile` would
+   *  have been refused the file. */
+  probe: (path: string) => Promise<void>;
+};
+
+const DENO_IO: TreeIo = {
+  stat: (path) => Deno.stat(path),
+  readFile: (path) => Deno.readFile(path),
+  probe: async (path) => (await Deno.open(path)).close(),
+};
+
+/** A refused tree read. `reason` is the ONE short line a version string may
+ *  carry — no path, because `--version`, `/__aio/health`, the WS hello and
+ *  `meta.json` all print it. The message is the full teachable text, root
+ *  included, and belongs in the log. */
+export class TreeRefusal extends Error {
+  constructor(message: string, readonly reason: string) {
+    super(message);
+    this.name = "TreeRefusal";
+  }
+}
+
+/** Refuse to identify a tree past its caps — BY NAME, never a partial hash. */
+function refuseTree(root: string, reason: string): never {
+  throw new TreeRefusal(
+    teachableError(
+      `[version] refusing to hash ${root}: ${reason}. A version identity ` +
+        `must not cost an unbounded read.`,
+      `If this directory is not the app's project, point the app at its own ` +
+        `deno.json — a stray deno.json in an ancestor directory (such as ` +
+        `$HOME) is not the app's project. If it is, keep the bulk out of the ` +
+        `tree (.gitignore it in a repository, or move it), or pin the ` +
+        `version: a three-part "version" in deno.json needs no tree identity.`,
+      "docs/build/versioning.md",
+    ).message,
+    reason,
+  );
+}
+
+/** Run git in `root`. Null when git is missing or says no; a {@link
+ *  TreeRefusal} when it does not answer inside the caps — `git status
+ *  --untracked-files=all` over an enormous work tree is the same unbounded
+ *  read as the walk, one process removed. */
+async function git(
+  root: string,
+  args: string[],
+  limits?: TreeLimits,
+): Promise<string | null> {
+  const ms = limits?.gitMs ?? GIT_TIMEOUT_MS;
+  const max = limits?.gitBytes ?? GIT_STDOUT_MAX_BYTES;
+  let child: Deno.ChildProcess;
   try {
-    const r = await new Deno.Command("git", {
+    child = new Deno.Command("git", {
       args: ["-C", root, ...args],
       stdout: "piped",
       stderr: "null",
@@ -357,11 +492,48 @@ async function git(root: string, args: string[]): Promise<string | null> {
       // GIT_WORK_TREE for the app's checkout means THIS repo — honour it.
       // The update rebuild strips it for its build (updates-rebuild.ts).
       env: GIT_NO_PROMPT_ENV,
-    }).output();
-    if (r.code !== 0) return null;
-    return new TextDecoder().decode(r.stdout);
+    }).spawn();
   } catch {
     return null; // git not installed
+  }
+  const reader = child.stdout.getReader();
+  let over: string | null = null;
+  const stop = (why: string) => {
+    over ??= why;
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      /* aio-ok: it already exited — there is nothing left to stop */
+    }
+    // The pipe too, not just the process: a grandchild that inherited it
+    // would keep the read below waiting for as long as it lives.
+    reader.cancel().catch(() => {
+      // aio-ok: the read already ended — there is no pipe left to cancel
+    });
+  };
+  const timer = setTimeout(
+    () => stop(`\`git ${args[0]}\` did not answer within ${ms} ms`),
+    ms,
+  );
+  const dec = new TextDecoder();
+  let text = "";
+  let bytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.length;
+      if (bytes > max) {
+        stop(`\`git ${args[0]}\` listed more than ${max} bytes of paths`);
+        break;
+      }
+      text += dec.decode(value, { stream: true });
+    }
+    const { code } = await child.status;
+    if (over) refuseTree(root, over);
+    return code === 0 ? text + dec.decode() : null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -375,24 +547,111 @@ function excluded(
   return excludes.some((x) => p === x.replace(/\/$/, "") || p.startsWith(x));
 }
 
-/** Refuse to hash a tree past the cap — BY NAME, never a partial/wrong hash.
- *  A version identity must not cost an unbounded read (see
- *  {@linkcode TREE_WALK_MAX_FILES}). */
-function refuseUnboundedWalk(
+/** A path inside a `node_modules/` at any depth. (The project root's own is
+ *  in {@link TREE_EXCLUDES} and never gets this far.) */
+const NESTED_NODE_MODULES = /(^|\/)node_modules\//;
+
+/** The identity of a set of files, built one path at a time — the ONE place
+ *  both readers (the dirty set, the non-repo walk) decide what is read.
+ *
+ *  It lists every path from `stat` alone, and reads a file's bytes only while
+ *  the set is still inside the content caps. `content: false` never reads. */
+function treeIdentity(
   root: string,
-  maxFiles: number,
-  maxBytes: number,
-): never {
-  throw teachableError(
-    `[version] refusing to hash ${root}: it holds more than ${maxFiles} ` +
-      `files or ${maxBytes} bytes and is not the app's own small project. A ` +
-      `version identity must not cost an unbounded read.`,
-    `This directory is not the app's project. Point the app at its own ` +
-      `deno.json (or make the project a git repository) so the tree hash ` +
-      `stays small — a stray deno.json in an ancestor directory (such as ` +
-      `$HOME) is not the app's project.`,
-    "docs/build/versioning.md",
-  );
+  limits: TreeLimits | undefined,
+  io: TreeIo,
+  content: boolean,
+) {
+  const maxFiles = limits?.files ?? TREE_WALK_MAX_FILES;
+  const maxBytes = limits?.bytes ?? TREE_WALK_MAX_BYTES;
+  const maxListed = limits?.listed ?? TREE_LIST_MAX_FILES;
+  // Null once the set is past a content cap: from there on nothing is read,
+  // and what was read is let go.
+  let entries: { path: string; bytes: Uint8Array | null }[] | null = content
+    ? []
+    : null;
+  const meta: string[] = [];
+  let bytes = 0;
+  let seen = 0;
+  const list = (line: string) => {
+    if (meta.length >= maxListed) {
+      refuseTree(root, `the project tree holds more than ${maxListed} files`);
+    }
+    meta.push(line);
+  };
+  return {
+    /** How many paths are in the set. */
+    seen: () => seen,
+    /** Still inside the content caps — files are still being read. */
+    content: () => entries !== null,
+    /** Leave content mode: nothing more is read. */
+    drop() {
+      entries = null;
+    },
+    /** Add one path. `gone` is what a path that cannot be read IS: a
+     *  deletion in the dirty set (git listed it), nothing at all in a walk. */
+    async add(rel: string, abs: string, gone: "deleted" | "skip") {
+      // A NESTED `node_modules/` is part of the content hash — it always was,
+      // and dropping it would move the version of every app that has one. It
+      // is NOT part of the cheap identity: past the caps it is the bulk that
+      // put the tree there, so it is neither listed nor counted, and a
+      // project is never refused a version for what `npm install` unpacked.
+      const vendored = NESTED_NODE_MODULES.test(rel);
+      if (vendored && !entries) {
+        seen++; // still a path in the set: a dirty tree stays dirty
+        return;
+      }
+      let st: Awaited<ReturnType<TreeIo["stat"]>> | null = null;
+      try {
+        st = await io.stat(abs);
+      } catch {
+        if (gone === "skip") return;
+      }
+      if (st?.isDirectory) return;
+      seen++;
+      if (!vendored) {
+        list(
+          st
+            ? `${rel}\0${st.size}\0${st.mtime?.getTime() ?? 0}`
+            : `${rel}\0deleted`,
+        );
+      }
+      if (!entries) return;
+      // STAT FIRST. The size decides BEFORE a byte is read: checking after
+      // `readFile` meant the one file that crossed the cap was read whole —
+      // a 1 GB file cost 1 GB of RSS to be refused.
+      const overFiles = entries.length >= maxFiles;
+      const overBytes = bytes + (st?.size ?? 0) > maxBytes;
+      let read: Uint8Array | null = null;
+      if (st) {
+        try {
+          // A file that cannot be read never counted toward a cap — its
+          // bytes were never read. So before a cap ends content mode over
+          // one, ask (without reading it) whether it would have been read
+          // at all: one large unreadable file must not move a tree from its
+          // content hash to the cheap one, where `touch` changes the version.
+          if (overFiles || overBytes) await io.probe(abs);
+          else read = await io.readFile(abs);
+        } catch {
+          // An unreadable file is not part of a walked tree's identity (the
+          // build refuses it elsewhere); in the dirty set it reads as deleted.
+          if (gone === "skip") return;
+          st = null;
+        }
+      }
+      // A deletion has no bytes, but it is an entry: it counts as a file.
+      if (overFiles || (st && overBytes)) {
+        entries = null;
+        return;
+      }
+      bytes += read?.length ?? 0;
+      // It grew between the stat and the read.
+      if (bytes > maxBytes) entries = null;
+      else entries.push({ path: rel, bytes: read });
+    },
+    hash: (): Promise<string> =>
+      entries ? contentHash8(entries) : metaHash8(meta),
+  };
 }
 
 /** Read what the resolver needs from `root`'s repository. `excludes` are
@@ -403,24 +662,47 @@ export async function readTreeFacts(
   opts: {
     excludes?: readonly string[];
     isOutput?: (rel: string) => boolean;
-    /** Override the non-repo walk cap (tests; production uses the consts). */
-    limits?: { files?: number; bytes?: number };
+    limits?: TreeLimits;
+    /** `false` when nothing will print the hash (a pinned version): no file is
+     *  read, and without a repository no tree is walked at all. `hash` then
+     *  only says whether the work tree is dirty. Default `true`. */
+    content?: boolean;
+    io?: TreeIo;
   } = {},
 ): Promise<TreeFacts> {
   const excludes = [...TREE_EXCLUDES, ...(opts.excludes ?? [])];
-  const top = (await git(root, ["rev-parse", "--show-toplevel"]))?.trim();
+  // Where builds and publishes of this project put their output — written
+  // down by the command that did it (`.aio/outputs.json`), never inferred
+  // from what a directory looks like.
+  const recorded = await recordedOutputs(root);
+  const content = opts.content ?? true;
+  const io = opts.io ?? DENO_IO;
+  const top = (await git(root, ["rev-parse", "--show-toplevel"], opts.limits))
+    ?.trim();
   if (!top) {
     return {
       repo: false,
       count: 0,
       commit: null,
-      hash: await projectTreeHash(root, excludes, opts.isOutput, opts.limits),
+      hash: content
+        ? await projectTreeHash(
+          root,
+          // No repository says which files are the project's: every recorded
+          // output dir is left out whole.
+          [...excludes, ...recorded],
+          opts.isOutput,
+          opts.limits,
+          io,
+        )
+        : null,
     };
   }
-  const countRaw = (await git(root, ["rev-list", "--count", "HEAD"]))?.trim();
+  const countRaw =
+    (await git(root, ["rev-list", "--count", "HEAD"], opts.limits))?.trim();
   const count = countRaw && /^\d+$/.test(countRaw) ? +countRaw : 0;
-  const commit = (await git(root, ["rev-parse", "--short=8", "HEAD"]))
-    ?.trim() ?? null;
+  const commit =
+    (await git(root, ["rev-parse", "--short=8", "HEAD"], opts.limits))
+      ?.trim() ?? null;
   // Porcelain v1, NUL-separated, every untracked file listed on its own —
   // paths are relative to the repo TOP, restricted to this app's subtree.
   const status = await git(root, [
@@ -430,9 +712,10 @@ export async function readTreeFacts(
     "--untracked-files=all",
     "--",
     ".",
-  ]) ?? "";
+  ], opts.limits) ?? "";
   const records = status.split("\0").filter(Boolean);
   const paths: string[] = [];
+  const untracked = new Set<string>();
   for (let i = 0; i < records.length; i++) {
     const rec = records[i]!;
     const code = rec.slice(0, 2);
@@ -442,6 +725,7 @@ export async function readTreeFacts(
     // build. Once tracked, a CHANGED lock is a real change (it decides which
     // dependency versions are built) and counts like any other edit.
     if (code === "??" && /(^|\/)deno\.lock$/.test(path)) continue;
+    if (code === "??") untracked.add(path);
     // A rename lists the ORIGINAL path as the next record — it is part of the
     // change too (its deletion), so keep both.
     if (code[0] === "R" || code[0] === "C") {
@@ -451,103 +735,88 @@ export async function readTreeFacts(
     paths.push(path);
   }
   const rootRel = relative(top, resolve(root)).replaceAll("\\", "/");
-  const maxFiles = opts.limits?.files ?? TREE_WALK_MAX_FILES;
-  const maxBytes = opts.limits?.bytes ?? TREE_WALK_MAX_BYTES;
-  const entries: { path: string; bytes: Uint8Array | null }[] = [];
-  let readBytes = 0;
+  // A repo whose work tree is enormous (`--untracked-files=all` lists every
+  // one) is the same unbounded read as a non-repo walk — capped the same way.
+  const id = treeIdentity(root, opts.limits, io, content);
   for (const p of new Set(paths)) {
+    // aio-ok: path-split — git output and `rootRel` are both `/`-separated
     const rel = rootRel && p.startsWith(rootRel + "/")
       ? p.slice(rootRel.length + 1)
       : p;
     if (excluded(rel, excludes, opts.isOutput)) continue;
-    let bytes: Uint8Array | null = null;
-    try {
-      const st = await Deno.stat(join(top, p));
-      if (st.isDirectory) continue;
-      bytes = await Deno.readFile(join(top, p));
-    } catch {
-      bytes = null; // deleted
-    }
-    if (bytes) readBytes += bytes.length;
-    entries.push({ path: rel, bytes });
-    // A repo whose work tree is enormous (`--untracked-files=all` lists every
-    // one) is the same unbounded read as a non-repo walk — capped the same way.
-    if (entries.length > maxFiles || readBytes > maxBytes) {
-      refuseUnboundedWalk(root, maxFiles, maxBytes);
-    }
+    // A directory a build or a publish of this project wrote to — while git
+    // does not track the path. A tracked file is source wherever it lies.
+    if (untracked.has(p) && excluded(rel, recorded)) continue;
+    await id.add(rel, join(top, p), "deleted");
   }
   return {
     repo: true,
     count,
     commit,
-    hash: entries.length === 0 ? null : await contentHash8(entries),
+    hash: id.seen() === 0 ? null : await id.hash(),
   };
 }
 
-/** A cap on the NON-repository tree walk ({@linkcode projectTreeHash}).
- *
- *  A version string must never cost an unbounded read. The walk runs when the
- *  project root is not a git work tree; the root comes from the nearest
- *  `deno.json` ancestor of the app's main module, so a STRAY one makes an
- *  unrelated, enormous directory look like the project. Measured: the test
- *  suite runs apps under `~/tmp/aio`, a leftover `~/deno.json` made `$HOME`
- *  the "project", and this walk then read and hashed an 896 GB home — ~0.5 GB
- *  of RSS per 5 s, four busy GC threads, a boot that never returned, and (with
- *  sharding) the whole-machine freezes. Past the cap the identity is REFUSED by
- *  name, never guessed: a wrong `nogit.<hash>` is the same class of confident
- *  wrong number this module already refuses elsewhere. */
-export const TREE_WALK_MAX_FILES = 20_000;
-export const TREE_WALK_MAX_BYTES = 128 * 1024 * 1024;
-
-/** Hash of every file under `root` (minus excludes) — the identity of a
- *  project that has no repository to be identified by. Bounded: past
- *  {@linkcode TREE_WALK_MAX_FILES}/`…_BYTES` it throws rather than reading on. */
+/** Identity of every file under `root` (minus excludes) — the identity of a
+ *  project that has no repository to be identified by. Bounded: see
+ *  {@linkcode TREE_WALK_MAX_FILES}. */
 async function projectTreeHash(
   root: string,
   excludes: readonly string[],
-  isOutput?: (rel: string) => boolean,
-  limits?: { files?: number; bytes?: number },
+  isOutput: ((rel: string) => boolean) | undefined,
+  limits: TreeLimits | undefined,
+  io: TreeIo,
 ): Promise<string> {
-  const maxFiles = limits?.files ?? TREE_WALK_MAX_FILES;
-  const maxBytes = limits?.bytes ?? TREE_WALK_MAX_BYTES;
-  const entries: { path: string; bytes: Uint8Array | null }[] = [];
-  let files = 0;
-  let bytes = 0;
-  let capped = false;
-  const walk = async (dir: string): Promise<void> => {
+  const maxDirs = limits?.dirs ?? TREE_WALK_MAX_DIRS;
+  const maxDepth = limits?.depth ?? TREE_WALK_MAX_DEPTH;
+  const id = treeIdentity(root, limits, io, true);
+  let dirs = 0;
+  let vendoredDirs = 0;
+  const walk = async (
+    dir: string,
+    depth: number,
+    vendored: boolean,
+  ): Promise<void> => {
+    if (vendored) {
+      // Inside a nested node_modules the walk only goes on while its files
+      // are still being read, and a bound met THERE ends content mode, not
+      // the walk — counted apart, so what is vendored can never use up the
+      // project's own allowance.
+      if (!id.content()) return;
+      if (++vendoredDirs > maxDirs || depth > maxDepth) return id.drop();
+    } else {
+      if (++dirs > maxDirs) {
+        refuseTree(root, `the project tree holds more than ${maxDirs} folders`);
+      }
+      if (depth > maxDepth) {
+        refuseTree(root, `the project tree nests more than ${maxDepth} deep`);
+      }
+    }
     // The guard wraps the ITERATION, not the call: `Deno.readDir` is a lazy
     // async iterator, so it does not throw at assignment — a directory that
     // vanished or cannot be read surfaced from the first `for await` and
     // aborted the whole walk with a raw error instead of being skipped.
     try {
       for await (const e of Deno.readDir(dir)) {
-        if (capped) return;
+        if (vendored && !id.content()) return;
         const abs = join(dir, e.name);
         const rel = relative(root, abs).replaceAll("\\", "/");
         if (excluded(rel, excludes, isOutput)) continue;
-        if (e.isDirectory) await walk(abs);
-        else if (e.isFile) {
-          try {
-            const b = await Deno.readFile(abs);
-            files++;
-            bytes += b.length;
-            entries.push({ path: rel, bytes: b });
-            if (files > maxFiles || bytes > maxBytes) {
-              capped = true;
-              return;
-            }
-          } catch {
-            /* aio-ok: an unreadable file is not part of the tree identity — the build refuses it elsewhere */
-          }
-        }
+        if (e.isDirectory) {
+          await walk(
+            abs,
+            depth + 1,
+            vendored || NESTED_NODE_MODULES.test(rel + "/"),
+          );
+        } else if (e.isFile) await id.add(rel, abs, "skip");
       }
-    } catch {
+    } catch (e) {
+      if (e instanceof TreeRefusal) throw e;
       return; // a directory that vanished or cannot be read is not tree identity
     }
   };
-  await walk(root);
-  if (capped) refuseUnboundedWalk(root, maxFiles, maxBytes);
-  return contentHash8(entries);
+  await walk(root, 0, false);
+  return id.hash();
 }
 
 /** `deno.json build.out`, as the root-relative exclude the tree reader wants. */
@@ -557,6 +826,22 @@ export function outDirExclude(root: string, out: string | undefined): string {
     "/",
   );
   return (rel && !rel.startsWith("..") ? rel : "dist") + "/";
+}
+
+/** The root-relative dirs a build of `root` writes into, as tree excludes:
+ *  `dist/` ALWAYS — the build stages there whatever `out` is — and the `out`
+ *  dir beside it.
+ *
+ *  It used to be `dist/` OR the out dir. With `--out=release` the staging in
+ *  `dist/` was therefore part of the tree: the first build created it, the
+ *  second one hashed it, and the version of an untouched project moved from
+ *  build to build — in a project without a repository always, in a repository
+ *  wherever `dist/` was not ignored. */
+export function outputExcludes(
+  root: string,
+  out: string | undefined,
+): string[] {
+  return [...new Set(["dist/", outDirExclude(root, out)])];
 }
 
 /** Resolve the version for a BUILD of `root`: the fleet's answer when it set
@@ -569,6 +854,7 @@ export async function buildVersionFor(
     env?: string | undefined;
     /** A root-level file that is this app's own build output (never dirty). */
     isOutput?: (rel: string) => boolean;
+    limits?: TreeLimits;
   } = {},
 ): Promise<{ bv: BuildVersion; fromFleet: boolean }> {
   const env = opts.env ?? Deno.env.get(BUILD_VERSION_ENV);
@@ -582,11 +868,70 @@ export async function buildVersionFor(
     }
     return { bv, fromFleet: true };
   }
-  const tree = await readTreeFacts(root, {
-    excludes: [outDirExclude(root, opts.out)],
+  // The declaration FIRST: a pinned version prints no hash, so its build must
+  // not pay for one — it read the whole tree anyway, and an app pinned at
+  // `0.1.0` with one large asset was refused a version it had written down.
+  // What a pinned build still records is its commit and whether it is dirty,
+  // and neither needs a file opened.
+  const read = {
+    excludes: outputExcludes(root, opts.out),
     isOutput: opts.isOutput,
-  });
+    limits: opts.limits,
+  };
+  let tree: TreeFacts;
+  if (parseDeclaredVersion(declared).kind !== "pinned") {
+    tree = await readTreeFacts(root, read);
+  } else {
+    try {
+      tree = await readTreeFacts(root, { ...read, content: false });
+    } catch (e) {
+      if (!(e instanceof TreeRefusal)) throw e;
+      log.warn(
+        `[version] ${e.reason} — building the pinned version without its ` +
+          `commit and dirty facts`,
+      );
+      tree = NO_TREE;
+    }
+  }
   return { bv: resolveBuildVersion(declared, tree), fromFleet: false };
+}
+
+/** The facts of a tree nobody read. */
+const NO_TREE: TreeFacts = { repo: false, count: 0, commit: null, hash: null };
+
+/** What a SOURCE RUN reads from the tree to name its version — and for a
+ *  pinned declaration that is NOTHING: the version is written down, so no git
+ *  child is spawned and no file is touched. (A refused declaration needs no
+ *  tree either: {@linkcode resolveRuntimeVersion} reports it in the refusal's
+ *  own words.) */
+export function runtimeTreeFacts(
+  root: string,
+  config: { version?: unknown; build?: unknown },
+  read: typeof readTreeFacts = readTreeFacts,
+): Promise<TreeFacts> {
+  let derived = false;
+  try {
+    derived = parseDeclaredVersion(config.version).kind !== "pinned";
+  } catch {
+    /* aio-ok: a malformed version is refused by resolveRuntimeVersion */
+  }
+  if (!derived) return Promise.resolve(NO_TREE);
+  return read(root, {
+    excludes: outputExcludes(
+      root,
+      (config.build as { out?: string } | undefined)?.out,
+    ),
+  });
+}
+
+/** The version of a source run whose tree read was refused: `unknown (…)`
+ *  with ONE short line and no path. The refusal's full text — three lines,
+ *  with the absolute project root — used to ride this string into `--version`,
+ *  `/__aio/health`, the WS hello and `meta.json`; it belongs in the log. */
+export function unresolvedTreeVersion(e: unknown): string {
+  return `${UNRESOLVED}${
+    e instanceof TreeRefusal ? e.reason : "the project tree could not be read"
+  } — see the log)`;
 }
 
 // ── the stamp ───────────────────────────────────────────────────────────────
@@ -811,6 +1156,7 @@ const OS_SUFFIXES: readonly string[] = [
 export function installArtifactName(
   file: string,
 ): { base: string; ext: string; version: string | null } {
+  // aio-ok: path-split — `\\` normalised to `/` first
   const name = file.replaceAll("\\", "/").split("/").pop() ?? file;
   const m = new RegExp(`-(${VERSION_TOKEN_RE.source})(?=$|[-.])`).exec(name);
   const unversioned = stripVersionToken(name);

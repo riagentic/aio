@@ -13,6 +13,7 @@ import { stripVersionToken } from "../src/build/build-version.ts";
 import { descendantPids } from "../src/server/single-instance-lock.ts";
 import { aioTestDir } from "../src/testing/test-strict.ts";
 import type { Template } from "../src/am/am-help-text.ts";
+import { freePort } from "../src/testing/server-test.ts";
 
 export const REPO_ROOT = resolve(import.meta.dirname!, "..");
 const dec = new TextDecoder();
@@ -101,13 +102,11 @@ export async function task(
   return { code: p.code, out: dec.decode(p.stdout), err: dec.decode(p.stderr) };
 }
 
-/** An OS-assigned free TCP port. */
-export function freePort(): number {
-  const l = Deno.listen({ port: 0, hostname: "127.0.0.1" });
-  const port = (l.addr as Deno.NetAddr).port;
-  l.close();
-  return port;
-}
+/** A free TCP port — THE one `freePort` (src/testing), which draws from this
+ *  run's port slice when one is set. The `port: 0` twin that stood here handed
+ *  out a number another process's `port: 0` could be given before the child
+ *  bound it ("port 45025 already in use", in test:build under load). */
+export { freePort };
 
 /** The environment EVERY app a test spawns must carry, spread into the child's
  *  `env`. Two facts, both about not outliving or escaping the test:

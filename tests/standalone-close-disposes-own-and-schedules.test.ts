@@ -47,6 +47,7 @@ Deno.test("standalone close(): an owned resource is disposed, as on the server",
   try {
     const c = makeCell("r6ownsa");
     const app = await sa.aio.run({
+      watch: false,
       appId: "r6ownsa",
       cells: [c],
       persist: false,
@@ -85,6 +86,7 @@ Deno.test("standalone close(): an `every` schedule stops firing, as on the serve
       },
     });
     const app = await sa.aio.run({
+      watch: false,
       appId: "r6tick",
       cells: [ticker],
       persist: false,

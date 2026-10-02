@@ -43,6 +43,7 @@ async function boot(
     baseDir: await tempDir("aio-sess-only-"),
     appDir,
     ...extra,
+    watch: false,
   });
   const hasSessions = !!app.sessions;
   await app.close();

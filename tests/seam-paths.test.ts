@@ -23,6 +23,7 @@ import { join, relative } from "@std/path";
 import { stopChild } from "./stop-child.ts";
 import { childCoverageDir } from "../src/testing/temp-dir.ts";
 import { permissiveUmask } from "./permissive-umask.ts";
+import { freePort } from "../src/testing/server-test.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 const dec = new TextDecoder();
@@ -34,13 +35,6 @@ const _childCovDir = childCoverageDir();
  *  sandbox on every run (slow, and indistinguishable from an aio stray). */
 const REAL_DENO_DIR = Deno.env.get("DENO_DIR") ??
   join(Deno.env.get("HOME") ?? "/tmp", ".cache", "deno");
-
-function freePort(): number {
-  const l = Deno.listen({ port: 0 });
-  const port = (l.addr as Deno.NetAddr).port;
-  l.close();
-  return port;
-}
 
 async function waitFor<T>(fn: () => Promise<T | null>): Promise<T> {
   const deadline = Date.now() + 30_000;

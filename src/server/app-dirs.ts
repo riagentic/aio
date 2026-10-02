@@ -31,6 +31,8 @@ import {
   SEPARATOR,
 } from "@std/path";
 import { sweepStaleTmps, uuidTmpBefore } from "../diagnostics/tmp-sweep.ts";
+import { renameOverSync } from "../diagnostics/rename-over.ts";
+import { log } from "../diagnostics/logger-api.ts";
 import { appImageOwner, homedir } from "./paths.ts";
 
 /** Two ways to answer "where does this app live", and one rule each:
@@ -757,6 +759,12 @@ const OS_FOLDER_LITTER: ReadonlySet<string> = new Set([
   ".directory",
 ]);
 
+/** Is `name` one of those files? The one list: the home check below and the
+ *  build's "whose files are in this out dir" rule read it. Pure. */
+export function isOsFolderLitter(name: string): boolean {
+  return OS_FOLDER_LITTER.has(name.toLowerCase());
+}
+
 /** `null` when `home` may be `appId`'s, else the boot refusal — cause and fix.
  *
  *  The home is derived from the NAME (`~/.<appId>`, or `$AIO_APPS_DIR/<appId>`),
@@ -960,7 +968,8 @@ export type AppMeta = {
 };
 
 /** Write/refresh `meta.json`. Best-effort: a read-only home must never fail a
- *  boot — the app runs fine without it, only `am restore` loses a safety check. */
+ *  boot — the app runs fine without it, only `am restore` loses a safety check.
+ *  A write that did not land is said once, as a warning. */
 export function writeAppMeta(
   dirs: AppDirs,
   info: { appId: string; aio: string; app?: string; profile?: string },
@@ -989,14 +998,24 @@ export function writeAppMeta(
         createNew: true,
         mode: 0o600,
       });
-      Deno.renameSync(tmp, dirs.meta);
+      renameOverSync(tmp, dirs.meta);
     } catch (e) {
       try {
         Deno.removeSync(tmp);
       } catch { /* aio-ok: never created, or already renamed */ }
       throw e;
     }
-  } catch { /* best-effort by design */ }
+  } catch (e) {
+    // Never a reason to fail the boot — and never silent: a stale record
+    // makes `am restore` compare against the wrong version.
+    log.warn(
+      "meta",
+      `${dirs.meta} was not updated (${
+        e instanceof Error ? e.message : String(e)
+      }) — the app runs without it; \`am restore\` checks a backup against ` +
+        `what this file says.`,
+    );
+  }
 }
 
 // ── The workspace share ──────────────────────────────────────────────────────
@@ -1130,6 +1149,7 @@ export function matchShare(
 ): { share: ShareRoot; rel: string } | null {
   for (const share of shares) {
     if (path === share.prefix) return { share, rel: "" };
+    // aio-ok: path-split — a URL path under a share prefix
     if (path.startsWith(share.prefix + "/")) {
       return { share, rel: path.slice(share.prefix.length + 1) };
     }

@@ -60,6 +60,7 @@ export const ownState = cell("ownState", {
 
 if (isCellWorker()) {
   await aio.run({
+    watch: false,
     appId: "worker-own-state-probe",
     cells: [ownState],
     client: "server-only",

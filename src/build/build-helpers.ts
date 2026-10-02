@@ -59,6 +59,33 @@ export async function chmodIfSupported(
   await Deno.chmod(path, mode);
 }
 
+/** The mode an entry carries INSIDE a package: a directory or an executable
+ *  is 0755, any other file 0644 — whatever it was staged with. Pure. */
+export function artifactMode(kind: "dir" | "file", mode: number): number {
+  return kind === "dir" || mode & 0o111 ? 0o755 : 0o644;
+}
+
+/** Give `root` and everything under it its {@link artifactMode}.
+ *
+ *  A staged tree is written under the builder's umask, and the packers (zip,
+ *  tar, squashfs, hdiutil) store what they find: built under umask 077, an
+ *  installed `.app` was `drwx------` and no other account on that Mac could
+ *  open it. What a package holds must not depend on who built it, so every
+ *  packer's input goes through here first. Links are left as they are (a
+ *  link has no mode of its own, and its target may sit outside the tree). */
+export async function normalizeArtifactModes(root: string): Promise<void> {
+  if (Deno.build.os === "windows") return; // no POSIX mode bits to set
+  await Deno.chmod(root, artifactMode("dir", 0));
+  for await (const e of Deno.readDir(root)) {
+    const path = join(root, e.name);
+    if (e.isDirectory) await normalizeArtifactModes(path);
+    else if (e.isFile) {
+      const { mode } = await Deno.lstat(path);
+      await Deno.chmod(path, artifactMode("file", mode ?? 0));
+    }
+  }
+}
+
 /** Slugify a string for use as binary/app name. The transform is THE one in
  *  `single-instance-lock.ts` — an app's binary name and its lock id must not be
  *  able to disagree about what its name reduces to. Only the fallback differs.
@@ -606,4 +633,58 @@ export async function ensureAppimagetool(
   await chmodIfSupported(toolPath, 0o755);
   console.log("[appimage] ✓ appimagetool cached");
   return toolPath;
+}
+
+/** Move a built artifact — a file, or a directory artifact (`web`,
+ *  `ios-client`) — to where the release is assembled.
+ *
+ *  A rename when it can be one. Across filesystems (`dist/` on another mount)
+ *  it is a copy and a remove, and the copy must leave what the rename would
+ *  have: `copyDir` keeps links as links and exec bits, but it creates each
+ *  directory under the builder's umask, so the copied tree is normalized
+ *  again ({@link normalizeArtifactModes}) — a web folder placed that way was
+ *  `drwx------` under umask 077 while the same build on one filesystem was
+ *  not. `rename` is injectable so that path can be run on one filesystem. */
+export async function moveArtifact(
+  from: string,
+  to: string,
+  rename: (from: string, to: string) => Promise<void> = Deno.rename,
+): Promise<void> {
+  try {
+    await rename(from, to);
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) throw e;
+    // EXDEV (cross-device) or any other rename failure → copy, then remove.
+    // `Deno.copyFile` cannot copy a directory (it threw a raw TypeError after
+    // the target had "built", leaving the artifact in the root with no
+    // manifest), so a directory goes through the build's recursive copy.
+    if ((await Deno.lstat(from)).isDirectory) {
+      await copyDir(from, to);
+      await normalizeArtifactModes(to);
+      await Deno.remove(from, { recursive: true });
+    } else {
+      await Deno.copyFile(from, to);
+      await Deno.remove(from);
+    }
+  }
+}
+
+/** Pack `appDir` into the AppImage `out`. THE call both AppImage builds make,
+ *  so the tree is normalized ({@link normalizeArtifactModes}) and the tool is
+ *  run the same way (see {@link appimageEnv}) wherever one is assembled.
+ *  False when the tool failed — it has printed why. */
+export async function runAppimagetool(
+  toolPath: string,
+  appDir: string,
+  out: string,
+  arch: string,
+): Promise<boolean> {
+  await normalizeArtifactModes(appDir);
+  const r = await new Deno.Command(toolPath, {
+    args: [appDir, out],
+    stdout: "inherit",
+    stderr: "inherit",
+    env: appimageEnv(arch),
+  }).output();
+  return r.success;
 }

@@ -21,6 +21,7 @@ Deno.test("memory typo without ui: boots, and warns with the nearest key", async
   const cap = capture();
   try {
     const app = await aio.run({
+      watch: false,
       appId: "memtypo-test",
       cells: [c],
       libraryMode: true,
@@ -50,6 +51,7 @@ Deno.test("memory typo WITH ui: still refused, as before", async () => {
     await assertRejects(
       () =>
         aio.run({
+          watch: false,
           appId: "memtypo2-test",
           cells: [c],
           libraryMode: true,

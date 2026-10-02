@@ -53,6 +53,7 @@ export const wiReject = cell("wiReject", {
 
 if (isCellWorker()) {
   await aio.run({
+    watch: false,
     appId: "worker-oninit-probe",
     cells: [wiAsync, wiThrow, wiReject],
     client: "server-only",

@@ -6,6 +6,8 @@
 import { readDenoJson } from "../server/deno-json.ts";
 import { KILL_POLL_MS } from "../server/single-instance-lock.ts";
 import { windowsCommandLine } from "../server/no-console.ts";
+import { controlKeyPath } from "../server/app-key.ts";
+import { STOP_REFUSED } from "../server/server-auth.ts";
 import { basename, dirname, join, resolve } from "@std/path";
 import { cwdIsProject, isUnder, projectRoot } from "./am-project.ts";
 import {
@@ -37,6 +39,8 @@ import {
   AppLock,
   deadOwnerWarning,
   foreignOwnerRefusal,
+  HANDOFF_ENV,
+  heldLockLine,
   type InstanceInfo,
   instances,
   isLockOwnerAlive,
@@ -49,6 +53,7 @@ import {
   lockDir,
   lockKey,
   ownerIdentity,
+  probeEndpoint,
   readLaunchInfo,
   readLock,
   removeLockIfOwner,
@@ -57,11 +62,12 @@ import {
   STARTUP_GRACE_MS,
   STUCK_STARTING_MS,
   writeLaunchInfo,
+  zombieVerdict,
 } from "../server/single-instance-lock.ts";
 import { EXIT_WAIT_MS } from "../server/shutdown-budget.ts";
 import { HEY } from "../diagnostics/fmt.ts";
 import { STDOUT_IS_LOG_ENV } from "../diagnostics/logger-format.ts";
-import { VERSION } from "../server/aio-cli.ts";
+import { runtimeSpelling, VERSION } from "../server/aio-cli.ts";
 import {
   amIsInteractive,
   displayChoice,
@@ -99,12 +105,14 @@ import {
   maintenanceMessage,
   maintenanceOp,
   noDoorMessage,
+  printable,
   readEntryConfig,
   readPid,
   removeLockKeyed,
   removePid,
   resolveAmAppId,
   resolveEntry,
+  runningApps,
 } from "./am-utils.ts";
 import {
   componentLaunchArgs,
@@ -381,9 +389,12 @@ export async function ensureSingleton(
     // app every 10 s forever (h7 F2, measured).
     //
     // The rule now: alive and nothing bound is BOOTING until neither the lock
-    // nor the app's own log has moved for `STUCK_STARTING_MS`; alive and
-    // bound but not answering past the grace is a zombie listener; and a
-    // booting instance is attached to, never killed.
+    // nor the app's own log has moved for `STUCK_STARTING_MS`; a booting
+    // instance is attached to, never killed. And something LISTENING on its
+    // port that does not answer is never ended by am either — the same rule
+    // as a `started` one below: a listener is a live process, and a port
+    // that answers a connect is not even proof the listener is this app's.
+    // It is refused, saying so, and the user ends it (`am stop`/`am kill`).
     const probePort = pf.trojanPort ?? pf.port;
     const pastGrace = Date.now() - pf.startedAt >= STARTUP_GRACE_MS;
     const listening = probePort > 0
@@ -399,17 +410,8 @@ export async function ensureSingleton(
         outError(alreadyRunningLine(pf), mode);
         Deno.exit(1);
       }
-      // Bound but not answering, past the grace — a zombie listener.
-      out(
-        mode === "pretty"
-          ? `killing stuck instance (pid ${pf.pid}, status: starting, ` +
-            `listening but not answering)…`
-          : { killing: pf.pid, reason: "stuck-starting" },
-        mode,
-      );
-      await killProcess(pf.pid, undefined, pf);
-      removePid(appId, pf);
-      return;
+      outError(notAnsweringLine(pf), mode);
+      Deno.exit(1);
     }
     if (
       !listening &&
@@ -462,9 +464,22 @@ export async function ensureSingleton(
   if (!responds && pf.socketPath) {
     responds = await isSocketAlive(pf.socketPath);
   }
-
-  if (responds) {
-    outError(alreadyRunningLine(pf), mode);
+  // ONE look that finds no answer is not a zombie. An app's record says
+  // `started` a moment before its listener is bound (measured: 56 ms on a
+  // desktop app), and killing on that look ended a healthy app that had just
+  // come up. THE rule is the lock's own (`zombieVerdict`): a settled record,
+  // and nothing listening through several attempts seconds apart. Anything
+  // less is a running app.
+  const verdict = responds
+    ? null
+    : await zombieVerdict(lockKey(pf.appId, pf.home, pf.profile), pf);
+  if (verdict === null || verdict === "moved") {
+    // Not answering, and something IS at the address its record names: say
+    // that. Otherwise (a record just written, or one that names no address)
+    // it is simply running.
+    const at = responds ? null : await probeEndpoint(pf);
+    const there = at !== null && at.state !== "gone";
+    outError(there ? notAnsweringLine(pf) : alreadyRunningLine(pf), mode);
     Deno.exit(1);
   }
 
@@ -482,7 +497,15 @@ export async function ensureSingleton(
 // ── Process management commands ─────────────────────────────
 
 /** The per-OS command that spawns a DETACHED deno child whose stdout+stderr
- *  land in `logFile` and whose real PID is printed to stdout.
+ *  land in `logFile` and whose real PID is written to `<logFile>.pid`.
+ *
+ *  A FILE, never the launcher's stdout: on Windows `Start-Process` creates the
+ *  child with handle inheritance on (its redirects need it), so the child
+ *  inherited PowerShell's stdout — am's pipe — and am, reading that pipe to
+ *  EOF for the pid, waited for the APP's whole lifetime (measured: `am start`
+ *  still running 12 min after the app was healthy, exiting 237 ms after the
+ *  app was killed). Run it with {@linkcode launchDetached}, which gives the
+ *  launcher no pipe at all.
  *
  *  POSIX: `sh -c "nohup deno … >log 2>&1 & echo $!"` — nohup detaches from
  *  the session so the child survives am's exit and terminal close.
@@ -497,7 +520,12 @@ export function detachedSpawnSpec(
   denoBin: string = Deno.execPath(),
 ): { cmd: string; args: string[] } {
   if (os === "windows") {
-    const q = (v: string) => "'" + v.replace(/'/g, "''") + "'";
+    // PowerShell ends a single-quoted string at ANY of its quote characters,
+    // not only U+0027: the typographic ‘ ’ ‚ ‛ (U+2018/2019/201A/201B) close
+    // it too, so `--title=Don’t` ran whatever followed as PowerShell. Each is
+    // escaped the same way — doubled.
+    const q = (v: string) =>
+      "'" + v.replace(/['\u2018\u2019\u201A\u201B]/g, "$&$&") + "'";
     // ONE pre-quoted command line, not an ARRAY of values. `Start-Process`
     // joins `-ArgumentList` elements into a single string with spaces and does
     // NOT quote them (the single quotes above are PowerShell syntax and are
@@ -511,7 +539,9 @@ export function detachedSpawnSpec(
       q(argLine)
     } -RedirectStandardOutput ${q(logFile)} -RedirectStandardError ${
       q(logFile + ".err")
-    } -PassThru -WindowStyle Hidden; Write-Output $p.Id`;
+    } -PassThru -WindowStyle Hidden; [IO.File]::WriteAllText(${
+      q(logFile + ".pid")
+    }, [string]$p.Id)`;
     return {
       cmd: "powershell",
       args: ["-NoProfile", "-NonInteractive", "-Command", ps],
@@ -534,9 +564,66 @@ export function detachedSpawnSpec(
       // the caller is not a group leader — a `sh -c` background job never is —
       // so `$!` is still the deno PID am records. Where there is no setsid
       // binary (macOS), nohup alone is what there was.
-      `if command -v setsid >/dev/null 2>&1; then setsid ${run} & else ${run} & fi; echo $!`,
+      `if command -v setsid >/dev/null 2>&1; then setsid ${run} & else ${run} & fi; echo $! >${
+        esc(logFile + ".pid")
+      }`,
     ],
   };
+}
+
+/** How long a launcher may take to hand back the pid. It only starts a
+ *  process; seconds are generous, and it is a bound, not a wait on the app. */
+export const LAUNCHER_TIMEOUT_MS = 30_000;
+
+/** Run a {@linkcode detachedSpawnSpec} launcher and return the child's pid
+ *  (the launcher's own when it wrote none — the old fallback).
+ *
+ *  The launcher gets NO pipe — stdin, stdout and stderr all null — so there is
+ *  nothing for the app to inherit and nothing am waits on but the LAUNCHER's
+ *  exit, bounded by `timeoutMs`; past it the launcher is killed and this
+ *  throws, naming it. Never the app's lifetime. */
+export async function launchDetached(
+  spec: { cmd: string; args: string[] },
+  logFile: string,
+  opts: { cwd?: string; env?: Record<string, string> } = {},
+  timeoutMs = LAUNCHER_TIMEOUT_MS,
+): Promise<number> {
+  const pidFile = logFile + ".pid";
+  try {
+    Deno.removeSync(pidFile);
+  } catch { /* aio-ok: no pid file left over from an earlier launch */ }
+  const proc = new Deno.Command(spec.cmd, {
+    args: spec.args,
+    ...opts,
+    stdin: "null",
+    stdout: "null",
+    stderr: "null",
+  }).spawn();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const done = await Promise.race([
+    proc.status.then(() => true),
+    new Promise<false>((r) => timer = setTimeout(() => r(false), timeoutMs)),
+  ]).finally(() => clearTimeout(timer));
+  if (!done) {
+    try {
+      proc.kill("SIGKILL");
+    } catch {
+      /* aio-ok: the launcher ended between the timeout and the kill */
+    }
+    await proc.status;
+    throw new Error(
+      `the launcher (${spec.cmd}, pid ${proc.pid}) did not return within ` +
+        `${timeoutMs / 1000} s — the app may or may not have started; ` +
+        `check \`am status\` and ${logFile}`,
+    );
+  }
+  let text = "";
+  try {
+    text = Deno.readTextFileSync(pidFile);
+    Deno.removeSync(pidFile);
+  } catch { /* aio-ok: no pid written — the launcher's pid, as before */ }
+  const pid = parseInt(text.trim(), 10);
+  return Number.isFinite(pid) ? pid : proc.pid;
 }
 
 // ── am ui — open amui, the visual app manager ───────────────────────────────
@@ -606,21 +693,14 @@ export async function cmdUi(
     amuiDenoArgs(entry, args),
     logFile,
   );
-  const proc = new Deno.Command(spec.cmd, {
-    args: spec.args,
-    // amui is its OWN project: Deno discovers `deno.json` from the working
-    // directory, so launching it from the user's app directory hands it the
-    // APP's config — the app's import map, the app's lock file — for a program
-    // that is not the app. `am ui` is typed inside an app by definition, so
-    // that is the normal case, not the corner one. Run it where it lives.
+  // amui is its OWN project: Deno discovers `deno.json` from the working
+  // directory, so launching it from the user's app directory hands it the
+  // APP's config — the app's import map, the app's lock file — for a program
+  // that is not the app. `am ui` is typed inside an app by definition, so
+  // that is the normal case, not the corner one. Run it where it lives.
+  const pid = await launchDetached(spec, logFile, {
     cwd: dirname(dirname(entry)),
-    stdin: "null",
-    stdout: "piped",
-    stderr: "null",
-  }).spawn();
-  const output = await proc.output();
-  const childPid = parseInt(new TextDecoder().decode(output.stdout).trim(), 10);
-  const pid = Number.isFinite(childPid) ? childPid : proc.pid;
+  });
   out(
     mode === "pretty"
       ? `✓ amui launched (pid ${pid}) — ${entry}\n  log: ${logFile}`
@@ -877,9 +957,18 @@ export async function cmdStart(
   // shutdown and the next boot refused to start.
   const home = appDirs(appId).home;
   const lock = new AppLock(appId, home, registeredProfile(appId));
-  const result = await lock.acquire(port);
+  // The child is handed this secret (`HANDOFF_ENV`) and takes the lock over
+  // with it — the only proof it is the child this lock was filed for.
+  const handoff = crypto.randomUUID();
+  const result = await lock.acquire(port, false, { handoff });
   if (!result.ok) {
-    outError(alreadyRunningLine(result.existing), mode);
+    lock.release();
+    outError(
+      result.held !== undefined
+        ? heldLockLine(appId, result.existing, result.held)
+        : alreadyRunningLine(result.existing),
+      mode,
+    );
     Deno.exit(1);
   }
 
@@ -950,9 +1039,11 @@ export async function cmdStart(
   // `--display=` is AM's (where the window goes), not the app's. `start` is a
   // PASSTHROUGH verb, so anything left here reaches the child as one of its
   // own flags — an app that does not know `--display` would refuse to boot.
+  // A build word that picks a client (`--headless`) is translated to its
+  // runtime spelling — the app itself refuses the build word.
   const passthrough = args.filter((a) =>
     a.startsWith("--") && !a.startsWith("--display=")
-  );
+  ).map((a) => runtimeSpelling(a) ?? a);
   // A GUI client on a headless box hangs forever (electron never returns) —
   // fail FAST with the fix instead (a field report). The
   // effective client is the --client override, else the app's declared target.
@@ -1060,35 +1151,35 @@ export async function cmdStart(
         : `am: note: ${plan.note}`,
     );
   }
-  const proc = new Deno.Command(spec.cmd, {
-    args: spec.args,
-    // Inherited PLUS the containment decision. Spread, never replaced: the
-    // child needs PATH, HOME and the user's own environment to boot at all.
-    // And told that its stdout is a log FILE, so the `--expose` banner's
-    // share-link token and pair code are masked there as in every other log
-    // file (the key file the banner names still holds the key).
-    env: {
-      ...Deno.env.toObject(),
-      ...plan.env,
-      [STDOUT_IS_LOG_ENV]: "1",
-    },
-    // THE cwd the launch record above claims — the same value, not a second
-    // decision. Without it the child inherited am's OWN cwd: `cd src && am
-    // start` recorded `cwd: <root>` in launch.json and the lock (which `am
-    // restart`, `am doctor` and `foreignCheckout` read as where the app runs)
-    // while the process actually ran from `<root>/src` — so a relative
-    // `--db-path=data.db` or `--tls-cert=certs/x.pem` resolved one directory
-    // below where every reader of the record said it would, and the state
-    // landed in a file `am data`/`am backup` never looked at.
-    cwd,
-    stdin: "null",
-    stdout: "piped",
-    stderr: "null",
-  }).spawn();
-
-  const output = await proc.output();
-  const childPid = parseInt(new TextDecoder().decode(output.stdout).trim(), 10);
-  const pid = Number.isFinite(childPid) ? childPid : proc.pid;
+  let pid: number;
+  try {
+    pid = await launchDetached(spec, logFile, {
+      // Inherited PLUS the containment decision. Spread, never replaced: the
+      // child needs PATH, HOME and the user's own environment to boot at all.
+      // And told that its stdout is a log FILE, so the `--expose` banner's
+      // share-link token and pair code are masked there as in every other log
+      // file (the key file the banner names still holds the key).
+      env: {
+        ...Deno.env.toObject(),
+        ...plan.env,
+        [STDOUT_IS_LOG_ENV]: "1",
+        [HANDOFF_ENV]: handoff,
+      },
+      // THE cwd the launch record above claims — the same value, not a second
+      // decision. Without it the child inherited am's OWN cwd: `cd src && am
+      // start` recorded `cwd: <root>` in launch.json and the lock (which `am
+      // restart`, `am doctor` and `foreignCheckout` read as where the app runs)
+      // while the process actually ran from `<root>/src` — so a relative
+      // `--db-path=data.db` or `--tls-cert=certs/x.pem` resolved one directory
+      // below where every reader of the record said it would, and the state
+      // landed in a file `am data`/`am backup` never looked at.
+      cwd,
+    });
+  } catch (e) {
+    lock.release();
+    outError(e instanceof Error ? e.message : String(e), mode);
+    Deno.exit(1);
+  }
 
   // Release am's placeholder lock THE MOMENT the child exists — before the
   // liveness grace below, not after it.
@@ -1114,10 +1205,7 @@ export async function cmdStart(
   // started, and calling that "starting" is the lie.
   await new Promise((r) => setTimeout(r, SPAWN_LIVENESS_GRACE_MS));
   if (!isProcessAlive(pid)) {
-    const tail = (await Deno.readTextFile(logFile).catch(() => ""))
-      // deno-lint-ignore no-control-regex
-      .replace(/\x1b\[[0-9;]*m/g, "") // the child's colours are not ours
-      .trim();
+    const { text: tail, files } = childSaid(logFile);
     // A fresh clone's failure is ALWAYS this one, and Deno states it as a bare
     // `Module not found "file:///…/dep/aio/mod.ts"`. The link is gitignored on
     // purpose (it is machine-specific), so a clone never has it and the repair
@@ -1130,12 +1218,16 @@ export async function cmdStart(
           ? `  it said:\n${
             crashTail(tail).map((l) => `      ${l}`).join("\n")
           }\n`
-          : `  it wrote nothing to ${logFile}\n`) +
+          : `  it wrote nothing to ${
+            Deno.build.os === "windows"
+              ? `${logFile} or ${logFile}.err`
+              : logFile
+          }\n`) +
         (missingLink
           ? `  this clone has no dep/aio link (it is gitignored — every clone ` +
             `has to make its own).\n  fix: am fix\n`
           : "") +
-        `  full log: ${logFile}`,
+        `  full log: ${(files.length ? files : [logFile]).join(" and ")}`,
       mode,
     );
     Deno.exit(1);
@@ -1344,7 +1436,7 @@ async function awaitStarted(o: {
       livePort = written?.port || declared;
       if (livePort === undefined) continue; // no port chosen yet
     }
-    if (await doorAnswers(resolveControlPort(livePort, appId))) {
+    if (await doorAnswers(resolveControlPort(livePort, appId), appId)) {
       healthy = true;
       break;
     }
@@ -1417,12 +1509,13 @@ async function awaitStarted(o: {
     // What it said — the `error:` line and the `→ fix:` lines under it, not
     // the last lines of the log (the stack frames, so the one line that says
     // what to do was the first to be cut).
-    const said = crashTail(readLogTail(logPath()));
+    const left = childSaid(logPath());
+    const said = crashTail(left.text);
     outError(
       said.length
         ? `${appId} did not start — the child (pid ${pid}) exited.\n` +
           `  it said:\n${said.map((l) => `      ${l}`).join("\n")}\n` +
-          `  full log: ${logPath()}`
+          `  full log: ${left.files.join(" and ")}`
         : `process crashed — check ${logPath()}`,
       mode,
     );
@@ -1496,7 +1589,7 @@ async function racingPeer(
 async function answers(l: LockData, appId: string): Promise<boolean> {
   if (l.socketPath && !l.port) return await isSocketAlive(l.socketPath);
   if (!(l.port > 0)) return false;
-  return await doorAnswers(resolveControlPort(l.port, appId));
+  return await doorAnswers(resolveControlPort(l.port, appId), appId);
 }
 
 /** Does the aio server on `port` ANSWER? Its page (`/`) with a 2xx — or,
@@ -1506,19 +1599,39 @@ async function answers(l: LockData, appId: string): Promise<boolean> {
  *  exit 1 ("did not answer") for an app that was serving, and made the
  *  single-instance check kill it as a zombie. `/__aio/health` is served in
  *  every mode; a 401/403 there is a keyed app answering. THE liveness
- *  question for `start`, the singleton check and a restart's peer. */
-async function doorAnswers(port: number): Promise<boolean> {
+ *  question for `start`, the singleton check and a restart's peer.
+ *  `appId`: the app it must be — another app answering is not an answer.
+ *  @internal */
+export async function doorAnswers(
+  port: number,
+  appId?: string,
+): Promise<boolean> {
   const get = async (path: string): Promise<number> => {
     try {
       const r = await fetch(`http://127.0.0.1:${port}${path}`, {
         signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
       });
+      // The app that answers, when the caller knows which one it waits for:
+      // a declared port can be another app's while ours still boots, and
+      // its answer was read as "ours started".
+      if (appId !== undefined && path === "/__aio/health" && r.ok) {
+        let who: { appId?: unknown } = {};
+        try {
+          who = await r.json();
+        } catch {
+          // aio-ok: not JSON — no name to compare, the status decides
+        }
+        return typeof who.appId === "string" && who.appId !== appId
+          ? -1
+          : r.status;
+      }
       await r.body?.cancel();
       return r.status;
     } catch {
       return 0; // aio-ok: nothing answered — the verdict below says so
     }
   };
+  if (appId !== undefined && await get("/__aio/health") === -1) return false;
   const page = await get("/");
   if (page >= 200 && page < 300) return true;
   if (page === 0) return false;
@@ -1722,6 +1835,25 @@ export function slowStartReason(log: string): string | null {
 
 /** The last 64 KB of a log, or "" when it cannot be read — a probe, not a
  *  requirement: no log means no reason to wait longer. */
+/** What a child that died left in its log: the text (ANSI stripped) and the
+ *  files it is in. Both `logFile` and `<logFile>.err` — on Windows stderr is
+ *  split off there (`detachedSpawnSpec`), and the reason a boot failed is
+ *  usually THERE: naming only the stdout log ("it wrote nothing to …") sent
+ *  the reader to the empty file. @internal */
+export function childSaid(logFile: string): { text: string; files: string[] } {
+  const files: string[] = [];
+  const texts: string[] = [];
+  for (const f of [logFile, `${logFile}.err`]) {
+    // deno-lint-ignore no-control-regex
+    const t = readLogTail(f).replace(/\x1b\[[0-9;]*m/g, "").trim();
+    if (t) {
+      files.push(f);
+      texts.push(t);
+    }
+  }
+  return { text: texts.join("\n"), files };
+}
+
 function readLogTail(path: string): string {
   try {
     const st = Deno.statSync(path);
@@ -1776,7 +1908,7 @@ export function noLockMessage(appId: string): string {
   // appId, and the running one is the answer.
   let live = "";
   try {
-    const running = instances().filter((i) => i.alive);
+    const running = runningApps().filter((i) => i.alive);
     // THIS id, running from a home the target did not name (a profile, an
     // isolated boot). Listing it as "running right now: x, x — target one
     // with --app=<id>" repeated the id that had already resolved and left out
@@ -1825,7 +1957,9 @@ export type StopTarget = { appId: string; port: number; pf: LockData | null };
  *  it belongs to. `--port=N` is documented as a way to point at a listener, so
  *  it has to be able to name an app other than the cwd's. */
 export function lockOnPort(port: number): LockData | null {
-  return instances().find((i) => i.port === port) ?? null;
+  // An app's, never a maintenance hold's: its record says port 0 and it
+  // holds none, so `--port=0` named whichever app was being backed up.
+  return runningApps().find((i) => i.port === port) ?? null;
 }
 
 /** WHICH instance a process verb is about, decided from the lock files alone —
@@ -1890,7 +2024,7 @@ export function resolveLockTarget(flags: GlobalFlags): LockTarget {
 
 /** What a verb that can only act on a LOCK says when `--port=N` names none. */
 export function noLockOnPortMessage(port: number): string {
-  const live = instances();
+  const live = runningApps();
   return `no running app holds port ${port} — refusing to act on a ` +
     `different app than the one you named.\n` +
     (live.length
@@ -1998,6 +2132,21 @@ export function alreadyRunningLine(
       : "");
 }
 
+/** What `am start` and `am status` say about an instance that is alive, has
+ *  a listener, and does not answer: ONE story — it is running, it is not
+ *  answering, and ending it is the user's call. am ends a process only when
+ *  nothing at all is listening where its record says (`zombieVerdict`). */
+export function notAnsweringLine(
+  pf: Pick<LockData, "appId" | "pid" | "port">,
+): string {
+  const app = printable(pf.appId);
+  return `not answering: ${app} (pid ${pf.pid}${
+    pf.port > 0 ? `, port ${pf.port}` : ""
+  }) is running and listening, but does not answer — am does not end a ` +
+    `process that is still listening. \`am stop --app=${app}\` asks it to ` +
+    `quit; \`am kill --app=${app}\` ends it.`;
+}
+
 /** THE definition of "an instance of this project" — read by `stop --all`,
  *  `doctor` and `status`, so they cannot answer differently.
  *
@@ -2092,13 +2241,40 @@ async function finalPersistVerdict(
 
 /** Stop ONE resolved target. Exported for the no-door test only.
  *  @internal */
+/** One `am stop`'s outcome. */
+type StopResult =
+  | {
+    ok: true;
+    appId: string;
+    pid?: number;
+    port: number;
+    unsaved?: string;
+    /** How it ended: the app accepted the stop and ran its own shutdown,
+     *  or am signalled it — on Windows a signal is TerminateProcess, no
+     *  `onStop`, no final flush ("killed"). */
+    how: "graceful" | "signal" | "killed";
+  }
+  | { ok: false; appId: string; error: string };
+
+/** What `am stop` says when the app REFUSED its stop — the server's own
+ *  `STOP_REFUSED` answer, never a guess: an app with no stop at all (a
+ *  production build before 1.0.17-beta: a bare 404, or 1.0.16's lockdown
+ *  door) gets null, and the signal it always got. Pure. */
+export function stopRefusalNote(
+  appId: string,
+  keyPath: string,
+  error: string,
+): string | null {
+  if (!error.startsWith(STOP_REFUSED)) return null;
+  return `[am] ${appId}: the app refused the stop credential — ${keyPath} ` +
+    `is missing or does not match this boot (${error.split("\n")[0]}); ` +
+    `ending it without a clean shutdown`;
+}
+
 export async function stopOne(
   target: StopTarget,
   flags: GlobalFlags,
-): Promise<
-  | { ok: true; appId: string; pid?: number; port: number; unsaved?: string }
-  | { ok: false; appId: string; error: string }
-> {
+): Promise<StopResult> {
   const { appId, port, pf } = target;
   // A lock with NO DOOR (`am start`'s "starting, port 0" placeholder — see
   // `lockHasNoDoor`) has nothing to ask for a graceful shutdown or a persist
@@ -2146,7 +2322,9 @@ export async function stopOne(
       // here — stopped. Gone but the owner LIVES (a lock removed by hand, an
       // exit still under way): nothing to mark, but the process is still
       // the one to stop — fall through to the stop below, as ever.
-      if (!isLockOwnerAlive(pf)) return { ok: true, appId, pid: pf.pid, port };
+      if (!isLockOwnerAlive(pf)) {
+        return { ok: true, appId, pid: pf.pid, port, how: "graceful" };
+      }
     } else {
       return {
         ok: false,
@@ -2169,10 +2347,21 @@ export async function stopOne(
   // The SIGTERM fallback is for an app that has a lock ON THIS PORT and is not
   // answering. It must never fire on an identity refusal — killing our own pid
   // because someone ELSE holds the port is the same retargeting bug mirrored.
+  let how: "graceful" | "signal" | "killed" = "graceful";
   if (
     !result.ok && pf && (noDoor || pf.port === port) && isLockOwnerAlive(pf) &&
     !foreignOwnerRefusal(pf)
   ) {
+    how = Deno.build.os === "windows" ? "killed" : "signal";
+    // The app SAID it refused the credential (`STOP_REFUSED`) — not an app
+    // too old to have a stop. The user asked to stop, so it still ends; but
+    // never silently without its clean shutdown.
+    const note = stopRefusalNote(
+      appId,
+      controlKeyPath(appId, pf.home),
+      result.error,
+    );
+    if (note) sayErr(note);
     try {
       Deno.kill(pf.pid, "SIGTERM");
     } catch { /* already dead */ }
@@ -2200,6 +2389,7 @@ export async function stopOne(
       pid: pf?.pid,
       port,
       ...(unsaved ? { unsaved } : {}),
+      how,
     };
   }
 
@@ -2239,6 +2429,7 @@ export async function stopOne(
     const foreign = foreignOwnerRefusal(pf);
     if (foreign) return { ok: false, appId, error: foreign };
     await killProcess(pf.pid, 0, pf); // already waited gracefully
+    how = "killed";
     // Reported as it IS: "stopped" for a process still alive after SIGKILL
     // is the lie a script then starts a second copy on.
     if (isLockOwnerAlive(pf)) {
@@ -2257,6 +2448,7 @@ export async function stopOne(
     pid: pf?.pid,
     port,
     ...(unsaved ? { unsaved } : {}),
+    how,
   };
 }
 
@@ -2411,6 +2603,7 @@ export async function cmdStop(
         pid: r.pid,
         port: r.port,
         ...(r.unsaved ? { unsaved: r.unsaved } : {}),
+        how: r.how,
       }
       : {
         appId: r.appId,
@@ -2418,6 +2611,7 @@ export async function cmdStop(
         pid: r.pid,
         port: r.port,
         ...(r.unsaved ? { unsaved: r.unsaved } : {}),
+        how: r.how,
       },
     mode,
   );
@@ -2967,7 +3161,7 @@ export async function cmdStatus(
   // every appId. Saying which id was asked about, and what else is running,
   // makes it one answer.
   if (!pf) {
-    const others = instances();
+    const others = runningApps();
     // Its PROFILES are not "the app", but they are what the reader is looking
     // for when the app itself is stopped: name each, with the command.
     const profiles = others.filter((i) => i.appId === appId && i.alive)
@@ -3144,6 +3338,8 @@ export async function cmdStatus(
           pid: pf.pid,
           port,
           transport,
+          // The client the instance runs (additive): "is there a window?"
+          ...(pf.client ? { client: pf.client } : {}),
           ...(url ? { url } : {}),
           ...(pf.socketPath ? { socketPath: pf.socketPath } : {}),
           ...m,
@@ -3167,17 +3363,33 @@ export async function cmdStatus(
           pid: pf.pid,
           port,
           transport,
+          // The client the instance runs (additive): "is there a window?"
+          ...(pf.client ? { client: pf.client } : {}),
           ...(url ? { url } : {}),
           ...(pf.socketPath ? { socketPath: pf.socketPath } : {}),
         }, mode);
       }
     }
   } else {
-    // Port not responding but process alive → starting (exit 2 = transitional, not error)
+    // Port not responding but process alive → starting (exit 2 = transitional, not error).
+    // …unless something IS listening where its record says, and does not
+    // answer: then it is what `am start` refuses with — the same sentence
+    // here, its record's own status, `answering: false` (additive).
+    const at = await probeEndpoint(pf);
+    const deaf = at !== null && at.state !== "gone";
     out(
       mode === "pretty"
-        ? `${appId}: starting (pid ${pf.pid}, port ${port})`
-        : { appId, status: "starting", pid: pf.pid, port },
+        ? deaf
+          ? `${appId}: ${pf.status} — ${notAnsweringLine(pf)}`
+          : `${appId}: starting (pid ${pf.pid}, port ${port})`
+        : {
+          appId,
+          status: deaf ? pf.status : "starting",
+          pid: pf.pid,
+          port,
+          ...(pf.client ? { client: pf.client } : {}),
+          ...(deaf ? { answering: false, said: notAnsweringLine(pf) } : {}),
+        },
       mode,
     );
     Deno.exit(2);

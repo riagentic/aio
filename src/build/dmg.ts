@@ -156,6 +156,12 @@ export function codesignScript(
   ].join("\n");
 }
 
+/** First line of work in both image scripts. The stage directory becomes the
+ *  volume's root and `tar -x` narrows every mode by the umask: on a Mac
+ *  account with umask 077 the image would hold an owner-only app whatever the
+ *  bundle was assembled with. */
+const DMG_UMASK = "umask 022";
+
 /** A shell snippet that prepares a staging dir with the `.app` plus the
  *  `/Applications` symlink users expect, makes the DMG, and (given `sign`)
  *  seals the app first. Run on the Mac. Pure over the values, so it is
@@ -176,6 +182,7 @@ export function remoteDmgScript(opts: {
   const app = `${stage}/${opts.appName}`;
   return [
     "set -euo pipefail",
+    DMG_UMASK,
     // Only the STAGE is cleared — `payload.tgz` sits in workDir beside it and
     // must survive (it is the file this script is about to unpack).
     `rm -rf ${q(stage)}`,
@@ -211,6 +218,7 @@ export function localDmgScript(opts: {
   }`;
   return [
     "set -euo pipefail",
+    DMG_UMASK,
     `rm -rf ${q(stage)}`,
     `mkdir -p ${q(stage)}`,
     `ditto ${q(opts.appPath)} ${q(app)}`,

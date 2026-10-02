@@ -263,7 +263,7 @@ async function delegateToPathPin(): Promise<boolean> {
   // `…/My%20App/…` against `…/My App/…`, never matched, and re-exec'd itself
   // on every command; on Windows it also keeps the `/C:/…` shape. The same
   // rule as build-compile.ts.
-  if (sameFile(fromFileUrl(import.meta.url), entry)) return false;
+  if (runsFrom(import.meta.url, entry)) return false;
   // A checkout from before the per-machine override (`.aio/pin.local`)
   // cannot read the pin that just selected it — its am would see an unpinned
   // app and re-seal it. Stay on the installed am and say so, rather than
@@ -308,6 +308,19 @@ export function readPinQuiet(dir: string): string | null {
   } catch {
     return null;
   }
+}
+
+/** Is the module at `moduleUrl` (an `import.meta.url`) the file `entry`?
+ *
+ *  Only a `file:` URL can be: an am run from the registry (`deno run -A
+ *  jsr:@riagentic/aio/am` — `https://jsr.io/…/src/am.ts`) is never the pinned
+ *  checkout's, so it hands off, as it did when this compared `.pathname`.
+ *  `fromFileUrl` THROWS on anything else ("URL must be a file URL"), which
+ *  took every `am` command down in a path-pinned app.
+ *  @internal */
+export function runsFrom(moduleUrl: string, entry: string): boolean {
+  return moduleUrl.startsWith("file:") &&
+    sameFile(fromFileUrl(moduleUrl), entry);
 }
 
 /** Two paths name one file — through symlinks. A path that does not exist

@@ -166,11 +166,13 @@ function _renderSync(
     } else if (areaText !== null) html += areaText;
     else if (RAW_TEXT_ELEMENTS.has(tag)) {
       const inner: SsrNodes = { n: 0 };
+      let text = "";
       for (const child of vnode.children) {
-        html += typeof child === "string" || typeof child === "number"
-          ? (inner.n++, rawTextContent(tag, String(child), isDevMode()))
+        text += typeof child === "string" || typeof child === "number"
+          ? (inner.n++, String(child))
           : dropSlotMarkers(_renderSync(child, inner, scope));
       }
+      html += rawTextContent(tag, text, isDevMode());
     } else {
       const inner: SsrNodes = { n: 0 };
       const text = TEXT_CONTENT_ELEMENTS.has(tag);
@@ -567,13 +569,19 @@ async function* _stream(
       yield (vnode.props.dangerouslySetInnerHTML as { __html: string }).__html;
     } else if (areaText !== null) yield keepLeadingNewline(tag, areaText);
     else if (RAW_TEXT_ELEMENTS.has(tag)) {
+      // Held back until the last child is in: the content is judged WHOLE
+      // (see `rawTextContent`), and a chunk already sent cannot be refused.
+      let text = "";
       for (const child of vnode.children) {
         if (typeof child === "string" || typeof child === "number") {
-          yield rawTextContent(tag, String(child), isDevMode());
+          text += String(child);
         } else {
-          for await (const c of _stream(child, scope)) yield dropSlotMarkers(c);
+          for await (const c of _stream(child, scope)) {
+            text += dropSlotMarkers(c);
+          }
         }
       }
+      if (text) yield rawTextContent(tag, text, isDevMode());
     } else if (tag === "pre" || tag === "listing" || tag === "textarea") {
       yield* _keepLeadingNewline(tag, vnode.children, scope);
     } else if (tag === "title") {

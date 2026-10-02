@@ -30,6 +30,7 @@ Deno.test("dbPath: a missing parent directory is CREATED, not an unopenable file
     // on a fresh machine, and of a service unit's StateDirectory.
     const dbPath = join(dir, "srv", "app", "data", "state.db");
     const app = await aio.run({
+      watch: false,
       appId: "dbparent-test",
       cells: [c],
       libraryMode: true,
@@ -68,6 +69,7 @@ Deno.test("dbPath: when the directory truly cannot be made, the error names the 
     let err: unknown;
     try {
       const app = await aio.run({
+        watch: false,
         appId: "dbparent-blocked-test",
         cells: [c],
         libraryMode: true,

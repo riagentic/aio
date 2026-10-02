@@ -21,7 +21,14 @@
  * does not carry. The layout itself is Chromium's, from the app's own CSS.
  */
 
-import { basename, dirname, join, resolve } from "@std/path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+} from "@std/path";
 import { chromiumBin, chromiumPage, launchChromium } from "./chromium.ts";
 import {
   codecCandidates,
@@ -31,7 +38,6 @@ import {
   planFrames,
   videoFormatOf,
 } from "../media/encoder.ts";
-import { aioTestRoot } from "./test-strict.ts";
 import type { VideoFormat } from "../media/chunks.ts";
 import { codeMask } from "../diagnostics/code-mask.ts";
 import { generateHTML } from "../server/server-html-gen.ts";
@@ -490,68 +496,18 @@ function shellHead(o: {
 // "Per run" is per PROCESS: `deno test` gives every test FILE its own module
 // graph (and its own `globalThis`) in one process, and fires `unload` as each
 // file ends — so an in-module Map saw only its own file, and two files'
-// same-named tests wrote one video. A claim is therefore a file, under the
-// test root, named after the process that made it (pid + its kernel start
-// time, so a recycled pid is not the same run). A re-run is a different
-// process: it never sees an old claim and overwrites the old video, as it
-// should. Claims of processes that are gone are pruned.
+// same-named tests wrote one video. The one store every file of a process
+// shares, and that ends exactly when the process does, is its ENVIRONMENT: a
+// claim is an environment variable. A re-run is a different process and never
+// sees an old claim. A child process inherits the variables, so each one is
+// keyed by the pid that made it, and a child (another pid) reads none of its
+// parent's.
+//
+// Claims were files under the test root, named after their process and
+// pruned when the next run started: the last run's claims always outlived
+// it, and the temp root's orphan check counted them.
 
-const CLAIM_PREFIX = "aio-video-claim-";
-
-/** When process `pid` started, from the kernel, or "" where that is not
- *  readable (then the pid alone identifies the run). */
-function processStart(pid: number | "self"): string {
-  if (Deno.build.os !== "linux") return "";
-  try {
-    const stat = Deno.readTextFileSync(`/proc/${pid}/stat`);
-    // Field 22; the command name (field 2) may hold spaces, so count from
-    // after its closing parenthesis.
-    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19] ?? "";
-  } catch {
-    return "gone";
-  }
-}
-
-const RUN = `${Deno.pid}-${processStart("self") || "0"}`;
-let pruned = false;
-
-/** Remove claims left by runs that have ended. Best effort: a claim that
- *  cannot be removed only costs a file, never a wrong answer — its name
- *  names a process that is not this one. */
-function pruneClaims(dir: string): void {
-  if (pruned) return;
-  pruned = true;
-  let entries: Deno.DirEntry[];
-  try {
-    entries = [...Deno.readDirSync(dir)];
-  } catch {
-    return; // aio-ok: no claim directory yet is nothing to prune
-  }
-  const dayAgo = Date.now() - 24 * 3600_000;
-  for (const e of entries) {
-    if (!e.isFile || !e.name.startsWith(CLAIM_PREFIX)) continue;
-    const [pid, start] = e.name.slice(CLAIM_PREFIX.length).split("-");
-    if (`${pid}-${start}` === RUN) continue;
-    const path = join(dir, e.name);
-    let gone: boolean;
-    if (Deno.build.os === "linux") {
-      gone = (processStart(Number(pid)) || "0") !== start;
-    } else {
-      try {
-        gone = (Deno.statSync(path).mtime?.getTime() ?? 0) < dayAgo;
-      } catch {
-        continue; // aio-ok: removed by another pruner meanwhile
-      }
-    }
-    if (!gone) continue;
-    try {
-      Deno.removeSync(path);
-    } catch {
-      // aio-ok: another run pruned it first, or it is not ours to remove —
-      // either way the claim names a process that is not this one.
-    }
-  }
-}
+const CLAIM_PREFIX = `AIO_VIDEO_CLAIM_${Deno.pid}_`;
 
 /** A held claim on a video file for this run. */
 type Claim = { out: string; release(): void };
@@ -559,46 +515,24 @@ type Claim = { out: string; release(): void };
 /** Claim `out` for `label` in this run, or say who holds it (`label` of the
  *  holder). */
 function claim(out: string, label: string): Claim | { heldBy: string } {
-  const dir = aioTestRoot();
-  pruneClaims(dir);
-  const path = join(
-    dir,
-    `${CLAIM_PREFIX}${RUN}-${shortHash(out)}${shortHash(out, 0x1234567)}`,
-  );
+  const key = `${CLAIM_PREFIX}${shortHash(out)}${shortHash(out, 0x1234567)}`;
+  let held: string | undefined;
   try {
-    Deno.writeTextFileSync(path, JSON.stringify({ out, label }), {
-      createNew: true,
-    });
+    held = Deno.env.get(key);
+    if (held === undefined) Deno.env.set(key, label);
   } catch (e) {
-    if (!(e instanceof Deno.errors.AlreadyExists)) {
-      throw new Error(
-        `[aio:video] cannot record which test writes ${out}: ${e}`,
-      );
-    }
-    let held: { out?: string; label?: string } = {};
-    try {
-      held = JSON.parse(Deno.readTextFileSync(path));
-    } catch {
-      // aio-ok: a claim being written right now reads as empty — it is
-      // still held, which is the answer.
-    }
-    return { heldBy: held.label ?? "another test" };
+    throw new Error(
+      `[aio:video] cannot record which test writes ${out}: ${e}`,
+    );
   }
+  if (held !== undefined) return { heldBy: held || "another test" };
   let released = false;
   return {
     out,
     release() {
       if (released) return;
       released = true;
-      try {
-        Deno.removeSync(path);
-      } catch (e) {
-        if (!(e instanceof Deno.errors.NotFound)) {
-          console.error(
-            `[aio:video] could not release the claim on ${out}: ${e}`,
-          );
-        }
-      }
+      Deno.env.delete(key);
     },
   };
 }
@@ -913,7 +847,8 @@ async function renderVideo(
       }
       if (appRoot) {
         const file = resolve(appRoot, "." + path);
-        if (file.startsWith(appRoot + "/")) {
+        const r = relative(appRoot, file);
+        if (r && !/^\.\.(?:[\\/]|$)/.test(r) && !isAbsolute(r)) {
           try {
             const body = await Deno.readFile(file);
             const ext = /\.([a-z0-9]+)$/i.exec(file)?.[1]?.toLowerCase() ?? "";

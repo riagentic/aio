@@ -74,6 +74,7 @@ export const main = cell("main", {
 
 if ((globalThis as { name?: string }).name?.startsWith("aio-cell:")) {
   await aio.run({
+    watch: false,
     appId: "worker-cancelon-probe",
     cells: [ctl, job, main],
     client: "server-only",

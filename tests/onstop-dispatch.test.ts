@@ -155,6 +155,7 @@ Deno.test("onStop: the app's hook runs while the logger is still attached", asyn
     let ranAt = -1;
     const { aio } = await import("../mod.ts");
     const app = await aio.run({
+      watch: false,
       cells: [c],
       appId: "onstop-log-app",
       client: "server-only",

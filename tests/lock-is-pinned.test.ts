@@ -65,6 +65,30 @@ Deno.test("lock: this repo's own deno.lock has no open-ended request", async () 
   );
 });
 
+// The lock also records WHICH config asked for what (`workspace`), and deno
+// rewrites that on every run from the config it finds. `package.json` is not
+// tracked (.gitignore), so a lock that names one describes a tree no checkout
+// has: the first `am` or build run from a fresh checkout rewrote deno.lock,
+// and the install stopped being the commit it was cloned at. The committed
+// lock is the one a checkout KEEPS — what deno.json declares, nothing else.
+Deno.test("lock: the committed lock is the one a fresh checkout keeps — it records deno.json and no untracked config", async () => {
+  const read = async (name: string) =>
+    JSON.parse(
+      await Deno.readTextFile(new URL(`../${name}`, import.meta.url)),
+    );
+  const declared = Object.values(
+    (await read("deno.json")).imports as Record<string, string>,
+  ).filter((spec) => /^(jsr|npm):/.test(spec)).sort();
+  assertEquals(
+    (await read("deno.lock")).workspace,
+    { dependencies: declared },
+    "deno.lock's `workspace` is not what deno writes for a checkout of this " +
+      "commit. A `packageJson` block comes from a root package.json, which " +
+      "git does not track: remove that file and let any deno run rewrite the " +
+      "lock (or run once with DENO_NO_PACKAGE_JSON=1), then commit it.",
+  );
+});
+
 // The whole-tree sweep is `deno task check:lock`, which runs in CI and in
 // release-check.ts — repeating it here would be a second decider for the same
 // question, and the two would drift.

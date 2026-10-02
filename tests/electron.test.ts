@@ -252,9 +252,9 @@ Deno.test("electron: UDS script — preload cleanup on exit", () => {
     "/tmp/test.sock",
     {},
   );
-  // The preload lives in a private directory of its own (0700, random name —
-  // see tmplPreloadWrite), so sweeping it is a directory removal now.
-  assertStringIncludes(s, "rmSync(preloadDir");
+  // The preload is one file in the app's profile (see tmplPreloadWrite):
+  // the sweep removes that file.
+  assertStringIncludes(s, "rmSync(preloadFile");
 });
 
 Deno.test("electron: UDS script — MIME types for static serving", () => {

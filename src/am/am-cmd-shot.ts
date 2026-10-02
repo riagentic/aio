@@ -43,6 +43,18 @@ export function shotDiffOptions(
   args: readonly string[],
 ): { ok: true; opts: PngDiffOptions } | { ok: false; error: string } {
   const opts: { threshold?: number; maxRatio?: number } = {};
+  // The space form is not read (`--threshold 3` leaves `3` a positional), and
+  // skipping it ran the check at the DEFAULT tolerance under a flag that said
+  // otherwise. Refused, with the spelling that works.
+  const bare = args.find((a) => a === "--threshold" || a === "--max-diff");
+  if (bare) {
+    return {
+      ok: false,
+      error: `${bare} takes its value after "=" (${bare}=${
+        bare === "--threshold" ? "3" : "0.01"
+      })`,
+    };
+  }
   const th = args.find((a) => a.startsWith("--threshold="))?.slice(12);
   if (th !== undefined) {
     const n = parseNumArg(th, "--threshold", {

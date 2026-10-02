@@ -87,7 +87,7 @@
         },
         "AioMeta": {
           "kind": "typeAlias",
-          "sig": "66cf6d8ec2e4e2f4",
+          "sig": "461843efeac536d7",
           "members": {
             "title": "opt:2fb40568533c1a6d",
             "width": "opt:f6522636230fa080",
@@ -96,13 +96,14 @@
             "requireSandbox": "opt:0ecca0fe3beba89b",
             "unsandboxedChildWindows": "opt:0ecca0fe3beba89b",
             "permissions": "opt:8da42e37586d60a5",
+            "allowLocalPeers": "opt:0ecca0fe3beba89b",
             "chrome": "opt:0cb8e5493e58cfb7",
             "tray": "opt:bb7b2f54156b6da6",
             "profileName": "opt:2fb40568533c1a6d",
             "showFile": "opt:2fb40568533c1a6d"
           },
           "sigs": [
-            "66cf6d8ec2e4e2f4"
+            "461843efeac536d7"
           ]
         },
         "AioUser": {
@@ -794,14 +795,15 @@
         },
         "ElectronConfig": {
           "kind": "typeAlias",
-          "sig": "2d64d8eb0299b527",
+          "sig": "cf8f209751c5822b",
           "members": {
             "requireSandbox": "opt:0ecca0fe3beba89b",
             "unsandboxedChildWindows": "opt:0ecca0fe3beba89b",
-            "permissions": "opt:d09e2eedb122e382"
+            "permissions": "opt:d09e2eedb122e382",
+            "allowLocalPeers": "opt:0ecca0fe3beba89b"
           },
           "sigs": [
-            "2d64d8eb0299b527"
+            "cf8f209751c5822b"
           ]
         },
         "errorCode": {
@@ -4728,7 +4730,7 @@
         },
         "LockData": {
           "kind": "typeAlias",
-          "sig": "5dccd00b2ad07c2c",
+          "sig": "2735279b1e7625ec",
           "members": {
             "appId": "req:2fb40568533c1a6d",
             "pid": "req:f6522636230fa080",
@@ -4745,6 +4747,8 @@
             "cwd": "req:2fb40568533c1a6d",
             "home": "opt:2fb40568533c1a6d",
             "socketPath": "opt:2fb40568533c1a6d",
+            "host": "opt:2fb40568533c1a6d",
+            "handoff": "opt:2fb40568533c1a6d",
             "trojanPort": "opt:f6522636230fa080",
             "discovery": "opt:object",
             "discovery.title": "opt:2fb40568533c1a6d",
@@ -4762,7 +4766,7 @@
             "settings": "opt:09b94ba87da5c3f0"
           },
           "sigs": [
-            "5dccd00b2ad07c2c"
+            "2735279b1e7625ec"
           ]
         },
         "markAsync": {

@@ -24,6 +24,7 @@
 //   ./.aio/log/*                              → <logs>/
 
 import { basename, join } from "@std/path";
+import { moveFileSync, renameOverSync } from "../diagnostics/rename-over.ts";
 import type { AppDirs } from "./app-dirs.ts";
 import { ensureAppDirs } from "./app-dirs.ts";
 import {
@@ -73,7 +74,7 @@ function moveFile(from: string, to: string): Move {
     }
   }
   try {
-    Deno.renameSync(from, to);
+    moveFileSync(from, to);
     return { from, to, outcome: "moved" };
   } catch {
     // Cross-device (EXDEV) or a platform that refuses the rename.
@@ -116,7 +117,7 @@ function moveFile(from: string, to: string): Move {
       } finally {
         f.close();
       }
-      Deno.renameSync(partial, to);
+      renameOverSync(partial, to);
       Deno.removeSync(from);
       return { from, to, outcome: "moved" };
     } catch (e) {

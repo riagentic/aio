@@ -883,7 +883,8 @@ Allow the electron client to open CHILD windows to arbitrary http(s) URLs via
 electron?: ElectronConfig
 ```
 
-The Electron process's own security decisions (sandbox policy) — see
+The Electron process's own security decisions (sandbox policy, permissions, and
+`allowLocalPeers` — the opt-out of the production local-peer lockdown) — see
 `ElectronConfig`. <sub>src/server/aio-types.ts</sub>
 
 ```ts

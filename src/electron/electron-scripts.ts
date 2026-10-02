@@ -3,6 +3,8 @@
 import {
   type AioMeta,
   shellBridgePreload,
+  shellProfileName,
+  tmplAppMenu,
   tmplBounds,
   tmplBoundsTracking,
   tmplCrashGuard,
@@ -16,7 +18,7 @@ import {
   tmplTray,
   tmplWillNavigate,
   tmplWindowShape,
-  toSlug,
+  udsPreloadDiagnostics,
 } from "./electron-shared.ts";
 
 /** Generates a minimal Electron main.cjs that loads the given URL */
@@ -25,7 +27,7 @@ export function electronMainScript(url: string, meta?: AioMeta): string {
   const h = meta?.height ?? 600;
   // The userData directory — the title's slug, or the profile the
   // lifecycle derived from this run's HOME (electronProfileName).
-  const slug = meta?.profileName ?? toSlug(meta?.title ?? "aio-app");
+  const slug = shellProfileName(meta);
   // The tray icon is the app's own monogram, fetched from the app itself —
   // the WebSocket shell has no app dir to read `icon.png` from.
   const trayIcon =
@@ -43,11 +45,19 @@ export function electronMainScript(url: string, meta?: AioMeta): string {
 const { app, BrowserWindow, Menu } = require('electron');
 const path = require('path');
 const fs = require('fs');
-Menu.setApplicationMenu(null);
-// The shell bridge (focus, tray clicks) — the ONLY preload this window has;
+${tmplAppMenu(meta?.title)}
+// The shell bridge (focus, tray clicks, the window verbs) and the mount
+// signal ("ui mounted N element(s)") — the ONLY preload this window has;
 // it must not carry __aioIPC, whose presence would select the IPC transport.
-${tmplPreloadWrite(JSON.stringify(shellBridgePreload({ standalone: true })))}
+// The name first: it decides the profile directory the preload is written to.
 app.name = ${JSON.stringify(slug)};
+${
+    tmplPreloadWrite(
+      JSON.stringify(
+        shellBridgePreload({ standalone: true }) + udsPreloadDiagnostics(),
+      ),
+    )
+  }
 ${tmplCrashGuard()}
 ${tmplPermissionGuard(meta?.permissions)}
 ${tmplIpcGuard()}
@@ -64,7 +74,7 @@ ${tmplWindowShape(meta, { preload: "preloadFile" })}
   const _appOrigin = new URL(${JSON.stringify(url)}).origin;
   __aioIpcBind(win, _appOrigin); // before any handler can run (tmplIpcGuard)
 ${tmplBoundsTracking()}
-${tmplRendererDiagnostics(false)}
+${tmplRendererDiagnostics(true)}
 ${tmplTray(meta, trayIcon, meta?.title)}
   win.loadURL(${JSON.stringify(url)});
 ${tmplWillNavigate("_appOrigin")}

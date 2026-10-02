@@ -29,6 +29,7 @@ Deno.test("a dispatch with no patches broadcasts nothing", async () => {
 
   const sent: string[] = [];
   const app = await aio.run({
+    watch: false,
     appId: `noop-broadcast-${Math.floor(performance.now())}`,
     cells: [ticker],
     libraryMode: true,

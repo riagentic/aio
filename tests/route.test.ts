@@ -9,6 +9,7 @@ import {
   route,
   serializeCookie,
 } from "../src/server/route.ts";
+import { freePort } from "../src/testing/server-test.ts";
 
 // ── matchRoute ──
 
@@ -133,15 +134,6 @@ Deno.test("route: redirect helper", async () => {
 });
 
 // ── end to end: a booted server serves a :param route ──
-
-/** A guaranteed-free port (bind :0, read it, release) — avoids cross-file
- *  collisions under parallel test load. */
-function freePort(): number {
-  const l = Deno.listen({ port: 0 });
-  const p = (l.addr as Deno.NetAddr).port;
-  l.close();
-  return p;
-}
 
 Deno.test("route e2e: a :param route with a cookie is served by a real app", async () => {
   const { aio, cell, route: routeFn } = await import("../mod.ts");

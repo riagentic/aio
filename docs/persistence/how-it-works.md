@@ -328,7 +328,11 @@ recovered instead of lost.
 - **Worker cells** (`worker: true`) are journalled as the patch batches their
   worker commits (`__aioWorkerPatch`, attributed to the cell as
   `<cell>:__worker` in `am timeline`). A cell with any `redactActions` pattern
-  has its batches' values withheld, because a batch carries no method name.
+  has its batches' values withheld, because a batch carries no method name. A
+  call is answered after the saves its batches owe, and a failed one makes its
+  reply `unsaved`. A batch carries no call either, so on a worker cell a failed
+  save marks every call in flight on that cell `unsaved` — a conservative
+  answer, never a false `ok` — where the main isolate answers per call.
 - **A database that went back in time is never replayed onto.** Every compaction
   records what it dropped in `<journal>.base`. When the store's watermark is
   below that — `checkIntegrityOnBoot` restored `<db>.snapshot`, or a backup was
@@ -368,9 +372,18 @@ databases. A flush that runs out of budget is logged and abandoned, so a very
 large final write, or a slow `onStop` ahead of it, can leave the last window
 unwritten. A clean stop is a best effort with a stated ceiling, not a guarantee.
 
+The databases close last, with a floor of 0.2 s (`STORES_RESERVE_MS`): whatever
+came before them, they get at least that. It is added, not set aside — a stop
+whose phases fit the budget is not touched, and only when an earlier phase
+overran, so that less than the floor is left, does the teardown run that much
+longer. The floor is for their close, not a promise of a finished checkpoint: a
+close that is cut loses nothing that was written — the WAL is replayed at the
+next start.
+
 Anything that waits for an aio app to exit before escalating to SIGKILL must
 wait at least `SHUTDOWN_BUDGET_MS` (3 s + 5 s), or it cuts a legitimate final
-flush short.
+flush short. After an overrun the databases' floor comes on top of that; a wait
+with no slack for it cuts only the floor.
 
 ### What survives what
 

@@ -656,6 +656,11 @@ const _callSettleHooks = new Set<
 >();
 /** Register a host's settle hook (see `_callSettleHooks`); returns the
  *  unregister. @internal */
+/** Is call `callId` registered and not yet settled? @internal */
+export function _callPending(callId: string): boolean {
+  return _pending.has(callId);
+}
+
 export function _onCallSettle(
   hook: (callId: string) => Promise<unknown> | undefined,
 ): () => void {
@@ -3213,7 +3218,16 @@ export function createLiveProxy<S extends Record<string, unknown>>(
     },
 
     has(_target, prop) {
-      if (typeof prop === "symbol") return false;
+      // A symbol is answered like a name (below), minus the stale-proxy throw
+      // and the read note: `Symbol.iterator in s.items` is how a helper asks
+      // "is this iterable?", and it was true in a sync method and false here.
+      if (typeof prop === "symbol") {
+        const at = effectiveAt();
+        // A held reference whose slot is now a string or a number has no
+        // symbols to ask about: `in` on a primitive throws, the answer is no.
+        // aio-ok(proto-in): the prototype IS the question (Symbol.iterator).
+        return typeof at === "object" && at !== null && prop in at;
+      }
       assertFresh();
       // The root-level pseudo-keys the get trap SERVES (`s.$do`, `s.$commit`,
       // `s.$live`, `s.$signal`) must also EXIST: `"$do" in s` was true in a
@@ -3235,12 +3249,15 @@ export function createLiveProxy<S extends Record<string, unknown>>(
       );
       const fresh = effectiveAt();
       if (fresh === null || fresh === undefined) return false; // AIO-232
-      // OWN keys: `prop in fresh` is true for every Object.prototype name, so
-      // `"toString" in s` / `"constructor" in s` answered true on a cell with
-      // no such field — the same class the useAio state-proxy pin closed.
-      return typeof prop === "string"
-        ? Object.hasOwn(fresh as object, prop)
-        : prop in (fresh as object);
+      // `in`, prototype chain included — because that is what the sync twin
+      // answers (an Immer draft's `has` is `prop in state`), and one method
+      // body must not get two answers. 1.0.15 made this own-keys-only, which
+      // is the better rule on its own and the wrong one alone: `"push" in
+      // s.items` turned true-when-sync, false-when-async. Own-key questions
+      // have their own spelling (`Object.hasOwn`), which both sides answer
+      // alike. tests/proxy-differential.test.ts runs `in` on both.
+      // aio-ok(proto-in): parity with the sync draft, deliberately.
+      return prop in (fresh as object);
     },
 
     ownKeys() {

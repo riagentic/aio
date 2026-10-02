@@ -106,6 +106,7 @@ Deno.test("a closed app's cell answers as before, and binds to the next app", as
   };
   const boot = async (dir: string) =>
     await aio.run({
+      watch: false,
       cells: [c],
       appId: `tomb-${crypto.randomUUID().slice(0, 8)}`,
       appDir: dir,

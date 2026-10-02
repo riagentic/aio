@@ -1,4 +1,4 @@
-// Every wall has a door (feedback/frustration.md F5).
+// Every wall has a door (a field report).
 //
 // An error that says WHAT went wrong but not what to DO is a wall: "check
 // for missing dependencies", "guard against already-cleaned resources". The

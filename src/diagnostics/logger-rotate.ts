@@ -1,6 +1,8 @@
 // logger-rotate.ts — Log file rotation and cleanup on startup
 
 import { basename, dirname } from "@std/path";
+import { log } from "./logger-api.ts";
+import { moveFile } from "./rename-over.ts";
 
 /** Every log file the on-start policy governs. `client` is `client.log` —
  *  forwarded browser/Electron console output (`src/server/client-log.ts`),
@@ -96,11 +98,109 @@ async function archiveIndices(base: string): Promise<number[]> {
   return out.sort((a, b) => a - b);
 }
 
+/** The file two starts meet on before either touches the previous run's logs:
+ *  OS-locked for the length of one on-start pass, and holding the pid of the
+ *  process that last made one. */
+export const START_CLAIM = ".rotate";
+
+/** How long after one process's on-start pass another process's is skipped.
+ *  The window to cover is the first start's way from its logger to its
+ *  single-instance lock — measured at 70 ms on a desktop machine — after
+ *  which a later start sees the lock and does not rotate at all. Wide enough
+ *  for a slow, cold machine; short enough that a restart a few seconds later
+ *  still archives the run before it. */
+export const START_ONCE_MS = 3_000;
+
+/** What {@linkcode oncePerStart} does with its claim file. */
+export type ClaimFile = Pick<
+  Deno.FsFile,
+  "lock" | "read" | "stat" | "truncate" | "seek" | "write" | "close"
+>;
+
+const openClaim = (path: string): Promise<ClaimFile> =>
+  Deno.open(path, { read: true, write: true, create: true, mode: 0o600 });
+
+/** Run the on-start pass (`run`: rotate or wipe) ONCE for starts that overlap.
+ *
+ *  The logger starts before the single-instance lock is taken, so two launches
+ *  at the same moment — a double double-click — both believed they were the
+ *  only one and both rotated. Interleaved, one saw the live file, then the
+ *  other's fresh `.1`, shifted that to `.2` and found the live file gone:
+ *  `debug.log.2` with no `.1`. One after the other, the second archived the
+ *  first's seconds-old files as "the previous run".
+ *
+ *  So the pass is serialised by an OS lock on {@linkcode START_CLAIM} (held
+ *  only while it runs; a process that dies in it releases it), and a pass that
+ *  ANOTHER process finished less than {@linkcode START_ONCE_MS} ago is not
+ *  repeated: `skipped` is returned and this start appends to the live files,
+ *  exactly as a start refused by the lock does. The same process starting
+ *  again (a restart in place, a test's next run) always runs its pass.
+ *
+ *  A file system that cannot lock, or a directory the claim cannot be created
+ *  in, runs the pass unserialised — what every start did before. */
+export async function oncePerStart<T>(
+  dir: string,
+  run: () => Promise<T>,
+  skipped: T,
+  who: {
+    pid?: number;
+    now?: () => number;
+    /** The claim file's opener — a test's seam for a file that fails. */
+    open?: (path: string) => Promise<ClaimFile>;
+  } = {},
+): Promise<T> {
+  const me = String(who.pid ?? Deno.pid);
+  let f: ClaimFile;
+  try {
+    f = await (who.open ?? openClaim)(`${dir}/${START_CLAIM}`);
+  } catch {
+    return await run(); // aio-ok: no claim possible here — the pass still runs
+  }
+  try {
+    try {
+      await f.lock(true);
+    } catch {
+      // aio-ok: no OS locks on this file system — unserialised, as before.
+    }
+    // Through `f`: on Windows the lock keeps every other handle out.
+    let last = "";
+    let at: number | undefined;
+    try {
+      const buf = new Uint8Array(32);
+      last = new TextDecoder().decode(buf.subarray(0, await f.read(buf) ?? 0));
+      at = (await f.stat()).mtime?.getTime();
+    } catch {
+      // aio-ok: an unreadable claim is no claim — the pass runs, as before.
+    }
+    // A claim "from the future" (a clock that stepped back) is not recent.
+    const age = at === undefined ? Infinity : (who.now?.() ?? Date.now()) - at;
+    if (last !== "" && last !== me && age >= 0 && age < START_ONCE_MS) {
+      return skipped;
+    }
+    const out = await run();
+    try {
+      await f.truncate(0);
+      await f.seek(0, Deno.SeekMode.Start);
+      await f.write(new TextEncoder().encode(me));
+    } catch {
+      // aio-ok: the pass ran; unrecorded, an overlapping start repeats it —
+      // what every start did before. Never a reason for the logger to fail.
+    }
+    return out;
+  } finally {
+    f.close();
+  }
+}
+
 /** Rotate existing logs on start — used with `backupLogs: true`.
  *
- *  `.1` is ALWAYS the run that just ended, and indices only grow older:
- *  archives shift up (`.n` → `.n+1`) before the live file becomes `.1`, and
- *  anything that would fall past `keep` is removed first. `keep: 0` = unlimited.
+ *  `.1` is the file that was live when this start rotated, and indices only
+ *  grow older: archives shift up (`.n` → `.n+1`) before the live file becomes
+ *  `.1`, and anything that would fall past `keep` is removed first. `keep: 0` =
+ *  unlimited. One file is usually one run — not always: a start less than
+ *  {@linkcode START_ONCE_MS} after another process rotated does not rotate
+ *  again (see {@linkcode oncePerStart}), so runs started that close together
+ *  share a file, each line carrying its own time.
  *
  *  It used to pick the target slot by scanning for the first FREE index and
  *  then prune upward from `.1`. That inverts the moment the first prune frees a
@@ -113,10 +213,11 @@ async function archiveIndices(base: string): Promise<number[]> {
 export async function rotateOnStart(
   pathFn: (kind: LogKind) => string,
   keep: number,
+  warn?: (msg: string) => void,
 ): Promise<LogKind[]> {
   const rotated: LogKind[] = [];
   for (const kind of KINDS) {
-    if (await rotateFile(pathFn(kind), keep)) rotated.push(kind);
+    if (await rotateFile(pathFn(kind), keep, warn)) rotated.push(kind);
   }
   return rotated;
 }
@@ -133,7 +234,21 @@ export async function rotateOnStart(
  *  Returns whether anything was actually archived — the caller says so out loud
  *  (`.katana/_aio.md`: a default whose effect is only observable at runtime must
  *  never change silently), and "nothing to rotate" must not produce that line. */
-export async function rotateFile(base: string, keep: number): Promise<boolean> {
+export async function rotateFile(
+  base: string,
+  keep: number,
+  /** Told when an archive could not be moved (never for one that is simply
+   *  not there): the run still starts, and appends to the file left behind. */
+  warn: (msg: string) => void = (m) => log.warn("logger", m),
+): Promise<boolean> {
+  const notMoved = (from: string, e: unknown) => {
+    if (e instanceof Deno.errors.NotFound) return;
+    warn(
+      `${from} was not archived (${
+        e instanceof Error ? e.message : String(e)
+      }) — this run's lines are appended to it`,
+    );
+  };
   try {
     await Deno.stat(base);
   } catch {
@@ -155,14 +270,17 @@ export async function rotateFile(base: string, keep: number): Promise<boolean> {
   // that has not moved yet.
   for (const i of existing.filter(survives).reverse()) {
     try {
-      await Deno.rename(`${base}.${i}`, `${base}.${i + 1}`);
-    } catch { /* best-effort */ }
+      await moveFile(`${base}.${i}`, `${base}.${i + 1}`);
+    } catch (e) {
+      notMoved(`${base}.${i}`, e); // never a boot error — but said
+    }
   }
   try {
-    await Deno.rename(base, `${base}.1`);
+    await moveFile(base, `${base}.1`);
     return true;
-  } catch {
-    return false; // best-effort — a log that cannot be archived is not a boot error
+  } catch (e) {
+    notMoved(base, e);
+    return false;
   }
 }
 
@@ -206,6 +324,7 @@ export async function enforceBudget(
   try {
     for await (const e of Deno.readDir(dir)) {
       if (!e.isFile && !e.isSymlink) continue;
+      if (e.name === START_CLAIM) continue; // a few bytes, and not a log
       let size = 0;
       try {
         size = (await Deno.stat(`${dir}/${e.name}`)).size;

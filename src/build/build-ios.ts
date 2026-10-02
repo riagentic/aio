@@ -16,7 +16,11 @@ import type { BuildConfig } from "./build-config.ts";
 import { readDenoJson } from "../server/deno-json.ts";
 import { appIconLabel, appIconPng } from "./app-icon.ts";
 import { _writeConnectPage, androidVersion } from "./build-android.ts";
-import { misplacedIconHint, resolveAppIcon } from "./build-helpers.ts";
+import {
+  misplacedIconHint,
+  normalizeArtifactModes,
+  resolveAppIcon,
+} from "./build-helpers.ts";
 import { HEY, NO, NOTE, OK } from "../diagnostics/fmt.ts";
 import { emptyDir, foreignArtifactRefusal } from "./dist-staging.ts";
 
@@ -207,6 +211,7 @@ export async function buildIos(cfg: BuildConfig): Promise<void> {
     );
     console.log(`${OK} icon (generated monogram, 1024×1024)`);
   }
+  await normalizeArtifactModes(dir);
   console.log(
     `${OK} Xcode project ${
       join(dir, "App.xcodeproj")

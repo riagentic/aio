@@ -387,6 +387,39 @@ function unixListeners(pids: number[]): string[] {
   return out;
 }
 
+/** TCP LISTEN sockets of THIS uid that no process whose descriptors can be
+ *  read holds — i.e. held by a NON-DUMPABLE process of this user (whose
+ *  `/proc/<pid>/fd` only root may read). The packaged app's runtime makes
+ *  itself exactly that (the local-peer lockdown), so a per-pid census is
+ *  blind to it; this one is not. Compared against a baseline taken before
+ *  the app starts. */
+function unattributedTcpListeners(): Set<string> {
+  const uid = String(Deno.uid());
+  const held = new Set<string>();
+  for (const e of Deno.readDirSync("/proc")) {
+    if (/^\d+$/.test(e.name)) {
+      for (const i of socketInodes(Number(e.name))) held.add(i);
+    }
+  }
+  const out = new Set<string>();
+  for (const table of ["/proc/net/tcp", "/proc/net/tcp6"]) {
+    let text = "";
+    try {
+      text = Deno.readTextFileSync(table);
+    } catch {
+      continue; // aio-ok: no IPv6 table on this kernel
+    }
+    for (const line of text.split("\n").slice(1)) {
+      // local_address st … uid at [7], inode at [9]; st 0A = LISTEN
+      const f = line.trim().split(/\s+/);
+      if (f.length > 9 && f[3] === "0A" && f[7] === uid && !held.has(f[9]!)) {
+        out.add(`${f[1]} (inode ${f[9]})`);
+      }
+    }
+  }
+  return out;
+}
+
 async function until<T>(
   probe: () => T | undefined | Promise<T | undefined>,
   ms: number,
@@ -483,6 +516,8 @@ const standalone = (store: "native" | "localStorage"): Host => ({
 });
 
 let appImage = "";
+/** `unattributedTcpListeners()` before the packaged app starts. */
+let tcpBefore = new Set<string>();
 
 /** The server host, in each persist layout: \`single\` rewrites one document,
  *  \`multi\` keeps a ROW per cell — and deletes a row only when it knows the
@@ -548,6 +583,7 @@ const HOSTS: Host[] = [
       assert(name, "the electron build placed no AppImage in dist/");
       appImage = join(fx, "dist", name);
       await Deno.chmod(appImage, 0o755);
+      tcpBefore = unattributedTcpListeners();
     },
     launch: (_fx, root, env) =>
       // From a FOREIGN cwd, with HOME/XDG pointed inside the scanned root so
@@ -578,9 +614,15 @@ const HOSTS: Host[] = [
         }
       );
       const pids = await tree(run.proc.pid);
-      // 1. The default door: NO TCP listen socket anywhere in the tree.
+      // 1. The default door: NO TCP listen socket anywhere in the tree —
+      //    the readable processes by pid, and the runtime, which is
+      //    non-dumpable (its descriptors are root-only), by what of this
+      //    user's no readable process holds and was not there before.
       assertEquals(
-        tcpListeners(pids),
+        [
+          ...tcpListeners(pids),
+          ...[...unattributedTcpListeners()].filter((l) => !tcpBefore.has(l)),
+        ],
         [],
         `the packaged app (no transport flag, no --expose) holds a TCP ` +
           `listen socket — its default must be the local socket only`,
@@ -590,13 +632,24 @@ const HOSTS: Host[] = [
       //    the server's own handler (uds.ts) — the same door, other side. A
       //    \`ctlr\` reply (any status) proves the instrument reached the app;
       //    it must not be the state.
-      // The NDJSON state socket (`<key>.sock`), not the page's `.http.sock`.
-      const sock = unixListeners(pids).find((p) =>
-        p.endsWith(".sock") && !p.endsWith(".http.sock")
-      );
+      // The NDJSON state socket (`<key>.sock`), where the app says it is:
+      // its runtime is non-dumpable, so no census by pid can see its
+      // listener — and NO other process of the tree may hold it (the window
+      // once inherited the listening socket; it is close-on-exec now).
+      const sock = /transport: UDS at (\S+)/.exec(run.log())?.[1];
+      assert(sock, `the app never said where its socket is:\n${run.log()}`);
       assert(
-        sock,
-        `no local socket among the tree's unix listeners: ` +
+        Deno.readTextFileSync("/proc/net/unix").split("\n").some((l) => {
+          const f = l.trim().split(/\s+/);
+          return f[3] === "00010000" && f[7] === sock;
+        }),
+        `nothing listens on the socket the app named: ${sock}`,
+      );
+      assertEquals(
+        unixListeners(pids),
+        [],
+        `a process of the tree other than the runtime holds a listening ` +
+          `local socket (an inherited listener): ` +
           JSON.stringify(unixListeners(pids)),
       );
       const snap = await udsRequest(

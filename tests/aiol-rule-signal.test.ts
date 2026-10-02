@@ -873,6 +873,14 @@ export function NftThumb({ id }: { id: string }) {
     }),
     expect: "useCell() was REMOVED",
   },
+  {
+    name: "useCell imported and never called",
+    files: app({
+      "src/W.tsx":
+        `import { useCell } from "aio/air";\nimport { counter } from "./cell.ts";\nexport function W() { return <div>Loading{counter.count}</div>; }\n`,
+    }),
+    expect: "imports useCell",
+  },
   // testing
   {
     name: "cell without a test",
@@ -1087,6 +1095,14 @@ await aio.run({ perfBudget: { methods: { "models:scan": { timeout: 0 } } } });
         `import { call } from "aio";\nexport const f = () => call({ timeout: 5000 }, () => {});\n`,
     }),
     expect: "was REMOVED in alpha52",
+  },
+  {
+    name: "call({ timeout }) through a name the file binds itself",
+    files: app({
+      "src/c.ts":
+        `import { call } from "aio";\nexport const f = (call: (o: { timeout: number }) => void) => call({ timeout: 5000 });\nexport const k = call;\n`,
+    }),
+    expect: "if this is aio's `call`",
   },
   {
     name: "server-only symbol imported from aio",

@@ -649,6 +649,18 @@ export function maintenanceOp(pf: unknown): string | null {
   return typeof op === "string" && op ? printable(op) : "am";
 }
 
+/** The APPS that are running: every instance but a maintenance hold. A hold
+ *  (`am backup` / `am restore` on one app) holds a lock and serves nothing —
+ *  to a command about ANOTHER app it is not "an app that is running": am
+ *  listed it as `<app> @ :0`, and from a directory with no project in it took
+ *  it for the one running app and answered about that app instead. Whoever
+ *  asks "what could this command have meant?" asks here; a verb about the
+ *  held app itself reads its lock and names the hold
+ *  ({@linkcode maintenanceMessage}). */
+export function runningApps(): ReturnType<typeof instances> {
+  return instances().filter((i) => !isHold(i));
+}
+
 /** The lock module's one print-safety helper, for `am`'s own callers. */
 export { printable };
 
@@ -709,7 +721,7 @@ export function resolvePort(
   const pf = liveLock(id);
   if (pf) return doorPort(id, pf);
 
-  const live = instances();
+  const live = runningApps();
   // The "one running instance" rung exists for a GUESSED id — a cwd with no
   // project in it, where the id came from a directory name. Two things are
   // NOT a guess: an id the user typed (`--app=X`), and the id of the project

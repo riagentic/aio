@@ -49,12 +49,14 @@ async function boot2(
     port: freePort(),
     appDir: dir,
     ...extra,
+    watch: false,
   } as Any);
 }
 
 async function boot(dir: string, cells: unknown[]) {
   const { aio } = await import("../mod.ts");
   return await aio.run({
+    watch: false,
     cells,
     appId: "shutdown-inflight-app",
     client: "server-only",

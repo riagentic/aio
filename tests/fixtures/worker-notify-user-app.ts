@@ -21,6 +21,7 @@ export const wpinger = cell("wpnotice", {
 
 if ((globalThis as { name?: string }).name?.startsWith("aio-cell:")) {
   await aio.run({
+    watch: false,
     appId: "worker-notify-user-probe",
     cells: [wpinger],
     client: "server-only",

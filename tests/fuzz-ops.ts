@@ -399,11 +399,50 @@ export function applyOp(s: { data: Data }, op: Op, log: unknown[]): void {
       log.push(Object.hasOwn(d.obj, w));
       break;
     }
+    // `in`, with names that live on the prototype chain, at the root, on an
+    // object, on arrays and on an array element. The live proxy answered OWN
+    // keys only for one release while the Immer draft walks the chain:
+    // `"push" in s.items` was true in a sync method and false in its async
+    // twin, and no op here asked.
+    case "read_in_proto_names": {
+      const w = RESERVED_WORDS[op.i % 4]!;
+      const arrName = ["push", "length", "map", "at", "nope"][op.v % 5]!;
+      log.push(
+        w in s,
+        "data" in s,
+        w in d,
+        w in d.obj,
+        "x" in d.obj,
+        w in d.deep.l1,
+        arrName in d.nums,
+        arrName in d.items,
+        (op.i % 4) in d.nums,
+        String(op.i % 4) in d.items,
+        Symbol.iterator in d.nums,
+        Symbol.iterator in d.obj,
+        d.items[0] ? w in d.items[0] : null,
+        d.grid[0] ? arrName in d.grid[0] : null,
+        Reflect.has(d.obj, w),
+      );
+      break;
+    }
+    // "Is this iterable?" asked of a reference whose slot has since become a
+    // primitive. This IS the capture-overwrite-use shape the header forbids,
+    // with the one question that has a parity target: a symbol `in` never
+    // throws the stale-reference error, so both sides must simply answer —
+    // and the live proxy ran `in` on the primitive itself, a raw TypeError.
+    // (A held ARRAY is not asked: the draft is still an array, the slot is
+    // not — tests/proxy-symbol-in-stale-slot.test.ts pins that side.)
+    case "sym_in_after_slot_primitive": {
+      const o = d.obj as Record<string, unknown>;
+      o.tmp = { b: op.i };
+      const held = o.tmp as object;
+      o.tmp = [op.v, `s${op.v}`, op.v % 2 === 0, null][op.i % 4];
+      log.push(Symbol.iterator in held, Symbol.asyncIterator in held);
+      delete o.tmp;
+      break;
+    }
     // Every own-key question a guard might ask, answered for a reserved name.
-    // Not `w in d.obj`: `in` walks the prototype chain on an Immer draft and
-    // answers OWN keys only on the live proxy (tests/live-proxy.test.ts) — an
-    // intentional safety split, not a method-body parity bug. Own-key probes
-    // (hasOwn / hasOwnProperty / keys / entries / descriptor) must still agree.
     case "reserved_own_reads": {
       const w = RESERVED_WORDS[op.i % 4]!;
       log.push(
@@ -1066,6 +1105,8 @@ export const KINDS = [
   "read_write_elsewhere_read",
   "obj_set_then_reread",
   "obj_del_then_reread",
+  "read_in_proto_names",
+  "sym_in_after_slot_primitive",
 ];
 
 /** Ops whose value is a row REMOVED from an array — `pop`/`shift`/`splice`.

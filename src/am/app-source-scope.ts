@@ -120,6 +120,7 @@ export function sourceScopeFrom(
 
   return {
     excludedBy(rel, isDir) {
+      // aio-ok: path-split — `\\` normalised to `/` first
       const segs = rel.replaceAll("\\", "/").split("/").filter(Boolean);
       // A rule matches a path when it matches the path or any ancestor —
       // excluding a directory excludes what is under it, so `examples` covers

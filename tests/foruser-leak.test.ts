@@ -538,24 +538,37 @@ Deno.test("forUser memo: a class whose toJSON is NOT JSON-faithful gets no key",
     "an unfaithful toJSON reused another caller's cached view",
   );
 
-  // …while a FAITHFUL toJSON still keys (no needless recompute).
-  class Faithful {
-    constructor(readonly tenant: string) {}
+  // …and a toJSON that LOOKS faithful is not trusted either. This pinned the
+  // opposite ("a faithful toJSON stays keyed") until the key was shown to
+  // follow what the class chose to print, not what a view can read: a
+  // `toJSON` leaving `role` out keyed an admin and a viewer as one record.
+  // Nothing in the key can tell that class from this one, so neither is
+  // keyed — a class instance costs a recompute, never a shared view.
+  class Printed {
+    constructor(readonly tenant: string, readonly role: string) {}
     toJSON() {
       return { tenant: this.tenant };
     }
   }
-  let calls = 0;
   const memo2 = createMemoizedUIState(
-    (s: { n: number }, user?: AioUser) => {
-      calls++;
-      return { n: (user as unknown as Faithful)?.tenant ? s.n : -1 };
-    },
+    (s: { secrets: string[] }, user?: AioUser) => ({
+      secrets: (user as unknown as Printed)?.role === "admin" ? s.secrets : [],
+    }),
   );
-  const st = { n: 7 };
-  memo2(st, new Faithful("a") as unknown as AioUser);
-  memo2(st, new Faithful("a") as unknown as AioUser);
-  assertEquals(calls, 1, "a faithful toJSON stays keyed");
+  const asAdmin = memo2(
+    state,
+    new Printed("a", "admin") as unknown as AioUser,
+  ) as { secrets: string[] };
+  const asViewer = memo2(
+    state,
+    new Printed("a", "viewer") as unknown as AioUser,
+  ) as { secrets: string[] };
+  assertEquals(asAdmin.secrets, ["TOP-SECRET"]);
+  assertEquals(
+    asViewer.secrets,
+    [],
+    "a toJSON that omits a field reused another caller's cached view",
+  );
 });
 
 // ── Channel 4: CRDT sync ──────────────────────────────────────────────────

@@ -73,6 +73,50 @@ export const PLATFORMS: Record<string, PlatformSpec> = {
   },
 };
 
+/** A system as npm names it: what a package's `os` / `cpu` / `libc` fields
+ *  are matched against. `libc` only on Linux, where it is a question. */
+export interface NpmSystem {
+  os: string;
+  cpu: string;
+  libc?: string;
+}
+
+/** The npm system a platform's binary runs on. `deno compile` targets glibc
+ *  on Linux, so a musl build of a native package is another system's. */
+export function npmSystemOf(
+  spec: Pick<PlatformSpec, "os" | "arch">,
+): NpmSystem {
+  return {
+    os: spec.os === "windows" ? "win32" : spec.os,
+    cpu: spec.arch === "aarch64" ? "arm64" : "x64",
+    ...(spec.os === "linux" ? { libc: "glibc" } : {}),
+  };
+}
+
+/** Does a package install on `sys`, by its OWN `package.json` — the rule npm
+ *  and deno apply to `os` / `cpu` (a list of names, `!name` to refuse one,
+ *  absent or `any` for everywhere) and npm to `libc`. THE decider for "is
+ *  this native package the target's": the build leaves every other system's
+ *  out of the binary, and the audit names one it still finds. A package that
+ *  states none of the three runs everywhere. Pure. */
+export function runsOn(
+  pkg: { os?: unknown; cpu?: unknown; libc?: unknown },
+  sys: NpmSystem,
+): boolean {
+  const allows = (field: unknown, value: string | undefined): boolean => {
+    if (value === undefined) return true;
+    const names = (Array.isArray(field) ? field : [field]).filter((n) =>
+      typeof n === "string"
+    ) as string[];
+    if (names.includes(`!${value}`)) return false;
+    const wanted = names.filter((n) => !n.startsWith("!"));
+    return wanted.length === 0 || wanted.includes("any") ||
+      wanted.includes(value);
+  };
+  return allows(pkg.os, sys.os) && allows(pkg.cpu, sys.cpu) &&
+    allows(pkg.libc, sys.libc);
+}
+
 /** The platform name for the machine running the build. */
 export function hostPlatform(
   build: { os: string; arch: string } = Deno.build,

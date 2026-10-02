@@ -193,12 +193,17 @@ the one-click `<name>-win-x64.exe` SFX (kind `binary`) is the platform's update,
 and the `.zip` gets a manifest of its own, `<os>-<arch>.electron-zip.json` — an
 install unpacked from the zip reads that one first and falls back to
 `<os>-<arch>.json` when the channel has none (a 404 or 410, then not asked again
-for a day; a timeout fails the check). A zip install running aio older than
-1.0.13-beta only reads `<os>-<arch>.json`, is offered the `.exe` it cannot
-install, and must be updated by hand once; publish's summary says so. Any other
-tie is refused, naming both files. A macOS `.dmg` is download-only: `downloads`
-in `--json` lists it, `stranded` lists any download whose platform got no
-manifest, and each of `releases` names its `kind`.
+for a day; a timeout fails the check). A channel that has one costs one request
+per check. A zip install running aio older than 1.0.13-beta only reads
+`<os>-<arch>.json`, is offered the `.exe` it cannot install, and must be updated
+by hand once; publish's summary says so. An app installed by the one-click
+`.exe` runs from the folder that `.exe` extracted, so it is an `electron-zip`
+install too: it updates from the **zip's** manifest, not from the `.exe` it was
+downloaded as — publish the `.zip` with every release, or those installs are
+offered an `.exe` they cannot install. Any other tie is refused, naming both
+files. A macOS `.dmg` is download-only: `downloads` in `--json` lists it,
+`stranded` lists any download whose platform got no manifest, and each of
+`releases` names its `kind`.
 
 **The data contract.** Publish asks each artifact it can run here
 (`<binary> --aio-data-contract`) and stamps that answer into the manifests of
@@ -211,11 +216,28 @@ its bundle executable asked, unless `--data` or `--no-data` already answers. A
 without a contract is warned about on stderr, in `--json` mode too, with the
 reason per file.
 
+The answer is read off a **marked line**, not off whatever the binary printed:
+besides the JSON on stdout, `--aio-data-contract` writes
+`[aio] data-contract:
+{…}` on stderr, with `[aio] persisting-cells: …` and
+`[aio] app-id: …` beside it. Publish (and the git update source, for the binary
+it rebuilt) sets `AIO_PROBE_NONCE` to a fresh value for each probe, the binary
+echoes it — `[aio:<value>] data-contract: {…}` — and only lines carrying that
+value are read, so an app that prints at module top level, or prints a line of
+the same shape, neither breaks nor forges the answer. A binary built before the
+marker is read as before: from stdout. A `--data=` file may hold either form.
+
 Useful flags: `--dir=/srv/releases` (where to stage), `--channel=test`,
 `--notes="fixes the sync bug"`, `--no-build` (publish what `dist/` already
 holds). Unsigned is allowed for a local or air-gapped channel, and every step
 says so out loud — but a client only installs unsigned releases if the app opted
 in.
+
+`--dir` inside the project must be a directory of its own — the rule the build's
+`--out` follows: not the project root, `src/`, an app dir, `.git`, `.aio`, nor
+inside or around one of them. `--dir=src` is refused before anything is built or
+written, and so is any other name for it (a link to `src`, `src.`, `src`). A
+directory outside the project is always fine.
 
 The long way is the same three steps by hand, if you want to see them:
 
@@ -314,14 +336,138 @@ next boot logs `update X → Y was rolled back: …` and dismisses Y, so it is n
 installed again automatically. A newer release is offered as usual, and
 `undismiss()` offers Y again.
 
-If the helper cannot move a folder (a file lock held by antivirus or an open
-Explorer window), it retries each move for 10 s. If the move still fails, it
-puts back what it moved, starts the old version, and records why; the next boot
-logs `update X → Y could not be installed: <why>`. If it cannot move the old
-folder back during a rollback, it starts the version in place and the next boot
-logs `ROLLBACK FAILED of update X → Y: … — this is still Y`, naming the folder
-to put back by hand. When neither folder can be moved back, it records that
-first and starts the old copy where it was set aside
+If the helper cannot move a folder (a file lock held by antivirus, an open
+Explorer window, a program whose working directory is inside it), it retries: on
+Windows the move of the running version aside for 30 s, every other move for 10
+s. If the move still fails, it puts back what it moved, removes the tree it had
+staged, starts the old version, and records why; the next boot logs
+`update X → Y could not be installed: <why>` — with what the system said (on
+macOS and Linux the words of the `mv` or `rm` that failed, cut to one line) and,
+on Windows, the processes still running from the folder or started with its path
+(up to eight by name; a program that only has its working directory there is on
+no list Windows gives cheaply, and the line says so). An earlier
+`<install>.old-<version>` that cannot be removed is named as that:
+`an earlier copy of the app (…) could not be removed`.
+
+A swap that was never made is not a rollback: Y never ran, so it is **not**
+dismissed. It stays on offer (`… — Y stays on offer (failed attempt 1 of 3)`)
+and the next click, or with `auto: true` the next check after the one at that
+boot, tries again. The count is kept per release in `update-trust.json`; the
+third failure in a row dismisses Y like a rollback does, with a line that names
+the folder that was held and what to do about it on this OS. The count ends
+there, and with a confirmed update: after `undismiss()` Y has its three tries
+again. An old copy that had to be started from where it was set aside, and a
+count that cannot be written, are dismissed at once.
+
+### What the updater may remove
+
+The folder an app is installed in is the user's — `~/Apps`, `Downloads`, a
+shared `Programs` folder — and an update leaves things there: a download
+(`<install>.zip-<version>`, `<install>.new-<version>`, and while it runs a
+staging folder `.aio-update-<download name>-<pid>-<8 hex>`), an unpacked tree
+(`<install>.staged-<version>`), the version it replaced
+(`<install>.old-<version>`), a build set aside by a rollback
+(`<install>.failed-<time>`). A name proves nothing there: `notes.staged-1.2.3`
+can be somebody's folder.
+
+So the updater removes a path only when it can prove it made what is there:
+
+- Before it makes anything beside the install it writes the path down in
+  `update-artifacts.json` in the app's data directory, with the process that is
+  making it. A crash can leave a record with nothing behind it, never a thing
+  with no record.
+- Once the thing exists the record holds what the filesystem says it IS (kind,
+  device, file number, creation time). A path is ours only while the very object
+  that was made is still there — not when something else has taken the name. For
+  a file that also means its bytes: the record holds its size and SHA-256,
+  checked before it is removed, pruned or taken as a kept version. (On NTFS a
+  file made again under a deleted one's name inherits its creation time, and the
+  file number Deno reports there is rounded — identity alone is a hint.) A name
+  the update needs that cannot even be looked at (access denied) is in the way,
+  refused before the download. Nothing is written into what the updater makes
+  (one more file in an unpacked macOS bundle would break its seal).
+- A boot with no update in flight removes the recorded leftovers nobody is
+  working on (their process is gone; the same pid in an earlier run counts as
+  gone), each renamed aside first (to `<install>.swept-<pid>-<n>`, a free name
+  that goes on the record before the rename), and logs their names:
+  `removed what an unfinished update left beside …`.
+- Anything beside the install that only LOOKS like a leftover is left where it
+  is and named once per boot:
+  `left alone beside …: not made by this app's
+  updater — …`. A second copy of
+  the app running from the same folder with another data directory has its own
+  record, so it leaves the first one's download and staged tree alone.
+- When a name the update needs is taken by something that is not the updater's,
+  the update is refused before anything is downloaded —
+  `… is in the way of the update, and it was not made by this app's updater` —
+  and nothing is removed.
+
+Things made by a build older than this record (1.0.16 and earlier) are on no
+record, and looking at one can only say "this is a copy of the app", never "the
+updater made it". So that look is taken **once**: the first start with no update
+in flight (or the first confirmed update) on 1.0.17 or later goes through the
+exact names those builds used — `<install>.old-<version>`, `.staged-<version>`,
+`.zip-<version>`, `.new-<version>`, `.failed-<time>`, and the download folder
+`.aio-update-<8 hex>` — and takes onto the record what also passes by content: a
+folder that is this very app (an `electron/` folder and the running install's
+launcher, byte for byte; on macOS the running bundle's identifier), beside a
+single-file install a file of the same executable format as the running one, a
+`.zip-<version>` that is an archive, an old download folder that holds nothing
+but a file `artifact`. A leftover (anything but an `.old-` copy) must also have
+been untouched for an hour; while one is younger the look stays open and the
+next start takes it again. Each time the look is taken one info line says so,
+naming what it took:
+`looked for what an earlier version's updater left beside … (…): took over …`
+(or `nothing to take over`). A run from source never looks: its "install" is the
+`deno` binary, and no update is applied there. From then on only the record
+counts — a copy of the app you make later under one of those names is left
+alone, never pruned as an old version, and refuses an update that needs the
+name.
+
+That look is the single place where a name and a content check stand in for
+proof: at the first start on 1.0.17, and at any start that finds no record or
+one without its mark (`update-artifacts.json` deleted, edited by hand, or
+restored from before 1.0.17), a copy of the app that somebody made BY HAND under
+exactly such a name (`<install>.old-1.2.3`) is taken for the updater's — kept as
+an old version and pruned like one. What the record already names is never taken
+twice.
+
+On a file system that gives files no creation time the record cannot prove
+anything it names: nothing is removed there and old versions are not pruned —
+each start warns with the path and its size, and they are yours to delete.
+
+### What an update keeps, and what it costs in disk
+
+Each update keeps the version it replaced beside the install, as
+`<install>.old-<version>` — a file for a single-file artifact, a whole folder
+for an Electron `.zip` or a macOS `.app` install. That copy is what a rollback
+puts back, and what makes going back by hand a rename instead of a download.
+
+A single-file artifact is kept by copying it (on Windows the running file is
+renamed aside instead). The copy is on the record as unfinished until every byte
+is on disk, and is recorded as whole before the new build goes in. One cut off
+half-way — the app killed, the disk full — is not a version: it is not counted
+among the kept ones, a rollback refuses it
+(`the copy to roll back to (…) was cut off while it was being written …`), and
+the next start removes it. A copy that comes out short stops the update, with
+nothing changed.
+
+The **three newest** are kept. Older ones are deleted when a later update is
+confirmed (the new version's first healthy boot), never before. Only copies the
+updater itself set aside are counted and deleted (see above): a
+`<install>.old-photos` of your own is neither. So an install that has been
+updated three times or more occupies up to **four times the app's size**: the
+running version plus three old ones. For a 430 MB Windows folder install that is
+about 1.7 GB. An install made by `run.sh` keeps its versions under
+`versions/<version>/` instead, three in all, pruned at the same moment. Deleting
+an `.old-` copy by hand is safe while no update is in flight; the only thing
+lost is the rollback to that version without a download.
+
+If it cannot move the old folder back during a rollback, it starts the version
+in place and the next boot logs
+`ROLLBACK FAILED of update X → Y: … — this is still Y`, naming the folder to put
+back by hand. When neither folder can be moved back, it records that first and
+starts the old copy where it was set aside
 (`— this is X, started
 from where it was set aside`). A pending marker found by
 the very executable it was meant to replace is recorded as a failed update,
@@ -409,15 +555,29 @@ thrown error, so a method can show it.
     identity per version therefore leaves nothing for macOS to ask about.
   - A swapped-in version carries no quarantine mark (it was never downloaded by
     a browser), so Gatekeeper does not hold its launch.
-- **Electron (Windows)** — the one-click `.exe` (SFX) is replaced like a Linux
-  binary; on next launch the new SFX re-extracts when its payload stamp differs.
-  An install unpacked from the `.zip` is a folder, swapped by a detached helper
-  once the app exits (it waits up to 30 s for every process running from the
-  install, retries each move for 10 s, and always ends with a version started).
-  The helper starts through `CreateProcessW` with no console window; without
-  `--allow-ffi`, through `cmd.exe`. The `--version` check of a new download runs
-  off the app's thread, so the antivirus scan of a new exe does not freeze the
-  window.
+- **Electron (Windows)** — the install is a folder either way: unpacked from the
+  `.zip` by hand, or extracted by the one-click `.exe` (SFX) to
+  `%LOCALAPPDATA%\aio-sfx\<name>\win-<arch>\`. The downloaded `.exe` itself is
+  never replaced. The folder is swapped by a detached helper once the app exits
+  (it waits up to 30 s for every process running from the install, then up to 30
+  s for the folder itself to become movable, and always ends with a version
+  started). The helper starts through `CreateProcessW` with no console window;
+  without `--allow-ffi`, through `cmd.exe`. The `--version` check of a new
+  download runs off the app's thread, so the antivirus scan of a new exe does
+  not freeze the window.
+  - **The `.exe` after an update.** The SFX re-extracts its own payload whenever
+    the folder's stamp (`.aio-sfx-stamp`, the hash of the payload that was
+    extracted) is not its own. The updater therefore carries the stamp into
+    every folder it swaps in — an update and a rollback alike — so the `.exe`
+    the user keeps double-clicking stays a launcher for the updated app. A
+    **different** `.exe` (a newer download, or an older one) has another hash
+    and installs the version it carries over the folder: the `.exe` you open
+    wins, in both directions. It refuses, changing nothing, while the app is
+    running ("close it first").
+  - An app built with aio 1.0.16-beta swaps without carrying the stamp; the
+    updated version puts it back on its first start. Until that start — or if
+    the updated version is itself built with aio 1.0.16-beta — opening the old
+    `.exe` re-installs the old version over the update.
 - **A CLI binary you launched yourself** — with no `auto`, the check at startup
   asks on the terminal: `Update to 2.1.0? The app will restart. [y/N]`. A
   non-interactive launch is never asked, because a service blocking on stdin
@@ -547,8 +707,9 @@ back.
 
 A re-published `1.2.3` with different bytes is a real update, and it is
 detected: the install records the SHA-256 of the artifact it is running (the
-digest verified at the last swap, or measured once from the artifact itself),
-and a manifest whose digest differs at the same version is offered with
+digest verified at the last swap — for a directory install, written once that
+update is confirmed — or measured once from the artifact itself), and a manifest
+whose digest differs at the same version is offered with
 `reason: "same version, new build…"`. One released (signed `releasedAt`) BEFORE
 the build installed by an update is an older build — a CDN edge still caching
 the previous manifest, or a replay of it — and is not offered.

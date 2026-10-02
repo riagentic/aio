@@ -56,6 +56,7 @@ async function boot(dir: string, c: unknown, extra: Record<string, Any> = {}) {
     baseDir: dir,
     logging: { level: "debug", dir: `${dir}/logs` },
     ...extra,
+    watch: false,
   } as Any);
 }
 

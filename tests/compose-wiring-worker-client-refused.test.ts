@@ -25,6 +25,7 @@ async function boot(extra: Record<string, any>) {
       persist: false,
       port: freePort(),
       ...extra,
+      watch: false,
       // deno-lint-ignore no-explicit-any
     } as any);
     await app.close();

@@ -71,6 +71,7 @@ Deno.test({
     });
     const port = freePort();
     const app = await aio.run({
+      watch: false,
       cells: [notes],
       appId: "aio-internal-gate",
       client: "server-only",

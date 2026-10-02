@@ -52,6 +52,7 @@ async function boot(
     persist: false,
     port: freePort(),
     ...extra,
+    watch: false,
   } as never) as unknown as App;
 }
 

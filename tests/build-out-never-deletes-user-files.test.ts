@@ -36,6 +36,20 @@ Deno.test("out dir: only what the previous manifest placed counts as the build's
     "manifest.json",
   ]);
   assertEquals(foreignOutEntries([], null), []);
+  // What the desktop drops into a folder somebody opened is nobody's file —
+  // in the out dir and in a channel dir, in any case; a folder holding
+  // nothing else is still not a channel.
+  const litter = [".DS_Store", "Thumbs.db", "DESKTOP.INI", ".directory"];
+  assertEquals(
+    foreignOutEntries(
+      [...litter, "app-1.0.0", "manifest.json", "prod", "empty", "x.db"],
+      manifest,
+      { prod: ["linux-x86_64.json", "app-1.0.0", ...litter], empty: litter },
+    ),
+    ["empty", "x.db"],
+  );
+  assertEquals(foreignOutEntries(litter, null), []);
+  assertEquals(foreignOutEntries([...litter, "a.ts"], null), ["a.ts"]);
 });
 
 Deno.test("out dir: a build pointed at a directory of the user's files refuses and deletes nothing", async () => {
@@ -67,6 +81,51 @@ Deno.test("out dir: a build pointed at a directory of the user's files refuses a
   } finally {
     await dropTempDir(dir);
   }
+});
+
+// The same refusal for a name that only READS differently: a trailing space
+// or dot (dropped by Windows), a link to the sources.
+Deno.test({
+  name:
+    "out dir: `--out` at the sources under another spelling — 'src ', 'src.', a link to src — is refused like --out=src",
+  ignore: Deno.build.os === "windows",
+  async fn() {
+    const dir = await tempDir("aio-out-src-spellings-");
+    try {
+      await Deno.writeTextFile(
+        join(dir, "deno.json"),
+        JSON.stringify({ title: "outguard", build: { targets: ["browser"] } }),
+      );
+      await Deno.mkdir(join(dir, "src"));
+      await Deno.writeTextFile(join(dir, "src", "app.ts"), "// mine\n");
+      await Deno.symlink("src", join(dir, "srclink"));
+      const outs = ["src", "src ", "src.", "srclink", "srclink/out"];
+      for (const o of outs) {
+        const out = await new Deno.Command(Deno.execPath(), {
+          args: ["run", "-A", BUILD_ALL, `--out=${o}`],
+          cwd: dir,
+          env: { NO_COLOR: "1" },
+          stdout: "piped",
+          stderr: "piped",
+        }).output();
+        const dec = new TextDecoder();
+        const said = dec.decode(out.stderr) + dec.decode(out.stdout);
+        assertEquals(out.code, 1, `${JSON.stringify(o)}: ${said}`);
+        assertStringIncludes(said, "refusing to build into", o);
+        assertStringIncludes(said, "a dedicated subdirectory", o);
+      }
+      assertEquals(
+        [...Deno.readDirSync(dir)].map((e) => e.name).sort(),
+        ["deno.json", "src", "srclink"],
+      );
+      assertEquals(
+        [...Deno.readDirSync(join(dir, "src"))].map((e) => e.name),
+        ["app.ts"],
+      );
+    } finally {
+      await dropTempDir(dir);
+    }
+  },
 });
 
 Deno.test("out dir: what am publish wrote beside the artifacts counts as aio's own", () => {

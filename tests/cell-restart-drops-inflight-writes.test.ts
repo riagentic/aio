@@ -29,6 +29,7 @@ const c = cell("restartinflight", {
 Deno.test("restart mid-call: the old call's writes never reach the new state", async () => {
   const dir = await tempDir("restart-inflight-");
   const app = await aio.run({
+    watch: false,
     cells: [c],
     appId: "restartinflight",
     client: "server-only",

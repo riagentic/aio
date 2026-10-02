@@ -54,6 +54,7 @@
  * blob buffers in flight. No V8 flag governs those, and the memory monitor
  * cannot see them either.
  */
+import { log } from "../diagnostics/logger-api.ts";
 
 /** Never go below this: it is V8's own default here, so the policy can only
  *  ever raise a ceiling. A regression would be worse than doing nothing. */
@@ -201,15 +202,63 @@ export function resolveMaxHeapMB(
  *  4 GB a 16 GB machine already gives every app), so its memory is bounded and
  *  predictable instead of scaling with the host. Never below the floor: a cap
  *  cannot undercut what a smaller machine already tolerates. */
-export function envHeapCapMB(env?: string | null): number | null {
+export function envHeapCapMB(
+  env?: string | null,
+  /** Where a refused, re-read or raised value is SAID (once per value, per
+   *  process). */
+  warn: (msg: string) => void = (m) => log.warn("heap", m),
+): number | null {
   // `undefined` = read the real environment (the production default); `null` =
   // "pretend it is unset", so a unit test can pin both paths deterministically.
-  const raw = env === undefined ? Deno.env.get("AIO_MAX_HEAP_MB") : env;
+  let raw = env;
+  if (raw === undefined) {
+    try {
+      raw = Deno.env.get("AIO_MAX_HEAP_MB");
+    } catch {
+      return null; // no --allow-env here: the environment is not readable
+    }
+  }
   if (raw === null || raw === undefined || raw.trim() === "") return null;
+  const said = (msg: string) => {
+    if (_heapCapSaid.has(raw)) return;
+    _heapCapSaid.add(raw);
+    warn(msg);
+  };
+  // A value that is not a number above zero (`4g`, `0`) is no cap, and used
+  // to be no cap in SILENCE — on the one variable that exists to keep a
+  // runner from freezing its host. It still must not stop a boot, so it is a
+  // warning and the app runs uncapped.
   const mb = Number(raw);
-  if (!Number.isFinite(mb) || mb <= 0) return null;
-  return Math.max(HEAP_FLOOR_MB, Math.floor(mb));
+  if (!Number.isFinite(mb) || mb <= 0) {
+    said(
+      `AIO_MAX_HEAP_MB=${raw} is not a heap cap (want megabytes in decimal ` +
+        `digits, e.g. ${HEAP_FLOOR_MB}) — ignored: this app's heap is NOT ` +
+        `capped. Fix or unset it.`,
+    );
+    return null;
+  }
+  const cap = Math.max(HEAP_FLOOR_MB, Math.floor(mb));
+  // Any other spelling `Number()` reads (`4096.0`, `1e4`, `0x2000`, `+4096`)
+  // CAPS, as it always has: on a safety variable an odd spelling must fail
+  // closed. It is said, because the number it was read as may not be the one
+  // that was meant.
+  if (!/^\d+$/.test(raw.trim())) {
+    said(
+      `AIO_MAX_HEAP_MB=${raw} is not plain decimal digits — read as a cap ` +
+        `of ${cap} MB. Write it as ${cap} to say exactly that.`,
+    );
+  } else if (mb < HEAP_FLOOR_MB) {
+    said(
+      `AIO_MAX_HEAP_MB=${raw} is below the ${HEAP_FLOOR_MB} MB floor every ` +
+        `app already has — capping at ${HEAP_FLOOR_MB} MB instead.`,
+    );
+  }
+  return cap;
 }
+
+/** `AIO_MAX_HEAP_MB` values already spoken about: every boot asks twice (the
+ *  launcher's flag, the boot report), and the answer is one fact. */
+const _heapCapSaid = new Set<string>();
 
 /** The share of the machine a resolved ceiling represents, when it exceeds the
  *  automatic one — else null. A number to SAY, not to enforce: an app allowed

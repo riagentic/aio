@@ -5,15 +5,16 @@
  * real `.app` (in a `.dmg`, or a zip of the bundle when no Mac is available) on
  * macOS. See `macos-app.ts` for the bundle and `dmg.ts` for the disk image.
  */
-import { dirname, join } from "@std/path";
+import { basename, dirname, join, resolve } from "@std/path";
 import {
-  appimageEnv,
   chmodIfSupported,
   copyDir,
   ensureAppimagetool,
   formatMb,
   misplacedIconHint,
+  normalizeArtifactModes,
   resolveAppIcon,
+  runAppimagetool,
   toolCacheDir,
   writeDefaultIcon,
 } from "./build-helpers.ts";
@@ -23,8 +24,8 @@ import { appIconLabel } from "./app-icon.ts";
 import { assembleMacApp, icnsFromName, icnsFromPng } from "./macos-app.ts";
 import { trimLocalePaks } from "./electron-locales.ts";
 import {
+  applyChromiumExtrasStrip,
   chromiumExtrasStripped,
-  stripOptionalChromiumExtras,
 } from "./electron-strip.ts";
 import {
   canFinalizeDmg,
@@ -60,26 +61,28 @@ import {
  *  Frameworks are a web of them, and a package that resolved them into copies
  *  is both enormous and subtly broken. PowerShell's Compress-Archive is the
  *  fallback (Windows hosts without `zip`), and it is no longer the only way —
- *  that was what made a Windows package a Windows-only act. */
-async function zipDir(dir: string, out: string): Promise<boolean> {
+ *  that was what made a Windows package a Windows-only act.
+ *
+ *  The tree is normalized first: `zip` stores each entry's mode, and the
+ *  self-contained exe is packed from this same tree afterwards. @internal */
+export async function zipDir(dir: string, out: string): Promise<boolean> {
+  await normalizeArtifactModes(dir);
   // `zip -r` UPDATES an existing archive: entries the tree no longer has stay
   // in it. A previous build's zip therefore carried its files into this one
   // however clean the staging dir was. Only absence is fine.
   await Deno.remove(out).catch((e) => {
     if (!(e instanceof Deno.errors.NotFound)) throw e;
   });
-  const attempts: [string, string[]][] = [
+  const ps = _zipFallbackSpec(dir, out);
+  const attempts: [string, string[], Record<string, string>?][] = [
     ["zip", ["-r", "-y", "-q", out, "."]],
-    ["powershell", [
-      "-NoProfile",
-      "-Command",
-      `Compress-Archive -Path "${dir}/*" -DestinationPath "${out}" -Force`,
-    ]],
+    [ps.cmd, ps.args, ps.env],
   ];
-  for (const [cmd, args] of attempts) {
+  for (const [cmd, args, env] of attempts) {
     try {
       const r = await new Deno.Command(cmd, {
         args,
+        env,
         cwd: cmd === "zip" ? dir : undefined,
         stdout: "null",
         stderr: "piped",
@@ -97,6 +100,33 @@ async function zipDir(dir: string, out: string): Promise<boolean> {
       "(Debian/Ubuntu: sudo apt install zip)",
   );
   return false;
+}
+
+/** The PowerShell that packs `dir`'s contents into `out` where there is no
+ *  `zip`: entries relative to `dir`, no folder on top.
+ *
+ *  Both paths travel in the ENVIRONMENT and reach .NET as they are. Written
+ *  into the script inside double quotes, a path with `$` or a backtick was
+ *  expanded and one with `"` ended the string; and `Compress-Archive` reads
+ *  `-Path` — and the folder of its destination — as a wildcard pattern, so a
+ *  project under `C:\\work [old]\\app` packed nothing. @internal */
+export function _zipFallbackSpec(
+  dir: string,
+  out: string,
+): { cmd: string; args: string[]; env: Record<string, string> } {
+  return {
+    cmd: "powershell",
+    args: [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "try { Add-Type -AssemblyName System.IO.Compression.FileSystem; " +
+      "[IO.Compression.ZipFile]::CreateFromDirectory($env:AIO_ZIP_DIR, " +
+      "$env:AIO_ZIP_OUT) } catch { " +
+      "[Console]::Error.WriteLine($_.Exception.Message); exit 1 }",
+    ],
+    env: { AIO_ZIP_DIR: resolve(dir), AIO_ZIP_OUT: resolve(out) },
+  };
 }
 
 /** Where every Electron package is assembled before it is packed. */
@@ -284,19 +314,15 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
     console.log(`${OK} trimmed ${trimmed} unused locale(s) from the runtime`);
   }
 
-  // Optional graphics extras (DXIL compiler, software Vulkan) — OFF by default
+  // Optional graphics extras (DXIL compiler, Vulkan) — OFF by default
   // because every one of them is used by SOME app (see electron-strip.ts). An
   // owner who knows the app renders no GPU content opts in.
-  if (os !== "darwin" && await chromiumExtrasStripped(root)) {
-    const removed = stripOptionalChromiumExtras(electronDst);
-    console.log(
-      removed.length
-        ? `${OK} stripped ${removed.length} optional Chromium extra(s): ${
-          removed.join(", ")
-        } (build.chromiumExtras: "strip")`
-        : `${OK} build.chromiumExtras: "strip" — nothing optional was present`,
-    );
-  }
+  //
+  // The declaration is read BEFORE the platform is looked at: a typo'd value
+  // is named on a macOS build too (a warning there — nothing is stripped from
+  // a bundle), not only on the day the same app is first built for Windows.
+  const stripExtras = await chromiumExtrasStripped(root, os);
+  if (stripExtras) console.log(applyChromiumExtrasStrip(electronDst, os));
 
   // Icon \u2014 from THE app-dir decider (cfg.appDir), same place dev reads it
   const { icon: userIcon, misplaced } = await resolveAppIcon(
@@ -417,14 +443,7 @@ Categories=Utility;
     `${binaryName}-${arch}.AppImage`,
   );
   console.log(`packaging...`);
-  const appimageResult = await new Deno.Command(toolPath, {
-    args: [appDir, appImageOut],
-    stdout: "inherit",
-    stderr: "inherit",
-    env: appimageEnv(arch), // FUSE-less hosts — see appimageEnv
-  }).output();
-
-  if (appimageResult.code !== 0) {
+  if (!await runAppimagetool(toolPath, appDir, appImageOut, arch)) {
     console.error(`${NO} appimagetool failed`);
     Deno.exit(1);
   }
@@ -633,7 +652,7 @@ async function zipAppBundle(appPath: string, out: string): Promise<boolean> {
         "-y",
         "-q",
         out,
-        appPath.slice(appPath.lastIndexOf("/") + 1),
+        basename(appPath),
       ],
       cwd: dirname(appPath),
       stdout: "null",

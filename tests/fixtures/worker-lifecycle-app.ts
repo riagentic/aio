@@ -33,6 +33,7 @@ export const wlc = cell("wlc", {
 
 if (isCellWorker()) {
   await aio.run({
+    watch: false,
     appId: "worker-lifecycle-probe",
     cells: [wlc],
     client: "server-only",

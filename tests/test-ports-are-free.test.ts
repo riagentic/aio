@@ -8,6 +8,8 @@
 // that is free right now, which removes the bookkeeping AND the flake class.
 import { assertEquals } from "@std/assert";
 import { appDirs } from "../src/server/app-dirs.ts";
+import { codeMask } from "../aiol/scan.ts";
+import { portSliceFor } from "../scripts/test-shards.ts";
 
 // `\w*(?<![A-Za-z])PORT` = a PORT-named const (PORT, TT_PORT, CDP_PORT) and not
 // a word that merely contains it (IMPORT_RE).
@@ -142,4 +144,166 @@ Deno.test("tests: no test writes into the repo root", () => {
       "repo root is visible to every other test file:\n  " +
       offenders.join("\n  "),
   );
+});
+
+// One `freePort`, not a twin per file. `src/testing/server-test.ts` draws from
+// the run's port slice (`AIO_TEST_PORT_SLICE`) when one is set; a local
+// "listen on port 0, read the number, close" hands back a number from the OS
+// ephemeral range that ANY other process's `port: 0` can be given before the
+// caller binds it — "port 45025 already in use" in test:build under load, from
+// the twin `tests/e2e-app-harness.ts` carried. Seventeen files had one.
+
+/** Every place in `src` that opens a port-0 listener and closes it within
+ *  six lines with nothing awaited in between: a port NUMBER handed on, not a
+ *  listener used. A listener held (a test occupying a port, or probing it while
+ *  it is up) is not one. Source quoted in a string is not code. Pure; 1-based
+ *  lines. */
+function portZeroTwins(src: string): number[] {
+  const mask = codeMask(src);
+  const lines: number[] = [];
+  const open =
+    /const\s+(\w+)\s*=\s*Deno\.listen\(\s*\{[^}]*\bport\s*:\s*0\b[^}]*\}\s*\)/g;
+  for (const m of src.matchAll(open)) {
+    if (mask[m.index!] !== 1) continue;
+    const at = src.slice(0, m.index).split("\n").length;
+    const next = src.slice(m.index! + m[0].length).split("\n").slice(0, 7)
+      .join("\n");
+    const close = new RegExp(`\\b${m[1]}\\.close\\(\\)`).exec(next);
+    if (close && !/\bawait\b/.test(next.slice(0, close.index))) {
+      lines.push(at);
+    }
+  }
+  return lines;
+}
+
+Deno.test("ports: a port-0 twin is seen; a held listener and quoted source are not", () => {
+  assertEquals(
+    portZeroTwins(`
+function freePort(): number {
+  const l = Deno.listen({ port: 0 });
+  const port = (l.addr as Deno.NetAddr).port;
+  l.close();
+  return port;
+}
+  const k = Deno.listen({ hostname: "127.0.0.1", port: 0 });
+  const p = (k.addr as Deno.NetAddr).port;
+  k.close(); // nothing listens on it
+  const held = Deno.listen({ port: 0, hostname: "127.0.0.1" });
+  const owner = (held.addr as Deno.NetAddr).port;
+  writeLock({ port: owner });
+  await boot();
+  await expectRefusal();
+  held.close();
+  const probed = Deno.listen({ hostname: "127.0.0.1", port: 0 });
+  const up = (probed.addr as Deno.NetAddr).port;
+  assertEquals(await probe(up), "up");
+  probed.close();
+  const quoted = \`const q = Deno.listen({ port: 0 }); q.close();\`;
+  const fixed = Deno.listen({ port: 8080 });
+  fixed.close();
+`),
+    [3, 8],
+  );
+});
+
+function* sourceFiles(dir: string): Generator<string> {
+  for (const e of Deno.readDirSync(dir)) {
+    const path = `${dir}/${e.name}`;
+    if (e.isDirectory) {
+      if (e.name !== "node_modules") yield* sourceFiles(path);
+    } else if (e.isFile && /\.tsx?$/.test(e.name)) yield path;
+  }
+}
+
+Deno.test("tests: one freePort — no port-0 twin in tests/ or scripts/", () => {
+  const twins: string[] = [];
+  const read = new Set<string>();
+  for (const dir of ["tests", "scripts"]) {
+    for (const path of sourceFiles(dir)) {
+      if (path === "tests/test-ports-are-free.test.ts") continue;
+      read.add(path);
+      for (const line of portZeroTwins(Deno.readTextFileSync(path))) {
+        twins.push(`${path}:${line}`);
+      }
+    }
+  }
+  // Both trees, all the way down — a scan that stops short reports clean.
+  assertEquals(
+    ["scripts/test-shards.ts", "tests/e2e-app-harness.ts"]
+      .filter((p) => !read.has(p)),
+    [],
+  );
+  assertEquals(
+    [...read].some((p) => p.split("/").length > 2),
+    true,
+    "the scan reached nested directories",
+  );
+  assertEquals(
+    twins,
+    [],
+    'import { freePort } from "../src/testing/server-test.ts" — a local ' +
+      "`port: 0` twin draws from the OS ephemeral range, outside the run's " +
+      "port slice:\n  " + twins.join("\n  "),
+  );
+});
+
+// …and the slice has to exist. The shard runner sets one per shard
+// (scripts/test-shards.ts); the single-process e2e tasks ran with none, so
+// their `freePort()` fell back to `port: 0`. Each now has its own range:
+// below the shards' (which start at portSliceFor's first port), below the OS
+// ephemeral range (which the kernel hands out to every `port: 0`), and apart
+// from each other — release-check runs them side by side.
+const E2E_TASKS = ["test:build", "test:onboard", "test:e2e", "test:electron"];
+
+/** `[first, last]` of every `deno test` in `task`, null where one has none. */
+function taskSlices(task: string): ([number, number] | null)[] {
+  return task.split("&&").filter((p) => /\bdeno test\b/.test(p)).map((p) => {
+    const m = /\bAIO_TEST_PORT_SLICE=(\d+)-(\d+)\s/.exec(p);
+    return m ? [Number(m[1]), Number(m[2])] : null;
+  });
+}
+
+Deno.test("tests: every e2e task draws its ports from a slice of its own", () => {
+  const tasks = (JSON.parse(Deno.readTextFileSync("deno.json")) as {
+    tasks: Record<string, string>;
+  }).tasks;
+  const shardsFrom = Number(portSliceFor(0, 1).split("-")[0]);
+  let ephemeralFrom = 32768; // Linux's default floor
+  try {
+    ephemeralFrom = Number(
+      Deno.readTextFileSync("/proc/sys/net/ipv4/ip_local_port_range")
+        .trim().split(/\s+/)[0],
+    );
+  } catch {
+    // aio-ok: not Linux — the default floor above is the bound checked
+  }
+  const ranges: [string, number, number][] = [];
+  const problems: string[] = [];
+  for (const name of E2E_TASKS) {
+    const slices = taskSlices(tasks[name] ?? "");
+    if (slices.length === 0) problems.push(`${name}: no \`deno test\` in it`);
+    for (const s of slices) {
+      if (!s) {
+        problems.push(`${name}: a \`deno test\` with no AIO_TEST_PORT_SLICE`);
+        continue;
+      }
+      const [a, b] = s;
+      if (a < 1024 || a > b) problems.push(`${name}: ${a}-${b} is not a range`);
+      if (b >= shardsFrom) {
+        problems.push(`${name}: ${a}-${b} reaches the shards' ${shardsFrom}+`);
+      }
+      if (b >= ephemeralFrom) {
+        problems.push(`${name}: ${a}-${b} reaches the OS ephemeral range`);
+      }
+      if (!ranges.some(([n, x, y]) => n === name && x === a && y === b)) {
+        for (const [n, x, y] of ranges) {
+          if (n !== name && a <= y && x <= b) {
+            problems.push(`${name}: ${a}-${b} overlaps ${n}'s ${x}-${y}`);
+          }
+        }
+        ranges.push([name, a, b]);
+      }
+    }
+  }
+  assertEquals(problems, []);
 });

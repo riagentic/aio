@@ -9,11 +9,13 @@ import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { tempDir } from "../src/testing/temp-dir.ts";
 import {
+  _zombieDeps,
   AppLock,
   lockKey,
   lockPath,
   writeLock,
 } from "../src/server/single-instance-lock.ts";
+import { freePort } from "../src/testing/server-test.ts";
 
 const HOUR = 3_600_000;
 
@@ -57,20 +59,27 @@ Deno.test("lock: a 'starting' zombie with a FUTURE startedAt loses its grace", a
     // A LIVE process that is not us, owning a lock whose port answers nothing.
     const owner = new Deno.Command("sleep", { args: ["30"] }).spawn();
     try {
-      const l = Deno.listen({ port: 0, hostname: "127.0.0.1" });
-      const deadPort = (l.addr as Deno.NetAddr).port;
-      l.close();
+      const deadPort = freePort();
       writeLock({
         appId: "futzombie",
         pid: owner.pid,
         port: deadPort,
+        host: "127.0.0.1",
         startedAt: Date.now() + HOUR,
         status: "starting",
         cwd: "/",
         home,
       });
       const lock = new AppLock("futzombie", home);
-      const r = await lock.acquire(0);
+      // The zombie verdict wants a record that has not changed for the
+      // grace, and probes seconds apart: aged and un-paused here — what is
+      // tested is that the future stamp does not keep the STARTUP grace.
+      const real = { ..._zombieDeps };
+      _zombieDeps.recordAge = () => HOUR;
+      _zombieDeps.delay = () => Promise.resolve();
+      const r = await lock.acquire(0).finally(() =>
+        Object.assign(_zombieDeps, real)
+      );
       try {
         assertEquals(
           r.ok,
@@ -82,8 +91,8 @@ Deno.test("lock: a 'starting' zombie with a FUTURE startedAt loses its grace", a
         lock.release();
       }
     } finally {
-      owner.kill("SIGKILL");
-      await owner.status;
+      // The takeover ended it — a zombie is ended before its lock is taken.
+      assertEquals((await owner.status).signal !== null, true);
     }
   });
 });

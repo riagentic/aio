@@ -216,7 +216,7 @@ export function _isTTPausedRefusal(e: unknown): boolean {
 export { deepFreeze } from "./immutable.ts";
 import { deepFreeze } from "./immutable.ts";
 import { cloneExecEffect, isExecEffect } from "./exec-effect.ts";
-import { count } from "../diagnostics/fmt.ts";
+import { count, overLimit } from "../diagnostics/fmt.ts";
 import { _outsideTracking } from "./signal.ts";
 import { _captureCaller, type Reenter } from "./method-policy.ts";
 
@@ -517,7 +517,9 @@ export function createDispatch<S, A, E>(
       : "";
     const err = createAioError(
       code,
-      `${source} exceeded budget: ${duration.toFixed(1)}ms > ${budget}ms` +
+      `${source} exceeded budget: ${
+        overLimit(duration, budget, 1)
+      }ms > ${budget}ms` +
         (source === "effect"
           // FACT only. The remedy for this code lives in ONE place —
           // `errorTip()` in diagnostics/error.ts — because two half-overlapping

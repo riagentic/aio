@@ -22,6 +22,7 @@ import { join } from "@std/path";
 import { createHash } from "node:crypto";
 import { appDirs } from "./app-dirs.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { renameOver } from "../diagnostics/rename-over.ts";
 import { syncDir } from "../db/durable.ts";
 
 /** What the store knows about one blob. */
@@ -229,7 +230,7 @@ function makeStore(dir: string): BlobStore {
       await Deno.remove(tmp).catch(() => {});
     } else {
       try {
-        await Deno.rename(tmp, path);
+        await renameOver(tmp, path);
       } catch (e) {
         // Windows refuses rename-onto-existing: a concurrent put of the SAME
         // content won the race — that is dedup, not failure.

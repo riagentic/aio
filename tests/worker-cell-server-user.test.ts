@@ -48,6 +48,7 @@ export const whoW = cell("whoW", {
 
 if (isCellWorker()) {
   await aio.run({
+    watch: false,
     appId: "worker-cell-server-user",
     cells: [whoW],
     client: "server-only",

@@ -39,6 +39,7 @@ Deno.test("shutdown: a door refusal says re-send (retryAfterMs), a refusal insid
   } as Any) as Any;
   const port = freePort();
   const app = await aio.run({
+    watch: false,
     cells: [main, other],
     appId: "door-retry",
     appDir: dir,

@@ -10,8 +10,8 @@ All-in-one full-stack TypeScript framework on Deno ≥2.9 (`MIN_DENO` in
 state, persistence (worker-thread SQLite, one `state.db`), CRDT sync, and the UI
 (AIR — a signals+JSX renderer; a page downloads 82 KB gz, renderer plus client
 runtime). One codebase builds to browser, Electron, Android, CLI, and service
-targets. Elm-like core: `(state, action) → { state, effects[] }`. v1.0.14-beta,
-~10600 test blocks in `tests/`.
+targets. Elm-like core: `(state, action) → { state, effects[] }`. v1.0.17-beta,
+~11600 test blocks in `tests/`.
 
 An app is TWO files' worth of decisions: `cell({ state, methods })` and a
 component. Everything a finished app also needs — a stylesheet, an icon, a
@@ -62,9 +62,9 @@ deliberate, regenerated diff.
 
 Peer top-level apps: `amui/` (visual app manager), `aiol/` (custom linter),
 `examples/`, `docs/` (`docs/[domain]/[doc].md`), `.katana/` (katas =
-project-quality specs, see below), `future/` (`v2.md` — a fix that would need a
-major version, with what it would break), `feedback/` (field reports from real
-apps built on aio).
+project-quality specs, see below), `untracked/` (gitignored; `v2.md` — a fix
+that would need a major version, with what it would break), `feedback/` (field
+reports from real apps built on aio).
 
 ## Architecture
 

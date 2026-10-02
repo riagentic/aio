@@ -15,7 +15,14 @@
 //   • A failed boot after an update rolls itself back, because the case that
 //     most needs a rollback (an unattended service) has nobody to run one — and
 //     a rollback that FAILS keeps its marker and says so on every boot.
-import { dirname, isAbsolute, join, resolve, SEPARATOR } from "@std/path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  resolve,
+  SEPARATOR,
+} from "@std/path";
 import { dirname as posixDirname } from "@std/path/posix";
 import { dirname as winDirname } from "@std/path/windows";
 import { pruneVersions, reconcileInstalledVersion } from "./install-record.ts";
@@ -26,6 +33,22 @@ import { readBuildStamp } from "./app-version.ts";
 import type { ReleaseTarget, UpdateTarget } from "../build/ship.ts";
 import { type Log, log } from "../diagnostics/logger-api.ts";
 import {
+  moveFile,
+  moveFileSync,
+  renameOver,
+  renameOverSync,
+} from "../diagnostics/rename-over.ts";
+import {
+  forget,
+  identity,
+  made,
+  ownEntry,
+  readOwned,
+  record,
+  sumOf,
+} from "./updates-owned.ts";
+import {
+  neutralCwd,
   outlivingParent,
   spawnInheritingOrNull,
   startWindowless,
@@ -266,6 +289,7 @@ export function macAppUpdateBlocker(
   app: string,
   canWrite: (dir: string) => boolean = dirWritable,
 ): string | null {
+  // aio-ok: path-split — a macOS `.app` path — macOS only
   const name = app.slice(app.lastIndexOf("/") + 1);
   const where = app.includes("/AppTranslocation/")
     ? `macOS is running it from a temporary read-only copy (App ` +
@@ -421,6 +445,14 @@ export type PendingUpdate = {
    *  confirms it first thing: at exit, the confirm's prune of the kept-aside
    *  copy (async) and its log line (the logger had flushed) never happened. */
   confirmedAt?: string;
+  /** The update's verified digest and signed release time. A directory swap
+   *  is made by a helper after the process that verified them has gone, and a
+   *  single-file one can be cut off between its renames and the trust write —
+   *  so they ride here and go on the trust record when the update is
+   *  CONFIRMED. A swap that never happened leaves no claim about what is
+   *  installed. */
+  sha256?: string;
+  releasedAt?: string;
   /** What went wrong AFTER the old build's shutdown — the retirement of its
    *  profile, or the relaunch itself. Its logger was closed by then, so the
    *  line is carried here and said by the next boot that judges the marker. */
@@ -488,6 +520,115 @@ export function firstBootPath(dataDir: string): string {
   return join(dataDir, "update-first-boot.json");
 }
 
+/** The file the Windows SFX stub writes into the tree it extracts: the SHA-256
+ *  of the payload of the `.exe` the user downloaded. The stub re-extracts
+ *  whenever the install's stamp is not its own, so a tree swapped in WITHOUT
+ *  it is overwritten with the old version the next time that `.exe` is opened.
+ *  Keep in sync with `stampName` in `build/windows-sfx-stub/install.go`. */
+export const SFX_STAMP_FILE = ".aio-sfx-stamp";
+
+/** Carry the SFX stamp of install `from` into install `to`, so the `.exe`
+ *  that extracted `from` stays a plain launcher for `to`. False when `from`
+ *  has none — every install that is not a Windows SFX's. Never throws: an
+ *  update or a rollback must not stop over it, so a failure is said instead,
+ *  with what it costs. */
+export function carrySfxStamp(
+  from: string,
+  to: string,
+  logger: Log = log,
+): boolean {
+  let stamp: Uint8Array;
+  try {
+    stamp = Deno.readFileSync(join(from, SFX_STAMP_FILE));
+  } catch (e) {
+    if (
+      !(e instanceof Deno.errors.NotFound) &&
+      !(e instanceof Deno.errors.NotADirectory)
+    ) {
+      logger.warn(
+        "updates",
+        `could not read ${join(from, SFX_STAMP_FILE)} (${e}) — if this app ` +
+          `was installed by its one-click .exe, opening that .exe again ` +
+          `re-installs the version it carries`,
+      );
+    }
+    return false;
+  }
+  try {
+    Deno.writeFileSync(join(to, SFX_STAMP_FILE), stamp);
+    return true;
+  } catch (e) {
+    logger.warn(
+      "updates",
+      `could not write ${join(to, SFX_STAMP_FILE)} (${e}) — opening the ` +
+        `one-click .exe this app was installed from re-installs the version ` +
+        `it carries, over this one`,
+    );
+    return false;
+  }
+}
+
+/** Is `dir` where the one-click `.exe` extracts —
+ *  `<LOCALAPPDATA>\aio-sfx\<binary>\win-<arch>` (`installDir` in
+ *  `build/windows-sfx-stub/main.go`)? Such an install must carry the stamp. */
+export function sfxInstall(dir: string): boolean {
+  return basename(dir).startsWith("win-") &&
+    basename(dirname(dirname(dir))) === "aio-sfx";
+}
+
+/** Give an install the one-click `.exe` extracted the stamp it lost.
+ *
+ *  aio 1.0.16 and older swapped trees in without it, so opening that `.exe`
+ *  again extracted its old payload over the updated app. The stamp is the
+ *  SHA-256 of that `.exe`'s payload — not derivable from any tree, and the
+ *  `.exe` itself is wherever the user keeps it. But every tree that `.exe`
+ *  extracted carries it, and the copies an update keeps are those trees: the
+ *  newest stamp among the kept copies this updater has on record (the one
+ *  the most recent extraction wrote) is the `.exe` the user opens. Copying
+ *  it says only "this install is what that `.exe` would put here" — which an
+ *  update made true. No stamp anywhere: said, with what it costs. */
+export function repairSfxStamp(
+  install: string,
+  dataDir: string,
+  logger: Log = log,
+): void {
+  if (!sfxInstall(install) || existsSync(join(install, SFX_STAMP_FILE))) {
+    return;
+  }
+  const dir = dirname(install), kept = `${basename(install)}.old-`;
+  const stamped = readOwned(dataDir)
+    .filter((e) =>
+      e.kind === "dir" && dirname(e.path) === dir &&
+      basename(e.path).startsWith(kept) && !!ownEntry(dataDir, e.path) &&
+      existsSync(join(e.path, SFX_STAMP_FILE))
+    )
+    .map((e) => ({
+      path: e.path,
+      at: Deno.statSync(join(e.path, SFX_STAMP_FILE)).mtime?.getTime() ?? 0,
+    }))
+    .sort((a, b) => b.at - a.at);
+  const exe = `${basename(dirname(install))}-${basename(install)}.exe`;
+  if (stamped.length === 0) {
+    logger.warn(
+      "updates",
+      `${install} has no stamp of the one-click ${exe} that installed it, ` +
+        `and no copy this updater kept has one — opening that .exe ` +
+        `reinstalls the version it carries, over this one. Start the app ` +
+        `from its own shortcut, or download the current ${exe}.`,
+    );
+    return;
+  }
+  if (carrySfxStamp(stamped[0]!.path, install, logger)) {
+    logger.info(
+      "updates",
+      `${install} had lost the stamp of the one-click ${exe} (an update by ` +
+        `aio 1.0.16 or older dropped it) — taken from ` +
+        `${basename(stamped[0]!.path)}, so opening that .exe starts this ` +
+        `version instead of reinstalling its own`,
+    );
+  }
+}
+
 /** Take the first-boot token for the booting new version. "won": it was
  *  there and is ours; "lost": the swap helper took it first — this build was
  *  rolled back and must exit without touching anything; "none": no helper is
@@ -499,6 +640,15 @@ export function claimFirstBoot(
 ): "won" | "lost" | "none" {
   try {
     Deno.removeSync(firstBootPath(dataDir));
+    // Swapped in by aio 1.0.16-beta, whose helper did not carry the SFX stamp:
+    // take it from the version this one replaced, before the user opens the
+    // old `.exe` again. A tree that has one already keeps it.
+    if (
+      pending.artifact &&
+      !existsSync(join(pending.artifact, SFX_STAMP_FILE))
+    ) {
+      carrySfxStamp(pending.previous, pending.artifact, logger);
+    }
     return "won";
   } catch (e) {
     if (!(e instanceof Deno.errors.NotFound)) throw e;
@@ -544,7 +694,7 @@ export function setAsideRecord(
 ): void {
   const aside = `${path}.bad-${Date.now()}`;
   try {
-    Deno.renameSync(path, aside);
+    moveFileSync(path, aside);
     logger.error("updates", `${path} ${why} — ignored, kept as ${aside}`);
   } catch (e) {
     logger.error(
@@ -619,7 +769,7 @@ export function writeRecordAtomic(path: string, p: PendingUpdate): void {
   } finally {
     f.close();
   }
-  Deno.renameSync(tmp, path);
+  renameOverSync(tmp, path);
 }
 
 export function clearPending(dataDir: string): void {
@@ -842,7 +992,7 @@ self.onmessage = async ({ data: a }) => {
   let child;
   try {
     child = new Deno.Command(a.path, {
-      args: a.args, stdin: "null", stdout: "null", stderr: "piped",
+      args: a.args, cwd: a.cwd, stdin: "null", stdout: "null", stderr: "piped",
     }).spawn();
   } catch (e) {
     self.postMessage({ spawnError: e instanceof Error ? e.message : String(e) });
@@ -908,7 +1058,9 @@ async function probeOffThread(
         clearTimeout(guard);
         reject(new Error(e.message));
       };
-      w.postMessage({ path, args, timeoutMs });
+      // Outside the install: a probe that hangs must not hold the folder the
+      // update is about to move.
+      w.postMessage({ path, args, timeoutMs, cwd: neutralCwd() });
     });
   } finally {
     w.terminate();
@@ -925,6 +1077,9 @@ export type PendingMark = {
   backup?: string;
   /** `exeIdentity()` of the running (old) build — `PendingUpdate.fromExe`. */
   exe?: string;
+  /** The verified digest and release time — see `PendingUpdate.sha256`. */
+  sha256?: string;
+  releasedAt?: string;
 };
 
 export async function swapArtifact(opts: {
@@ -972,6 +1127,8 @@ export async function swapArtifact(opts: {
       previous,
       backup: opts.pending.backup,
       fromExe: opts.pending.exe,
+      sha256: opts.pending.sha256,
+      releasedAt: opts.pending.releasedAt,
       attempts: 0,
       startedAt: new Date().toISOString(),
     });
@@ -1010,14 +1167,14 @@ export async function swapArtifact(opts: {
         // is not there, there is nothing to clear; if it cannot be removed,
         // the rename below fails loudly with the real reason.
       });
-      await Deno.rename(layout.target, previousPath);
+      await moveFile(layout.target, previousPath);
     }
     if (Deno.build.os !== "windows") await Deno.chmod(opts.staged, 0o755);
-    await Deno.rename(opts.staged, next);
+    await moveFile(opts.staged, next);
     const tmpLink = `${layout.link}.new-${opts.toVersion}`;
-    await Deno.remove(tmpLink).catch(() => {});
+    await removeLeftoverLink(tmpLink);
     await Deno.symlink(next, tmpLink);
-    await Deno.rename(tmpLink, layout.link);
+    await renameOver(tmpLink, layout.link);
     // `am installed` and `am upgrade` read installed.json, and nothing but
     // `run.sh` ever wrote it — so an app that updated itself five times still
     // reported the version it was first installed at, and `am upgrade`'s prune
@@ -1039,9 +1196,42 @@ export async function swapArtifact(opts: {
     return { previous: previousPath };
   }
   const previous = `${opts.current}.old-${opts.fromVersion}`;
+  // On record before it exists — and something that is not the updater's
+  // under that name refuses the update here, before anything moved. Windows
+  // renames the running file there (the same object, known now). Elsewhere it
+  // is a copy: the file is made empty and recorded as that very file, still
+  // `filling`, then filled, and only a copy that is whole — every byte, on
+  // disk — is recorded as done, BEFORE the new build goes in. A kill mid-copy
+  // leaves a half copy the record can prove and knows is half: a boot
+  // removes it, pruning does not count it, a rollback refuses it.
+  const aside = (opts.strategy ?? swapStrategy()) === "rename-self-aside";
+  const data = opts.pending?.dataDir;
+  if (data) {
+    record(data, previous, "file", {
+      role: "kept",
+      is: aside ? identity(opts.current) : null,
+      sum: aside ? sumOf(opts.current) : null,
+    });
+    if (!aside) {
+      Deno.writeFileSync(previous, new Uint8Array());
+      made(data, previous, { filling: true });
+    }
+  }
   mark(previous);
   try {
-    await swapFlat(opts, previous);
+    await swapFlat(opts, previous, () => {
+      if (!data) return;
+      using f = Deno.openSync(previous);
+      f.syncSync();
+      const want = Deno.statSync(opts.current).size, got = f.statSync().size;
+      if (got !== want) {
+        throw new Error(
+          `the copy of the running version (${previous}) has ${got} of ` +
+            `${want} bytes — nothing was changed`,
+        );
+      }
+      made(data, previous);
+    });
   } catch (e) {
     // The swap never happened: the running artifact is still at its path (the
     // Windows branch undoes its own first step). A marker left behind claimed
@@ -1067,11 +1257,23 @@ export async function swapArtifact(opts: {
   return { previous };
 }
 
+/** Seam for tests: a copy that comes out short, and a file still held, which
+ *  no real disk produces on demand. */
+export const _swapDeps = {
+  copyFile: (from: string, to: string): Promise<void> =>
+    Deno.copyFile(from, to),
+  remove: (path: string): Promise<void> =>
+    Deno.remove(path, { recursive: true }),
+};
+
 /** The flat-layout swap: keep the running artifact aside as `previous`, move
  *  the staged one into its name. */
 async function swapFlat(
   opts: Parameters<typeof swapArtifact>[0],
   previous: string,
+  /** The copy at `previous` is written (the copy strategy): before the new
+   *  build goes in. */
+  copied: () => void,
 ): Promise<void> {
   if (Deno.build.os !== "windows") await Deno.chmod(opts.staged, 0o755);
   if ((opts.strategy ?? swapStrategy()) === "rename-self-aside") {
@@ -1079,16 +1281,17 @@ async function swapFlat(
     // of the name first, then move the new one in. If the second step fails the
     // first is undone, so the app is never left with no artifact at its path.
     await Deno.remove(previous).catch(() => {});
-    await Deno.rename(opts.current, previous);
+    await moveFile(opts.current, previous);
     try {
-      await Deno.rename(opts.staged, opts.current);
+      await moveFile(opts.staged, opts.current);
     } catch (e) {
-      await Deno.rename(previous, opts.current).catch(() => {});
+      await moveFile(previous, opts.current).catch(() => {});
       throw e;
     }
   } else {
-    await Deno.copyFile(opts.current, previous);
-    await Deno.rename(opts.staged, opts.current);
+    await _swapDeps.copyFile(opts.current, previous);
+    copied();
+    await moveFile(opts.staged, opts.current);
   }
 }
 
@@ -1119,6 +1322,9 @@ async function swapFlat(
 export async function restoreArtifact(
   current: string,
   previous: string,
+  /** The app's data directory: the set-aside copy of the build that failed
+   *  goes on record there, so a boot can remove it if this is cut off. */
+  dataDir?: string,
 ): Promise<void> {
   try {
     await Deno.lstat(previous);
@@ -1129,6 +1335,13 @@ export async function restoreArtifact(
       } (${previous}) — nothing was ` +
         `changed. Re-install the version you want, or run \`am upgrade\`.`,
       { cause: e },
+    );
+  }
+  if (dataDir && ownEntry(dataDir, previous)?.state === "filling") {
+    throw new Error(
+      `the copy to roll back to (${previous}) was cut off while it was ` +
+        `being written — it is not a whole build, and nothing was changed. ` +
+        `Re-install the version you want, or run \`am upgrade\`.`,
     );
   }
   const layout = await versionedInstall(current);
@@ -1143,7 +1356,7 @@ export async function restoreArtifact(
     // the user's back; it is named, because it is exactly what would make the
     // symlink below fail with a bare `File exists`.
     try {
-      await Deno.remove(tmpLink);
+      await removeLeftoverLink(tmpLink);
     } catch (e) {
       if (!(e instanceof Deno.errors.NotFound)) {
         throw new Error(
@@ -1165,7 +1378,7 @@ export async function restoreArtifact(
       );
     }
     try {
-      await Deno.rename(tmpLink, current);
+      await moveFile(tmpLink, current);
     } catch (e) {
       // The link was made but never moved into place: `current` is unchanged
       // and `<current>.rollback` is left behind, pointing at `previous`.
@@ -1189,6 +1402,14 @@ export async function restoreArtifact(
   if (await lexists(current)) {
     aside = `${current}.failed-${Date.now()}`;
     try {
+      if (dataDir) {
+        record(
+          dataDir,
+          aside,
+          (await Deno.lstat(current)).isDirectory ? "dir" : "file",
+          { is: identity(current), sum: sumOf(current) },
+        );
+      }
       await Deno.rename(current, aside);
     } catch (e) {
       throw new Error(
@@ -1240,8 +1461,35 @@ export async function restoreArtifact(
     );
   }
   if (aside) {
-    await Deno.remove(aside, { recursive: true }).catch(() => {});
+    const gone = aside;
+    // Off the record once it is gone; still held (Windows: the failed build
+    // may still be running), it stays on it — provably ours — for a start to
+    // remove.
+    await _swapDeps.remove(gone).then(
+      () => dataDir && forget(dataDir, gone),
+      () => {}, // aio-ok: held — on record, removed by a later start
+    );
   }
+}
+
+/** Remove the temporary LINK a re-point leaves when it is cut off between
+ *  its two steps. Ours is always a symlink; a file or folder of that name is
+ *  somebody's, and is refused rather than removed. */
+async function removeLeftoverLink(path: string): Promise<void> {
+  let info: Deno.FileInfo;
+  try {
+    info = await Deno.lstat(path);
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) return;
+    throw e;
+  }
+  if (!info.isSymlink) {
+    throw new Error(
+      `${path} is in the way, and it is not a link this app's updater ` +
+        `made — move it or remove it, then try again`,
+    );
+  }
+  await Deno.remove(path);
 }
 
 async function lexists(path: string): Promise<boolean> {
@@ -1257,62 +1505,91 @@ async function lexists(path: string): Promise<boolean> {
 export const KEEP_OLD = 3;
 
 /** Keep the N most recent kept-aside artifacts, delete older ones. A manual
- *  rollback is then a rename, not a re-download. */
-export async function pruneOld(current: string, keep: number): Promise<void> {
+ *  rollback is then a rename, not a re-download.
+ *
+ *  Only copies on the record in `dataDir` count, and only those are deleted.
+ *  A `<install>.old-photos` of the user's — or a copy of the app somebody
+ *  made by hand — is neither counted nor touched. */
+export async function pruneOld(
+  current: string,
+  keep: number,
+  dataDir: string,
+): Promise<void> {
   const dir = dirname(current);
-  await pruneKeepingNewest(dir, `${current.slice(dir.length + 1)}.old-`, keep);
+  const prefix = `${current.slice(dir.length + 1)}.old-`;
+  const own: { path: string; mtime: number }[] = [];
+  try {
+    for await (const e of Deno.readDir(dir)) {
+      const path = join(dir, e.name);
+      if (e.isSymlink || !e.name.startsWith(prefix)) continue;
+      // A copy cut off while it was written is no version to keep.
+      // Counted by identity and size; proven by its bytes before it goes.
+      const kept = ownEntry(dataDir, path, false);
+      if (!kept || kept.state === "filling") continue;
+      const st = await Deno.stat(path).catch(() => null);
+      own.push({ path, mtime: st?.mtime?.getTime() ?? 0 });
+    }
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) return; // nothing was ever kept
+    throw e;
+  }
+  own.sort((a, b) => b.mtime - a.mtime);
+  for (const f of own.slice(keep)) {
+    if (!ownEntry(dataDir, f.path)) continue;
+    // Off the record in the same step, once it is gone — a record that names
+    // what is no longer there lags until a boot drops it.
+    await Deno.remove(f.path, { recursive: true }).then(
+      () => forget(dataDir, f.path),
+      () => {}, // aio-ok: held open — kept, and on record, for a later prune
+    );
+  }
 }
 
-/** Names an update leaves behind at the stable path. `.old-` is retained (it is
- *  the rollback); the rest are debris from a swap that was interrupted, and
- *  nothing ever removed them — on the electron-zip target a whole unpacked
- *  install per attempt. */
-const STALE_SUFFIXES = [
-  ".new-",
-  ".staged-",
-  ".zip-",
-  ".failed-",
-  ".rollback",
-];
-
-/** Sweep interrupted-swap leftovers beside the stable path.
+/** The content proof for a thing a build OLDER than the ownership record
+ *  left beside `current` — asked once, when the record takes those things
+ *  over (`adoptOlder`), and nowhere else: it can say "this is the app", not
+ *  "the updater made it".
  *
- *  Bounded twice over: only names this module writes, and only entries older
- *  than `minAgeMs` — a swap that is happening RIGHT NOW must not have its
- *  staging directory deleted out from under it. Best-effort by design; a boot
- *  must not fail because a temp file could not be removed. Returns what it
- *  removed so the caller can say so. */
-export async function sweepStaleSwaps(
-  current: string,
-  opts: { minAgeMs?: number; max?: number } = {},
-): Promise<string[]> {
-  const minAge = opts.minAgeMs ?? 60 * 60 * 1000; // an hour
-  const max = opts.max ?? 64;
-  const dir = dirname(current);
-  const base = current.slice(dir.length + 1);
-  const removed: string[] = [];
-  const now = Date.now();
-  let entries: Deno.DirEntry[];
+ *  A folder: an unpacked install of this app — it holds an `electron/` folder
+ *  and a launcher byte-identical to the running install's, or it is a macOS
+ *  bundle with the running bundle's identifier. A file beside a single-file
+ *  install: it starts with the same four bytes as the running artifact (an
+ *  executable of the same format). A file beside a folder install: a zip or
+ *  a gzip, its download. Anything else — and every link — is not. */
+export function madeByOlderUpdater(path: string, current: string): boolean {
   try {
-    entries = [...Deno.readDirSync(dir)];
+    const here = Deno.lstatSync(path);
+    if (here.isSymlink) return false;
+    if (here.isFile) {
+      const head = (p: string) => {
+        using f = Deno.openSync(p);
+        const b = new Uint8Array(4);
+        return f.readSync(b) === 4 ? b.join() : null;
+      };
+      const got = head(path);
+      if (Deno.statSync(current).isDirectory) {
+        return got === "80,75,3,4" || !!got?.startsWith("31,139,");
+      }
+      return got !== null && got === head(current);
+    }
+    const same = (rel: string) => {
+      const a = Deno.readFileSync(join(path, rel));
+      const b = Deno.readFileSync(join(current, rel));
+      return a.length === b.length && a.every((x, i) => x === b[i]);
+    };
+    const bundleId = (app: string) =>
+      /<key>CFBundleIdentifier<\/key>\s*<string>([^<]+)<\/string>/.exec(
+        Deno.readTextFileSync(join(app, "Contents", "Info.plist")),
+      )?.[1];
+    if (existsSync(join(path, "Contents", "Info.plist"))) {
+      const id = bundleId(path);
+      return id !== undefined && id === bundleId(current);
+    }
+    const launcher = Deno.build.os === "windows" ? "run.bat" : "run.sh";
+    return Deno.statSync(join(path, "electron")).isDirectory && same(launcher);
   } catch {
-    return removed;
+    return false; // aio-ok: unreadable or not that shape — not provably ours
   }
-  for (const e of entries) {
-    if (removed.length >= max) break;
-    if (!e.name.startsWith(base)) continue;
-    const rest = e.name.slice(base.length);
-    if (!STALE_SUFFIXES.some((sfx) => rest.startsWith(sfx))) continue;
-    const full = join(dir, e.name);
-    const st = await Deno.stat(full).catch(() => null);
-    if (!st) continue;
-    if (now - (st.mtime?.getTime() ?? 0) < minAge) continue;
-    try {
-      await Deno.remove(full, { recursive: true });
-      removed.push(e.name);
-    } catch { /* in use, or not ours to remove — never fatal at boot */ }
-  }
-  return removed;
 }
 
 /** Keep the `keep` newest files named `<prefix>*` in `dir`, delete the rest.
@@ -1660,6 +1937,7 @@ function findShell(): Shell | null {
     try {
       if (Deno.statSync(sh).isFile) {
         const real = Deno.realPathSync(sh);
+        // aio-ok: path-split — /bin/sh — POSIX only
         return { path: sh, name: real.slice(real.lastIndexOf("/") + 1) };
       }
     } catch {
@@ -1788,7 +2066,10 @@ export async function awaitPredecessor(
  *  updater downloads to `<install>.zip-<version>` — so every electron-zip update
  *  on Windows failed at unpack ("… is not a supported archive file format"),
  *  after downloading and verifying it. `dest` is always a fresh directory.
- *  Paths go into single-quoted PowerShell strings, where `'` is written `''`.
+ *  Paths go into single-quoted PowerShell strings, where `'` is written `''`
+ *  — and so is each typographic quote (U+2018, 2019, 201A, 201B): PowerShell
+ *  ends a single-quoted string at any of them, so a profile folder named
+ *  `Dan’s PC` cut the path short and ran the rest as code.
  *
  *  @internal exported for tests */
 export function unpackCommand(
@@ -1799,7 +2080,8 @@ export function unpackCommand(
   if (os !== "windows") {
     return { cmd: "unzip", args: ["-q", "-o", archive, "-d", dest] };
   }
-  const q = (s: string) => `'${s.replaceAll("'", "''")}'`;
+  const q = (s: string) =>
+    `'${s.replace(/['\u2018\u2019\u201A\u201B]/g, "$&$&")}'`;
   return {
     cmd: "powershell",
     args: [
@@ -1826,7 +2108,11 @@ export async function unpackArchive(
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   await Deno.mkdir(dest, { recursive: true });
   const { cmd: bin, args } = unpackCommand(Deno.build.os, archive, dest);
-  const cmd = new Deno.Command(bin, { args, stderr: "piped" });
+  const cmd = new Deno.Command(bin, {
+    args,
+    cwd: neutralCwd(),
+    stderr: "piped",
+  });
   try {
     const out = await cmd.output();
     if (!out.success) {
@@ -1928,6 +2214,22 @@ export function swapDirectoryDetached(opts: {
   ) => void;
 }): { previous: string } {
   const previous = `${opts.current}.old-${opts.fromVersion}`;
+  // The helper removes whatever is at `previous`, then moves the running
+  // version there. Written down first as an INTENT (`moving`): the record
+  // keeps saying what is at `previous` now — a copy of ours that a held file
+  // stops the helper from deleting stays ours — until the move is seen. And
+  // refused here when something of the user's has that name.
+  if (opts.pending) {
+    record(opts.pending.dataDir, previous, "dir", {
+      role: "kept",
+      is: identity(opts.current),
+      moving: true,
+    });
+  }
+  // An install extracted by the Windows one-click `.exe`: the tree going in
+  // answers to the same stamp, an update and a rollback alike.
+  if (opts.pending) repairSfxStamp(opts.current, opts.pending.dataDir);
+  carrySfxStamp(opts.current, opts.staged);
   if (opts.pending) {
     writePending(opts.pending.dataDir, {
       from: opts.pending.from,
@@ -1936,12 +2238,14 @@ export function swapDirectoryDetached(opts: {
       previous,
       backup: opts.pending.backup,
       fromExe: opts.pending.exe,
+      sha256: opts.pending.sha256,
+      releasedAt: opts.pending.releasedAt,
       attempts: 0,
       startedAt: new Date().toISOString(),
     });
     const token = firstBootPath(opts.pending.dataDir);
     Deno.copyFileSync(pendingPath(opts.pending.dataDir), `${token}.tmp`);
-    Deno.renameSync(`${token}.tmp`, token);
+    renameOverSync(`${token}.tmp`, token);
   }
   const spawn = opts.spawn ??
     ((cmd, args, extra) => spawnSwapHelper(cmd, args, extra));
@@ -1967,7 +2271,18 @@ export function swapDirectoryDetached(opts: {
     Deno.chmodSync(scriptPath, 0o700);
   }
   const spec = _swapSpec(Deno.build.os, values, scriptPath);
-  spawn(spec.cmd, spec.args, { env: spec.env, cwd: spec.cwd });
+  try {
+    spawn(spec.cmd, spec.args, { env: spec.env, cwd: spec.cwd });
+  } catch (e) {
+    // Written here, so removed here unless the helper started: it removes
+    // itself first thing, and a helper that never ran never will.
+    if (scriptPath) {
+      try {
+        Deno.removeSync(scriptPath);
+      } catch { /* aio-ok: the spawn's own error is the one that matters */ }
+    }
+    throw e;
+  }
   return { previous };
 }
 
@@ -2111,26 +2426,43 @@ rm -f "$0"
 # undoes the first at once — a SIGKILL or a power loss mid-retry must never
 # leave no app, since nothing inside the install can repair it.
 # 0 = done; 1 = "$1" could not be moved aside; 3 = "$2" could not go in (the
-# first move undone); 2 = stuck half-way.
+# first move undone); 4 = exchanged, but what was at "$1" could not go to "$3"
+# (exchanged back: nothing moved); 2 = stuck half-way. "$held" is what the
+# plain move that failed last said (an exchange is not asked: where mv has
+# none it complains about the option, and the plain move that follows gives
+# the real reason). After an exchange nothing is retried: each further try
+# would put the other version at the install's name for a moment.
+held=""
 swap_in() {
   i=0; r=1
   while :; do
     if mv -T --exchange "$2" "$1" 2>/dev/null; then
-      mv "$2" "$3" 2>/dev/null && return 0
-      mv -T --exchange "$2" "$1" 2>/dev/null || return 2
-    elif mv "$1" "$3" 2>/dev/null; then
+      held=$(mv "$2" "$3" 2>&1) && return 0
+      mv -T --exchange "$2" "$1" 2>/dev/null && return 4
+      return 2
+    elif held=$(mv "$1" "$3" 2>&1); then
       r=3
-      mv "$2" "$1" 2>/dev/null && return 0
+      held=$(mv "$2" "$1" 2>&1) && return 0
       mv "$3" "$1" 2>/dev/null || return 2
     fi
     i=$((i + 1)); [ "$i" -lt 50 ] || return "$r"; sleep 0.2
   done
 }
 # The swap could not be made: the first-boot token becomes the failed record,
-# with why, so the next boot says it and does not install it again in a loop.
+# with why, so the next boot says it and counts it (it is offered again until
+# it has failed this way three times in a row).
 note() {
   [ -n "$token" ] && [ -f "$token" ] || return 0
-  { printf '{\\n  "swapFailed": "%s",' "$1"; tail -c +2 "$token"; } >"$failed.tmp" && mv -f "$failed.tmp" "$failed" && rm -f "$token" "$mark"
+  { printf '{\\n  "swapFailed": "%s",' "$(because "$1")"; tail -c +2 "$token"; } >"$failed.tmp" && mv -f "$failed.tmp" "$failed" && rm -f "$token" "$mark"
+}
+# "$1", and what the command that failed said: one line, at most 300 bytes,
+# and nothing that would end the JSON string it is written into.
+because() {
+  if [ -n "$held" ]; then
+    printf '%s (%s)' "$1" "$(printf '%s' "$held" | head -c 300)"
+  else
+    printf '%s' "$1"
+  fi | tr '\\001-\\037' ' ' | tr '"\\\\' "'/"
 }
 # Start the install in place — or, when no move could put one there, whichever
 # copy is left, the old one first, with the launcher and every argument that
@@ -2162,7 +2494,7 @@ start() {
 # install is started.
 unrolled() {
   why="$1"; shift
-  { printf '{\\n  "rollbackFailed": "%s",' "$why"; tail -c +2 "$failed"; } >"$failed.tmp" && mv -f "$failed.tmp" "$failed"
+  { printf '{\\n  "rollbackFailed": "%s",' "$(because "$why")"; tail -c +2 "$failed"; } >"$failed.tmp" && mv -f "$failed.tmp" "$failed"
   start "$@"
 }
 # The new version claimed the rollback the aio <= 1.0.12 way: that build never
@@ -2175,14 +2507,21 @@ claimed() {
   [ "$a" != "$b" ]
 }
 while kill -0 "$pid" 2>/dev/null; do sleep 0.2; done
-rm -rf "$prev"
-r=1
-[ -e "$prev" ] || { swap_in "$cur" "$new" "$prev"; r=$?; }
+held=$(rm -rf "$prev" 2>&1)
+r=5
+[ -e "$prev" ] || [ -L "$prev" ] || { swap_in "$cur" "$new" "$prev"; r=$?; }
 case "$r" in
   0) ;;
+  5) note "an earlier copy of the app ($prev) could not be removed"
+     rm -rf "$new"
+     exec "$launch" "$@" ;;
   1) note "the running version could not be moved aside"
+     rm -rf "$new"
      exec "$launch" "$@" ;;
   3) note "the new version could not be moved into place"
+     rm -rf "$new"
+     exec "$launch" "$@" ;;
+  4) note "the version it replaces could not be set aside"
      rm -rf "$new"
      exec "$launch" "$@" ;;
   *) note "the new version could not be moved into place, nor the old one back"
@@ -2218,7 +2557,7 @@ rm -f "$mark"
 swap_in "$cur" "$prev" "$new"
 case "$?" in
   0) ;;
-  1) unrolled "the new version could not be moved out of the way" "$@" ;;
+  1|4) unrolled "the new version could not be moved out of the way" "$@" ;;
   3) unrolled "the old version could not be moved back into place" "$@" ;;
   *) unrolled "the old version could not be moved back into place, nor the new one" "$@" ;;
 esac
@@ -2241,6 +2580,10 @@ const WIN_SWAP_PS1 = `$ErrorActionPreference = 'Stop'
 # means the updater gave up waiting and kept its version: nothing to do.
 $go = $env:AIO_SWAP_GO
 if ($go) { try { [IO.File]::Move($go, $go + '.run') } catch { exit 0 }; try { [IO.File]::Delete($go + '.run') } catch {} }
+# From here on, whatever goes wrong, the script does not end with no app while
+# a copy exists: the catch at the bottom starts one.
+$script:started = $false
+try {
 $p = [int]$env:AIO_SWAP_PID
 $cur = $env:AIO_SWAP_CUR
 $prev = $env:AIO_SWAP_PREV
@@ -2253,23 +2596,26 @@ $wait = [int]$env:AIO_SWAP_WAIT
 $n = [int]$env:AIO_SWAP_ARGC
 $argv = @(for ($i = 0; $i -lt $n; $i++) { [Environment]::GetEnvironmentVariable("AIO_SWAP_ARG_$i") })
 Get-ChildItem Env: | Where-Object { $_.Name -like 'AIO_SWAP_*' } | ForEach-Object { Remove-Item -LiteralPath ("Env:" + $_.Name) }
-function Start-App {
+function Start-App($l) {
+  if (-not $l) { $l = $launch }
   $q = @($argv | ForEach-Object { '"' + (($_ -replace '(\\\\*)"', '$1$1\\"') -replace '(\\\\+)$', '$1$1') + '"' })
   $si = New-Object System.Diagnostics.ProcessStartInfo
   $si.FileName = 'cmd.exe'
-  $si.Arguments = '/d /s /c "' + ((@('"' + [IO.Path]::GetFileName($launch) + '"') + $q) -join ' ') + '"'
-  $si.WorkingDirectory = [IO.Path]::GetDirectoryName($launch)
+  $si.Arguments = '/d /s /c "' + ((@('"' + [IO.Path]::GetFileName($l) + '"') + $q) -join ' ') + '"'
+  $si.WorkingDirectory = [IO.Path]::GetDirectoryName($l)
   $si.UseShellExecute = $false
   $si.CreateNoWindow = $true
   [void][System.Diagnostics.Process]::Start($si)
+  $script:started = $true
 }
 # The install in place — or, when no move could put one there, whichever copy
 # is left, the old one first. Never no app while a copy exists.
 function Start-Any {
   foreach ($d in @($cur, $prev, $new)) {
     if (-not [IO.Directory]::Exists($d)) { continue }
-    if ($launch.StartsWith($cur + '\\', [StringComparison]::OrdinalIgnoreCase)) { $script:launch = $d + $launch.Substring($cur.Length) }
-    Start-App; return
+    $l = $launch
+    if ($launch.StartsWith($cur + '\\', [StringComparison]::OrdinalIgnoreCase)) { $l = $d + $launch.Substring($cur.Length) }
+    Start-App $l; return
   }
 }
 # Read without locking: a new build renames or deletes these files while the
@@ -2300,22 +2646,42 @@ function Move-Dir($a, $b) {
 # empty through a retry, which a kill or a power loss would make permanent
 # (nothing inside the install can repair it). 0 = done; 1 = $a could not be
 # moved aside; 3 = $b could not go in (the first move undone); 2 = stuck.
-function Swap-In($a, $b, $c) {
+# $tries x 200 ms: the wait is for the FOLDER to become movable, whoever holds
+# it - a process that merely has its working directory inside is on no list.
+function Swap-In($a, $b, $c, $tries) {
   $r = 1
-  for ($i = 0; $i -lt 50; $i++) {
+  for ($i = 0; $i -lt $tries; $i++) {
     if ($i -gt 0) { Start-Sleep -Milliseconds 200 }
-    try { [IO.Directory]::Move($a, $c) } catch { continue }
+    try { [IO.Directory]::Move($a, $c) } catch { $script:held = $_.Exception.GetBaseException().Message; continue }
     $r = 3
-    try { [IO.Directory]::Move($b, $a); return 0 } catch {}
+    try { [IO.Directory]::Move($b, $a); return 0 } catch { $script:held = $_.Exception.GetBaseException().Message }
     if (-not (Move-Dir $c $a)) { return 2 }
   }
   return $r
 }
+# Why the install could not be moved, for the record the next boot reads: what
+# Windows said, and (best effort) every process that runs from the install or
+# was started with its path. One that only has its working directory inside
+# cannot be listed cheaply, so that case is named instead.
+function Get-Held {
+  if (-not $script:held) { return '' }
+  $who = 'no process runs from it or was started with its path - a program whose working directory is inside it, an open Explorer window or an antivirus scan can hold it'
+  try {
+    $n = @(Get-CimInstance Win32_Process | Where-Object { ($_.ExecutablePath -and $_.ExecutablePath.StartsWith($cur + '\\', [StringComparison]::OrdinalIgnoreCase)) -or ($_.CommandLine -and $_.CommandLine.IndexOf($cur, [StringComparison]::OrdinalIgnoreCase) -ge 0) } | ForEach-Object { $_.Name + ' (pid ' + $_.ProcessId + ')' })
+    if ($n.Count -gt 0) {
+      $who = 'still running from it or started with its path: ' + (@($n | Select-Object -First 8) -join ', ')
+      if ($n.Count -gt 8) { $who = $who + ' and ' + ($n.Count - 8) + ' more' }
+      $who = $who + ' - a program whose working directory is inside it holds it too, and is on no list'
+    }
+  } catch {}
+  return ' after 30 s (' + $script:held + ' ' + $who + ')'
+}
+function Get-JsonText($s) { (($s -replace '\\\\', '\\\\') -replace '"', '\\"') -replace '[\\x00-\\x1f]', ' ' }
 function Write-Failed($why) {
   if (-not $token -or -not [IO.File]::Exists($token)) { return }
   try {
     $j = Read-Shared $token
-    [IO.File]::WriteAllText($failed + '.tmp', '{' + [char]10 + '  "swapFailed": "' + $why + '",' + $j.Substring(1))
+    [IO.File]::WriteAllText($failed + '.tmp', '{' + [char]10 + '  "swapFailed": "' + (Get-JsonText $why) + '",' + $j.Substring(1))
     if ([IO.File]::Exists($failed)) { [IO.File]::Delete($failed) }
     [IO.File]::Move($failed + '.tmp', $failed)
     [IO.File]::Delete($token)
@@ -2331,13 +2697,27 @@ function Set-Unrolled($why) {
   } catch {}
   Start-Any
 }
-function Remove-Dir($d) { try { Remove-Item -LiteralPath $d -Recurse -Force } catch {} }
+# Remove a tree WITHOUT following links: a junction or a symbolic link in it is
+# removed as the link it is - "Remove-Item -Recurse" on Windows PowerShell 5.1
+# goes through one and deletes what it points at. Read-only files go too.
+function Remove-Tree($d) {
+  if ([IO.File]::Exists($d)) { [IO.File]::SetAttributes($d, 'Normal'); [IO.File]::Delete($d); return }
+  $i = New-Object IO.DirectoryInfo($d)
+  if (-not $i.Exists) { return }
+  if (-not ($i.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+    foreach ($e in $i.GetFileSystemInfos()) { Remove-Tree $e.FullName }
+    $i.Attributes = 'Directory'
+  }
+  $i.Delete()
+}
+function Remove-Dir($d) { try { Remove-Tree $d } catch { $script:held = $_.Exception.GetBaseException().Message } }
+function Test-There($d) { [IO.Directory]::Exists($d) -or [IO.File]::Exists($d) }
 while (Get-Process -Id $p -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }
-for ($i = 0; $i -lt 150 -and (Get-Running).Count -gt 0; $i++) { Start-Sleep -Milliseconds 200 }
-if (Test-Path -LiteralPath $prev) { Remove-Dir $prev }
-$r = 1
-if (-not (Test-Path -LiteralPath $prev)) { $r = Swap-In $cur $new $prev }
-if ($r -eq 1) { Write-Failed 'the running version could not be moved aside'; Start-App; exit 1 }
+for ($i = 0; $i -lt 150 -and @(Get-Running).Count -gt 0; $i++) { Start-Sleep -Milliseconds 200 }
+if (Test-There $prev) { Remove-Dir $prev }
+if (Test-There $prev) { Write-Failed ('an earlier copy of the app (' + $prev + ') could not be removed: ' + $script:held); Remove-Dir $new; Start-App; exit 1 }
+$r = Swap-In $cur $new $prev 150
+if ($r -eq 1) { Write-Failed ('the running version could not be moved aside' + (Get-Held)); Remove-Dir $new; Start-App; exit 1 }
 if ($r -eq 3) { Write-Failed 'the new version could not be moved into place'; Remove-Dir $new; Start-App; exit 1 }
 if ($r -eq 2) { Write-Failed 'the new version could not be moved into place, nor the old one back'; Start-Any; exit 1 }
 if (-not $token -or -not [IO.File]::Exists($token)) { Start-App; exit 0 }
@@ -2350,17 +2730,22 @@ for ($i = 0; $i -lt $wait; $i++) {
 Remove-File $failed
 try { [IO.File]::Move($token, $failed) } catch { exit 0 }
 if (Test-Claimed $failed) { Remove-File $failed; exit 0 }
+$script:started = $false
 for ($i = 0; $i -lt 50; $i++) {
-  $ps = Get-Running
+  $ps = @(Get-Running)
   if ($ps.Count -eq 0) { break }
   $ps | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
   Start-Sleep -Milliseconds 200
 }
 Remove-File $mark
-$r = Swap-In $cur $prev $new
+$r = Swap-In $cur $prev $new 50
 if ($r -eq 1) { Set-Unrolled 'the new version could not be moved out of the way'; exit 1 }
 if ($r -eq 3) { Set-Unrolled 'the old version could not be moved back into place'; exit 1 }
 if ($r -eq 2) { Set-Unrolled 'the old version could not be moved back into place, nor the new one'; exit 1 }
 Remove-Dir $new
 Start-App
+} catch {
+  if (-not $script:started) { try { Start-Any } catch {} }
+  exit 1
+}
 `;

@@ -1001,9 +1001,12 @@ from a cell, supersession, cancel, and the `.server.ts` boundary — and
 For the desktop pattern "reveal in file manager" / "open in browser", don't
 re-derive the per-OS launcher — `openExternal(target)` from `aio/server` covers
 files, folders and URLs (`open`/`start`/`xdg-open`), and rejects loudly when the
-desktop refuses. The other direction — "let the user CHOOSE a path" — is
-`pickFile()` / `pickDirectory()`, and a child process you can stream, pause and
-cancel as a tree is `spawn()`. Both are on `aio/server`; see
+desktop refuses. A relative path is resolved against the app's working
+directory; on Windows the program that opens it starts in the Windows directory
+instead, so that it never holds the install folder an update has to move. The
+other direction — "let the user CHOOSE a path" — is `pickFile()` /
+`pickDirectory()`, and a child process you can stream, pause and cancel as a
+tree is `spawn()`. Both are on `aio/server`; see
 [desktop jobs](../clients/desktop-jobs.md).
 
 ## Guard lines — machine states without a machine

@@ -3,24 +3,14 @@
 // offline.
 //
 // This is a PREBUILT binary, committed at
-// ../prebuilt/aio-windows-sfx-stub-amd64.exe, so building the one-click `.exe`
-// needs no Go toolchain. Rebuild it ONLY when this source changes:
-//
-//   GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
-//     go build -ldflags="-s -w -H windowsgui" \
-//     -o ../prebuilt/aio-windows-sfx-stub-amd64.exe .
+// prebuilt/aio-windows-sfx-stub-amd64.exe, so building the one-click `.exe`
+// needs no Go toolchain. Rebuild it ONLY when this source changes — the exact
+// command, the pinned Go version and the SHA-256 to update are in README.md.
 //
 // The payload is a zstd-compressed tar of the AppDir, packed in Deno
-// (`packAppDirTarZstd` in ../../build-windows-exe.ts), ~20% smaller than the
+// (`packAppDirTarZstd` in ../build-windows-exe.ts), ~15% smaller than the
 // old deflate zip and faster to decompress. "zip" is still accepted for
-// artifacts packed before the change.
-//
-// Trailer layout (end of file):
-//   [payload bytes]
-//   [JSON header]
-//   [u32 LE header length]
-//   [u64 LE payload length]
-//   [8 magic "AIOSFX02"]
+// artifacts packed before the change. The trailer is described in format.go.
 //
 //go:build windows
 
@@ -28,20 +18,28 @@ package main
 
 import (
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"unsafe"
 )
 
+// How long a launch waits for another one that is extracting. First extraction
+// of a large app under an antivirus scan takes a while; past this it says so.
+const lockWaitMs = 10 * 60 * 1000
+
 func main() {
+	// A Windows mutex belongs to the THREAD that waited for it, and a goroutine
+	// moves between threads (it does during extraction): released from another
+	// thread, the install lock stayed held until this process exited.
+	runtime.LockOSThread()
 	if err := run(); err != nil {
 		showError(err.Error())
 		os.Exit(1)
@@ -68,52 +66,12 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	size := st.Size()
-	if size < 8+8+4 {
-		return fmt.Errorf("SFX too small (%d bytes) — not an aio Windows installer", size)
-	}
-
-	mag := make([]byte, 8)
-	if _, err := f.ReadAt(mag, size-8); err != nil {
+	hdr, payloadOff, payloadLen, err := readTrailer(f, st.Size())
+	if err != nil {
 		return err
 	}
-	if string(mag) != magic {
-		return fmt.Errorf("not an aio SFX (missing %s trailer)", magic)
-	}
 
-	var payloadLen uint64
-	var hdrLen uint32
-	if err := binary.Read(io.NewSectionReader(f, size-8-8, 8), binary.LittleEndian, &payloadLen); err != nil {
-		return err
-	}
-	if err := binary.Read(io.NewSectionReader(f, size-8-8-4, 4), binary.LittleEndian, &hdrLen); err != nil {
-		return err
-	}
-	if payloadLen == 0 || hdrLen == 0 || hdrLen > 1<<20 {
-		return fmt.Errorf("corrupt SFX trailer (payloadLen=%d hdrLen=%d)", payloadLen, hdrLen)
-	}
-	hdrOff := size - 8 - 8 - 4 - int64(hdrLen)
-	payloadOff := hdrOff - int64(payloadLen)
-	if payloadOff < 0 || hdrOff < 0 {
-		return fmt.Errorf("corrupt SFX sizes")
-	}
-
-	hdrBytes := make([]byte, hdrLen)
-	if _, err := f.ReadAt(hdrBytes, hdrOff); err != nil {
-		return err
-	}
-	var hdr header
-	if err := json.Unmarshal(hdrBytes, &hdr); err != nil {
-		return fmt.Errorf("SFX header: %w", err)
-	}
-	if hdr.Binary == "" || hdr.SHA256 == "" || hdr.Arch == "" {
-		return fmt.Errorf("SFX header incomplete")
-	}
-	if hdr.Format == "" {
-		hdr.Format = "zip" // pre-AIOSFX02 headers carried a zip
-	}
-
-	payload := io.NewSectionReader(f, payloadOff, int64(payloadLen))
+	payload := io.NewSectionReader(f, payloadOff, payloadLen)
 	h := sha256.New()
 	if _, err := io.Copy(h, payload); err != nil {
 		return fmt.Errorf("hash payload: %w", err)
@@ -128,51 +86,37 @@ func run() error {
 		base = os.TempDir()
 	}
 	installDir := filepath.Join(base, "aio-sfx", hdr.Binary, "win-"+hdr.Arch)
-	stampPath := filepath.Join(installDir, ".aio-sfx-stamp")
 	inner := filepath.Join(installDir, hdr.Binary+".exe")
 	electron := filepath.Join(installDir, "electron", "electron.exe")
 
-	needExtract := true
-	if prev, err := os.ReadFile(stampPath); err == nil &&
-		strings.EqualFold(strings.TrimSpace(string(prev)), hdr.SHA256) {
-		if fileExists(inner) && fileExists(electron) {
-			needExtract = false
-		}
+	// One launch at a time checks, extracts and stamps: a second double-click
+	// during the first extraction waits here, then finds the stamp and only
+	// launches.
+	unlock, err := lockInstall(installDir, hdr.Binary)
+	if err != nil {
+		return err
 	}
-
-	if needExtract {
-		stage := installDir + ".incoming"
-		_ = os.RemoveAll(stage)
-		if err := os.MkdirAll(stage, 0o755); err != nil {
+	err = ensureInstalled(installDir, hdr.SHA256, hdr.Binary, func(stage string) error {
+		if _, err := payload.Seek(0, io.SeekStart); err != nil {
 			return err
 		}
-		payload.Seek(0, io.SeekStart)
-		var exErr error
 		switch hdr.Format {
 		case "tar.zstd":
-			exErr = extractTarZstd(payload, stage)
+			return extractTarZstd(payload, stage)
 		case "zip":
-			exErr = extractZip(payload, int64(payloadLen), stage)
-		default:
-			exErr = fmt.Errorf("unknown payload format %q", hdr.Format)
+			return extractZip(payload, payloadLen, stage)
 		}
-		if exErr != nil {
-			_ = os.RemoveAll(stage)
-			return fmt.Errorf("extract: %w", exErr)
-		}
-		// Replace install dir atomically-ish: remove old, rename stage.
-		_ = os.RemoveAll(installDir)
-		if err := os.Rename(stage, installDir); err != nil {
-			// Cross-volume fallback
-			if err2 := copyDir(stage, installDir); err2 != nil {
-				_ = os.RemoveAll(stage)
-				return fmt.Errorf("install: %w / %v", err, err2)
-			}
-			_ = os.RemoveAll(stage)
-		}
-		if err := os.WriteFile(stampPath, []byte(hdr.SHA256+"\n"), 0o644); err != nil {
-			return err
-		}
+		return fmt.Errorf("unknown payload format %q", hdr.Format)
+	})
+	unlock()
+	var busy *inUseError
+	if errors.As(err, &busy) {
+		return fmt.Errorf("%s is running, so this version cannot be installed over it.\n\n"+
+			"Close %s, then open this file again. Nothing was changed.\n\n(%v)",
+			hdr.Binary, hdr.Binary, busy.err)
+	}
+	if err != nil {
+		return err
 	}
 
 	if !fileExists(inner) {
@@ -194,43 +138,40 @@ func run() error {
 	return nil
 }
 
-func fileExists(p string) bool {
-	st, err := os.Stat(p)
-	return err == nil && !st.IsDir()
-}
+var kernel32 = syscall.NewLazyDLL("kernel32.dll")
 
-func copyDir(src, dst string) error {
-	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
+// lockInstall takes the named mutex of one install directory and returns its
+// release. The name is derived from the directory, which is per user, so two
+// users (or two apps) never wait on each other. A mutex abandoned by a stub
+// that died is acquired like a free one — ensureInstalled repairs what that
+// stub left.
+func lockInstall(installDir, binary string) (func(), error) {
+	sum := sha256.Sum256([]byte(strings.ToLower(installDir)))
+	name, err := syscall.UTF16PtrFromString("Global\\aio-sfx-" + hex.EncodeToString(sum[:16]))
+	if err != nil {
+		return nil, err
+	}
+	h, _, callErr := kernel32.NewProc("CreateMutexW").Call(0, 0, uintptr(unsafe.Pointer(name)))
+	if h == 0 {
+		return nil, fmt.Errorf("install lock: %v", callErr)
+	}
+	const waitObject0, waitAbandoned = 0, 0x80
+	r, _, callErr := kernel32.NewProc("WaitForSingleObject").Call(h, lockWaitMs)
+	if r != waitObject0 && r != waitAbandoned {
+		syscall.CloseHandle(syscall.Handle(h))
+		if r == uintptr(syscall.WAIT_TIMEOUT) {
+			return nil, fmt.Errorf("another copy of this file is still installing %s — try again in a moment", binary)
 		}
-		rel, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
+		return nil, fmt.Errorf("install lock: %v", callErr)
+	}
+	return func() {
+		// Not fatal — the lock goes when this process exits — but a launch
+		// waiting on it waits that long, so it is said.
+		if ok, _, callErr := kernel32.NewProc("ReleaseMutex").Call(h); ok == 0 {
+			fmt.Fprintf(os.Stderr, "aio SFX: install lock not released: %v\n", callErr)
 		}
-		target := filepath.Join(dst, rel)
-		if info.IsDir() {
-			return os.MkdirAll(target, 0o755)
-		}
-		in, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		defer in.Close()
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return err
-		}
-		out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode())
-		if err != nil {
-			return err
-		}
-		_, copyErr := io.Copy(out, in)
-		closeErr := out.Close()
-		if copyErr != nil {
-			return copyErr
-		}
-		return closeErr
-	})
+		syscall.CloseHandle(syscall.Handle(h))
+	}, nil
 }
 
 func showError(msg string) {

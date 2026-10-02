@@ -1,14 +1,24 @@
 // updates-apply.test.ts — the swap must leave the app runnable at every point,
 // and a build that cannot come up must put itself back.
-import { assert, assertEquals } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertMatch,
+  assertRejects,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
 import { join } from "@std/path";
 import {
+  _swapDeps,
   awaitPredecessor,
   clearPending,
   installDir,
   judgePending,
   launchArtifactPath,
+  madeByOlderUpdater,
   MAX_BOOT_ATTEMPTS,
+  pendingPath,
   type PendingUpdate,
   pruneKeepingNewest,
   pruneOld,
@@ -19,11 +29,18 @@ import {
   swapArtifact,
   swapDirectoryDetached,
   swapStrategy,
-  sweepStaleSwaps,
   unpackArchive,
   unpackCommand,
   writePending,
 } from "../src/server/updates-apply.ts";
+import {
+  identity,
+  isOwn,
+  made,
+  ownedPath,
+  readOwned,
+  record,
+} from "../src/server/updates-owned.ts";
 
 /** A real, runnable program that prints `body` and exits 0 — so a swap under
  *  test is a swap of something that actually runs, which is what the smoke test
@@ -299,24 +316,55 @@ Deno.test("smoke test: a program that cannot be spawned is refused, by its reaso
   if (!r.ok) assert(r.error.includes("cannot be executed"), r.error);
 });
 
-Deno.test("swap: pruning keeps the N newest rollback targets", async () => {
+/** Make `path` the way the updater does: on record in `data` first. */
+async function keptAside(
+  data: string,
+  path: string,
+  kind: "file" | "dir",
+  day: number,
+): Promise<void> {
+  record(data, path, kind, { role: "kept" });
+  if (kind === "dir") await Deno.mkdir(path);
+  else await Deno.writeTextFile(path, "an old version");
+  made(data, path);
+  // Distinct mtimes so "newest" is well-defined.
+  const t = new Date(2026, 0, day);
+  await Deno.utime(path, t, t);
+}
+
+Deno.test("swap: pruning keeps the N newest rollback targets — of the ones the updater made", async () => {
   const dir = await tmp();
+  const data = await tmp();
   try {
     const current = join(dir, "app");
-    await Deno.writeTextFile(current, "v4");
+    await Deno.writeTextFile(current, "this version");
     for (const [i, v] of ["1.0.0", "2.0.0", "3.0.0"].entries()) {
-      const p = `${current}.old-${v}`;
-      await Deno.writeTextFile(p, v);
-      // Distinct mtimes so "newest" is well-defined.
-      const t = new Date(2026, 0, 1 + i);
-      await Deno.utime(p, t, t);
+      await keptAside(data, `${current}.old-${v}`, "file", 1 + i);
     }
-    await pruneOld(current, 2);
+    // Not on the record: a file of the user's under the same prefix, and two
+    // that look like old versions — one the very same kind of file as the
+    // running one (another program of the same format), and the oldest of
+    // all. None is counted, none is touched.
+    await Deno.writeTextFile(`${current}.old-photos`, "holiday");
+    await Deno.writeTextFile(`${current}.old-0.5.0`, "my notes on 0.5.0");
+    await Deno.writeTextFile(`${current}.old-0.9.0`, "this was 0.9.0");
+    const t = new Date(2025, 0, 1);
+    await Deno.utime(`${current}.old-0.9.0`, t, t);
+
+    await pruneOld(current, 2, data);
 
     const left = [...Deno.readDirSync(dir)].map((e) => e.name).sort();
-    assertEquals(left, ["app", "app.old-2.0.0", "app.old-3.0.0"]);
+    assertEquals(left, [
+      "app",
+      "app.old-0.5.0",
+      "app.old-0.9.0",
+      "app.old-2.0.0",
+      "app.old-3.0.0",
+      "app.old-photos",
+    ]);
   } finally {
     await Deno.remove(dir, { recursive: true });
+    await Deno.remove(data, { recursive: true });
   }
 });
 
@@ -468,6 +516,34 @@ Deno.test("directory swap: a path with a space and a quote survives it", async (
     assert(out.success, new TextDecoder().decode(out.stderr));
     assertEquals(await Deno.readTextFile(join(current, "VERSION")), "2.0.0");
     assertEquals(await Deno.readTextFile(join(previous, "VERSION")), "1.0.0");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("directory swap: a helper that cannot be started leaves no script behind", async () => {
+  if (Deno.build.os === "windows") return; // no script file there
+  const dir = await tmp();
+  try {
+    const current = join(dir, "MyApp");
+    await Deno.mkdir(current);
+    await Deno.mkdir(`${current}.staged-2.0.0`);
+    let script = "";
+    assertThrows(
+      () =>
+        swapDirectoryDetached({
+          current,
+          staged: `${current}.staged-2.0.0`,
+          fromVersion: "1.0.0",
+          spawn: (_c, args) => {
+            script = args[0]!;
+            throw new Deno.errors.PermissionDenied("blocked by policy");
+          },
+        }),
+      Deno.errors.PermissionDenied,
+    );
+    assertMatch(script, /aio-swap-.*\.sh$/);
+    assertThrows(() => Deno.lstatSync(script), Deno.errors.NotFound);
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
@@ -751,41 +827,42 @@ Deno.test("swap: a refused artifact leaves no marker at all", async () => {
   }
 });
 
-Deno.test("sweep: interrupted-swap leftovers are removed, live ones are not", async () => {
-  // `.old-` is the rollback and stays. `.new-`, `.staged-` and `.zip-` are
-  // debris nothing ever removed — on the electron-zip target, one full unpacked
-  // install per interrupted attempt.
-  const dir = await tmp();
-  try {
-    const current = join(dir, "app");
-    await Deno.writeTextFile(current, "v1");
-    const old = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    for (const n of ["app.new-2.0.0", "app.zip-2.0.0", "app.rollback"]) {
-      await Deno.writeTextFile(join(dir, n), "x");
-      await Deno.utime(join(dir, n), old, old);
-    }
-    // A whole staged DIRECTORY, which is the electron-zip case.
-    await Deno.mkdir(join(dir, "app.staged-2.0.0"));
-    await Deno.writeTextFile(join(dir, "app.staged-2.0.0", "f"), "x");
-    await Deno.utime(join(dir, "app.staged-2.0.0"), old, old);
-    // A swap happening RIGHT NOW must not be deleted out from under itself.
-    await Deno.writeTextFile(join(dir, "app.new-3.0.0"), "live");
-    // The rollback is not debris.
-    await Deno.writeTextFile(join(dir, "app.old-1.0.0"), "keep");
-    await Deno.utime(join(dir, "app.old-1.0.0"), old, old);
+Deno.test({
+  name:
+    "prune: what it deletes leaves the record in the same step — one it cannot delete stays on it",
+  ignore: Deno.build.os === "windows", // a read-only folder is the held file
+  fn: async () => {
+    const dir = await tmp();
+    const data = await tmp();
+    const held = join(dir, "MyApp.old-1.0.0", "held");
+    try {
+      const current = join(dir, "MyApp");
+      await Deno.writeTextFile(current, "the running build");
+      const old = ["1.0.0", "2.0.0", "3.0.0", "4.0.0"].map((v) =>
+        `${current}.old-${v}`
+      );
+      for (const [i, p] of old.entries()) {
+        await keptAside(data, p, "dir", 1 + i);
+      }
+      // The oldest cannot be deleted: a folder in it nobody may empty.
+      await Deno.mkdir(held);
+      await Deno.writeTextFile(join(held, "f"), "x");
+      await Deno.chmod(held, 0o500);
+      const t = new Date(2026, 0, 1);
+      await Deno.utime(old[0]!, t, t);
 
-    const removed = await sweepStaleSwaps(current);
-    assertEquals(removed.sort(), [
-      "app.new-2.0.0",
-      "app.rollback",
-      "app.staged-2.0.0",
-      "app.zip-2.0.0",
-    ]);
-    const left = [...Deno.readDirSync(dir)].map((e) => e.name).sort();
-    assertEquals(left, ["app", "app.new-3.0.0", "app.old-1.0.0"]);
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
+      await pruneOld(current, 1, data);
+      assertEquals(
+        [...Deno.readDirSync(dir)].map((e) => e.name).sort(),
+        ["MyApp", "MyApp.old-1.0.0", "MyApp.old-4.0.0"],
+      );
+      assertEquals(readOwned(data).map((e) => e.path), [old[0], old[3]]);
+    } finally {
+      await Deno.chmod(held, 0o700).catch(() => {});
+      await Deno.remove(dir, { recursive: true });
+      await Deno.remove(data, { recursive: true });
+    }
+  },
 });
 
 Deno.test("prune: `.old-` DIRECTORIES are pruned too, not just files", async () => {
@@ -793,21 +870,53 @@ Deno.test("prune: `.old-` DIRECTORIES are pruned too, not just files", async () 
   // directories meant that target leaked one complete copy of the app per
   // update, forever — nothing failed, the disk just filled.
   const dir = await tmp();
+  const data = await tmp();
   try {
     const current = join(dir, "MyApp");
-    await Deno.mkdir(current);
+    await Deno.mkdir(join(current, "electron"), { recursive: true });
+    const launcher = Deno.build.os === "windows" ? "run.bat" : "run.sh";
+    await Deno.writeTextFile(join(current, launcher), "start MyApp");
     for (const [i, v] of ["1.0.0", "2.0.0", "3.0.0"].entries()) {
-      const p = `${current}.old-${v}`;
-      await Deno.mkdir(p);
-      await Deno.writeTextFile(join(p, "VERSION"), v);
-      const t = new Date(2026, 0, 1 + i);
-      await Deno.utime(p, t, t);
+      await keptAside(data, `${current}.old-${v}`, "dir", 1 + i);
     }
-    await pruneOld(current, 1);
+    // A folder of the user's, and a copy of this very app somebody made by
+    // hand (its launcher, an electron/ folder, a file of their own) — the
+    // oldest. On no record: not counted, not touched.
+    await Deno.mkdir(`${current}.old-projects`);
+    await Deno.writeTextFile(join(`${current}.old-projects`, "f"), "mine");
+    const legacy = `${current}.old-0.9.0`;
+    await Deno.mkdir(join(legacy, "electron"), { recursive: true });
+    await Deno.writeTextFile(join(legacy, launcher), "start MyApp");
+    await Deno.writeTextFile(join(legacy, "my-config.json"), "{}");
+    const t = new Date(2025, 0, 1);
+    await Deno.utime(legacy, t, t);
+    // A link of the user's to this very app is a link, not a copy of it.
+    const posix = Deno.build.os !== "windows";
+    if (posix) await Deno.symlink(current, `${current}.old-0.8.0`);
+    assertEquals(
+      [legacy, `${current}.old-0.8.0`, `${current}.old-projects`].map((p) =>
+        madeByOlderUpdater(p, current)
+      ),
+      [true, false, false],
+    );
+
+    await pruneOld(current, 1, data);
     const left = [...Deno.readDirSync(dir)].map((e) => e.name).sort();
-    assertEquals(left, ["MyApp", "MyApp.old-3.0.0"]);
+    assertEquals(left, [
+      "MyApp",
+      ...(posix ? ["MyApp.old-0.8.0"] : []),
+      "MyApp.old-0.9.0",
+      "MyApp.old-3.0.0",
+      "MyApp.old-projects",
+    ]);
+    assertEquals(await Deno.readTextFile(join(legacy, "my-config.json")), "{}");
+    assertEquals(
+      await Deno.readTextFile(join(`${current}.old-projects`, "f")),
+      "mine",
+    );
   } finally {
     await Deno.remove(dir, { recursive: true });
+    await Deno.remove(data, { recursive: true });
   }
 });
 
@@ -897,4 +1006,255 @@ Deno.test("launch path: inside an AppImage the .AppImage file wins over the moun
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
+});
+
+// ── what the swap sets aside is on record before it is there ───────────────
+
+Deno.test("directory swap: the copy it keeps is on record as the very folder that is the install now — and a folder of the user's under that name refuses the swap", async () => {
+  const dir = await tmp();
+  const data = await tmp();
+  try {
+    const current = join(dir, "MyApp"), staged = `${current}.staged-2.0.0`;
+    const launcher = Deno.build.os === "windows" ? "run.bat" : "run.sh";
+    const app = async (p: string) => {
+      await Deno.mkdir(join(p, "electron"), { recursive: true });
+      await Deno.writeTextFile(join(p, launcher), "start MyApp");
+    };
+    await app(current);
+    await Deno.mkdir(staged);
+    const pending = { dataDir: data, from: "1.0.0", to: "2.0.0" };
+    let spawned = 0;
+    const spawn = (_c: string, args: string[]) => {
+      spawned++;
+      if (Deno.build.os !== "windows") Deno.removeSync(args[0]!);
+    };
+    swapDirectoryDetached({
+      current,
+      staged,
+      fromVersion: "1.0.0",
+      pending,
+      spawn,
+    });
+    assertEquals(
+      readOwned(data).map((e) => [e.path, e.kind, e.role, e.is]),
+      [[`${current}.old-1.0.0`, "dir", "kept", identity(current)!]],
+    );
+    assertEquals(spawned, 1);
+    // The helper deletes whatever has that name. Somebody's folder there —
+    // even a copy of this very app, made by hand — is on no record: refused
+    // before the helper is started, nothing written.
+    const theirs = `${current}.old-1.5.0`;
+    await app(theirs);
+    await Deno.writeTextFile(join(theirs, "user.txt"), "mine");
+    clearPending(data);
+    assertThrows(
+      () =>
+        swapDirectoryDetached({
+          current,
+          staged,
+          fromVersion: "1.5.0",
+          pending,
+          spawn,
+        }),
+      Error,
+      `${theirs} is in the way of the update`,
+    );
+    assertEquals(spawned, 1);
+    assertEquals(readPending(data), null);
+    assertEquals(await Deno.readTextFile(join(theirs, "user.txt")), "mine");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+    await Deno.remove(data, { recursive: true });
+  }
+});
+
+Deno.test("swap: the copy a single-file update keeps is recorded as the very file BEFORE it is filled — a kill mid-copy leaves nothing the record cannot prove", async () => {
+  const dir = await tmp();
+  const data = await tmp();
+  try {
+    const current = join(dir, "app"), staged = join(dir, "app.new-2.0.0");
+    await Deno.writeTextFile(current, "old");
+    await Deno.writeTextFile(staged, "new");
+    // Cut off right after the copy's file exists: the marker cannot be
+    // written (its name is taken by a folder), so the swap stops there.
+    await Deno.mkdir(pendingPath(data));
+    await assertRejects(() =>
+      swapArtifact({
+        current,
+        staged,
+        fromVersion: "1.0.0",
+        smoke: false,
+        strategy: "rename-over",
+        pending: { dataDir: data, from: "1.0.0", to: "2.0.0" },
+      })
+    );
+    const kept = `${current}.old-1.0.0`;
+    // On record as that very file, and as not whole yet.
+    assertEquals(
+      readOwned(data).map((e) => [e.path, e.role, e.is, e.state]),
+      [[kept, "kept", identity(kept)!, "filling"]],
+    );
+    assertEquals(await Deno.readTextFile(current), "old");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+    await Deno.remove(data, { recursive: true });
+  }
+});
+
+Deno.test("swap: the kept copy is done only when it is whole — before the new build goes in; a short one stops the update", async () => {
+  const dir = await tmp();
+  const data = await tmp();
+  const real = _swapDeps.copyFile;
+  try {
+    const current = join(dir, "app"), kept = `${current}.old-1.0.0`;
+    const swap = (to: string) =>
+      swapArtifact({
+        current,
+        staged: join(dir, `app.new-${to}`),
+        fromVersion: "1.0.0",
+        smoke: false,
+        strategy: "rename-over",
+        pending: { dataDir: data, from: "1.0.0", to },
+      });
+    await Deno.writeTextFile(current, "the old build");
+    await Deno.writeTextFile(join(dir, "app.new-2.0.0"), "the new build");
+    // The disk filled half-way through the copy.
+    _swapDeps.copyFile = async (from, to) => {
+      await Deno.writeTextFile(to, (await Deno.readTextFile(from)).slice(0, 4));
+    };
+    await assertRejects(
+      () => swap("2.0.0"),
+      Error,
+      `the copy of the running version (${kept}) has 4 of 13 bytes — ` +
+        `nothing was changed`,
+    );
+    assertEquals(await Deno.readTextFile(current), "the old build");
+    assertEquals(
+      readOwned(data).find((e) => e.path === kept)?.state,
+      "filling",
+    );
+
+    // A whole copy is done (no state, the very file) BEFORE the new build
+    // goes in: here the new build cannot be moved in (a folder cannot take
+    // a file's name), and the copy is already recorded as done.
+    _swapDeps.copyFile = real;
+    await Deno.mkdir(join(dir, "app.new-2.0.1"));
+    await assertRejects(() => swap("2.0.1"));
+    assertEquals(await Deno.readTextFile(current), "the old build");
+    assertEquals(
+      readOwned(data).find((e) => e.path === kept)?.state,
+      undefined,
+    );
+
+    // (A failed swap took its staged build with it.)
+    await Deno.writeTextFile(join(dir, "app.new-2.0.0"), "the new build");
+    await swap("2.0.0");
+    assertEquals(await Deno.readTextFile(current), "the new build");
+    assertEquals(await Deno.readTextFile(kept), "the old build");
+    const done = readOwned(data).find((e) => e.path === kept)!;
+    assertEquals([done.role, done.is, done.state], [
+      "kept",
+      identity(kept)!,
+      undefined,
+    ]);
+  } finally {
+    _swapDeps.copyFile = real;
+    await Deno.remove(dir, { recursive: true });
+    await Deno.remove(data, { recursive: true });
+  }
+});
+
+Deno.test("rollback: the build that failed is set aside under a name that is on record first, as the very file — with its bytes, and off the record once deleted", async () => {
+  const dir = await tmp();
+  const data = await tmp();
+  const real = _swapDeps.remove;
+  try {
+    const current = join(dir, "app"), previous = `${current}.old-1.0.0`;
+    const back = async () => {
+      await Deno.writeTextFile(current, "the build that failed");
+      await Deno.writeTextFile(previous, "the build that worked");
+    };
+    await back();
+    const failed = identity(current)!;
+    // Still held (Windows: still running) — it cannot be deleted yet.
+    _swapDeps.remove = () =>
+      Promise.reject(new Deno.errors.PermissionDenied("held"));
+    await restoreArtifact(current, previous, data);
+    assertEquals(await Deno.readTextFile(current), "the build that worked");
+    const mine = readOwned(data);
+    assertEquals(mine.map((e) => [e.kind, e.role, e.is]), [
+      ["file", "temp", failed],
+    ]);
+    assertMatch(mine[0]!.path, /app\.failed-\d+$/);
+    // With its bytes: provably the build that failed, so a start removes it.
+    assertMatch(mine[0]!.sum!, /^21:[0-9a-f]{64}$/);
+    assert(isOwn(data, mine[0]!.path));
+
+    // Deleted: off the record in the same step.
+    _swapDeps.remove = real;
+    await Deno.remove(mine[0]!.path);
+    await Deno.remove(ownedPath(data));
+    await back();
+    await restoreArtifact(current, previous, data);
+    assertEquals(readOwned(data), []);
+  } finally {
+    _swapDeps.remove = real;
+    await Deno.remove(dir, { recursive: true });
+    await Deno.remove(data, { recursive: true });
+  }
+});
+
+Deno.test({
+  name:
+    "versioned install: a file of the user's under a temporary link's name is refused, not removed — a leftover link goes",
+  ignore: Deno.build.os === "windows", // the layout is a symlink
+  fn: async () => {
+    const dir = await tmp();
+    try {
+      const v1 = join(dir, "versions", "1.0.0", "notes");
+      const v2 = join(dir, "versions", "2.0.0", "notes");
+      await Deno.mkdir(join(dir, "versions", "1.0.0"), { recursive: true });
+      await Deno.mkdir(join(dir, "versions", "2.0.0"), { recursive: true });
+      await Deno.writeTextFile(v1, "v1");
+      await Deno.writeTextFile(v2, "v2");
+      const link = join(dir, "notes");
+      await Deno.symlink(v2, link);
+      // The rollback's temporary link name, as somebody's file.
+      await Deno.writeTextFile(`${link}.rollback`, "my rollback plan");
+      const e = await assertRejects(() => restoreArtifact(link, v1), Error);
+      assertStringIncludes(e.message, "is in the way of the rollback");
+      assertEquals(
+        await Deno.readTextFile(`${link}.rollback`),
+        "my rollback plan",
+      );
+      assertEquals(await Deno.readTextFile(link), "v2", "it was re-pointed");
+      // A link left by a rollback that was cut off is ours.
+      await Deno.remove(`${link}.rollback`);
+      await Deno.symlink(v2, `${link}.rollback`);
+      await restoreArtifact(link, v1);
+      assertEquals(await Deno.readTextFile(link), "v1");
+      // The swap's temporary link name, the same way.
+      const staged = join(dir, "incoming");
+      await Deno.writeTextFile(staged, "v3");
+      await Deno.writeTextFile(`${link}.new-3.0.0`, "my new thing");
+      const e2 = await assertRejects(
+        () =>
+          swapArtifact({
+            current: link,
+            staged,
+            fromVersion: "1.0.0",
+            toVersion: "3.0.0",
+            smoke: false,
+          }),
+        Error,
+      );
+      assertStringIncludes(e2.message, `${link}.new-3.0.0 is in the way`);
+      assertEquals(
+        await Deno.readTextFile(`${link}.new-3.0.0`),
+        "my new thing",
+      );
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
 });

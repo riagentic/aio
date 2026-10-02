@@ -19,6 +19,7 @@ Deno.test("app.loadSnapshot: a non-object cell value is refused with the shared 
   });
   const dir = await Deno.makeTempDir({ prefix: "aio-loadsnap-shape-" });
   const app = await aio.run({
+    watch: false,
     cells: [counter],
     appId: `loadsnap-${crypto.randomUUID().slice(0, 8)}`,
     appDir: dir,

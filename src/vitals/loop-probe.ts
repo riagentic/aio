@@ -29,6 +29,7 @@ const DRAIN_WINDOW_MS = 5_000;
 
 /** Extract cell name from "cell/ACTION" or "cell:ACTION" patterns */
 function extractCell(actionType: string): string {
+  // aio-ok: path-split — an action type, not a path
   const slashIdx = actionType.indexOf("/");
   if (slashIdx > 0) return actionType.slice(0, slashIdx);
   const colonIdx = actionType.indexOf(":");
