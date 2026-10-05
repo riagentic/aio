@@ -180,18 +180,23 @@ export function budget(
       }
       used += n;
       if (used > max) {
-        throw teachableError(
-          `MEMORY_UNBOUNDED: "${name}" passed its ceiling — ${used} > ` +
-            `${max} ${unit} (+${n} in this call). ` +
-            (opts.why ??
-              `It is a COUNTER (cumulative work), not a heap size: whatever ` +
-                `feeds it is looping, so this is a control-flow bug, not a ` +
-                `memory setting to raise.`),
-          opts.fix ??
-            `Find the loop that keeps calling into "${name}" — the ` +
-              `counter's owner ("${owner}") and the stack trace name the ` +
-              `site. \`am heap\` and /__aio/metrics show every watched series.`,
-          "docs/debugging/performance.md",
+        // `.code` as well as the word in the message: a caller that wants to
+        // tell this error from any other had only the text to match on.
+        throw Object.assign(
+          teachableError(
+            `MEMORY_UNBOUNDED: "${name}" passed its ceiling — ${used} > ` +
+              `${max} ${unit} (+${n} in this call). ` +
+              (opts.why ??
+                `It is a COUNTER (cumulative work), not a heap size: whatever ` +
+                  `feeds it is looping, so this is a control-flow bug, not a ` +
+                  `memory setting to raise.`),
+            opts.fix ??
+              `Find the loop that keeps calling into "${name}" — the ` +
+                `counter's owner ("${owner}") and the stack trace name the ` +
+                `site. \`am heap\` and /__aio/metrics show every watched series.`,
+            "docs/debugging/performance.md",
+          ),
+          { code: "MEMORY_UNBOUNDED" },
         );
       }
     },

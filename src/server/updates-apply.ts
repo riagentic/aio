@@ -524,8 +524,41 @@ export function firstBootPath(dataDir: string): string {
  *  of the payload of the `.exe` the user downloaded. The stub re-extracts
  *  whenever the install's stamp is not its own, so a tree swapped in WITHOUT
  *  it is overwritten with the old version the next time that `.exe` is opened.
- *  Keep in sync with `stampName` in `build/windows-sfx-stub/install.go`. */
+ *  Keep in sync with `STAMP_NAME` in `build/windows-sfx-stub/src/install.rs`. */
 export const SFX_STAMP_FILE = ".aio-sfx-stamp";
+
+/** The file in a one-click install that names the app VERSION it holds, one
+ *  line. The stub writes it when it extracts and reads it before extracting:
+ *  an `.exe` whose payload is OLDER opens the install instead of putting its
+ *  version over it — the data may already be in the newer version's shape,
+ *  and the older build then refuses to start. Keep in sync with
+ *  `VERSION_NAME` in `build/windows-sfx-stub/src/install.rs`. */
+export const SFX_VERSION_FILE = ".aio-sfx-version";
+
+/** Record, in a one-click install, the version that is running from it — at
+ *  every start, so the file is right after an update, after a rollback, and
+ *  for an install an older aio updated. A no-op anywhere else. Never throws:
+ *  a start must not stop over it, so a failure is said instead. */
+export function stampSfxVersion(
+  install: string,
+  version: string,
+  logger: Log = log,
+): void {
+  if (!sfxInstall(install)) return;
+  const path = join(install, SFX_VERSION_FILE);
+  try {
+    if (
+      existsSync(path) && Deno.readTextFileSync(path).trim() === version
+    ) return;
+    Deno.writeTextFileSync(path, `${version}\n`);
+  } catch (e) {
+    logger.warn(
+      "updates",
+      `could not record this version in ${path} (${e}) — an older one-click ` +
+        `.exe opened later may install its version over this one`,
+    );
+  }
+}
 
 /** Carry the SFX stamp of install `from` into install `to`, so the `.exe`
  *  that extracted `from` stays a plain launcher for `to`. False when `from`
@@ -569,8 +602,8 @@ export function carrySfxStamp(
 }
 
 /** Is `dir` where the one-click `.exe` extracts —
- *  `<LOCALAPPDATA>\aio-sfx\<binary>\win-<arch>` (`installDir` in
- *  `build/windows-sfx-stub/main.go`)? Such an install must carry the stamp. */
+ *  `<LOCALAPPDATA>\aio-sfx\<binary>\win-<arch>` (`install_dir` in
+ *  `build/windows-sfx-stub/src/main.rs`)? Such an install must carry the stamp. */
 export function sfxInstall(dir: string): boolean {
   return basename(dir).startsWith("win-") &&
     basename(dirname(dirname(dir))) === "aio-sfx";

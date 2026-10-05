@@ -375,6 +375,10 @@ export type ClientMeta = {
    *  platform, not on the machine running `am`. */
   mac?: boolean;
   user?: AioUser;
+  /** `userMemoKey(user)` as it was when `user` was adopted. A session store
+   *  that hands back the SAME object, edited in place, has changed `user`
+   *  under this socket: only a key taken earlier can tell. */
+  userKey?: string | null;
   /** The server this socket belongs to authenticates INDIVIDUALS (`WsDeps.
    *  perUserAuth`). Carried per socket so a sender that only holds the
    *  connection map — the broadcaster's `tt-state` flush — applies the same
@@ -1002,7 +1006,12 @@ export function createWsManager(deps: WsDeps): WsManager {
   ): void {
     const prev = meta.user;
     meta.user = fresh;
-    const a = userMemoKey(prev), b = userMemoKey(fresh);
+    // `a` is the key taken when `prev` was adopted, not `prev`'s key now: for
+    // a record edited in place (`prev === fresh`) the two are the same object,
+    // so its key now is `b` by construction and a demotion compared equal.
+    const a = meta.userKey !== undefined ? meta.userKey : userMemoKey(prev);
+    const b = userMemoKey(fresh);
+    meta.userKey = b;
     // A record with no key (a `Set` of scopes, a class instance) cannot be
     // compared whole, and "its id and role are what a view is decided on" was
     // a guess: revoking `scopes` on such a record left the socket showing the
@@ -1337,6 +1346,7 @@ export function createWsManager(deps: WsDeps): WsManager {
     const clientIndex = nextIndex();
     const isElectron = /electron/i.test(userAgent);
     const meta: ClientMeta = {
+      userKey: userMemoKey(user),
       id: clientId,
       index: clientIndex,
       clientType: "unknown",

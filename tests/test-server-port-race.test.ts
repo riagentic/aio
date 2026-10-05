@@ -47,6 +47,39 @@ Deno.test("the predicate matches what a real port collision throws", async () =>
   );
 });
 
+// A boot that loses its port throws out of a synchronous `createServer`, so
+// nothing is left to wait for work it started. The dev CSS step used to start
+// BEFORE the bind: its read of the project's deno.json was still running when
+// the refusal was thrown, and under load it finished inside the next test —
+// which then failed with "an async readTextFile started before the test".
+// Every read is held open here, so "still running" is a count, not a race.
+Deno.test("a boot that loses its port leaves no file read running", async () => {
+  const running = new Set<string>();
+  const real = Deno.readTextFile;
+  Deno.readTextFile = ((path: string | URL, opts?: Deno.ReadFileOptions) => {
+    const key = `${path}#${running.size}`;
+    running.add(key);
+    return new Promise((r) => setTimeout(r, 200))
+      .then(() => real(path, opts))
+      .finally(() => running.delete(key));
+  }) as typeof Deno.readTextFile;
+  try {
+    const port = freePort();
+    await using _held = await testServer({ cells: [xport], port });
+    // The holder's own step is owned (its close waits for it) — let it end,
+    // so what is counted below belongs to the refused boot alone.
+    while (running.size > 0) await new Promise((r) => setTimeout(r, 20));
+    await assertRejects(() => testServer({ cells: [xport], port }));
+    assertEquals(
+      [...running],
+      [],
+      "the refused boot must not leave a read behind",
+    );
+  } finally {
+    Deno.readTextFile = real;
+  }
+});
+
 Deno.test("the predicate does not match an unrelated failure", () => {
   assertEquals(_isPortTakenError(new Error("disk is full")), false);
   assertEquals(_isPortTakenError(new Error("port is already in use")), false);

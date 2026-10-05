@@ -829,3 +829,35 @@ Deno.test("updates config: the veto and the key roster survive resolution", () =
   // Absent by default — an app with no opinion gets no hook, not a stub.
   assertEquals(resolveUpdates("https://rel.example.com/w").canApply, undefined);
 });
+
+// An unpacked desktop install (the Windows one-click `.exe` makes one) takes
+// only the release's `.zip`. Offered the program instead, it used to be told
+// to "reinstall from the artifact this channel actually serves" — the `.exe`,
+// which installs the same kind again and is refused again.
+Deno.test("decide: a release published without its zip is called that, not answered with 'reinstall'", () => {
+  const d = decide({
+    current: "1.0.0",
+    manifest: manifest({ target: "binary" }),
+    local,
+    canInstall: ["electron-zip"],
+    installedTarget: "electron-zip",
+  });
+  assertEquals(d.kind, "refused");
+  const reason = d.kind === "refused" ? d.reason : "";
+  assertStringIncludes(reason, 'published to "prod" without its .zip');
+  assertStringIncludes(reason, "electron-zip.json");
+  assertStringIncludes(reason, "nothing to reinstall");
+  assert(!reason.includes("reinstall from the artifact"), reason);
+  // Any other mismatch keeps the general answer.
+  const other = decide({
+    current: "1.0.0",
+    manifest: manifest({ target: "binary" }),
+    local,
+    canInstall,
+    installedTarget: "appimage",
+  });
+  assertStringIncludes(
+    other.kind === "refused" ? other.reason : "",
+    'cannot apply a "binary" release',
+  );
+});

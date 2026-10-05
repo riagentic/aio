@@ -16,7 +16,7 @@
  *
  * After `buildElectron` stages the AppDir, this concatenates:
  *
- *   [tiny prebuilt stub PE (~3.5 MB)] + [payload] + [JSON hdr] + [lengths] + [magic]
+ *   [tiny prebuilt stub PE (~0.7 MB)] + [payload] + [JSON hdr] + [lengths] + [magic]
  *
  * into `<bin>-win-<arch>.exe`. The stub (see `windows-sfx-stub/`) extracts the
  * payload once into `%LOCALAPPDATA%\aio-sfx\<bin>\win-<arch>\`, verifies the
@@ -30,16 +30,16 @@
  * `server/updates-apply.ts`), which keeps the downloaded `.exe` a plain
  * launcher for the updated app instead of extracting its old payload over it.
  *
- * ## The payload: zstd-compressed tar, packed by Deno (no Go)
+ * ## The payload: zstd-compressed tar, packed by Deno
  *
  * The stub extracts any payload, so the `.exe` need not reuse the `.zip`'s
  * deflate. The default payload is a **zstd-compressed tar of the AppDir**,
  * produced by {@link packAppDirTarZstd} — `@std/tar` piped through Deno's
  * `node:zlib` `createZstdCompress` — measured ~14% smaller than the zip on a
  * reference Electron tree, and zstd decompresses faster than deflate, so first
- * launch is faster too. Building it needs **no Go**: the extractor stub is a
- * committed prebuilt PE ({@link ensureWindowsSfxStub}) and the compression runs
- * in Deno. The `.zip` artifact is unchanged (Windows users unzip it with
+ * launch is faster too. Building it needs **no compiler**: the extractor stub
+ * is a committed prebuilt PE ({@link ensureWindowsSfxStub}, a Rust program —
+ * a Go one through 1.0.17-beta) and the compression runs in Deno. The `.zip` artifact is unchanged (Windows users unzip it with
  * Explorer); if packing fails, the exe falls back to the zip payload
  * (`format: "zip"`) — larger, never broken.
  *
@@ -61,6 +61,12 @@ import { pipeline } from "node:stream/promises";
 import { createWriteStream } from "node:fs";
 import { createHash } from "node:crypto";
 import type { BuildConfig } from "./build-config.ts";
+import {
+  readSfxTrailerOfFile,
+  SFX_MAGIC,
+  type SfxFormat,
+  type SfxHeader,
+} from "./sfx-trailer.ts";
 import { electronStagingDir } from "./build-electron.ts";
 import { runDenoCompile } from "./build-compile.ts";
 import { ensureHeadroom } from "./freeze-guard.ts";
@@ -73,29 +79,31 @@ import {
 } from "../electron/electron-runtime-fetch.ts";
 import { HEY, NO, OK } from "../diagnostics/fmt.ts";
 
-/** Magic trailer the stub and the packer agree on. Keep in sync with
- *  `windows-sfx-stub/format.go`. `AIOSFX01` was a bare zip payload; `AIOSFX02`
- *  is a zstd tar (the stub still extracts a `zip` payload for old artifacts). */
-export const SFX_MAGIC = "AIOSFX02";
+export {
+  parseSfxTrailer,
+  readSfxTrailer,
+  readSfxTrailerOfFile,
+  SFX_MAGIC,
+  type SfxFormat,
+  type SfxHeader,
+  type SfxTrailer,
+} from "./sfx-trailer.ts";
 
 /** SHA-256 of the committed stub PE. {@link ensureWindowsSfxStub} refuses any
  *  other bytes, so what goes into every user's `.exe` is exactly the binary
  *  built from `windows-sfx-stub/` by the command in its README — update this
  *  line with every rebuild. */
 export const SFX_STUB_SHA256 =
-  "e9bee8d42ef71032400fb36bc1f4cffdf932af8e7895cf1965d5c2873af17263";
+  "2fd8497fbb7c00cf1cecee664b4e8b1b2bd8c01e0a5c0196f010bf8704d41871";
 
-/** SHA-256 over the stub's SOURCES (`*.go`, `go.mod`, `go.sum`) as they were
- *  when {@link SFX_STUB_SHA256} was built. Rebuilding needs Go, which the
- *  gates do not have; this needs none, so a source edit that was not followed
- *  by a rebuild and a re-pin of both lines goes red everywhere
+/** SHA-256 over the stub's SOURCES (`src/*.rs`, `Cargo.toml`, `Cargo.lock`) as
+ *  they were when {@link SFX_STUB_SHA256} was built. Rebuilding needs Rust,
+ *  which a gate may not have; this needs none, so a source edit that was not
+ *  followed by a rebuild and a re-pin of both lines goes red everywhere
  *  (`tests/build-windows-sfx-stub.test.ts` prints the value to put here). */
-// aio-ok: a test-only seam — the pin a gate without Go compares the sources with.
+// aio-ok: a test-only seam — the pin a gate without Rust compares the sources with.
 export const SFX_STUB_SOURCE_SHA256 =
-  "2aabfadf55385b773e8fe8cc67f9aa6a95c77544e9579d963df1682366205834";
-
-/** Payload kinds the stub understands. */
-export type SfxFormat = "tar.zstd" | "zip";
+  "7aa3ce923acd381e4dae5a0c8a8b51e4177b64cf6adaefd4e62f70a2f7c5b3fd";
 
 /** The self-contained exe's file name — the zip's name with `.exe`, so the
  *  two Windows desktop artifacts sort together and neither is mistaken for
@@ -108,15 +116,6 @@ export function selfContainedExeName(binaryName: string, archStr: string) {
 export function windowsZipName(binaryName: string, archStr: string) {
   return `${binaryName}-win-${archStr}.zip`;
 }
-
-/** JSON header embedded in the SFX trailer. */
-export type SfxHeader = {
-  sha256: string;
-  binary: string;
-  arch: string;
-  /** `"tar.zstd"` (default) or `"zip"` (fallback / pre-AIOSFX02). */
-  format: SfxFormat;
-};
 
 /** The bytes that follow the payload: JSON | u32 hdrLen | u64 payloadLen |
  *  magic. Pure. */
@@ -157,64 +156,6 @@ export function appendSfxPayload(
   return out;
 }
 
-/** What an SFX trailer says. */
-export type SfxTrailer = {
-  header: SfxHeader;
-  payloadOffset: number;
-  payloadLength: number;
-};
-
-/** Parse an SFX trailer from the end of `bytes`. Returns null when not an
- *  aio SFX (no magic). Used by tests / size gates. */
-// aio-ok: a test-only seam — the in-memory form of readSfxTrailerOfFile.
-export function readSfxTrailer(bytes: Uint8Array): SfxTrailer | null {
-  return parseSfxTrailer(bytes, bytes.length);
-}
-
-/** {@link readSfxTrailer} for a file on disk, reading only its tail — an SFX
- *  is hundreds of MB and the trailer is a few hundred bytes. */
-export async function readSfxTrailerOfFile(
-  path: string,
-): Promise<SfxTrailer | null> {
-  using f = await Deno.open(path, { read: true });
-  const size = (await f.stat()).size;
-  const tail = new Uint8Array(Math.min(size, 64 * 1024));
-  await f.seek(size - tail.length, Deno.SeekMode.Start);
-  let n = 0;
-  while (n < tail.length) {
-    const r = await f.read(tail.subarray(n));
-    if (r === null) return null;
-    n += r;
-  }
-  return parseSfxTrailer(tail, size);
-}
-
-/** `tail` is the last bytes of a file of `fileSize` bytes. Pure. */
-export function parseSfxTrailer(
-  tail: Uint8Array,
-  fileSize: number,
-): SfxTrailer | null {
-  const mag = SFX_MAGIC.length;
-  if (tail.length < mag + 8 + 4) return null;
-  const end = tail.length;
-  const magicBytes = tail.subarray(end - mag);
-  if (new TextDecoder().decode(magicBytes) !== SFX_MAGIC) return null;
-  const view = new DataView(tail.buffer, tail.byteOffset, tail.byteLength);
-  const lenLo = view.getUint32(end - mag - 8, true);
-  const lenHi = view.getUint32(end - mag - 4, true);
-  const payloadLength = lenLo + lenHi * 0x100000000;
-  const hdrLen = view.getUint32(end - mag - 8 - 4, true);
-  if (hdrLen === 0 || hdrLen > 1 << 20) return null;
-  const hdrOff = end - mag - 8 - 4 - hdrLen;
-  const payloadOffset = fileSize - tail.length + hdrOff - payloadLength;
-  if (payloadOffset < 0 || hdrOff < 0) return null;
-  const header = JSON.parse(
-    new TextDecoder().decode(tail.subarray(hdrOff, hdrOff + hdrLen)),
-  ) as SfxHeader;
-  if (!header.format) header.format = "zip"; // pre-AIOSFX02 headers
-  return { header, payloadOffset, payloadLength };
-}
-
 /** True when `bytes` look like a PE that embeds `electron-runtime.zip` as a
  *  Deno VFS file name — the old fat path. Size-regression / packaging gate. */
 // aio-ok: a test-only seam — the packaging gate reads a built exe with it.
@@ -250,7 +191,7 @@ export function windowsSfxStubDir(): string {
 }
 
 /** The committed Windows stub — a prebuilt PE, so building the one-click `.exe`
- *  needs no Go toolchain on the build host. Rebuilt only when the stub's source
+ *  needs no compiler on the build host. Rebuilt only when the stub's source
  *  changes; see `windows-sfx-stub/README.md`. */
 // aio-ok: a test-only seam — the product reads the stub through ensureWindowsSfxStub.
 export function prebuiltStubPath(): string {
@@ -507,7 +448,7 @@ const ZSTD_C_COMPRESSION_LEVEL = 100;
 
 /** Pack `dir` into a **zstd-compressed tar** at `outPath`, entirely in Deno:
  *  `@std/tar` → `node:zlib`'s `createZstdCompress` at maximum compression.
- *  No Go, no host packer binary. Entries stream lazily, so only one file is
+ *  No host packer binary. Entries stream lazily, so only one file is
  *  open at a time, none is left open when the pack ends — however it ends —
  *  and the ~800 MB tree is never buffered whole.
  *
@@ -602,6 +543,11 @@ export async function writeWindowsSfxExe(opts: {
   outPath: string;
   binaryName: string;
   archStr: string;
+  /** The app's version, title and whether the stub adds a Start-menu
+   *  shortcut — see {@link SfxHeader}. Left out of the header when absent. */
+  version?: string;
+  title?: string;
+  shortcut?: boolean;
 }): Promise<{ size: number; sha256: string; payloadSize: number }> {
   const stub = await Deno.readFile(opts.stubPath);
   await Deno.mkdir(dirname(opts.outPath), { recursive: true });
@@ -629,6 +575,9 @@ export async function writeWindowsSfxExe(opts: {
         binary: opts.binaryName,
         arch: opts.archStr,
         format: opts.payloadFormat,
+        ...(opts.version ? { version: opts.version } : {}),
+        ...(opts.title ? { title: opts.title } : {}),
+        ...(opts.shortcut ? { shortcut: true } : {}),
       }, payloadSize);
       await out.write(trailer);
       size = stub.length + payloadSize + trailer.length;
@@ -782,6 +731,9 @@ async function buildWindowsSfxExe(
       outPath: out,
       binaryName,
       archStr,
+      version: cfg.version.version,
+      title: cfg.appTitle ?? binaryName,
+      shortcut: cfg.windowsShortcut,
     });
   } catch (e) {
     return e instanceof Error ? e.message : String(e);

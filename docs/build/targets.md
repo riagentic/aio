@@ -429,6 +429,35 @@ an Apple Developer account, which is a distribution decision, not a build step.
 A copy that never carried the mark (built locally, or copied with `scp`) opens
 directly.
 
+**Opened without being dragged to Applications.** A user who double-clicks the
+app inside the mounted `.dmg`, or in Downloads, gets an app that works and can
+never update: it runs from a read-only image, or from the temporary read-only
+copy macOS makes of a quarantined app (App Translocation). So a desktop app that
+finds itself outside `/Applications` and `~/Applications` asks once, after its
+window is up: **Move _App_ to your Applications folder?** — **Move to
+Applications** / **Not Now**.
+
+- **Move** copies the bundle into `/Applications` (`~/Applications` when that
+  folder cannot be written), clears the quarantine mark from that copy, closes
+  the app the ordinary way and opens the copy. The copy it was opened from is
+  left where it is.
+- **Not Now** is remembered in the app's data directory (`macos-move-declined`);
+  delete that file to be asked again. A dialog nobody answers is not an answer.
+- **No question at all** when an app of the same name is already in Applications
+  (nothing is replaced), for a server-only or browser client, and when running
+  from source.
+- `AIO_MOVE_TO_APPLICATIONS=never` switches the question off; `=move` moves
+  without asking (an unattended install).
+
+Measured on macOS 14: opened from the mounted image and from a quarantined copy
+in Downloads (running translocated), the app moved, the copy in Applications
+carried no quarantine mark and a valid signature, and it came back as the one
+entry in the Dock. The question waits for the window on purpose — asked earlier,
+its process took the app's own entry in the system's application list. The
+buttons themselves were not pressed in that run (the test Mac has no way to
+click them remotely); what each answer does is covered by
+`tests/macos-move.test.ts`.
+
 `"build": { "macos": { "bundleId": "com.acme.Counter" } }` overrides
 `CFBundleIdentifier`; the default is `app.aio.<binaryName>`.
 
@@ -1008,7 +1037,7 @@ Electron -> generate launcher + icon -> package (AppImage on Linux, a signed
 `.app` + `.dmg` on macOS — see below, a zip on Windows). On Windows the
 one-click `<name>-win-x64.exe` is then built as a **thin SFX**: the staged
 package is packed into a **zstd-compressed tar** and appended to a small stub
-(~3.5 MB), so the download is smaller than the zip (zstd beats deflate by ~15%
+(~0.7 MB), so the download is smaller than the zip (zstd beats deflate by ~15%
 and decompresses faster), and it is not a second `deno compile` with
 `electron-runtime.zip` inside the PE. First double-click extracts to
 `%LOCALAPPDATA%\aio-sfx\<name>\win-<arch>\`; later launches skip extract when
@@ -1027,6 +1056,17 @@ What the `.exe` does when it is opened:
   changed, and a message says to close the app and open the file again.
 - **The app updated itself**: the `.exe` starts the updated app — see
   [Updates](../deploy/updates.md).
+- **A newer version is installed** than the one the `.exe` carries: the `.exe`
+  opens what is installed and changes nothing. An old download can no longer put
+  its version over a newer app, whose data it may not be able to read. (An
+  `.exe` built with aio 1.0.17-beta or older still installs what it carries.)
+- **It installed the app**: it adds a Start-menu shortcut named after the app
+  (`title`), pointing at the installed `<name>.exe` — so the download can be
+  deleted. Opening the `.exe` again without installing anything does not put
+  back a shortcut the user removed.
+  `"build": { "windows": { "shortcut": false } }` in `deno.json` builds an
+  `.exe` that adds none. Nothing removes the shortcut when the app's folder is
+  deleted by hand: aio has no uninstaller.
 
 **Signing the `.exe` (Authenticode).** Sign the finished `<name>-win-x64.exe`
 with your own tool —
@@ -1040,22 +1080,23 @@ signature covers the whole download, payload included; the `<name>.exe` and
 Electron that it extracts are not signed individually. aio does not sign for
 you.
 
-Building that one-click `.exe` needs **no Go toolchain**: the extractor stub is
-a committed **prebuilt PE** (`src/build/windows-sfx-stub/prebuilt/`, rebuilt
-only when its source changes — see that directory's README), and the zstd
-payload is packed by aio itself, in Deno (`@std/tar` through `node:zlib`). The
-stub is used only when its SHA-256 is the one pinned in aio's source, and its
-build is reproducible (`-trimpath`, no VCS stamp), so the bytes at the start of
-your `.exe` are checkable against the stub's source; the licenses of what it
-links are in `THIRD_PARTY_NOTICES` beside it. The payload is deterministic too:
-the same staged package packs to the same bytes. If packing ever fails, the
-payload falls back to the same zip (`format: "zip"`) — larger, still one-click.
-A symlink in the staged package ships as a copy of its target (the build says
-so, with the size); one that points outside the package, at nothing, or at a
-folder it is inside stops the build, naming the path. `AIO_WINDOWS_FAT_EXE=1`
-restores the legacy `deno compile` PE instead, and the build falls back to it by
-itself, with a warning, when the stub cannot be read, fetched or verified. The
-intermediate `dist/app.js` does not survive into the finished `dist/`.
+Building that one-click `.exe` needs **no compiler**: the extractor stub is a
+committed **prebuilt PE** (`src/build/windows-sfx-stub/prebuilt/`, a ~0.7 MB
+Rust program, rebuilt only when its source changes — see that directory's
+README), and the zstd payload is packed by aio itself, in Deno (`@std/tar`
+through `node:zlib`). The stub is used only when its SHA-256 is the one pinned
+in aio's source, and its build is reproducible (remapped paths, no build time),
+so the bytes at the start of your `.exe` are checkable against the stub's
+source; the licenses of what it links are in `THIRD_PARTY_NOTICES` beside it.
+The payload is deterministic too: the same staged package packs to the same
+bytes. If packing ever fails, the payload falls back to the same zip
+(`format: "zip"`) — larger, still one-click. A symlink in the staged package
+ships as a copy of its target (the build says so, with the size); one that
+points outside the package, at nothing, or at a folder it is inside stops the
+build, naming the path. `AIO_WINDOWS_FAT_EXE=1` restores the legacy
+`deno compile` PE instead, and the build falls back to it by itself, with a
+warning, when the stub cannot be read, fetched or verified. The intermediate
+`dist/app.js` does not survive into the finished `dist/`.
 
 On Linux and Windows the launcher sets `$ELECTRON_PATH` before starting the Deno
 binary; on macOS the `.app` bundles the runtime where the binary looks for it

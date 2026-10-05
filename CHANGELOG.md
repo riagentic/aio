@@ -1,5 +1,140 @@
 # Changelog
 
+## v1.0.18-beta — the Windows stub is Rust: Go leaves aio (2026-10-04)
+
+> **One flag (`am publish --no-zip`), one build key (`build.windows.shortcut`)
+> and one environment variable (`AIO_MOVE_TO_APPLICATIONS`) are added; nothing
+> is removed or renamed, and no app needs a change.** A Windows one-click `.exe`
+> is about 3 MB smaller and installs, opens and updates the way it did. Two
+> things can be noticed: `am publish` now refuses a one-click `.exe` whose
+> `.zip` is missing, and a macOS app opened outside Applications asks once to be
+> moved there. See
+> [the upgrade guide](docs/upgrade/from-1.0.17-beta-to-1.0.18-beta.md).
+
+### Publishing and updates (a field report)
+
+- **`am publish` refuses a one-click Windows `.exe` that has no `.zip` beside
+  it.** An install made by the one-click `.exe` is an unpacked install, the same
+  kind the `.zip` makes, and updates only from the zip's manifest
+  (`<os>-<arch>.electron-zip.json`). A channel given the `.exe` alone published
+  releases no install could take. The refusal names the missing zip; `--no-zip`
+  publishes the `.exe` on purpose, as a download nothing updates from. A plain
+  Windows program (the `browser` target, or `AIO_WINDOWS_FAT_EXE=1`) is not
+  affected. `tests/am-publish.test.ts`.
+- **An install offered such a release says what is wrong.** It used to answer
+  "reinstall from the artifact this channel actually serves" — the `.exe`, which
+  installs the same kind again and is refused again. It now says the release was
+  published without its `.zip` and that there is nothing to reinstall.
+  `tests/updates-core.test.ts`.
+- **A signed one-click `.exe` is recognised as one.** A signature puts its
+  certificate table after the SFX trailer; aio's own reader looked only at the
+  end of the file, so it called every signed installer "not an installer". It
+  now looks before the certificate table too, as the stub does
+  (`src/build/sfx-trailer.ts`). `tests/build-windows-sfx.test.ts`.
+
+### Running an app
+
+- **A user record edited in place reaches the socket that holds it.** A
+  `resolveUser` or session store that keeps its records in a map hands back the
+  same object on every re-check; demoting it (`u.role = "user"`) left an idle
+  page showing the admin-only slice, because "the user it had" and "the user it
+  has now" were one object. The key taken when the user was adopted is compared
+  instead, so the view is re-sent at the next re-check (within 5 s).
+  `tests/ws-user-edited-in-place.test.ts`.
+- **A set `AIO_DISCOVERY_PORT` that is not a port is said.** The app fell back
+  to 8099 without a word while its operator looked for it on the port they had
+  typed. The fallback stays; the log now names the value and the port in use.
+  `tests/discovery.test.ts`.
+- **The memory-budget error carries `.code`.** `MEMORY_UNBOUNDED` was only a
+  word in the message; a caller can now tell the error apart by
+  `err.code === "MEMORY_UNBOUNDED"`. `tests/memory-ledger.test.ts`.
+- `am create --css=tailwind` with a template other than `counter` was refused
+  with a reason the docs did not mention; `docs/ui/css-toolchain.md` now does.
+
+### Testing
+
+- **A parallel test run no longer leaves an `apps-*` sandbox behind.** The
+  harness's per-process app sandbox is removed by the last test file to unload.
+  A file that joined while that last one was leaving lost its place, used the
+  folder anyway, and nothing removed it — about 1 run in 15 of
+  `tests/apps-sandbox-one-per-process.test.ts`. Joining and leaving now happen
+  under one file lock (`<test root>/.apps.lock`).
+
+- **A dev server that cannot get its port no longer leaves a file read
+  running.** The CSS step (`build.css`) started before the port was bound, so a
+  refused start threw with that step's read of `deno.json` still in flight and
+  nothing left to wait for it. In a test run it finished inside the next test,
+  which then failed with "an async readTextFile started before the test". The
+  step now starts after the port is bound.
+
+- **`testUI --video=<dir>/` under `--parallel`: two same-named tests no longer
+  share one video.** The claim on a file name was a read then a write, and
+  `--parallel` runs each test file on its own thread of one process — two tests
+  that asked in the same instant were both told the name was free, and the
+  second video overwrote the first. The claim is now made under a file lock
+  (`<test root>/.video.lock`).
+
+### Desktop builds
+
+- **A macOS app opened outside Applications offers to move itself there.**
+  Opened from the mounted `.dmg` or from Downloads, the app worked and could
+  never update — it ran from a read-only image, or from the read-only copy macOS
+  makes of a quarantined app. It now asks once, after its window is up; "Move to
+  Applications" copies the bundle into `/Applications` (`~/Applications` when
+  that cannot be written), clears the quarantine mark from the copy, closes the
+  app and opens the copy. "Not Now" is remembered. Nothing is replaced: with an
+  app of that name already in Applications there is no question.
+  `AIO_MOVE_TO_APPLICATIONS=never` switches it off, `=move` moves without
+  asking. Measured on macOS 14 from the image and from a quarantined copy in
+  Downloads; the buttons were not pressed there (`tests/macos-move.test.ts`
+  covers what each answer does). `src/server/macos-move.ts`.
+- **A `build.chromiumExtras` typo is said by every build.** Only the Electron
+  package step read the key, so a server or CLI build carried `"stripped"` in
+  silence until the desktop build from the same `deno.json` was refused. A build
+  that packages no Electron now warns and goes on.
+  `tests/build-electron-extras-frozen.test.ts`.
+- **The Windows SFX stub is a Rust program; no Go is left in aio.** The stub —
+  the first bytes of every one-click `<name>-win-x64.exe` — was a Go program
+  (3,712,000 bytes) since 1.0.16-beta. It is now Rust (706,048 bytes), so each
+  `.exe` is 3.0 MB smaller. The Go sources, `go.mod`, `go.sum` and the Go module
+  it linked are deleted. Building an app still needs no compiler: the stub stays
+  a committed, SHA-256-pinned, reproducibly built PE, and only changing the stub
+  itself needs Rust (`src/build/windows-sfx-stub/README.md`).
+- **An old download no longer puts its version over a newer app.** The `.exe`
+  you open used to win in both directions: an older `.exe` extracted its version
+  over an app that had updated itself, and that older build then refused to
+  start on data the newer one had already migrated. The header now carries the
+  app's version, the install says its own in `.aio-sfx-version` (written by the
+  stub, rewritten by the app at every start), and an `.exe` that is older only
+  opens what is installed. The stub and the updater order versions from one
+  shared table (`src/build/windows-sfx-stub/version-order.json`). An `.exe`
+  built with aio 1.0.17-beta or older still installs what it carries.
+  `tests/build-windows-sfx-stub.test.ts`, `tests/updates-sfx-stamp.test.ts`.
+- **The one-click `.exe` adds a Start-menu shortcut when it installs the app**,
+  named after the app and pointing at the installed program, so the download can
+  be deleted. `"build": { "windows": { "shortcut": false } }` builds an `.exe`
+  that adds none; a shortcut the user removed is not put back by merely opening
+  the `.exe` again. `tests/build-windows-sfx.test.ts`.
+- **Nothing an installed app depends on moved.** The trailer (`AIOSFX02`), the
+  `tar.zstd` and `zip` payloads, the install folder
+  `%LOCALAPPDATA%\aio-sfx\<name>\win-<arch>`, the `.aio-sfx-stamp` and the
+  install lock's name are the same, so an `.exe` built with either stub opens,
+  keeps or replaces an install the other made, and the app's own updater is
+  untouched. Measured on Windows 11 with both stubs taking turns on one install:
+  fresh install, second open, version swap in both directions, the zip payload,
+  four launches at once, a damaged payload, and an install that is in use
+  (refused, nothing changed, by both).
+- **First open is a little slower, later opens are not.** The Rust zstd decoder
+  is slower than the Go one. Measured on Windows 11 with a 465 MB app (147 MB
+  payload): first open 1.44 s (Go: 1.12 s); every later open 0.09 s (Go: 0.10
+  s).
+- **The stub is stricter about what it reads.** A header whose app or
+  architecture name holds a path separator or a drive, and a payload entry named
+  with a drive (`C:…`), are refused; a payload of several zstd frames is read to
+  its end, and one cut short is an error. `tests/build-windows-sfx-stub.test.ts`
+  (which runs the stub's own `cargo test` and, with the pinned toolchain,
+  rebuilds the PE and compares the bytes), `tests/build-windows-sfx.test.ts`.
+
 ## v1.0.17-beta — the size repair, and what an audit of 1.0.15 and 1.0.16 found shipped broken (2026-10-03)
 
 > **The public surface only grows: one optional key,

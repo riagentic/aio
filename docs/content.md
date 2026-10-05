@@ -166,10 +166,10 @@
 
 ## Upgrade guides — version-to-version migration notes
 
-- [Upgrade Guides](upgrade/README.md) — every one, newest first (92 pages)
+- [Upgrade Guides](upgrade/README.md) — every one, newest first (93 pages)
+- [Upgrading from 1.0.17-beta to 1.0.18-beta](upgrade/from-1.0.17-beta-to-1.0.18-beta.md) — Nothing is removed or renamed.
 - [Upgrading from 1.0.16-beta to 1.0.17-beta](upgrade/from-1.0.16-beta-to-1.0.17-beta.md) — Nothing is removed or renamed; the public surface gains optional keys only:
 - [Upgrading from 1.0.15-beta to 1.0.16-beta](upgrade/from-1.0.15-beta-to-1.0.16-beta.md) — Nothing is removed and nothing changes shape.
-- [Upgrading from 1.0.14-beta to 1.0.15-beta](upgrade/from-1.0.14-beta-to-1.0.15-beta.md) — Nothing is removed and nothing changes shape.
 - [The aio restructure — alpha27/alpha28 breaking changes](upgrade/restructure.md) — This guide tracks every breaking change of the restructure
 
 ## Design specs — decision records — background, not manuals

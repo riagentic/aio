@@ -99,7 +99,10 @@ Deno.test("sessions: a ttl under a millisecond cannot issue a dead session", () 
     assertEquals(typeof t1, "string");
 
     // A fractional ttl is accepted — and the COLUMN still holds an integer.
-    for (const ttl of [60_000.5, 1.5, 999.9]) {
+    // Long enough to still be alive when it is read back: with `1.5` the
+    // session could expire between `issue` and `get` on a loaded machine, and
+    // the test failed on `null` — about its own clock, not the column.
+    for (const ttl of [60_000.5, 30_001.5, 45_999.9]) {
       const t = store.issue({ id: "u3", role: "user" }, { ttlMs: ttl });
       const exp = store.get(t)!.expiresAt;
       assert(

@@ -68,6 +68,7 @@ import {
   repairSfxStamp,
   restoreArtifact,
   setAsideRecord,
+  stampSfxVersion,
   swapDirectoryDetached,
   writePending,
   writeRecordAtomic,
@@ -1060,6 +1061,13 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
       deps.log,
     );
   }
+  // A one-click install says which version runs from it, so an older `.exe`
+  // opened later opens this install instead of extracting over it.
+  stampSfxVersion(
+    here ?? deps.artifact ?? artifactPath(),
+    deps.appVersion,
+    deps.log,
+  );
 
   /** One check, plus whatever the policy says to do about the answer. */
   // The release this machine rolled back, for this process's life: never

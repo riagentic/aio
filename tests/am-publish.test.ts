@@ -21,6 +21,7 @@ import {
   pickUpdateArtifact,
 } from "../src/am/am-cmd-publish.ts";
 import { hostPlatform } from "../src/build/platforms.ts";
+import { appendSfxPayload } from "../src/build/build-windows-exe.ts";
 import { buildVersionFor } from "../src/server/app-version.ts";
 
 /** Capture stdout (am writes its JSON document to console.log). */
@@ -1367,4 +1368,94 @@ Deno.test("am publish: notProbedHere names the precise reason", () => {
     }),
     "built on macos, and this machine is linux",
   );
+});
+
+// An install made by the one-click `.exe` is the same kind of install as the
+// unzipped `.zip`, and updates only from the zip's manifest. A channel given
+// the `.exe` alone published releases no install could take, and each install
+// was told to reinstall — from that `.exe` (a field report: seven releases).
+Deno.test("am publish: a one-click Windows exe without its zip is refused; --no-zip publishes it on purpose", async () => {
+  const orig = Deno.cwd();
+  const dir = await tempDir("am-publish-sfx-");
+  const exit = Deno.exit;
+  let code: number | undefined;
+  try {
+    await Deno.mkdir(join(dir, "src"), { recursive: true });
+    await Deno.mkdir(join(dir, "dist"), { recursive: true });
+    await Deno.writeTextFile(
+      join(dir, "deno.json"),
+      JSON.stringify({
+        appId: "notes",
+        version: "2.1.0",
+        entry: "src/app.ts",
+        build: { targets: ["electron"], platforms: ["windows"] },
+      }),
+    );
+    await Deno.writeTextFile(join(dir, "src", "app.ts"), `fetch("x");`);
+    await Deno.writeFile(
+      join(dir, "dist", "notes-win-x64.exe"),
+      appendSfxPayload(
+        new TextEncoder().encode("MZ fake stub"),
+        new TextEncoder().encode("payload"),
+        { sha256: "ab", binary: "notes", arch: "x64", format: "tar.zstd" },
+      ),
+    );
+    await Deno.writeTextFile(
+      join(dir, "dist", "manifest.json"),
+      JSON.stringify({
+        app: "notes",
+        targets: [{
+          target: "electron",
+          ok: true,
+          host: false,
+          platform: "windows",
+          artifacts: [{ file: "notes-win-x64.exe" }],
+        }],
+      }),
+    );
+    Deno.chdir(dir);
+    // deno-lint-ignore no-explicit-any
+    (Deno as any).exit = (c?: number) => {
+      code = c;
+      throw new Error("exited");
+    };
+    const refused = await withHome(() =>
+      capture(async () => {
+        try {
+          await cmdPublish(["--no-build", "--dir=release"], { json: true });
+        } catch { /* the stubbed exit */ }
+      })
+    );
+    assertEquals(code, 1);
+    const err = (JSON.parse(refused.at(-1)!) as { error: string }).error;
+    assertStringIncludes(err, "notes-win-x64.exe is a one-click Windows .exe");
+    assertStringIncludes(err, "electron-zip.json");
+    assertStringIncludes(err, "notes-win-x64.zip");
+    assertStringIncludes(err, "--no-zip");
+    // Nothing was laid out for a client to fetch.
+    await assertRejects(() =>
+      Deno.stat(join(dir, "release", "prod", "windows-x86_64.json"))
+    );
+
+    // The explicit way out: the exe goes out as the platform's download.
+    code = undefined;
+    const ok = await withHome(() =>
+      capture(() =>
+        cmdPublish(["--no-build", "--dir=release", "--no-zip"], { json: true })
+      )
+    );
+    assertEquals(code, undefined);
+    const doc = JSON.parse(ok.at(-1)!) as {
+      releases: { artifact: string; kind: string }[];
+    };
+    assertEquals(
+      doc.releases.map((r) => [r.artifact, r.kind]),
+      [[join("prod", "notes-win-x64.exe"), "binary"]],
+    );
+  } finally {
+    // deno-lint-ignore no-explicit-any
+    (Deno as any).exit = exit;
+    Deno.chdir(orig);
+    await dropTempDir(dir);
+  }
 });

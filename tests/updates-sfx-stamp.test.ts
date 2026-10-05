@@ -10,6 +10,8 @@ import {
   firstBootPath,
   type PendingUpdate,
   SFX_STAMP_FILE,
+  SFX_VERSION_FILE,
+  stampSfxVersion,
   swapDirectoryDetached,
 } from "../src/server/updates-apply.ts";
 import type { Log } from "../src/diagnostics/logger-api.ts";
@@ -155,6 +157,50 @@ Deno.test("a stamp that cannot be written or read is said, and never stops the s
     assert(!carrySfxStamp(join(tmp, "app.exe"), to, log));
     assertEquals(warned.length, 2);
     assertEquals(await stampOf(to), null);
+  } finally {
+    await dropTempDir(tmp);
+  }
+});
+
+// The stub keeps an install that is NEWER than the `.exe` being opened, and
+// knows how new the install is from this file. The app rewrites it with its
+// own version at every start, so it is right after an update — which is the
+// case that matters: an old download opened over an updated app.
+Deno.test("a one-click install records the version that runs from it; any other install is left alone", async () => {
+  const tmp = await tempDir("sfx-version-");
+  try {
+    const sfx = await install(join(tmp, "aio-sfx", "notes", "win-x64"));
+    const versionOf = (dir: string) =>
+      Deno.readTextFile(join(dir, SFX_VERSION_FILE)).catch(() => null);
+    stampSfxVersion(sfx, "1.2.0", quiet);
+    assertEquals(await versionOf(sfx), "1.2.0\n");
+    // The same version again writes nothing (the file keeps its time).
+    const before = (await Deno.stat(join(sfx, SFX_VERSION_FILE))).mtime;
+    stampSfxVersion(sfx, "1.2.0", quiet);
+    assertEquals((await Deno.stat(join(sfx, SFX_VERSION_FILE))).mtime, before);
+    // After an update, and after a rollback: whatever runs now.
+    stampSfxVersion(sfx, "1.3.0-beta", quiet);
+    assertEquals(await versionOf(sfx), "1.3.0-beta\n");
+    stampSfxVersion(sfx, "1.2.0", quiet);
+    assertEquals(await versionOf(sfx), "1.2.0\n");
+    // An unzipped install, an AppImage's folder: not the stub's, nothing written.
+    const zip = await install(join(tmp, "Apps", "notes"));
+    stampSfxVersion(zip, "1.2.0", quiet);
+    assertEquals(await versionOf(zip), null);
+    // A file that cannot be written is said, and the start goes on.
+    await Deno.remove(join(sfx, SFX_VERSION_FILE));
+    await Deno.mkdir(join(sfx, SFX_VERSION_FILE));
+    const said: string[] = [];
+    stampSfxVersion(
+      sfx,
+      "1.4.0",
+      {
+        ...quiet,
+        warn: (_s: string, m: string) => said.push(m),
+      } as unknown as Log,
+    );
+    assertEquals(said.length, 1);
+    assert(said[0]!.includes(".aio-sfx-version"), said[0]);
   } finally {
     await dropTempDir(tmp);
   }

@@ -122,3 +122,20 @@ Deno.test("strip: the Electron build hands its platform to the decider — a mac
     await dropTempDir(tmp);
   }
 });
+
+Deno.test("a bad build.chromiumExtras is said by a build that packages no Electron, and only there", async () => {
+  const { chromiumExtrasNote } = await import("../src/build/build-config.ts");
+  const bad = { build: { chromiumExtras: "stripped" } };
+  const said = chromiumExtrasNote(bad, false) ?? "";
+  assertEquals(said.includes('"stripped"'), true, said);
+  assertEquals(said.includes('"keep"') && said.includes('"strip"'), true, said);
+  // An Electron build has its own, stricter reader — not said twice.
+  assertEquals(chromiumExtrasNote(bad, true), null);
+  for (
+    const ok of [{}, { build: {} }, { build: { chromiumExtras: "keep" } }, {
+      build: { chromiumExtras: "strip" },
+    }]
+  ) {
+    assertEquals(chromiumExtrasNote(ok, false), null, JSON.stringify(ok));
+  }
+});

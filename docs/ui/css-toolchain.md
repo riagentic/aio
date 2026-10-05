@@ -38,6 +38,13 @@ Tailwind** — because `src/style.css` existing is exactly what makes the
 generated theme step aside, so an example written against that theme would
 render unstyled on the first `deno task dev`.
 
+Only the `counter` template has that Tailwind twin.
+`am create myapp
+--template=todo --css=tailwind` (or any other template) is
+refused and says so: the other templates' markup uses aio's theme classes, which
+a Tailwind stylesheet does not define. Use `--template=counter`, leave
+`--css=tailwind` out, or write `src/App.tsx` in Tailwind utilities yourself.
+
 The rest of this section is the same wiring by hand.
 
 Tailwind v4 needs `tailwindcss` resolvable as a node package, so the app's

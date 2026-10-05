@@ -982,6 +982,21 @@ export function decide(opts: {
         ],
       };
     }
+    if (opts.installedTarget === "electron-zip" && m.target === "binary") {
+      // An unpacked desktop install (the Windows one-click .exe makes one, and
+      // so does the .zip) updates from the release's .zip. The channel has
+      // the program and not the zip: "reinstall from what this channel
+      // serves" would install this same kind again, and be refused again.
+      return {
+        kind: "refused",
+        reason: `${m.version} was published to "${m.channel}" without its ` +
+          `.zip, and this install updates from the .zip ` +
+          `(<os>-<arch>.electron-zip.json) — a publishing mistake, not ` +
+          `something wrong with this install: there is nothing to reinstall ` +
+          `here. Fix (publisher): publish the build's .zip beside its .exe ` +
+          `(am publish does both from one build).`,
+      };
+    }
     return {
       kind: "refused",
       reason: `this install cannot apply a "${m.target}" release (it can ` +

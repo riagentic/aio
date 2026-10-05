@@ -242,6 +242,7 @@ import {
   startUpdates,
   ttyPrompt,
 } from "./updates-boot.ts";
+import { offerMoveToApplications } from "./macos-move.ts";
 import { PERSIST_SCHEMA_VERSION } from "./persist-schema.ts";
 import {
   deriveDataContract,
@@ -5664,6 +5665,32 @@ async function _runPhases<S, A, E>(
       slot: _appSlots.get(config)?.updates,
     })
     : undefined;
+
+  // macOS: a desktop app opened from its disk image or from Downloads offers,
+  // once, to move itself into Applications (macos-move.ts). Un-awaited on
+  // purpose: the app is up, and a question must never hold it.
+  if (
+    Deno.build.os === "darwin" && isCompiled() && !config.libraryMode &&
+    clientOf(cli, config).value === "electron"
+  ) {
+    void offerMoveToApplications({
+      title,
+      dataDir: _dirs.data,
+      argv: ownReplayArgs(),
+      log,
+      shutdown: () => shutdown(),
+      // A page has connected, so the window exists; then a moment more, for
+      // it to have checked in with the window server.
+      windowUp: async () => {
+        for (let waited = 0; clientCounter.value === 0; waited += 500) {
+          if (waited >= 300_000) return false;
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        await new Promise((r) => setTimeout(r, 3000));
+        return true;
+      },
+    });
+  }
 
   // Problem reports: user-filed and automatic. Off in libraryMode — a test or
   // a host app owns this process, and its failures are not the app's to file.

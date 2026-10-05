@@ -1,0 +1,49 @@
+{
+  "comment": "Version pairs and their order, shared by the two comparators that must agree: compareVersions (src/server/updates-core.ts) and compare_versions (src/version.rs). ascending: each entry sorts strictly before the next. equal: pairs that compare equal. unorderable: strings neither may order.",
+  "ascending": [
+    "0.0.1",
+    "0.1",
+    "0.1.607",
+    "0.1.614",
+    "0.1.620",
+    "1.0.0-alpha",
+    "1.0.0-alpha.1",
+    "1.0.0-alpha9",
+    "1.0.0-alpha62",
+    "1.0.0-alpha.beta",
+    "1.0.0-beta",
+    "1.0.0-beta.2",
+    "1.0.0-beta.11",
+    "1.0.0-rc.1",
+    "1.0.0",
+    "1.0.1-beta",
+    "1.0.1",
+    "1.0.17-beta",
+    "1.0.18-beta",
+    "1.2.3",
+    "1.10.0",
+    "2",
+    "2.0.1",
+    "10.0.0-0",
+    "10.0.0"
+  ],
+  "equal": [
+    ["1.2.3", "v1.2.3"],
+    ["1.2", "1.2.0"],
+    ["2", "2.0.0"],
+    ["1.2.3+a", "1.2.3+b-1"],
+    ["1.0.0-rc1", "1.0.0-rc.1"],
+    ["1.0.0-alpha.007", "1.0.0-alpha7"],
+    [" 1.2.3 ", "1.2.3"]
+  ],
+  "unorderable": [
+    "",
+    "unknown (compiled binary)",
+    "1.2.3.4",
+    "1..2",
+    "a.b.c",
+    "1.2.3-",
+    "1.2.3+",
+    "1.2.3-β"
+  ]
+}

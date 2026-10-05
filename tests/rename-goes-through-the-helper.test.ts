@@ -120,6 +120,9 @@ const VERBS: Record<string, { "replace-temp"?: number; "move-data"?: number }> =
     // back (2 layouts), the rollback's link — left where it is on a failure,
     // because the error names it
     "src/server/updates-apply.ts": { "replace-temp": 3, "move-data": 8 },
+    // the copy of the app bundle made beside its place in Applications, moved
+    // into a name nothing holds (an existing bundle there means no move)
+    "src/server/macos-move.ts": { "move-data": 1 },
   };
 /** Routed by their own module; not counted here. */
 const VERBS_SKIP = new Set(["src/diagnostics/rename-over.ts"]);

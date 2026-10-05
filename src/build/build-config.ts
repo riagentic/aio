@@ -39,6 +39,51 @@ import {
   resolvePlatforms,
 } from "./platforms.ts";
 
+/** deno.json `build.windows.shortcut`: whether the one-click `.exe` adds a
+ *  Start-menu shortcut when it installs the app. True unless it says `false`;
+ *  anything else is refused — a typo there must not decide what an installer
+ *  writes on a user's machine. Pure. */
+export function resolveWindowsShortcut(
+  mainConfig: { build?: unknown },
+): boolean {
+  const windows = (mainConfig.build as { windows?: unknown } | undefined)
+    ?.windows;
+  if (windows === undefined) return true;
+  const shortcut = (windows as { shortcut?: unknown } | null)?.shortcut;
+  if (
+    windows === null || typeof windows !== "object" || Array.isArray(windows) ||
+    (shortcut !== undefined && typeof shortcut !== "boolean")
+  ) {
+    throw new Error(
+      `deno.json build.windows is ${JSON.stringify(windows)} — it must be ` +
+        `{ "shortcut": true | false } (whether the one-click .exe adds a ` +
+        `Start-menu shortcut; true when left out).`,
+    );
+  }
+  return shortcut !== false;
+}
+
+/** What to say about a `build.chromiumExtras` that is neither "keep" nor
+ *  "strip" in a build that packages no Electron runtime, or null. The key
+ *  decides nothing there, so the build goes on (it always did) — but the only
+ *  reader was the Electron package step, so a server or CLI build carried a
+ *  typo in silence until the day someone built the desktop app from the same
+ *  deno.json and was refused. Pure. */
+export function chromiumExtrasNote(
+  mainConfig: { build?: unknown },
+  packagesElectron: boolean,
+): string | null {
+  const v = (mainConfig.build as { chromiumExtras?: unknown } | undefined)
+    ?.chromiumExtras;
+  if (packagesElectron || v === undefined || v === "keep" || v === "strip") {
+    return null;
+  }
+  return `deno.json build.chromiumExtras is ${JSON.stringify(v)} — it must ` +
+    `be "keep" (the default) or "strip". This build packages no Electron ` +
+    `runtime, so nothing reads it here; an Electron build for Windows or ` +
+    `Linux refuses the value.`;
+}
+
 /** THE macOS bundle-identifier decider — one place, because the outer bundle
  *  and the nested Electron runtime MUST agree on it (matching identifiers are
  *  what make macOS show one app instead of "Electron").
@@ -174,6 +219,10 @@ export interface BuildConfig {
    *  produce a real `.dmg`. Null means "this host cannot, and none is
    *  configured" — the build then ships the `.app` and says so. */
   macosHost: string | null;
+  /** Whether the one-click Windows `.exe` adds a Start-menu shortcut when it
+   *  installs the app. On unless deno.json says
+   *  `build.windows.shortcut: false`. */
+  windowsShortcut: boolean;
   /** The macOS bundle identifier (`CFBundleIdentifier`) — the app's permanent
    *  OS-level identity, shown as the Dock entry's reverse-DNS name and used by
    *  macOS to merge the Deno server and its Electron child into ONE app.
@@ -400,6 +449,9 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
   // saved window frame all key off it), so "fixed up" is strictly worse than
   // "refused" — the same rule `android.applicationId` follows.
   const macBundleId = resolveMacBundleId(mainConfig, binaryName);
+  const windowsShortcut = resolveWindowsShortcut(mainConfig);
+  const extrasNote = chromiumExtrasNote(mainConfig, doElectron);
+  if (extrasNote) warn(extrasNote);
   // THE app version. The fleet resolves it once and hands it down
   // (AIO_BUILD_VERSION); a direct single-target build resolves it here and
   // prints the notes itself — exactly once per build either way.
@@ -582,6 +634,7 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
     binaryName,
     appTitle,
     macosHost,
+    windowsShortcut,
     macBundleId,
     version,
     configEntry,

@@ -46,6 +46,7 @@ import { readDenoJsonSync } from "../server/deno-json.ts";
 import { resolveEntryPath } from "../server/paths.ts";
 import { appIdFromConfig, slugify } from "../server/single-instance-lock.ts";
 import { VIDEO_FLAGS } from "./harness-flags.ts";
+import { aioTestRoot } from "./test-strict.ts";
 
 // deno-lint-ignore no-explicit-any
 type AnyNode = any;
@@ -518,8 +519,21 @@ function claim(out: string, label: string): Claim | { heldBy: string } {
   const key = `${CLAIM_PREFIX}${shortHash(out)}${shortHash(out, 0x1234567)}`;
   let held: string | undefined;
   try {
-    held = Deno.env.get(key);
-    if (held === undefined) Deno.env.set(key, label);
+    // Read-then-write, under a file lock: `--parallel` runs each test file on
+    // its own THREAD of this one process, and two same-named tests that read
+    // "unclaimed" in the same instant both wrote `same-name.mp4`. The lock is
+    // per open file, so it excludes those threads.
+    const lock = Deno.openSync(`${aioTestRoot()}/.video.lock`, {
+      create: true,
+      write: true,
+    });
+    try {
+      lock.lockSync(true);
+      held = Deno.env.get(key);
+      if (held === undefined) Deno.env.set(key, label);
+    } finally {
+      lock.close(); // closing releases the lock
+    }
   } catch (e) {
     throw new Error(
       `[aio:video] cannot record which test writes ${out}: ${e}`,

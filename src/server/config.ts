@@ -164,6 +164,9 @@ export const VALID_BUILD_KEYS = new Set<string>([
   // it does nothing". `tests/build-block-shape-and-typos.test.ts` now derives
   // the readers from the source, so the next key cannot be forgotten here.
   "chromiumExtras",
+  // `{ shortcut }` — read by build-config.ts (`resolveWindowsShortcut`):
+  // whether the one-click Windows `.exe` adds a Start-menu shortcut.
+  "windows",
   // `{ bundleId, host }` — read by build-config.ts (`resolveMacBundleId`,
   // `resolveMacHost`) and documented in docs/build/targets.md.
   "macos",

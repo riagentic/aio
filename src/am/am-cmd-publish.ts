@@ -43,6 +43,7 @@ import {
   shipRelease,
 } from "../build/ship.ts";
 import { appIdFromConfig } from "../server/single-instance-lock.ts";
+import { readSfxTrailerOfFile } from "../build/sfx-trailer.ts";
 import { count } from "../diagnostics/fmt.ts";
 
 /** What `dist/manifest.json` records — the fleet build's own report. */
@@ -270,7 +271,8 @@ export async function cmdPublish(
       `am publish takes no arguments (got ${
         stray.map((a) => JSON.stringify(a)).join(" ")
       }) — every setting is a --flag=value: --channel= --dir= --targets= ` +
-        `--target= --key= --notes= --version= --min-from= --data= --no-data`,
+        `--target= --key= --notes= --version= --min-from= --data= --no-data ` +
+        `--no-zip`,
       mode,
     );
   }
@@ -390,6 +392,8 @@ export async function cmdPublish(
   const dataFlag = flag("data");
   /** Publish without a contract on purpose — `aio ship`'s own hatch. */
   const noData = args.includes("--no-data");
+  /** Publish a one-click Windows `.exe` without its `.zip` on purpose. */
+  const noZip = args.includes("--no-zip");
   for (const t of built) {
     if (only && t.target !== only) continue;
     // A fleet entry can produce COMPANION files beside its program — the
@@ -435,6 +439,28 @@ export async function cmdPublish(
     // refuses the program's `binary` release. It gets its own manifest,
     // `<os>-<arch>.electron-zip.json`, which a zip install reads first.
     const zips = pick.downloads.filter((f) => /\.zip$/i.test(f));
+    // The one-click `.exe` unpacks into the SAME kind of install as the zip,
+    // so every install made from it updates from the zip's manifest and from
+    // nothing else. Published alone, it is a release no install can take —
+    // and the install's only advice used to be "reinstall", from this `.exe`.
+    if (
+      zips.length === 0 && !noZip && /\.exe$/i.test(pick.file) &&
+      await readSfxTrailerOfFile(join(distDir, pick.file)) !== null
+    ) {
+      fail(
+        `target "${t.target}": ${pick.file} is a one-click Windows .exe, and ` +
+          `an install made from it updates from the .zip of the same build ` +
+          `(<channel>/<os>-<arch>.electron-zip.json) — which is not in ${
+            join(distDir, "manifest.json")
+          }. Published like this, no install could update, now or from a ` +
+          `later release.\n` +
+          `Fix: rebuild (deno task build) so ${
+            pick.file.replace(/\.exe$/i, ".zip")
+          } is beside it, and publish both. --no-zip publishes the .exe as ` +
+          `a download nothing updates from.`,
+        mode,
+      );
+    }
     downloads.push(
       ...pick.downloads.filter((f) => !zips.includes(f)).map((file) => ({
         file,
@@ -752,6 +778,7 @@ export async function cmdPublish(
         shipped.filter((x) => x.spec.manifestName).map((x) =>
           x.spec.manifestName
         ).join(", ") +
+        ` (an install made by the one-click .exe is a zip install too)` +
         ` — a zip install running aio older than 1.0.13-beta reads the ` +
         `platform's own manifest (the .exe, kind binary) and cannot install ` +
         `it: those installs are stranded until updated by hand once.`,

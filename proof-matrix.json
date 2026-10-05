@@ -9,8 +9,8 @@
   {
     "target": "cli",
     "env": "binary",
-    "commit": "aa9e73804",
-    "date": "2026-10-01",
+    "commit": "d33706902",
+    "date": "2026-10-05",
     "detail": "compiled cli-client ↔ compiled server, state printed"
   },
   {
@@ -23,8 +23,8 @@
   {
     "target": "web",
     "env": "real-browser",
-    "commit": "3141fa34d",
-    "date": "2026-10-01",
+    "commit": "d33706902",
+    "date": "2026-10-05",
     "detail": "chromium: surface → trigger → server state converged"
   },
   {

@@ -1,12 +1,13 @@
 // Windows one-click exe is an SFX over a compressed payload (Task1), and since
 // 1.0.16-beta that payload is a zstd tar packed by Deno, with a committed
-// prebuilt stub — building it needs no Go toolchain (optimal-builds §6).
+// prebuilt stub — building it needs no compiler (optimal-builds §6).
 import {
   assert,
   assertEquals,
   assertExists,
   assertRejects,
   assertStringIncludes,
+  assertThrows,
 } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { UntarStream } from "@std/tar";
@@ -32,7 +33,10 @@ import {
   windowsZipName,
   writeWindowsSfxExe,
 } from "../src/build/build-windows-exe.ts";
-import type { BuildConfig } from "../src/build/build-config.ts";
+import {
+  type BuildConfig,
+  resolveWindowsShortcut,
+} from "../src/build/build-config.ts";
 import { electronStagingDir } from "../src/build/build-electron.ts";
 import { sha256Hex } from "../src/build/ship.ts";
 import { extractZip } from "../src/server/zip-extract.ts";
@@ -134,6 +138,9 @@ async function stagedBuild(tmp: string): Promise<BuildConfig> {
     outDir: tmp,
     binaryName: "myapp",
     archStr: "x64",
+    version: { version: "1.2.3" },
+    appTitle: "My App",
+    windowsShortcut: true,
   } as BuildConfig;
 }
 
@@ -217,11 +224,12 @@ Deno.test({
   async fn() {
     const tmp = await tempDir("windows-sfx-");
     try {
-      // The stub is committed prebuilt — no Go — and must be a real PE.
+      // The stub is committed prebuilt — no compiler — and must be a real PE.
       const stubPath = await ensureWindowsSfxStub();
       const stubStat = await Deno.stat(stubPath);
       assert(stubStat.size > 100_000, "stub PE should be a real linked binary");
-      assert(stubStat.size < 8_000_000, "stub must stay tiny vs Deno PE");
+      // 3.7 MB as a Go program (through 1.0.17-beta); every `.exe` starts with it.
+      assert(stubStat.size < 1_000_000, "the stub must stay under 1 MB");
 
       // A small AppDir → zstd tar, packed entirely in Deno.
       const stage = join(tmp, "app");
@@ -945,7 +953,9 @@ Deno.test("an app with a symlink builds a zstd exe that carries the target; one 
     await Deno.symlink("myapp.exe", join(appDir, "link.exe"));
     // A linked file big enough that its copy takes the exe past the zip it is
     // gated against (which holds the file once): the gate counts the copy.
-    const big = new Uint8Array(2 * 1024 * 1024);
+    // 5 MB: zstd packs the copy to almost nothing, and the stub is under 1 MB,
+    // so the file alone has to be larger than the 4 MB zip plus its margin.
+    const big = new Uint8Array(5 * 1024 * 1024);
     for (let at = 0; at < big.length; at += 65536) {
       crypto.getRandomValues(big.subarray(at, at + 65536));
     }
@@ -962,12 +972,17 @@ Deno.test("an app with a symlink builds a zstd exe that carries the target; one 
       said,
       "big-link.bin and 1 more are reached through a symlink",
     );
-    assertStringIncludes(said, "(2.0 MB)");
+    assertStringIncludes(said, "(5.0 MB)");
     assert(!said.includes("falling back"), said);
     const exe = join(tmp, selfContainedExeName("myapp", "x64"));
     const trail = await readSfxTrailerOfFile(exe);
     assertExists(trail);
     assertEquals(trail.header.format, "tar.zstd");
+    // What the stub needs to keep a newer install and to name its shortcut.
+    assertEquals(
+      [trail.header.version, trail.header.title, trail.header.shortcut],
+      ["1.2.3", "My App", true],
+    );
     const pe = await Deno.readFile(exe);
     const files = await tarFiles(
       pe.subarray(
@@ -1036,6 +1051,122 @@ Deno.test("the zip fallback of an app with a symlink carries the target, not the
     assertEquals(scratch, ["AppDir"]);
   } finally {
     if (fat !== undefined) Deno.env.set("AIO_WINDOWS_FAT_EXE", fat);
+    await dropTempDir(tmp);
+  }
+});
+
+/** A minimal PE32+ header — enough for the security directory to be found —
+ *  and the offset of that directory's entry. */
+function fakePe(): { stub: Uint8Array; securityEntry: number } {
+  const lfanew = 0x80;
+  const stub = new Uint8Array(0x200);
+  const view = new DataView(stub.buffer);
+  stub.set(new TextEncoder().encode("MZ"));
+  view.setUint32(0x3c, lfanew, true);
+  stub.set(new TextEncoder().encode("PE\0\0"), lfanew);
+  const opt = lfanew + 4 + 20;
+  view.setUint16(opt, 0x20b, true);
+  view.setUint32(opt + 108, 16, true); // NumberOfRvaAndSizes
+  return { stub, securityEntry: opt + 112 + 4 * 8 };
+}
+
+/** `exe` with an Authenticode-shaped certificate table appended: the file
+ *  padded to 8 bytes, the table after it, the security directory naming it. */
+function signedPe(exe: Uint8Array, securityEntry: number): Uint8Array {
+  const padded = Math.ceil(exe.length / 8) * 8;
+  const out = new Uint8Array(padded + 4096).fill(0xc5, padded);
+  out.set(exe);
+  out.fill(0, exe.length, padded);
+  const view = new DataView(out.buffer);
+  view.setUint32(securityEntry, padded, true);
+  view.setUint32(securityEntry + 4, 4096, true);
+  return out;
+}
+
+// `am publish` asks this reader whether an `.exe` is a one-click installer. A
+// signature puts the certificate table AFTER the trailer, so a reader that
+// only looked at the end of the file called every signed installer "not one".
+Deno.test("a signed exe's trailer is read from before its certificate table, at every padding", async () => {
+  const tmp = await tempDir("windows-sfx-");
+  try {
+    const { stub, securityEntry } = fakePe();
+    const header = {
+      sha256: "ab",
+      binary: "myapp",
+      arch: "x64",
+      format: "tar.zstd" as const,
+    };
+    for (let pad = 0; pad < 8; pad++) {
+      const payload = new TextEncoder().encode("PAYLOAD" + "x".repeat(pad));
+      const exe = appendSfxPayload(stub, payload, header);
+      const signed = signedPe(exe, securityEntry);
+      assert(
+        new TextDecoder().decode(signed.subarray(-SFX_MAGIC.length)) !==
+          SFX_MAGIC,
+        "fixture: the magic must not be at the end of the file",
+      );
+      const want = {
+        header,
+        payloadOffset: stub.length,
+        payloadLength: payload.length,
+      };
+      assertEquals(readSfxTrailer(exe), want);
+      assertEquals(readSfxTrailer(signed), want, `padding ${pad}`);
+      const path = join(tmp, `signed-${pad}.exe`);
+      await Deno.writeFile(path, signed);
+      assertEquals(await readSfxTrailerOfFile(path), want, `padding ${pad}`);
+    }
+    // Bytes after the trailer that no security directory accounts for are not
+    // a signature: not an installer this reader may vouch for.
+    const exe = appendSfxPayload(stub, new Uint8Array([1, 2, 3]), header);
+    const trailing = new Uint8Array(exe.length + 4096);
+    trailing.set(exe);
+    assertEquals(readSfxTrailer(trailing), null);
+    const path = join(tmp, "trailing.exe");
+    await Deno.writeFile(path, trailing);
+    assertEquals(await readSfxTrailerOfFile(path), null);
+    // …and a file that is no PE at all, shorter than a PE header.
+    await Deno.writeTextFile(path, "MZ fake exe");
+    assertEquals(await readSfxTrailerOfFile(path), null);
+  } finally {
+    await dropTempDir(tmp);
+  }
+});
+
+Deno.test("build.windows.shortcut: on unless it says false; anything else is refused", async () => {
+  assertEquals(resolveWindowsShortcut({}), true);
+  assertEquals(resolveWindowsShortcut({ build: {} }), true);
+  assertEquals(resolveWindowsShortcut({ build: { windows: {} } }), true);
+  assertEquals(
+    resolveWindowsShortcut({ build: { windows: { shortcut: true } } }),
+    true,
+  );
+  assertEquals(
+    resolveWindowsShortcut({ build: { windows: { shortcut: false } } }),
+    false,
+  );
+  assertThrows(
+    () => resolveWindowsShortcut({ build: { windows: { shortcut: "no" } } }),
+    Error,
+    "build.windows",
+  );
+  assertThrows(
+    () => resolveWindowsShortcut({ build: { windows: false } }),
+    Error,
+    "build.windows",
+  );
+  // Off: the header says nothing, and the stub adds none.
+  const tmp = await tempDir("windows-sfx-");
+  try {
+    const cfg = { ...await stagedBuild(tmp), windowsShortcut: false };
+    await hushed(() => buildSelfContainedWindowsExe(cfg));
+    const trail = await readSfxTrailerOfFile(
+      join(tmp, selfContainedExeName("myapp", "x64")),
+    );
+    assertExists(trail);
+    assertEquals(trail.header.shortcut, undefined);
+    assertEquals(trail.header.version, "1.2.3");
+  } finally {
     await dropTempDir(tmp);
   }
 });

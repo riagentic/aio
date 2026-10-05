@@ -212,10 +212,32 @@ export function aioTestDir(prefix: string): string {
 // as one, and the uncounted one stayed (seen once in a loaded suite). Each
 // file that uses it holds a marker in `<dir>/.users/`; at unload it drops its
 // own, and the one whose `rmdir .users` succeeds (the kernel's answer to "am
-// I the last", atomic across threads) removes the dir. `AIO_APPS_SANDBOX`
-// tells the sandbox from a runner's own pin; a child process inherits it and
-// joins its parent's dir as one more user, so it never removes it early.
+// I the last") removes the dir. `AIO_APPS_SANDBOX` tells the sandbox from a
+// runner's own pin; a child process inherits it and joins its parent's dir as
+// one more user, so it never removes it early.
+//
+// Joining and leaving happen under ONE file lock (`<test root>/.apps.lock`).
+// Without it, a file arming while the last user was leaving lost its marker
+// to that user's `rm -r` — or failed to write it and ran unsandboxed-by-count:
+// it used the dir, recreated it, and nothing removed it (1 run in 15).
 const SANDBOX_ENV = "AIO_APPS_SANDBOX";
+
+/** Run `fn` holding the sandbox lock of the test root `dir` lives in. The lock
+ *  is per open file, so it excludes the other test files of this process (one
+ *  thread each under `--parallel`) and its child processes alike. */
+function _withAppsLock<T>(dir: string, fn: () => T): T {
+  // The parent by its text: `<dir>/..` does not resolve before `dir` exists.
+  const lock = Deno.openSync(`${dir.replace(/[/\\][^/\\]+$/, "")}/.apps.lock`, {
+    create: true,
+    write: true,
+  });
+  try {
+    lock.lockSync(true);
+    return fn();
+  } finally {
+    lock.close(); // closing releases the lock
+  }
+}
 let _appsDir: string | undefined;
 let _appsWarned = false;
 function _sandboxAppDirs(): void {
@@ -230,21 +252,25 @@ function _sandboxAppDirs(): void {
     if (pinned && pinned !== Deno.env.get(SANDBOX_ENV)) return; // runner (or the test) pinned it
     const dir = pinned ?? `${aioTestRoot()}/apps-${Deno.pid}`;
     const users = `${dir}/.users`;
-    Deno.mkdirSync(users, { recursive: true, mode: 0o700 });
     const me = `${users}/${crypto.randomUUID()}`;
-    Deno.writeTextFileSync(me, "");
+    _withAppsLock(dir, () => {
+      Deno.mkdirSync(users, { recursive: true, mode: 0o700 });
+      Deno.writeTextFileSync(me, "");
+    });
     _appsDir = dir;
     Deno.env.set("AIO_APPS_DIR", dir);
     Deno.env.set(SANDBOX_ENV, dir);
     globalThis.addEventListener("unload", () => {
       try {
-        Deno.removeSync(me);
-        Deno.removeSync(users); // throws while another file still holds a marker
-      } catch (e) {
-        if (!(e instanceof Deno.errors.NotFound)) return; // aio-ok: not the last user
-      }
-      try {
-        Deno.removeSync(dir, { recursive: true });
+        _withAppsLock(dir, () => {
+          try {
+            Deno.removeSync(me);
+            Deno.removeSync(users); // throws while another file still holds a marker
+          } catch (e) {
+            if (!(e instanceof Deno.errors.NotFound)) return; // aio-ok: not the last user
+          }
+          Deno.removeSync(dir, { recursive: true });
+        });
       } catch {
         // aio-ok: process-exit cleanup of a directory this function created
         // and nothing else refers to. The two ways it fails are "already

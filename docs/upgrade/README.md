@@ -26,6 +26,12 @@ app, that is a bug in aio, not a step you missed.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [1.0.17-beta → **1.0.18-beta**](from-1.0.17-beta-to-1.0.18-beta.md) — nothing
+  is removed or renamed; one flag (`am publish --no-zip`) and one build key
+  (`build.windows.shortcut`) are added. The Windows one-click `.exe` stub is
+  Rust (no Go is left in aio, each `.exe` is 3 MB smaller), an older `.exe` no
+  longer overwrites a newer install, and the first open adds a Start-menu
+  shortcut. `am publish` refuses a one-click `.exe` without its `.zip`.
 - [1.0.16-beta → **1.0.17-beta**](from-1.0.16-beta-to-1.0.17-beta.md) — nothing
   is removed and the surface does not move. The size repair: a peer-reached
   `typescript` (and other dev-only packages) is left out by name, source

@@ -982,27 +982,6 @@ export function createServer(config: ServerConfig): ServerHandle {
       runCss: () => _runAppCssStep(absBaseDir, _cssStop.signal),
     });
     watcher.start();
-    // Once at boot too: a dev server that serves the stylesheet from the last
-    // BUILD until the first edit is the same wrong-answer shape as serving a
-    // stale one after an edit.
-    //
-    // TRACKED, not fire-and-forget. `void`-ing it left a promise (and, for an
-    // app with no step, a `Deno.readDir`) outliving whatever started the
-    // server: eight tests that only boot one reported a leaked readDir, and
-    // the sanitizers are right — work nobody owns is exactly what this
-    // project's own leak round existed to remove. `_runAppCssStep` returns
-    // immediately for an app that declares no step, so the common case costs
-    // nothing at all.
-    _cssBootRun = _runAppCssStep(absBaseDir, _cssStop.signal).then(
-      () => {},
-      () => {
-        // aio-ok: `_runAppCssStep` runs with `throwOnFail: false` and has
-        // ALREADY logged the failure with its command and the tool's own output
-        // (server-css-step.ts). Rejecting here would only turn a reported,
-        // recoverable dev-loop failure into an unhandled rejection — the dev
-        // server stays up on purpose so the next save can fix it.
-      },
-    );
   }
 
   // ── Build TrojanDeps lazily (uses wsMgr) ──
@@ -1987,6 +1966,36 @@ export function createServer(config: ServerConfig): ServerHandle {
       }
       throw e;
     }
+  }
+
+  if (!prod) {
+    // AFTER the listener is bound, never before: a boot that loses its port
+    // throws out of this (synchronous) function with nothing left to wait for
+    // the step, and its read of the project's deno.json then finished inside
+    // whatever ran next — "an async readTextFile started before the test",
+    // in a test that never touched a file (tests/test-server-port-race.test.ts).
+    //
+    // Once at boot too: a dev server that serves the stylesheet from the last
+    // BUILD until the first edit is the same wrong-answer shape as serving a
+    // stale one after an edit.
+    //
+    // TRACKED, not fire-and-forget. `void`-ing it left a promise (and, for an
+    // app with no step, a `Deno.readDir`) outliving whatever started the
+    // server: eight tests that only boot one reported a leaked readDir, and
+    // the sanitizers are right — work nobody owns is exactly what this
+    // project's own leak round existed to remove. `_runAppCssStep` returns
+    // immediately for an app that declares no step, so the common case costs
+    // nothing at all.
+    _cssBootRun = _runAppCssStep(absBaseDir, _cssStop.signal).then(
+      () => {},
+      () => {
+        // aio-ok: `_runAppCssStep` runs with `throwOnFail: false` and has
+        // ALREADY logged the failure with its command and the tool's own output
+        // (server-css-step.ts). Rejecting here would only turn a reported,
+        // recoverable dev-loop failure into an unhandled rejection — the dev
+        // server stays up on purpose so the next save can fix it.
+      },
+    );
   }
 
   // When TLS is active: spin up a plain-HTTP trojan server on 127.0.0.1

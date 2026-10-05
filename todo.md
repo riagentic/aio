@@ -9,14 +9,16 @@
 > Shipped work lives in `CHANGELOG.md`; what was fixed or refused from field
 > reports lives in `feedback/resolved.md` and `feedback/refused.md`.
 
-## Current: 1.0.17-beta (2026-10-02) — 1.0.15-beta and 1.0.16-beta shipped
+## Current: 1.0.18-beta (2026-10-04) — the Windows stub is Rust
 
-- **1.0.15-beta** (2026-09-30) and **1.0.16-beta** (2026-10-01) are published.
-- **1.0.17-beta** is the current release: the size repair, plus the repair of
-  what an audit found shipped broken in 1.0.15/1.0.16 (minified builds, the
-  local-peer lockdown, the Windows one-click `.exe`, the version read, env
-  refusals). What it changed is in `CHANGELOG.md`; what it left open is under
-  [Open work](#open-work) → "Left open by the 1.0.17-beta audit round".
+- **1.0.15-beta** (2026-09-30), **1.0.16-beta** (2026-10-01) and **1.0.17-beta**
+  (2026-10-03) are published.
+- **1.0.18-beta** is the current release: the Windows one-click `.exe` stub is
+  Rust (no Go is left in aio), an older `.exe` keeps a newer install, the first
+  open adds a Start-menu shortcut, and `am publish` refuses a one-click `.exe`
+  without its `.zip`. What it changed is in `CHANGELOG.md`; what 1.0.17-beta
+  left open is under [Open work](#open-work) → "Left open by the 1.0.17-beta
+  audit round".
 - Still owed on real machines (Windows, macOS): the lockdown's pipe and
   `LOCAL_PEERPID` paths, and a real app updating itself from the one-click
   `.exe`.
@@ -1096,6 +1098,18 @@ bundle are not inside it. GitHub releases exist: `deno task ship github`.
 
 ## Open work
 
+### macOS: offer "Move to Applications" — built in 1.0.18-beta
+
+- [x] A `.app` opened from the mounted `.dmg` or from Downloads asks once, after
+      its window is up, to be copied into Applications and reopened from there
+      (`src/server/macos-move.ts`). Run on macOS 14 from the image and from a
+      quarantined, translocated copy.
+- [ ] The two buttons were never pressed on a real Mac (no remote click on the
+      test Mac; `AIO_MOVE_TO_APPLICATIONS=move` drove the move). A person should
+      press each once.
+- [ ] A real browser download (Gatekeeper's first-open hold, then the offer) was
+      not run end to end, for the same reason.
+
 ### Left open by the 1.0.17-beta audit round (2026-10-02) — accepted, not yet built
 
 Skipped or left open by the fixes that went into 1.0.17-beta. One line each.
@@ -1128,11 +1142,11 @@ Build / trim:
 - [ ] The "graph loads it" trim guard sees one entry per npm package, not its
       files: a CJS package that `require`s from its own root-level `test/` is
       not detected (`build.keepPackages` is the escape).
-- [ ] `cli` targets keep unreached packages (`keepUnreached`) while
-      `docs/build/targets.md` says they are dropped "for every target" — make
-      the doc or the build agree.
-- [ ] `build.chromiumExtras` is validated only by Electron builds; a server-only
-      build never reads it.
+- [x] `cli` targets keep unreached packages (`keepUnreached`);
+      `docs/build/targets.md` says "for every target except `cli`".
+- [x] `build.chromiumExtras` was validated only by Electron builds — a build
+      that packages no Electron now warns about a bad value
+      (`chromiumExtrasNote`).
 - [ ] Minify: esbuild refuses TS parameter decorators ("could not minify"), and
       a nested function declared after a `return` loses its name.
 - [ ] `docs/build/environment.md` (`AIO_STRIP_CHROMIUM`) still says "software
@@ -1144,12 +1158,16 @@ Windows one-click `.exe`:
       update → reopen the old `.exe`) — done on Windows 11 for 1.0.17-beta,
       including a 1.0.16 install updated by 1.0.16 and then 1.0.17.
 - [ ] The stub always exits 0 — it does not propagate the app's exit code.
-- [ ] An older `.exe` opened over a newer install downgrades it ("the exe you
-      open wins"); preventing it needs a version in the SFX header and stamp.
-- [ ] A channel that publishes only the `.exe` offers SFX installs a release
-      they refuse; nothing gates "publish the zip with every release".
+- [x] An older `.exe` opened over a newer install downgrades it — the header
+      carries the version, the install says its own in `.aio-sfx-version`, and
+      the stub keeps a newer install (an `.exe` built before this still wins).
+- [x] A channel that publishes only the `.exe` offers SFX installs a release
+      they refuse — `am publish` refuses a one-click `.exe` without its `.zip`
+      (`--no-zip` is the way out), and the install's refusal names the missing
+      zip instead of "reinstall".
 - [ ] No progress UI during the first extraction.
-- [ ] The Deno-side `readSfxTrailer` does not parse a signed `.exe`.
+- [x] The Deno-side `readSfxTrailer` parses a signed `.exe`
+      (`src/build/sfx-trailer.ts`).
 - [ ] Untested: the remote stub fetch against the real registry, a Windows build
       host, the 10-minute lock timeout and an abandoned mutex.
 
@@ -1175,26 +1193,28 @@ Version / memory / updates:
       re-runs the whole boot block starts a fresh session each time.
 - [ ] `pressure` memory reports still repeat every interval;
       `docs/debugging/production.md` does not mention the said-once rule.
-- [ ] The budget error carries no `.code`.
+- [x] The budget error carries `.code` (`MEMORY_UNBOUNDED`).
 
 Core:
 
-- [ ] `_adoptUser` misses an in-place mutation of the same user object (store
-      the key on the client's meta at connect).
+- [x] `_adoptUser` missed an in-place mutation of the same user object — the key
+      is stored on the client's meta at connect (`userKey`). A record with NO
+      key (a `Set`, a class instance) edited in place is still not seen.
 - [ ] aio client pin: the warning has no durable surface once the app page
       loads; a CA-valid certificate that differs from the pin raises no
       `certificate-error`; the token is still sent after the warning. Refusing a
       changed pin is major-version material.
-- [ ] The server's `AIO_DISCOVERY_PORT` falls back to 8099 in silence for a
-      non-decimal value — add the one-line warning.
+- [x] The server's `AIO_DISCOVERY_PORT` fell back to 8099 in silence for a
+      non-decimal value — said now (`discoveryPortRefusal`).
 - [ ] The pin handler was exercised through the evaluated script, not a real
       Electron window.
 
 Tooling:
 
-- [ ] `am create --css=tailwind`'s refusal (`tailwindRefusal`) is undocumented.
-- [ ] The typographic-quote PowerShell escape fixed in `am start` is still open
-      in `src/server/pick-path.ts` (`_psEscape`).
+- [x] `am create --css=tailwind`'s refusal (`tailwindRefusal`) is documented
+      (`docs/ui/css-toolchain.md`).
+- [x] The typographic-quote PowerShell escape is in `src/server/pick-path.ts`
+      (`_psEscape`) too.
 - [ ] `aiol --safe-fix`: a nested function that shadows an imported `call` is
       still rewritten; JSX prose next to a `{…}` child is read as code;
       `codeMask` is not JSX-aware.

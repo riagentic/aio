@@ -10,7 +10,7 @@ All-in-one full-stack TypeScript framework on Deno ≥2.9 (`MIN_DENO` in
 state, persistence (worker-thread SQLite, one `state.db`), CRDT sync, and the UI
 (AIR — a signals+JSX renderer; a page downloads 82 KB gz, renderer plus client
 runtime). One codebase builds to browser, Electron, Android, CLI, and service
-targets. Elm-like core: `(state, action) → { state, effects[] }`. v1.0.17-beta,
+targets. Elm-like core: `(state, action) → { state, effects[] }`. v1.0.18-beta,
 ~11600 test blocks in `tests/`.
 
 An app is TWO files' worth of decisions: `cell({ state, methods })` and a

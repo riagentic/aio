@@ -219,3 +219,19 @@ Deno.test({
     }
   },
 });
+
+Deno.test("discovery: a set AIO_DISCOVERY_PORT that is not a port is said, with the port used instead", async () => {
+  const { discoveryPortRefusal, discoveryPortOf, DEFAULT_DISCOVERY_PORT } =
+    await import("../src/server/discovery.ts");
+  // Unset, empty, or a real port: nothing to say.
+  for (const ok of [undefined, "", "  ", "8100", " 8100 ", "1", "65535"]) {
+    assertEquals(discoveryPortRefusal(ok), null, JSON.stringify(ok));
+  }
+  // Every spelling the decider falls back on is named, with the fallback.
+  for (const bad of ["0x1F90", "1e3", "+8099", "0", "65536", "port", "80 90"]) {
+    assertEquals(discoveryPortOf(bad), DEFAULT_DISCOVERY_PORT, bad);
+    const said = discoveryPortRefusal(bad) ?? "";
+    assertEquals(said.includes(JSON.stringify(bad)), true, said);
+    assertEquals(said.includes(String(DEFAULT_DISCOVERY_PORT)), true, said);
+  }
+});

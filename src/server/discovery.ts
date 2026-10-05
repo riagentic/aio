@@ -48,6 +48,19 @@ export function discoveryPortOf(raw: string | undefined): number {
   return n;
 }
 
+/** Why a set `AIO_DISCOVERY_PORT` is not the port in use, or null when it is
+ *  (or is unset). The fallback itself is deliberate ({@link discoveryPortOf});
+ *  doing it without a word was not — the app answered on 8099 while its
+ *  operator looked for it on the port they had typed. @internal */
+export function discoveryPortRefusal(raw: string | undefined): string | null {
+  if (raw === undefined || raw.trim() === "") return null;
+  if (String(discoveryPortOf(raw)) === raw.trim()) return null;
+  return `discovery: AIO_DISCOVERY_PORT=${
+    JSON.stringify(raw)
+  } is not a port (decimal digits, 1–65535) — answering on the default, ` +
+    `${DEFAULT_DISCOVERY_PORT}.`;
+}
+
 /** Fixed UDP port apps answer discovery probes on. Override with the
  *  `AIO_DISCOVERY_PORT` env var (must match between server and client). */
 export const AIO_DISCOVERY_PORT = discoveryPortOf(
@@ -188,6 +201,8 @@ export function startDiscoveryResponder(
   listApps: () => AioAppAd[],
   onNote?: (msg: string) => void,
 ): { stop: () => void } {
+  const refused = discoveryPortRefusal(safeEnv("AIO_DISCOVERY_PORT"));
+  if (refused) onNote?.(refused);
   let socket: dgram.Socket;
   try {
     socket = dgram.createSocket({ type: "udp4", reuseAddr: true });

@@ -199,11 +199,13 @@ per check. A zip install running aio older than 1.0.13-beta only reads
 by hand once; publish's summary says so. An app installed by the one-click
 `.exe` runs from the folder that `.exe` extracted, so it is an `electron-zip`
 install too: it updates from the **zip's** manifest, not from the `.exe` it was
-downloaded as — publish the `.zip` with every release, or those installs are
-offered an `.exe` they cannot install. Any other tie is refused, naming both
-files. A macOS `.dmg` is download-only: `downloads` in `--json` lists it,
-`stranded` lists any download whose platform got no manifest, and each of
-`releases` names its `kind`.
+downloaded as. So `am publish` refuses a one-click `.exe` whose `.zip` is not in
+the build (`--no-zip` publishes it on purpose, as a download nothing updates
+from), and an install that is offered such a release says it was published
+without its zip — there is nothing to reinstall. Any other tie is refused,
+naming both files. A macOS `.dmg` is download-only: `downloads` in `--json`
+lists it, `stranded` lists any download whose platform got no manifest, and each
+of `releases` names its `kind`.
 
 **The data contract.** Publish asks each artifact it can run here
 (`<binary> --aio-data-contract`) and stamps that answer into the manifests of
@@ -229,9 +231,10 @@ marker is read as before: from stdout. A `--data=` file may hold either form.
 
 Useful flags: `--dir=/srv/releases` (where to stage), `--channel=test`,
 `--notes="fixes the sync bug"`, `--no-build` (publish what `dist/` already
-holds). Unsigned is allowed for a local or air-gapped channel, and every step
-says so out loud — but a client only installs unsigned releases if the app opted
-in.
+holds), `--no-zip` (publish a one-click Windows `.exe` without its `.zip`, on
+purpose — no install updates from it). Unsigned is allowed for a local or
+air-gapped channel, and every step says so out loud — but a client only installs
+unsigned releases if the app opted in.
 
 `--dir` inside the project must be a directory of its own — the rule the build's
 `--out` follows: not the project root, `src/`, an app dir, `.git`, `.aio`, nor
@@ -570,10 +573,14 @@ thrown error, so a method can show it.
     extracted) is not its own. The updater therefore carries the stamp into
     every folder it swaps in — an update and a rollback alike — so the `.exe`
     the user keeps double-clicking stays a launcher for the updated app. A
-    **different** `.exe` (a newer download, or an older one) has another hash
-    and installs the version it carries over the folder: the `.exe` you open
-    wins, in both directions. It refuses, changing nothing, while the app is
-    running ("close it first").
+    **different** `.exe` has another hash and installs the version it carries
+    over the folder — unless the folder holds a **newer** version, which it then
+    only opens. The folder says which version it holds in `.aio-sfx-version`:
+    the `.exe` writes it when it installs, and the app rewrites it with its own
+    version at every start, so it is right after an update and after a rollback.
+    An `.exe` built with aio 1.0.17-beta or older does not look, and still
+    installs what it carries. An `.exe` refuses, changing nothing, while the app
+    is running ("close it first").
   - An app built with aio 1.0.16-beta swaps without carrying the stamp; the
     updated version puts it back on its first start. Until that start — or if
     the updated version is itself built with aio 1.0.16-beta — opening the old

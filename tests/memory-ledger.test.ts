@@ -132,6 +132,8 @@ Deno.test("budget: the breach says MEMORY_UNBOUNDED — the word the docs tell a
     true,
     err.message,
   );
+  // And as a code, so a caller can tell it apart without matching text.
+  assertEquals((err as Error & { code?: string }).code, "MEMORY_UNBOUNDED");
   // How much, against what, and how much of it THIS call brought.
   assertEquals(err.message.includes("7 > 5 count (+7 in this call)"), true);
 });

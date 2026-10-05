@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "1.0.17-beta",
+  "version": "1.0.18-beta",
   "appId": "aio",
   "exports": {
     ".": "./mod.ts",
@@ -107,7 +107,7 @@
       ".katana/",
       "feedback/",
       "review/",
-      "src/build/windows-sfx-stub/vendor/"
+      "src/build/windows-sfx-stub/target/"
     ]
   },
   "lint": {
