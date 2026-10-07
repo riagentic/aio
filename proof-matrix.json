@@ -9,8 +9,8 @@
   {
     "target": "cli",
     "env": "binary",
-    "commit": "d33706902",
-    "date": "2026-10-05",
+    "commit": "5eac592fe",
+    "date": "2026-10-07",
     "detail": "compiled cli-client ↔ compiled server, state printed"
   },
   {
