@@ -864,7 +864,7 @@ export function testCell(
         // real worker puts there — see `_callAcrossWorkerBoundary`.
         const result = (worker
           ? _callAcrossWorkerBoundary(f.__aio.id, args, (a) =>
-            direct(a))
+            direct(a), key)
           : direct(args)) as Promise<unknown>;
         // Fire-and-forget parity: an un-awaited failing call must not blow up
         // the test run as an unhandled rejection (production logs it too) —

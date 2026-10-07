@@ -13,7 +13,6 @@ const dec = new TextDecoder();
 
 Deno.test({
   name: "am restart: an app with no declared port comes back on the SAME port",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await makeApp("counter", "am-restart-port-");
     const apps = await tempDir("am-restart-port-apps-");

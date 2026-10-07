@@ -109,7 +109,7 @@ Deno.test({
     "a nested display started by aio refuses a client WITHOUT its cookie, and admits one WITH it (cc §10)",
   // Real Xephyr + a real X client, on a NEW display number — the shared one
   // is never stopped by a test. Skipped where the tools are missing.
-  ignore: Deno.build.os !== "linux" || !Deno.env.get("DISPLAY") ||
+  ignore: Deno.build.os !== "linux" || !Deno.env.get("DISPLAY") || // an X11 server on a unix socket: Windows has no X display
     !hasTool("Xephyr") || !hasTool("xdpyinfo"),
   async fn() {
     // A free number well above the shared range.
@@ -178,7 +178,7 @@ function hasTool(name: string): boolean {
 Deno.test({
   name:
     "nestedDisplayAccepts: the server's own answer — a stale cookie file is refused, the right one accepted",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // an X11 server on a unix socket: Windows has no X display
   async fn() {
     // A fake X server on a display number nobody uses: it reads the setup
     // request and answers 1 only for the cookie it was "started" with.

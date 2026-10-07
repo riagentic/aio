@@ -23,8 +23,10 @@ Deno.test("foreignAppHomeError: OS folder litter alone does not make a home fore
       "DESKTOP.INI",
       ".directory",
     ];
-    for (const name of litter) {
-      const home = join(dir, `one-${name.replace(/\W/g, "_")}`);
+    // Numbered, not named: `desktop.ini` and `DESKTOP.INI` are one folder on
+    // a case-insensitive disk (macOS, Windows).
+    for (const [i, name] of litter.entries()) {
+      const home = join(dir, `one-${i}`);
       await Deno.mkdir(home);
       await Deno.writeTextFile(join(home, name), "");
       assertEquals(foreignAppHomeError("notes", home), null, name);

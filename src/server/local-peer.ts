@@ -362,6 +362,13 @@ type PeerLib = {
     arg4: number,
     arg5: number,
   ) => number;
+  proc_pidinfo?: (
+    pid: number,
+    flavor: number,
+    arg: bigint,
+    buffer: Uint8Array,
+    size: number,
+  ) => number;
 };
 
 let _lib: PeerLib | null = null;
@@ -387,6 +394,14 @@ function libc(): PeerLib | null {
         ? {
           prctl: {
             parameters: ["i32", "usize", "usize", "usize", "usize"],
+            result: "i32",
+          },
+        }
+        : {}),
+      ...(Deno.build.os === "darwin"
+        ? {
+          proc_pidinfo: {
+            parameters: ["i32", "i32", "u64", "buffer", "i32"],
             result: "i32",
           },
         }
@@ -493,6 +508,67 @@ function _darwinUid(lib: PeerLib, fd: number): number | null {
     return null;
   }
   return new DataView(buf.buffer).getUint32(4, true);
+}
+
+// ── macOS: a process's START time, without spawning anything ─────────────────
+
+/** `proc_pidinfo`'s flavor for `struct proc_bsdinfo`, and that struct's size.
+ *  MEASURED, not read off a header: on macOS 26 arm64 and macOS 14 x86_64 the
+ *  call returns 136 for a 136-byte buffer and 0 for a 135-byte one, and the
+ *  fields below matched `ps -o lstart=` for this process, its parent and a
+ *  child it spawned. */
+const PROC_PIDTBSDINFO = 3;
+const BSDINFO_SIZE = 136;
+
+/** `struct proc_bsdinfo` → `"<pbi_start_tvsec>.<pbi_start_tvusec>"` (bytes
+ *  120 and 128, both u64), or null for anything that is not that struct
+ *  filled in for `pid` (`pbi_pid`, byte 12). Pure. @internal */
+export function decodeBsdInfoStart(
+  buf: Uint8Array,
+  pid: number,
+): string | null {
+  if (buf.length < BSDINFO_SIZE) return null;
+  const v = new DataView(buf.buffer, buf.byteOffset, BSDINFO_SIZE);
+  const sec = v.getBigUint64(120, true), usec = v.getBigUint64(128, true);
+  if (v.getUint32(12, true) !== pid || sec === 0n || usec >= 1_000_000n) {
+    return null;
+  }
+  return `${sec}.${String(usec).padStart(6, "0")}`;
+}
+
+/** macOS: when `pid` started, to the microsecond, as the kernel recorded it —
+ *  the same for the process's whole life and for every reader, and another
+ *  value for a process that later gets the same pid. What the local-peer gate
+ *  keeps beside the window's pid there (Linux and Windows have
+ *  `processStartToken`); one library call, so it can be asked on every
+ *  connection, which a `ps` spawn cannot.
+ *
+ *  Null — "cannot say", and then the pid alone decides, as it did before —
+ *  elsewhere, for a pid that is gone or belongs to another user (the call
+ *  answers only for this user's processes: measured, 0 for launchd), or when
+ *  FFI is not already granted: asking would put a permission prompt in front
+ *  of a connection. NOT a lock field: a lock file already carries macOS's
+ *  identity as `startEpoch`, and a `startToken` on darwin would be compared
+ *  with the locale text old locks hold there and call a live owner dead. */
+export function darwinProcessStart(
+  pid: number,
+  os: typeof Deno.build.os = Deno.build.os,
+): string | null {
+  if (os !== "darwin" || !Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    if (Deno.permissions.querySync({ name: "ffi" }).state !== "granted") {
+      return null;
+    }
+    const call = libc()?.proc_pidinfo;
+    if (call === undefined) return null;
+    const buf = new Uint8Array(BSDINFO_SIZE);
+    if (call(pid, PROC_PIDTBSDINFO, 0n, buf, buf.length) !== BSDINFO_SIZE) {
+      return null;
+    }
+    return decodeBsdInfoStart(buf, pid);
+  } catch {
+    return null; // aio-ok: a failed read is "cannot say" — the pid decides
+  }
 }
 
 // ── Hardening: stop a same-user process from reading this one's memory ───────

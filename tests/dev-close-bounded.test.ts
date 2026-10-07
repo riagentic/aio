@@ -20,7 +20,7 @@
 //    closed server broadcast a reload and printed `reloaded …`. Close now
 //    ends the step, either one, and returns when its process has exited.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import {
@@ -33,8 +33,9 @@ import { _runAppCssStep } from "../src/server/server-css-step.ts";
 import { loadEsbuild, stopEsbuild } from "../src/server/server-transpile.ts";
 import { toFileUrl } from "@std/path";
 import { TEARDOWN_TIMEOUT_MS } from "../src/server/shutdown-budget.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("..", import.meta.url));
 const linux = Deno.build.os === "linux";
 
 /** A /proc entry that went away under the read: the file is missing, or —
@@ -393,7 +394,7 @@ async function cssApp(
     JSON.stringify({
       build: { css: ["sh", "-c", `if [ -f slow ]; then ${slow}; fi`] },
       imports: {
-        "aio": `${REPO}mod.ts`,
+        "aio": `${spec(REPO)}mod.ts`,
         "aio/jsx-runtime": `${REPO}src/jsx-runtime.ts`,
         "immer": "npm:immer@10.2.0",
       },

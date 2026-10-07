@@ -20,8 +20,10 @@
 // incidental timing: spawn a real app, signal it at a range of delays that
 // straddle boot, and require it to be gone.
 import { assert } from "@std/assert";
+import { fromFileUrl } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 /** Spawn a real (non-libraryMode) app, SIGTERM it after `delayMs`, and report
  *  how long it took to exit. `null` means it never did. */
@@ -35,7 +37,7 @@ async function signalAfter(delayMs: number): Promise<number | null> {
       version: "0.0.1",
       unstable: ["kv"],
       imports: {
-        "aio": `${ROOT}mod.ts`,
+        "aio": `${spec(ROOT)}mod.ts`,
         "immer": "npm:immer@10.2.0",
         "@std/path": "jsr:@std/path@^1",
       },
@@ -96,7 +98,7 @@ await aio.run({ persist: true, key: true });
 
 Deno.test({
   name: "signal: SIGTERM at any point during boot still stops the app",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // Windows has no SIGTERM to handle: Deno.kill is TerminateProcess
   async fn() {
     // A spread that straddles the whole boot: before the runtime exists, while
     // it is wiring itself up, and after it is serving. The lost-signal window

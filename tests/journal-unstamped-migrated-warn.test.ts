@@ -10,12 +10,13 @@
 // replay keeps its old behaviour — but it used to do so SILENTLY. It says so
 // now, naming the cell and the lines.
 import { assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const MOD = new URL("../mod.ts", import.meta.url).href;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 const V1 = `const w = cell("w", {
   state: { units: 0 },
@@ -32,7 +33,7 @@ const V2 = `const w = cell("w", {
 });`;
 
 const child = (cellSrc: string) => `
-import { aio, cell } from "${MOD}";
+import { aio, cell } from "${spec(MOD)}";
 const DIR = Deno.env.get("DIR");
 ${cellSrc}
 const app = await aio.run({

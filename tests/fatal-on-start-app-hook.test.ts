@@ -3,11 +3,11 @@
 // the app's hook logged and carried on, leaving a half-started app running.
 // Child processes, because the promise is an exit code.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const MOD = new URL("../mod.ts", import.meta.url).href;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 async function boot(onStart: string, fatal: boolean) {
   const dir = await tempDir("aio-fatal-start-");

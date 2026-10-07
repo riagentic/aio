@@ -15,13 +15,13 @@
 // Driven through a REAL process: an in-process test cannot observe which
 // stream a line went to, and the stream is the whole finding.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { outError } from "../src/am/am-output.ts";
 import { AM_STDERR_SINK } from "../src/am/am-log.ts";
 
-const AM = new URL("../src/am.ts", import.meta.url).pathname;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
-const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const AM = fromFileUrl(new URL("../src/am.ts", import.meta.url));
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
+const REPO = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 
 type Ran = { code: number; stdout: string; stderr: string };
 

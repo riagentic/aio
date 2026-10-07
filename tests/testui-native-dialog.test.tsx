@@ -109,3 +109,26 @@ Deno.test("testUI: overlapping mounts — disposing the first keeps the refusal 
   await second[Symbol.asyncDispose]();
   assertEquals(globalThis.confirm, native);
 });
+
+// The second mount renders into the FIRST one's window (it is the global
+// document by then). MEASURED (happy-dom 20.14.5): a closed window dispatches
+// to no listener — 17.6.3's still did — so disposing the first used to leave
+// the second with a dead page: the click below ran nothing, and the test
+// above went on passing only because the click itself threw.
+Deno.test("testUI: overlapping mounts — the second is still a live page after the first is disposed", async () => {
+  const first = await testUI(App);
+  const second = await testUI(App);
+  await first[Symbol.asyncDispose]();
+  const before = globalThis.confirm;
+  globalThis.confirm = () => true;
+  try {
+    const n = guarded.removed;
+    second.DeleteButton.click();
+    await second.settle();
+    assertEquals(guarded.removed, n + 1, "the click reached its handler");
+  } finally {
+    globalThis.confirm = before;
+    await second[Symbol.asyncDispose]();
+  }
+  assertEquals(second.window.closed, true, "the last mount out closes it");
+});

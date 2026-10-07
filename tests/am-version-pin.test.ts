@@ -53,6 +53,15 @@ async function sandbox(): Promise<{
     stderr: "piped",
   }).output();
   assert(clone.success, new TextDecoder().decode(clone.stderr));
+  // Said ONCE, here, by name: without it a depth-1 clone two commits past the
+  // tag failed nine tests nine different ways ("no releases in the 1.x line",
+  // a TypeError on `undefined.startsWith`, "alpha26 is behind null").
+  assert(
+    (await knownTags(root)).length > 0,
+    "this checkout has no release tag reachable from HEAD — these tests pin " +
+      "real releases, so they need the tags and the history (a shallow clone " +
+      "past the last release has neither): `git fetch --unshallow --tags`",
+  );
   await Deno.mkdir(app, { recursive: true });
   await Deno.writeTextFile(
     join(app, "deno.json"),

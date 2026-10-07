@@ -8,6 +8,7 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { scaffold, TEMPLATES } from "../src/am/am-cmd-create.ts";
 import { TARGETS } from "../src/am/am-help-text.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { fromFileUrl } from "@std/path";
 
 /** The `deno check …` half of a scaffold's `check` task, as argv. */
 function denoCheckArgs(denoJson: string): string[] {
@@ -62,7 +63,10 @@ Deno.test({
   sanitizeOps: false, // aio-ok: `deno check` child
   sanitizeResources: false, // aio-ok: same
   fn: async () => {
-    const repo = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+    const repo = fromFileUrl(new URL("..", import.meta.url)).replace(
+      /[\\/]$/,
+      "",
+    );
     const dir = await tempDir("aio-check-tests-");
     try {
       const f = scaffold("checkprobe", "counter", true, "browser");

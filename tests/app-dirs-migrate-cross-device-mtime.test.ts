@@ -10,16 +10,17 @@
 // The child is the migration as boot runs it, with `renameSync` refusing like
 // a cross-device rename and the `-wal`'s copy SIGKILLing the process.
 import { assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { DatabaseSync } from "node:sqlite";
 import { appDirs } from "../src/server/app-dirs.ts";
 import { migrateLegacyLayout } from "../src/server/app-dirs-migrate.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const MIGRATE = new URL("../src/server/app-dirs-migrate.ts", import.meta.url)
   .href;
 const DIRS = new URL("../src/server/app-dirs.ts", import.meta.url).href;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 const APP_ID = "cross-device-mtime-probe";
 
 const LEGACY = `
@@ -34,8 +35,8 @@ Deno.kill(Deno.pid, "SIGKILL");
 
 const MOVE = `
 import { dirname } from "@std/path";
-import { migrateLegacyLayout } from "${MIGRATE}";
-import { appDirs } from "${DIRS}";
+import { migrateLegacyLayout } from "${spec(MIGRATE)}";
+import { appDirs } from "${spec(DIRS)}";
 const ROOT = Deno.env.get("ROOT");
 const rename = Deno.renameSync;
 Deno.renameSync = (from, to) => {

@@ -1,6 +1,7 @@
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { join, resolve } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { linkDir, linkFile, linkText } from "./symlink-helper.ts";
 import {
   copyDir,
   formatMb,
@@ -127,7 +128,7 @@ Deno.test("copyDir: preserves symlinks", async () => {
   const dstTarget = join(dst, "out");
   try {
     await Deno.writeTextFile(join(src, "real.txt"), "data");
-    await Deno.symlink("real.txt", join(src, "link.txt"));
+    await linkFile("real.txt", join(src, "link.txt"));
 
     await copyDir(src, dstTarget);
 
@@ -139,22 +140,27 @@ Deno.test("copyDir: preserves symlinks", async () => {
   }
 });
 
-Deno.test("copyDir: preserves executable bit", async () => {
-  const src = await tempDir("aio-build-");
-  const dst = await tempDir("aio-build-");
-  const dstTarget = join(dst, "out");
-  try {
-    await Deno.writeTextFile(join(src, "run.sh"), "#!/bin/bash\necho hi");
-    await Deno.chmod(join(src, "run.sh"), 0o755);
+Deno.test({
+  name: "copyDir: preserves executable bit",
+  ignore: Deno.build.os === "windows", // no execute bit to preserve there
+  // POSIX file modes: Windows has no executable bit to preserve.
+  fn: async () => {
+    const src = await tempDir("aio-build-");
+    const dst = await tempDir("aio-build-");
+    const dstTarget = join(dst, "out");
+    try {
+      await Deno.writeTextFile(join(src, "run.sh"), "#!/bin/bash\necho hi");
+      await Deno.chmod(join(src, "run.sh"), 0o755);
 
-    await copyDir(src, dstTarget);
+      await copyDir(src, dstTarget);
 
-    const info = await Deno.stat(join(dstTarget, "run.sh"));
-    assertEquals((info.mode! & 0o111) !== 0, true);
-  } finally {
-    await dropTempDir(src);
-    await dropTempDir(dst);
-  }
+      const info = await Deno.stat(join(dstTarget, "run.sh"));
+      assertEquals((info.mode! & 0o111) !== 0, true);
+    } finally {
+      await dropTempDir(src);
+      await dropTempDir(dst);
+    }
+  },
 });
 
 // ── formatMb ─────────────────────────────────────────────
@@ -323,10 +329,7 @@ Deno.test("build: symlinks restored after failed --cli compile", async () => {
 
     // Top-level symlink: node_modules/esbuild → .deno/esbuild@0.1.0/node_modules/esbuild
     const symlinkPath = join(tmp, "node_modules", "esbuild");
-    await Deno.symlink(
-      join(fakeEsbuild, "node_modules", "esbuild"),
-      symlinkPath,
-    );
+    await linkDir(join(fakeEsbuild, "node_modules", "esbuild"), symlinkPath);
 
     // Verify symlink exists before build
     const before = await Deno.readLink(symlinkPath);
@@ -356,7 +359,7 @@ Deno.test("build: links an interrupted compile held aside come back on the next 
     const pkg = join(nm, ".deno", "esbuild@0.1.0", "node_modules", "esbuild");
     await Deno.mkdir(pkg, { recursive: true });
     const link = join(nm, "esbuild");
-    await Deno.symlink(pkg, link);
+    await linkDir(pkg, link);
     const mod = new URL("../src/build/build-compile.ts", import.meta.url).href;
     // The dying build: `fn` exits the process, as a signal would.
     const died = await new Deno.Command(Deno.execPath(), {
@@ -405,7 +408,7 @@ Deno.test("build: a project moved after an interrupted compile still gets its li
       },
     );
     const target = ".deno/esbuild@0.1.0/node_modules/esbuild"; // as deno writes it
-    await Deno.symlink(target, join(nm, "esbuild"));
+    await linkDir(target, join(nm, "esbuild"));
     const mod = new URL("../src/build/build-compile.ts", import.meta.url).href;
     const died = await new Deno.Command(Deno.execPath(), {
       args: [
@@ -423,7 +426,10 @@ Deno.test("build: a project moved after an interrupted compile still gets its li
       "../src/build/build-compile.ts"
     );
     await recoverInterruptedLinks(moved);
-    assertEquals(await Deno.readLink(join(moved, "esbuild")), target);
+    assertEquals(
+      await Deno.readLink(join(moved, "esbuild")),
+      linkText(target, join(moved, "esbuild")),
+    );
     await assertRejects(() => Deno.lstat(join(tmp, "a")));
   } finally {
     await dropTempDir(tmp);
@@ -475,7 +481,7 @@ Deno.test("build: two builds journaling at once lose no link", async () => {
     // End to end: a compile that finishes removes only its own journal.
     const pkg = join(nm, ".deno", "esbuild@0.1.0", "node_modules", "esbuild");
     await Deno.mkdir(pkg, { recursive: true });
-    await Deno.symlink(pkg, join(nm, "esbuild"));
+    await linkDir(pkg, join(nm, "esbuild"));
     const other = _linkJournal(nm);
     await withDevExcluded(nm, async () => {
       assertEquals(await journaled(), ["esbuild"]); // journaled before removal
@@ -619,7 +625,7 @@ Deno.test("build: taking over a dead build's lock leaves no stale stamp beside t
 Deno.test({
   name:
     "build: a lock or journal from another pid namespace is never taken over at once",
-  ignore: Deno.build.os !== "linux",
+  ignore: Deno.build.os !== "linux", // pid namespaces are a Linux kernel feature
   fn: async () => {
     const tmp = await tempDir("aio-build-");
     try {
@@ -697,7 +703,7 @@ Deno.test({
 Deno.test({
   name:
     "build: another namespace's lock and journal untouched for 2 min are recovered",
-  ignore: Deno.build.os !== "linux",
+  ignore: Deno.build.os !== "linux", // pid namespaces are a Linux kernel feature
   fn: async () => {
     const tmp = await tempDir("aio-build-");
     const { _lockTiming } = await import("../src/server/pid-lock.ts");
@@ -787,7 +793,7 @@ Deno.test({
 // a lagging host clock makes a live holder's heartbeat look 2 min old.
 Deno.test({
   name: "build: recovery trusts a watched foreign lock over its old mtime",
-  ignore: Deno.build.os !== "linux",
+  ignore: Deno.build.os !== "linux", // pid namespaces are a Linux kernel feature
   fn: async () => {
     const tmp = await tempDir("aio-build-");
     const { _lockTiming, tryPidLock } = await import(
@@ -847,7 +853,7 @@ Deno.test("build: the lock and journal names stay readable by an older aio", asy
     const nm = join(tmp, "node_modules");
     const pkg = join(nm, ".deno", "esbuild@0.1.0", "node_modules", "esbuild");
     await Deno.mkdir(pkg, { recursive: true });
-    await Deno.symlink(pkg, join(nm, "esbuild"));
+    await linkDir(pkg, join(nm, "esbuild"));
     const { withDevExcluded } = await import("../src/build/build-compile.ts");
     await withDevExcluded(nm, async () => {
       const lock = await Deno.readTextFile(join(nm, ".aio-build-lock"));
@@ -1431,14 +1437,20 @@ import {
   realDistCandidates,
 } from "../src/server/paths.ts";
 
-Deno.test("appimageEnv: extract-and-run is always set (FUSE-less hosts)", () => {
-  const env = appimageEnv("x86_64");
-  // Without this, appimagetool (itself an AppImage) can't mount on Ubuntu
-  // 22.04+/containers/WSL/CI and the packaging step dies.
-  assertEquals(env.APPIMAGE_EXTRACT_AND_RUN, "1");
-  assertEquals(env.ARCH, "x86_64");
-  // The host environment is inherited, not replaced (PATH etc. must survive).
-  assertEquals(env.PATH, Deno.env.get("PATH"));
+Deno.test({
+  name: "appimageEnv: extract-and-run is always set (FUSE-less hosts)",
+  ignore: Deno.build.os === "windows", // AppImage is Linux-only
+  // An AppImage is assembled by `appimagetool`, which runs on Linux only (see
+  // `crossCompileBlocker`); Windows also spells the variable `Path`.
+  fn: () => {
+    const env = appimageEnv("x86_64");
+    // Without this, appimagetool (itself an AppImage) can't mount on Ubuntu
+    // 22.04+/containers/WSL/CI and the packaging step dies.
+    assertEquals(env.APPIMAGE_EXTRACT_AND_RUN, "1");
+    assertEquals(env.ARCH, "x86_64");
+    // The host environment is inherited, not replaced (PATH etc. must survive).
+    assertEquals(env.PATH, Deno.env.get("PATH"));
+  },
 });
 
 Deno.test("appimageEnv: the tool unpacks somewhere private, never /tmp", () =>
@@ -1540,21 +1552,25 @@ Deno.test("compileArgs: output + entry are last, dist omitted when absent", () =
   assertEquals(args, ["compile", "-q", "-A", "-o", "bin", "src/app.ts"]);
 });
 
+// The ladders answer with `resolve()`d paths — `/tmp/x` here, `C:\tmp\x` on
+// Windows — so every path below is spelled the way this OS spells it.
+const P = (p: string) => resolve(p);
+
 Deno.test("distCandidates: entry-relative BEFORE the filesystem (portability)", () => {
   const c = distCandidates({
     mainModule: "file:///tmp/deno-compile-myapp/app/src/app.ts",
-    cwd: "/somewhere/else",
-    execDir: "/usr/local/bin",
-    moduleDir: "/proj/dep/aio/src/server",
+    cwd: P("/somewhere/else"),
+    execDir: P("/usr/local/bin"),
+    moduleDir: P("/proj/dep/aio/src/server"),
   });
   // The embedded dist/ (next to the entry in the VFS) must win: it's the only
   // candidate that holds when the binary is run from an arbitrary cwd.
-  assertEquals(c[0], "/tmp/deno-compile-myapp/app/dist");
-  assertEquals(c[1], "/tmp/deno-compile-myapp/app/src/dist");
+  assertEquals(c[0], P("/tmp/deno-compile-myapp/app/dist"));
+  assertEquals(c[1], P("/tmp/deno-compile-myapp/app/src/dist"));
   // …filesystem probes stay as fallbacks (Electron AppDir ships a real dist/).
-  assert(c.includes("/somewhere/else/dist"), "cwd fallback kept");
-  assert(c.includes("/usr/local/bin/dist"), "exec dir fallback kept");
-  const cwdIdx = c.indexOf("/somewhere/else/dist");
+  assert(c.includes(P("/somewhere/else/dist")), "cwd fallback kept");
+  assert(c.includes(P("/usr/local/bin/dist")), "exec dir fallback kept");
+  const cwdIdx = c.indexOf(P("/somewhere/else/dist"));
   assert(cwdIdx > 1, "cwd must NOT be probed before the embedded dist");
 });
 
@@ -1644,15 +1660,15 @@ Deno.test("baseDirCandidates: a compiled binary reads its EMBEDDED app dir first
   // was a real URL in dev and a broken-image glyph in the AppImage.
   const c = baseDirCandidates({
     mainModule: "file:///tmp/deno-compile-myapp/src/app.ts",
-    cwd: "/somewhere/else",
+    cwd: P("/somewhere/else"),
     compiled: true,
   });
   // Entry-relative first: `deno compile` embeds `compile.include` files into a
   // VFS rooted next to the entry, and readFile/stat/realPath all answer there.
-  assertEquals(c[0], "/tmp/deno-compile-myapp/src");
+  assertEquals(c[0], P("/tmp/deno-compile-myapp/src"));
   // …and the old root stays reachable BEHIND it, so a binary run beside a real
   // source tree keeps serving from it. Nothing that resolved before stops.
-  assertEquals(c[1], "/somewhere/else/src");
+  assertEquals(c[1], P("/somewhere/else/src"));
   assertEquals(c.length, 2);
 });
 
@@ -1660,10 +1676,10 @@ Deno.test("baseDirCandidates: uncompiled is the entry dir, and only that", () =>
   // `deno run src/app.ts` from anywhere — the rule that already worked.
   const c = baseDirCandidates({
     mainModule: "file:///proj/src/app.ts",
-    cwd: "/somewhere/else",
+    cwd: P("/somewhere/else"),
     compiled: false,
   });
-  assertEquals(c, ["/proj/src"]);
+  assertEquals(c, [P("/proj/src")]);
 });
 
 Deno.test("baseDirCandidates: always answers, and never repeats itself", () => {
@@ -1671,18 +1687,22 @@ Deno.test("baseDirCandidates: always answers, and never repeats itself", () => {
   // directory — the cwd fallback is what makes the list non-empty, which is
   // what lets every caller read [0] without a fallback of its own.
   assertEquals(
-    baseDirCandidates({ mainModule: "data:,1", cwd: "/here", compiled: false }),
-    ["/here/src"],
+    baseDirCandidates({
+      mainModule: "data:,1",
+      cwd: P("/here"),
+      compiled: false,
+    }),
+    [P("/here/src")],
   );
   // A binary run from the directory its VFS mirrors must not stat the same
   // root twice per request.
   assertEquals(
     baseDirCandidates({
       mainModule: "file:///app/src/app.ts",
-      cwd: "/app",
+      cwd: P("/app"),
       compiled: true,
     }),
-    ["/app/src"],
+    [P("/app/src")],
   );
 });
 
@@ -1692,22 +1712,22 @@ Deno.test("baseDirCandidates: the ladder distCandidates already had", () => {
   // Both deciders must now agree that the embedded copy outranks the cwd.
   const opts = {
     mainModule: "file:///tmp/deno-compile-app/src/app.ts",
-    cwd: "/mnt/elsewhere",
+    cwd: P("/mnt/elsewhere"),
   };
   const base = baseDirCandidates({ ...opts, compiled: true });
   const dist = distCandidates({
     ...opts,
-    execDir: "/usr/bin",
+    execDir: P("/usr/bin"),
     moduleDir: null,
   });
   assert(
-    base[0].startsWith("/tmp/deno-compile-") &&
-      !!dist[0]?.startsWith("/tmp/deno-compile-"),
+    base[0].startsWith(P("/tmp/deno-compile-")) &&
+      !!dist[0]?.startsWith(P("/tmp/deno-compile-")),
     "both ladders must prefer the artifact's own copy over the process cwd",
   );
   assert(
-    base.indexOf("/mnt/elsewhere/src") > 0 &&
-      dist.indexOf("/mnt/elsewhere/dist") > 0,
+    base.indexOf(P("/mnt/elsewhere/src")) > 0 &&
+      dist.indexOf(P("/mnt/elsewhere/dist")) > 0,
     "…and both must keep the filesystem probe as a fallback, not a first try",
   );
 });
@@ -1715,9 +1735,9 @@ Deno.test("baseDirCandidates: the ladder distCandidates already had", () => {
 Deno.test("realDistCandidates: never the compile VFS (Electron blank window)", () => {
   const opts = {
     mainModule: "file:///tmp/deno-compile-myapp/app/src/app.ts",
-    cwd: "/mnt/appimage",
-    execDir: "/mnt/appimage",
-    moduleDir: "/proj/dep/aio/src/server",
+    cwd: P("/mnt/appimage"),
+    execDir: P("/mnt/appimage"),
+    moduleDir: P("/proj/dep/aio/src/server"),
   };
   const real = realDistCandidates(opts);
   // The embedded VFS path resolves fine via Deno.stat but does NOT exist for
@@ -1727,9 +1747,9 @@ Deno.test("realDistCandidates: never the compile VFS (Electron blank window)", (
     real.every((d) => !d.includes("deno-compile-")),
     `no VFS path may reach a foreign process; got: ${real.join(", ")}`,
   );
-  assertEquals(real[0], "/mnt/appimage/dist");
+  assertEquals(real[0], P("/mnt/appimage/dist"));
   // …and prod-detection keeps the VFS candidates, first, as before.
-  assertEquals(distCandidates(opts)[0], "/tmp/deno-compile-myapp/app/dist");
+  assertEquals(distCandidates(opts)[0], P("/tmp/deno-compile-myapp/app/dist"));
   assertEquals(distCandidates(opts).slice(-real.length), real);
 });
 
@@ -1742,23 +1762,23 @@ Deno.test("distCandidates: a NESTED entry still finds the embedded dist/", () =>
   // 503 the first time anyone opened the artifact.
   const c = distCandidates({
     mainModule: "file:///tmp/deno-compile-relay/app/src/server/app.ts",
-    cwd: "/elsewhere",
-    execDir: "/usr/local/bin",
+    cwd: P("/elsewhere"),
+    execDir: P("/usr/local/bin"),
     moduleDir: null,
   });
   assert(
-    c.includes("/tmp/deno-compile-relay/app/dist"),
+    c.includes(P("/tmp/deno-compile-relay/app/dist")),
     `the embedded dist/ must be a candidate; got: ${c.join(", ")}`,
   );
   // …and every level in between, so no depth is a special case.
-  assert(c.includes("/tmp/deno-compile-relay/app/src/dist"));
-  assert(c.includes("/tmp/deno-compile-relay/app/src/server/dist"));
+  assert(c.includes(P("/tmp/deno-compile-relay/app/src/dist")));
+  assert(c.includes(P("/tmp/deno-compile-relay/app/src/server/dist")));
   // The walk stops at the filesystem root instead of looping.
   assert(c.length < 20, `candidate list must stay bounded, got ${c.length}`);
   // Real-filesystem probes still come last (Electron reads a real dist/).
   assert(
-    c.indexOf("/elsewhere/dist") >
-      c.indexOf("/tmp/deno-compile-relay/app/dist"),
+    c.indexOf(P("/elsewhere/dist")) >
+      c.indexOf(P("/tmp/deno-compile-relay/app/dist")),
     "entry-relative candidates must precede the filesystem ones",
   );
 });
@@ -1766,14 +1786,14 @@ Deno.test("distCandidates: a NESTED entry still finds the embedded dist/", () =>
 Deno.test("distCandidates: survives a non-file mainModule, no dupes", () => {
   const c = distCandidates({
     mainModule: "https://example.com/app.ts",
-    cwd: "/app",
-    execDir: "/app",
+    cwd: P("/app"),
+    execDir: P("/app"),
     moduleDir: null,
   });
   // No entry-relative candidates, but the fallbacks must still be produced —
   // never an empty list (that would make prod undetectable).
   assert(c.length > 0, "fallbacks survive an unparseable entry");
-  assert(c.includes("/app/dist"));
+  assert(c.includes(P("/app/dist")));
 });
 
 // ── the generated systemd unit's flags must be REAL runtime flags ────────────

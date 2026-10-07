@@ -12,13 +12,13 @@
 // a cleared environment, HOME in the temp dir, GIT_CEILING_DIRECTORIES at the
 // temp root. The real HOME and this repo's .git are never touched.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { GIT_REPO_ENV_VARS } from "../src/am/am-versions.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { DENO_DIR } from "./deno-dir-helper.ts";
 
 const VERSIONS = new URL("../src/am/am-versions.ts", import.meta.url).href;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 async function git(cwd: string, env: Record<string, string>, ...a: string[]) {
   const o = await new Deno.Command("git", {
@@ -51,6 +51,13 @@ Deno.test("am git: an inherited GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE never r
       GIT_COMMITTER_EMAIL: "t@t",
     };
     env.DENO_DIR = DENO_DIR;
+    // What no Windows process is ever without: Deno resolves a bare `git`
+    // through PATHEXT ("Failed to spawn 'git': entity not found" otherwise),
+    // and system DLLs load through SystemRoot. Absent on POSIX — nothing set.
+    for (const k of ["PATHEXT", "SystemRoot"]) {
+      const v = Deno.env.get(k);
+      if (v !== undefined) env[k] = v;
+    }
     const repo = async (dir: string, tag: string) => {
       await Deno.mkdir(dir, { recursive: true });
       await git(dir, env, "init", "-q", "-b", "main");

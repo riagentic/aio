@@ -5,6 +5,8 @@
 // Sandboxed: AIO_APPS_DIR scopes the lock registry and HOME / AMUI_ROOTS the
 // disk scan to a temp dir, so no real running app is ever seen or touched.
 // The "instances" are `sleep` processes holding hand-written locks.
+import { SLEEP_ARGS } from "./proc-helper.ts";
+import { join } from "@std/path";
 import { assert, assertEquals, assertNotEquals } from "@std/assert";
 import { testCell } from "../src/testing/cell-test.ts";
 import { manager } from "../amui/src/manager.ts";
@@ -44,8 +46,8 @@ async function withTwoInstances(
   Deno.env.set("AMUI_ROOTS", dir);
   Deno.env.set("HOME", sandbox);
   const spawn = () =>
-    new Deno.Command("sleep", {
-      args: ["120"],
+    new Deno.Command(Deno.execPath(), {
+      args: SLEEP_ARGS,
       stdin: "null",
       stdout: "null",
       stderr: "null",
@@ -225,8 +227,8 @@ testCell(
   async (t) => {
     await withTwoInstances(async (_dir, pids) => {
       const sandbox = Deno.env.get("HOME")!;
-      const devLogs = `${sandbox}/apps/.${APP}-dev/logs`;
-      const dfltLogs = `${sandbox}/apps/${APP}/logs`;
+      const devLogs = join(sandbox, "apps", `.${APP}-dev`, "logs");
+      const dfltLogs = join(sandbox, "apps", APP, "logs");
       await Deno.mkdir(devLogs, { recursive: true });
       await Deno.mkdir(dfltLogs, { recursive: true });
       await Deno.writeTextFile(`${devLogs}/app.log`, "DEV-INSTANCE-LINE\n");
@@ -249,7 +251,7 @@ testCell(
         const s = t.getState();
         assertEquals(
           s.logPath,
-          `${logs}/app.log`,
+          join(logs, "app.log"),
           "tailed another instance's log",
         );
         assertEquals((s.logs ?? []).map((l) => l.raw), [want]);

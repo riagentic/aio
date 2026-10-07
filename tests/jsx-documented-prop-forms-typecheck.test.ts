@@ -17,6 +17,8 @@ import { closeWindow } from "../src/testing/close-window.ts";
 import { h } from "../src/air/vdom.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
 import { signal } from "../src/state/signal.ts";
+import { fromFileUrl } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 
 const FIXTURE = `
 import { signal } from "aio/air";
@@ -46,7 +48,7 @@ export const _ = [a, a2, b, c, d, e1, e2, e3];
 
 Deno.test("jsx types: the documented className/style/select-multiple forms type-check", async () => {
   const dir = await Deno.makeTempDir();
-  const repo = new URL("..", import.meta.url).pathname;
+  const repo = fromFileUrl(new URL("..", import.meta.url));
   try {
     await Deno.writeTextFile(
       `${dir}/deno.jsonc`,
@@ -59,9 +61,9 @@ Deno.test("jsx types: the documented className/style/select-multiple forms type-
           lib: ["deno.ns", "deno.unstable", "dom"],
         },
         imports: {
-          "aio/jsx-runtime": `${repo}src/jsx-runtime.ts`,
-          "aio/air": `${repo}src/air.ts`,
-          "aio": `${repo}mod.ts`,
+          "aio/jsx-runtime": `${spec(repo)}src/jsx-runtime.ts`,
+          "aio/air": `${spec(repo)}src/air.ts`,
+          "aio": `${spec(repo)}mod.ts`,
         },
       }),
     );

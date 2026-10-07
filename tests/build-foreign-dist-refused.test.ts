@@ -6,11 +6,11 @@
 // and no release manifest, was never aio's — refused, naming the files. A
 // dist/ any aio build wrote is emptied exactly as before.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { foreignDist } from "../src/build/dist-staging.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const BUILD_ALL = new URL("../src/build-all.ts", import.meta.url).pathname;
+const BUILD_ALL = fromFileUrl(new URL("../src/build-all.ts", import.meta.url));
 
 /** A per-target builder that succeeds at once (the fleet's `--build-spec`
  *  seam): the fleet's own placement is what is under test, not a compile. */

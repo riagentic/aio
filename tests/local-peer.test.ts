@@ -5,9 +5,12 @@
 // identity it could not read, and never lets a different pid through. A file
 // (`control.key`), an env value or a PIN cannot do this — a same-user process
 // reads them all — which is why the kernel's answer is the one that is used.
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
+import { parseLstartUtc } from "../src/server/single-instance-lock.ts";
 import {
   createLocalPeerGate,
+  darwinProcessStart,
+  decodeBsdInfoStart,
   foreignCtlAllowed,
   foreignHealthView,
   peerRefusal,
@@ -275,6 +278,122 @@ Deno.test("local-peer: the foreign health view is status + appId, whatever the d
   );
 });
 
+// ── macOS: the window's start time, read from the kernel ────────────────────
+
+/** `struct proc_bsdinfo` as `proc_pidinfo(46351, PROC_PIDTBSDINFO)` filled it
+ *  on macOS 26 arm64 — a `deno` whose `ps -o lstart=` read 1791310976. (The
+ *  macOS 14 x86_64 capture has the same layout.) */
+const BSDINFO_46351 =
+  "3040400002000000000000000fb500000eb50000f501000014000000f5010000" +
+  "14000000f5010000140000000000000064656e6f0073657373696f6e00726100" +
+  "64656e6f0073657373696f6e0072617070657200000000000000000000000000" +
+  "190000000fb5000000000000ffffffff0000000005000000803cc56a00000000" +
+  "258c070000000000";
+const unhex = (h: string) =>
+  Uint8Array.from(h.match(/../g)!, (b) => parseInt(b, 16));
+
+Deno.test("local-peer: a captured proc_bsdinfo decodes to its start second and microsecond", () => {
+  const buf = unhex(BSDINFO_46351);
+  assertEquals(buf.length, 136);
+  assertEquals(decodeBsdInfoStart(buf, 46351), "1791310976.494629");
+  // A view into a larger buffer reads its own bytes, not the buffer's.
+  const padded = new Uint8Array(200);
+  padded.set(buf, 64);
+  assertEquals(
+    decodeBsdInfoStart(padded.subarray(64), 46351),
+    "1791310976.494629",
+  );
+  // Anything that is not that struct, filled in for THAT pid, is "cannot say".
+  assertEquals(decodeBsdInfoStart(buf, 46352), null, "another pid's struct");
+  assertEquals(decodeBsdInfoStart(buf.subarray(0, 135), 46351), null, "short");
+  assertEquals(decodeBsdInfoStart(new Uint8Array(136), 0), null, "unfilled");
+  const badUsec = buf.slice();
+  new DataView(badUsec.buffer).setBigUint64(128, 1_000_000n, true);
+  assertEquals(decodeBsdInfoStart(badUsec, 46351), null, "not a microsecond");
+});
+
+Deno.test("local-peer: off macOS, and for a pid that cannot be one, there is no darwin start", () => {
+  assertEquals(darwinProcessStart(Deno.pid, "linux"), null);
+  assertEquals(darwinProcessStart(Deno.pid, "windows"), null);
+  for (const pid of [0, -1, 1.5, NaN]) {
+    assertEquals(darwinProcessStart(pid, "darwin"), null, String(pid));
+  }
+});
+
+Deno.test({
+  name:
+    "local-peer: on macOS a process's start is stable, the same from another process, and its own",
+  ignore: Deno.build.os !== "darwin", // proc_pidinfo is macOS's; Linux and Windows have processStartToken
+  async fn() {
+    const mine = darwinProcessStart(Deno.pid);
+    assert(mine !== null && /^\d+\.\d{6}$/.test(mine), String(mine));
+    assertEquals(darwinProcessStart(Deno.pid), mine, "two reads, one answer");
+
+    // The second is the one `ps` prints — the layout is not merely plausible.
+    const ps = await new Deno.Command("ps", {
+      args: ["-o", "lstart=", "-p", String(Deno.pid)],
+      env: { LC_ALL: "C", LANG: "C", TZ: "UTC" },
+      stdout: "piped",
+    }).output();
+    assertEquals(
+      Number(mine.split(".")[0]),
+      parseLstartUtc(new TextDecoder().decode(ps.stdout)),
+      "ps -o lstart= agrees on the second",
+    );
+
+    // Another process reads the SAME value for this pid, and its own differs.
+    const mod = new URL("../src/server/local-peer.ts", import.meta.url).href;
+    const child = new Deno.Command(Deno.execPath(), {
+      args: [
+        "eval",
+        `import { darwinProcessStart as s } from ${JSON.stringify(mod)};
+         console.log(JSON.stringify([s(${Deno.pid}), s(Deno.pid)]));
+         await Deno.stdin.read(new Uint8Array(1));`,
+      ],
+      stdin: "piped",
+      stdout: "piped",
+      stderr: "inherit",
+    }).spawn();
+    const out = child.stdout.getReader();
+    try {
+      const line = (await out.read()).value;
+      const [ofMe, ofItself] = JSON.parse(new TextDecoder().decode(line));
+      assertEquals(ofMe, mine, "read from another process");
+      assertEquals(darwinProcessStart(child.pid), ofItself, "and the reverse");
+      assert(ofItself !== mine, "a different process, a different start");
+
+      // The gate, on the real read: this process armed as the window is
+      // admitted; the same PID recorded with another process's start is not.
+      const peer = { peerIdentity: () => ({ pid: Deno.pid, uid: 0, gid: 0 }) };
+      const gateOn = (startOf: (pid: number) => string | null) =>
+        createLocalPeerGate({
+          selfUid: 0,
+          startOf,
+          warn: () => {},
+          error: () => {},
+        });
+      const real = gateOn(darwinProcessStart);
+      real.arm(Deno.pid);
+      assertEquals(real.refusal(peer, "door"), null);
+      let armed = false;
+      const recycled = gateOn((pid) =>
+        armed ? darwinProcessStart(pid) : (armed = true, ofItself)
+      );
+      recycled.arm(Deno.pid);
+      const why = recycled.refusal(peer, "door");
+      assert(why?.includes("reused"), String(why));
+    } finally {
+      await child.stdin.close();
+      await out.cancel();
+      await child.status;
+    }
+
+    // A process this user does not own: the kernel does not answer, and that
+    // is "cannot say" — the gate then keeps the pid alone, as before.
+    assertEquals(darwinProcessStart(1), null, "launchd");
+  },
+});
+
 // ── No peer credentials ⇒ no gate ⇒ no boot ─────────────────────────────────
 
 Deno.test("local-peer: requireLocalPeer passes where credentials are readable", () => {
@@ -288,7 +407,7 @@ Deno.test("local-peer: requireLocalPeer passes where credentials are readable", 
 Deno.test({
   name:
     "local-peer: hardenLocalPeer makes the process unreadable to another process of the same user",
-  ignore: Deno.build.os !== "linux",
+  ignore: Deno.build.os !== "linux", // a non-dumpable process, proven by reading its /proc entries
   async fn() {
     // The memory half of the lockdown: a non-dumpable process's `/proc`
     // entries are closed to everyone but root. Proven from OUTSIDE — this

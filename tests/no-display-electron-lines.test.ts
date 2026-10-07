@@ -12,12 +12,12 @@
 // launches, the install lives in the window launch (findElectronBin), and the
 // binary was still missing when the run was killed.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { noDesktopSessionWarning } from "../src/server/aio-lifecycle.ts";
 import { electronBinaryMissingLine, lint } from "../src/server/lint.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const ROOT = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 
 Deno.test("no-display warning: a zero-port app names its sockets and the way to a URL, never a dead URL", () => {
   const w = noDesktopSessionWarning(

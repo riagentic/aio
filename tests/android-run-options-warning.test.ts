@@ -5,7 +5,7 @@
 // both halves: the bundle really leaves the entry out, and the build names
 // each option the app sets.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import * as esbuild from "esbuild";
 import { bundleClient } from "../src/build/client-bundle.ts";
 import { stopEsbuildService } from "../src/build/esbuild-shared.ts";
@@ -16,8 +16,9 @@ import {
 import { _writeLocalAssets } from "../src/build/build-android.ts";
 import type { BuildConfig } from "../src/build/build-config.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { fixtureNodeModules } from "./symlink-helper.ts";
 
-const REPO = new URL("../", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("../", import.meta.url));
 
 Deno.test("android bundle: the app entry module is not in the APK bundle", async () => {
   // The premise of the warning. If a future build DOES bake the entry in,
@@ -33,6 +34,8 @@ Deno.test("android bundle: the app entry module is not in the APK bundle", async
       join(root, "src", "App.tsx"),
       `export default function App() { return null; }\n`,
     );
+    // The framework's own npm dep, where the build looks for it.
+    await fixtureNodeModules(root, "npm:immer@10.2.0");
     const b = await bundleClient({
       esbuild,
       root,
@@ -73,6 +76,8 @@ Deno.test("bundleClient: the former `doAndroid` switch still builds the standalo
       shares: [],
       frameworkSrcDir: join(REPO, "src"),
     };
+    // The framework's own npm dep, where the build looks for it.
+    await fixtureNodeModules(root, "npm:immer@10.2.0");
     const legacy = await bundleClient({ ...base, doAndroid: true });
     assert(legacy.ok, legacy.errors.join("\n"));
     assertEquals(legacy.format, "iife");

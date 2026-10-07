@@ -12,6 +12,7 @@ import { dirname, fromFileUrl, join } from "@std/path";
 import { lockDir } from "../src/server/single-instance-lock.ts";
 import { aioRootDir } from "../src/server/tls.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const REPO = dirname(dirname(fromFileUrl(import.meta.url)));
 const DENO_JSON = join(REPO, "deno.json");
@@ -49,7 +50,6 @@ Deno.test("AIO_APPS_DIR spellings: one lock dir and one CA root, whichever cwd-r
 Deno.test({
   name:
     "AIO_APPS_DIR spellings: am with `apps` finds the app started with `demo/../apps`",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = Deno.realPathSync(await tempDir("aio-appsdir-am-"));
     await Deno.mkdir(join(dir, "demo"));
@@ -57,7 +57,7 @@ Deno.test({
     const appId = `spell-${crypto.randomUUID().slice(0, 8)}`;
     await Deno.writeTextFile(
       join(dir, "app.ts"),
-      `import { aio, cell } from "${REPO}/mod.ts";
+      `import { aio, cell } from "${spec(REPO)}/mod.ts";
 const c = cell("c", { state: { n: 1 }, methods: {
   inc(s: { n: number }) { s.n++; },
 } });

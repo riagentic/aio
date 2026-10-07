@@ -38,6 +38,51 @@ import {
 /** How long to wait for a spawned host to report `ready` before failing boot. */
 const READY_TIMEOUT_MS = 30_000;
 
+/** `workerRespawn: true`: this many crashes inside the window and the last one
+ *  is NOT respawned — a crash loop ends dead and loud, never spinning. */
+export const WORKER_RESPAWN_MAX = 3;
+export const WORKER_RESPAWN_WINDOW_MS = 60_000;
+
+/** One crash of cell worker `name`: the error every caller is told, and
+ *  whether a respawn follows. `times` is the cell's recent crash times (null:
+ *  it does not respawn) — this crash is added, the ones out of the window
+ *  dropped. One decider for a real worker and a harness's in-process stand-in
+ *  (`crashWorker`, testing/boot-refusals.ts). @internal */
+export function _workerCrash(
+  name: string,
+  why: string,
+  times: number[] | null,
+  now: number = Date.now(),
+): { err: Error; respawn: boolean } {
+  let tail = "";
+  let respawn = false;
+  if (times) {
+    times.push(now);
+    while (times[0]! <= now - WORKER_RESPAWN_WINDOW_MS) times.shift();
+    respawn = times.length < WORKER_RESPAWN_MAX;
+    if (!respawn) {
+      tail = ` (crash ${times.length} in ${
+        WORKER_RESPAWN_WINDOW_MS / 1000
+      }s: a crash loop — respawn stopped)`;
+    }
+  }
+  return {
+    err: new Error(`[aio] cell worker "${name}" crashed: ${why}${tail}`),
+    respawn,
+  };
+}
+
+/** The live hosted workers' crash doors, by cell — for `crashWorker`. */
+const hosted = new Map<string, (why: string) => void>();
+
+/** Crash cell `name`'s hosted worker as an uncaught error in its thread does.
+ *  False: no live worker hosts that cell here. @internal */
+export function _crashHostedWorker(name: string, why: string): boolean {
+  const crash = hosted.get(name);
+  crash?.(why);
+  return crash !== undefined;
+}
+
 export type CellWorkerDeps = {
   /** The app entry to load in the worker — normally `Deno.mainModule`. */
   entry: string;
@@ -67,6 +112,8 @@ export type CellWorkerDeps = {
   /** One error of this cell, for the owner's circuit breaker — the failures
    *  its composition would have counted had the method run there. */
   countError?: () => void;
+  /** The cell's `workerRespawn: true` — start a crashed worker again. */
+  respawn?: boolean;
 };
 
 /** The `cell-error` codes the owner's composition counts toward the circuit
@@ -194,13 +241,8 @@ export function createCellWorker(
   deps: CellWorkerDeps,
 ): CellWorker {
   const name = cell.__aio.id;
-  const worker = new Worker(deps.entry, {
-    type: "module",
-    // The owner's resolved appId travels in the name: the worker re-runs the
-    // app's entry, and must take ITS identity from here, never re-derive it
-    // (see cellWorkerName for why it cannot).
-    name: cellWorkerName(name, deps.appId),
-  });
+  /** The CURRENT thread — replaced by a respawn (`spawn`, below). */
+  let worker: Worker;
 
   let seq = 0;
   /** The slice generation the worker was last seeded with — see `reseed`. */
@@ -238,6 +280,13 @@ export function createCellWorker(
    *  permanently unreachable, with two subsequent calls still pending after
    *  six seconds and no answer coming. */
   let crashError: Error | null = null;
+  /** `workerRespawn: true` bookkeeping. `everReady`: a worker that never
+   *  answered `ready` is a BOOT failure, never respawned. `started`/`disabled`
+   *  are what the dead thread knew and its replacement must be told. */
+  const crashTimes: number[] = [];
+  let everReady = false;
+  let started = false;
+  let disabled = false;
   let readyResolve: (() => void) | null = null;
   let readyReject: ((e: Error) => void) | null = null;
   let closedResolve: (() => void) | null = null;
@@ -245,7 +294,14 @@ export function createCellWorker(
     readyResolve = res;
     readyReject = rej;
   });
-  const readyTimer = setTimeout(() => {
+  /** Arm the `ready` deadline of the thread just spawned. */
+  const armReady = (late: () => void): ReturnType<typeof setTimeout> => {
+    const t = setTimeout(late, READY_TIMEOUT_MS);
+    // A boot failure must not keep the process alive on this timer.
+    if (typeof Deno !== "undefined") Deno.unrefTimer?.(t as unknown as number);
+    return t;
+  };
+  let readyTimer = armReady(() => {
     readyReject?.(
       new Error(
         // The old text ("does the app entry call aio.run()?") named the one
@@ -265,11 +321,7 @@ export function createCellWorker(
           `  Less commonly: the entry never reaches aio.run() at all.`,
       ),
     );
-  }, READY_TIMEOUT_MS);
-  // A boot failure must not keep the process alive on this timer.
-  if (typeof Deno !== "undefined") {
-    Deno.unrefTimer?.(readyTimer as unknown as number);
-  }
+  });
 
   /** Reject every in-flight call — used by terminate() and a worker crash.
    *  Async-method awaiters wait in the pending-call registry, not on the
@@ -285,10 +337,11 @@ export function createCellWorker(
     inflight.clear();
   };
 
-  worker.onmessage = (ev: MessageEvent<FromWorker>) => {
+  const onMessage = (ev: MessageEvent<FromWorker>) => {
     const msg = ev.data;
     switch (msg.t) {
       case "ready":
+        everReady = true;
         clearTimeout(readyTimer);
         // A fresh worker for this cell is up (a dev restart, the next boot in
         // this process): the crash episode below is over. The tracker is
@@ -398,6 +451,8 @@ export function createCellWorker(
         return;
       }
       case "boot-error":
+        // A respawn that cannot boot is one more crash of this cell.
+        if (deps.respawn && everReady) return crashed(msg.message);
         clearTimeout(readyTimer);
         readyReject?.(new Error(`[aio] cell worker "${name}": ${msg.message}`));
         return;
@@ -407,12 +462,14 @@ export function createCellWorker(
     }
   };
 
-  worker.onerror = (ev: ErrorEvent) => {
-    // An uncaught error in the host thread. Loud, never silent: the cell is now
-    // unreachable and every waiting caller has to learn that.
-    ev.preventDefault?.();
-    const err = new Error(
-      `[aio] cell worker "${name}" crashed: ${ev.message ?? "unknown error"}`,
+  /** The thread died: an uncaught error in it (`onerror`), a respawn that
+   *  never answered `ready`, or a test's `crashWorker`. Loud, never silent:
+   *  every waiting caller has to learn it. */
+  const crashed = (why: string): void => {
+    const { err, respawn } = _workerCrash(
+      name,
+      why,
+      deps.respawn && everReady && !closed ? crashTimes : null,
     );
     log.error("cell-worker", err.message);
     // …and on the health surface. The crash rejected the calls in flight and
@@ -425,17 +482,63 @@ export function createCellWorker(
     clearTimeout(readyTimer);
     readyReject?.(err);
     failAll(err);
-    // The cell is gone. SAY so for every later call rather than posting into
-    // a dead thread: the `closed` branch in `call()` already answers by name
-    // and settles both the transport promise and the registry one.
-    crashError = err;
-    closed = true;
     try {
       worker.terminate();
     } catch {
       // aio-ok: it already died — terminating a dead worker is the no-op we
       // want, and a throw here must not replace the crash we are reporting.
     }
+    if (!respawn) {
+      // The cell is gone. SAY so for every later call rather than posting
+      // into a dead thread: the `closed` branch in `call()` already answers
+      // by name and settles both the transport promise and the registry one.
+      crashError = err;
+      closed = true;
+      if (hosted.get(name) === crashed) hosted.delete(name);
+      return;
+    }
+    // `workerRespawn: true` — a fresh thread, seeded with the slice THIS isolate
+    // holds: every patch the dead one streamed home, nothing it had not
+    // committed. A new generation, so nothing of the old thread can land on
+    // it. A `disable` the dead thread never answered did not happen.
+    log.warn(
+      "cell-worker",
+      `${name}: respawning from the last committed state (crash ` +
+        `${crashTimes.length} of ${WORKER_RESPAWN_MAX} allowed in ` +
+        `${WORKER_RESPAWN_WINDOW_MS / 1000}s)` +
+        (started && !disabled ? " — its onInit runs again" : ""),
+    );
+    for (const done of disabling.splice(0)) done(false);
+    gen++;
+    spawn();
+    readyTimer = armReady(() =>
+      crashed(`its respawn was not ready within ${READY_TIMEOUT_MS}ms`)
+    );
+    // `onInit` belongs to the isolate that runs the cell, and this one is
+    // new: whatever the last `onInit` opened died with the old thread. A
+    // disabled cell's waits for its `enable`.
+    if (started && !disabled) send({ t: "start" });
+  };
+
+  const spawn = (): void => {
+    const w = new Worker(deps.entry, {
+      type: "module",
+      // The owner's resolved appId travels in the name: the worker re-runs the
+      // app's entry, and must take ITS identity from here, never re-derive it
+      // (see cellWorkerName for why it cannot).
+      name: cellWorkerName(name, deps.appId),
+    });
+    // A thread a respawn replaced has nothing left to say.
+    w.onmessage = (ev) => {
+      if (w === worker) onMessage(ev);
+    };
+    w.onerror = (ev: ErrorEvent) => {
+      // An uncaught error in the host thread.
+      ev.preventDefault?.();
+      if (w === worker) crashed(ev.message ?? "unknown error");
+    };
+    worker = w;
+    seed(deps.initialState());
   };
 
   const send = (msg: ToWorker) => worker.postMessage(msg);
@@ -455,7 +558,8 @@ export function createCellWorker(
       gen,
       ...(deps.strictTypes ? { strictTypes: deps.strictTypes } : {}),
     });
-  seed(deps.initialState());
+  spawn();
+  hosted.set(name, crashed);
 
   return {
     cell: name,
@@ -470,6 +574,7 @@ export function createCellWorker(
     },
     start(): void {
       if (closed) return;
+      started = true;
       send({ t: "start" });
     },
     cancel(actionType: string): void {
@@ -478,11 +583,15 @@ export function createCellWorker(
     },
     disable(done: (ok: boolean) => void): void {
       if (closed) return;
-      disabling.push(done);
+      disabling.push((ok) => {
+        if (ok) disabled = true;
+        done(ok);
+      });
       send({ t: "disable" });
     },
     enable(): void {
       if (closed) return;
+      disabled = false;
       send({ t: "enable" });
     },
     call(
@@ -539,6 +648,7 @@ export function createCellWorker(
     async close(): Promise<void> {
       if (closed) return;
       closed = true;
+      if (hosted.get(name) === crashed) hosted.delete(name);
       clearTimeout(readyTimer);
       try {
         const acked = new Promise<void>((r) => closedResolve = r);
@@ -571,6 +681,7 @@ export function createCellWorker(
     terminate(reason: string): void {
       if (closed) return;
       closed = true;
+      if (hosted.get(name) === crashed) hosted.delete(name);
       clearTimeout(readyTimer);
       log.warn("cell-worker", `${name}: terminated — ${reason}`);
       failAll(new Error(`[aio] cell worker "${name}" terminated: ${reason}`));

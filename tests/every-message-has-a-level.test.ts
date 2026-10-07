@@ -18,8 +18,9 @@
 // should be fixed. Error = must be fixed. Nothing prints without one.
 import { assert, assertEquals } from "@std/assert";
 import { codeText } from "../src/diagnostics/code-mask.ts";
+import { fromFileUrl, toFileUrl } from "@std/path";
 
-const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const REPO = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 
 /** Server-side runtime: everything here has a logger and must use it. */
 const RUNTIME_FOLDERS = [
@@ -178,7 +179,7 @@ Deno.test("output: the log API stays browser-safe", async () => {
     for (const m of text.matchAll(/from\s*["']([^"']+)["']/g)) {
       const spec = m[1]!;
       if (spec.startsWith(".")) {
-        queue.push(new URL(spec, `file://${path}`).pathname);
+        queue.push(fromFileUrl(new URL(spec, toFileUrl(path))));
       } else if (!spec.startsWith("node:")) {
         bare.push(`${spec} (via ${path.slice(REPO.length + 1)})`);
       }

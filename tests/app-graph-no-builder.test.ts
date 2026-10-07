@@ -60,6 +60,7 @@ Deno.test("app graph: importing aio reaches the runtime's own build modules and 
     "build/build-css.ts", // the dev css step
     "build/build-flags.ts", // the CLI names build flags to refuse them
     "build/build-integrity.ts", // dev bundling of http imports
+    "build/build-journals.ts", // a start from source asks whether a build was interrupted
     "build/build-shape.ts", // what a build puts in an out dir: the version leaves out only that
     "build/build-version.ts", // the update check compares versions
     "build/capabilities.ts", // an update's capability manifest

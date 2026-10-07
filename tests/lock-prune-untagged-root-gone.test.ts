@@ -8,6 +8,7 @@ import { assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import {
+  ownPidNs,
   pruneDeadLockDirAt,
   pruneDeadLockDirsTagged,
 } from "../src/server/single-instance-lock.ts";
@@ -37,8 +38,15 @@ Deno.test("lock prune: an untagged watch file of a dead pid keeps a live root's 
     const lockDir = join(dir, "aio-x");
     await Deno.mkdir(lockDir);
     await Deno.writeTextFile(join(lockDir, `watch-${await deadPid()}.tmp`), "");
-    assertEquals(pruneDeadLockDirAt(lockDir), false, "fresh: kept 10 minutes");
-    assertEquals(pruneDeadLockDirAt(lockDir, true), true);
+    // Where there are no pid namespaces (macOS) an untagged file is the
+    // native form and its pid is unambiguous: dead means gone at once.
+    const namespaced = ownPidNs() !== undefined;
+    assertEquals(
+      pruneDeadLockDirAt(lockDir),
+      !namespaced,
+      namespaced ? "fresh: kept 10 minutes" : "no namespaces: a dead pid",
+    );
+    if (namespaced) assertEquals(pruneDeadLockDirAt(lockDir, true), true);
     assertEquals(exists(lockDir), false);
   } finally {
     await dropTempDir(dir);
@@ -59,8 +67,11 @@ Deno.test("lock prune: a live pid's untagged watch file is kept even with the ro
 
 Deno.test("lock prune: dropping a temp dir removes its tagged lock dir holding an untagged dead watch file", async () => {
   const runtime = await tempDir("aio-lock-untagged-runtime-");
-  const was = Deno.env.get("XDG_RUNTIME_DIR");
-  Deno.env.set("XDG_RUNTIME_DIR", runtime);
+  // The lock dirs' base is the variable the product reads on this OS
+  // (`_lockDirParts`): %TEMP% on Windows, $XDG_RUNTIME_DIR elsewhere.
+  const BASE = Deno.build.os === "windows" ? "TEMP" : "XDG_RUNTIME_DIR";
+  const was = Deno.env.get(BASE);
+  Deno.env.set(BASE, runtime);
   try {
     const tag = "0123456789abcdef";
     const lockDir = join(runtime, `aio-e-tmp-aio-sweep-${tag}`);
@@ -69,8 +80,8 @@ Deno.test("lock prune: dropping a temp dir removes its tagged lock dir holding a
     assertEquals(pruneDeadLockDirsTagged(tag), 1);
     assertEquals(exists(lockDir), false);
   } finally {
-    if (was === undefined) Deno.env.delete("XDG_RUNTIME_DIR");
-    else Deno.env.set("XDG_RUNTIME_DIR", was);
+    if (was === undefined) Deno.env.delete(BASE);
+    else Deno.env.set(BASE, was);
     await dropTempDir(runtime);
   }
 });

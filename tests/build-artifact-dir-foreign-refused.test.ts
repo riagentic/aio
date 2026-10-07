@@ -4,7 +4,7 @@
 // both: a directory with files but without the build's own signed file was
 // never aio's — refused, naming the files, deleting nothing.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { emptyDir, foreignArtifactRefusal } from "../src/build/dist-staging.ts";
 import { versionStamp } from "../src/build/build-bundle.ts";
 import { VERSION_STAMP } from "../src/protocol/protocol-version.ts";
@@ -58,7 +58,7 @@ Deno.test("artifact dir: a web build over a user folder of that name refuses and
       args: [
         "run",
         "-A",
-        `--config=${new URL("../deno.json", import.meta.url).pathname}`,
+        `--config=${fromFileUrl(new URL("../deno.json", import.meta.url))}`,
         script,
       ],
       env: { NO_COLOR: "1" },

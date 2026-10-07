@@ -176,11 +176,34 @@ const posts = async (k) => {
     if (i % 2 === 0) await op("feed", "onPost", "d" + (n + 1));
   }
 };
+// A clean stop. Windows has no SIGTERM — `Deno.kill` is TerminateProcess
+// there, a kill — so it is the request `am stop` sends, with this boot's
+// control credential.
+const stopCleanly = async () => {
+  if (Deno.build.os !== "windows") return Deno.kill(Deno.pid, "SIGTERM");
+  const res = await fetch(
+    "http://127.0.0.1:" + PORT + "/__aio/trojan/shutdown",
+    {
+      method: "POST",
+      headers: {
+        "X-AIO": "1",
+        "X-Aio-Control": Deno.readTextFileSync(DIR + "/data/control.key")
+          .trim(),
+      },
+    },
+  );
+  const text = await res.text();
+  if (res.status !== 200) throw new Error(res.status + " " + text);
+};
 const CLEAN = Deno.env.get("CLEAN") === "1";
 const KILLAT = Number(Deno.env.get("KILLAT") ?? "0");
 const done = async () => {
   if (KILLAT) await sleep(KILLAT);
-  Deno.writeTextFileSync(DIR + "/expected.json", JSON.stringify(snap()));
+  Deno.writeTextFileSync(
+    DIR + "/expected.json",
+    // `acked`: every op the server acknowledged before the kill.
+    JSON.stringify({ ...snap(), acked: [...acks] }),
+  );
   // PERSISTFAULT=1: from here on every store write fails — the stop's final
   // save is refused (the test drops these triggers before the next boot).
   if (Deno.env.get("PERSISTFAULT") === "1") {
@@ -198,7 +221,7 @@ const done = async () => {
   if (CLEAN) {
     ws.close();
     await sleep(50);
-    Deno.kill(Deno.pid, "SIGTERM");
+    await stopCleanly();
     await sleep(20000);
   }
   Deno.kill(Deno.pid, "SIGKILL");
@@ -448,7 +471,11 @@ if (PHASE === "before-fold") {
     await sleep(5);
   }
   await sleep(300);
-  Deno.writeTextFileSync(DIR + "/expected.json", JSON.stringify(snap()));
+  Deno.writeTextFileSync(
+    DIR + "/expected.json",
+    // `acked`: every op the server acknowledged before the kill.
+    JSON.stringify({ ...snap(), acked: [...acks] }),
+  );
   Deno.kill(Deno.pid, "SIGKILL");
 } else if (PHASE === "streaming") {
   // Kill at a random-ish point in a stream: persists and folds land on their

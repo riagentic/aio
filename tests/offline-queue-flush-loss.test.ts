@@ -194,7 +194,10 @@ Deno.test("dev: a method argument the wire silently CHANGES is named", () => {
   }
 });
 
-Deno.test("prod: the same call is silent, and lands the same bytes", () => {
+// It was SILENT in prod ("observe-only is dev's half") — and a field report's
+// packaged app then stored changed arguments with no line anywhere. Prod says
+// it now: once per action type, same bytes on the wire.
+Deno.test("prod: the same call is said once per method, and lands the same bytes", () => {
   _resetTransport();
   _resetActionWarnings();
   setDevModeOverride(false);
@@ -203,7 +206,9 @@ Deno.test("prod: the same call is silent, and lands the same bytes", () => {
     const { sent, transport } = flakyTransport(-1);
     setTransport(transport);
     send({ type: "q:due", payload: { args: [{ at: new Date(0) }] } });
-    assertEquals(seen, [], "prod says nothing — observe-only is dev's half");
+    send({ type: "q:due", payload: { args: [{ n: NaN }] } });
+    assertEquals(seen.length, 1, `once per method in prod: ${seen.join("|")}`);
+    assertStringIncludes(seen[0]!, "q:due.args[0].at: Date → string");
     assertStringIncludes(sent[0]!, "1970-01-01T00:00:00.000Z");
   } finally {
     restore();

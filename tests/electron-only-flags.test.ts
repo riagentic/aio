@@ -17,12 +17,13 @@
 // family, before anything boots, naming WHAT WAS TYPED — the flag when it was
 // the flag, the config key when it was the key.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { electronOnlyFlagRefusal, parseCli } from "../src/server/aio-cli.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { childCoverageDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 const _childCovDir = childCoverageDir();
 
 const refusal = (args: string[], client: string, config = {}): string =>
@@ -105,7 +106,10 @@ async function scaffold(appId: string): Promise<string> {
   await Deno.mkdir(join(dir, "src"), { recursive: true });
   await Deno.writeTextFile(
     join(dir, "deno.json"),
-    JSON.stringify({ title: appId, imports: { aio: join(ROOT, "mod.ts") } }),
+    JSON.stringify({
+      title: appId,
+      imports: { aio: spec(join(ROOT, "mod.ts")) },
+    }),
   );
   await Deno.writeTextFile(
     join(dir, "src", "app.ts"),

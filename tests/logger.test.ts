@@ -25,7 +25,7 @@ function mkLogger(
     level?: "trace" | "debug" | "info" | "warn" | "error";
   },
 ): AioLogger {
-  return new AioLogger({
+  const l = new AioLogger({
     ...opts,
     heartbeat: 0,
     console: opts.console ?? false,
@@ -33,10 +33,20 @@ function mkLogger(
     // verbose level (the production default is "info", pinned separately).
     level: opts.level ?? "trace",
   });
+  made.push(l);
+  return l;
 }
+const made: AioLogger[] = [];
 
-/** Wait for the buffered sink (250ms timer) to flush */
-const flush = () => new Promise((r) => setTimeout(r, 400));
+/** Wait for the buffered sink (250ms timer) to flush — the timer itself, never
+ *  `l.flush()`: that the lines reach disk with nobody asking is the point.
+ *  Then for the writes that timer STARTED: they are async, and 150 ms was all
+ *  they were given — on a loaded Windows run `app.log` was not there yet, and
+ *  the write finished inside the next test. */
+const flush = async () => {
+  await new Promise((r) => setTimeout(r, 400));
+  await Promise.allSettled(made.flatMap((l) => [...l["_pending"]]));
+};
 
 /** Read a log file and return lines (plain text) */
 async function readLines(path: string): Promise<string[]> {
@@ -185,19 +195,15 @@ Deno.test("logger: backupLogs:false wipes logs on start", async () => {
   const l = mkLogger({ dir, backupLogs: false });
   await l.init();
   // Old log should be gone, not rotated
-  try {
-    await Deno.stat(`${dir}/app.log.1`);
-    throw new Error("should not exist");
-  } catch (e) {
-    assertStringIncludes((e as Error).message, "No such file");
-  }
+  await assertRejects(
+    () => Deno.stat(`${dir}/app.log.1`),
+    Deno.errors.NotFound,
+  );
   // app.log should not exist yet (nothing logged)
-  try {
-    await Deno.stat(`${dir}/app.log`);
-    throw new Error("should not exist");
-  } catch (e) {
-    assertStringIncludes((e as Error).message, "No such file");
-  }
+  await assertRejects(
+    () => Deno.stat(`${dir}/app.log`),
+    Deno.errors.NotFound,
+  );
 });
 
 Deno.test("logger: backupLogs rotates instead of wiping", async () => {

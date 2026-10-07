@@ -17,19 +17,20 @@
 // is structuredClone (Date/Map survive), the socket is JSON (they do not). A
 // divergence here is either a real bug or a limit worth naming out loud.
 import { assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const REPO = new URL("../", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("../", import.meta.url));
 
 async function writeApp(dir: string, port: number): Promise<void> {
   await Deno.writeTextFile(
     join(dir, "deno.json"),
     JSON.stringify({
       imports: {
-        "aio": `${REPO}mod.ts`,
-        "aio/": `${REPO}src/`,
+        "aio": `${spec(REPO)}mod.ts`,
+        "aio/": `${spec(REPO)}src/`,
         "immer": "npm:immer@10.2.0",
         "@std/path": "jsr:@std/path@1.1.2",
       },

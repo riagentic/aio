@@ -16,6 +16,8 @@ import { _resetInstanceVerify, trojanPost } from "../src/am/am-http.ts";
 import { createUDSListener } from "../src/server/aio.ts";
 import { _noteShortCall, shortCallSentence } from "../src/server/action-ack.ts";
 import { join } from "@std/path";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
+import { connectLocal } from "../src/server/local-listen.ts";
 
 type Ack = { cid: string; ok: boolean; value?: unknown; short?: string };
 
@@ -42,7 +44,7 @@ async function udsAck(
   socketPath: string,
   d: Record<string, unknown>,
 ): Promise<Ack> {
-  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  const conn = await connectLocal(socketPath);
   const w = conn.writable.getWriter();
   await w.write(new TextEncoder().encode(enc("action", d) + "\n"));
   const r = conn.readable.getReader();
@@ -140,7 +142,7 @@ Deno.test("short call: WS, UDS and the trojan carry the SAME `short` sentence", 
     // transport needs an Electron client to boot, so the door is driven with
     // the seam itself: `_noteShortCall` on the action, as dispatchNetwork does
     // above — proven on WS against the real app).
-    const sock = join(dir, "short.sock");
+    const sock = localEndpoint(join(dir, "short.sock"));
     const uds = createUDSListener(
       sock,
       () => ({ ok: true }),
@@ -162,6 +164,7 @@ Deno.test("short call: WS, UDS and the trojan carry the SAME `short` sentence", 
       assertEquals(u.short, w1.short, "UDS and WS must agree");
     } finally {
       uds.shutdown();
+      await localIdle();
     }
 
     // Trojan: `args:[]` is the one short shape it does not refuse.

@@ -25,6 +25,14 @@
 // Escape hatches (use SPARINGLY): fence info `no-check`, or the literal first
 // line `// snippet: fragment` for true fragments.
 import { assert } from "@std/assert";
+import { fromFileUrl, toFileUrl } from "@std/path";
+
+// Paths here are `/`-separated on every OS (Deno's file APIs take them on
+// Windows too), and cross to a `file:` URL and back only through these two —
+// `file://${path}` is not a URL of `C:/x`, and `.pathname` is not a path.
+const urlOf = (path: string): string => toFileUrl(path).href;
+const pathOf = (url: string | URL): string =>
+  fromFileUrl(url).replaceAll("\\", "/");
 
 /** Deno still paints `deno check` diagnostics even under `NO_COLOR` + a pipe
  *  (2.9.x). The stub-pass regex and the doc-line remapper both key on plain
@@ -305,7 +313,8 @@ function clauseNames(
 }
 
 Deno.test("doc ts/tsx code blocks type-check against the real API", async () => {
-  const tmp = await Deno.makeTempDir({ prefix: "aio-doc-snippets-" });
+  const tmp = (await Deno.makeTempDir({ prefix: "aio-doc-snippets-" }))
+    .replaceAll("\\", "/");
   try {
     const files: URL[] = [new URL("README.md", ROOT)];
     for await (const f of markdownFiles(new URL("docs/", ROOT))) files.push(f);
@@ -371,12 +380,12 @@ Deno.test("doc ts/tsx code blocks type-check against the real API", async () => 
         if (!sn.file) continue;
         for (const m of sn.code.matchAll(REL_IMPORT_RE)) {
           const [, , clause, spec] = m;
-          const resolved = new URL(spec!, `file://${sn.file}`).pathname;
+          const resolved = pathOf(new URL(spec!, urlOf(sn.file)));
           if (projFiles.has(resolved)) continue; // plain relative import works
           const hit = [".ts", ".tsx", "/index.ts", "/index.tsx"]
             .map((ext) => resolved + ext).find((p) => projFiles.has(p));
           if (hit) {
-            imports[`file://${resolved}`] = `file://${hit}`;
+            imports[urlOf(resolved)] = urlOf(hit);
             continue;
           }
           const stub = stubs.get(resolved) ??
@@ -406,7 +415,7 @@ Deno.test("doc ts/tsx code blocks type-check against the real API", async () => 
         stubPath,
         stubSource(req.names, req.hasDefault),
       );
-      imports[`file://${resolved}`] = `file://${stubPath}`;
+      imports[urlOf(resolved)] = urlOf(stubPath);
     }
 
     const repoCfg = JSON.parse(
@@ -461,10 +470,10 @@ Deno.test("doc ts/tsx code blocks type-check against the real API", async () => 
       const unknown = new Map<string, Set<string>>();
       for (
         const m of stderr.matchAll(
-          /(?:Cannot find name '([\w$]+)'|No value exists in scope for the shorthand property '([\w$]+)')[\s\S]*?\n\s+at (file:\/\/[^\s:]+):\d+:\d+/g,
+          /(?:Cannot find name '([\w$]+)'|No value exists in scope for the shorthand property '([\w$]+)')[\s\S]*?\n\s+at (file:\/\/\S+?):\d+:\d+/g,
         )
       ) {
-        const file = new URL(m[3]!).pathname;
+        const file = pathOf(m[3]!);
         if (!byFile.get(file)?.auto) continue;
         (unknown.get(file) ?? unknown.set(file, new Set()).get(file)!)
           .add((m[1] ?? m[2])!);
@@ -502,14 +511,14 @@ Deno.test("doc ts/tsx code blocks type-check against the real API", async () => 
         const off = (sn.auto ? 1 : 0) + (sn.stubbed ? 2 : 0);
         report = report.replaceAll(
           new RegExp(
-            `file://${path.replace(/[.*+?^$()|[\]\\]/g, "\\$&")}:(\\d+):(\\d+)`,
+            `${urlOf(path).replace(/[.*+?^$()|[\]\\]/g, "\\$&")}:(\\d+):(\\d+)`,
             "g",
           ),
           (_m, l: string, c: string) =>
             `${sn.doc}:${sn.line + Number(l) - 1 - off}:${c}`,
         );
         report = report.replaceAll(
-          `file://${path}`,
+          urlOf(path),
           `${sn.doc} (snippet at line ${sn.line})`,
         );
       }

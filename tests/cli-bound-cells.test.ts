@@ -8,6 +8,7 @@ import type { CellDef } from "../src/state/cell-types.ts";
 import { stopChild } from "./stop-child.ts";
 import { childCoverageDir } from "../src/testing/temp-dir.ts";
 import { freePort } from "../src/testing/server-test.ts";
+import { fromFileUrl } from "@std/path";
 const _childCovDir = childCoverageDir();
 
 async function waitFor<T>(
@@ -37,7 +38,7 @@ Deno.test({
         "--client=server-only",
         `--port=${port}`,
       ],
-      cwd: new URL("../examples/counter", import.meta.url).pathname,
+      cwd: fromFileUrl(new URL("../examples/counter", import.meta.url)),
       stdin: "null",
       stdout: "null",
       stderr: "null",
@@ -94,7 +95,7 @@ Deno.test({
         "--client=server-only",
         `--port=${port}`,
       ],
-      cwd: new URL("../examples/counter", import.meta.url).pathname,
+      cwd: fromFileUrl(new URL("../examples/counter", import.meta.url)),
       stdin: "null",
       stdout: "null",
       stderr: "null",

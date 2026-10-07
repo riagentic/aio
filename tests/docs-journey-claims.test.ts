@@ -7,8 +7,9 @@
 //   `ship`/`am publish` default to that file; a doc that shows
 //   `--key=release-key.json` (in-repo) teaches the location keygen refuses.
 import { assert, assertEquals } from "@std/assert";
+import { fromFileUrl } from "@std/path";
 
-const ROOT = new URL("../", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("../", import.meta.url));
 const read = (rel: string) => Deno.readTextFile(ROOT + rel);
 
 Deno.test("quickstart describes the printed boot line, not a fixed port", async () => {

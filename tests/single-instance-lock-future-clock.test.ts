@@ -5,6 +5,7 @@
 // the lock read that as "just written": a truncated lock (a crash mid-write)
 // was never reclaimed, and the app refused to start, "already running
 // (pid 0)", forever; a zombie still "starting" kept its startup grace forever.
+import { sleeper } from "./proc-helper.ts";
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { tempDir } from "../src/testing/temp-dir.ts";
@@ -57,7 +58,7 @@ Deno.test("lock: a 'starting' zombie with a FUTURE startedAt loses its grace", a
   await inApps(async (dir) => {
     const home = join(dir, "home");
     // A LIVE process that is not us, owning a lock whose port answers nothing.
-    const owner = new Deno.Command("sleep", { args: ["30"] }).spawn();
+    const owner = sleeper();
     try {
       const deadPort = freePort();
       writeLock({
@@ -92,7 +93,12 @@ Deno.test("lock: a 'starting' zombie with a FUTURE startedAt loses its grace", a
       }
     } finally {
       // The takeover ended it — a zombie is ended before its lock is taken.
-      assertEquals((await owner.status).signal !== null, true);
+      // (Windows ends a process without a signal: a non-zero exit code.)
+      const st = await owner.status;
+      assertEquals(
+        Deno.build.os === "windows" ? st.code !== 0 : st.signal !== null,
+        true,
+      );
     }
   });
 });

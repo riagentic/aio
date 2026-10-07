@@ -11,7 +11,7 @@
 import { assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 
-const REPO_ROOT = dirname(fromFileUrl(import.meta.url)).replace(/\/tests$/, "");
+const REPO_ROOT = dirname(dirname(fromFileUrl(import.meta.url)));
 
 Deno.test("aiol: every rule that exists is in ALL_CHECKS", async () => {
   const src = await Deno.readTextFile(join(REPO_ROOT, "aiol", "checks.ts"));

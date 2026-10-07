@@ -10,6 +10,9 @@ import {
   rebuildFromGit,
 } from "../src/server/updates-rebuild.ts";
 import type { Log } from "../src/diagnostics/logger.ts";
+import { EXE, programBytes } from "./fake-program-helper.ts";
+
+const WIN = Deno.build.os === "windows";
 
 const silentLog = {
   info: () => {},
@@ -64,20 +67,26 @@ async function repo(
     // A `deno.jsonc` with a trailing comment — legal JSONC, as Deno reads it.
     opts.jsonc ? cfg.replace('"demo",', '"demo", // the app') : cfg,
   );
+  // The artifact: a program that answers the probe — a shell script, or on
+  // Windows a real executable carrying it (fake-program-helper.ts). The build
+  // writes its bytes; `app` there is `app.exe`.
+  const program = await programBytes(`#!/bin/sh
+if [ "$1" = "--aio-data-contract" ]; then ${
+    opts.answer ?? `echo '${contract}'`
+  }; exit 0; fi
+echo running
+`);
   await Deno.writeTextFile(
     join(root, "make.ts"),
     opts.buildFails
       ? `console.error("the app's own build blew up"); Deno.exit(3);`
       : `
-const out = "dist/app";
+const out = "dist/app${EXE}";
 await Deno.mkdir("dist", { recursive: true });
-await Deno.writeTextFile(out, \`#!/bin/sh
-if [ "$1" = "--aio-data-contract" ]; then ${
-        opts.answer ?? `echo '${contract}'`
-      }; exit 0; fi
-echo running
-\`);
-await Deno.chmod(out, 0o755);
+await Deno.writeFile(out, Uint8Array.from(atob("${
+        btoa(Array.from(program, (b) => String.fromCharCode(b)).join(""))
+      }"), (c) => c.charCodeAt(0)));
+if (Deno.build.os !== "windows") await Deno.chmod(out, 0o755);
 `,
   );
   await git(["init", "-q", "-b", "main"], root);
@@ -102,7 +111,7 @@ Deno.test("git rebuild: clones the ref, builds it, and reports the artifact + co
     if (!r.ok) return;
 
     assert(/[0-9a-f]{40}/.test(r.sha), "reports the commit it built");
-    assertStringIncludes(r.artifact, "dist/app");
+    assertStringIncludes(r.artifact, join("dist", "app"));
     // The data gate's input, asked of the binary that was just built — a
     // repository has no signed manifest to carry the answer.
     assertEquals(r.contract?.cells.notes?.version, 1);
@@ -127,7 +136,7 @@ Deno.test("git rebuild: a deno.jsonc app's compile task is found (JSONC, both na
       log: silentLog,
     });
     assert(r.ok, r.ok ? "" : r.error);
-    if (r.ok) assertStringIncludes(r.artifact, "dist/app");
+    if (r.ok) assertStringIncludes(r.artifact, join("dist", "app"));
   } finally {
     await Deno.remove(src, { recursive: true });
     await dropTempDir(work);
@@ -142,8 +151,7 @@ Deno.test("git rebuild: the contract is read off its marker line, whatever the a
       `echo 'warming' >&2; ` +
       // The binary's own line carries the value the probe handed it; a line
       // of the plain shape printed after it is the app's.
-      `printf '[aio:%s] ' "$AIO_PROBE_NONCE" >&2; ` +
-      `echo 'data-contract: {"schema":1,"cells":{"notes":{"version":4,"migratesFrom":2}}}' >&2; ` +
+      `echo "[aio:$AIO_PROBE_NONCE] data-contract: {\\"schema\\":1,\\"cells\\":{\\"notes\\":{\\"version\\":4,\\"migratesFrom\\":2}}}" >&2; ` +
       `echo '[aio] data-contract: {"schema":1,"cells":{"forged":{"version":1,"migratesFrom":1}}}' >&2; ` +
       `echo '[aio] app-id: demo' >&2`,
   });
@@ -171,7 +179,7 @@ Deno.test("git rebuild: an unreadable data contract is NAMED, not swallowed", as
   // the answer comes from the binary that was just built. The commonest cause
   // is the app printing something (a banner, a warning) on stdout before aio
   // boots, and nothing said so.
-  const src = await repo({ contract: "Starting up...\\n{ oops" });
+  const src = await repo({ answer: "echo 'Starting up...'; echo '{ oops'" });
   const work = await Deno.makeTempDir({ prefix: "aio-git-work-" });
   const lines: string[] = [];
   const log = {
@@ -278,9 +286,10 @@ Deno.test("artifact discovery: by TIME, and an AppImage wins over a plain binary
   const dir = await Deno.makeTempDir({ prefix: "aio-artifacts-" });
   try {
     const old = new Date(2020, 0, 1);
-    const stale = join(dir, "stale-binary");
+    // "Executable": the mode bit, or on Windows the `.exe` name.
+    const stale = join(dir, "stale-binary" + EXE);
     await Deno.writeTextFile(stale, "");
-    await Deno.chmod(stale, 0o755);
+    if (!WIN) await Deno.chmod(stale, 0o755);
     await Deno.utime(stale, old, old);
 
     const marker = new Date(2021, 0, 1);
@@ -289,17 +298,18 @@ Deno.test("artifact discovery: by TIME, and an AppImage wins over a plain binary
     await Deno.writeTextFile(join(dir, "build.log"), "x");
     await Deno.writeTextFile(join(dir, "mod.ts"), "x");
 
-    const plain = join(dir, "app");
+    const plain = join(dir, "app" + EXE);
     await Deno.writeTextFile(plain, "");
-    await Deno.chmod(plain, 0o755);
+    if (!WIN) await Deno.chmod(plain, 0o755);
 
     assertEquals(await findBuiltArtifact(dir, marker), plain);
 
     // The Electron target emits both; the AppImage is the one to install.
     const appimage = join(dir, "app-x86_64.AppImage");
     await Deno.writeTextFile(appimage, "");
-    await Deno.chmod(appimage, 0o755);
-    assertEquals(await findBuiltArtifact(dir, marker), appimage);
+    if (!WIN) await Deno.chmod(appimage, 0o755);
+    // An AppImage is no Windows artifact: there the plain binary stays.
+    assertEquals(await findBuiltArtifact(dir, marker), WIN ? plain : appimage);
 
     // Nothing new since the marker ⇒ nothing to install.
     assertEquals(await findBuiltArtifact(dir, new Date(2030, 0, 1)), null);

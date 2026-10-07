@@ -16,9 +16,11 @@
 // through these functions, and a format known to two writers is a format that
 // drifts.
 
-import { basename, join } from "@std/path";
+import { basename, dirname, join } from "@std/path";
 import { installedAppPaths } from "./app-dirs.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { renameOver } from "../diagnostics/rename-over.ts";
+import { isProcessAlive } from "./single-instance-lock.ts";
 
 /** What an install knows about itself. Every field is optional except `name`:
  *  a record written from a directory with no git, no version and no remote is
@@ -54,6 +56,67 @@ export async function readRecord(name: string): Promise<InstallRecord | null> {
   }
 }
 
+/** Put `rec` at `path` WHOLE: a temp beside it, on disk, renamed over it.
+ *
+ *  It was written in place — truncated, then filled — and a record that is
+ *  read while it is empty reads as "no record": `am installed` drops the app,
+ *  the next boot's check takes the install for one `am` does not manage, and a
+ *  process killed in that instant leaves it so for good (found on macOS: a
+ *  reader took `Unexpected end of JSON input` from a record being corrected). */
+async function writeWhole(path: string, rec: InstallRecord): Promise<void> {
+  sweepDeadTemps(path);
+  // A name of this CALL's own, made new: two writes of one record that
+  // overlap in a process (a boot's correction beside the updater's) shared
+  // `.tmp-<pid>` — the second emptied what the first had filled, and the
+  // first renamed that into place.
+  const tmp = `${path}.tmp-${Deno.pid}-${_recordDeps.nonce()}`;
+  const f = await Deno.open(tmp, { write: true, createNew: true });
+  try {
+    try {
+      const bytes = new TextEncoder().encode(
+        JSON.stringify(rec, null, 2) + "\n",
+      );
+      for (let n = 0; n < bytes.length;) n += await f.write(bytes.subarray(n));
+      await f.sync();
+    } finally {
+      f.close();
+    }
+  } catch (e) {
+    await Deno.remove(tmp).catch(() => {
+      // aio-ok: not removable — `e` is what is said
+    });
+    throw e;
+  }
+  await renameOver(tmp, path); // removes `tmp` itself when it fails
+}
+
+/** What a test replaces: the part of a temp's name that is one write's own.
+ *  @internal */
+export const _recordDeps = {
+  nonce: (): string => crypto.randomUUID().slice(0, 8),
+};
+
+/** Remove the temps beside the record at `path` whose writer is gone: a
+ *  process killed between the write and the rename left its
+ *  `installed.json.tmp-<pid>-<nonce>` for good. One a LIVE process names is a
+ *  write in flight and stays — this process's own too, except in the older
+ *  `.tmp-<pid>` shape, which this build never writes. */
+function sweepDeadTemps(path: string): void {
+  const name = basename(path);
+  try {
+    for (const e of [...Deno.readDirSync(dirname(path))]) {
+      if (!e.isFile || !e.name.startsWith(`${name}.tmp-`)) continue;
+      const m = /^(\d+)(-[0-9a-z]+)?$/.exec(e.name.slice(name.length + 5));
+      if (!m) continue;
+      const pid = Number(m[1]);
+      if (pid === Deno.pid ? m[2] !== undefined : isProcessAlive(pid)) continue;
+      Deno.removeSync(join(dirname(path), e.name));
+    }
+  } catch {
+    // aio-ok: no folder yet, or gone meanwhile — nothing to remove
+  }
+}
+
 export async function writeRecord(rec: InstallRecord): Promise<string> {
   const path = recordPath(rec.name);
   await Deno.mkdir(installedAppPaths(rec.name).dir, { recursive: true });
@@ -61,7 +124,7 @@ export async function writeRecord(rec: InstallRecord): Promise<string> {
     ...rec,
     installedAt: rec.installedAt ?? new Date().toISOString(),
   };
-  await Deno.writeTextFile(path, JSON.stringify(full, null, 2) + "\n");
+  await writeWhole(path, full);
   return path;
 }
 
@@ -98,7 +161,7 @@ export async function reconcileInstalledVersion(
     installedAt: new Date().toISOString(),
   };
   try {
-    await Deno.writeTextFile(path, JSON.stringify(updated, null, 2) + "\n");
+    await writeWhole(path, updated);
     return true;
   } catch (e) {
     log.warn(

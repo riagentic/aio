@@ -35,7 +35,7 @@
 //
 // Usage: deno run --allow-read --allow-env scripts/check-home-clean.ts
 //          [--save=<file> (needs --allow-write) | --against=<file>]
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
 
 type Env = Record<string, string | undefined>;
 
@@ -114,12 +114,15 @@ export function storeChanges(
 
 /** Is `gitdir` inside a directory only a TEST makes? Pure. */
 export function isTestGitdir(gitdir: string, env: Env): boolean {
-  const home = (env.HOME ?? env.USERPROFILE ?? "").replace(/[/\\]+$/, "");
+  // Compared `/`-spelled: on Windows the home is `C:\\Users\\x` and git writes
+  // the gitdir `C:/Users/x/…` — as written, the two never matched.
+  const fwd = (p: string) => p.replaceAll("\\", "/").replace(/\/+$/, "");
+  const home = fwd(env.HOME ?? env.USERPROFILE ?? "");
   const roots = [
     home ? `${home}/tmp/aio/` : undefined,
-    env.AIO_TEST_ROOT ? env.AIO_TEST_ROOT.replace(/[/\\]+$/, "") + "/" : "",
+    env.AIO_TEST_ROOT ? fwd(env.AIO_TEST_ROOT) + "/" : "",
   ].filter((r): r is string => !!r);
-  return roots.some((r) => gitdir.startsWith(r)) ||
+  return roots.some((r) => fwd(gitdir).startsWith(r)) ||
     /[/\\]\.aio-test-[^/\\]*[/\\]/.test(gitdir);
 }
 
@@ -156,7 +159,8 @@ const TEST_SHAPES: RegExp[] = [
   /^\.e2e-[0-9a-f]{8}$/, // e2e-harness scaffoldApp()
   /^\.ver-probe-[0-9a-f]{8}$/, // app-version-identity
   /^\.aio-test-apps-/, // an older sandbox prefix
-  /^\.[a-z0-9-]*-e2e$/, // cell-worker-e2e, worker-parity-e2e, dev-restart-e2e
+  // cell-worker-e2e, worker-parity-e2e, dev-restart-e2e, dev-restart-e2e-unnamed
+  /^\.[a-z0-9-]*-e2e(-[a-z0-9]+)?$/,
   /^\.e2e-probe$/,
 ];
 
@@ -166,6 +170,91 @@ export function isTestStray(name: string): boolean {
 
 export function straysIn(names: string[]): string[] {
   return names.filter(isTestStray).sort();
+}
+
+/** A random-id test app's name where it is NOT dot-prefixed: an install
+ *  (`~/app/app-1a2b3c4d`), its PATH link, its menu entry, its Electron profile.
+ *  Only the shapes that carry 8 random hex digits — nobody names a real
+ *  program that, and these directories are full of the user's own. */
+const INSTALL_SHAPE = /^(app|e2e|ver-probe)-[0-9a-f]{8}(\.desktop)?$/;
+
+/** The REAL directories an INSTALLED app occupies outside `~/.<appId>` — what
+ *  `run.sh` and a launched artifact write, none of which follows
+ *  `AIO_APPS_DIR`:
+ *
+ *  - the install root (`installRoot()`: the user's own `AIO_INSTALL_ROOT`,
+ *    `~/app`, `%LOCALAPPDATA%\Programs`) — the program, ~110 MB each;
+ *  - `~/.local/bin` — a headless target's PATH link;
+ *  - `~/.local/share/applications` — a GUI target's `<name>.desktop`;
+ *  - `~/.config` and `~/.cache` (or XDG's) — an Electron artifact's profile,
+ *    and the private unpack dir the menu entry makes.
+ *
+ *  MEASURED 2026-10-07: `tests/run-sh-e2e.test.ts` ran run.sh with the
+ *  developer's HOME — 794 programs in `~/app` (~140 GB, a full disk) and as
+ *  many links in `~/.local/bin`, four per `test:onboard`, for seven weeks.
+ *  Pure. */
+export function installDirs(env: Env): string[] {
+  const home = env.HOME ?? env.USERPROFILE;
+  const dirs = [
+    env.AIO_INSTALL_ROOT,
+    home ? join(home, "app") : undefined,
+    env.LOCALAPPDATA ? join(env.LOCALAPPDATA, "Programs") : undefined,
+    home ? join(home, ".local", "bin") : undefined,
+    home ? join(home, ".local", "share", "applications") : undefined,
+    env.XDG_CONFIG_HOME ?? (home ? join(home, ".config") : undefined),
+    env.XDG_CACHE_HOME ?? (home ? join(home, ".cache") : undefined),
+  ];
+  return [...new Set(dirs.filter((d): d is string => !!d))];
+}
+
+/** The test-shaped entries of every {@link installDirs} directory, as full
+ *  paths. A missing directory has none. */
+export function installStrays(env: Env): string[] {
+  const out: string[] = [];
+  for (const dir of installDirs(env)) {
+    let names: string[];
+    try {
+      names = [...Deno.readDirSync(dir)].map((e) => e.name);
+    } catch (e) {
+      if (e instanceof Deno.errors.NotFound) continue;
+      throw e; // unreadable is not "empty" — the gate cannot vouch for it
+    }
+    for (const n of names.sort()) {
+      if (INSTALL_SHAPE.test(n)) out.push(join(dir, n));
+    }
+  }
+  return out;
+}
+
+/** The install check. Exit code: 0 clean, 1 dirty. */
+function checkInstalls(): number {
+  const env = Deno.env.toObject();
+  const strays = installStrays(env);
+  if (strays.length === 0) return 0;
+  console.error(
+    `✗ ${strays.length} test INSTALL artefact(s) outside every sandbox — a ` +
+      `test installed an app with the real HOME:\n`,
+  );
+  for (const dir of installDirs(env)) {
+    const mine = strays.filter((s) => dirname(s) === dir);
+    if (mine.length > 0) {
+      console.error(`  ${String(mine.length).padStart(5)} in ${dir}`);
+      console.error(`        e.g. ${mine[0]}`);
+    }
+  }
+  console.error(
+    `\n  cause: \`run.sh\` installs to \`installRoot()\` — AIO_INSTALL_ROOT, else\n` +
+      `  ~/app/<name>/ — and links it from $HOME/.local/bin; a launched Electron\n` +
+      `  artifact keeps its profile in ~/.config/<name>. AIO_APPS_DIR moves NONE\n` +
+      `  of these. A test that runs run.sh or an installed artifact gives the\n` +
+      `  child its own HOME and AIO_INSTALL_ROOT (\`ownHome()\` in\n` +
+      `  tests/run-sh-e2e.test.ts) and removes that directory when it ends.\n` +
+      `\n  These are yours to remove, not this gate's:\n` +
+      `      ls -d ~/app/app-???????? ~/.local/bin/app-???????? \\\n` +
+      `            ~/.config/app-???????? 2>/dev/null\n` +
+      `      # review the list, then delete it`,
+  );
+  return 1;
 }
 
 /** The store checks. Exit code: 0 clean, 1 dirty. */
@@ -211,7 +300,7 @@ function checkStores(): number {
 }
 
 if (import.meta.main) {
-  const storesBad = checkStores();
+  const storesBad = Math.max(checkStores(), checkInstalls());
   const home = Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE");
   if (!home) {
     console.log("✓ home-clean: no HOME to check");

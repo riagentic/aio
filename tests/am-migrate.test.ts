@@ -16,8 +16,9 @@ import {
   seriesRank,
 } from "../src/am/am-cmd-migrate.ts";
 import { REMOVALS } from "../src/state/removals.ts";
+import { fromFileUrl, join } from "@std/path";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("..", import.meta.url));
 
 async function am(
   args: string[],
@@ -119,7 +120,7 @@ Deno.test("a retired cell-config key is found, with the fix and the guide", asyn
     assertEquals(direct.length, 1, JSON.stringify(direct));
     assertEquals(direct[0]!.key, row.key);
     assertEquals(direct[0]!.line, 3);
-    assertEquals(direct[0]!.file, "src/app.ts");
+    assertEquals(direct[0]!.file, join("src", "app.ts"));
 
     const r = await am(["migrate", "--json"], dir);
     assertEquals(
@@ -212,7 +213,7 @@ Deno.test("a type member named like a retired key is not a migration", async () 
     );
     const hits = await scanMigrations(dir, undefined);
     assertEquals(hits.length, 1, JSON.stringify(hits));
-    assertEquals(hits[0]!.file, "src/cell.ts");
+    assertEquals(hits[0]!.file, join("src", "cell.ts"));
   } finally {
     await dropTempDir(dir);
   }

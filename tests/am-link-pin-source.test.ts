@@ -3,7 +3,7 @@
 // reader — the two lines disagreed, and the wrong one is the one a developer
 // acts on (they open deno.json and find no pin at all).
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { _linkTarget } from "../src/am/am-cmd-link.ts";
 import { cmdFix } from "../src/am/am-cmd-fix.ts";
 import type { GlobalFlags } from "../src/am/am-types.ts";
@@ -64,7 +64,7 @@ Deno.test("am link: the source it reports is the one THE reader resolved", async
     await Deno.mkdir(join(dir, ".aio"));
     // The reader verifies the target IS a checkout (mod.ts), so point it at
     // this one.
-    const checkout = new URL("../", import.meta.url).pathname;
+    const checkout = fromFileUrl(new URL("../", import.meta.url));
     await Deno.writeTextFile(join(dir, LOCAL_PIN_FILE), checkout + "\n");
     const { pin, source } = readFrameworkPinSync(dir);
     assertEquals(source, "local", "the local override wins over aioVersion");
@@ -100,7 +100,10 @@ Deno.test("am link: the source it reports is the one THE reader resolved", async
 // preview: --dry-run is what a careful person runs BEFORE the repair.
 Deno.test("am fix --dry-run: a path-pinned link is already right, not 'would-fix'", async () => {
   const dir = await tempDir("aio-fix-dry-");
-  const checkout = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
+  const checkout = fromFileUrl(new URL("../", import.meta.url)).replace(
+    /[\\/]$/,
+    "",
+  );
   const orig = Deno.cwd();
   const realLog = console.log;
   const printed: string[] = [];

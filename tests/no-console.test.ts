@@ -96,6 +96,44 @@ Deno.test("outliving children: the successor and the swap helper are detached on
   );
 });
 
+// The option value above is a claim; this is the fact, on the OS running the
+// test: a real child started with `outlivingParent()` is still there after
+// the process that started it has exited.
+Deno.test("outliving children: a child started with outlivingParent() survives its parent's exit", async () => {
+  const parent = await new Deno.Command(Deno.execPath(), {
+    args: [
+      "eval",
+      `import { outlivingParent } from ${
+        JSON.stringify(
+          new URL("../src/server/no-console.ts", import.meta.url).href,
+        )
+      };
+const c = new Deno.Command(Deno.execPath(), {
+  args: ["eval", "setTimeout(() => {}, 600000)"],
+  stdin: "null", stdout: "null", stderr: "null",
+  ...outlivingParent(),
+}).spawn();
+c.unref();
+console.log(c.pid);
+Deno.exit(0);`,
+    ],
+    stdin: "null",
+    stderr: "inherit",
+  }).output();
+  const pid = Number(new TextDecoder().decode(parent.stdout).trim());
+  assert(pid > 0, "the parent named no child");
+  try {
+    // The parent is gone (`output()` returned). Long enough for a child that
+    // dies with it to be gone too (measured on Windows 11: within 1.5 s).
+    await new Promise((r) => setTimeout(r, 1_500));
+    Deno.kill(pid, 0); // throws when the child is gone
+  } finally {
+    try {
+      Deno.kill(pid, "SIGKILL");
+    } catch { /* aio-ok: the assertion above already failed — it is gone */ }
+  }
+});
+
 Deno.test("outliving children: POSIX keeps the plain spawn (the terminal's Ctrl-C still reaches it)", () => {
   for (const os of ["linux", "darwin"] as const) {
     assertEquals(outlivingParent(os), {});

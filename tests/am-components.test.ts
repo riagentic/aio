@@ -12,6 +12,7 @@
 // A single-app repo must be completely unaffected, which is most of what these
 // tests check.
 import { assert, assertEquals, assertThrows } from "@std/assert";
+import { join } from "@std/path";
 import { declaredPort } from "../src/am/am-utils.ts";
 import { envPort } from "../src/server/paths.ts";
 import {
@@ -244,7 +245,7 @@ Deno.test("plan: --app=<component> is that component — its id AND its entry", 
       if (plan.kind === "one") {
         assertEquals(plan.component.appId, "anat-pro");
         assert(
-          plan.component.entry.endsWith("src/pro/app.ts"),
+          plan.component.entry.endsWith(join("src", "pro", "app.ts")),
           plan.component.entry,
         );
       }

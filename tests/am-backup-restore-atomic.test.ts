@@ -11,7 +11,7 @@
 // The failure is a real one — a mode-000 file the copy cannot read — so these
 // cannot run as root (root reads it anyway).
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { cmdBackup, cmdRestore } from "../src/am/am-cmd-data.ts";
 import {
   _resetAppDirs,
@@ -74,6 +74,22 @@ async function done(base: string) {
   await dropTempDir(base);
 }
 
+/** Makes `path` a file a copy cannot read, and returns the undo. POSIX: mode
+ *  000. Windows has no mode bits; an exclusive byte-range lock is mandatory
+ *  there, so every other handle's read of the file is refused. */
+function unreadable(path: string): () => void {
+  if (Deno.build.os !== "windows") {
+    Deno.chmodSync(path, 0o000);
+    return () => Deno.chmodSync(path, 0o600);
+  }
+  const held = Deno.openSync(path, { read: true, write: true });
+  held.lockSync(true);
+  return () => {
+    held.unlockSync();
+    held.close();
+  };
+}
+
 const siblings = (dir: string, prefix: string) =>
   [...Deno.readDirSync(join(dir, ".."))].map((e) => e.name)
     .filter((n) => n.startsWith(prefix));
@@ -84,12 +100,13 @@ Deno.test({
   fn: async () => {
     const { base, d } = await world();
     const src = join(base, "archive");
+    let readable = () => {};
     try {
       Deno.mkdirSync(src);
       Deno.writeTextFileSync(join(src, "meta.json"), '{"appId":"atomicapp"}');
       Deno.writeTextFileSync(join(src, "state.db"), "ARCHIVE");
       Deno.writeTextFileSync(join(src, "zz-unreadable"), "x");
-      Deno.chmodSync(join(src, "zz-unreadable"), 0o000);
+      readable = unreadable(join(src, "zz-unreadable"));
       const r = await run(cmdRestore, [src]);
       assertEquals(r.exited, 1, r.out);
       assertStringIncludes(r.out, "was not touched");
@@ -97,7 +114,7 @@ Deno.test({
       assertEquals(siblings(d.data, "data.restoring-"), [], "staging left");
       assertEquals(siblings(d.data, "data.replaced-"), [], "nothing moved");
     } finally {
-      Deno.chmodSync(join(src, "zz-unreadable"), 0o600);
+      readable();
       await done(base);
     }
   },
@@ -127,9 +144,10 @@ Deno.test({
   fn: async () => {
     const { base, d } = await world();
     const bad = join(d.data, "zz-unreadable");
+    let readable = () => {};
     try {
       Deno.writeTextFileSync(bad, "x");
-      Deno.chmodSync(bad, 0o000);
+      readable = unreadable(bad);
       const dest = join(base, "bk");
       const r = await run(cmdBackup, [dest]);
       assertEquals(r.exited, 1, r.out);
@@ -142,7 +160,7 @@ Deno.test({
         "a partial backup was left where restore would accept it",
       );
     } finally {
-      Deno.chmodSync(bad, 0o600);
+      readable();
       await done(base);
     }
   },
@@ -171,7 +189,11 @@ Deno.test("am backup: a leftover <dest>.partial (a killed backup) is named, neve
     Deno.mkdirSync(`${dest}.partial`);
     const r = await run(cmdBackup, [dest]);
     assertEquals(r.exited, 1, r.out);
-    assertStringIncludes(r.out, `${dest}.partial already exists`);
+    // The answer is JSON: a Windows path arrives with its `\\` escaped.
+    assertStringIncludes(
+      r.out,
+      JSON.stringify(`${dest}.partial already exists`).slice(1, -1),
+    );
     assertStringIncludes(r.out, "did not finish");
     assertEquals(
       [...Deno.readDirSync(base)].map((e) => e.name).includes("bk"),
@@ -269,7 +291,7 @@ function signalOnFirstCopy() {
 
 Deno.test({
   name: "am backup: SIGTERM mid-copy aborts, leaves nothing, exits 143",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // Deno.kill is TerminateProcess there: no signal reaches the copy
   fn: async () => {
     const { base, d } = await world();
     Deno.writeTextFileSync(join(d.data, "b.db"), "B");
@@ -291,7 +313,7 @@ Deno.test({
 
 Deno.test({
   name: "am restore: SIGTERM mid-copy aborts, data/ untouched, exits 143",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // Deno.kill is TerminateProcess there: no signal reaches the copy
   fn: async () => {
     const { base, d } = await world();
     const undo = signalOnFirstCopy();
@@ -351,7 +373,7 @@ Deno.test("am restore: a failed swap puts the previous data back and says so", a
 // SIGINT in this one.
 Deno.test({
   name: "am backup: Ctrl-C (SIGINT) mid-copy aborts, leaves nothing, exits 130",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // Deno.kill is TerminateProcess there: no signal reaches the copy
   fn: async () => {
     const base = await tempDir("am-atomic-int-");
     try {
@@ -386,7 +408,7 @@ Deno.test({
         args: [
           "eval",
           "--config",
-          new URL("../deno.json", import.meta.url).pathname,
+          fromFileUrl(new URL("../deno.json", import.meta.url)),
           code,
         ],
         env: { AIO_APPS_DIR: join(base, "apps"), NO_COLOR: "1" },
@@ -539,7 +561,7 @@ async function lastFileSignal(verb: "backup" | "restore"): Promise<number> {
       args: [
         "eval",
         "--config",
-        new URL("../deno.json", import.meta.url).pathname,
+        fromFileUrl(new URL("../deno.json", import.meta.url)),
         code,
       ],
       env: { AIO_APPS_DIR: join(base, "apps"), NO_COLOR: "1" },
@@ -576,14 +598,14 @@ async function lastFileSignal(verb: "backup" | "restore"): Promise<number> {
 
 Deno.test({
   name: "am backup: SIGTERM during the last file still aborts — no dest, 143",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // Deno.kill is TerminateProcess there: no signal reaches the copy
   fn: async () => assertEquals(await lastFileSignal("backup"), 143),
 });
 
 Deno.test({
   name:
     "am restore: SIGTERM during the last file never swaps — data/ kept, 143",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // Deno.kill is TerminateProcess there: no signal reaches the copy
   fn: async () => assertEquals(await lastFileSignal("restore"), 143),
 });
 
@@ -676,7 +698,7 @@ async function signalledCopy(opts: {
     args: [
       "eval",
       "--config",
-      new URL("../deno.json", import.meta.url).pathname,
+      fromFileUrl(new URL("../deno.json", import.meta.url)),
       code,
     ],
     env: { AIO_APPS_DIR: join(base, "apps"), NO_COLOR: "1" },
@@ -718,7 +740,7 @@ async function signalledCopy(opts: {
 Deno.test({
   name:
     "am backup: one signal stops the copy at the NEXT file — later files are never copied",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // Deno.kill is TerminateProcess there: no signal reaches the copy
   fn: async () => {
     const r = await signalledCopy({
       verb: "backup",
@@ -739,7 +761,7 @@ Deno.test({
 Deno.test({
   name:
     "am backup: a SECOND signal abandons the file in flight — exits now, no partial",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // Deno.kill is TerminateProcess there: no signal reaches the copy
   fn: async () => {
     const t0 = Date.now();
     const r = await signalledCopy({
@@ -761,7 +783,7 @@ Deno.test({
 
 Deno.test({
   name: "am restore: a SECOND signal abandons the copy — data/ untouched, 143",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // Deno.kill is TerminateProcess there: no signal reaches the copy
   fn: async () => {
     const r = await signalledCopy({
       verb: "restore",

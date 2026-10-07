@@ -33,7 +33,12 @@ function withEnv(vars: Record<string, string | null>, fn: () => void): void {
   }
 }
 
-Deno.test("testDisplay: an explicit AIO_TEST_DISPLAY always wins", () => {
+Deno.test({
+  name: "testDisplay: an explicit AIO_TEST_DISPLAY always wins",
+  // Linux only: the variable picks a nested X display, and macOS/Windows have
+  // no X (`testDisplay()` hands back `$DISPLAY` there, see the last two tests).
+  ignore: Deno.build.os !== "linux", // a nested X display: macOS and Windows have no X
+}, () => {
   // CI with Xvfb, a remote X display, a user who already runs their own nested
   // session — none of them want us starting a second server.
   withEnv({ AIO_TEST_DISPLAY: ":99" }, () => {
@@ -47,9 +52,11 @@ Deno.test("testDisplay: an explicit AIO_TEST_DISPLAY always wins", () => {
 });
 
 Deno.test("testDisplay: cached — the answer cannot usefully change mid-run", () => {
-  withEnv({ AIO_TEST_DISPLAY: ":98" }, () => {
+  // Off Linux the answer comes from `$DISPLAY` — cached all the same.
+  const name = Deno.build.os === "linux" ? "AIO_TEST_DISPLAY" : "DISPLAY";
+  withEnv({ [name]: ":98" }, () => {
     assertEquals(testDisplay(), ":98");
-    Deno.env.set("AIO_TEST_DISPLAY", ":97");
+    Deno.env.set(name, ":97");
     assertEquals(
       testDisplay(),
       ":98",

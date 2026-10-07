@@ -23,7 +23,13 @@ import {
   transpile,
 } from "./server-transpile.ts";
 import { setUiRootProbe } from "./server-html-classify.ts";
-import { ensureLockDirOf, lockDir, ownPidTag } from "./single-instance-lock.ts";
+import {
+  _lockDeps,
+  createInLockDir,
+  lockDir,
+  ownPidTag,
+  sweepDeadSentinels,
+} from "./single-instance-lock.ts";
 import { log } from "../diagnostics/logger-api.ts";
 
 /** File extensions that trigger live reload */
@@ -886,33 +892,51 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
   // following symlinks (F-2 defense); createNew:true is O_EXCL atomic.
   function ensureSentinel(): boolean {
     try {
-      ensureLockDirOf(SENTINEL); // pruned since `lockDir()` cached it
-    } catch {
-      return false; // aio-ok: no private dir for it — falls back as below
-    }
-    try {
-      const info = Deno.lstatSync(SENTINEL);
-      if (!info.isFile) {
-        log.warn(
-          `[aio] live reload — sentinel path ${SENTINEL} is not a regular file (symlink/dir), refusing to use`,
-        );
-        return false;
+      // Dead watchers' sentinels go first: a killed app's, or one whose
+      // process exited without stopping its server, stayed for good.
+      sweepDeadSentinels(dirname(SENTINEL));
+      try {
+        const info = Deno.lstatSync(SENTINEL);
+        if (!info.isFile) {
+          log.warn(
+            `[aio] live reload — sentinel path ${SENTINEL} is not a regular file (symlink/dir), refusing to use`,
+          );
+          return false;
+        }
+        Deno.removeSync(SENTINEL);
+      } catch (e) {
+        if (!(e instanceof Deno.errors.NotFound)) throw e;
       }
-      Deno.removeSync(SENTINEL);
-    } catch (e) {
-      if (!(e instanceof Deno.errors.NotFound)) return false;
-    }
-    try {
-      const f = Deno.openSync(SENTINEL, { createNew: true, write: true });
-      f.close();
+      // Its dir is made first, and again when a sibling's exit prunes it
+      // under the create (`createInLockDir`).
+      createInLockDir(
+        SENTINEL,
+        () => _lockDeps.create(SENTINEL, { createNew: true, write: true }),
+      ).close();
       return true;
-    } catch {
-      return false; // dir not writable or raced — watcher falls back to absBaseDir only
+    } catch (e) {
+      // Said, once per start: without the sentinel a watcher that went deaf
+      // is restarted for nothing (or not noticed) — it used to degrade
+      // without a word. The watcher still runs, on the app's own folder.
+      log.warn(
+        `live reload — no health sentinel at ${SENTINEL} (${e}); ` +
+          `watching without it`,
+      );
+      return false;
     }
   }
 
+  /** At process exit: an app that ends with `Deno.exit()` never runs
+   *  `shutdown`, and its sentinel stayed in the lock dir for good. */
+  const dropSentinel = (): void => {
+    try {
+      Deno.removeSync(SENTINEL);
+    } catch { /* aio-ok: already gone, or never made */ }
+  };
+
   function start(): boolean {
     _sentinelOk = ensureSentinel();
+    if (_sentinelOk) addEventListener("unload", dropSentinel);
     if (!startWatcher()) return false;
     log.info(`[aio] live reload watching ${absBaseDir}`);
     // Health check — touch sentinel every 30s, restart watcher if no events for 60s.
@@ -976,9 +1000,8 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
       clearInterval(healthTimer);
       healthTimer = null;
     }
-    try {
-      Deno.removeSync(SENTINEL);
-    } catch { /* already gone */ }
+    removeEventListener("unload", dropSentinel);
+    dropSentinel();
   }
 
   async function cssSettled(): Promise<void> {

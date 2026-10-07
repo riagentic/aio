@@ -14,10 +14,11 @@
 // today — importing it from there is a link error). The guard below makes that
 // red, instead of a dev server that silently runs its cells as prod.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 const BOOT = new URL("../src/server/aio-boot.ts", import.meta.url).href;
 
 async function run(args: string[], cwd: string): Promise<string> {
@@ -39,7 +40,7 @@ Deno.test("dev stamp: a cell module imported FIRST already sees __aioDev at cell
     await Deno.writeTextFile(
       join(dir, "deno.json"),
       JSON.stringify({
-        imports: { aio: `${ROOT}mod.ts`, immer: "npm:immer@10.2.0" },
+        imports: { aio: `${spec(ROOT)}mod.ts`, immer: "npm:immer@10.2.0" },
       }),
     );
     await Deno.writeTextFile(

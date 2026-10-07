@@ -5,15 +5,17 @@
 // another cell's action, the HTTP loop, or shutdown. Everything else (state,
 // persistence, broadcast) must behave exactly as it does for a normal cell,
 // because the worker only streams patches home.
+import { askToStop } from "./proc-helper.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { enc } from "../src/protocol/envelope.ts";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { validateWorkerCells } from "../src/server/cell-worker-pool.ts";
 import { cell } from "../mod.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { childEnv } from "./e2e-app-harness.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const REPO = new URL("../", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("../", import.meta.url));
 
 /** Write a throwaway app whose `heavy` cell is worker-hosted and whose `ticker`
  *  cell is not, then run it as a real process. */
@@ -22,8 +24,8 @@ async function writeApp(dir: string, port: number): Promise<void> {
     join(dir, "deno.json"),
     JSON.stringify({
       imports: {
-        "aio": `${REPO}mod.ts`,
-        "aio/": `${REPO}src/`,
+        "aio": `${spec(REPO)}mod.ts`,
+        "aio/": `${spec(REPO)}src/`,
         "immer": "npm:immer@10.2.0",
         "@std/path": "jsr:@std/path@1.1.2",
       },
@@ -48,7 +50,13 @@ export const heavy = cell("heavy", {
     async twoPhase(s: { note: string; $commit: () => void }) {
       s.note = "phase1";
       s.$commit();                  // alpha52 spinner idiom: publish mid-method
-      await new Promise((r) => setTimeout(r, 60));
+      // Held mid-method until the test has SEEN phase1 (it then writes this
+      // file into the app's cwd) — not for 60 ms, which a loaded machine
+      // spends before the first look.
+      for (;;) {
+        try { Deno.statSync("phase2.go"); break; }
+        catch { await new Promise((r) => setTimeout(r, 10)); }
+      }
       s.note = "phase2";
     },
     boom() {
@@ -182,7 +190,7 @@ await aio.run({
 type Proc = {
   child: Deno.ChildProcess;
   url: string;
-  stop: () => Promise<string>;
+  stop: (keyFile?: string) => Promise<string>;
 };
 
 async function boot(dir: string, port: number): Promise<Proc> {
@@ -212,9 +220,12 @@ async function boot(dir: string, port: number): Promise<Proc> {
   return {
     child,
     url,
-    stop: async () => {
+    // `keyFile` (the app's `<home>/data/control.key`): a stop that must be
+    // GRACEFUL on Windows too, where SIGTERM is TerminateProcess.
+    stop: async (keyFile?: string) => {
       try {
-        child.kill("SIGTERM");
+        if (keyFile) await askToStop(child.pid, port, keyFile);
+        else child.kill("SIGTERM");
       } catch { /* gone */ }
       const out = await child.output();
       return new TextDecoder().decode(out.stdout) +
@@ -226,7 +237,6 @@ async function boot(dir: string, port: number): Promise<Proc> {
 Deno.test({
   name:
     "cell worker e2e: a blocking method never stalls other cells or the HTTP loop",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await Deno.makeTempDir({ prefix: "aio-cell-worker-" });
     const port = freePort();
@@ -275,7 +285,6 @@ Deno.test({
 Deno.test({
   name:
     "cell worker e2e: mid-method commits stream home, and a throw rejects the caller",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await Deno.makeTempDir({ prefix: "aio-cell-worker-" });
     const port = freePort();
@@ -284,13 +293,30 @@ Deno.test({
     try {
       // An async method's write BEFORE its await must be visible immediately —
       // that's what makes `s.status = "working"` show a spinner.
+      // The method cannot finish before the test lets it (`phase2.go`), so
+      // "phase1" read here is read MID-method on a machine of any speed. A
+      // commit that never streams home leaves `""` for the whole ten seconds.
+      const noteBecomes = async (want: string): Promise<string> => {
+        let note = "";
+        for (const end = Date.now() + 10_000; Date.now() < end;) {
+          note = (await (await fetch(`${app.url}/state`)).json()).note;
+          if (note === want) break;
+          await new Promise((r) => setTimeout(r, 10));
+        }
+        return note;
+      };
       await (await fetch(`${app.url}/two-phase`)).text();
-      await new Promise((r) => setTimeout(r, 25));
-      const mid = await (await fetch(`${app.url}/state`)).json();
-      assertEquals(mid.note, "phase1", "the pre-await commit streamed home");
-      await new Promise((r) => setTimeout(r, 120));
-      const after = await (await fetch(`${app.url}/state`)).json();
-      assertEquals(after.note, "phase2", "the post-await commit followed");
+      assertEquals(
+        await noteBecomes("phase1"),
+        "phase1",
+        "the pre-await commit streamed home",
+      );
+      await Deno.writeTextFile(join(dir, "phase2.go"), "");
+      assertEquals(
+        await noteBecomes("phase2"),
+        "phase2",
+        "the post-await commit followed",
+      );
 
       // A throwing method rejects the caller with its real message.
       const boom = await fetch(`${app.url}/boom`);
@@ -306,7 +332,6 @@ Deno.test({
 Deno.test({
   name:
     "cell worker e2e: an AWAITED async method resolves with its value and rejects with its error",
-  ignore: Deno.build.os === "windows",
   async fn() {
     // The regression this pins: an async worker method's
     // return value lands in the WORKER's resolveCall registry; the caller
@@ -404,7 +429,6 @@ Deno.test("worker cells: a supported cell passes validation", () => {
 Deno.test({
   name:
     "cell worker e2e: ordering, ambient context, and a shutdown that never waits",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await Deno.makeTempDir({ prefix: "aio-cell-worker-" });
     const port = freePort();
@@ -445,7 +469,6 @@ Deno.test({
 Deno.test({
   name:
     "cell worker e2e: a NETWORK action reaches the worker, not the main isolate",
-  ignore: Deno.build.os === "windows",
   async fn() {
     // The gap this pins: the network dispatcher used to be wired to the RAW
     // dispatcher, so a browser calling a worker cell would have executed the
@@ -491,7 +514,6 @@ Deno.test({
 Deno.test({
   name:
     "cell worker e2e: state persists across a restart and the worker is re-seeded",
-  ignore: Deno.build.os === "windows",
   async fn() {
     // The worker's slice is authoritative on the MAIN isolate — so persistence
     // must work untouched, and a fresh worker must start from the restored
@@ -520,7 +542,7 @@ Deno.test({
       const before = await (await fetch(`${first.url}/state`)).json();
       assertEquals(before.heavy, 2);
     } finally {
-      await first.stop();
+      await first.stop(join(data, "data", "control.key"));
     }
 
     // Give the flush a beat, then boot the same app again.
@@ -548,7 +570,6 @@ Deno.test({
 Deno.test({
   name:
     "cell worker e2e: two worker cells run in parallel, and effects come home",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await Deno.makeTempDir({ prefix: "aio-cell-worker-" });
     const port = freePort();
@@ -588,7 +609,6 @@ Deno.test({
 Deno.test({
   name:
     "cell worker e2e: reading a PEER cell fails loud instead of returning defaults",
-  ignore: Deno.build.os === "windows",
   async fn() {
     // Field report: boot validation catches config-level
     // misuse, but a peer read inside a METHOD BODY slipped through and silently

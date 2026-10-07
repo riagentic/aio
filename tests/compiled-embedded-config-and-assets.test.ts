@@ -13,11 +13,12 @@
 //
 // Real `deno compile`, real server, foreign cwd, sandboxed HOME — no mocks.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { join, resolve } from "@std/path";
 import { assetIncludes } from "../src/build/build-compile.ts";
 import { assetDirCandidates } from "../src/server/paths.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { linkDir } from "./symlink-helper.ts";
 
 const AIO_ROOT = join(import.meta.dirname!, "..");
 
@@ -58,7 +59,7 @@ Deno.test({
       await Deno.mkdir(join(root, "src"));
       await Deno.mkdir(join(root, "media"));
       await Deno.mkdir(join(root, "dep"));
-      await Deno.symlink(AIO_ROOT, join(root, "dep", "aio"));
+      await linkDir(AIO_ROOT, join(root, "dep", "aio"));
       // A comment: exactly what plain JSON.parse refuses and Deno accepts.
       await Deno.writeTextFile(
         join(root, "deno.jsonc"),
@@ -98,6 +99,11 @@ Deno.test({
       const env: Record<string, string> = {
         PATH: Deno.env.get("PATH") ?? "",
         HOME: h,
+        USERPROFILE: h,
+        // Windows cannot open a socket without it (os error 10106).
+        ...(Deno.build.os === "windows"
+          ? { SystemRoot: Deno.env.get("SystemRoot") ?? "" }
+          : {}),
         AIO_HOME: join(h, "aio"),
         AIO_VERSIONS_DIR: join(h, "versions"),
         AIO_FEEDBACK_DIR: join(h, "feedback"),
@@ -158,15 +164,15 @@ Deno.test("assetDirCandidates: compiled → the live cwd folder first, embedded 
   const opts = { cwd: "/run/here", embeddedRoot: "/vfs/app" };
   assertEquals(
     assetDirCandidates("./media", { ...opts, compiled: true }),
-    ["/run/here/media", "/vfs/app/media"],
+    [resolve("/run/here/media"), resolve("/vfs/app/media")],
   );
   assertEquals(
     assetDirCandidates("./media", { ...opts, compiled: false }),
-    ["/run/here/media"],
+    [resolve("/run/here/media")],
   );
   assertEquals(
     assetDirCandidates("/abs/media", { ...opts, compiled: true }),
-    ["/abs/media"],
+    [resolve("/abs/media")],
   );
   assertEquals(
     assetDirCandidates("media", {
@@ -174,7 +180,7 @@ Deno.test("assetDirCandidates: compiled → the live cwd folder first, embedded 
       compiled: true,
       embeddedRoot: null,
     }),
-    ["/run/here/media"],
+    [resolve("/run/here/media")],
   );
 });
 

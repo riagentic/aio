@@ -8,7 +8,7 @@
 //    docs said it shows the drift. It now says it needs a running app and
 //    that the refusal itself is the drift report.
 import { assert, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { shapeDriftRefusal } from "../src/server/aio-boot.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
@@ -39,7 +39,7 @@ Deno.test("drift refusal: under AIO_APPS_DIR, `--instance` (which is ignored the
 Deno.test("am migrations on an app that is not running says it needs a running app", async () => {
   const home = await tempDir("aio-am-migrations-offline-");
   try {
-    const REPO = new URL("..", import.meta.url).pathname;
+    const REPO = fromFileUrl(new URL("..", import.meta.url));
     const { code, stdout, stderr } = await new Deno.Command(Deno.execPath(), {
       args: [
         "run",

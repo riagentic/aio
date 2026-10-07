@@ -261,9 +261,21 @@ export function startDiscoveryResponder(
  * `nonce` — when given, the probe carries it and ONLY replies echoing it are
  * kept (the echo is stripped from the result). Without one, every responder
  * counts. See the module doc: a test-time filter, never a production gate.
+ *
+ * `onNote` — told when the probe could NOT BE SENT. The result is `[]` either
+ * way, and without this "nobody answered" and "nobody was asked" are the same
+ * empty list. Measured on macOS 26: a process with no Local Network
+ * permission (one that outlived the login session that started it, or an app
+ * the user has not allowed) has the broadcast refused with "No route to
+ * host", every time, while everything else on the network works.
  */
 export function discoverAioApps(
-  opts: { timeoutMs?: number; port?: number; nonce?: string } = {},
+  opts: {
+    timeoutMs?: number;
+    port?: number;
+    nonce?: string;
+    onNote?: (msg: string) => void;
+  } = {},
 ): Promise<DiscoveredApp[]> {
   const timeoutMs = opts.timeoutMs ?? 1200;
   const port = opts.port ?? AIO_DISCOVERY_PORT;
@@ -315,13 +327,34 @@ export function discoverAioApps(
         url: `${ad.tls ? "https" : "http"}://${host}:${ad.port}`,
       });
     });
+    const unsent = (e: unknown) =>
+      opts.onNote?.(
+        `discovery: the probe could not be sent to 255.255.255.255:${port} ` +
+          `— ${e}. Nothing was asked, so an empty result says nothing about ` +
+          `what is running.` +
+          (Deno.build.os === "darwin"
+            ? ` On macOS this is the Local Network permission (System ` +
+              `Settings → Privacy & Security → Local Network): the app this ` +
+              `runs under needs it, and a process that outlived the login ` +
+              `session that started it has none.`
+            : ""),
+      );
     socket.bind(0, () => {
       try {
         socket.setBroadcast(true);
       } catch { /* broadcast not permitted on this iface */ }
       try {
-        socket.send(Buffer.from(probe), port, "255.255.255.255");
-      } catch { /* broadcast blocked */ }
+        socket.send(
+          Buffer.from(probe),
+          port,
+          "255.255.255.255",
+          (e: unknown) => {
+            if (e) unsent(e);
+          },
+        );
+      } catch (e) {
+        unsent(e);
+      }
     });
     timer.id = setTimeout(done, timeoutMs);
   });

@@ -13,10 +13,10 @@
 // a claim; a generated one is evidence. `recordProof` is called by the gated
 // test itself, on success, with the commit it ran against — the same principle
 // as "read the artifact, not the source tree", applied to proof.
-import { dirname, resolve } from "@std/path";
+import { dirname, fromFileUrl, resolve } from "@std/path";
 
 const FILE = resolve(
-  new URL("../", import.meta.url).pathname,
+  fromFileUrl(new URL("../", import.meta.url)),
   "proof-matrix.json",
 );
 

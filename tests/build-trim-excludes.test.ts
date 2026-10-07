@@ -6,7 +6,7 @@
 // exclude SET is a pure function here so every rule in it has a test that
 // names it.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { join, SEPARATOR } from "@std/path";
 import {
   denoEntryNameOf,
   denoEntryOfRel,
@@ -19,6 +19,7 @@ import {
   withDevExcluded,
 } from "../src/build/build-compile.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { linkDir, linkText } from "./symlink-helper.ts";
 import { HEY } from "../src/diagnostics/fmt.ts";
 
 const denoNmPackageNameOf = (e: string) =>
@@ -43,7 +44,7 @@ async function denoEntryFile(
 /** Link `node_modules/<name>` at the `.deno` entry, the way deno install does. */
 async function link(nm: string, entry: string, pkg: string): Promise<void> {
   await Deno.mkdir(join(nm, pkg, ".."), { recursive: true });
-  await Deno.symlink(`.deno/${entry}/node_modules/${pkg}`, join(nm, pkg));
+  await linkDir(`.deno/${entry}/node_modules/${pkg}`, join(nm, pkg));
 }
 
 /** `myapp` depends on `lib`, and `lib` reaches `typescript` through the
@@ -64,7 +65,7 @@ async function libWithTypescript(
   await link(nm, "lib@1.0.0", "lib");
   await denoEntryFile(nm, "typescript@5.6.3", "typescript", "lib/tsc.js");
   const sibling = join(nm, ".deno", "lib@1.0.0", "node_modules", "typescript");
-  await Deno.symlink("../../typescript@5.6.3/node_modules/typescript", sibling);
+  await linkDir("../../typescript@5.6.3/node_modules/typescript", sibling);
   return sibling;
 }
 
@@ -83,7 +84,9 @@ async function built(
     await withDevExcluded(
       nm,
       async (e) => {
-        excluded = e.flatMap((p) => p.split("/.deno/")[1] ?? []);
+        excluded = e.flatMap((p) =>
+          p.replaceAll(SEPARATOR, "/").split("/.deno/")[1] ?? []
+        );
         await during();
         return true;
       },
@@ -119,7 +122,7 @@ Deno.test("excludes: a kept package's sibling link into a dropped one is held as
     assert(!linkedDuring, "deno follows the link and re-embeds the package");
     assertEquals(
       await Deno.readLink(sibling),
-      "../../typescript@5.6.3/node_modules/typescript",
+      linkText("../../typescript@5.6.3/node_modules/typescript", sibling),
     );
 
     // Asked for by name: neither dropped nor unlinked.
@@ -576,7 +579,7 @@ Deno.test("excludes: only a package kept BY NAME is left whole — what it needs
     await Deno.mkdir(join(nm, ".deno", "tsx@4.19.2", "node_modules"), {
       recursive: true,
     });
-    await Deno.symlink(
+    await linkDir(
       "../../get-tsconfig@4.14.3/node_modules/get-tsconfig",
       join(nm, ".deno", "tsx@4.19.2", "node_modules", "get-tsconfig"),
     );

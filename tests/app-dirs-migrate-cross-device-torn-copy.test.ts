@@ -8,23 +8,24 @@
 // The copy is now written under a temporary name and renamed into place (one
 // rename, same directory) only once it is whole.
 import { assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { appDirs } from "../src/server/app-dirs.ts";
 import { migrateLegacyLayout } from "../src/server/app-dirs-migrate.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const MIGRATE = new URL("../src/server/app-dirs-migrate.ts", import.meta.url)
   .href;
 const DIRS = new URL("../src/server/app-dirs.ts", import.meta.url).href;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 const APP_ID = "cross-device-torn-probe";
 
 // Cross-device everywhere except within one directory (a real EXDEV only
 // ever crosses filesystems); the database's copy dies halfway.
 const MOVE = `
 import { dirname } from "@std/path";
-import { migrateLegacyLayout } from "${MIGRATE}";
-import { appDirs } from "${DIRS}";
+import { migrateLegacyLayout } from "${spec(MIGRATE)}";
+import { appDirs } from "${spec(DIRS)}";
 const ROOT = Deno.env.get("ROOT");
 const rename = Deno.renameSync;
 Deno.renameSync = (from, to) => {

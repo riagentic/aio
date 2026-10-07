@@ -23,7 +23,7 @@
 // Each case is checked at the decider, and once more end to end: lint, fix,
 // fix again (same bytes), and `deno check` over what the fix left.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { join, toFileUrl } from "@std/path";
 import { lintProject } from "../aiol/mod.ts";
 import {
   callTimeoutScan,
@@ -53,7 +53,9 @@ import {
 } from "../aiol/fixes.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const REPO = new URL("../", import.meta.url).pathname;
+// An import map names a module by specifier, never by path: `C:\\x\\mod.ts`
+// is the URL scheme `c:` to Deno.
+const REPO = new URL("../", import.meta.url).href;
 const AIO = `import { call } from "aio";\n`;
 
 /** Whose the bare `name` is in this file, and why `cell(…)` is left. */
@@ -1994,10 +1996,10 @@ Deno.test("aiol --safe-fix: own `call`s, action payloads and JSX text survive; t
       .replace(/\x1b\[[0-9;]*m/g, "");
     // Of the project's own files: aio's sources are read through the import
     // map, and what the compiler says about THEM is not this test's subject.
-    const own = `${await Deno.realPath(dir)}/`;
+    const own = `${toFileUrl(await Deno.realPath(dir)).href}/`;
     assertEquals(
       [...stderr.matchAll(
-        /^(TS\d+) [^\n]*\n(?:[^\n]*\n)*?\s+at file:\/\/([^:\n]+):/gm,
+        /^(TS\d+) [^\n]*\n(?:[^\n]*\n)*?\s+at (file:\/\/\S+?):\d+:\d+$/gm,
       )]
         .filter((m) => m[2]!.startsWith(own))
         .map((m) => `${m[1]} ${m[2]!.slice(own.length)}`),

@@ -21,6 +21,7 @@ import { assert, assertEquals, assertRejects } from "@std/assert";
 import { aio, cell } from "../mod.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { fromFileUrl } from "@std/path";
 
 const N = 30;
 /** Post-gc() data heap per cycle. Before the fix: ~110 KB. After: ~15 KB,
@@ -41,8 +42,10 @@ async function probe(): Promise<
         "-A",
         "--v8-flags=--expose-gc",
         "--config",
-        new URL("../deno.json", import.meta.url).pathname,
-        new URL("./fixtures/closed-app-gc/probe.ts", import.meta.url).pathname,
+        fromFileUrl(new URL("../deno.json", import.meta.url)),
+        fromFileUrl(
+          new URL("./fixtures/closed-app-gc/probe.ts", import.meta.url),
+        ),
         String(N),
         `${root}/apps-root`,
       ],

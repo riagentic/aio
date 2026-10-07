@@ -12,6 +12,7 @@ import {
   paint,
 } from "../src/diagnostics/color.ts";
 import { formatText } from "../src/diagnostics/logger-format.ts";
+import { fromFileUrl } from "@std/path";
 
 const ESC = "\x1b[";
 
@@ -93,7 +94,10 @@ Deno.test("no-color: the decision has ONE home", async () => {
   // Every module that emits a colour escape imports the decider. A second copy
   // of the rule is how one surface keeps colouring after the user said not to
   // — which is exactly how this repo ended up with four of them.
-  const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+  const REPO = fromFileUrl(new URL("..", import.meta.url)).replace(
+    /[\\/]$/,
+    "",
+  );
   const offenders: string[] = [];
   const walk = async function* (dir: string): AsyncGenerator<string> {
     for await (const e of Deno.readDir(dir)) {

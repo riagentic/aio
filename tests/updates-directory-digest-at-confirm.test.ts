@@ -19,6 +19,7 @@ import {
   writeRecordAtomic,
 } from "../src/server/updates-apply.ts";
 import {
+  _confirm,
   confirmPendingUpdate,
   startUpdates,
   sweepRecordTmps,
@@ -69,6 +70,7 @@ Deno.test("directory update: the verified digest rides on the marker and is reco
     // The new build's first boot counted itself, then proved healthy.
     writePending(data, { ...marker, attempts: 1 });
     confirmPendingUpdate(data, quiet);
+    await _confirm.pruned; // its background prune, read to the end
     const trust = readTrust(data);
     assertEquals(
       [trust.installedSha256, trust.installedReleasedAt],
@@ -91,6 +93,7 @@ Deno.test("single-file update: a marker with no digest leaves the record its swa
       startedAt: "2026-10-02T18:30:00.000Z",
     });
     confirmPendingUpdate(data, quiet);
+    await _confirm.pruned; // its background prune, read to the end
     const trust = readTrust(data);
     assertEquals(
       [trust.installedSha256, trust.installedReleasedAt],
@@ -168,6 +171,7 @@ Deno.test("single-file update: the digest rides on the marker too, and a confirm
     assertEquals([marker.sha256, marker.releasedAt], [SHA, RELEASED]);
     writePending(data, { ...marker, attempts: 1 });
     confirmPendingUpdate(data, quiet);
+    await _confirm.pruned; // its background prune, read to the end
     const trust = readTrust(data);
     assertEquals(
       [trust.installedSha256, trust.installedReleasedAt],

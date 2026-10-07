@@ -16,6 +16,8 @@
 // the one cell a single window subscribes to.
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
+import { connectLocal } from "../src/server/local-listen.ts";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
 import { _resetDegraded, degradedReport } from "../src/diagnostics/degraded.ts";
 import { createBroadcaster } from "../src/server/server-broadcast.ts";
 import { createUDSListener } from "../src/server/uds.ts";
@@ -139,17 +141,17 @@ Deno.test("ws: the round verdict still recovers once every view serializes", asy
 
 Deno.test("uds: a cell that fails for ONE subscriber escalates while the others are fine", async () => {
   _resetDegraded();
-  const socketPath = join(
+  const socketPath = localEndpoint(join(
     await tempDir("aio-broadcast-degraded-per-round-"),
     "per-round.sock",
-  );
+  ));
   // `b` holds a BigInt: JSON refuses it. A window subscribed to `a` alone
   // is fine; one subscribed to `b` never receives a snapshot again.
   const state = { a: { n: 1 }, b: { n: 1n as unknown } };
   const uds = createUDSListener(socketPath, () => state, () => {}, () => {});
   await wait(30);
   const connect = async (subs: string[]) => {
-    const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+    const conn = await connectLocal(socketPath);
     const reader = conn.readable.getReader();
     (async () => {
       try {
@@ -185,6 +187,7 @@ Deno.test("uds: a cell that fails for ONE subscriber escalates while the others 
     starved.close();
     await wait(30);
     uds.shutdown();
+    await localIdle();
     _resetDegraded();
   }
 });

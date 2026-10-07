@@ -5,6 +5,7 @@
 // files), and they keep the scoped lock dir from being pruned. `acquire`
 // sweeps them — but only a DEAD pid's: a live process's temp is an operation
 // in flight. (The `<lock>.mx` mutex file: single-instance-lock-mutex.test.ts.)
+import { sleeper } from "./proc-helper.ts";
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { tempDir } from "../src/testing/temp-dir.ts";
@@ -31,7 +32,7 @@ Deno.test("lock: acquire sweeps a dead process's temp files, and only those", as
   const dir = await tempDir("lock-orphans-");
   const was = Deno.env.get("AIO_APPS_DIR");
   Deno.env.set("AIO_APPS_DIR", join(dir, "apps"));
-  const live = new Deno.Command("sleep", { args: ["30"] }).spawn();
+  const live = sleeper();
   let planted: string[] = [];
   try {
     const home = join(dir, "home");

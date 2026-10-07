@@ -18,7 +18,7 @@
 // A validity check must test the SHAPE of a field, never its truthiness, when
 // zero is a legal value.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import {
   AppLock,
   lockDir,
@@ -26,8 +26,9 @@ import {
   writeLock,
 } from "../src/server/single-instance-lock.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const REPO = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
+const REPO = fromFileUrl(new URL("../", import.meta.url)).replace(/[\\/]$/, "");
 
 const exists = (p: string) => {
   try {
@@ -116,7 +117,7 @@ Deno.test({
     const src = join(dir, "app.ts");
     await Deno.writeTextFile(
       src,
-      `import { aio, cell } from "${REPO}/mod.ts";
+      `import { aio, cell } from "${spec(REPO)}/mod.ts";
 const c = cell("p", { state: { n: 0 }, visible: "all", methods: {} });
 const app = await aio.run({
   cells: [c], appId: ${JSON.stringify(appId)},
@@ -188,7 +189,9 @@ Deno.test({
     const src = join(appsDir, "probe.ts");
     await Deno.writeTextFile(
       src,
-      `import { AppLock, lockDir } from "${REPO}/src/server/single-instance-lock.ts";
+      `import { AppLock, lockDir } from "${
+        spec(REPO)
+      }/src/server/single-instance-lock.ts";
 const a = new AppLock("multi-a");
 const b = new AppLock("multi-b");
 await a.acquire(31111, false);
@@ -260,7 +263,7 @@ setInterval(() => {}, 1000);
 
 Deno.test({
   name: "lock: one app closing must not un-protect the apps still running",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // the process-wide SIGTERM listeners: Windows delivers no signal
   async fn() {
     // The mirror image of the bug above, reached from the other side. The
     // signal listeners belong to the PROCESS, but they were torn down by
@@ -271,7 +274,9 @@ Deno.test({
     const src = join(appsDir, "probe.ts");
     await Deno.writeTextFile(
       src,
-      `import { AppLock, lockDir } from "${REPO}/src/server/single-instance-lock.ts";
+      `import { AppLock, lockDir } from "${
+        spec(REPO)
+      }/src/server/single-instance-lock.ts";
 const a = new AppLock("unreg-a");
 const b = new AppLock("unreg-b");
 await a.acquire(31211, false);

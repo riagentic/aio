@@ -10,7 +10,7 @@
 //   "targtes": [...]       → built the declared-or-default set, silently
 // and the linter called the documented `build.macos` an unknown key.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import {
   buildBlockShapeProblems,
   buildBlockShapeWarnings,
@@ -20,7 +20,7 @@ import { codeText } from "../src/diagnostics/code-mask.ts";
 import { unknownBuildKeys, VALID_BUILD_KEYS } from "../src/server/config.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const BUILD_ALL = new URL("../src/build-all.ts", import.meta.url).pathname;
+const BUILD_ALL = fromFileUrl(new URL("../src/build-all.ts", import.meta.url));
 
 Deno.test("build block shape: each wrong shape is named by its key", () => {
   const one = (b: unknown) => buildBlockShapeProblems(b);

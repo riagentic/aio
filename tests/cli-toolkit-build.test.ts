@@ -28,11 +28,31 @@ const CONFIG = join(EXAMPLE, "deno.json");
 const GATE = Deno.env.get("AIO_BUILD_E2E") === "1";
 const dec = new TextDecoder();
 
+/** The example's `node_modules`, set up before anything reads stderr. In a
+ *  fresh clone the first `deno run` of a `nodeModulesDir: "auto"` project
+ *  writes `Initialize esbuild@…` lines there — the runtime's words, once per
+ *  checkout, not the program's — and "nothing on stderr" then failed for
+ *  whichever test ran first. Done once, loudly, so `err` below is the CLI's. */
+let primed: Promise<void> | undefined;
+const prime = () =>
+  primed ??= (async () => {
+    const p = await new Deno.Command(Deno.execPath(), {
+      args: ["cache", "--config", CONFIG, APP],
+      cwd: EXAMPLE,
+      env: childEnv(),
+      stdin: "null",
+      stdout: "null",
+      stderr: "piped",
+    }).output();
+    assert(p.success, `could not set the example up: ${dec.decode(p.stderr)}`);
+  })();
+
 /** Run the example from SOURCE, from a throwaway cwd, capturing everything. */
 async function todo(
   args: string[],
   opts: { cwd?: string; env?: Record<string, string> } = {},
 ): Promise<{ code: number; out: string; err: string }> {
+  await prime();
   const cwd = opts.cwd ?? await Deno.makeTempDir({ prefix: "cli-tool-cwd-" });
   const p = await new Deno.Command(Deno.execPath(), {
     args: ["run", "-A", "--config", CONFIG, APP, ...args],

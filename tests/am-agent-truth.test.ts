@@ -44,6 +44,7 @@ import { DISPLAY_FLAG } from "../src/am/am-display.ts";
 import { AIO_RUNTIME_FLAGS } from "../src/diagnostics/runtime-flags.ts";
 import { scaffold, standardTasks } from "../src/am/am-cmd-create.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const ROOT = new URL("..", import.meta.url);
 const read = (rel: string) => Deno.readTextFileSync(new URL(rel, ROOT));
@@ -382,9 +383,9 @@ Deno.test({
       for (const [i, g] of BRIEF_API.entries()) {
         await Deno.writeTextFile(
           `${dir}/api-${i}.ts`,
-          `import type { ${
-            g.names.join(", ")
-          } } from "${g.entry}";\nexport {};\n`,
+          `import type { ${g.names.join(", ")} } from "${
+            spec(g.entry)
+          }";\nexport {};\n`,
         );
         files.push(`${dir}/api-${i}.ts`);
       }

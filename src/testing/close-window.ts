@@ -10,6 +10,12 @@
 // two runs out of five ON ITS OWN — a flaky leak floor, which is worse than no
 // floor at all, because it teaches a reader that red means nothing.
 //
+// RE-MEASURED (happy-dom 20.14.5, what aio pins now): gone — the manager's
+// flag is `destroyed`, never cleared, so a late Immediate re-arms nothing
+// (0 leaks in 14 runs of that test with the turn below removed). The turn
+// stays, at the price of one macrotask: a window a caller made from its own
+// `"happy-dom"` import (which may still pin 17) is closed through here too.
+//
 // One macrotask turn after the close lets that timer fire inside the test that
 // owns it. It is not a sleep for luck: `setTimeout(0)` is queued BEHIND the
 // timer happy-dom just armed with the same delay, so it cannot run first.

@@ -13,6 +13,8 @@
 // by itself, so no assertion here has to guess at a timer's existence.
 import { assert, assertRejects } from "@std/assert";
 import { connectCli, connectCliUDS } from "../src/server/cli-client.ts";
+import { listenLocal, type LocalConn } from "../src/server/local-listen.ts";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
 
 Deno.test({
   name:
@@ -92,25 +94,25 @@ Deno.test({
 Deno.test({
   name:
     "connectCliUDS: close() during the dial hangs up the connection it lands",
-  ignore: Deno.build.os === "windows",
   sanitizeOps: true,
   sanitizeResources: true,
   async fn() {
     const dir = await Deno.makeTempDir({ prefix: "aio-uds-close-" });
-    const path = `${dir}/s.sock`;
-    const listener = Deno.listen({ transport: "unix", path });
+    // The local transport: a unix socket, a named pipe on Windows.
+    const path = localEndpoint(`${dir}/s.sock`);
+    const listener = listenLocal(path);
+    const accepted = listener[Symbol.asyncIterator]();
     try {
       const app = connectCliUDS(path);
       app.close(); // the dial started synchronously and has not landed yet
-      const server = await listener.accept();
+      const server = (await accepted.next()).value as LocalConn;
       try {
         // The client end must hang up: a read hits EOF. Bounded, so a client
         // that keeps the socket open fails here rather than hanging the run.
         let guard: ReturnType<typeof setTimeout> | undefined;
         const eof = await Promise.race([
           (async () => {
-            const buf = new Uint8Array(4096);
-            while ((await server.read(buf)) !== null) { /* drain the hello */ }
+            for await (const _ of server.readable) { /* drain the hello */ }
             return true;
           })(),
           new Promise<false>((r) => {
@@ -123,6 +125,7 @@ Deno.test({
       }
     } finally {
       listener.close();
+      await localIdle();
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }
   },

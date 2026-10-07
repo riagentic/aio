@@ -28,7 +28,7 @@
 //
 // Exit code is the gate: 0 = every scenario passed.
 
-import { basename, join, resolve } from "@std/path";
+import { basename, fromFileUrl, join, resolve } from "@std/path";
 import { mark, NO, style } from "../src/diagnostics/fmt.ts";
 import {
   artifactPaths,
@@ -36,7 +36,7 @@ import {
   readBuildManifest,
 } from "../src/build/build-manifest.ts";
 
-const HERE = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const HERE = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 
 /** The commit the lab should install for `--source=local`. Uncommitted work is
  *  invisible to it by construction: the container clones a git repo, and a
@@ -177,7 +177,7 @@ async function findRuntime(): Promise<string> {
         Deno.execPath(),
         "run",
         "-A",
-        new URL(import.meta.url).pathname,
+        fromFileUrl(import.meta.url),
         ...Deno.args,
       ].map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ");
       const r = await new Deno.Command("sg", {

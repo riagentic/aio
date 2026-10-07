@@ -11,24 +11,25 @@
 //
 // Both halves reproduce under plain `deno run`, which is what this drives.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
 import { aioTestDir } from "../src/testing/test-strict.ts";
 import {
   cellWorkerName,
   parseCellWorkerName,
 } from "../src/server/cell-worker-protocol.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const AIO_ROOT = new URL("..", import.meta.url).pathname;
+const AIO_ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 /** The probe app: one worker cell whose method reports the identity the
  *  WORKER resolves, and a main isolate that reports its own, optionally after
  *  moving the process into another project's directory. */
 const APP = `import { aio, cell, isCellWorker } from "${
-  join(AIO_ROOT, "mod.ts")
+  spec(join(AIO_ROOT, "mod.ts"))
 }";
 import { resolveAppId } from "${
-  join(AIO_ROOT, "src/server/single-instance-lock.ts")
+  spec(join(AIO_ROOT, "src/server/single-instance-lock.ts"))
 }";
 export const idProbe = cell("idProbe", {
   worker: true,

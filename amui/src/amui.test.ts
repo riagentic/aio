@@ -10,6 +10,10 @@ import App from "./App.tsx";
 import { readProjectMeta } from "./server/scan.server.ts";
 import { psStats, readFile } from "./server/proc.server.ts";
 import { freePort } from "../../src/testing/server-test.ts";
+import { basename, DELIMITER, fromFileUrl, join } from "@std/path";
+import { homedir } from "../../src/server/paths.ts";
+import { bundleNodePaths } from "../../src/build/client-bundle.ts";
+import { fixtureNodeModules } from "../../tests/symlink-helper.ts";
 
 // ── manager cell (hermetic) ──────────────────────────────────────────────────
 testCell(manager, "initial state is empty and idle", (t) => {
@@ -75,6 +79,8 @@ testCell(manager, "discover runs the real scan cleanly", async (t) => {
     s.lastScan !== null &&
     // roots are always surfaced (so an empty result is diagnosable)
     s.scanRoots.length > 0 &&
+    // …with how to add one, in the server OS's spelling (the UI shows it)
+    s.rootsExample.includes(`path${DELIMITER}`) &&
     // the walk-up from the test's cwd (examples/amui) finds sibling aio apps
     s.projects.length > 0 &&
     // every project has the required shape
@@ -173,8 +179,25 @@ for (const action of ["start", "stop", "restart"] as const) {
 // framework repo itself must never appear as a managed project.
 Deno.test("discoverProjects: roots cover ~/aio-apps + cwd; excludes the framework", async () => {
   const { discoverProjects } = await import("./server/scan.server.ts");
-  const { projects, roots } = await discoverProjects();
-  assert(roots.some((r) => r.endsWith("/aio-apps")), "includes ~/aio-apps");
+  // A checkout need not sit under $HOME (a CI runner, a fenced lab): name its
+  // parent as a root, so the walk reaches the framework repo wherever it is —
+  // otherwise "excludes the framework" is true only because nothing looked.
+  const hadRoots = Deno.env.get("AMUI_ROOTS");
+  Deno.env.set(
+    "AMUI_ROOTS",
+    fromFileUrl(new URL("../../..", import.meta.url)),
+  );
+  let found;
+  try {
+    found = await discoverProjects();
+  } finally {
+    if (hadRoots === undefined) Deno.env.delete("AMUI_ROOTS");
+    else Deno.env.set("AMUI_ROOTS", hadRoots);
+  }
+  const { projects, roots } = found;
+  assert(roots.some((r) => basename(r) === "aio-apps"), "includes ~/aio-apps");
+  // The hint for adding roots is spelled for the OS the server runs on.
+  assertStringIncludes(found.rootsExample, `path${DELIMITER}`);
   assert(
     roots.some((r) => Deno.cwd().startsWith(r)),
     "includes a cwd ancestor",
@@ -446,9 +469,9 @@ Deno.test("readLogs: prefers the app's own log dir, falls back to the old one", 
     try {
       const own = appDirs("logapp");
       await Deno.mkdir(own.logs, { recursive: true });
-      await Deno.writeTextFile(`${own.logs}/app.log`, "from the app dir\n");
+      await Deno.writeTextFile(join(own.logs, "app.log"), "from the app dir\n");
       const r2 = await readLogs(dir, "app", 500, "logapp");
-      assertEquals(r2.path, `${own.logs}/app.log`);
+      assertEquals(r2.path, join(own.logs, "app.log"));
       assertStringIncludes(r2.lines[0]!, "from the app dir");
     } finally {
       if (prevHome === undefined) Deno.env.delete("AIO_DATA_HOME");
@@ -570,9 +593,63 @@ Deno.test("runtimeInfo: dev deno process → runtime root is the project dir", a
   const { runtimeInfo } = await import("./server/proc.server.ts");
   // Our own process is `deno` running from this repo — kind dev, exe = deno.
   const ri = await runtimeInfo(Deno.pid, "/tmp/proj");
-  // On Linux /proc resolves; elsewhere it falls back to the project dir.
-  assert(["dev", "unknown"].includes(ri.kind), `kind=${ri.kind}`);
+  // /proc on Linux, kernel32 on Windows, `ps` on macOS: every OS names it.
+  assertEquals(ri.kind, "dev", `exe=${ri.exe}`);
   assert(typeof ri.root === "string" && ri.root.length > 0);
+});
+
+Deno.test("runtimeOf: the runtime is read off the executable, in its OS's paths", async () => {
+  const { runtimeOf } = await import("./server/proc.server.ts");
+  const win = runtimeOf(
+    "windows",
+    "C:\\Users\\d\\.deno\\bin\\deno.exe",
+    null,
+    "C:\\p",
+  );
+  assertEquals([win.kind, win.root], ["dev", "C:\\p"]);
+  const exe = runtimeOf(
+    "windows",
+    "C:\\apps\\wallet\\wallet.exe",
+    null,
+    "C:\\p",
+  );
+  assertEquals([exe.kind, exe.root], ["compiled", "C:\\apps\\wallet"]);
+  const dev = runtimeOf("linux", "/usr/bin/deno", "/srv/app", "/p");
+  assertEquals([dev.kind, dev.root], ["dev", "/srv/app"]);
+  const bin = runtimeOf(
+    "darwin",
+    "/Applications/W.app/Contents/MacOS/w",
+    null,
+    "/p",
+  );
+  assertEquals([bin.kind, bin.root], [
+    "compiled",
+    "/Applications/W.app/Contents/MacOS",
+  ]);
+  const img = runtimeOf("linux", "/tmp/.mount_abc/usr/bin/w", null, "/p");
+  assertEquals([img.kind, img.root], ["appimage", "/tmp/.mount_abc"]);
+  assertEquals(runtimeOf("windows", null, null, "C:\\p").kind, "unknown");
+});
+
+// The Windows sample is decoded from what kernel32 fills in — checked here on
+// every OS, against hand-built buffers.
+Deno.test("psStats (Windows): FILETIMEs and the working set decode to a sample", async () => {
+  const { decodeWinSample } = await import("./server/win-proc.server.ts");
+  const ft = (sec: number) => {
+    const b = new Uint8Array(8);
+    new DataView(b.buffer).setBigUint64(0, BigInt(sec) * 10_000_000n, true);
+    return b;
+  };
+  const pmc = new Uint8Array(72);
+  new DataView(pmc.buffer).setBigUint64(16, 512n * 1024n * 1024n, true);
+  const EPOCH = 11_644_473_600; // 1601 → 1970, seconds
+  // Created at Unix t=1000 s, sampled at t=1100 s, 20 s kernel + 30 s user.
+  const s = decodeWinSample(
+    { creation: ft(EPOCH + 1000), kernel: ft(20), user: ft(30) },
+    pmc,
+    1_100_000,
+  );
+  assertEquals(s, { cpuSec: 50, cpuPct: 50, rssKb: 512 * 1024 });
 });
 
 // ── server helpers ───────────────────────────────────────────────────────────
@@ -770,7 +847,8 @@ Deno.test("readFile: reads within the project, blocks path traversal", async () 
     assertStringIncludes(bad.error ?? "", "outside");
     // A symlink INSIDE the project pointing outside is refused too.
     try {
-      await Deno.symlink("/etc/hostname", `${dir}/escape`);
+      // A file every OS has, outside the project: the runtime itself.
+      await Deno.symlink(Deno.execPath(), `${dir}/escape`, { type: "file" });
       const link = await readFile(dir, "escape");
       assert(!link.ok, "symlink escape must be refused");
       assertStringIncludes(link.error ?? "", "outside");
@@ -816,30 +894,98 @@ Deno.test("findCellSource: locates the cell definition, not references", async (
 Deno.test("scan: explicit AMUI_ROOTS is honoured verbatim", async () => {
   const { _internals } = await import("./server/scan.server.ts");
   const prev = Deno.env.get("AMUI_ROOTS");
-  Deno.env.set("AMUI_ROOTS", "/work/apps:/mnt/projects");
+  // Separated like PATH — `;` on Windows, where a path holds a colon.
+  Deno.env.set("AMUI_ROOTS", ["/work/apps", "/mnt/projects"].join(DELIMITER));
   try {
     const roots = _internals.defaultRoots([]);
     assert(roots.includes("/work/apps"), roots.join(","));
     // A network mount is not walked into by accident, but IS honoured when the
     // user names it — configuration beats the traversal filter.
     assert(roots.includes("/mnt/projects"), roots.join(","));
-    // $HOME is always a root, so an unconfigured install still finds projects.
-    assert(roots.includes(Deno.env.get("HOME")!), roots.join(","));
+    // The home directory ($HOME, else %USERPROFILE%) is always a root, so an
+    // unconfigured install still finds projects.
+    assert(roots.includes(homedir()), roots.join(","));
+    assert(roots.includes(join(homedir(), "aio-apps")), roots.join(","));
   } finally {
     if (prev === undefined) Deno.env.delete("AMUI_ROOTS");
     else Deno.env.set("AMUI_ROOTS", prev);
   }
 });
 
+Deno.test("scan: the roots are spelled in the server OS's paths", async () => {
+  const { _internals, rootsExample } = await import("./server/scan.server.ts");
+  assertEquals(
+    _internals.rootsFor("windows", "C:\\Users\\dev", "D:\\work;E:\\x y", [
+      "C:\\Users\\dev\\code\\wallet", // its siblings are scanned
+      "c:\\users\\DEV\\Code\\shop", // the same home, however it is cased
+      "C:\\Users\\dev\\app", // the parent is the home: already a root
+      "D:\\srv\\apps\\x", // not under the home
+    ]),
+    [
+      "D:\\work",
+      "E:\\x y",
+      "C:\\Users\\dev\\aio-apps",
+      "C:\\Users\\dev",
+      "C:\\Users\\dev\\code",
+      "c:\\users\\DEV\\Code",
+    ],
+  );
+  assertEquals(
+    _internals.rootsFor("linux", "/home/dev", "/work/apps:/mnt/p", [
+      "/home/dev/code/wallet",
+      "/home/dev/app",
+      "/srv/apps/x",
+    ]),
+    [
+      "/work/apps",
+      "/mnt/p",
+      "/home/dev/aio-apps",
+      "/home/dev",
+      "/home/dev/code",
+    ],
+  );
+  assertEquals(rootsExample("windows"), "AMUI_ROOTS=C:\\path;D:\\path2");
+  assertEquals(rootsExample("linux"), "AMUI_ROOTS=/path:/path2");
+  assertEquals(rootsExample("darwin"), "AMUI_ROOTS=/path:/path2");
+});
+
 Deno.test("scan: never walks pseudo-filesystems or machine state", async () => {
-  const { _internals } = await import("./server/scan.server.ts");
+  const { _internals, pathKey } = await import("./server/scan.server.ts");
+  const linux = _internals.neverWalk("linux", "/home/dev", () => undefined);
   for (const p of ["/proc", "/sys", "/dev", "/var", "/etc", "/mnt", "/media"]) {
     assert(
-      _internals.NEVER_WALK.has(p),
+      linux.has(p),
       `${p} must never be traversed — it cannot hold a project and readDir on a
        network mount blocks for seconds`,
     );
   }
+  assert(!linux.has("/home/dev/Library") && !linux.has("/System"));
+  // macOS: the same list, plus where its system and the user's app state are.
+  const mac = _internals.neverWalk("darwin", "/Users/dev", () => undefined);
+  for (const p of [...linux, "/System", "/private", "/Volumes"]) {
+    assert(mac.has(p), p);
+  }
+  assert(mac.has("/Users/dev/Library"), "keychains and app state");
+  // Windows: the system, machine state, and the user's app state — from the
+  // environment where it says, wherever Windows was installed.
+  const env: Record<string, string> = {
+    SystemDrive: "D:",
+    SystemRoot: "D:\\WINDOWS",
+    ProgramFiles: "D:\\Program Files",
+  };
+  const win = _internals.neverWalk("windows", "C:\\Users\\dev", (k) => env[k]);
+  for (
+    const p of [
+      "D:\\Windows", // found whatever its case
+      "D:\\Program Files",
+      "D:\\Program Files (x86)",
+      "D:\\ProgramData",
+      "D:\\$Recycle.Bin",
+      "D:\\System Volume Information",
+      "C:\\Users\\dev\\AppData",
+    ]
+  ) assert(win.has(pathKey("windows", p)), p);
+  assert(!win.has(pathKey("windows", "C:\\Users\\dev\\code")));
 });
 
 // ── a wedged app must not read as a healthy one ──────────────────────────────
@@ -925,8 +1071,43 @@ testCell(
 // and `.aws/credentials` listed in the tree, opened by the viewer, and copied
 // into amui's cell state (and from there into the DOM and every synced client).
 Deno.test("amui: $HOME is never a repo root, and secret dirs are never read", async () => {
-  const { findRepoRoot, listFiles, readFile, touchesSecretDir } = await import(
-    "./server/proc.server.ts"
+  const {
+    findRepoRoot,
+    listFiles,
+    readFile,
+    repoCandidates,
+    touchesSecretDir,
+  } = await import("./server/proc.server.ts");
+  // Which directories may be a repo root at all — on each OS's own paths.
+  assertEquals(
+    repoCandidates(
+      "windows",
+      "C:\\Users\\dev\\code\\wallet\\src",
+      "c:\\users\\DEV\\",
+    ),
+    [
+      "C:\\Users\\dev\\code\\wallet\\src",
+      "C:\\Users\\dev\\code\\wallet",
+      "C:\\Users\\dev\\code",
+    ],
+    "stops below the home, however the home is cased",
+  );
+  assertEquals(repoCandidates("windows", "D:\\srv\\app", "C:\\Users\\dev"), [
+    "D:\\srv\\app",
+    "D:\\srv",
+  ], "never the drive root");
+  assertEquals(
+    repoCandidates("linux", "/home/dev/code/wallet/src", "/home/dev"),
+    ["/home/dev/code/wallet/src", "/home/dev/code/wallet", "/home/dev/code"],
+  );
+  assertEquals(repoCandidates("linux", "/srv/app", "/home/dev"), [
+    "/srv/app",
+    "/srv",
+  ]);
+  assertEquals(
+    repoCandidates("linux", "/a/b/c/d/e/f/g/h", "/home/dev").length,
+    6,
+    "bounded",
   );
   const home = await Deno.makeTempDir({ prefix: "aio-amui-home-" });
   try {
@@ -935,11 +1116,11 @@ Deno.test("amui: $HOME is never a repo root, and secret dirs are never read", as
     // failing because of another.
     // A real repo BELOW $HOME still resolves — the guard must not blind the
     // feature it protects.
-    await Deno.mkdir(`${home}/code/wallet/src`, { recursive: true });
-    await Deno.mkdir(`${home}/code/wallet/.git`);
+    await Deno.mkdir(join(home, "code", "wallet", "src"), { recursive: true });
+    await Deno.mkdir(join(home, "code", "wallet", ".git"));
     assertEquals(
-      await findRepoRoot(`${home}/code/wallet/src`, home),
-      `${home}/code/wallet`,
+      await findRepoRoot(join(home, "code", "wallet", "src"), home),
+      join(home, "code", "wallet"),
     );
 
     // …but $HOME itself is not a repo, however many `.git` dirs sit in it.
@@ -949,7 +1130,7 @@ Deno.test("amui: $HOME is never a repo root, and secret dirs are never read", as
     await Deno.mkdir(`${home}/.aws`);
     await Deno.writeTextFile(`${home}/.aws/credentials`, "aws_secret=x");
     await Deno.mkdir(`${home}/loose/app`, { recursive: true });
-    assertEquals(await findRepoRoot(`${home}/loose/app`, home), null);
+    assertEquals(await findRepoRoot(join(home, "loose", "app"), home), null);
 
     // Even pointed straight at a home dir, the tree hides them…
     const { nodes } = await listFiles(home);
@@ -990,7 +1171,7 @@ Deno.test({
   sanitizeResources: false,
   sanitizeOps: false,
   fn: async () => {
-    const amuiDir = new URL("..", import.meta.url).pathname;
+    const amuiDir = fromFileUrl(new URL("..", import.meta.url));
     // `--out=` is where COMPILED artifacts land; the browser bundle is always
     // staged in `dist/` (src/build.ts: "dist/ is staging and never a
     // destination"). Reading the bundle from an --out directory found nothing
@@ -998,6 +1179,29 @@ Deno.test({
     // convention — so the test that exists to prove amui builds could not say
     // whether it had.
     const bundle = `${amuiDir}dist/app.js`;
+    const lock = () => Deno.readTextFile(join(amuiDir, "deno.lock"));
+    const lockBefore = await lock();
+    // A fresh checkout has no `node_modules` anywhere (amui's own appears the
+    // first time amui RUNS — `"nodeModulesDir": "auto"`), and the bundler
+    // resolves the framework's `immer` from there. Installed as that first
+    // run would, only when the bundler's own search path holds none.
+    const installed = bundleNodePaths(amuiDir).some((nm) => {
+      try {
+        return Deno.statSync(join(nm, "immer")).isDirectory;
+      } catch {
+        return false;
+      }
+    });
+    // Only that package, and with no lock: a plain `deno install` here
+    // resolves everything the config can reach and REWROTE the tracked
+    // `amui/deno.lock` (11 KB → 15 KB, on Linux as on Windows) — a test must
+    // leave the checkout as it found it.
+    if (!installed) {
+      const { imports } = JSON.parse(
+        await Deno.readTextFile(join(amuiDir, "deno.json")),
+      );
+      await fixtureNodeModules(amuiDir, imports.immer);
+    }
     {
       const cmd = new Deno.Command(Deno.execPath(), {
         args: ["run", "-A", "../src/build.ts", "--force"],
@@ -1024,6 +1228,10 @@ Deno.test({
         `the build reported success and wrote no bundle at ${bundle}:\n${text}`,
       );
       assert(js!.length > 1000, "an empty bundle is not a bundle");
+      assert(
+        await lock() === lockBefore,
+        "this test rewrote the tracked amui/deno.lock",
+      );
     }
   },
 });

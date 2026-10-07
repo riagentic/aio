@@ -7,14 +7,17 @@
 // Windows binary (10 MB), linked by deno DURING the compile, after the
 // exclude list had been built from the tree on disk.
 import { assert, assertEquals } from "@std/assert";
+import { join } from "@std/path";
 import {
   compileModuleRoots,
   type DenoInfoGraph,
   devOnlyPackageByName,
+  includeDirModules,
   keptByFamily,
   reachedOutsideBuildTooling,
   unreachableNpmEntries,
 } from "../src/build/build-compile.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const pkgs = (deps: Record<string, string[]>) =>
   Object.fromEntries(
@@ -212,4 +215,50 @@ Deno.test("npm graph: module roots are the entry plus every included module file
     ]),
     ["src/app.ts", "/fw/src/server/db-worker.ts", "src/server/geo.server.ts"],
   );
+});
+
+Deno.test("npm graph: the modules under a compile.include DIRECTORY are roots too — a file entry, data and a nested node_modules are not walked", async () => {
+  const root = await tempDir("include-dir-roots-");
+  try {
+    const put = async (rel: string, body = "export {};\n") => {
+      await Deno.mkdir(join(root, rel, ".."), { recursive: true });
+      await Deno.writeTextFile(join(root, rel), body);
+    };
+    await put(
+      "deno.json",
+      JSON.stringify({
+        compile: { include: ["plugins", "one.ts", "data/model.bin", "gone"] },
+      }),
+    );
+    for (
+      const f of [
+        "plugins/a.ts",
+        "plugins/deep/b.tsx",
+        "plugins/deep/c.mjs",
+        "plugins/readme.md",
+        "plugins/table.json",
+        "plugins/node_modules/x/index.js",
+        "one.ts",
+        "data/model.bin",
+        "elsewhere/d.ts",
+      ]
+    ) await put(f);
+    const dirModules = await includeDirModules(root);
+    assertEquals(dirModules, [
+      "plugins/a.ts",
+      "plugins/deep/b.tsx",
+      "plugins/deep/c.mjs",
+    ]);
+    assertEquals(
+      compileModuleRoots("main.ts", ["--include", "one.ts"], [
+        ...dirModules,
+        "one.ts",
+      ]),
+      ["main.ts", "one.ts", ...dirModules],
+    );
+    // No deno.json, or nothing declared: no roots.
+    assertEquals(await includeDirModules(join(root, "plugins")), []);
+  } finally {
+    await dropTempDir(root);
+  }
 });

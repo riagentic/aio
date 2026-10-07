@@ -11,14 +11,50 @@
 //    with the server parked in its drain. 58 of those and the app was gone.
 //
 // The generated main is CJS text, so this test EVALUATES it — the real
-// function, against a real HTTP server on a real unix socket — rather than
-// asserting on the source. Windows is the OS the defect belongs to, but the
-// mechanism is Node's and reproduces here; the Win32 half is the Wine rig
-// (`scripts/wine-pipe.ts`) and the real-VM run.
+// function, against a real HTTP server on a real local endpoint — rather than
+// asserting on the source: a unix socket under `Deno.serve`, and on Windows
+// (the OS the defect belongs to) the app's own named-pipe door,
+// `serveHttpOverLocal` over `listenLocal`.
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { tempDir } from "../src/testing/temp-dir.ts";
 import { tmplSocketFetch } from "../src/electron/electron-shared.ts";
+import { serveHttpOverLocal } from "../src/server/http-over-conn.ts";
+import type { LocalConn } from "../src/server/local-listen.ts";
+import { listenBound, localEndpoint } from "./local-endpoint-helper.ts";
+
+/** An HTTP server on `sock`: `Deno.serve` on a unix socket; on Windows, which
+ *  has none, the door the packaged app itself serves its pipe with. */
+async function serveOn(
+  sock: string,
+  handler: (req: Request) => Response,
+): Promise<{ shutdown(): Promise<void> }> {
+  if (Deno.build.os !== "windows") {
+    return Deno.serve({ path: sock, onListen: () => {}, handler });
+  }
+  const s = serveHttpOverLocal(await listenBound(sock), handler);
+  return { shutdown: () => s.close() };
+}
+
+/** One read of whatever the peer sent first (the request head). */
+async function readSome(conn: LocalConn): Promise<void> {
+  if (conn.read) {
+    await conn.read(new Uint8Array(4096));
+    return;
+  }
+  const r = conn.readable.getReader();
+  await r.read();
+  r.releaseLock();
+}
+
+/** Write all of `text`. */
+async function writeText(conn: LocalConn, text: string): Promise<void> {
+  const bytes = new TextEncoder().encode(text);
+  if (conn.write) return await conn.write(bytes);
+  const w = conn.writable.getWriter();
+  await w.write(bytes);
+  w.releaseLock();
+}
 
 /** The generated `socketFetch`, bound to a socket path. */
 function socketFetchOn(sock: string): (
@@ -53,12 +89,11 @@ const nodeProcess = await import("node:process");
 Deno.test({
   name:
     "socketFetch: bounded connections, and a body nobody reads is read here",
-  ignore: Deno.build.os === "windows",
   sanitizeResources: false, // aio-ok: node:http keeps its agent's sockets
   sanitizeOps: false, // aio-ok: same
   async fn() {
     const dir = await tempDir("aio-sockfetch");
-    const sock = join(dir, "app.sock");
+    const sock = localEndpoint(join(dir, "app.sock"));
     let live = 0;
     let peak = 0;
     /** Response bodies the SERVER is still holding open — i.e. written into
@@ -91,10 +126,9 @@ Deno.test({
         },
       });
     };
-    const server = Deno.serve({
-      path: sock,
-      onListen: () => {},
-      handler: (req) => {
+    const server = await serveOn(
+      sock,
+      (req) => {
         const url = new URL(req.url);
         if (url.pathname.startsWith("/missing")) {
           // What an <img> gets from a route that has nothing: an error with a
@@ -130,7 +164,7 @@ Deno.test({
           { headers: { "content-type": "application/octet-stream" } },
         );
       },
-    });
+    );
     const fetchOne = socketFetchOn(sock);
     try {
       // ① 60 error responses that NOBODY READS — the page full of broken
@@ -189,7 +223,6 @@ Deno.test({
 
 Deno.test({
   name: "socketFetch: a body that is CUT SHORT is never delivered as a 200",
-  ignore: Deno.build.os === "windows",
   sanitizeResources: false, // aio-ok: node:http keeps its agent's sockets
   sanitizeOps: false, // aio-ok: same
   async fn() {
@@ -204,20 +237,19 @@ Deno.test({
     // `drain()` now CLOSES a connection whose peer has not read within
     // DRAIN_TIMEOUT_MS (win-pipe.ts), which is exactly a body cut short.
     const dir = await tempDir("aio-sockfetch-cut");
-    const sock = join(dir, "app.sock");
-    const listener = Deno.listen({ transport: "unix", path: sock });
+    const sock = localEndpoint(join(dir, "app.sock"));
+    const listener = await listenBound(sock);
     const served = (async () => {
       for await (const conn of listener) {
         void (async () => {
           try {
-            await conn.read(new Uint8Array(4096));
-            await conn.write(
-              new TextEncoder().encode(
-                "HTTP/1.1 200 OK\r\ncontent-type: text/javascript\r\n" +
-                  "content-length: 1000\r\n\r\n",
-              ),
+            await readSome(conn);
+            await writeText(
+              conn,
+              "HTTP/1.1 200 OK\r\ncontent-type: text/javascript\r\n" +
+                "content-length: 1000\r\n\r\n",
             );
-            await conn.write(new TextEncoder().encode("export const a = 1;"));
+            await writeText(conn, "export const a = 1;");
             conn.close();
           } catch { /* the client hung up first */ }
         })();
@@ -247,7 +279,6 @@ Deno.test({
 Deno.test({
   name:
     "socketFetch: a peer that never answers is bounded, and does not wedge the rest",
-  ignore: Deno.build.os === "windows",
   sanitizeResources: false, // aio-ok: node:http keeps its agent's sockets
   sanitizeOps: false, // aio-ok: same
   async fn() {
@@ -260,14 +291,14 @@ Deno.test({
     //
     // A server that ACCEPTS and never writes a byte is exactly that peer.
     const dir = await tempDir("aio-sockfetch-hang");
-    const sock = join(dir, "app.sock");
-    const listener = Deno.listen({ transport: "unix", path: sock });
-    const held: Deno.Conn[] = [];
+    const sock = localEndpoint(join(dir, "app.sock"));
+    const listener = await listenBound(sock);
+    const held: LocalConn[] = [];
     const served = (async () => {
       for await (const conn of listener) {
         held.push(conn);
         // Read the request and answer NOTHING, ever.
-        void conn.read(new Uint8Array(4096)).catch(() => {});
+        void readSome(conn).catch(() => {});
       }
     })();
     // Short enough for a test; the knob is what the fix makes configurable.
@@ -324,7 +355,6 @@ Deno.test({
 Deno.test({
   name:
     "socketFetch: the bound is to the FIRST byte — a slow stream is not killed",
-  ignore: Deno.build.os === "windows",
   sanitizeResources: false, // aio-ok: node:http keeps its agent's sockets
   sanitizeOps: false, // aio-ok: same
   async fn() {
@@ -335,11 +365,10 @@ Deno.test({
     // call it a fix. Once the headers are here the app has answered, and the
     // renderer owns the stream from that point.
     const dir = await tempDir("aio-sockfetch-slow");
-    const sock = join(dir, "app.sock");
-    const server = Deno.serve({
-      path: sock,
-      onListen: () => {},
-      handler: () =>
+    const sock = localEndpoint(join(dir, "app.sock"));
+    const server = await serveOn(
+      sock,
+      () =>
         new Response(
           new ReadableStream<Uint8Array>({
             async pull(c) {
@@ -352,7 +381,7 @@ Deno.test({
           }),
           { headers: { "content-type": "text/event-stream" } },
         ),
-    });
+    );
     Deno.env.set("AIO_SOCKET_TIMEOUT_MS", "300");
     const fetchOne = socketFetchOn(sock);
     try {

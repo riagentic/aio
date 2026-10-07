@@ -68,7 +68,7 @@ import {
   stampReactions,
   unwrapReduced,
 } from "./aio-boot.ts";
-import { getCompactedTs } from "../sync/server-store.ts";
+import { getCompactedTs, settleOp } from "../sync/server-store.ts";
 import { recordStoreGen } from "./store-gen.ts";
 import { inFlightVerdict, opKey, placeOps } from "./op-placement.ts";
 import { takeRejectionFor } from "../state/rejection-tracker.ts";
@@ -79,6 +79,7 @@ import { unpersistedFromBase } from "../state/cell-persist-filter.ts";
 import {
   type ActionCause,
   beginReplaySession,
+  chargeReplayAcrossBoots,
   isLegacyTail,
   type JournalEntry,
   type JournalGap,
@@ -173,7 +174,10 @@ import {
   resolveTitle,
   startVitalsCheck,
 } from "./aio-run-helpers.ts";
-import { appDenoJsonLocated } from "./aio-run-helpers.ts";
+import {
+  appDenoJsonLocated,
+  recoverInterruptedBuild,
+} from "./aio-run-helpers.ts";
 import {
   readBuildStamp,
   resolveRuntimeVersion,
@@ -2070,6 +2074,11 @@ async function _runPhases<S, A, E>(
     })
   ) return null!;
 
+  // A build killed mid-compile left this project's node_modules trimmed and
+  // unlinked; put it back before the dev bundle resolves a package. A binary
+  // has no node_modules to repair.
+  if (!isCompiled()) await recoverInterruptedBuild();
+
   // Zero-config baseDir: the main module's directory — always right for
   // `deno run src/app.ts` regardless of cwd, and in a compiled binary the VFS
   // directory that `compile.include` embedded the app's assets into. A binary
@@ -2559,9 +2568,10 @@ async function _runPhases<S, A, E>(
     // With the journal off, a journal a crash left still holds the op
     // records: its ops caught in flight are resolved as a journal-on boot
     // resolves them — and nothing else is placed (`strayJournal`).
+    /** COMMIT(X) records read (journal.ts) — `opKey`. */
+    const commits = new Set<string>();
     if (_marking || legacy || strayJournal !== null) {
       const intents = new Map<string, number>();
-      const commits = new Set<string>();
       // A journal that is moved aside unreplayed (below) takes its reaction
       // lines and its commits with it: none of them covers anything any
       // more — each op is named once here and committed anew.
@@ -2680,7 +2690,10 @@ async function _runPhases<S, A, E>(
       state,
       log,
       undefined,
-      { defer: new Map(_deferred.map((d) => [d.cell, d.ts])) },
+      {
+        defer: new Map(_deferred.map((d) => [d.cell, d.ts])),
+        committed: commits,
+      },
     );
   }
 
@@ -3257,6 +3270,8 @@ async function _runPhases<S, A, E>(
     }
     if (gap) await _refuseJournalAcrossGap(journal, gap);
     const tail = _quarantinedTail(gap ? [] : journal.readTail());
+    // A tail an earlier boot already replayed, and no save since: charged.
+    chargeReplayAcrossBoots(journal.path, tail[0]?.seq, tail.length);
     if (tail.length > 0) _warnUnstampedAcrossMigration(tail);
     if (tail.length > 0) {
       // Sync cells' `listensTo` reactions first: each goes back BETWEEN the
@@ -3457,6 +3472,9 @@ async function _runPhases<S, A, E>(
       }
       state = next as S;
       reduced++;
+      // In the state this boot serves: its author's resend is a duplicate,
+      // acknowledged (server-store.ts `settleOp`).
+      await settleOp(asyncDb, d.id);
       _unmarked.push({ cell: d.cell, id: d.id, ts: d.ts });
     }
     if (reduced > 0) {
@@ -5679,6 +5697,7 @@ async function _runPhases<S, A, E>(
       argv: ownReplayArgs(),
       log,
       shutdown: () => shutdown(),
+      stopSignal: _stopCtl.signal,
       // A page has connected, so the window exists; then a moment more, for
       // it to have checked in with the window server.
       windowUp: async () => {

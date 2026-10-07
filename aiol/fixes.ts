@@ -2,7 +2,14 @@
 // Every fix here is guaranteed to be harmless: no behavior change, no data loss.
 // Only adds missing config, removes dead code, or normalizes formatting.
 
-import { basename, dirname, join, resolve } from "@std/path";
+import {
+  basename,
+  dirname,
+  fromFileUrl,
+  join,
+  resolve,
+  SEPARATOR,
+} from "@std/path";
 import {
   argumentSpan,
   codeMask,
@@ -575,7 +582,7 @@ export function fixAddTypesReact(projectDir: string): Promise<boolean> {
 export function fixAddEsbuild(projectDir: string): Promise<boolean> {
   return patchDenoJson(projectDir, (c) => {
     if (!c.imports) c.imports = {};
-    if (!c.imports["esbuild"]) c.imports["esbuild"] = "npm:esbuild@^0.24";
+    if (!c.imports["esbuild"]) c.imports["esbuild"] = "npm:esbuild@^0.25";
   });
 }
 
@@ -975,6 +982,19 @@ function _mapEntries(
 
 const _SCHEME = /^(?:npm|jsr|node|https?):/;
 
+/** The path a `file:` specifier names, in the host's spelling: a URL's
+ *  `pathname` is `/C:/x` on Windows, which is no path there. */
+function _filePath(spec: string): string {
+  try {
+    return fromFileUrl(spec);
+  } catch (e) {
+    // An escape that decodes to no text (`%ff`): the raw pathname names no
+    // file the run holds, so the answer stays "maybe" — and no config throws.
+    if (e instanceof URIError) return new URL(spec).pathname;
+    throw e;
+  }
+}
+
 /** {@linkcode SpecKinds} from a deno.json `imports` value (`null`, or
  *  anything that is no object, maps nothing) and its `scopes` — and, with
  *  `run`, the one hop into the app's own modules. Pure. */
@@ -1004,8 +1024,9 @@ function _kinds(
       const path = run && /^(?:\.{0,2}\/|file:)/.test(prefix)
         ? resolve(
           run.root,
-          prefix.startsWith("file:") ? new URL(prefix).pathname : prefix,
-        ) + (prefix.endsWith("/") ? "/" : "")
+          prefix.startsWith("file:") ? _filePath(prefix) : prefix,
+          // `resolve` answers in the host's separators, and so does `run.from`.
+        ) + (prefix.endsWith("/") ? SEPARATOR : "")
         : undefined;
       const level = _mapEntries(value);
       if (path === undefined) {
@@ -1013,7 +1034,9 @@ function _kinds(
           scoped.bad.add(key);
         }
       } else if (
-        path.endsWith("/") ? run!.from.startsWith(path) : run!.from === path
+        path.endsWith(SEPARATOR)
+          ? run!.from.startsWith(path)
+          : run!.from === path
       ) applies.push([path.length, level]);
     }
     applies.sort((a, b) => b[0] - a[0]);
@@ -1046,7 +1069,7 @@ function _kinds(
     !run || !/^(?:\.{0,2}\/|file:)/.test(target)
       ? undefined
       : target.startsWith("file:")
-      ? new URL(target).pathname
+      ? _filePath(target)
       : resolve(key === undefined ? dirname(run.from) : run.root, target);
   const hops = new Map<string, "aio" | "maybe" | "other">();
   /** Whose `name` is, as the app's own module at `path` hands it out. `aio`

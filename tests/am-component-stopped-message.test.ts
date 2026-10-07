@@ -15,11 +15,11 @@
 // components — so the answer is the same as for a single-app project, naming
 // the part: `am start agent`.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const AM = new URL("../src/am.ts", import.meta.url).pathname;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const AM = fromFileUrl(new URL("../src/am.ts", import.meta.url));
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 const ENTRY = (appId: string) =>
   `import { aio } from "aio";\nawait aio.run({ appId: "${appId}", cells: [] });\n`;

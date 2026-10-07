@@ -15,7 +15,7 @@
 // store whose watermark is below it refuses replay loudly and the journal is
 // parked beside the damaged database.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 // @ts-ignore node:sqlite types unavailable when an old @types/node shadows them
 import { DatabaseSync } from "node:sqlite";
 import { freePort } from "../src/testing/server-test.ts";
@@ -27,12 +27,13 @@ import {
 } from "../src/server/journal.ts";
 import { makeRedactor, REDACTED } from "../src/diagnostics/redact.ts";
 import { createTimeline } from "../src/server/timeline.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const MOD = new URL("../mod.ts", import.meta.url).href;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 const CHILD = `
-import { aio, cell } from "${MOD}";
+import { aio, cell } from "${spec(MOD)}";
 const DIR = Deno.env.get("DIR");
 const PORT = Number(Deno.env.get("PORT"));
 const bank = cell("bank", {

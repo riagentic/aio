@@ -10,6 +10,7 @@
 // the file nor the import. The rule is now a test, which is the only kind of
 // rule a bundle can be held to.
 import { assertEquals } from "@std/assert";
+import { fromFileUrl } from "@std/path";
 
 /** Modules in the BROWSER graph whose static imports are pinned, with the set
  *  each may have. Empty means: no static imports at all. */
@@ -21,7 +22,7 @@ const PINNED: Record<string, string[]> = {
 };
 
 Deno.test("browser graph: pinned modules import exactly what they are allowed to", async () => {
-  const root = new URL("../", import.meta.url).pathname;
+  const root = fromFileUrl(new URL("../", import.meta.url));
   const wrong: string[] = [];
   for (const [file, allowed] of Object.entries(PINNED)) {
     const src = await Deno.readTextFile(root + file);

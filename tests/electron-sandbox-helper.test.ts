@@ -92,8 +92,9 @@ async function devLayout(root: string): Promise<{ real: string }> {
 Deno.test({
   name:
     "electron sandbox: the launcher resolves to the binary it spawns, and the helper beside THAT decides",
-  ignore: Deno.build.os !== "linux" ||
-    Deno.env.get("AIO_ELECTRON_SANDBOX") === "1", // the check is short-circuited by design then
+  // (…or the check is short-circuited by design: AIO_ELECTRON_SANDBOX=1.)
+  ignore: Deno.build.os !== "linux" || // chrome-sandbox, a setuid helper, is Linux-only
+    Deno.env.get("AIO_ELECTRON_SANDBOX") === "1",
   fn: async () => {
     const root = await tempDir("aio-sandbox-");
     try {

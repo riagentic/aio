@@ -72,10 +72,11 @@ export interface TestClient {
   /** Call a cell method THE WAY A CLIENT DOES — over this client's socket.
    *
    *  The gap this closes: a non-async method called from a browser tab, an
-   *  Electron window or `am` crosses the wire. The in-process call every test
-   *  writes (`counter.add(x)`, `testCell`, `testUI`) does not — it hands the
-   *  argument over by reference, on a trusted `_source`, and gets the real
-   *  object back. Over the wire the payload is JSON, the return value is
+   *  Electron window or `am` crosses the wire. The server-side call a test
+   *  writes (`counter.add(x)` under `bootCells`, `testCell`) does not — it
+   *  hands the argument over by reference, on a trusted `_source`, and gets
+   *  the real object back. (`testUI` crosses the JSON half in process; this
+   *  is the real socket.) Over the wire the payload is JSON, the return value is
    *  JSON-vetted (`serializeReturn`), the action is re-stamped `_source: "UI"`,
    *  and a throw comes back as a message with no stack. Four differences that
    *  a test calling the method in-process cannot see, and that the client sees
@@ -393,7 +394,16 @@ export async function testMultiClient(
         lastSendAt = Date.now();
         // `cid` rides on the action frame — cli-client passes the object
         // through untouched, and the server answers any frame carrying one.
-        cli.send({ ...action, cid } as { type: string; payload?: unknown });
+        try {
+          cli.send({ ...action, cid } as { type: string; payload?: unknown });
+        } catch (e) {
+          // The client refused to send (a BigInt, a cycle): that is the
+          // call's rejection. It used to throw past the armed ack timer, which
+          // then rejected a promise nobody held, 5 s later.
+          const waiting = acks.get(cid);
+          acks.delete(cid);
+          waiting?.fail(e instanceof Error ? e : new Error(String(e)));
+        }
         return p;
       };
       /** The client path, end to end: an action frame with a correlation id

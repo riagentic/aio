@@ -24,6 +24,8 @@ import { dec, enc } from "../../src/protocol/envelope.ts";
 import { protoHello } from "../../src/protocol/protocol-version.ts";
 import { VERSION } from "../../src/server/aio-cli.ts";
 import { join } from "@std/path";
+import { isPipePath } from "../../src/server/local-listen.ts";
+import { connectRW, type RWConn } from "../local-endpoint-helper.ts";
 
 function Counter() {
   const s = useLocal({ count: 0 });
@@ -50,7 +52,11 @@ async function findSocket(): Promise<string> {
         try {
           const lock = JSON.parse(Deno.readTextFileSync(join(dir, e.name)));
           const p = lock?.socketPath;
-          if (typeof p === "string" && Deno.lstatSync(p).isSocket) return p;
+          // (A Windows pipe is no file to stat: `connect` below waits for it.)
+          if (
+            typeof p === "string" &&
+            (isPipePath(p) || Deno.lstatSync(p).isSocket)
+          ) return p;
         } catch { /* half-written, or its socket not bound yet */ }
       }
     } catch { /* not created yet */ }
@@ -64,10 +70,17 @@ async function findSocket(): Promise<string> {
 // not a test file.
 await using _ui = await testUI(Counter);
 {
-  const conn = await Deno.connect({
-    transport: "unix",
-    path: await findSocket(),
-  });
+  // The app's local transport: a unix socket, a named pipe on Windows.
+  const path = await findSocket();
+  let conn: RWConn | undefined;
+  for (let i = 0; !conn; i++) {
+    try {
+      conn = await connectRW(path);
+    } catch (e) {
+      if (i >= 150) throw e; // 15 s: named in the lock, never bound
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
   const send = (line: string) =>
     conn.write(new TextEncoder().encode(line + "\n")).catch(() => {});
   await send(enc("proto", protoHello(VERSION)));

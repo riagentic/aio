@@ -8,7 +8,7 @@
 //
 // DRIVEN BY REAL FILES. Two PNGs already in this repo, produced by two
 // different encoders: `docs/img/theme.png` is a screenshot from an external
-// tool (colour type 2, RGB), `amui/dist/icon.png` is this repo's own writer
+// tool (colour type 2, RGB), amui's `dist/icon.png` is this repo's own writer
 // (type 6, RGBA). A fixture I encode myself only proves my decoder agrees with
 // my encoder, which is the self-confirming shape this project keeps finding —
 // so the independent file comes first.
@@ -46,7 +46,10 @@ Deno.test("a REAL screenshot from another tool decodes (RGB, type 2)", async () 
 });
 
 Deno.test("a REAL icon decodes (RGBA, type 6) and keeps its transparency", async () => {
-  const bytes = await Deno.readFile(join(REPO, "amui/dist/icon.png"));
+  // The very bytes a build writes to `amui/dist/icon.png` — made here, since
+  // `dist/` is a build output and a fresh checkout (CI, the Windows lab) has
+  // none.
+  const bytes = await appIconPng("amui", 512);
   const px = await decodePng(bytes);
   assertEquals([px.width, px.height], [512, 512]);
   assertEquals(px.rgba.length, 512 * 512 * 4);

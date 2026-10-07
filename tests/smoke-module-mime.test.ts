@@ -6,6 +6,7 @@ import { cell } from "../mod.ts";
 import { _isJsMime, smoke } from "../src/testing/smoke-test.ts";
 import { stopEsbuild } from "../src/server/server-transpile.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { join } from "@std/path";
 
 const probe = cell("smoke-mime-probe", { state: { n: 0 }, methods: {} });
 
@@ -40,7 +41,10 @@ export default function App() { return h("div", null, label); }`,
     assert(err.message.includes("Content-Type"), err.message);
     assert(err.message.includes("application/octet-stream"), err.message);
     assert(
-      err.message.includes("App.tsx → lib/label.ts → lib/legacy.cjs"),
+      // Files, as the host spells them (the URL above stays `/`).
+      err.message.includes(
+        `App.tsx → ${join("lib", "label.ts")} → ${join("lib", "legacy.cjs")}`,
+      ),
       err.message,
     );
   } finally {

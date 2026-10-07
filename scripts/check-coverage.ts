@@ -20,10 +20,11 @@
 // not rise, and ratcheting on one machine's first correct reading is the thing
 // the comment above warns against. Let CI confirm, then raise it.
 
+import { fromFileUrl } from "@std/path";
 const FLOOR = 73; // % of src/ lines covered (deno coverage, full suite)
 
 /** This repo. Every path the gate counts must live under it. */
-const ROOT = new URL("../", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("../", import.meta.url));
 
 const LCOV = "coverage/lcov.info";
 

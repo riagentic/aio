@@ -42,6 +42,11 @@ import { createUDSListener } from "../src/server/aio.ts";
 import { serverFns } from "../src/server/server-fns.ts";
 import { dec, enc } from "../src/protocol/envelope.ts";
 import { tempDir } from "../src/testing/temp-dir.ts";
+import {
+  connectRW,
+  localEndpoint,
+  localIdle,
+} from "./local-endpoint-helper.ts";
 
 type Kind = "file" | "files" | "directory";
 const out = (stdout: string, code = 0): Deno.CommandOutput =>
@@ -126,8 +131,9 @@ Deno.test("parity: a window-reported failure THROWS — it is not a cancel", () 
 });
 
 Deno.test("parity: the window is asked for exactly what the tool is given", async () => {
-  const dir = await tempDir("pick-parity-");
-  const file = join(dir, "last.mp4");
+  // Spelled with `/` — these are the "linux" rows of two pure functions.
+  const dir = (await tempDir("pick-parity-")).replaceAll("\\", "/");
+  const file = `${dir}/last.mp4`;
   await Deno.writeTextFile(file, "");
   const opts = {
     startIn: file, // a FILE: its directory is used, on both paths
@@ -215,7 +221,7 @@ type Peer = {
 };
 
 async function peer(socketPath: string): Promise<Peer> {
-  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  const conn = await connectRW(socketPath);
   const frames: { t: string; d?: unknown }[] = [];
   let open = true;
   (async () => {
@@ -271,7 +277,9 @@ async function withUds(
     hostsSeen: DialogHost[],
   ) => Promise<void>,
 ) {
-  const socketPath = join(await tempDir("pick-uds-"), "s.sock");
+  const socketPath = localEndpoint(
+    join(await tempDir("pick-uds-"), "s.sock"),
+  );
   const calls: Promise<unknown>[] = [];
   const probes: Record<string, string | null> = {};
   const hostsSeen: DialogHost[] = [];
@@ -302,13 +310,13 @@ async function withUds(
     await fn(socketPath, calls, probes, hostsSeen);
   } finally {
     uds.shutdown();
+    await localIdle();
   }
 }
 
 Deno.test({
   name:
     "uds: a window that announced dialogs opens the pick; its answer is the result",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     await withUds(async (socketPath, calls) => {
       const w = await peer(socketPath);
@@ -341,7 +349,6 @@ Deno.test({
 
 Deno.test({
   name: "uds: cancel in the window is null",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     await withUds(async (socketPath, calls) => {
       const w = await peer(socketPath);
@@ -364,7 +371,6 @@ Deno.test({
 Deno.test({
   name:
     "uds: the window closing mid-dialog REJECTS the pick (not a cancel, not a hang)",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     await withUds(async (socketPath, calls) => {
       const w = await peer(socketPath);
@@ -398,7 +404,6 @@ Deno.test({
 Deno.test({
   name:
     "uds: a peer that did NOT announce dialogs is never a dialog host — even with a window connected beside it",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     await withUds(async (socketPath, _calls, probes) => {
       const win = await peer(socketPath);
@@ -441,7 +446,6 @@ serverFns(SFN_NS, {
 
 Deno.test({
   name: "uds: a serverFn call runs as a call from ITS connection too",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     await withUds(async (socketPath) => {
       const win = await peer(socketPath);
@@ -475,7 +479,6 @@ Deno.test({
 Deno.test({
   name:
     "uds: a pick started AFTER its window closed rejects at once — it cannot hang",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     // The stale-host case: a long method takes the window's host into its
     // scope, the window closes while it works, and only THEN does it call

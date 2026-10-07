@@ -32,7 +32,14 @@ import {
   stack,
 } from "./am-output.ts";
 import { resolveAioRoot, withoutAioFlag } from "./am-cmd-link.ts";
-import { basename, join, relative, resolve } from "@std/path";
+import {
+  basename,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  SEPARATOR,
+} from "@std/path";
 import {
   compareVersions,
   currentLink,
@@ -441,8 +448,11 @@ export async function cmdPin(
   // the path does not exist, and `am pin latest` returns to a release.
   if (
     ref !== "" &&
-    (isPathPin(ref) || ref.startsWith("/") || ref.startsWith("./") ||
-      ref.startsWith("../") || ref === ".")
+    // `isAbsolute` and the separator are the HOST's: `C:\aio` and `.\aio`
+    // are paths on Windows, and were read as a version there.
+    (isPathPin(ref) || isAbsolute(ref) || ref.startsWith("./") ||
+      ref.startsWith("../") || ref.startsWith(`.${SEPARATOR}`) ||
+      ref.startsWith(`..${SEPARATOR}`) || ref === ".")
   ) {
     const target = resolve(
       Deno.cwd(),

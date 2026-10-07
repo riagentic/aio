@@ -58,10 +58,8 @@ Deno.test("abuse block: a flooding raw socket has EVERY dropped frame answered, 
     // ── the abusive peer: fires 200 frames and never listens to a refusal ──
     const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
     const acks = new Map<string, { ok: boolean; retryAfterMs?: number }>();
-    const closed = new Promise<void>((res) => {
-      // Not asserting 1008: the peer is still mid-write when the server
-      // closes, so the close is unclean on this side and arrives without it.
-      ws.onclose = () => res();
+    const closed = new Promise<CloseEvent>((res) => {
+      ws.onclose = (e) => res(e);
     });
     ws.onmessage = (e) => {
       const f = dec(String(e.data));
@@ -80,11 +78,21 @@ Deno.test("abuse block: a flooding raw socket has EVERY dropped frame answered, 
     for (let i = 0; i < 200; i++) {
       ws.send(enc("action", { type: "flood:bump", payload: {}, cid: `f${i}` }));
     }
-    const timedOut = await Promise.race([
-      closed.then(() => false),
-      sleep(5_000).then(() => true),
+    const close = await Promise.race([
+      closed,
+      sleep(5_000).then(() => null),
     ]);
-    assert(!timedOut, "a 200-frame flood was never closed");
+    assert(close, "a 200-frame flood was never closed");
+    // …and TOLD why. The server used to close from inside the handler of the
+    // 50th drop, with f149..f199 still unread: the close handshake failed on
+    // them, so this side saw an abrupt end with no code — and on macOS,
+    // most runs, no end at all (this assert's first form timed out there).
+    // The burst is read out first now (`_closeAfterRead` in server-ws.ts).
+    assertEquals(
+      [close.code, close.reason],
+      [1008, "Rate limit exceeded"],
+      "the flooder is closed with the code and reason the docs promise",
+    );
     // Frame 1 was the hello, f0..f98 fit the budget, f99..f148 are the 50
     // drops — the 50th of which closes the socket. Every one is answered.
     const unanswered = Array.from({ length: 50 }, (_, i) => `f${99 + i}`)

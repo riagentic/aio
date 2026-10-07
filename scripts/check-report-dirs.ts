@@ -29,6 +29,7 @@
 // there is ever committed.
 
 /** The two directories whose contents are reports, never source. */
+import { fromFileUrl } from "@std/path";
 export const REPORT_DIRS = ["feedback/", "review/"] as const;
 
 export type Verdict = {
@@ -75,7 +76,7 @@ async function gitLsFiles(root: string): Promise<string[]> {
 }
 
 if (import.meta.main) {
-  const root = new URL("../", import.meta.url).pathname;
+  const root = fromFileUrl(new URL("../", import.meta.url));
   const v = verdict(
     await gitLsFiles(root),
     await Deno.readTextFile(`${root}.gitignore`),

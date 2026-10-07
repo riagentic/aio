@@ -4,6 +4,7 @@
 // must still be tellable apart from the other aio apps in a taskbar. So the
 // assertions here are about identity (same name → same icon, different name →
 // different colour) and about the two renderers agreeing, not about bytes.
+import { join } from "@std/path";
 import {
   assert,
   assertEquals,
@@ -182,11 +183,11 @@ Deno.test("icon: a script with no glyphs falls back, and says so by being the sa
 Deno.test("icon: the app dir's icon wins, with nothing to report", async () => {
   const dir = await Deno.makeTempDir({ prefix: "aio-icon-" });
   try {
-    await Deno.mkdir(`${dir}/src`);
-    await Deno.writeFile(`${dir}/src/icon.png`, new Uint8Array([1]));
-    await Deno.writeFile(`${dir}/icon.png`, new Uint8Array([2]));
-    const r = await resolveAppIcon(dir, `${dir}/src`);
-    assertEquals(r.icon, `${dir}/src/icon.png`);
+    await Deno.mkdir(join(dir, "src"));
+    await Deno.writeFile(join(dir, "src", "icon.png"), new Uint8Array([1]));
+    await Deno.writeFile(join(dir, "icon.png"), new Uint8Array([2]));
+    const r = await resolveAppIcon(dir, join(dir, "src"));
+    assertEquals(r.icon, join(dir, "src", "icon.png"));
     assertEquals(
       r.misplaced,
       null,
@@ -200,14 +201,14 @@ Deno.test("icon: the app dir's icon wins, with nothing to report", async () => {
 Deno.test("icon: an icon at the project root is reported, not used", async () => {
   const dir = await Deno.makeTempDir({ prefix: "aio-icon-" });
   try {
-    await Deno.mkdir(`${dir}/src`);
-    await Deno.writeFile(`${dir}/icon.png`, new Uint8Array([2]));
-    const r = await resolveAppIcon(dir, `${dir}/src`);
+    await Deno.mkdir(join(dir, "src"));
+    await Deno.writeFile(join(dir, "icon.png"), new Uint8Array([2]));
+    const r = await resolveAppIcon(dir, join(dir, "src"));
     assertEquals(r.icon, null, "the build still draws its monogram");
-    assertEquals(r.misplaced, `${dir}/icon.png`);
-    const hint = misplacedIconHint(r.misplaced!, `${dir}/src`);
-    assertStringIncludes(hint, `${dir}/icon.png`);
-    assertStringIncludes(hint, `${dir}/src/icon.png`); // where to move it
+    assertEquals(r.misplaced, join(dir, "icon.png"));
+    const hint = misplacedIconHint(r.misplaced!, join(dir, "src"));
+    assertStringIncludes(hint, join(dir, "icon.png"));
+    assertStringIncludes(hint, join(dir, "src", "icon.png")); // where to move it
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
@@ -216,8 +217,8 @@ Deno.test("icon: an icon at the project root is reported, not used", async () =>
 Deno.test("icon: no icon anywhere says nothing — the monogram is the answer", async () => {
   const dir = await Deno.makeTempDir({ prefix: "aio-icon-" });
   try {
-    await Deno.mkdir(`${dir}/src`);
-    const r = await resolveAppIcon(dir, `${dir}/src`);
+    await Deno.mkdir(join(dir, "src"));
+    const r = await resolveAppIcon(dir, join(dir, "src"));
     assertEquals(r, { icon: null, misplaced: null });
   } finally {
     await Deno.remove(dir, { recursive: true });
@@ -229,8 +230,8 @@ Deno.test("icon: a FLAT app cannot misplace its icon — root IS the app dir", a
   try {
     const r = await resolveAppIcon(dir, dir);
     assertEquals(r.misplaced, null, "no hint that says 'move it to itself'");
-    await Deno.writeFile(`${dir}/icon.png`, new Uint8Array([3]));
-    assertEquals((await resolveAppIcon(dir, dir)).icon, `${dir}/icon.png`);
+    await Deno.writeFile(join(dir, "icon.png"), new Uint8Array([3]));
+    assertEquals((await resolveAppIcon(dir, dir)).icon, join(dir, "icon.png"));
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

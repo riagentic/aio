@@ -12,8 +12,10 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { DEFAULT_TESTGEN_OUT } from "../src/am/am-cmd-testgen.ts";
+import { fromFileUrl, normalize } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("..", import.meta.url));
 
 async function am(
   args: string[],
@@ -41,11 +43,11 @@ async function makeApp(dir: string, appTsx: string): Promise<void> {
       title: "tgapp",
       version: "0.1",
       imports: {
-        "aio": `${REPO}mod.ts`,
+        "aio": `${spec(REPO)}mod.ts`,
         "aio/air": `${REPO}src/air.ts`,
         "aio/testing": `${REPO}src/cell-test.ts`,
         "aio/jsx-runtime": `${REPO}src/jsx-runtime.ts`,
-        "happy-dom": "npm:happy-dom@^17",
+        "happy-dom": "npm:happy-dom@^20",
       },
       compilerOptions: { jsx: "react-jsx", jsxImportSource: "aio" },
     }),
@@ -78,8 +80,11 @@ Deno.test("am testgen writes a typed client naming the real elements", async () 
     assertStringIncludes(gen, "tab-settings");
     assertStringIncludes(gen, "TypedTestUI");
     // …and it says so, rather than writing a file in silence.
+    // A path the user reads (the host's separator), inside a JSON string.
     assert(
-      (r.out + r.err).includes(DEFAULT_TESTGEN_OUT),
+      (r.out + r.err).includes(
+        JSON.stringify(normalize(DEFAULT_TESTGEN_OUT)).slice(1, -1),
+      ),
       `it must name the file it wrote: ${r.out}${r.err}`,
     );
   } finally {

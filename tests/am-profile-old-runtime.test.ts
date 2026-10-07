@@ -3,10 +3,10 @@
 // on the app's real data. Pinned against the actual v1.0.9-beta parser, read
 // out of the repository's own history (skipped where that tag is absent).
 import { assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const REPO = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 const TAG = "v1.0.9-beta";
 
 const tagged = (() => {

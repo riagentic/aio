@@ -8,10 +8,19 @@
 // windows, split chunks, a partial frame left by a dead connection — becomes
 // observable instead of assumed.
 
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import {
+  GUEST_PRELOAD_REFUSED_EVENT,
+  guestPreload,
+} from "../src/protocol/guest-preload.ts";
 import { electronMainScriptUDS } from "../src/electron/electron.ts";
 import { serveHttpOverLocal } from "../src/server/http-over-conn.ts";
-import { listenLocal } from "../src/server/local-listen.ts";
+import {
+  isPipePath,
+  listenLocal,
+  type LocalConn,
+} from "../src/server/local-listen.ts";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
 import { requireLocalPeer } from "../src/server/local-peer.ts";
 import { join } from "@std/path";
 import { fuzzEnvInt } from "./fuzz-seed.ts";
@@ -105,14 +114,20 @@ let _curUrl = '';
 // below move _curUrl to aio://app/ on the http shell; the relay is what they
 // test, and the sender check has its own file (electron-ipc-sender-guard).
 let _loadedUrl = '';
+// The app's own session. Electron resolves '' and 'persist:' to the default
+// session (measured, 44), which is the one the app window is in.
+const _appSession = { clearCache: () => Promise.resolve(), clearStorageData: () => Promise.resolve() };
 const webContents = {
   on: (e, fn) => { (wcH[e] = wcH[e] || []).push(fn); },
+  once: () => {}, // a child window's first did-navigate (tmplWebGuard)
   // What the shell reads to tell a RELOAD (same url) from a route change.
   getURL: () => _curUrl,
   isLoading: () => false,
   send: (channel, arg) => ev({ ev: 'send', channel, arg }),
   setWindowOpenHandler: () => {},
-  session: { clearCache: () => Promise.resolve(), clearStorageData: () => Promise.resolve() },
+  // What main tells the PAGE by script (a refused preload's event).
+  executeJavaScript: (js) => { ev({ ev: 'exec', arg: js }); return Promise.resolve(); },
+  session: _appSession,
   print: () => {}, reloadIgnoringCache: () => {}, toggleDevTools: () => {},
 };
 class BrowserWindow {
@@ -133,9 +148,12 @@ module.exports = {
     commandLine: { appendSwitch: () => {} },
     quit: () => {},
     name: 'stub',
+    whenReady: () => new Promise((r) => setTimeout(r, 0)),
   },
   BrowserWindow,
-  Menu: { setApplicationMenu: () => {} },
+  // macOS: the generated main builds its menu after whenReady (tmplAppMenu;
+  // the menu itself is pinned by electron-window-close-and-menu.test.ts).
+  Menu: { setApplicationMenu: () => {}, buildFromTemplate: (t) => t },
   ipcMain: {
     on: (c, fn) => { (ipcH[c] = ipcH[c] || []).push(fn); },
     handle: (c, fn) => {
@@ -162,6 +180,11 @@ module.exports = {
     },
   },
   nativeImage: { createFromDataURL: () => ({}) },
+};
+// Only what asks for a partition by NAME reads this (openWindow's "is this
+// the app's own session"); there is no defaultSession, as there never was.
+module.exports.session = {
+  fromPartition: (n) => (n === '' || n === 'persist:' ? _appSession : { name: n }),
 };
 `;
 
@@ -196,15 +219,17 @@ const encoder = new TextEncoder();
 /** A scripted UDS server: writes exactly the bytes the test dictates and
  *  records exactly the lines the client wrote back. */
 function rawServer(path: string) {
-  const listener = Deno.listen({ transport: "unix", path });
-  const conns: Deno.Conn[] = [];
+  const listener = listenLocal(path);
+  const conns: LocalConn[] = [];
   const inbound: string[] = [];
-  let live: Deno.Conn | null = null;
+  let live: LocalConn | null = null;
+  let liveWriter: WritableStreamDefaultWriter<Uint8Array> | null = null;
   let connCount = 0;
   (async () => {
     for await (const conn of listener) {
       conns.push(conn);
       live = conn;
+      liveWriter = conn.writable.getWriter();
       connCount++;
       (async () => {
         let buf = "";
@@ -227,12 +252,8 @@ function rawServer(path: string) {
     inbound,
     conns: () => connCount,
     async write(raw: string) {
-      // `Conn.write` may take only PART of a buffer (a full socket buffer on
-      // a multi-MB frame): loop until every byte is on the wire.
-      const bytes = encoder.encode(raw);
-      for (let off = 0; off < bytes.length;) {
-        off += await live!.write(bytes.subarray(off));
-      }
+      // The stream's write resolves once every byte is on the wire.
+      await liveWriter!.write(encoder.encode(raw));
     },
     async writeLine(line: string) {
       await this.write(line + "\n");
@@ -242,6 +263,7 @@ function rawServer(path: string) {
         live?.close();
       } catch { /* already closed */ }
       live = null;
+      liveWriter = null;
     },
     close() {
       for (const c of conns) {
@@ -266,6 +288,8 @@ async function startMain(
     childWindows?: boolean;
     /** `electron: { unsandboxedChildWindows: true }` — the app's opt-in. */
     childWindowsUnsandboxed?: boolean;
+    /** deno.json `build.guestPreloads`, as the server resolved it. */
+    guestPreloads?: { dir: string; files: string[] };
     hidden?: boolean;
   } = {},
 ) {
@@ -294,6 +318,7 @@ async function startMain(
         meta: {
           childWindows: !!opts.childWindows,
           unsandboxedChildWindows: !!opts.childWindowsUnsandboxed,
+          ...(opts.guestPreloads ? { guestPreloads: opts.guestPreloads } : {}),
         },
       }
       : {}),
@@ -312,8 +337,9 @@ async function startMain(
   }
   await Deno.writeTextFile(join(dir, "main.cjs"), script);
 
-  const ctrlPath = join(dir, "ctrl.sock");
-  const ctrl = Deno.listen({ transport: "unix", path: ctrlPath });
+  const ctrlPath = localEndpoint(join(dir, "ctrl.sock"));
+  const ctrl = listenLocal(ctrlPath);
+  const ctrlConns = ctrl[Symbol.asyncIterator]();
   const proc = new Deno.Command(Deno.execPath(), {
     args: ["run", "-A", "--quiet", join(dir, "main.cjs")],
     cwd: dir,
@@ -339,7 +365,7 @@ async function startMain(
   // …and a child that dies at runtime before dialling in (a throw at module
   // scope, a missing stub method) must fail with ITS stderr, not hang here.
   const conn = await Promise.race([
-    ctrl.accept(),
+    ctrlConns.next().then((r) => r.value as LocalConn),
     proc.status.then((st) => {
       throw new Error(
         `main.cjs exited (code ${st.code}) before connecting to the harness:\n` +
@@ -523,17 +549,21 @@ async function withHarness(
     baseDir?: (dir: string) => Promise<string>;
     childWindows?: boolean;
     childWindowsUnsandboxed?: boolean;
+    guestPreloads?: (dir: string) => { dir: string; files: string[] };
     hidden?: boolean;
   } = {},
 ): Promise<void> {
   const dir = await Deno.makeTempDir({ prefix: "aio-esock-" });
-  const sockPath = join(dir, "s.sock");
+  const sockPath = localEndpoint(join(dir, "s.sock"));
   const srv = rawServer(sockPath);
   const main = await startMain(sockPath, {
-    httpSocketPath: opts.httpSocket ? join(dir, "http.sock") : undefined,
+    httpSocketPath: opts.httpSocket
+      ? localEndpoint(join(dir, "http.sock"))
+      : undefined,
     baseDir: opts.baseDir ? await opts.baseDir(dir) : undefined,
     childWindows: opts.childWindows,
     childWindowsUnsandboxed: opts.childWindowsUnsandboxed,
+    guestPreloads: opts.guestPreloads?.(dir),
     hidden: opts.hidden,
   });
   try {
@@ -548,6 +578,7 @@ async function withHarness(
   } finally {
     await main.close();
     srv.close();
+    await localIdle();
     await Deno.remove(dir, { recursive: true }).catch(() => {});
   }
 }
@@ -749,7 +780,7 @@ Deno.test("electron main: an aborted navigation gives the old document its relay
 // every crash-mid-frame reconnect.
 Deno.test("electron main: a partial frame does not corrupt the next connection", async () => {
   const dir = await Deno.makeTempDir({ prefix: "aio-esock-" });
-  const sockPath = join(dir, "s.sock");
+  const sockPath = localEndpoint(join(dir, "s.sock"));
   let srv = rawServer(sockPath);
   const main = await startMain(sockPath);
   try {
@@ -788,6 +819,7 @@ Deno.test("electron main: a partial frame does not corrupt the next connection",
   } finally {
     await main.close();
     srv.close();
+    await localIdle();
     await Deno.remove(dir, { recursive: true }).catch(() => {});
   }
 });
@@ -848,7 +880,7 @@ Deno.test("electron main: a multi-MB frame in many chunks reassembles, with its 
 // looks connected and is not.
 Deno.test("electron main: renderer-ready with no backend reports the outage", async () => {
   const dir = await Deno.makeTempDir({ prefix: "aio-esock-" });
-  const sockPath = join(dir, "s.sock"); // nothing listening
+  const sockPath = localEndpoint(join(dir, "s.sock")); // nothing listening
   const main = await startMain(sockPath);
   try {
     await new Promise((r) => setTimeout(r, 300));
@@ -901,7 +933,7 @@ Deno.test("electron main: relay fuzz — nothing lost, reordered or corrupted", 
     const pick = <T>(xs: readonly T[]): T => xs[Math.floor(rnd() * xs.length)]!;
 
     const dir = await Deno.makeTempDir({ prefix: "aio-efuzz-" });
-    const sockPath = join(dir, "s.sock");
+    const sockPath = localEndpoint(join(dir, "s.sock"));
     let srv = rawServer(sockPath);
     const main = await startMain(sockPath);
     const trail: string[] = [];
@@ -1098,6 +1130,7 @@ Deno.test("electron main: relay fuzz — nothing lost, reordered or corrupted", 
     } finally {
       await main.close();
       srv.close();
+      await localIdle();
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }
   }
@@ -1121,39 +1154,43 @@ function streamingHttpServer(
   gapMs: number,
 ) {
   const marks = { lastWriteAt: 0, firstWriteAt: 0 };
-  const server = Deno.serve(
-    { path, onListen: () => {} },
-    async (req) => {
-      const u = new URL(req.url);
-      if (req.method === "POST") {
-        return new Response("echo:" + await req.text(), { status: 201 });
-      }
-      if (u.pathname === "/gone") return new Response(null, { status: 204 });
-      if (!u.pathname.startsWith("/nft-image/")) {
-        return new Response("Not Found", { status: 404 });
-      }
-      const body = new ReadableStream<Uint8Array>({
-        async start(ctrl) {
-          for (let i = 0; i < chunks.length; i++) {
-            if (i > 0) await new Promise((r) => setTimeout(r, gapMs));
-            const now = Date.now();
-            if (i === 0) marks.firstWriteAt = now;
-            marks.lastWriteAt = now;
-            ctrl.enqueue(chunks[i]!);
-          }
-          ctrl.close();
-        },
-      });
-      return new Response(body, {
-        status: 200,
-        headers: {
-          "content-type": "image/png",
-          "x-content-type-options": "nosniff",
-          "cache-control": "private, max-age=31536000, immutable",
-        },
-      });
-    },
-  );
+  const handler = async (req: Request) => {
+    const u = new URL(req.url);
+    if (req.method === "POST") {
+      return new Response("echo:" + await req.text(), { status: 201 });
+    }
+    if (u.pathname === "/gone") return new Response(null, { status: 204 });
+    if (!u.pathname.startsWith("/nft-image/")) {
+      return new Response("Not Found", { status: 404 });
+    }
+    const body = new ReadableStream<Uint8Array>({
+      async start(ctrl) {
+        for (let i = 0; i < chunks.length; i++) {
+          if (i > 0) await new Promise((r) => setTimeout(r, gapMs));
+          const now = Date.now();
+          if (i === 0) marks.firstWriteAt = now;
+          marks.lastWriteAt = now;
+          ctrl.enqueue(chunks[i]!);
+        }
+        ctrl.close();
+      },
+    });
+    return new Response(body, {
+      status: 200,
+      headers: {
+        "content-type": "image/png",
+        "x-content-type-options": "nosniff",
+        "cache-control": "private, max-age=31536000, immutable",
+      },
+    });
+  };
+  // A pipe has no `Deno.serve`: there the app's handler is served by the
+  // server a Windows app really uses for it.
+  if (isPipePath(path)) {
+    const server = serveHttpOverLocal(listenLocal(path), handler);
+    return { marks, close: () => server.close() };
+  }
+  const server = Deno.serve({ path, onListen: () => {} }, handler);
   return { marks, close: () => server.shutdown() };
 }
 
@@ -1181,7 +1218,11 @@ Deno.test("electron aio://: a route response streams through the socket, headers
   await withHarness(async (_srv, main, dir) => {
     const chunks = randomChunks(4, 64 * 1024);
     const GAP = 200;
-    const http = streamingHttpServer(join(dir, "http.sock"), chunks, GAP);
+    const http = streamingHttpServer(
+      localEndpoint(join(dir, "http.sock")),
+      chunks,
+      GAP,
+    );
     try {
       const priv = main.events.find((e) => e.ev === "privileges")?.privileges;
       assert(priv, "the scheme was registered as privileged");
@@ -1222,9 +1263,16 @@ Deno.test("electron aio://: a route response streams through the socket, headers
             http.marks.lastWriteAt - r.t0
           }ms — the body was buffered`,
       );
+      // The two marks are read in two PROCESSES, and two `Date.now()`s on
+      // one machine do not agree to the millisecond (a Windows laptop under
+      // load: this read "ended" before the write it had just delivered —
+      // while the bytes above were whole). Half a gap is far past any such
+      // disagreement, and still after every chunk but the last.
       assert(
-        r.endedAt >= http.marks.lastWriteAt,
-        "the body was read to the end",
+        r.endedAt >= http.marks.lastWriteAt - GAP / 2,
+        `the body was read to the end (ended at +${
+          r.endedAt - r.t0
+        }ms, last chunk written at +${http.marks.lastWriteAt - r.t0}ms)`,
       );
 
       // A request body goes the other way through the same pipe.
@@ -1249,7 +1297,7 @@ Deno.test("electron aio://: a route response streams through the socket, headers
 // upload — a client no raw-socket test imitates exactly.
 Deno.test("electron aio://: through the lockdown's HTTP server — an unread upload keeps its answer, uploads arrive, the URL is the route's own", async () => {
   await withHarness(async (_srv, main, dir) => {
-    const path = join(dir, "http.sock");
+    const path = localEndpoint(join(dir, "http.sock"));
     const http = serveHttpOverLocal(
       listenLocal(path, { peer: true }),
       async (req) => {
@@ -1267,7 +1315,8 @@ Deno.test("electron aio://: through the lockdown's HTTP server — an unread upl
       { unixUrls: true },
     );
     try {
-      for (let i = 0; i < 300; i++) {
+      // A pipe is no file to wait for; its bind is already queued.
+      for (let i = 0; i < 300 && !isPipePath(path); i++) {
         try {
           if (Deno.lstatSync(path).isSocket) break;
         } catch { /* not bound yet */ }
@@ -1324,7 +1373,11 @@ Deno.test("electron aio://: FROM_DISK serves dist/ and falls through to the sock
   };
   await withHarness(async (_srv, main, dir) => {
     const chunks = randomChunks(2, 1024);
-    const http = streamingHttpServer(join(dir, "http.sock"), chunks, 10);
+    const http = streamingHttpServer(
+      localEndpoint(join(dir, "http.sock")),
+      chunks,
+      10,
+    );
     try {
       const page = await main.proto("aio://app/");
       assertEquals(page.status, 200);
@@ -1412,10 +1465,14 @@ for (const legacy of [false, true]) {
         // the relay if the veto did not.
         await srv.writeLine('{"v":2,"t":"state","d":{"n":2}}');
         await srv.writeLine('{"v":2,"t":"ui-surface","d":{"id":"q1"}}');
-        await main.waitFor(() => main.msgs().length >= before + 2, 3000).catch(
-          () => {},
-        );
-        const after = main.msgs().slice(before).map(kindOf);
+        // Waited for by KIND, not by count: the gate reopening may replay the
+        // last state first, and two frames are then not yet these two.
+        const kinds = () => main.msgs().slice(before).map(kindOf);
+        await main.waitFor(
+          () => kinds().includes("state") && kinds().includes("ui-surface"),
+          3000,
+        ).catch(() => {});
+        const after = kinds();
         assert(
           after.includes("state") && after.includes("ui-surface"),
           `the downlink died on an in-app link click — after it the renderer ` +
@@ -1906,6 +1963,150 @@ Deno.test("electron main: with the app's opt-in, sandbox:false is honoured", asy
   }, {
     childWindows: true,
     childWindowsUnsandboxed: true,
+    baseDir: async (dir) => {
+      app = await Deno.realPath(
+        // aio-ok: inside the harness's own dir, which it removes recursively
+        await Deno.makeTempDir({ dir, prefix: "app-" }),
+      );
+      await Deno.writeTextFile(join(app, "p.js"), "");
+      return app;
+    },
+  });
+});
+
+// openWindow's preload had the gap a <webview>'s had: it must sit in the app
+// directory, which in a package is dist/ — aio's own bundle, nothing of the
+// app's. A DECLARED guest preload (deno.json build.guestPreloads), named with
+// guestPreload(), resolves where this run keeps the file; an undeclared name
+// is refused by name, with the fix, to the caller AND as the page event.
+Deno.test("electron main: openWindow takes a declared guestPreload() name — the file outside the app directory loads; an undeclared name is refused with the fix and the page is told", async () => {
+  let app = "";
+  let staged = "";
+  await withHarness(async (_srv, main) => {
+    const pre = (e: Ev) =>
+      (e.opts as { webPreferences: { preload?: string } }).webPreferences
+        .preload;
+    // The package's shape: the file is NOT under the app directory.
+    const byPath = await main.invoke("__aio:openWindow", {
+      url: "https://x.test",
+      preload: join(staged, "src", "guest", "p.cjs"),
+    });
+    assertEquals(byPath.ok, false);
+    assertStringIncludes(byPath.error!, "outside the app directory");
+    assertStringIncludes(
+      byPath.error!,
+      'guestPreload("src/guest/preload.cjs")',
+    );
+    assertEquals(childWindows(main), []);
+
+    const named = await main.invoke("__aio:openWindow", {
+      url: "https://x.test",
+      preload: guestPreload("src/guest/p.cjs"),
+    });
+    assertEquals(named.ok, true, named.error);
+    assertEquals(childWindows(main).map(pre), [
+      join(staged, "src", "guest", "p.cjs"),
+    ]);
+
+    // Undeclared — though the file is right there beside the declared one.
+    const other = await main.invoke("__aio:openWindow", {
+      url: "https://x.test",
+      preload: guestPreload("src/guest/other.cjs"),
+    });
+    assertEquals(other.ok, false);
+    assertStringIncludes(other.error!, "is not a declared guest preload");
+    // The fix names the refused file, added to the declared list.
+    assertStringIncludes(
+      other.error!,
+      '"guestPreloads": ["src/guest/p.cjs","src/guest/other.cjs"] } and ' +
+        'pass { preload: guestPreload("src/guest/other.cjs") }',
+    );
+    assertEquals(childWindows(main).length, 1);
+    const told = main.events.filter((e) => e.ev === "exec").map((e) => e.arg!);
+    assertEquals(told.length, 2, told.join("\n"));
+    assertStringIncludes(told[1]!, GUEST_PRELOAD_REFUSED_EVENT);
+    assertStringIncludes(told[1]!, guestPreload("src/guest/other.cjs"));
+    // A path inside the app directory keeps loading, as before.
+    const old = await main.invoke("__aio:openWindow", {
+      url: "https://x.test",
+      preload: "p.js",
+    });
+    assertEquals(old.ok, true, old.error);
+    assertEquals(childWindows(main).map(pre)[1], join(app, "p.js"));
+  }, {
+    childWindows: true,
+    guestPreloads: (dir) => ({
+      dir: staged = Deno.realPathSync(join(dir, "staged")),
+      files: ["src/guest/p.cjs"],
+    }),
+    baseDir: async (dir) => {
+      const guest = join(dir, "staged", "src", "guest");
+      await Deno.mkdir(guest, { recursive: true });
+      await Deno.writeTextFile(join(guest, "p.cjs"), "");
+      await Deno.writeTextFile(join(guest, "other.cjs"), "");
+      app = await Deno.realPath(
+        // aio-ok: inside the harness's own dir, which it removes recursively
+        await Deno.makeTempDir({ dir, prefix: "app-" }),
+      );
+      await Deno.writeTextFile(join(app, "p.js"), "");
+      return app;
+    },
+  });
+});
+
+// A child window used to live in the app's own session — the one that serves
+// aio://app. Child windows get ONE persistent session of their own
+// (persist:aio-child — logins survive a restart, as they did), or the
+// partition the app names. Asserted on the window the real main.cjs makes.
+Deno.test("electron main: a child window gets its own session — never the app's; a named partition is the app's choice", async () => {
+  let app = "";
+  await withHarness(async (_srv, main) => {
+    const open = (arg: Record<string, unknown>) =>
+      main.cmd({ cmd: "ipc", channel: "__aio:openWindow", arg });
+    const partitions = () =>
+      childWindows(main).map((e) =>
+        (e.opts as { webPreferences: { partition?: string } }).webPreferences
+          .partition
+      );
+    const preload = join(app, "p.js");
+    await open({ url: "https://a.test", preload });
+    await open({ url: "https://b.test", preload });
+    await open({ url: "https://c.test", preload, partition: "persist:dapps" });
+    await main.waitFor(() => childWindows(main).length === 3);
+    assertEquals(partitions(), [
+      "persist:aio-child",
+      "persist:aio-child",
+      "persist:dapps",
+    ]);
+    const said = () => main.stderr.join("") + main.stdout.join("");
+    assert(
+      said().includes(
+        'session "persist:aio-child": the one child windows share',
+      ),
+      said(),
+    );
+    assert(said().includes("for a throw-away window"), said());
+    assert(said().includes('session "persist:dapps"'), said());
+    // A partition or an origins list of the wrong shape is refused, not guessed.
+    await open({ url: "https://d.test", preload, partition: "" });
+    await main.waitFor(() => said().includes("partition must be"));
+    await open({ url: "https://d.test", preload, origins: "https://x.test" });
+    await main.waitFor(() => said().includes("origins must be"));
+    // "persist:" is not a partition: Electron resolves it to the app's own
+    // session — a foreign page would sit in the session that serves aio://app.
+    await open({ url: "https://e.test", preload, partition: "persist:" });
+    await main.waitFor(() =>
+      said().includes(
+        'partition "persist:" resolves to the app\'s own session',
+      )
+    );
+    await open({ url: "https://e.test", preload, partition: "persist: " });
+    await main.waitFor(() =>
+      said().includes('partition "persist: " resolves to the app')
+    );
+    assertEquals(childWindows(main).length, 3);
+  }, {
+    childWindows: true,
     baseDir: async (dir) => {
       app = await Deno.realPath(
         // aio-ok: inside the harness's own dir, which it removes recursively

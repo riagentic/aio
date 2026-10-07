@@ -23,6 +23,7 @@
 // removing copies is the intended direction — retighten the ledger and commit
 // it.
 import { assertEquals } from "@std/assert";
+import { fromFileUrl } from "@std/path";
 
 /** Facts that must be spelled in `src/server/app-files.ts` and read from
  *  there. The number is the count of files still holding a raw literal —
@@ -87,7 +88,7 @@ async function* walk(dir: string): AsyncGenerator<string> {
 const JSON_PARSE_HOME = "src/server/deno-json.ts";
 
 Deno.test("one fact, one spelling: nothing hand-parses the app config", async () => {
-  const root = new URL("..", import.meta.url).pathname;
+  const root = fromFileUrl(new URL("..", import.meta.url));
   const offenders: string[] = [];
   for await (const f of walk(`${root}src`)) {
     const rel = f.slice(root.length);
@@ -112,7 +113,7 @@ Deno.test("one fact, one spelling: nothing hand-parses the app config", async ()
 });
 
 Deno.test("one fact, one spelling: the hardcoded-literal ledger only shrinks", async () => {
-  const root = new URL("..", import.meta.url).pathname;
+  const root = fromFileUrl(new URL("..", import.meta.url));
   const counts: Record<string, string[]> = {};
   for await (const f of walk(`${root}src`)) {
     const rel = f.slice(root.length);

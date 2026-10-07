@@ -1,17 +1,27 @@
 // least-privilege capability manifest (the structural half of
 // `aio ship`): scan what the app actually uses and emit the minimal --allow-*
 // set instead of -A.
+import { tempDir } from "../src/testing/temp-dir.ts";
 import { assert, assertEquals } from "@std/assert";
 import {
   _SCANNED_FS_APIS,
   AIO_BASELINE,
+  aioBaseline,
   type Capabilities,
   scanCapabilities,
+  scanCapabilitiesFor,
 } from "../src/build/capabilities.ts";
 import { manifestReport, permissionFlags } from "../src/testing/internal.ts";
+import { fromFileUrl } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
+
+// The scan itself is judged against the frozen, FFI-free baseline whatever
+// host runs this file; what a Windows target adds is pinned in the last case.
+const scan = (sources: { content: string }[]) =>
+  scanCapabilitiesFor(sources, "linux");
 
 Deno.test("scanCapabilities: detects each category from real API usage", () => {
-  const caps = scanCapabilities([
+  const caps = scan([
     { content: `const r = await fetch("https://api.x");` }, // net
     { content: `await Deno.readTextFile("./x");` }, // read
     { content: `await Deno.writeTextFile("./y", "z");` }, // write
@@ -44,7 +54,7 @@ Deno.test("scanCapabilities: a pure app still needs what AIO needs", () => {
   // dependency the user never wrote. Advice that produces an app which cannot
   // start is worse than no advice — and `runFlags` travels in the SIGNED
   // release manifest.
-  const caps = scanCapabilities([
+  const caps = scan([
     { content: `export const add = (a: number, b: number) => a + b;` },
   ]);
   assertEquals(permissionFlags(caps), [
@@ -77,7 +87,7 @@ Deno.test("capabilities: the baseline is a FLOOR, and never -A", () => {
 });
 
 Deno.test("scanCapabilities: a mention in a COMMENT does not grant a permission", () => {
-  const caps = scanCapabilities([
+  const caps = scan([
     {
       content:
         `// this used to call Deno.dlopen and fetch(); now it doesn't\nexport const x = 1;`,
@@ -106,7 +116,7 @@ Deno.test("permissionFlags: emits only the needed allow-flags, never -A", () => 
 });
 
 Deno.test("manifestReport: lists flags + the reason each was included", () => {
-  const report = manifestReport(scanCapabilities([
+  const report = manifestReport(scan([
     { content: `Deno.dlopen(p, {}); fetch("x");` },
   ]));
   assert(report.includes("--allow-ffi"));
@@ -126,7 +136,7 @@ Deno.test("manifestReport: lists flags + the reason each was included", () => {
 Deno.test("scanCapabilities: the *Sync spellings count — every scanned FS API, both ways", () => {
   for (const api of _SCANNED_FS_APIS) {
     for (const name of [api, `${api}Sync`]) {
-      const caps = scanCapabilities([{ content: `Deno.${name}("./x");` }]);
+      const caps = scan([{ content: `Deno.${name}("./x");` }]);
       assert(
         caps.read || caps.write,
         `Deno.${name} must require a file permission — it scanned to none`,
@@ -136,7 +146,7 @@ Deno.test("scanCapabilities: the *Sync spellings count — every scanned FS API,
 });
 
 Deno.test("scanCapabilities: an app written entirely in *Sync APIs is not permission-free", () => {
-  const caps = scanCapabilities([{
+  const caps = scan([{
     content: `const cfg = Deno.readTextFileSync("./config.json");
 Deno.mkdirSync("./out");
 Deno.writeTextFileSync("./out/report.json", cfg);`,
@@ -208,15 +218,15 @@ Deno.test({
   name: "capabilities: an app RUNS with the flags the manifest advertises",
   sanitizeResources: false, // aio-ok: the child is killed below; Deno sees its pipes
   async fn() {
-    const dir = await Deno.makeTempDir({ prefix: "aio-caps-run-" });
+    const dir = await tempDir("aio-caps-run-");
     try {
-      const root = new URL("..", import.meta.url).pathname;
+      const root = fromFileUrl(new URL("..", import.meta.url));
       await Deno.writeTextFile(
         `${dir}/deno.json`,
         JSON.stringify({
           name: "capsapp",
           version: "0.1.0",
-          imports: { aio: `${root}mod.ts` },
+          imports: { aio: `${spec(root)}mod.ts` },
         }),
       );
       // The app a scaffold produces: its own source touches no permissioned
@@ -230,6 +240,7 @@ Deno.test({
           } });\n`,
       );
       const flags = permissionFlags(
+        // THIS host's flags: the app is started here.
         scanCapabilities([{
           content: await Deno.readTextFile(`${dir}/app.ts`),
         }]),
@@ -272,4 +283,26 @@ Deno.test({
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }
   },
+});
+
+Deno.test("capabilities: a WINDOWS binary is told it needs FFI — aio's own pipes and key files", () => {
+  // Elsewhere the baseline is the frozen one: nothing of aio's needs FFI.
+  for (const os of ["linux", "darwin", "android"]) {
+    assertEquals(aioBaseline(os), { ...AIO_BASELINE });
+    assert(
+      !permissionFlags(scanCapabilitiesFor([], os)).includes("--allow-ffi"),
+    );
+  }
+  // Windows: without it the app boots with no control credential and no pipe
+  // (measured on Windows 11 — the "RUNS with the flags the manifest
+  // advertises" case above is what failed there).
+  assertEquals(aioBaseline("windows"), { ...AIO_BASELINE, ffi: true });
+  const flags = permissionFlags(scanCapabilitiesFor([], "windows"));
+  assert(flags.includes("--allow-ffi"), flags.join(" "));
+  // And the report says whose flag it is, so nobody "narrows" it away.
+  const report = manifestReport(scanCapabilitiesFor([], "windows"), "windows");
+  assert(/--allow-ffi — .*aio itself, on Windows/.test(report), report);
+  assert(
+    !manifestReport(scanCapabilitiesFor([], "linux"), "linux").includes("ffi"),
+  );
 });

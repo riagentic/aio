@@ -11,7 +11,7 @@
 //
 // Everything runs against a THROWAWAY repo made here — never this checkout.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { join, normalize } from "@std/path";
 import { ensureVersion, removeVersion } from "../src/am/am-versions.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
@@ -38,7 +38,8 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
 const registered = async (repo: string) =>
   (await git(repo, "worktree", "list", "--porcelain")).split("\n")
     .filter((l) => l.startsWith("worktree "))
-    .map((l) => l.slice("worktree ".length));
+    // git spells a Windows path `C:/…`; the paths compared here are join()ed.
+    .map((l) => normalize(l.slice("worktree ".length)));
 
 Deno.test("ensureVersion drops stale STORE registrations, and only those", async () => {
   const base = await tempDir("am-versions-heal-");
@@ -449,7 +450,7 @@ Deno.test({
   name:
     "ensureVersion: a torn checkout that cannot be DELETED is refused, never ok",
   // Root deletes through a read-only dir anyway — nothing to fail.
-  ignore: Deno.build.os === "windows" || Deno.uid() === 0,
+  ignore: Deno.build.os === "windows" || Deno.uid() === 0, // an undeletable entry is a POSIX mode bit
   fn: () =>
     withStore(async (_base, repo, store) => {
       const path = join(store, "v9.9.9");
@@ -494,7 +495,7 @@ Deno.test("store cleanup: a FUTURE-stamped lock on a vanished store dir is prune
 Deno.test({
   name:
     "ensureVersion: …and an UNLOCKED torn checkout that cannot be deleted too",
-  ignore: Deno.build.os === "windows" || Deno.uid() === 0,
+  ignore: Deno.build.os === "windows" || Deno.uid() === 0, // an undeletable entry is a POSIX mode bit
   fn: () =>
     withStore(async (_base, repo, store) => {
       const path = join(store, "v9.9.9");

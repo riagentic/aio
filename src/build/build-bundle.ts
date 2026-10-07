@@ -20,7 +20,11 @@ import { DIST_STAGED, emptyDir, foreignDistRefusal } from "./dist-staging.ts";
 import { type BuildConfig, isStandalone } from "./build-config.ts";
 import { VERSION } from "../server/aio-cli.ts";
 import { VERSION_STAMP } from "../protocol/protocol-version.ts";
-import { bundleClient, judgeClientBundle } from "./client-bundle.ts";
+import {
+  bundleClient,
+  explainMissingPackage,
+  judgeClientBundle,
+} from "./client-bundle.ts";
 import { appIconLabel, appIconPng, appIconSvg } from "./app-icon.ts";
 import { misplacedIconHint, resolveAppIcon } from "./build-helpers.ts";
 import { explainServerOnlyImport } from "../server/server-only-specs.ts";
@@ -521,10 +525,10 @@ export async function runBundle(
     // graph-audit (server-only leaks, Node globals at module scope) and
     // graph-eval (the bundle's module scope actually run, in a worker with
     // no Node globals). A bundle that cannot load NEVER becomes an artifact.
-    // B-6: pin the EXACT version deno.json pins (esbuild@0.24.2) so dev
+    // B-6: pin the EXACT version deno.json pins (esbuild@0.25.12) so dev
     // transpile and prod bundle never resolve a different esbuild than tested.
     // deno-lint-ignore no-import-prefix
-    const esbuild = await import("npm:esbuild@0.24.2");
+    const esbuild = await import("npm:esbuild@0.25.12");
     const bundle = await bundleClient({
       esbuild,
       root,
@@ -607,7 +611,8 @@ export async function runBundle(
         // imported into a component — said in aio's words rather than the
         // bundler's seven-`../` path. Null for anything else, which keeps its
         // own message.
-        const explained = explainServerOnlyImport(String(e));
+        const explained = explainServerOnlyImport(String(e)) ??
+          explainMissingPackage(String(e), root, relative(root, appEntry));
         console.error(
           explained ? `${NO} ${explained}` : `${NO} esbuild: ${e}`,
         );

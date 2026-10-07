@@ -14,11 +14,11 @@
 // XDG_RUNTIME_DIR in one temp dir, the environment cleared,
 // GIT_CEILING_DIRECTORIES at the temp root.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const AM = new URL("../src/am.ts", import.meta.url).pathname;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const AM = fromFileUrl(new URL("../src/am.ts", import.meta.url));
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 const ENTRY = (appId: string) =>
   `import { aio } from "aio";\nawait aio.run({ appId: "${appId}", cells: [] });\n`;
 

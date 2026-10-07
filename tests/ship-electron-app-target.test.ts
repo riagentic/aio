@@ -3,12 +3,12 @@
 // UPDATE_TARGETS — so the documented spelling was refused as "unknown", by the
 // CLI and by the `shipApp` door alike.
 import { assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { shipRelease } from "../src/build/ship.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const SHIP = new URL("../src/build/ship.ts", import.meta.url).pathname;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const SHIP = fromFileUrl(new URL("../src/build/ship.ts", import.meta.url));
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 async function fixture(): Promise<{ dir: string; archive: string }> {
   const dir = await tempDir("aio-ship-electron-app-");

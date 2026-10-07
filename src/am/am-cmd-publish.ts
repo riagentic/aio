@@ -20,7 +20,7 @@
  *   am publish --no-build             # ship what dist/ already holds
  */
 
-import { join, resolve } from "@std/path";
+import { join, resolve, SEPARATOR } from "@std/path";
 import type { GlobalFlags } from "./am-types.ts";
 import { hostPlatform, PLATFORMS } from "../build/platforms.ts";
 import { detectMode, fail, out, sayErr } from "./am-output.ts";
@@ -673,7 +673,7 @@ export async function cmdPublish(
   );
   const manifests = shipped.map((x) => x.m);
 
-  const rel = (p: string) => p.replace(root + "/", "");
+  const rel = (p: string) => p.replace(root + SEPARATOR, "");
   const unsigned = manifests.some((m) => !m.signature);
   // The warning is the same fact in both modes — a CI log used to get
   // `"signed":false` and nothing else, and an unsigned release is the one a

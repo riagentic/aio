@@ -14,15 +14,16 @@
 // Real process, real worker: libraryMode runs worker cells in-isolate, so no
 // in-process harness reaches the worker host's close handler.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
 import { childEnv } from "./e2e-app-harness.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const REPO = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
+const REPO = fromFileUrl(new URL("../", import.meta.url)).replace(/[\\/]$/, "");
 
 function appSource(port: number): string {
-  return `import { aio, cell, own } from "${REPO}/mod.ts";
+  return `import { aio, cell, own } from "${spec(REPO)}/mod.ts";
 
 const G = globalThis as any;
 export const w = cell("w", {

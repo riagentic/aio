@@ -319,9 +319,10 @@ Deno.test("expandDirs: a directory argument is the test files under it, so each 
         "tests/top.test.ts",
       ]
     ) await put(rel);
+    // File arguments, as the host spells them.
     assertEquals(await expandDirs(["tests/sub"], root), [
-      "tests/sub/a.test.ts",
-      "tests/sub/deep/b_test.tsx",
+      join("tests", "sub", "a.test.ts"),
+      join("tests", "sub", "deep", "b_test.tsx"),
     ]);
     // Absolute, and beside a file: a file stays as it was named, a path that
     // does not exist stays for deno to refuse, nothing is listed twice.
@@ -336,10 +337,10 @@ Deno.test("expandDirs: a directory argument is the test files under it, so each 
         root,
       ),
       [
-        "tests/sub/deep/b_test.tsx",
+        join("tests", "sub", "deep", "b_test.tsx"),
         "tests/top.test.ts",
         "tests/gone.test.ts",
-        "tests/sub/a.test.ts",
+        join("tests", "sub", "a.test.ts"),
       ],
     );
   } finally {
@@ -709,4 +710,44 @@ Deno.test("followShard: output on EITHER pipe starts the quiet interval over; th
     await sleep(MS * 2 + 50);
     assertEquals(said.length, stopped, "it spoke after the shard ended");
   }
+});
+
+Deno.test("planWithin: every shard's file list fits one command line, at no extra width", async () => {
+  const { argLimit, plan, planWithin, runLimited } = await import(
+    "../scripts/test-shards.ts"
+  );
+  // The measured case: 2,403 files of ~33 characters, 2 shards, real Windows.
+  const files = Array.from(
+    { length: 2403 },
+    (_, i) => `tests/some-test-file-name-${String(i).padStart(4, "0")}.test.ts`,
+  );
+  const none = () => false;
+  const chars = (l: string[]) => l.reduce((s, f) => s + f.length + 1, 0);
+  // Not the constraint off Windows: the plan is `plan`'s own, shard for shard.
+  assertEquals(argLimit("linux"), Infinity);
+  assertEquals(
+    planWithin(files, 2, {}, none, argLimit("linux")),
+    plan(files, 2, {}, none),
+  );
+  const win = planWithin(files, 2, {}, none, argLimit("windows"));
+  assert(win.length > 2, "2 shards of ~45,000 characters cannot start");
+  assert(win.every((l) => chars(l) <= argLimit("windows")));
+  assertEquals(win.flat().length, files.length); // nothing dropped
+  assertEquals(new Set(win.flat()).size, files.length); // nothing twice
+  // A limit no shard can meet ends at one file per shard, never a spin.
+  assertEquals(planWithin(files.slice(0, 5), 2, {}, none, 1).length, 5);
+
+  // …and the extra shards never widen the run.
+  let live = 0, peak = 0;
+  const out = await runLimited(
+    win.map((_, i) => async () => {
+      peak = Math.max(peak, ++live);
+      await new Promise((r) => setTimeout(r, 1));
+      live--;
+      return i;
+    }),
+    2,
+  );
+  assertEquals(peak, 2);
+  assertEquals(out, win.map((_, i) => i)); // results in shard order
 });

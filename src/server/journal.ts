@@ -64,14 +64,19 @@ const replayBudget = () =>
     owner: "journal",
     why:
       `This series counts journal entries replayed AGAIN within one boot — ` +
-      `the first replay is free, so a journal of any size boots. Passing ` +
-      `the ceiling means a recovery path keeps re-entering replay with the ` +
-      `tail (the size of this call is the tail it was handed): a ` +
+      `or by boot after boot over a tail no save has compacted. The ` +
+      `first replay is free, so a journal of any size boots. Passing the ` +
+      `ceiling means a recovery path keeps re-entering replay with the ` +
+      `tail (the size of this call is the tail it was handed), or every ` +
+      `boot dies after its replay and before its first save: a ` +
       `control-flow bug, not a journal that is too large and not a setting ` +
       `to raise.`,
-    fix: `The stack trace names the caller that replays a second time. The ` +
-      `journal file itself is untouched. \`am heap\` and /__aio/metrics ` +
-      `show the counter as "journal.replay.entries".`,
+    fix: `The stack trace names the caller that replays a second time; ` +
+      `under \`chargeReplayAcrossBoots\` it is the boots themselves — the ` +
+      `log of the boot before this one says why it stopped. The journal ` +
+      `file itself is untouched, and the count starts over: the next ` +
+      `start replays it (\`<journal>.replayed\` holds the count). \`am heap\` and /__aio/metrics show the counter as ` +
+      `"journal.replay.entries".`,
   });
 
 /** Replays since {@linkcode beginReplaySession} — the first is free. */
@@ -87,6 +92,61 @@ let _replaysThisBoot = 0;
 export function beginReplaySession(): void {
   _replaysThisBoot = 0;
   replayBudget().reset();
+}
+
+/** The same ceiling, across boots — `beginReplaySession` makes every boot a
+ *  new session, so a loop that re-runs the WHOLE boot (a supervisor restarting
+ *  an app that dies after its replay, an in-process retry around `aio.run`)
+ *  was never counted: each pass replayed the tail "for the first time".
+ *
+ *  The marker is `<journal>.replayed`: the seq the replayed tail began at, and
+ *  what has been charged for it. A boot whose tail begins at that same seq
+ *  replays what an earlier boot already did, with no save in between (a save
+ *  compacts the head of the tail away) — it is charged in full, on top of
+ *  what the marker holds. Any other tail starts a new marker at zero, and a
+ *  boot with nothing to replay removes it: a crash, a restart and a save is
+ *  the normal sequence, and costs nothing.
+ *
+ *  Written BEFORE the replay, so a boot that dies inside it is counted.
+ *  Throws `MEMORY_UNBOUNDED` at the ceiling, as a re-entry does — for THAT
+ *  boot: the count starts over, so the next start replays. */
+export function chargeReplayAcrossBoots(
+  journalPath: string,
+  fromSeq: number | undefined,
+  entries: number,
+): void {
+  const marker = `${journalPath}.replayed`;
+  if (fromSeq === undefined) {
+    try {
+      Deno.removeSync(marker);
+    } catch (e) {
+      if (!(e instanceof Deno.errors.NotFound)) throw e;
+    }
+    return;
+  }
+  let prior: string[] = [];
+  try {
+    prior = Deno.readTextFileSync(marker).split(" ");
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  }
+  const again = prior[0] === String(fromSeq);
+  // A marker that does not read as a count is a full charge: never a free one.
+  const held = again ? Number(prior[1]) : 0;
+  const charged = again
+    ? (Number.isFinite(held) ? held : REPLAY_ENTRY_CEILING) + entries
+    : 0;
+  replaceFileSync(marker, `${fromSeq} ${charged}`);
+  if (!again) return;
+  try {
+    replayBudget().spend(charged);
+  } catch (e) {
+    // The refusal is said once and the count starts over: recovery is never
+    // why an app stays down. A real loop is refused again a ceiling later; a
+    // large tail whose boots a person interrupted costs one refused start.
+    replaceFileSync(marker, `${fromSeq} 0`);
+    throw e;
+  }
 }
 
 /** The cell a `worker: true` cell's patch batch belongs to, when `type` is one.
@@ -1289,7 +1349,7 @@ export function createJournal(
     const name = basename(path);
     sweepStaleTmps(
       dirname(path),
-      [name, `${name}.base`, `${name}.wm`].flatMap((n) => [
+      [name, `${name}.base`, `${name}.wm`, `${name}.replayed`].flatMap((n) => [
         uuidTmpBefore(n),
         exactName(`${n}.tmp`),
       ]),

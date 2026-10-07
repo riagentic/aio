@@ -28,6 +28,7 @@ import { freePort } from "../src/testing/server-test.ts";
 import type { CellDef } from "../src/state/cell-types.ts";
 import { stopChild } from "./stop-child.ts";
 import { childCoverageDir } from "../src/testing/temp-dir.ts";
+import { fromFileUrl } from "@std/path";
 const _childCovDir = childCoverageDir();
 
 async function waitFor<T>(fn: () => T | null, timeoutMs = 20_000): Promise<T> {
@@ -76,7 +77,7 @@ async function withServer(
       "-A",
       "--unstable-kv",
       "--config",
-      new URL("../deno.json", import.meta.url).pathname,
+      fromFileUrl(new URL("../deno.json", import.meta.url)),
       "app.ts",
       `--port=${port}`,
     ],

@@ -1,3 +1,4 @@
+import { sleeper } from "./proc-helper.ts";
 import { assertEquals } from "@std/assert";
 import {
   _zombieDeps,
@@ -12,6 +13,7 @@ import {
   writeLock,
 } from "../src/server/single-instance-lock.ts";
 import { stopChild } from "./stop-child.ts";
+import { localEndpoint } from "./local-endpoint-helper.ts";
 import { getLogger, setLogger } from "../src/diagnostics/logger-api.ts";
 import { freePort } from "../src/testing/server-test.ts";
 
@@ -331,11 +333,11 @@ Deno.test("zombie reclaim: pid alive but port dead → lock reclaimed (notes #5)
   const deadPort = freePort();
   // Lock owned by a live foreign process (a spawned sleeper) whose "server"
   // port refuses connections, past the startup grace window.
-  const sleeper = new Deno.Command("sleep", { args: ["30"] }).spawn();
+  const owner = sleeper();
   try {
     writeLock({
       appId,
-      pid: sleeper.pid,
+      pid: owner.pid,
       port: deadPort,
       host: "127.0.0.1",
       startedAt: Date.now() - 60_000,
@@ -352,7 +354,7 @@ Deno.test("zombie reclaim: pid alive but port dead → lock reclaimed (notes #5)
     );
     lock.release();
   } finally {
-    await stopChild(sleeper, { quiet: true });
+    await stopChild(owner, { quiet: true });
   }
 });
 
@@ -361,17 +363,18 @@ Deno.test("zombie reclaim: UDS instance with dead socket is reclaimed", async ()
   const deadPort = freePort();
   // UDS instance whose socket path doesn't exist (listener died) — MUST be
   // reclaimed now that the zombie check probes UDS liveness, not just TCP.
-  const sleeper = new Deno.Command("sleep", { args: ["30"] }).spawn();
+  const owner = sleeper();
   try {
     writeLock({
       appId,
-      pid: sleeper.pid,
+      pid: owner.pid,
       port: deadPort,
       startedAt: Date.now() - 60_000,
       status: "started",
       cwd: Deno.cwd(),
-      socketPath: "/tmp/aio/nonexistent-" + crypto.randomUUID().slice(0, 8) +
-        ".sock",
+      socketPath: localEndpoint(
+        "/tmp/aio/nonexistent-" + crypto.randomUUID().slice(0, 8) + ".sock",
+      ),
     });
     const lock = new AppLock(appId);
     const result = await asSettledZombie(appId, () => lock.acquire(4322));
@@ -382,7 +385,7 @@ Deno.test("zombie reclaim: UDS instance with dead socket is reclaimed", async ()
     );
     lock.release(); // ours now — release it, and the signal handlers with it
   } finally {
-    await stopChild(sleeper, { quiet: true });
+    await stopChild(owner, { quiet: true });
   }
 });
 
@@ -391,11 +394,11 @@ Deno.test("zombie reclaim: skipped during startup grace", async () => {
   const deadPort = freePort();
   // Owner is still within the 10s startup grace — must NOT be reclaimed even
   // though its port refuses connections.
-  const sleeper = new Deno.Command("sleep", { args: ["30"] }).spawn();
+  const owner = sleeper();
   try {
     writeLock({
       appId,
-      pid: sleeper.pid,
+      pid: owner.pid,
       port: deadPort,
       startedAt: Date.now(),
       status: "starting",
@@ -410,7 +413,7 @@ Deno.test("zombie reclaim: skipped during startup grace", async () => {
     );
     removeLock(appId);
   } finally {
-    await stopChild(sleeper, { quiet: true });
+    await stopChild(owner, { quiet: true });
   }
 });
 

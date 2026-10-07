@@ -386,6 +386,7 @@ export type WorkerBoundaryCall = (
   cellId: string,
   args: unknown[],
   run: (args: unknown[]) => unknown,
+  key?: string,
 ) => unknown;
 
 /** One recorded failure and whether the caller ever looked at it. `named`:
@@ -469,6 +470,7 @@ export function _watchUnobservedCalls(
             def.__aio.id,
             args,
             (a) => call.apply(def, a),
+            key,
           )
           : call.apply(def, args);
         if (!isThenable(started)) return started;

@@ -5,7 +5,9 @@ import {
   tmplAppMenu,
   tmplBounds,
   tmplCrashGuard,
+  tmplIpcGuard,
   tmplPermissionGuard,
+  tmplWebGuard,
 } from "./electron-shared.ts";
 
 /** Generates a self-contained Electron main.cjs with a connect page for aio-client */
@@ -32,6 +34,8 @@ ${tmplAppMenu("aio client")}
 app.name = '${CLIENT_PROFILE}';
 ${tmplCrashGuard()}
 ${tmplPermissionGuard()}
+${tmplWebGuard()}
+${tmplIpcGuard()}
 
 // ── Window state persistence ──
 ${tmplBounds()}
@@ -154,6 +158,23 @@ const DISCOVERY_PORT = (() => {
   return n;
 })();
 
+// A probe that never left is not "no apps on the network": said ONCE (the
+// connect page sweeps repeatedly), with no address in it. macOS refuses the
+// broadcast to an app without the Local Network permission — "No route to
+// host", while everything else on the network works.
+let _discoveryUnsentSaid = false;
+function discoveryUnsent(why) {
+  if (_discoveryUnsentSaid) return;
+  _discoveryUnsentSaid = true;
+  console.error('[aio-client] discovery: the probe could not be sent (' +
+    ((why && (why.code || why.message)) || why) + ') — nothing was asked, so an ' +
+    'empty result says nothing about what is running. Type the address instead.' +
+    (process.platform === 'darwin'
+      ? ' On macOS this is the Local Network permission: allow this app ' +
+        'under System Settings > Privacy & Security > Local Network.'
+      : ''));
+}
+
 function discoverApps(timeoutMs, cb) {
   let sock;
   const found = new Map();
@@ -175,7 +196,11 @@ function discoverApps(timeoutMs, cb) {
   sock.bind(() => {
     try { sock.setBroadcast(true); } catch {}
     const probe = Buffer.from('AIO_DISCOVER? v1');
-    try { sock.send(probe, DISCOVERY_PORT, '255.255.255.255'); } catch {}
+    try {
+      sock.send(probe, DISCOVERY_PORT, '255.255.255.255', (why) => {
+        if (why) discoveryUnsent(why);
+      });
+    } catch (why) { discoveryUnsent(why); }
     setTimeout(() => {
       try { sock.close(); } catch {}
       cb([...found.values()].sort((a, b) => a.name.localeCompare(b.name)));
@@ -388,6 +413,10 @@ async function connectTo(win, url) {
     // We've fetched + validated this as an aio app — trust its (self-signed)
     // cert so Chromium will actually load the HTTPS page.
     try { _trustedHosts.add(new URL(url).host); } catch {}
+    // 🔒 This window, showing THIS origin, is the app — nothing else is: a
+    // site a redirect lands it on, or any other window, holds no permission
+    // (tmplPermissionGuard). Re-bound per connect: the app may be another one.
+    __aioIpcBind(win, __aioOrigin(url));
     win.loadURL(url);
   } catch (e) {
     const msg = e.message || String(e);
@@ -458,6 +487,27 @@ app.on('ready', () => {
     width: 480, height: 300,
     resizable: false,
     webPreferences: { nodeIntegration: false, contextIsolation: true },
+  });
+  // 🔒 The same rules as an app's own shell. Until a connect, no origin is
+  // the app (the connect page needs no permission). There is no <webview>
+  // (webviewTag is off) and no openWindow here, so the one other page this
+  // process could show was a pop-up: window.open made a real window, which
+  // the permission guard took for the app (a window, asking from the origin
+  // it shows). It is denied, as in both app shells — an http(s) link goes to
+  // the system browser.
+  __aioIpcBind(win, '');
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    try {
+      const u = new URL(url);
+      if (u.protocol === 'http:' || u.protocol === 'https:') {
+        require('electron').shell.openExternal(url);
+      } else {
+        console.warn('[aio:electron] pop-up BLOCKED (not http/https)');
+      }
+    } catch {
+      console.warn('[aio:electron] pop-up BLOCKED (not a URL)');
+    }
+    return { action: 'deny' };
   });
 
   // Imported profile → pin its cert, remember it, connect straight in.

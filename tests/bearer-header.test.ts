@@ -13,6 +13,7 @@ import {
   _extractTokenWithSource,
   bearerToken,
 } from "../src/server/server-auth.ts";
+import { fromFileUrl } from "@std/path";
 
 /** Every source file under a directory. At module scope, not inside the test:
  *  a generator declared in the body hides the assertion below it from
@@ -86,7 +87,7 @@ Deno.test("a URL token still outranks a header one", () => {
 // `Authorization: Bearer <t>` is the other direction and is fine. So the test
 // is "whoever reads the authorization header parses it with `bearerToken`".
 Deno.test("whoever reads the authorization header uses the ONE reader", async () => {
-  const root = new URL("../src/", import.meta.url).pathname;
+  const root = fromFileUrl(new URL("../src/", import.meta.url));
   const strays: string[] = [];
   for await (const f of walk(root)) {
     const rel = f.slice(root.length).replace(/^\/+/, "");

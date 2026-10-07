@@ -23,10 +23,15 @@ import {
   fetchVerifiedZip,
   FUSED_SUFFIX,
 } from "../src/electron/electron-runtime-fetch.ts";
-import { FUSE_SENTINEL, fusesAreOff } from "../src/electron/electron-fuses.ts";
+import {
+  electronFuseBinary,
+  FUSE_SENTINEL,
+  fusesAreOff,
+} from "../src/electron/electron-fuses.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { findElectronBin } from "../src/electron/electron-spawn.ts";
 import type { Log } from "../src/electron/electron-shared.ts";
+import { zipTree } from "./zip-helper.ts";
 
 const V = "9.9.9";
 const FUSE_WIRE = `${FUSE_SENTINEL}\x01\x09101100011`;
@@ -61,6 +66,9 @@ async function isolated<T>(fn: (tmp: string) => Promise<T>): Promise<T> {
   }
 }
 
+/** The file of this host's runtime that carries the fuse wire. */
+const fuseBin = (dir: string) => electronFuseBinary(dir, Deno.build.os);
+
 /** A zip holding this host's Electron executable name — enough for the
  *  installer's "is it an Electron runtime" check. */
 async function runtimeZip(tmp: string): Promise<string> {
@@ -70,14 +78,14 @@ async function runtimeZip(tmp: string): Promise<string> {
   // With Electron's fuse wire as shipped (RunAsNode, NODE_OPTIONS and
   // --inspect on), so the installer has real bytes to turn off.
   await Deno.writeTextFile(bin, `#!/bin/sh\n${FUSE_WIRE}`);
+  // On macOS the wire is in the framework, not in the executable.
+  const fuse = fuseBin(stage);
+  if (fuse !== bin) {
+    await Deno.mkdir(join(fuse, ".."), { recursive: true });
+    await Deno.writeTextFile(fuse, FUSE_WIRE);
+  }
   const zip = join(tmp, "runtime.zip");
-  const p = await new Deno.Command("zip", {
-    args: ["-q", "-r", zip, "."],
-    cwd: stage,
-    stdout: "null",
-    stderr: "null",
-  }).output();
-  assert(p.success, "zip is needed to build the test archive");
+  await zipTree(stage, zip);
   return zip;
 }
 
@@ -132,13 +140,13 @@ Deno.test("embedded runtime: the carried runtime is unpacked with its fuses off,
       fetch: embeddedRuntimeFetch(rt),
       log: () => {},
     });
-    assert(!fusesAreOff(await Deno.readFile(electronBinIn(plain))));
+    assert(!fusesAreOff(await Deno.readFile(fuseBin(plain))));
     const dir = await ensureElectronRuntime(V, SLUG, {
       embedded: rt,
       log: () => {},
     });
     assertEquals(dir, electronRuntimeDir(V, SLUG) + FUSED_SUFFIX);
-    assert(fusesAreOff(await Deno.readFile(electronBinIn(dir))));
+    assert(fusesAreOff(await Deno.readFile(fuseBin(dir))));
   });
 });
 

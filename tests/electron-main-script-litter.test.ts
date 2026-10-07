@@ -13,7 +13,7 @@
 //     file is still there WHILE the "window" is alive, which is the moment a
 //     kill used to strand it.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { basename, join } from "@std/path";
 import {
   electronProfileDir,
   electronStderrTail,
@@ -23,6 +23,8 @@ import {
   writeMainScript,
 } from "../src/electron/electron-spawn.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { modeBitsAreMeaningful } from "../src/server/dir-permissions.ts";
+import { EXE, writeDenoProgram } from "./fake-program-helper.ts";
 import { permissiveUmask } from "./permissive-umask.ts";
 
 /** Run `fn` with the window-profile base directories (and the temp
@@ -33,6 +35,8 @@ async function inHome<T>(dir: string, fn: () => Promise<T>): Promise<T> {
     "XDG_CONFIG_HOME",
     "APPDATA",
     "TMPDIR",
+    "TEMP", // Windows' temp directory is %TEMP% / %TMP%
+    "TMP",
     "ELECTRON_PATH",
   ];
   const had = keys.map((k) => Deno.env.get(k));
@@ -41,6 +45,8 @@ async function inHome<T>(dir: string, fn: () => Promise<T>): Promise<T> {
   Deno.env.set("XDG_CONFIG_HOME", join(dir, ".config"));
   Deno.env.set("APPDATA", join(dir, "AppData"));
   Deno.env.set("TMPDIR", join(dir, "tmp"));
+  Deno.env.set("TEMP", join(dir, "tmp"));
+  Deno.env.set("TMP", join(dir, "tmp"));
   try {
     return await fn();
   } finally {
@@ -96,7 +102,6 @@ Deno.test("main script: its first line removes the file it was loaded from, and 
 Deno.test({
   name:
     "main script: a launched window's script is gone from disk while the window is still running",
-  ignore: Deno.build.os === "windows", // the stand-in is a shell script
   fn: async () => {
     const dir = await tempDir("el-main-litter-");
     try {
@@ -105,15 +110,34 @@ Deno.test({
         // Stands in for Electron: loads the main script (it dies at
         // require('electron') — after its first line), then says what is on
         // disk BEFORE exiting, i.e. before the server's own after-exit removal.
-        const fake = join(dir, "fake-electron");
-        await Deno.writeTextFile(
-          fake,
-          `#!/bin/sh\ncd "${dir}"\n${DENO_RUN} "$1" >/dev/null 2>&1\n` +
-            `if [ -e "$1" ]; then echo "present $1" > "${report}.tmp"; ` +
-            `else echo "gone $1" > "${report}.tmp"; fi\n` +
-            `mv "${report}.tmp" "${report}"\n`,
-        );
-        await Deno.chmod(fake, 0o755);
+        let fake = join(dir, "fake-electron");
+        if (Deno.build.os === "windows") {
+          // The same stand-in without a shell.
+          fake = await writeDenoProgram(
+            fake,
+            `Deno.chdir(${JSON.stringify(dir)});
+await new Deno.Command(Deno.execPath(), {
+  args: ["run", "-A", "--quiet", "--no-config", "--no-lock", Deno.args[0]],
+  stdout: "null",
+  stderr: "null",
+}).output();
+let state = "present";
+try { Deno.statSync(Deno.args[0]); } catch { state = "gone"; }
+const report = ${JSON.stringify(report)};
+Deno.writeTextFileSync(report + ".tmp", state + " " + Deno.args[0] + "\\n");
+Deno.renameSync(report + ".tmp", report);
+`,
+          );
+        } else {
+          await Deno.writeTextFile(
+            fake,
+            `#!/bin/sh\ncd "${dir}"\n${DENO_RUN} "$1" >/dev/null 2>&1\n` +
+              `if [ -e "$1" ]; then echo "present $1" > "${report}.tmp"; ` +
+              `else echo "gone $1" > "${report}.tmp"; fi\n` +
+              `mv "${report}.tmp" "${report}"\n`,
+          );
+          await Deno.chmod(fake, 0o755);
+        }
         Deno.env.set("ELECTRON_PATH", fake);
         const lines: string[] = [];
         const log = {
@@ -126,9 +150,11 @@ Deno.test({
         assert(proc, `no window was launched: ${lines.join(" | ")}`);
         await proc.status;
         await electronStderrTail(proc, 5000);
-        const [state, path] = (await Deno.readTextFile(report)).trim().split(
-          " ",
-        );
+        // Split at the FIRST space only: the macOS profile directory has one
+        // in it (`Library/Application Support`).
+        const said = (await Deno.readTextFile(report)).trim();
+        const state = said.slice(0, said.indexOf(" "));
+        const path = said.slice(said.indexOf(" ") + 1);
         assert(
           path?.endsWith(".cjs"),
           `the stand-in got no main script: ${path}`,
@@ -165,7 +191,6 @@ Deno.test({
 Deno.test({
   name:
     "main script: a window that cannot be SPAWNED leaves no script behind either",
-  ignore: Deno.build.os === "windows", // no execute bit to take away
   fn: async () => {
     // Measured on macOS (a bundle whose runtime could not be executed): the
     // spawn threw PermissionDenied and one `<hex>.cjs` — the launch URL in
@@ -176,9 +201,11 @@ Deno.test({
       await inHome(dir, async () => {
         const bin = join(dir, "bin");
         await Deno.mkdir(bin);
-        const notRunnable = join(bin, "electron");
+        // A file the OS refuses to execute: no execute bit — or, on Windows
+        // (which has none), an `.exe` that is not one.
+        const notRunnable = join(bin, `electron${EXE}`);
         await Deno.writeTextFile(notRunnable, "not a program");
-        await Deno.chmod(notRunnable, 0o644);
+        if (Deno.build.os !== "windows") await Deno.chmod(notRunnable, 0o644);
         Deno.env.set("ELECTRON_PATH", notRunnable);
         const log = { info: () => {}, error: () => {} };
         let threw = "";
@@ -189,9 +216,14 @@ Deno.test({
         } catch (e) {
           threw = String(e);
         }
-        assert(/PermissionDenied|denied/i.test(threw), `spawn: ${threw}`);
+        assert(
+          (Deno.build.os === "windows"
+            ? /os error (193|216)\b/ // "not a valid / compatible program"
+            : /PermissionDenied|denied/i).test(threw),
+          `spawn: ${threw}`,
+        );
         assertEquals(
-          filesUnder(dir).filter((f) => f !== join("bin", "electron")),
+          filesUnder(dir).filter((f) => f !== join("bin", `electron${EXE}`)),
           [],
           "the failed launch left its main script behind",
         );
@@ -242,7 +274,6 @@ Deno.test("main script: Electron's profile directory, per platform — and none 
 Deno.test({
   name:
     "main script: written 0600 into the profile's 0700 aio-main/, named by this pid — and a launch removes what dead launchers left, never a live one's",
-  ignore: Deno.build.os === "windows", // modes
   fn: () =>
     permissiveUmask(async () => {
       const dir = await tempDir("el-main-home-");
@@ -265,12 +296,15 @@ Deno.test({
           const file = await writeMainScript("sweep", "// the script\n");
           assertEquals(
             [...Deno.readDirSync(home)].map((e) => e.name).sort(),
-            [file.split("/").pop()!, `${Deno.ppid}-bbbbbbbb.cjs`].sort(),
+            [basename(file), `${Deno.ppid}-bbbbbbbb.cjs`].sort(),
           );
-          assert(file.split("/").pop()!.startsWith(`${Deno.pid}-`), file);
+          assert(basename(file).startsWith(`${Deno.pid}-`), file);
           assertEquals(await Deno.readTextFile(file), "// the script\n");
-          assertEquals(((await Deno.stat(file)).mode ?? 0) & 0o777, 0o600);
-          assertEquals(((await Deno.stat(home)).mode ?? 0) & 0o777, 0o700);
+          // The modes, where the OS has mode bits (Windows: the profile's ACL).
+          if (modeBitsAreMeaningful()) {
+            assertEquals(((await Deno.stat(file)).mode ?? 0) & 0o777, 0o600);
+            assertEquals(((await Deno.stat(home)).mode ?? 0) & 0o777, 0o700);
+          }
           // Two launches of one process never share a file.
           assert(await writeMainScript("sweep", "x") !== file);
           assertEquals(filesUnder(join(dir, "tmp")), []);
@@ -284,13 +318,13 @@ Deno.test({
 Deno.test({
   name:
     "main script: where the profile cannot be written the temp directory is used, as before",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     const dir = await tempDir("el-main-nohome-");
     try {
       await inHome(dir, async () => {
         // The profile's parent is a FILE: nothing can be created under it.
         await Deno.writeTextFile(join(dir, ".config"), "");
+        await Deno.writeTextFile(join(dir, "AppData"), ""); // Windows' parent
         await Deno.mkdir(join(dir, "Library"));
         await Deno.writeTextFile(
           join(dir, "Library", "Application Support"),

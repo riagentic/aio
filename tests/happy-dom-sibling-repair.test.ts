@@ -13,7 +13,13 @@
 // `examples/todo` tripped it on the first click, and so would every app with a
 // form in it.
 import { assertEquals } from "@std/assert";
-import { repairProxiedSiblings } from "../src/testing/happy-dom-repair.ts";
+import {
+  acceptHostEvents,
+  repairProxiedSiblings,
+} from "../src/testing/happy-dom-repair.ts";
+import { h } from "../src/air/vdom.ts";
+import { onMount } from "../src/air.ts";
+import { testUI } from "../src/testing/ui-test.ts";
 import { closeWindow } from "../src/testing/close-window.ts";
 
 // deno-lint-ignore no-explicit-any
@@ -78,3 +84,74 @@ Deno.test("repairProxiedSiblings: a form and a select know their siblings", asyn
     await closeWindow(win);
   }
 });
+
+// MEASURED (happy-dom 20.14.5; 17.6.3 took anything): `dispatchEvent` throws
+// for an event that is not happy-dom's own — and under the harness the GLOBAL
+// `Event` is Deno's. `window.dispatchEvent(new Event("resize"))` in a
+// component is one line in a browser and was a TypeError here.
+Deno.test("acceptHostEvents: the host's Event is dispatched as it was before the check existed", async () => {
+  const win = await freshWindow();
+  try {
+    const d = win.document;
+    const el = d.createElement("div");
+    let threw = false;
+    try {
+      el.dispatchEvent(new Event("probe"));
+    } catch {
+      threw = true;
+    }
+    assertEquals(
+      acceptHostEvents(win),
+      threw,
+      "patched exactly when the engine refused — never a working DOM",
+    );
+    const seen: string[] = [];
+    el.addEventListener("ping", (e: Event) => seen.push(e.type));
+    win.addEventListener("resize", (e: Event) => seen.push(e.type));
+    let detail: unknown;
+    el.addEventListener("x", (e: Event) => detail = (e as CustomEvent).detail);
+    assertEquals(el.dispatchEvent(new Event("ping")), true);
+    win.dispatchEvent(new Event("resize"));
+    el.dispatchEvent(new CustomEvent("x", { detail: 7 }));
+    assertEquals(seen, ["ping", "resize"]);
+    assertEquals(detail, 7);
+    // The window's own events are untouched, and only the BASE check widened.
+    el.dispatchEvent(new win.Event("ping"));
+    assertEquals(seen, ["ping", "resize", "ping"]);
+    assertEquals(new Event("a") instanceof win.CustomEvent, false);
+    assertEquals(new win.CustomEvent("a") instanceof win.Event, true);
+    assertEquals({} instanceof win.Event, false);
+    let refused = false;
+    try {
+      el.dispatchEvent({ type: "ping" });
+    } catch {
+      refused = true;
+    }
+    assertEquals(refused || seen.length === 3, true, "a non-event is no event");
+    assertEquals(acceptHostEvents(win), false, "second call: nothing to do");
+  } finally {
+    await closeWindow(win);
+  }
+});
+
+const heard: string[] = [];
+const Resizer = () => {
+  onMount(() => {
+    const w = (globalThis as unknown as { window: Window }).window;
+    w.addEventListener("resize", () => heard.push("resize"));
+    // What a component writes: the GLOBAL constructors.
+    w.dispatchEvent(new Event("resize"));
+    document.dispatchEvent(new CustomEvent("app:ready", { detail: 1 }));
+    heard.push("after");
+  });
+  return h("div", null, ["x"]);
+};
+testUI(
+  Resizer as never,
+  "testUI: a component dispatching `new Event()` on window/document does not throw",
+  { cells: [] },
+  async (ui) => {
+    await ui.settle();
+    assertEquals(heard, ["resize", "after"]);
+  },
+);

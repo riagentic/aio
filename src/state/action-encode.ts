@@ -20,12 +20,13 @@
 //    the original. That is the green-test-broken-prod shape, and the identical
 //    value handed to a `serverFn` had warned loudly since alpha76.
 //
-// The lossy walk is DEV-ONLY and re-uses the string `enc` already produced
-// instead of stringifying a second time: category (b) of CLAUDE.md's dev/prod
-// rule — dev is STRICTER, prod behaves identically and pays nothing. The
-// REFUSAL is loud in both, because there is nothing to preserve about a call
-// that cannot be delivered either way.
-import { enc } from "../protocol/envelope.ts";
+// The lossy walk re-uses the string `enc` already produced instead of
+// stringifying a second time, and runs in dev AND prod (see `_warnLossy`):
+// observe-only, the frame is the same either way. Dev says every distinct
+// loss with the fix; prod says each action type once. The REFUSAL is loud in
+// both, because there is nothing to preserve about a call that cannot be
+// delivered either way.
+import { dec, enc } from "../protocol/envelope.ts";
 import {
   findLossy,
   formatLossy,
@@ -54,7 +55,15 @@ const WARN_MAX = 500;
  *  exists for. */
 export function _resetActionWarnings(): void {
   _warned.clear();
+  _checked.clear();
 }
+
+/** Prod checks an action type's first calls only. The walk parses the frame
+ *  again — 1 ms on a 190 KB payload, on the dispatch path of every call — and
+ *  a method that sent clean arguments sixteen times is not where the loss is.
+ *  Dev checks every call. */
+const PROD_CHECKS = 16;
+const _checked = new Map<string, number>();
 
 /** Encode an action frame, refusing loudly what the wire cannot carry.
  *
@@ -64,9 +73,14 @@ export function _resetActionWarnings(): void {
 export function encodeAction(
   action: { type: string; payload?: unknown },
 ): string {
-  let json: string;
+  const json = _encode(action);
+  _warnLossy(action, json);
+  return json;
+}
+
+function _encode(action: { type: string; payload?: unknown }): string {
   try {
-    json = enc("action", action);
+    return enc("action", action);
   } catch (err) {
     throw new Error(
       `[aio] ${action.type} was dispatched with an argument JSON cannot ` +
@@ -76,8 +90,72 @@ export function encodeAction(
       { cause: err },
     );
   }
-  if (isDevMode()) _warnLossy(action, json);
-  return json;
+}
+
+/** What the wire makes of an action's payload. */
+export interface ActionWireTrip {
+  /** The payload the server decodes from the frame. */
+  payload: unknown;
+  /** Every value that arrives changed; paths start at the action type
+   *  (`dialog:open.args[1].when`). Empty when the trip was exact — unless
+   *  `truncated`. */
+  lossy: LossyConversion[];
+  /** The walk stopped early (wire-value.ts's MAX_NODES): `lossy` is partial. */
+  truncated: boolean;
+}
+
+/** Who acts on a loss: `testUI` (fails the test), the dev console warning,
+ *  the production console warning. */
+export type WireLossReader = "harness" | "dev" | "prod";
+
+/** THE table of what each reader does with each kind of loss — one decider,
+ *  so the harness can never be stricter (or laxer) than the warnings by
+ *  accident.
+ *
+ *  `omitted` is `{ text, due: undefined }` arriving as `{ text }`: an optional
+ *  field left unset, which is ordinary code — the server reads `due` as
+ *  `undefined` either way. The harness delivers the decoded payload (key
+ *  absent, as production does) and does NOT fail; dev keeps the line it has
+ *  printed since the walk existed; prod says nothing. Everything else — a
+ *  `Date` that becomes a string, an `undefined` ARGUMENT or array slot that
+ *  becomes `null` (a default parameter does not apply to `null`) — is a value
+ *  the caller did not pass. */
+const WIRE_LOSS: Record<
+  "omitted" | "changed",
+  Record<WireLossReader, boolean>
+> = {
+  omitted: { harness: false, dev: true, prod: false },
+  changed: { harness: true, dev: true, prod: true },
+};
+
+/** Does this reader act on this loss? Reads {@linkcode WIRE_LOSS}. */
+export function wireLossCounts(
+  l: LossyConversion,
+  reader: WireLossReader,
+): boolean {
+  return WIRE_LOSS[
+    l.from === "undefined" && l.to === "absent" ? "omitted" : "changed"
+  ][reader];
+}
+
+/** THE decider for "what does the server receive for this call, and what was
+ *  lost on the way": the production encode, the production decode, and the
+ *  one lossy walk. The warning below reads it, and so does `testUI`
+ *  (testing/ui-test.ts), which hands the method `payload` and fails the test
+ *  on the losses `wireLossCounts(l, "harness")` — so the harness's verdict and the transport's cannot drift
+ *  (tests/wire-harness-differential.test.tsx compares them over a real
+ *  socket). Throws like {@linkcode encodeAction} for a BigInt or a cycle. */
+export function actionWireTrip(
+  action: { type: string; payload?: unknown },
+  json: string = _encode(action),
+): ActionWireTrip {
+  const payload = (dec(json)?.d as { payload?: unknown } | undefined)?.payload;
+  const lossy: LossyConversion[] = [];
+  const budget: LossyBudget = { n: 0 };
+  if (action.payload !== undefined) {
+    findLossy(action.payload, payload, action.type, lossy, budget);
+  }
+  return { payload, lossy, truncated: budget.truncated === true };
 }
 
 /** Vet a payload that will cross the wire inside a frame this module does not
@@ -106,26 +184,37 @@ export function vetWirePayload(what: string, payload: unknown): void {
       { cause: err },
     );
   }
-  if (isDevMode()) _warnLossy({ type: what, payload }, `{"d":${json}}`);
+  _warnLossy({ type: what, payload }, `{"v":2,"t":"action","d":${json}}`);
 }
 
-/** Compare the payload with what the wire will actually deliver. */
+/** Compare the payload with what the wire will actually deliver, and say so.
+ *
+ *  In dev AND prod. It was dev-only, on the argument that prod "pays nothing"
+ *  — and what prod paid instead was a server storing something other than
+ *  what the caller passed with no line anywhere (a field report: the only
+ *  trace was a dev-console warning, and the packaged app said nothing).
+ *  Observe-only either way; the frame is identical. Prod says it ONCE per
+ *  action type, briefly, and stops checking that type: `log.warn` is the
+ *  page's console, which the console forwarder carries to `client.log`. */
 function _warnLossy(
   action: { type: string; payload?: unknown },
   json: string,
 ): void {
   if (action.payload === undefined) return;
-  let round: unknown;
-  try {
-    round = (JSON.parse(json) as { d?: { payload?: unknown } }).d?.payload;
-  } catch {
-    return; // aio-ok: `enc` produced this string a line ago — it parses.
+  const dev = isDevMode();
+  if (!dev) {
+    const n = _checked.get(action.type) ?? 0;
+    if (n >= PROD_CHECKS || _warned.has(action.type)) return;
+    _checked.set(action.type, n + 1);
   }
-  const lossy: LossyConversion[] = [];
-  const budget: LossyBudget = { n: 0 };
-  findLossy(action.payload, round, action.type, lossy, budget);
+  const reader = dev ? "dev" : "prod";
+  const lossy = actionWireTrip(action, json).lossy.filter((l) =>
+    wireLossCounts(l, reader)
+  );
   if (lossy.length === 0) return;
-  const key = `${action.type}|${lossy.map((l) => l.path + l.from).join(",")}`;
+  const key = dev
+    ? `${action.type}|${lossy.map((l) => l.path + l.from).join(",")}`
+    : action.type;
   if (_warned.has(key)) return;
   if (_warned.size >= WARN_MAX) _warned.clear();
   _warned.add(key);
@@ -133,9 +222,11 @@ function _warnLossy(
     "wire",
     `${action.type} was dispatched with arguments JSON cannot carry ` +
       `intact — the server receives DIFFERENT values than the caller ` +
-      `passed:\n${formatLossy(lossy)}\nPass JSON-safe data across the wire ` +
-      `(ISO strings for dates, arrays for Map/Set, plain objects for class ` +
-      `instances). An in-process test crosses no wire, so it keeps the ` +
-      `original value and cannot see this.`,
+      `passed:\n${formatLossy(lossy)}` +
+      (dev
+        ? `\nPass JSON-safe data across the wire ` +
+          `(ISO strings for dates, arrays for Map/Set, plain objects for ` +
+          `class instances).`
+        : ""),
   );
 }

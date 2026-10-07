@@ -9,12 +9,12 @@
 // Run as a real app in a child process, in both modes, so the whole boot path
 // (the mode, the wiring, the subscriber) is the one that ships.
 import { assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const MOD = new URL("../mod.ts", import.meta.url).href;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 async function reportsAfterAThrow(mode: "dev" | "prod"): Promise<number> {
   const home = await tempDir("aio-fb-auto-prod-");
@@ -51,6 +51,14 @@ Deno.exit(0);
       AIO_FEEDBACK_DIR: join(home, "fb"),
       AIO_INSTALL_ROOT: join(home, "install"),
       PATH: Deno.env.get("PATH") ?? "",
+      // Windows: the home is USERPROFILE, and without SystemRoot no socket
+      // opens (Winsock, os error 10106).
+      ...(Deno.build.os === "windows"
+        ? {
+          USERPROFILE: home,
+          SystemRoot: Deno.env.get("SystemRoot") ?? "",
+        }
+        : {}),
       DENO_DIR: Deno.env.get("DENO_DIR") ??
         join(Deno.env.get("HOME") ?? "", ".cache", "deno"),
     };

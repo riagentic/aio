@@ -245,24 +245,55 @@ export async function persistOp(
   // check above is an optimization, not the correctness boundary.
   const serverTs = nextServerTs();
   onIssue?.(serverTs);
-  const { changes } = await db.execute(
-    `INSERT OR IGNORE INTO sync_ops (id, cell, action, payload, hlc_phys, hlc_cnt, hlc_node, server_ts, version)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      op.id,
-      op.cell,
-      op.action,
-      JSON.stringify(op.payload),
-      hlcPhys,
-      hlcCnt,
-      hlcNode,
-      serverTs,
-      cellVersion,
-    ],
-  );
+  const insert = async () =>
+    await db.execute(
+      `INSERT OR IGNORE INTO sync_ops (id, cell, action, payload, hlc_phys, hlc_cnt, hlc_node, server_ts, version, settled)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+      [
+        op.id,
+        op.cell,
+        op.action,
+        JSON.stringify(op.payload),
+        hlcPhys,
+        hlcCnt,
+        hlcNode,
+        serverTs,
+        cellVersion,
+      ],
+    );
+  const { changes } = await insert().catch(async (e) => {
+    // A table an older aio created, in a database only `SYNC_SCHEMA` was
+    // run on (`CREATE TABLE IF NOT EXISTS` adds no column; `aio.run` applies
+    // `SYNC_MIGRATIONS`): the column is added here, once, and the insert
+    // made again.
+    if (!/no column named settled/.test(String(e))) throw e;
+    await db.execute("ALTER TABLE sync_ops ADD COLUMN settled INTEGER").catch(
+      (dup) => {
+        // Two first inserts at once: the other one added it.
+        if (!/duplicate column/.test(String(dup))) throw dup;
+      },
+    );
+    return insert();
+  });
   if (changes === 0) return null;
   noteHandedOut(db, serverTs);
   return serverTs;
+}
+
+/**
+ * Mark an op's dispatch as SETTLED — accepted by the server's own reduce.
+ *
+ * The row is written BEFORE the dispatch (`persistOp`, `settled = 0`) and a
+ * refusal deletes it after. A process killed in between leaves the row of an
+ * op the server refused, or never decided: the boot replay must be able to
+ * tell it from an op that was accepted, acknowledged and no longer folds (a
+ * changed method — that one quarantines). This mark is the difference, so it
+ * is written before anyone is told the op landed (ack, broadcast).
+ *
+ *  @internal Engine/framework wiring — not public API.
+ */
+export async function settleOp(db: DB, id: string): Promise<void> {
+  await db.execute("UPDATE sync_ops SET settled = 1 WHERE id = ?", [id]);
 }
 
 /** Does the store still KNOW this op id — a live row in `sync_ops`, or the

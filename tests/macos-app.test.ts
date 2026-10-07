@@ -295,7 +295,7 @@ Deno.test("macapp: electronPlistsFor names the bundle and its helpers", async ()
     );
     const found = await electronPlistsFor(join(dir, "Electron.app"));
     assertEquals(found.length, 3);
-    assert(found[0]!.endsWith("Contents/Info.plist"));
+    assert(found[0]!.endsWith(join("Contents", "Info.plist")));
     assert(found.some((f) => f.includes("Electron Helper.app")));
     assert(found.some((f) => f.includes("Helper (GPU).app")));
   } finally {

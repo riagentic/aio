@@ -17,18 +17,19 @@
 // SIGKILLs the process at the retire call, after writing a marker the test
 // asserts, so a run where it never landed cannot pass as clean.
 import { assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const MOD = new URL("../mod.ts", import.meta.url).href;
 const BOOT = new URL("../src/server/aio-boot.ts", import.meta.url).href;
 const ASYNC_DB = new URL("../src/db/async-db.ts", import.meta.url).href;
 const SKV = new URL("../src/server/skv-sqlite.ts", import.meta.url).href;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 const APP = `
-import { aio, cell } from "${MOD}";
+import { aio, cell } from "${spec(MOD)}";
 const DIR = Deno.env.get("DIR");
 const box = cell("box", { state: { n: 0 }, methods: { set(s, n) { s.n = n; } } });
 const other = cell("other", { state: { k: 7 }, methods: { set(s, k) { s.k = k; } } });
@@ -50,9 +51,9 @@ Deno.exit(0);
 // The boot's migration step exactly as boot runs it, over a store that dies
 // at the retire.
 const CRASH = `
-import { loadAndMigrateSnapshot } from "${BOOT}";
-import { createDB } from "${ASYNC_DB}";
-import { sqliteKv } from "${SKV}";
+import { loadAndMigrateSnapshot } from "${spec(BOOT)}";
+import { createDB } from "${spec(ASYNC_DB)}";
+import { sqliteKv } from "${spec(SKV)}";
 const DIR = Deno.env.get("DIR");
 const db = createDB(DIR + "/data/state.db");
 const kv = sqliteKv(db);

@@ -12,7 +12,7 @@ import { AIO_LIBRARY_ENTRIES } from "../entries.ts";
 
 /** The pinned esbuild version — must equal deno.json's pin and the literal in
  *  build-bundle.ts (CI-enforced). */
-export const ESBUILD_VERSION = "0.24.2";
+export const ESBUILD_VERSION = "0.25.12";
 
 /** Computed specifier — lazy (never statically prefetched); used by paths
  *  that must stay esbuild-free at install time (dev transpile, aiol). */
@@ -70,9 +70,61 @@ export function _childPids(
   return kids;
 }
 
-/** The esbuild service processes this process started (Linux: `/proc`).
- *  Empty elsewhere, or when nothing can tell. */
-function esbuildChildPids(): number[] {
+/** Windows: this process's `esbuild.exe` children, from one toolhelp
+ *  snapshot of the process table (kernel32, opened and closed here — nothing
+ *  is held). By image name: a command line is not in the snapshot, and aio
+ *  starts no other esbuild. Empty when FFI is not granted — asking would put
+ *  a permission prompt in front of a stop. */
+function winEsbuildChildPids(): number[] {
+  if (Deno.permissions.querySync({ name: "ffi" }).state !== "granted") {
+    return [];
+  }
+  const lib = Deno.dlopen("kernel32.dll", {
+    CreateToolhelp32Snapshot: { parameters: ["u32", "u32"], result: "pointer" },
+    Process32FirstW: { parameters: ["pointer", "buffer"], result: "i32" },
+    Process32NextW: { parameters: ["pointer", "buffer"], result: "i32" },
+    CloseHandle: { parameters: ["pointer"], result: "i32" },
+  });
+  try {
+    const k = lib.symbols;
+    const snap = k.CreateToolhelp32Snapshot(2, /* TH32CS_SNAPPROCESS */ 0);
+    if (
+      snap === null ||
+      Deno.UnsafePointer.value(snap) === 0xffff_ffff_ffff_ffffn // INVALID_HANDLE_VALUE
+    ) return [];
+    try {
+      // PROCESSENTRY32W (x64): dwSize@0, th32ProcessID@8,
+      // th32ParentProcessID@32, szExeFile@44 (WCHAR[260]); 568 bytes.
+      const entry = new Uint8Array(568);
+      const view = new DataView(entry.buffer);
+      view.setUint32(0, entry.length, true);
+      const utf16 = new TextDecoder("utf-16le");
+      const kids: number[] = [];
+      for (
+        let ok = k.Process32FirstW(snap, entry);
+        ok;
+        ok = k.Process32NextW(snap, entry)
+      ) {
+        if (view.getUint32(32, true) !== Deno.pid) continue;
+        const exe = utf16.decode(entry.subarray(44, 564));
+        if (exe.slice(0, exe.indexOf("\0")).toLowerCase() === "esbuild.exe") {
+          kids.push(view.getUint32(8, true));
+        }
+      }
+      return kids;
+    } finally {
+      k.CloseHandle(snap);
+    }
+  } finally {
+    lib.close();
+  }
+}
+
+/** The esbuild service processes this process started (Linux: `/proc`;
+ *  Windows: the process table). Empty elsewhere, or when nothing can tell.
+ *  @internal */
+export function _esbuildChildPids(): number[] {
+  if (Deno.build.os === "windows") return winEsbuildChildPids();
   if (Deno.build.os !== "linux") return [];
   try {
     const tasks = [...Deno.readDirSync("/proc/self/task")].map((t) => t.name);
@@ -112,8 +164,12 @@ const STOP_REAP_MS = 2000;
  *   - Linux: every esbuild service child this process had is REAPED — and its
  *     subprocess resource with it, the runtime closes it in the same turn —
  *     or, after `reapMs`, it is named on stderr and left behind.
- *   - No `/proc` (macOS, Windows): the kill has been sent and one loop turn
- *     has passed. The exit itself is NOT awaited there; nothing can tell.
+ *   - Windows: the same wait, on the process table — see `_stillThere` for
+ *     which exit it waits for. Without it the exit was left to "one loop
+ *     turn", which is true on an idle machine and false under load (measured
+ *     on Windows 11: 4 tests of one file failed for a leaked child process).
+ *   - macOS: the kill has been sent and one loop turn has passed. The exit
+ *     itself is NOT awaited there; nothing can tell.
  *
  *  Call it with nothing in flight: a transform still pending when the pipes
  *  are destroyed never settles (measured on 0.24.2 — neither resolved nor
@@ -162,31 +218,75 @@ function heldHere(): Set<string> {
   return held;
 }
 
+/** Which of the services a stop is waited on are still there.
+ *
+ *  Linux is told which service the stop ended (`_stoppedByUs`), so each of
+ *  `pids` is asked for. Windows cannot be told — a process's handles are not
+ *  readable there — so `pids` is every service this process had, and a stop
+ *  ends at most ONE of them: the wait is over when any one has left. Waiting
+ *  for all of them would wait out the whole reap on another isolate's live
+ *  service, at every stop. Pure: the table is passed in. @internal */
+export function _stillThere(
+  pids: number[],
+  os: typeof Deno.build.os,
+  listed: (pid: number) => boolean,
+): number[] {
+  const left = pids.filter(listed);
+  return os === "windows" && left.length < pids.length ? [] : left;
+}
+
+/** Windows: the services that were still there when a stop gave up on them —
+ *  another esbuild instance's live one, since this process's own leaves in
+ *  milliseconds. Not waited on again: a stop that ends nothing (its instance
+ *  never started a service) would otherwise wait out the whole reap on them,
+ *  every time (measured on Windows 11: 2.0 s and a note in a build that
+ *  failed before it bundled). */
+const _outlived = new Set<number>();
+
 export async function stopEsbuildService(
   stop: () => void | Promise<void>,
   reapMs: number = STOP_REAP_MS,
 ): Promise<void> {
-  const before = esbuildChildPids();
+  const windows = Deno.build.os === "windows";
+  const before = _esbuildChildPids();
+  // A pid no longer listed is free to be reused — by a service of ours.
+  for (const pid of _outlived) if (!before.includes(pid)) _outlived.delete(pid);
   await stop();
   // Only what this stop ended is waited for — see `_stoppedByUs`.
-  const pids = _stoppedByUs(
-    before,
-    (pid) => Deno.readLinkSync(`/proc/${pid}/fd/0`),
-    heldHere,
-  );
+  const pids = windows
+    ? before.filter((pid) => !_outlived.has(pid))
+    : _stoppedByUs(
+      before,
+      (pid) => Deno.readLinkSync(`/proc/${pid}/fd/0`),
+      heldHere,
+    );
+  const stillThere = () => {
+    if (!windows) return _stillThere(pids, Deno.build.os, inProcTable);
+    const now = new Set(pids.length > 0 ? _esbuildChildPids() : []);
+    return _stillThere(pids, "windows", (pid) => now.has(pid));
+  };
   const asked = Date.now();
   const deadline = asked + reapMs;
-  while (pids.some(inProcTable) && Date.now() < deadline) {
+  while (stillThere().length > 0 && Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 5));
   }
-  const stuck = pids.filter(inProcTable);
+  const stuck = stillThere();
   if (stuck.length > 0) {
+    const waited = ((Date.now() - asked) / 1000).toFixed(1);
     console.warn(
-      `note: esbuild's service process (pid ${stuck.join(", ")}) was told ` +
-        `to stop and is still there ${
-          ((Date.now() - asked) / 1000).toFixed(1)
-        } s later — not waiting any longer; it is left to exit by itself.`,
+      // Windows cannot tell whose service a pid is (see `_stillThere`): say
+      // what is known — none left — and call no one of them the stopped one
+      // (one pid is no different: it was another instance's when measured).
+      windows
+        ? `note: a stop of esbuild's service ended none of this process's ` +
+          `esbuild services (pid ${stuck.join(", ")}) within ${waited} s — ` +
+          `either it had none of its own left to stop, or that one is slow ` +
+          `to exit; not waiting any longer.`
+        : `note: esbuild's service process (pid ${stuck.join(", ")}) was ` +
+          `told to stop and is still there ${waited} s later — not waiting ` +
+          `any longer; it is left to exit by itself.`,
     );
+    if (windows) { for (const pid of stuck) _outlived.add(pid); }
   }
   // One more turn, so the exit the runtime has just observed is delivered
   // (a turn, not a duration: any timer yields one).

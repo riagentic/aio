@@ -22,6 +22,7 @@
 import { assert } from "@std/assert";
 import { homeStoreEnv } from "../src/testing/test-strict.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { fromFileUrl } from "@std/path";
 
 /** Run one child suite with fresh modules `names` in a temp dir; assert it
  *  passed `passed` tests and nothing was refused as `refusal` says. */
@@ -47,9 +48,13 @@ async function assertChildSuitePasses(
         "-A",
         "--no-check",
         "--config",
-        new URL("../deno.json", import.meta.url).pathname,
-        new URL(`./fixtures/boot-scope-first-import/${suite}`, import.meta.url)
-          .pathname,
+        fromFileUrl(new URL("../deno.json", import.meta.url)),
+        fromFileUrl(
+          new URL(
+            `./fixtures/boot-scope-first-import/${suite}`,
+            import.meta.url,
+          ),
+        ),
       ],
       env: {
         ...homeStoreEnv(`${root}/stores`),

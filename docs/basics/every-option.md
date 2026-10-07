@@ -1,11 +1,11 @@
 # Every option, one page
 
 > Generated from the source by `deno task update:reference` — do not edit by
-> hand; `check:release` fails when it is stale. 188 entries: the signature, what
+> hand; `check:release` fails when it is stale. 189 entries: the signature, what
 > it does, an example when the source has one, and the file it lives in. The
 > guides explain; this page is for looking a name up.
 
-- [cell options](#cell-options) — 24
+- [cell options](#cell-options) — 25
 - [aio.run options](#aiorun-options) — 80
 - [aio/air](#aioair) — 84
 
@@ -240,6 +240,20 @@ THIS cell. <sub>src/state/cell-config-types.ts</sub>
 
 ```ts
 worker: true,   // this cell's methods run off the main thread
+```
+
+### `workerRespawn`
+
+```ts
+workerRespawn?: boolean
+```
+
+With `worker: true`: start this cell's worker again when it CRASHES.
+<sub>src/state/cell-config-types.ts</sub>
+
+```ts
+worker: true,
+workerRespawn: true,   // a crashed worker is started again
 ```
 
 ### `transaction`
@@ -873,8 +887,7 @@ honour this one list. <sub>src/server/aio-types.ts</sub>
 childWindows?: boolean
 ```
 
-Allow the electron client to open CHILD windows to arbitrary http(s) URLs via
-`__aioIPC.openWindow(url, { preload, sandbox })`.
+Electron: let the app show OTHER sites — both ways at once.
 <sub>src/server/aio-types.ts</sub>
 
 ### `electron`

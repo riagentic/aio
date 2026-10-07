@@ -7,16 +7,16 @@
 // too large"), which the persist path already reports, and the app stays up.
 // Linux/macOS only: Windows has no such signal.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("..", import.meta.url));
 const MOD = new URL("../mod.ts", import.meta.url).href;
 
 Deno.test({
   name:
     "persist: a write past `ulimit -f` is reported and the app keeps running",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // SIGXFSZ and `ulimit -f` are POSIX: Windows has no file-size signal
   fn: async () => {
     const dir = await tempDir("aio-sigxfsz-");
     try {

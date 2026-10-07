@@ -7,11 +7,11 @@ difference when you need it closed.
 
 Three boundaries separate a test from a running app.
 
-| Boundary                      | In the harness by default                 | Option                                         |
-| ----------------------------- | ----------------------------------------- | ---------------------------------------------- |
-| Worker **serialization**      | reproduced — always                       | none needed                                    |
-| Worker **isolation**          | not reproduced — the cell runs in-isolate | `testServer({ workers: "real", workerEntry })` |
-| A **client** calling a method | not reproduced — the call is in-process   | `client.call(cell, method, …)`                 |
+| Boundary                      | In the harness by default                                                                        | Option                                         |
+| ----------------------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------- |
+| Worker **serialization**      | reproduced — always                                                                              | none needed                                    |
+| Worker **isolation**          | not reproduced — the cell runs in-isolate                                                        | `testServer({ workers: "real", workerEntry })` |
+| A **client** calling a method | `testUI`: arguments and return value cross as JSON; `testCell` / `bootCells`: a server-side call | `client.call(cell, method, …)`                 |
 
 ## The worker serialization boundary — always on
 
@@ -120,7 +120,7 @@ binary).
 
 ## A client calling a method — `client.call()`
 
-Every test you write calls a cell method **in-process**:
+A `testCell` or `bootCells` test calls a cell method **in-process**:
 
 ```ts
 await todos.add("milk"); // a server-side call
@@ -138,6 +138,10 @@ socket, and four things change on the way:
    identity;
 4. `access: false` and per-user rules refuse the **client** and not the
    server-side caller.
+
+`testUI` reproduces 1, 2 and 4 for every call the UI makes — a lossy argument
+fails the test ([ui-testing.md](ui-testing.md#calls-cross-the-wire)). A call
+under `testCell` or `bootCells` is a server-side call and reproduces none.
 
 For an async method the CLI client already had that path
 (`connectCli().bind(cell)`). For a plain non-async method it did not, so those

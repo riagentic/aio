@@ -8,23 +8,22 @@ import { assert, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { smokeRunArtifact } from "../src/build/build-compile.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { EXE, writeProgram } from "./fake-program-helper.ts";
 
 const PATH_CAUSE = "known cause";
 
 async function failingBin(dir: string): Promise<string> {
-  const bin = join(dir, "tool");
-  await Deno.writeTextFile(
+  const bin = join(dir, `tool${EXE}`);
+  await writeProgram(
     bin,
     `#!/bin/sh\necho 'error: Import "@std/jsonc" not a dependency' >&2\nexit 1\n`,
   );
-  await Deno.chmod(bin, 0o755);
   return bin;
 }
 
 Deno.test({
   name:
     "smoke diagnosis: a plain path is not blamed, a path with a space still is",
-  ignore: Deno.build.os === "windows", // the stand-in artifact is a shell script
   fn: async () => {
     const dir = await tempDir("aio-smoke-diag-");
     try {

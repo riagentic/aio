@@ -31,6 +31,8 @@ import { cell } from "../src/state/cell-create.ts";
 import { bindCellReactive } from "../src/state/cell-reactive.ts";
 import { _resetSignals, getCellSignal } from "../src/state/state-signals.ts";
 import { _resetAioRuntime } from "../src/state/runtime-reset.ts";
+import { fromFileUrl } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 
 // ── the instrument ────────────────────────────────────────────────────────
 
@@ -611,11 +613,11 @@ Deno.test("visible.exclude: the headless surface hides the sentinel too", async 
   );
   const { bindCell } = await import("../src/state/cell-catalog.ts");
   const { dropTempDir, tempDir } = await import("../src/testing/temp-dir.ts");
-  const REPO = new URL("..", import.meta.url).pathname;
+  const REPO = fromFileUrl(new URL("..", import.meta.url));
   const dir = await tempDir("vfb-sec-surface-");
   await Deno.writeTextFile(
     `${dir}/cell.ts`,
-    `import { cell } from "${REPO}mod.ts";
+    `import { cell } from "${spec(REPO)}mod.ts";
 export const vault = cell("vfb-sec-vault", {
   state: { accounts: {} as Record<string, Record<string, string>>,
            pair: { b: "", c: "" } },
@@ -627,7 +629,7 @@ export const vault = cell("vfb-sec-vault", {
   const comp = (name: string, body: string) =>
     Deno.writeTextFile(
       `${dir}/${name}.ts`,
-      `import { h } from "${REPO}src/air/vdom.ts";
+      `import { h } from "${spec(REPO)}src/air/vdom.ts";
 import { vault } from "./cell.ts";
 export default function App() { return h("main", null, ${body}); }
 `,

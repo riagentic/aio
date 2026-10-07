@@ -65,7 +65,7 @@ import { extractZip } from "../server/zip-extract.ts";
  *  1.7 h old, blocked the whole example suite while 44.4.1 installed cleanly.
  *  When `latest` outruns this floor, the freshness test REPORTS it (see
  *  tests/electron-version-consistency.test.ts) rather than failing a build. */
-export const DEFAULT_ELECTRON_VERSION = "44.4.1";
+export const DEFAULT_ELECTRON_VERSION = "44.5.1";
 
 /** `dist/electron.json` — written by the build, read by the launcher of a
  *  compiled binary. The file name is the contract between the two. */

@@ -21,6 +21,8 @@ import type { PatchEntry } from "../src/protocol/broadcast-utils.ts";
 import { createUDSListener } from "../src/server/aio.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { join } from "@std/path";
+import { connectLocal } from "../src/server/local-listen.ts";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
 
 const PATCHES: PatchEntry[] = [
   {
@@ -271,7 +273,7 @@ Deno.test("metrics: aio_clients_connected counts BOTH transports", () => {
 // what the meter reports must EQUAL what a real socket received.
 Deno.test("cost: UDS wire bytes equal what the socket actually received", async () => {
   const dir = await tempDir("cost-uds-");
-  const socketPath = join(dir, "cost.sock");
+  const socketPath = localEndpoint(join(dir, "cost.sock"));
   const meter = createCostMeter();
   let state = { balances: { sol: 1 } };
   const uds = createUDSListener(
@@ -288,7 +290,7 @@ Deno.test("cost: UDS wire bytes equal what the socket actually received", async 
     undefined,
     meter,
   );
-  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  const conn = await connectLocal(socketPath);
   let received = 0;
   const reader = conn.readable.getReader();
   (async () => {
@@ -330,6 +332,7 @@ Deno.test("cost: UDS wire bytes equal what the socket actually received", async 
       conn.close();
     } catch { /* aio-ok: already closed */ }
     uds.shutdown();
+    await localIdle();
     await dropTempDir(dir);
   }
 });
@@ -341,7 +344,7 @@ Deno.test("cost: UDS wire bytes equal what the socket actually received", async 
 // patch payload can carry the literal `"t":"state"` in its own data.
 Deno.test("cost: a UDS frame is classified by its envelope, not by substring", async () => {
   const dir = await tempDir("cost-uds-kind-");
-  const socketPath = join(dir, "kind.sock");
+  const socketPath = localEndpoint(join(dir, "kind.sock"));
   const meter = createCostMeter();
   // The trap: a full-state frame whose PAYLOAD contains the text of a patches
   // envelope. Classified by substring it would be counted as a patch.
@@ -360,7 +363,7 @@ Deno.test("cost: a UDS frame is classified by its envelope, not by substring", a
     undefined,
     meter,
   );
-  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  const conn = await connectLocal(socketPath);
   const reader = conn.readable.getReader();
   (async () => {
     try {
@@ -387,6 +390,7 @@ Deno.test("cost: a UDS frame is classified by its envelope, not by substring", a
       conn.close();
     } catch { /* aio-ok: already closed */ }
     uds.shutdown();
+    await localIdle();
     await dropTempDir(dir);
   }
 });

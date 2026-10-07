@@ -14,19 +14,20 @@
 // path), writes a marker, and SIGKILLs the process on the spot. The marker is
 // asserted, so a run where the kill never landed cannot pass as "clean".
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { DatabaseSync } from "node:sqlite";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const MOD = new URL("../mod.ts", import.meta.url).href;
 const INTEGRITY = new URL("../src/server/db-integrity.ts", import.meta.url)
   .href;
 const ASYNC_DB = new URL("../src/db/async-db.ts", import.meta.url).href;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 const APP = `
-import { aio, cell } from "${MOD}";
+import { aio, cell } from "${spec(MOD)}";
 const DIR = Deno.env.get("DIR");
 const box = cell("box", {
   state: { n: 0, pad: "" },
@@ -52,8 +53,8 @@ Deno.exit(0);
 // The recovery exactly as boot runs it, with an fs whose first write aimed at
 // the live database path is the moment the process dies.
 const CRASH = `
-import { checkAndRecover } from "${INTEGRITY}";
-import { createDB } from "${ASYNC_DB}";
+import { checkAndRecover } from "${spec(INTEGRITY)}";
+import { createDB } from "${spec(ASYNC_DB)}";
 const DIR = Deno.env.get("DIR");
 const dbPath = DIR + "/data/state.db";
 const die = (op) => {

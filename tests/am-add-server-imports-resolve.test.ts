@@ -8,10 +8,10 @@
 // cannot tell a right import from a wrong one; resolving it against the real
 // `exports` map can.
 import { assert, assertEquals } from "@std/assert";
-import { toFileUrl } from "@std/path";
+import { fromFileUrl, toFileUrl } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("..", import.meta.url));
 const EXPORTS = JSON.parse(await Deno.readTextFile(`${REPO}deno.json`))
   .exports as Record<string, string>;
 

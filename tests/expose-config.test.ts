@@ -14,13 +14,14 @@
 // have bound an app to 0.0.0.0 with the privacy warning silently switched off.
 import { resolveRuntimeVersion } from "../src/server/app-version.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
 import { _exposeOf, exposeReason } from "../src/server/aio.ts";
 import { parseCli } from "../src/server/aio-cli.ts";
 import { childCoverageDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 const _childCovDir = childCoverageDir();
 
 /** A throwaway app project. `entrySub` nests the entry module (the depth the
@@ -39,7 +40,7 @@ async function scaffold(opts: {
     JSON.stringify({
       title: opts.appId,
       ...(opts.version ? { version: opts.version } : {}),
-      imports: { aio: join(ROOT, "mod.ts") },
+      imports: { aio: spec(join(ROOT, "mod.ts")) },
     }),
   );
   await Deno.writeTextFile(
@@ -331,29 +332,41 @@ Deno.test({
 // OPENS A CLIENT WINDOW AT — `localhost:PORT`, where nothing is listening.
 // `setupTransport` now resolves `bindHost` once and every consumer reads it.
 
+// Two loopback addresses that need no privileges — `[config, flag]`. Linux
+// answers on all of 127/8. macOS's lo0 carries only 127.0.0.1 and ::1, and
+// aio's URLs spell both `localhost` by design — so there the proof of where
+// the listener is is the report's `bind` line, which names the address.
+const LO0_ONLY = Deno.build.os === "darwin";
+const [HOST_CFG, HOST_FLAG] = LO0_ONLY
+  ? ["::1", "127.0.0.1"]
+  : ["127.0.0.2", "127.0.0.3"];
+
 Deno.test({
   name: "host: a config-set bind address reaches the boot report and the URLs",
   async fn() {
     const appId = `host-cfg-${crypto.randomUUID().slice(0, 8)}`;
     const port = freePort();
-    // 127.0.0.2 is loopback on Linux and binds without privileges, so the app
+    // HOST_CFG is loopback and binds without privileges, so the app
     // really listens on an address that is NOT the `localhost` the report used
     // to print — the exact divergence, provable in CI.
     const dir = await scaffold({
       appId,
-      runOpts: `host: "127.0.0.2", port: ${port}`,
+      runOpts: `host: "${HOST_CFG}", port: ${port}`,
     });
     try {
       const { out, code } = await boot(dir, []);
       assertEquals(code, 0, `app exited ${code}\n${out}`);
       // The report names where it actually bound…
-      assertStringIncludes(out, `ws://127.0.0.2:${port}/ws`);
-      assertStringIncludes(out, `http://127.0.0.2:${port}`);
-      // …and never advertises an address it is not listening on.
-      assert(
-        !out.includes(`http://localhost:${port}`),
-        `a 127.0.0.2-bound app must not advertise localhost\n${out}`,
-      );
+      assertStringIncludes(out, `${HOST_CFG} — loopback only`);
+      if (!LO0_ONLY) {
+        assertStringIncludes(out, `ws://${HOST_CFG}:${port}/ws`);
+        assertStringIncludes(out, `http://${HOST_CFG}:${port}`);
+        // …and never advertises an address it is not listening on.
+        assert(
+          !out.includes(`http://localhost:${port}`),
+          `a ${HOST_CFG}-bound app must not advertise localhost\n${out}`,
+        );
+      }
     } finally {
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }
@@ -367,14 +380,15 @@ Deno.test({
     const port = freePort();
     const dir = await scaffold({
       appId,
-      runOpts: `host: "127.0.0.2", port: ${port}`,
+      runOpts: `host: "${HOST_CFG}", port: ${port}`,
     });
     try {
-      const { out, code } = await boot(dir, ["--host=127.0.0.3"]);
+      const { out, code } = await boot(dir, [`--host=${HOST_FLAG}`]);
       assertEquals(code, 0, `app exited ${code}\n${out}`);
-      assertStringIncludes(out, `ws://127.0.0.3:${port}/ws`);
+      assertStringIncludes(out, `${HOST_FLAG} — loopback only`);
+      if (!LO0_ONLY) assertStringIncludes(out, `ws://${HOST_FLAG}:${port}/ws`);
       assert(
-        !out.includes("127.0.0.2"),
+        !out.includes(HOST_CFG),
         `--host must win over config host\n${out}`,
       );
     } finally {

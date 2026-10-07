@@ -18,6 +18,7 @@ import { detachedSpawnSpec } from "../src/am/am-cmd-process.ts";
 import { _zipFallbackSpec, zipDir } from "../src/build/build-electron.ts";
 import { join, resolve } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { EXE, writeProgram } from "./fake-program-helper.ts";
 
 function decode(b64: string): string {
   return new TextDecoder("utf-16le").decode(
@@ -243,7 +244,13 @@ Deno.test("generated PowerShell: the zip fallback never has a path in its text",
     AIO_ZIP_OUT: resolve("out dir/it's [1].zip"),
   });
   const text = spec.args[spec.args.length - 1]!;
-  assertEquals(balance(text), [], "a quoted value in the script");
+  // The one quoted value is a constant — the switch that makes .NET
+  // Framework name entries with `/` — never a path.
+  assertEquals(
+    balance(text),
+    ["Switch.System.IO.Compression.ZipFile.UseBackslash"],
+    "a quoted value in the script",
+  );
   // Neither a cmdlet that takes a pattern, nor a string a path could end.
   assertEquals(/Compress-Archive|-Path\b|"/.test(text), false, text);
   assert(
@@ -257,7 +264,6 @@ Deno.test("generated PowerShell: the zip fallback never has a path in its text",
 Deno.test({
   name:
     "generated PowerShell: with no zip, the fallback is run with both paths in its environment",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     const dir = await tempDir("aio-ps-zip-");
     const path = Deno.env.get("PATH");
@@ -268,11 +274,12 @@ Deno.test({
       await Deno.mkdir(bin);
       await Deno.mkdir(app);
       await Deno.writeTextFile(join(app, "f"), "x");
-      await Deno.writeTextFile(
-        join(bin, "powershell"),
-        `#!/bin/sh\nprintf '%s\\n%s\\n' "$AIO_ZIP_DIR" "$AIO_ZIP_OUT" > '${dir}/seen'\n`,
+      const seen = join(dir, "seen");
+      await writeProgram(
+        join(bin, "powershell" + EXE),
+        `#!/bin/sh\necho "$AIO_ZIP_DIR" > "${seen}"\n` +
+          `echo "$AIO_ZIP_OUT" >> "${seen}"\n`,
       );
-      await Deno.chmod(join(bin, "powershell"), 0o755);
       const out = join(dir, "out [2].zip");
       Deno.env.set("PATH", bin);
       assertEquals(await zipDir(app, out), true);

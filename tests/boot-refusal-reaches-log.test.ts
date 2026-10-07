@@ -16,6 +16,7 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { childEnv } from "./e2e-app-harness.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const REPO = join(import.meta.dirname!, "..");
 
@@ -132,8 +133,8 @@ async function boot(
       join(dir, "deno.json"),
       JSON.stringify({
         imports: {
-          "aio": `${REPO}/mod.ts`,
-          "aio/": `${REPO}/src/`,
+          "aio": `${spec(REPO)}/mod.ts`,
+          "aio/": `${spec(REPO)}/src/`,
           "immer": "npm:immer@10.2.0",
           "@std/path": "jsr:@std/path@1.1.2",
         },

@@ -20,6 +20,7 @@
 //
 // This is their suggested fix #1 — the few lines that close it forever.
 import { assert, assertEquals } from "@std/assert";
+import { fromFileUrl } from "@std/path";
 /** Keys `cell()` accepts that `MethodsCellConfig` does not declare.
  *
  *  EMPTY, and the state to defend — it lives here rather than in `src/` because
@@ -37,7 +38,7 @@ import { assert, assertEquals } from "@std/assert";
  *  visible only as errors on unrelated call sites, for eight releases. */
 const RENAMED_CELL_KEYS: ReadonlyArray<readonly [string, string]> = [];
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 /** Top-level keys of the `MethodsCellConfig` type literal. Parsed rather than
  *  reflected because a TypeScript type does not exist at runtime — which is

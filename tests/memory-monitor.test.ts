@@ -995,6 +995,113 @@ Deno.test("monitor: a machine condition that went away and came back is said aga
   assertEquals(reports.map((r) => r.tick), [0, 3]);
 });
 
+// ── `pressure` below critical is SAID once too ──────────────────────────────
+//
+// The same rule, on the heap: an app that sits at 80% of its ceiling logged
+// the same error every interval for as long as it ran. Only what is said
+// changes: the report is still made each interval, because the app's
+// `onMemoryPressure` is how memory gets shed. `critical` is said every time.
+
+/** One monitor over `heap` (MB of a 1000 MB ceiling): per report, its tick,
+ *  level, and whether it is `said`. */
+function driveSaid(
+  heap: number[],
+  /** RSS per tick in MB (default: the heap) and the machine's RAM. */
+  rss: number[] = heap,
+  total = 64 * GB_,
+): [tick: number, level: string, said: boolean][] {
+  const out: [number, string, boolean][] = [];
+  let i = 0;
+  const timers: Array<() => void> = [];
+  const realSet = globalThis.setInterval;
+  const realClear = globalThis.clearInterval;
+  // deno-lint-ignore no-explicit-any
+  (globalThis as any).setInterval = (fn: () => void) => {
+    timers.push(fn);
+    return 1;
+  };
+  // deno-lint-ignore no-explicit-any
+  (globalThis as any).clearInterval = () => {};
+  try {
+    createMemoryMonitor({
+      enabled: true,
+      interval: 1,
+      warnThreshold: 0.75,
+      criticalThreshold: 0.9,
+      trendWindow: 100,
+      onReport: (r, said) => {
+        assertEquals(r.reason, "pressure");
+        out.push([i, r.level, said]);
+      },
+      getMemoryUsage: () => ({
+        heapUsed: heap[i]! * MB_,
+        heapTotal: heap[i]! * MB_,
+        rss: rss[i]! * MB_,
+        external: 0,
+      }),
+      getHeapLimit: () => 1000 * MB_,
+      getTotalMemory: () => total,
+      getCellStates: () => [],
+    });
+    for (; i < heap.length; i++) timers.forEach((t) => t());
+  } finally {
+    globalThis.setInterval = realSet;
+    globalThis.clearInterval = realClear;
+  }
+  return out;
+}
+const saidAt = (heap: number[]) =>
+  driveSaid(heap).filter((r) => r[2]).map((r) => r[0]);
+
+Deno.test("monitor: half the machine reached DURING quiet pressure is said — once", () => {
+  // The heap sits at 800 MB (said at tick 0). At tick 10 RSS passes half of
+  // a 2 GB machine: the report is still `pressure`, and it must be said —
+  // quiet pressure silences its own repeat, not other news.
+  const reports = driveSaid(
+    ticks(30, () => 800),
+    ticks(30, (t) => (t < 10 ? 800 : 1200)),
+    2000 * MB_,
+  );
+  assertEquals(reports.length, 30);
+  assertEquals(reports.filter((r) => r[2]).map((r) => r[0]), [0, 10]);
+});
+
+Deno.test("monitor: a steady heap over the warn threshold is SAID once — and reported to the hook every interval", () => {
+  const reports = driveSaid(ticks(50, () => 800));
+  assertEquals(reports.length, 50, "the hook's turn, every interval");
+  assertEquals(reports.filter((r) => r[2]).map((r) => r[0]), [0]);
+});
+
+Deno.test("monitor: pressure that gets WORSE is said again, a tenth of the ceiling at a time — and at critical", () => {
+  // 760 → 890 MB in 10 MB steps, then steady: said at 760 and at 860.
+  assertEquals(saidAt(ticks(30, (t) => 760 + Math.min(t, 13) * 10)), [0, 10]);
+  // …and 900 MB is `critical`, whatever was said a tick before.
+  assertEquals(
+    driveSaid([760, 890, 900]),
+    [[0, "warn", true], [1, "warn", true], [2, "critical", true]],
+  );
+});
+
+Deno.test("monitor: critical pressure is said EVERY interval — and falling back under it is not news", () => {
+  assertEquals(
+    driveSaid([950, 950, 950, 800, 800, 950]).map((r) => [r[1], r[2]]),
+    [
+      ["critical", true],
+      ["critical", true],
+      ["critical", true],
+      ["warn", false],
+      ["warn", false],
+      ["critical", true],
+    ],
+  );
+});
+
+Deno.test("monitor: pressure that went away and came back is said again", () => {
+  // Re-armed by 640 (a tenth of the ceiling under the threshold) — not by
+  // 740, which is the same condition wobbling around its edge.
+  assertEquals(saidAt([800, 800, 640, 800, 800, 740, 800]), [0, 3]);
+});
+
 Deno.test("report text: each reason names the number that fired it", () => {
   const base: MemoryReport = {
     level: "warn",

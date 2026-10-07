@@ -6,12 +6,12 @@
 //     against live cell state (the alpha27 headless fallback)
 // These go through the exact client functions the am CLI uses (trojanGet).
 import { assert, assertEquals } from "@std/assert";
-import { join, toFileUrl } from "@std/path";
+import { fromFileUrl, join, toFileUrl } from "@std/path";
 import { trojanGet } from "../src/am/am-http.ts";
 import { aio } from "../src/server/aio.ts";
 import { _resetAioRuntime } from "../src/state/runtime-reset.ts";
 
-const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const REPO = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 
 Deno.test("Broken-2: am state serves the SERVER's live store with zero clients", async () => {
   _resetAioRuntime();

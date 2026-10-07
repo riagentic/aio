@@ -3,11 +3,12 @@
 // `deno.json` only, so a deno.jsonc — or a deno.json with one `//` comment,
 // which Deno accepts — got no note at all. It now uses the shared JSONC reader.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const AM_UTILS = new URL("../src/am/am-utils.ts", import.meta.url).href;
-const REPO_CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const REPO_CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 async function stderrOf(name: string, text: string): Promise<string> {
   const proj = await tempDir("aio-am-port-note-");
@@ -20,7 +21,7 @@ async function stderrOf(name: string, text: string): Promise<string> {
     );
     await Deno.writeTextFile(
       join(proj, "probe.ts"),
-      `import { declaredPort } from "${AM_UTILS}";\n` +
+      `import { declaredPort } from "${spec(AM_UTILS)}";\n` +
         `console.log(String(declaredPort()));\n`,
     );
     const env = Deno.env.toObject();

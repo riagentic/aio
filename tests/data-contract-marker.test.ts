@@ -6,8 +6,9 @@
 // The contract is also printed on a marker line of its own, which a reader
 // finds whatever surrounds it; a build older than the line is still read from
 // its stdout.
+import { writeProgram } from "./fake-program-helper.ts";
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import {
   parseDataContract,
   probeArtifact,
@@ -22,6 +23,7 @@ import {
   probeNonce,
 } from "../src/server/updates-core.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const CONTRACT = {
   schema: 1,
@@ -85,15 +87,13 @@ Deno.test("data contract marker: a capture of stderr parses as the contract; a c
 /** An executable that answers the probe with these shell lines. */
 async function answering(dir: string, lines: string): Promise<string> {
   const bin = join(dir, "app.bin");
-  await Deno.writeTextFile(bin, `#!/bin/sh\n${lines}\nexit 0\n`);
-  await Deno.chmod(bin, 0o755);
+  await writeProgram(bin, `#!/bin/sh\n${lines}\nexit 0\n`);
   return bin;
 }
 
 Deno.test({
   name:
     "data contract marker: the probe reads the marker line past anything on stdout, and an older build's bare stdout",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     const dir = await tempDir("aio-contract-marker-");
     try {
@@ -130,13 +130,13 @@ Deno.test({
     "data contract marker: a real app that prints at module top level still publishes its contract",
   fn: async () => {
     const dir = await tempDir("aio-contract-banner-");
-    const repo = new URL("../", import.meta.url).pathname;
+    const repo = fromFileUrl(new URL("../", import.meta.url));
     try {
       const entry = join(dir, "app.ts");
       await Deno.writeTextFile(
         entry,
         `console.log("demo starting");\n` +
-          `import { aio, cell } from "${repo}mod.ts";\n` +
+          `import { aio, cell } from "${spec(repo)}mod.ts";\n` +
           `console.log({ loaded: true });\n` +
           `export const notes = cell("notes", {\n` +
           `  version: 3,\n` +
@@ -172,12 +172,11 @@ Deno.test({
 
       // The publish that was refused.
       const script = join(dir, "app.bin");
-      await Deno.writeTextFile(
+      await writeProgram(
         script,
-        `#!/bin/sh\nexec "${Deno.execPath()}" ${run.slice(0, 4).join(" ")} ` +
-          `"${entry}" "$@"\n`,
+        `#!/bin/sh\nexec "${Deno.execPath()}" run -A --config ` +
+          `"${repo}deno.json" "${entry}" "$@"\n`,
       );
-      await Deno.chmod(script, 0o755);
       await Deno.mkdir(join(dir, "src"), { recursive: true });
       await Deno.writeTextFile(join(dir, "src", "a.ts"), `fetch("x");`);
       const m = await shipApp({
@@ -236,7 +235,6 @@ Deno.test("probe nonce: a fact is read off the line that carries the reader's ow
 Deno.test({
   name:
     "probe nonce: the probe hands the binary a value, and lines of that shape the app printed are not the binary's answer",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     const dir = await tempDir("aio-probe-nonce-");
     try {
@@ -298,7 +296,7 @@ Deno.test({
     "probe nonce: a real app that prints forged marker lines at import publishes its own contract and id",
   fn: async () => {
     const dir = await tempDir("aio-probe-forged-");
-    const repo = new URL("../", import.meta.url).pathname;
+    const repo = fromFileUrl(new URL("../", import.meta.url));
     try {
       const entry = join(dir, "app.ts");
       await Deno.writeTextFile(
@@ -311,7 +309,7 @@ Deno.test({
           `};\n` +
           `forge();\n` +
           `globalThis.addEventListener("unload", forge);\n` +
-          `import { aio, cell } from "${repo}mod.ts";\n` +
+          `import { aio, cell } from "${spec(repo)}mod.ts";\n` +
           `export const notes = cell("notes", {\n` +
           `  version: 3,\n` +
           `  state: { items: [] as string[] },\n` +
@@ -322,12 +320,11 @@ Deno.test({
           `libraryMode: true, baseDir: "${dir}" });\n`,
       );
       const script = join(dir, "app.bin");
-      await Deno.writeTextFile(
+      await writeProgram(
         script,
         `#!/bin/sh\nexec "${Deno.execPath()}" run -A --config ` +
           `"${repo}deno.json" "${entry}" "$@"\n`,
       );
-      await Deno.chmod(script, 0o755);
       assertEquals(await probeArtifact(script), {
         contract: CONTRACT,
         appId: "notes",

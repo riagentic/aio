@@ -59,8 +59,13 @@ const make = (name: string) =>
     },
   } as Any) as Any;
 
+/** `client`: the caller is a CLIENT (a `testUI` test body or component), so
+ *  the call crosses the JSON wire before the worker's boundary — a function or
+ *  a Date never reaches the thread to be cloned
+ *  (tests/wire-harness-differential.test.tsx). */
 async function boundary(
   call: (m: string, ...a: unknown[]) => Promise<unknown>,
+  client = false,
 ): Promise<"crossed"> {
   const k = await call("retK") as { x: number };
   assert(!(k instanceof K), "a class instance came back an instance");
@@ -71,9 +76,17 @@ async function boundary(
   await assertRejects(
     () => call("take", () => 1),
     Error,
-    "action payload cannot cross",
+    client ? "args[0]: function → null" : "action payload cannot cross",
   );
   const when = new Date(5);
+  if (client) {
+    await assertRejects(
+      () => call("retPlain", { n: 1, when }),
+      Error,
+      "args[0].when: Date → string",
+    );
+    return "crossed";
+  }
   const back = await call("retPlain", { n: 1, when }) as {
     n: number;
     when: Date;
@@ -98,7 +111,7 @@ Deno.test("bootCells: arguments and return values cross the boundary", async () 
 Deno.test("testUI: arguments and return values cross the boundary", async () => {
   const w = make("wbr5");
   await using _ui = await testUI(() => h("div", {}, "x"), { cells: [w] });
-  assertEquals(await boundary((m, ...a) => w[m](...a)), "crossed");
+  assertEquals(await boundary((m, ...a) => w[m](...a), true), "crossed");
 });
 
 const w3 = make("wbr3");

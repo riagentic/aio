@@ -10,7 +10,7 @@
 // boot that fails on its own still counts — it is what a rollback is for.
 // Child processes: the refusal is the process ending.
 import { assert, assertEquals, assertMatch } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import {
   pendingPath,
   readPending,
@@ -24,7 +24,7 @@ import type { Log } from "../src/diagnostics/logger-api.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const MOD = new URL("../mod.ts", import.meta.url).href;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 const text = (b: Uint8Array) => new TextDecoder().decode(b);
 
 /** An installed update waiting for its first boots, and an app to boot. */

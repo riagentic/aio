@@ -9,19 +9,21 @@
 > Shipped work lives in `CHANGELOG.md`; what was fixed or refused from field
 > reports lives in `feedback/resolved.md` and `feedback/refused.md`.
 
-## Current: 1.0.18-beta (2026-10-04) — the Windows stub is Rust
+## Current: 1.0.19-beta (2026-10-07) — tested on Windows and macOS as on Linux
 
 - **1.0.15-beta** (2026-09-30), **1.0.16-beta** (2026-10-01) and **1.0.17-beta**
   (2026-10-03) are published.
-- **1.0.18-beta** is the current release: the Windows one-click `.exe` stub is
-  Rust (no Go is left in aio), an older `.exe` keeps a newer install, the first
-  open adds a Start-menu shortcut, and `am publish` refuses a one-click `.exe`
-  without its `.zip`. What it changed is in `CHANGELOG.md`; what 1.0.17-beta
-  left open is under [Open work](#open-work) → "Left open by the 1.0.17-beta
-  audit round".
-- Still owed on real machines (Windows, macOS): the lockdown's pipe and
-  `LOCAL_PEERPID` paths, and a real app updating itself from the one-click
-  `.exe`.
+- **1.0.18-beta** (2026-10-04) is published: the Windows one-click `.exe` stub
+  is Rust (no Go is left in aio).
+- **1.0.19-beta** is the current release: the suite runs natively on Windows 11
+  and on an Apple-silicon Mac, and what that found is fixed (the lock folder and
+  its mutex, a sync app killed mid-refusal, the install record); packaged
+  desktop apps ship guest preloads and treat embedded pages as outsiders; what
+  only dev said is said in a package. What it changed is in `CHANGELOG.md`; what
+  it left open is under [Open work](#open-work) → "Left open by the 1.0.19-beta
+  round".
+- Still owed on real machines (Windows, macOS): a real app updating itself from
+  the one-click `.exe`, and a double-click on a real desktop session.
 
 ### The 1.0.15-beta list — close the external review list as far as v1 allows (shipped; two items still open)
 
@@ -1098,6 +1100,34 @@ bundle are not inside it. GitHub releases exist: `deno task ship github`.
 
 ## Open work
 
+### Left open by the 1.0.19-beta round (real Windows + macOS hardware)
+
+- [ ] Android emulator and iOS lanes: moved here from 1.0.19 by agreement.
+- [ ] 26 Windows tests still skipped: local-peer auth over named pipes, and
+      runner fixtures. `tests/test-shards-leftover.test.ts` has 7 of them.
+- [ ] `tests/stop-child.ts` is a hard kill on Windows (SIGTERM is
+      TerminateProcess there), so the 34 files that use it never ask an app to
+      stop on Windows.
+- [ ] `check:orphans` reads a recycled pid as a live orphan when the lock has no
+      start token (a pre-1.0.19 lock, a hand-written fixture).
+- [ ] About 12 dev-only renderer warnings are still silent in a packaged app.
+- [ ] A trailing positional `undefined` argument arrives as `null`; `testUI`
+      fails it and says why, the wire is unchanged.
+- [ ] A sync row left by a kill under 1.0.9–1.0.18 (no `settled` mark) still
+      stops the start; the message gives the one-line repair. Automatic repair
+      can drop an acknowledged change, so it is manual.
+- [ ] The `settled` mark is a second sync per accepted change under
+      `PRAGMA synchronous = FULL` (about 5 ms → 10 ms on NVMe).
+- [ ] The portal teardown has two deciders for the never-mounted case (the
+      `_anchor` guard and the `gone` skip); only the pair is guarded by a test.
+- [ ] A real double-click of the one-click `.exe` on a Windows desktop session
+      (it ran from ssh session 0: no window on screen), the macOS DMG
+      double-click path, and Bluetooth/USB/serial pickers in a real window.
+- [ ] `build --smoke` drives the desktop artifact on a Linux host only.
+- [ ] Test runs rewrite the tracked `proof-matrix.json` in the checkout.
+- [ ] macOS: a whole-suite run at background QoS with the display asleep is 4×
+      slower and fails timing tests; the lab fence runs it at normal priority.
+
 ### macOS: offer "Move to Applications" — built in 1.0.18-beta
 
 - [x] A `.app` opened from the mounted `.dmg` or from Downloads asks once, after
@@ -1127,9 +1157,9 @@ Found late in the round, deliberately not built in 1.0.17:
 - [ ] aiol: give the code mask the file's path so a `.ts` file gets the plain
       (non-JSX) rules; today a `.ts` holding `"</p>"` in a string is left
       `[manual]` (~130 mask call sites to thread).
-- [ ] A production build started with `--host=0.0.0.0` prints a `trojan` row;
+- [x] A production build started with `--host=0.0.0.0` prints a `trojan` row;
       the listener is keyed (401 without it), but the row name reads as the dev
-      API.
+      API. (1.0.19: the row is labelled `control`.)
 - [ ] A tree an older updater left half-made under another version
       (`<install>.staged-<v>`) cannot be proven the updater's and is named at
       every start; find a sound proof or a one-time prompt.
@@ -1189,10 +1219,12 @@ Version / memory / updates:
 
 - [ ] Directory rollback writes `installed.json` before the helper moves the
       folders; the forward directory swap never reconciles it.
-- [ ] The replay ceiling catches re-entry within one boot only; a loop that
-      re-runs the whole boot block starts a fresh session each time.
-- [ ] `pressure` memory reports still repeat every interval;
+- [x] The replay ceiling catches re-entry within one boot only; a loop that
+      re-runs the whole boot block starts a fresh session each time. (1.0.19: a
+      tail replayed start after start is charged against the ceiling.)
+- [x] `pressure` memory reports still repeat every interval;
       `docs/debugging/production.md` does not mention the said-once rule.
+      (1.0.19: said once, and again as it worsens.)
 - [x] The budget error carries `.code` (`MEMORY_UNBOUNDED`).
 
 Core:
@@ -1252,7 +1284,8 @@ defects fixed, see CHANGELOG). Still open, from the same audit:
       found a second defect in the same line: the permission implies a REQUIRED
       `android.hardware.camera`, so both features are declared optional —
       `tests/build-android-camera.test.ts` measures it with aapt2.
-- [ ] Windows host: the build's `gradlew` / `gradle.bat` path is unverified.
+- [x] Windows host: the build's `gradlew` / `gradle.bat` path is unverified.
+      (1.0.19: a Windows host starts `gradlew.bat`.)
 - [ ] **iOS: never built.** Needs Xcode on the macOS VM (`ssh aio-macos`, 16 GB
       now) — the user downloads the `.xip` (Apple ID). Read-only findings to
       verify there: ATS `NSAllowsLocalNetworking` makes `NSAllowsArbitraryLoads`
@@ -2585,7 +2618,9 @@ sentence became the only place it lived.
 The in-process harness (`testUI` / `testCell` / `bootCells`) runs dev-strict, so
 every tripwire fires in a test — but it never crosses a real transport, so a
 structured-clone hop, a worker-pool round trip, and a client-context replay are
-all invisible to it. Field reports keep landing here, and so did the hook-guard
+all invisible to it (since the round after 1.0.18-beta `testUI` does put a
+client call's arguments and return value through the action wire — see the last
+DONE item below). Field reports keep landing here, and so did the hook-guard
 false alarm in this release: every unit test of the validator passed while it
 warned on every boot of every app, because the object the CALLER hands it is
 what was wrong. A regression test written for that bug used `libraryMode: true`,
@@ -2644,6 +2679,22 @@ Still to cover, in rough order of what has already bitten:
   await) compared; `undefined` member / `Date` / `NaN` pinned with
   `wireBecomes`. Skips when `BROWSER === null`. Own file so an ignored empty
   case cannot break `check:vacuous`.
+- ~~`testUI` hands the method the caller's own object~~ **DONE** — a call the UI
+  makes (component, handler, test body) crosses the action wire in `testUI`:
+  `actionWireTrip` (`state/action-encode.ts`) is production's encode + decode +
+  the lossy walk, the method receives the decoded arguments, a lossy argument
+  FAILS the test (cell, method, `args[1].when`, `Date → string`, the fix), and
+  the return value comes back through `serializeReturn` as the ack carries it.
+  Server-origin calls (`isServerOrigin`: a method body, an effect, `onInit`) and
+  `scope: "client"` cells cross nothing, as in the app.
+  `tests/wire-harness-differential.test.tsx` runs one table (33 values) through
+  `testUI` and through `testMultiClient().call()` and requires the same verdict
+  — red on the previous harness for every lossy row. The console warning is no
+  longer dev-only: a production client says it once per `cell:method`. Still NOT
+  crossed in `testUI`: a thrown error keeps its identity and stack (over a
+  socket it is a message), `serverFn` arguments, and `useAio().send`. `testCell`
+  / `bootCells` stay server-side on purpose — they have no client entry;
+  `testMultiClient().call()` is the real one.
 
 Until then the standing rule is the cheap half of it: **a new validator is
 proven by BOOTING an app, not only by unit tests.**

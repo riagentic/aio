@@ -69,4 +69,9 @@ export {
   type SyncHandlerDeps,
 } from "./server-handler.ts";
 /** @internal Engine wiring — not public API, stripped from the snapshot. */
-export { getLowWater, loadOpsSince, persistOp } from "./server-store.ts";
+export {
+  getLowWater,
+  loadOpsSince,
+  persistOp,
+  settleOp,
+} from "./server-store.ts";

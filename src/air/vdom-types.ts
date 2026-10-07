@@ -315,6 +315,13 @@ export function _setDevA11yCheck(
  *  direction. */
 const _DEV_WARN_CAP = 500;
 
+/** @internal Test seam — forget which warnings were said. `testUI` calls it
+ *  at every mount, so each test hears about its own tree; a dev session keeps
+ *  the once-per-process rule. */
+export function _resetDevWarnings(): void {
+  _devWarned.clear();
+}
+
 export function _devWarn(id: string, msg: string): void {
   if (!isDevMode() || _devWarned.has(id)) return;
   if (_devWarned.size >= _DEV_WARN_CAP) _devWarned.clear();

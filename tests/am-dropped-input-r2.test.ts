@@ -11,7 +11,7 @@
 //   - `am create x --template counter`: "unknown flag --template".
 //   - `am top 2s --json`: the interval was validated only at a terminal.
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import {
   misplacedFlagError,
   strayArgsWarning,
@@ -25,8 +25,8 @@ import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { DENO_DIR } from "./deno-dir-helper.ts";
 
-const AM = new URL("../src/am.ts", import.meta.url).pathname;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const AM = fromFileUrl(new URL("../src/am.ts", import.meta.url));
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 /** `am <argv>` in a sandbox: empty cwd, temp HOME/runtime dirs, no display. */
 async function am(

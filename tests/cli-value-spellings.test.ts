@@ -19,12 +19,14 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { cliLine, parseCli } from "../src/server/aio-cli.ts";
 import { ENUM_VALUES } from "../src/server/config.ts";
 import { childCoverageDir } from "../src/testing/temp-dir.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+import { spec } from "./module-spec-helper.ts";
+
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 const _childCovDir = childCoverageDir();
 
 // ── Numbers are decimal digits, or they are refused ───────────────────
@@ -177,7 +179,7 @@ async function helpText(): Promise<string> {
       join(dir, "deno.json"),
       JSON.stringify({
         title: "helpapp",
-        imports: { aio: join(ROOT, "mod.ts") },
+        imports: { aio: spec(join(ROOT, "mod.ts")) },
       }),
     );
     await Deno.writeTextFile(

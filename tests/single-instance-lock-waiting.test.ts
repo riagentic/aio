@@ -2,6 +2,7 @@
 // the lock under its own pid with `waiting` set. A fresh start of the app takes
 // the slot — the session steps aside on its own — and never SIGTERMs it; the
 // `am` side names the wait (`waitingOf` / `waitingMessage`).
+import { exits0, sleeper } from "./proc-helper.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
@@ -20,7 +21,7 @@ Deno.test("waiting dev session: a new start takes the slot without killing it", 
   const dir = await tempDir("lock-wait-");
   const was = Deno.env.get("AIO_APPS_DIR");
   Deno.env.set("AIO_APPS_DIR", join(dir, "apps"));
-  const holder = new Deno.Command("sleep", { args: ["30"] }).spawn();
+  const holder = sleeper();
   const home = join(dir, "home");
   let lock: AppLock | null = null;
   try {
@@ -39,7 +40,7 @@ Deno.test("waiting dev session: a new start takes the slot without killing it", 
     const r = await lock.acquire(0, /* killExisting */ false);
     assert(r.ok, "a waiting dev session blocked a fresh start");
     assertEquals(readLock(lockKey("wt", home))?.pid, Deno.pid);
-    Deno.kill(holder.pid, "SIGCONT"); // throws if the session was killed
+    Deno.kill(holder.pid, 0); // throws if the session was killed
   } finally {
     lock?.release();
     try {
@@ -69,7 +70,7 @@ Deno.test("waiting dev session: its stale lock is reclaimed without a false 'sta
   const dir = await tempDir("lock-wait-dead-");
   const was = Deno.env.get("AIO_APPS_DIR");
   Deno.env.set("AIO_APPS_DIR", join(dir, "apps"));
-  const gone = new Deno.Command("true").spawn();
+  const gone = exits0();
   await gone.status; // reaped: its pid names no process
   const home = join(dir, "home");
   const warns: string[] = [];

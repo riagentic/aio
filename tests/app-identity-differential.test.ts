@@ -19,14 +19,15 @@
 // over the same project shapes and fails on any disagreement. Extend the shapes
 // when the identity chain grows — never hand-reason about equivalence.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { basename, join } from "@std/path";
+import { basename, fromFileUrl, join } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 import {
   appIdFromConfig,
   projectAppId,
   slugify,
 } from "../src/server/single-instance-lock.ts";
 
-const AIO_ROOT = new URL("..", import.meta.url).pathname;
+const AIO_ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 /** What a compiled artifact ends up with: the build names the binary, and
  *  `resolveAppId` slugifies that name out of the `deno-compile-<name>` segment
@@ -54,7 +55,9 @@ async function devAppId(
   await Deno.writeTextFile(
     entry,
     `import { resolveAppId } from ${
-      JSON.stringify(join(AIO_ROOT, "src/server/single-instance-lock.ts"))
+      JSON.stringify(
+        spec(join(AIO_ROOT, "src/server/single-instance-lock.ts")),
+      )
     };\nconsole.log("IDPROBE " + resolveAppId());\n`,
   );
   const r = await new Deno.Command(Deno.execPath(), {

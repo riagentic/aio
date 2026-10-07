@@ -35,7 +35,7 @@ const platform = { os: Deno.build.os, arch: Deno.build.arch };
 Deno.test({
   name:
     "hunt r10: a swap that fails (ENOSPC) does not leave an armed rollback marker",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // ENOSPC from a symlink to /dev/full: Windows has no such device
   fn: async () => {
     const newBytes = new TextEncoder().encode("#!/bin/sh\necho 2.0.0\n");
     const manifest = await buildShipManifest({

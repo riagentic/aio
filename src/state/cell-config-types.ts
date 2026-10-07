@@ -348,6 +348,22 @@ export type MethodsCellConfig<
    *  ```
    */
   worker?: boolean;
+  /** With `worker: true`: start this cell's worker again when it CRASHES.
+   *  Without it a crashed worker cell answers every later call with the crash
+   *  until the app restarts.
+   *
+   *  The new worker starts from the last committed state and its `onInit` runs
+   *  again there; calls in flight at the crash still fail, and module state is
+   *  gone. A third crash within 60 s is not respawned — the cell then stays
+   *  dead and says so. See docs/state/cell-workers.md#when-the-worker-crashes.
+   *
+   *  @example
+   *  ```ts
+   *  worker: true,
+   *  workerRespawn: true,   // a crashed worker is started again
+   *  ```
+   */
+  workerRespawn?: boolean;
   /** Transactional async methods: reads see a STABLE snapshot taken
    *  at method entry (an `await` never changes them), and writes commit
    *  ATOMICALLY at return — one batch, all-or-nothing (a throw/cancel

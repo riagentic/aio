@@ -67,7 +67,10 @@ Deno.test("fuses: the file is replaced, not written through — a hard-linked ca
         Deno.umask(um);
       }
       assertEquals(await Deno.readTextFile(staged), wire("000000011"));
-      assertEquals((await Deno.stat(staged)).mode! & 0o777, 0o755);
+      // Windows has no POSIX mode to keep (stat answers a constant).
+      if (Deno.build.os !== "windows") {
+        assertEquals((await Deno.stat(staged)).mode! & 0o777, 0o755);
+      }
       assertEquals(
         await Deno.readTextFile(cache),
         wire(),

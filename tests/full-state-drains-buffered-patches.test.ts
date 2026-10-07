@@ -20,6 +20,8 @@
 // re-subscribes: a 1 s poller pushing rows into a list is enough.
 import { assertEquals } from "@std/assert";
 import { join } from "@std/path";
+import { connectLocal } from "../src/server/local-listen.ts";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
 import { dec, enc } from "../src/protocol/envelope.ts";
 import { applyWirePatches, type WirePatch } from "../src/protocol/patch-ops.ts";
 import { freePort } from "../src/testing/server-test.ts";
@@ -173,7 +175,7 @@ Deno.test("ws: a subs reply mid-window is not followed by the patches it already
 // ── UDS: the desktop transport, same three doors ──────────────────────────
 
 async function udsPeer(socketPath: string) {
-  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  const conn = await connectLocal(socketPath);
   const frames: Frame[] = [];
   const decoder = new TextDecoder();
   let buf = "";
@@ -228,10 +230,10 @@ function udsRig(socketPath: string) {
 }
 
 Deno.test("uds: a peer that connects mid-window is not sent the patches its state already holds", async () => {
-  const socketPath = join(
+  const socketPath = localEndpoint(join(
     await tempDir("aio-full-state-drains-buffered-patches-"),
     "drain-connect.sock",
-  );
+  ));
   const r = udsRig(socketPath);
   await wait(30);
   const a = await udsPeer(socketPath);
@@ -255,15 +257,16 @@ Deno.test("uds: a peer that connects mid-window is not sent the patches its stat
     a.conn.close();
     await wait(30);
     r.close();
+    await localIdle();
   }
 });
 
 Deno.test("uds: resync and subs mid-window do not re-create the desync they repair", async () => {
   for (const door of ["resync", "subs"] as const) {
-    const socketPath = join(
+    const socketPath = localEndpoint(join(
       await tempDir("aio-full-state-drains-buffered-patches-"),
       `drain-${door}.sock`,
-    );
+    ));
     const r = udsRig(socketPath);
     await wait(30);
     const a = await udsPeer(socketPath);
@@ -285,6 +288,7 @@ Deno.test("uds: resync and subs mid-window do not re-create the desync they repa
       a.conn.close();
       await wait(30);
       r.close();
+      await localIdle();
     }
   }
 });

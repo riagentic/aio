@@ -12,6 +12,7 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
 import { _setStartSocket, AioLogger } from "../src/diagnostics/logger-core.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const REPO = dirname(dirname(fromFileUrl(import.meta.url)));
 
@@ -26,7 +27,7 @@ async function bootAndReadStarted(extraArgs: string[]): Promise<{
   const appId = `sl-${crypto.randomUUID().slice(0, 8)}`;
   await Deno.writeTextFile(
     join(dir, "app.ts"),
-    `import { aio, cell } from "${REPO}/mod.ts";
+    `import { aio, cell } from "${spec(REPO)}/mod.ts";
 const c = cell("c", { state: { n: 1 }, methods: { inc(s: { n: number }) { s.n++; } } });
 const app = await aio.run({ cells: [c], appId: ${JSON.stringify(appId)},
   persist: false, appDir: ${JSON.stringify(home)} });
@@ -94,7 +95,6 @@ Deno.test({
   name:
     "started line: a zero-port app names its socket, not a port it never bound",
   // Windows: the local socket is a named pipe; the UDS shape is what is pinned.
-  ignore: Deno.build.os === "windows",
   async fn() {
     const { line, appPort } = await bootAndReadStarted([]);
     assertStringIncludes(line, "socket=");
@@ -106,7 +106,6 @@ Deno.test({
 
 Deno.test({
   name: "started line: an app with a named TCP port still names that port",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const port = freePort();
     const { line, appPort } = await bootAndReadStarted([`--port=${port}`]);

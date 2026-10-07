@@ -73,17 +73,24 @@ Deno.test("fleet: a server target built for several platforms places one unit pe
     assertEquals(code, 0, lines.join("\n"));
     const units = [...Deno.readDirSync(join(dir, "dist"))]
       .map((e) => e.name).filter((n) => n.endsWith(".service")).sort();
-    // The host and linux-arm64 — never Windows or macOS.
-    assertEquals(units.length, 2, units.join(", "));
+    // The host (when it is a Linux one) and linux-arm64 — never Windows or
+    // macOS, which is what "host" is on a Mac.
+    assertEquals(
+      units.length,
+      Deno.build.os === "linux" ? 2 : 1,
+      units.join(", "),
+    );
     assert(units.some((u) => u.includes("linux-arm64")), units.join(", "));
     assert(!units.some((u) => /windows|macos/.test(u)), units.join(", "));
     // Each unit's install line names the binary of ITS platform, and the
     // summary tells the operator how to install every one of them.
     const said = lines.join("\n");
     for (const u of units) {
+      // `/` on every build host: the line is typed on the Linux box the unit
+      // is for (`placeServiceUnit`).
       assert(
         said.includes(
-          `sudo cp ${join("dist", u)} /etc/systemd/system/spapp.service`,
+          `sudo cp dist/${u} /etc/systemd/system/spapp.service`,
         ),
         `no install steps for ${u}:\n${said}`,
       );

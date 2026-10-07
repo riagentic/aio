@@ -14,7 +14,7 @@
 //
 // Each test below fails on the pre-fix tree.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { cmdLog, cmdTrigger } from "../src/am/am-cmd-inspect.ts";
 import { cmdAdd } from "../src/am/am-cmd-meta.ts";
 import { cmdCreate } from "../src/am/am-cmd-create.ts";
@@ -348,7 +348,10 @@ Deno.test("am: a client index that is not connected is a loud refusal", async ()
     "../src/am/am-cmd-inspect.ts"
   );
   const { toFileUrl } = await import("@std/path");
-  const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+  const REPO = fromFileUrl(new URL("..", import.meta.url)).replace(
+    /[\\/]$/,
+    "",
+  );
 
   _resetAioRuntime();
   const dir = await Deno.makeTempDir({ prefix: "am-noclient-" });

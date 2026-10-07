@@ -3,8 +3,9 @@
 //
 // Field reports (2026-09-17): a clean Windows 11 has no `unzip`/`bsdtar`/
 // `python3`; under Wine `powershell.exe` exited 0 having unpacked nothing.
-// Archives here are made by the real `zip` tool, so the reader is checked
-// against what Electron and aio's own packaging actually produce.
+// Archives here are made by the host's real archiver (`zip`; bsdtar `tar.exe`
+// on Windows — tests/zip-helper.ts), so the reader is checked against what
+// Electron and aio's own packaging actually produce.
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { join } from "@std/path";
 import {
@@ -14,21 +15,16 @@ import {
   safeZipPath,
 } from "../src/server/zip-extract.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { zipTree } from "./zip-helper.ts";
 
 const unix = Deno.build.os !== "windows";
 
 async function zipOf(
   stage: string,
-  args: string[] = ["-q", "-r", "-y"],
+  opts: { store?: boolean } = {},
 ): Promise<Uint8Array> {
   const out = `${stage}.zip`;
-  const p = await new Deno.Command("zip", {
-    args: [...args, out, "."],
-    cwd: stage,
-    stdout: "null",
-    stderr: "piped",
-  }).output();
-  assert(p.success, new TextDecoder().decode(p.stderr));
+  await zipTree(stage, out, opts);
   return await Deno.readFile(out);
 }
 
@@ -81,7 +77,7 @@ Deno.test("zip: a corrupted entry is refused, never written as good", async () =
     const stage = join(tmp, "stage");
     await Deno.mkdir(stage);
     await Deno.writeFile(join(stage, "a.bin"), new Uint8Array([1, 2, 3, 4, 5]));
-    const bytes = await zipOf(stage, ["-q", "-r", "-0"]); // stored: bytes are plain
+    const bytes = await zipOf(stage, { store: true }); // stored: bytes are plain
     const e = readZipDirectory(bytes)[0]!;
     const v = new DataView(bytes.buffer);
     const data = e.localOffset + 30 + v.getUint16(e.localOffset + 26, true) +

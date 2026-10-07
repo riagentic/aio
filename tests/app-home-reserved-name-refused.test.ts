@@ -11,7 +11,7 @@
 // Every case runs under a temp HOME with AIO_APPS_DIR unset — never the real
 // home — because `~/.<appId>` is the only shape the reservation is about.
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import {
   _resetAppDirs,
   RESERVED_APP_NAMES as BOOT_RESERVED,
@@ -20,8 +20,9 @@ import {
 } from "../src/server/app-dirs.ts";
 import { RESERVED_APP_NAMES as AM_RESERVED } from "../src/am/am-utils.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 async function withTempHome(fn: (home: string) => void | Promise<void>) {
   const dir = await tempDir("aio-reserved-home-");
@@ -110,7 +111,6 @@ Deno.test("resolveAppDirs: an EXISTING app under a reserved name, a chosen appDi
 Deno.test({
   name:
     'boot: aio.run({ appId: "kube" }) under a HOME with no ~/.kube refuses and creates nothing',
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("aio-reserved-boot-");
     try {
@@ -122,7 +122,7 @@ Deno.test({
         join(proj, "deno.json"),
         JSON.stringify({
           imports: {
-            "aio": `${ROOT}mod.ts`,
+            "aio": `${spec(ROOT)}mod.ts`,
             "immer": "npm:immer@10.2.0",
             "@std/path": "jsr:@std/path@^1",
           },

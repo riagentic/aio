@@ -326,6 +326,8 @@ function fileChildPlaceholder(
       ...self,
       waiting,
       pid: child,
+      // Whose child it is — `am` reads it (see `LockData.supervisor`).
+      supervisor: child === Deno.pid ? undefined : Deno.pid,
       port: port ?? self.port,
       status: "starting",
       startedAt: Date.now(),

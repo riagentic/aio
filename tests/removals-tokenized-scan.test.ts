@@ -72,10 +72,14 @@ Deno.test("preflight: only the real config refuses; a fixture path is marked war
     const found = await preflight(dir, "v1.0.0-alpha67");
     assertEquals(
       found.map((b) => [b.where, b.fixture]),
-      [["src/real.ts:4", false], ["tests/upgrade.test.ts:4", true]],
+      // `where` is a path the user reads: the host's separator.
+      [[join("src", "real.ts") + ":4", false], [
+        join("tests", "upgrade.test.ts") + ":4",
+        true,
+      ]],
     );
     const quoted = blockerLines(found[0]!);
-    assertStringIncludes(quoted, "src/real.ts:4");
+    assertStringIncludes(quoted, join("src", "real.ts") + ":4");
     assertStringIncludes(quoted, "| execute: { run() {} },");
     assertStringIncludes(quoted, "removed in");
   } finally {

@@ -11,7 +11,27 @@ across renders **by call order**, so index 0 is index 0 forever. A hook behind
 an `if` (or in a loop whose length changes) shifts every later hook onto a
 different slot, and the component silently starts reading another ref's value.
 Call those three unconditionally at the top of the body and put the condition
-inside the value. Dev mode reports it when the count changes between renders.
+inside the value. The same goes for every hook built on them — `useLocal`,
+`useResource`, `useHead`, `useOptimistic`, `useDimensions`, `useRaf`,
+`useInterval`, `useProjection`, `onUnmount`, `onGlobalKey`, `onWindowEvent` and
+the compat hooks (`useState`, `useEffect`, `useMemo`, `useCallback`).
+
+The easiest way to get it wrong is an early `return` above the hooks:
+
+```tsx
+function JobsPanel() {
+  if (jobs.list.length === 0) return null; // ✗ the hooks below run only sometimes
+  const [open, setOpen] = useLocal(false);
+  // …
+}
+```
+
+Move the hooks above the `return`. `aiol` reports the shape in the source (after
+an early `return`, behind a condition, in a loop). At runtime the renderer
+reports it when the count changes between renders —
+`<JobsPanel> called 1 state hooks this render but 0 last render` — on
+`console.error`, in dev on every such render and in a production build once per
+component, so it reaches the server log of a packaged app too.
 
 ---
 
@@ -132,8 +152,9 @@ Call it in the body, **unconditionally** — never inside an `if` or a loop.
 Unlike `onMount` and `onCleanup`, which just append to a list and are safe to
 call conditionally, `onUnmount` takes a hook slot (that is how it registers once
 rather than once per render), so it follows `useRef`'s rule instead of theirs.
-In dev, calling it conditionally is reported as hook-order drift — and, when the
-hook count stays the same (`if (a) onUnmount(A); else onUnmount(B)`), as one
+Calling it conditionally is reported as hook-order drift (and by `aiol`, in the
+source). In dev, when the hook count stays the same
+(`if (a) onUnmount(A); else onUnmount(B)`), it is also reported as one
 `onUnmount` taking another's slot, naming both call sites.
 
 ```tsx

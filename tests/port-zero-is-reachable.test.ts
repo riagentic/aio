@@ -19,6 +19,7 @@
 // answer and no URL may be printed; here a port really was bound.
 import { assert, assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 
 const REPO = dirname(dirname(fromFileUrl(import.meta.url)));
 
@@ -31,7 +32,7 @@ Deno.test({
     const src = join(dir, "app.ts");
     await Deno.writeTextFile(
       src,
-      `import { aio, cell } from "${REPO}/mod.ts";
+      `import { aio, cell } from "${spec(REPO)}/mod.ts";
 const c = cell("p", { state: { n: 1 }, visible: "all", methods: {} });
 await aio.run({
   cells: [c], appId: ${JSON.stringify(appId)},

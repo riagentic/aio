@@ -52,6 +52,7 @@
 
 /** Rules, in the order they are reported. */
 import { justified as okMarker } from "../src/diagnostics/ok-marker.ts";
+import { fromFileUrl } from "@std/path";
 
 export type Rule =
   | "empty-loop"
@@ -803,7 +804,6 @@ export const LEDGER: readonly string[] = [
   "no-assertions|tests/testui-absent-and-t.test.tsx|absent(): composes with waitFor",
   "no-assertions|tests/testui-revealed-controls.test.tsx|testUI: the same reveal, three actions deep",
   "empty-loop|tests/transport-chaos-fuzz.test.ts|chaos: one intent, one outcome — under drop / kill / reconnect",
-  "no-assertions|tests/transport-exactly-once.test.ts|uds: a patch that fails to apply asks the server to resync",
   "no-assertions|tests/uds-accept-resilience.test.ts|uds: an unserializable state does not throw out of broadcastState",
   "empty-loop|tests/ui-kit-semantic.test.tsx|fuzz: every interactive element is reachable and drivable by name",
   "empty-loop|tests/ui-kit-semantic.test.tsx|fuzz: every interactive element is reachable and drivable by name",
@@ -864,7 +864,7 @@ export function report(v: Verdict): string {
 }
 
 if (import.meta.main) {
-  const root = new URL("../", import.meta.url).pathname;
+  const root = fromFileUrl(new URL("../", import.meta.url));
   const all = await scan(root);
   const v = verdict(all, LEDGER);
   if (Deno.args.includes("--print-ledger")) {

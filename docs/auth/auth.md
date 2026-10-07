@@ -1169,9 +1169,11 @@ In production (`--prod` / a built app), an Electron app on its local socket
 therefore serves a session **only to the window process it launched**. The
 kernel reports who is on the other end of each connection — `SO_PEERCRED`
 (Linux), `LOCAL_PEERPID` (macOS), `GetNamedPipeClientProcessId` (Windows) — and
-a same-user process cannot forge that answer. On Linux the check is pid **and**
-process start time, so a pid the kernel reuses after the window exits is not the
-window; everywhere, the gate is disarmed the moment the window exits.
+a same-user process cannot forge that answer. The check is pid **and** process
+start time (`/proc` on Linux, `proc_pidinfo` on macOS, `GetProcessTimes` on
+Windows), so a pid the kernel reuses after the window exits is not the window;
+where the start time cannot be read the pid alone decides, and everywhere the
+gate is disarmed the moment the window exits.
 
 What is gated — every local door, by one gate:
 

@@ -232,13 +232,15 @@ Deno.test("android `aio`: the db schema builders are present, and are THE same o
   // …and a cell module declaring a table BUNDLES against the android entry
   // (esbuild refused it: "No matching export … for import \"table\"").
   const esbuild = await import("esbuild");
-  const entry = new URL("../src/standalone-air.ts", import.meta.url).pathname;
+  const entry = fromFileUrl(
+    new URL("../src/standalone-air.ts", import.meta.url),
+  );
   try {
     const out = await esbuild.build({
       stdin: {
         contents:
           `import { table, pk, text } from "aio"; console.log(table({ id: pk(), t: text() }));`,
-        resolveDir: new URL("../src/", import.meta.url).pathname,
+        resolveDir: fromFileUrl(new URL("../src/", import.meta.url)),
         loader: "ts",
       },
       bundle: true,
@@ -278,6 +280,7 @@ Deno.test("android `aio`: log is present, and is THE logger", () => {
 import { androidLocalHTML } from "../src/server/server-html-gen.ts";
 import { Window } from "happy-dom";
 import { closeWindow } from "../src/testing/close-window.ts";
+import { fromFileUrl } from "@std/path";
 
 function shellDoc(opts: { appCss?: boolean } = {}) {
   const win = new Window();

@@ -442,10 +442,25 @@ async function resolveEntry(dir: string): Promise<string | null> {
  *  app consuming its parent's `../dep/aio`). Anchored to a path segment: a
  *  substring test would misread "../vendor-dep/aio-core/mod.ts". Pure. */
 export function depAioProvider(dir: string, spec: string): string | null {
-  if (!(spec.startsWith(".") || spec.startsWith("/"))) return null;
-  const m = /(^|\/)dep\/aio(\/|$)/.exec(spec);
+  const path = specPath(spec);
+  if (path === null) return null;
+  const m = /(^|\/)dep\/aio(\/|$)/.exec(path);
   if (!m) return null;
-  return resolve(dir, spec.slice(0, m.index + m[1]!.length) + "dep/aio");
+  return resolve(dir, path.slice(0, m.index + m[1]!.length) + "dep/aio");
+}
+
+/** The path an import-map target names, `/`-separated — or null when it names
+ *  no path (a registry spec, a bare name). A `file:` URL is a path: it is the
+ *  ONLY absolute spelling Windows has (`C:\x` is the URL scheme `c:` to Deno),
+ *  and read as "no path" it made `am fix` answer `no "aio" import`. Pure. */
+function specPath(spec: string): string | null {
+  if (spec.startsWith(".") || spec.startsWith("/")) return spec;
+  if (!spec.startsWith("file:")) return null;
+  try {
+    return fromFileUrl(spec).replaceAll("\\", "/");
+  } catch {
+    return null; // aio-ok: not a local file URL — reported as an unknown mode, never guessed
+  }
 }
 
 /** Whether `provider` (from {@linkcode depAioProvider}) is `dir`'s OWN
@@ -624,7 +639,7 @@ export async function cmdFix(
 
   // Recognize HOW the app consumes aio, so we only take actions that fit it.
   const aioSpec = imports["aio"] ?? "";
-  const isPath = aioSpec.startsWith(".") || aioSpec.startsWith("/");
+  const isPath = specPath(aioSpec) !== null;
   // A `dep/aio` path that is NOT this app's own `./dep/aio` is ANOTHER app's
   // framework — a nested app (`client/` inside a repo) consuming its parent's
   // through `../dep/aio`. Its pin, link and task paths belong to that app:

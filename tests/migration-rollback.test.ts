@@ -19,11 +19,11 @@
 import { assert, assertEquals } from "@std/assert";
 // @ts-ignore node:sqlite types unavailable when an old @types/node shadows them
 import { DatabaseSync } from "node:sqlite";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { freePort } from "../src/testing/server-test.ts";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("..", import.meta.url));
 const MOD = new URL("../mod.ts", import.meta.url).href;
 
 /** Write one runnable "build" of an app against `dir`. */

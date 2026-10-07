@@ -5,7 +5,7 @@
 // the exact tmp pattern next to a file it owns, a regular file (a symlink is
 // never touched or followed), owned by this user, older than this process.
 import { assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { purgeDisabledArtifacts } from "../src/diagnostics/mod.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
@@ -36,7 +36,7 @@ async function openInChild(code: string, dir: string): Promise<void> {
     args: [
       "eval",
       "--config",
-      new URL("../deno.json", import.meta.url).pathname,
+      fromFileUrl(new URL("../deno.json", import.meta.url)),
       src,
     ],
     stdout: "piped",

@@ -8,6 +8,7 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { scaffold, TEMPLATES } from "../src/am/am-cmd-create.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { fromFileUrl } from "@std/path";
 
 const files = (t: "counter" | "todo" | "canvas" | "assets") =>
   scaffold(`probe-${t}`, t, true, "browser");
@@ -148,7 +149,10 @@ Deno.test({
   sanitizeOps: false, // aio-ok: `deno check` child
   sanitizeResources: false, // aio-ok: same
   fn: async () => {
-    const repo = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+    const repo = fromFileUrl(new URL("..", import.meta.url)).replace(
+      /[\\/]$/,
+      "",
+    );
     for (const t of TEMPLATES) {
       const dir = await tempDir(`aio-tpl-${t}-`);
       try {

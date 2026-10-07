@@ -38,8 +38,9 @@
 const CEILING = 52;
 
 import { type Hit, likelyNew, mtimeUnder } from "./ratchet-kit.ts";
+import { fromFileUrl } from "@std/path";
 
-const ROOT = new URL("../src/", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("../src/", import.meta.url));
 
 async function walk(dir: string, out: string[]): Promise<string[]> {
   for await (const e of Deno.readDir(dir)) {

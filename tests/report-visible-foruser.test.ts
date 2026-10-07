@@ -20,6 +20,8 @@ import { cell } from "../src/state/cell-create.ts";
 import { _resetAioRuntime } from "../src/state/runtime-reset.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { tempDir } from "../src/testing/temp-dir.ts";
+import { fromFileUrl } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 
 const MINE = "row-of-alice";
 const THEIRS = "SECRET-row-of-bob";
@@ -189,10 +191,10 @@ Deno.test("report timeline: a forUser cell's diff leaves lose their values", asy
 
 // ── The same thing end to end: a real app, a real feedback capture ─────────
 const MOD = new URL("../mod.ts", import.meta.url).href;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 const CHILD = `
-import { aio, cell } from "${MOD}";
+import { aio, cell } from "${spec(MOD)}";
 const DIR = Deno.env.get("DIR");
 const PORT = Number(Deno.env.get("PORT"));
 const acct = cell("acct", {

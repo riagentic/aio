@@ -1,9 +1,9 @@
 // Two ways `aiol --safe-fix` lied about what it did.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { fixAddNodeModulesDir } from "../aiol/fixes.ts";
 
-const AIO_ROOT = new URL("..", import.meta.url).pathname;
+const AIO_ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 async function project(
   config: string,

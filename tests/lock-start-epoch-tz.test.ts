@@ -21,7 +21,7 @@ const AT = 1790150137; // Wed Sep 23 07:55:37 2026 UTC — 19:55:37 in Auckland
 Deno.test({
   name:
     "processStartEpoch: lstart is asked for in UTC — exact to the second from any reader's zone",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // `ps lstart` is how unix reads a start time; Windows never runs it
   async fn() {
     const dir = await tempDir("ps-tz-");
     const was = { ...PS_TIMEOUT };

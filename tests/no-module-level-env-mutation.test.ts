@@ -23,6 +23,7 @@
 // duration and can restore it in a `finally`. `src/testing/env-pin.ts` is the
 // spelling that does both for a whole file.
 import { assert, assertEquals } from "@std/assert";
+import { fromFileUrl } from "@std/path";
 
 const DIRS = ["tests", "tests/sync"] as const;
 const SELF = "no-module-level-env-mutation.test.ts";
@@ -33,7 +34,10 @@ const SELF = "no-module-level-env-mutation.test.ts";
 const MODULE_LEVEL = /^Deno\.env\.(set|delete)\s*\(/m;
 
 async function scan(): Promise<string[]> {
-  const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+  const root = fromFileUrl(new URL("..", import.meta.url)).replace(
+    /[\\/]$/,
+    "",
+  );
   const bad: string[] = [];
   for (const dir of DIRS) {
     for await (const e of Deno.readDir(`${root}/${dir}`)) {
@@ -77,7 +81,10 @@ Deno.test("the gate catches the shape it is named for", async () => {
 
   // And the walk reaches a real population, so silence means "clean", not
   // "looked at nothing".
-  const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+  const root = fromFileUrl(new URL("..", import.meta.url)).replace(
+    /[\\/]$/,
+    "",
+  );
   let files = 0;
   for await (const e of Deno.readDir(`${root}/tests`)) {
     if (e.isFile && /\.tsx?$/.test(e.name)) files++;

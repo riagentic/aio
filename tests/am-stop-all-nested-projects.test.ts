@@ -7,8 +7,9 @@
 // deno.json. Measured: `{"root":".../fh","stopped":[r2stopp1,r2stopp2]}`.
 //
 // An instance belongs to the NEAREST project above where it was launched.
+import { SLEEP_ARGS } from "./proc-helper.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import {
   instancesInNestedProjects,
   instancesInProject,
@@ -20,8 +21,8 @@ import {
 } from "../src/server/single-instance-lock.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const AM = new URL("../src/am.ts", import.meta.url).pathname;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const AM = fromFileUrl(new URL("../src/am.ts", import.meta.url));
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 const lock = (appId: string, cwd: string, pid = Deno.pid): LockData => ({
   appId,
@@ -86,7 +87,11 @@ Deno.test("instancesInProject: a nested project's app is not the parent's", asyn
 Deno.test("am stop --all from a plain folder under a stray deno.json stops no other project", async () => {
   const { base, home } = await layout();
   const victims = ["p1", "p2"].map(() =>
-    new Deno.Command("sleep", { args: ["60"], stdout: "null", stderr: "null" })
+    new Deno.Command(Deno.execPath(), {
+      args: SLEEP_ARGS,
+      stdout: "null",
+      stderr: "null",
+    })
       .spawn()
   );
   try {

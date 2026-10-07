@@ -119,7 +119,12 @@ Deno.test("the committed stub PE is the pinned build", async () => {
 // with their line endings normalised (a checkout may convert them), each as
 // `<name> NUL <text> NUL`.
 Deno.test("the stub sources are the ones the committed PE was built from", async () => {
-  const names = ["Cargo.toml", "Cargo.lock", "version-order.json"];
+  const names = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "shortcut-names.json",
+    "version-order.json",
+  ];
   for await (const e of Deno.readDir(join(STUB_DIR, "src"))) {
     if (e.isFile && e.name.endsWith(".rs")) names.push(`src/${e.name}`);
   }

@@ -112,6 +112,8 @@ const VERBS: Record<string, { "replace-temp"?: number; "move-data"?: number }> =
     "src/diagnostics/logger-rotate.ts": { "move-data": 2 },
     // the trust store from a temp; the verified download into its name
     "src/server/updates-check.ts": { "replace-temp": 1, "move-data": 1 },
+    // `installed.json`, by the installer and by the updater, from a temp
+    "src/server/install-record.ts": { "replace-temp": 1 },
     // the record of what the updater made, from a temp
     "src/server/updates-owned.ts": { "replace-temp": 1 },
     // temps: the rollback record, the first-boot token, the temporary link

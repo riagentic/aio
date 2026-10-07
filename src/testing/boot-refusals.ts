@@ -24,7 +24,12 @@ import { refuseUnsafeComposition } from "../server/aio-composition.ts";
 import { syncListensMismatches } from "../server/aio-cells-bridge.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { validateWorkerCells } from "../server/cell-worker-pool.ts";
-import type { CellDef, CellEntry } from "../state/cell-types.ts";
+import {
+  _crashHostedWorker,
+  _workerCrash,
+  closedWorkerCall,
+} from "../server/cell-worker.ts";
+import type { CellDef, CellEntry, Msg } from "../state/cell-types.ts";
 import { _cloneAcrossWorkerBoundary } from "../state/cell-impl.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { BootScope } from "../standalone-air.ts";
@@ -99,12 +104,21 @@ export function _refuseWorkerCells(
  *  that throws, or returns a plain object, in the app. `testServer` already
  *  clones at its dispatch seam; this is the same boundary for `testCell`,
  *  `bootCells` and `testUI`. A clone failure is the call's rejection, as it is
- *  there. @internal */
+ *  there. `key` names the method, for a crashed cell's refusal. @internal */
 export function _callAcrossWorkerBoundary(
   cellId: string,
   args: unknown[],
   run: (args: unknown[]) => unknown,
+  key?: string,
 ): unknown {
+  const sim = crashSims.get(cellId);
+  if (sim && sim.dead !== null) {
+    return closedWorkerCall(
+      cellId,
+      sim.dead,
+      { type: `${cellId}:${key}` } as Msg,
+    );
+  }
   let sent: unknown[];
   try {
     sent = _cloneAcrossWorkerBoundary(
@@ -116,13 +130,84 @@ export function _callAcrossWorkerBoundary(
     return Promise.reject(e);
   }
   const out = run(sent);
-  return out !== null && typeof (out as { then?: unknown })?.then === "function"
-    ? (out as Promise<unknown>).then((v) =>
-      v === undefined
-        ? v
-        : _cloneAcrossWorkerBoundary(v, "return value", cellId)
-    )
-    : out;
+  if (
+    out === null || typeof (out as { then?: unknown })?.then !== "function"
+  ) return out;
+  const value = (out as Promise<unknown>).then((v) =>
+    v === undefined ? v : _cloneAcrossWorkerBoundary(v, "return value", cellId)
+  );
+  if (!sim) return value;
+  // In flight until it settles: a crash meanwhile is its rejection.
+  return new Promise((resolve, reject) => {
+    sim.inflight.add(reject);
+    value.then(resolve, reject).finally(() => sim.inflight.delete(reject));
+  });
+}
+
+// ── A worker crash, in process ────────────────────────────────────────────
+
+/** One in-process worker cell a harness is running: the crash that closed it
+ *  (null: alive), its recent crashes when it respawns (`_workerCrash`), and
+ *  the calls in flight. */
+type CrashSim = {
+  dead: string | null;
+  times: number[] | null;
+  inflight: Set<(e: Error) => void>;
+};
+const crashSims = new Map<string, CrashSim>();
+
+/** Crash a `worker: true` cell's worker, the way an uncaught error in its
+ *  thread does — so a test can prove what the app does next.
+ *
+ *  Every call in flight rejects with the crash. After it, a `worker: true`
+ *  cell answers each call with the crash, by name; with `workerRespawn: true`
+ *  it serves the next call from the last committed state — until its third
+ *  crash within 60 s, which is not respawned.
+ *
+ *  Under `testServer({ workers: "real" })` the real thread is terminated and
+ *  (with `workerRespawn`) a fresh one spawned, `onInit` included. Under
+ *  `testCell`, `bootCells` and `testUI` the cell runs in process, where there
+ *  is no thread to end: the calls are answered as above, but a method body
+ *  already running runs on (what it writes afterwards still commits), module
+ *  state survives and `onInit` does not run again. When that is what the
+ *  test is about, use real workers (docs/state/cell-workers.md).
+ *
+ *  ```ts
+ *  const slow = heavy.scan();
+ *  crashWorker(heavy);
+ *  await assertRejects(() => slow, Error, "crashed");
+ *  ```
+ */
+export function crashWorker(
+  cell: { __aio: { id: string; worker?: boolean; workerRespawn?: boolean } },
+): void {
+  const id = cell?.__aio?.id;
+  if (cell?.__aio?.worker !== true) {
+    throw new Error(
+      `crashWorker: ${
+        id ? `cell "${id}"` : "the argument"
+      } is not a worker cell — only a cell declared worker: true has a ` +
+        `worker to crash.`,
+    );
+  }
+  const why = "crashWorker() in a test";
+  if (_crashHostedWorker(id, why)) return;
+  const sim = crashSims.get(id);
+  if (!sim || sim.dead !== null) {
+    throw new Error(
+      `crashWorker: cell "${id}" has no live worker to crash — ` +
+        (sim
+          ? `it already crashed for good.`
+          : `no testCell, bootCells or testUI is running it, and under ` +
+            `testServer it needs a real one: testServer({ workers: "real", ` +
+            `workerEntry }) (docs/testing/prod-parity.md).`),
+    );
+  }
+  const { err, respawn } = _workerCrash(id, why, sim.times);
+  log.error("cell-worker", err.message);
+  if (!respawn) sim.dead = err.message;
+  for (const reject of sim.inflight) reject(err);
+  sim.inflight.clear();
 }
 
 // ── Worker isolation, in process ──────────────────────────────────────────
@@ -315,9 +400,12 @@ export function _shedLeakedScopes(): void {
 /** Refuse, while a `worker: true` cell's method runs in process, what a real
  *  worker refuses: reading another cell's state, and calling any cell's
  *  method. Returns the undo. No-op when `cells` has no worker cell.
+ *  `crashable`: the harness calls these cells through
+ *  `_callAcrossWorkerBoundary`, so `crashWorker` can stand in for a crash.
  *  @internal */
 export function _isolateWorkerCellsInProcess(
   cells: readonly CellEntry[],
+  crashable = true,
 ): () => void {
   const defs = cells.map((entry) =>
     ("__aio" in entry ? entry : (entry as { cell: CellDef }).cell) as CellDef
@@ -328,6 +416,16 @@ export function _isolateWorkerCellsInProcess(
    *  a render/effect is TRACKING is UI code, not the method. */
   const insideWorker = (): string | undefined =>
     _openScopeDepth().track > 0 ? undefined : _workerScope.getStore();
+  for (const def of crashable ? defs : []) {
+    if (def.__aio.worker !== true) continue;
+    const id = def.__aio.id;
+    crashSims.set(id, {
+      dead: null,
+      times: def.__aio.workerRespawn ? [] : null,
+      inflight: new Set(),
+    });
+    undo.push(() => crashSims.delete(id));
+  }
 
   // 1. Scope every booted cell's reduce + executor: a worker cell's INTO its
   //    scope, everyone else's OUT of it — a peer's method drained from inside a

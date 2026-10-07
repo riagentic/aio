@@ -6,6 +6,7 @@ import { deadOwnerWarning } from "../src/server/single-instance-lock.ts";
 import { installerKillPlan } from "../src/electron/electron-spawn.ts";
 import { type AppDirs, writeAppMeta } from "../src/server/app-dirs.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { exits0, sleeper } from "./proc-helper.ts";
 
 const REPO = join(import.meta.dirname!, "..");
 
@@ -32,11 +33,10 @@ Deno.test("dead owner: a killed maintenance holder is named, not blamed for lost
 
 Deno.test({
   name: "dead owner: the boot's reclaim of a killed backup's lock says so",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("dead-mnt-");
     try {
-      const gone = new Deno.Command("true").spawn();
+      const gone = exits0();
       await gone.status; // a pid that no longer runs
       const mod = toFileUrl(join(REPO, "src/server/single-instance-lock.ts"));
       const home = join(dir, "home");
@@ -89,7 +89,6 @@ Deno.test("installer kill: POSIX signals the group, Windows kills the tree", () 
 // `meta.json` symlink was written THROUGH.
 Deno.test({
   name: "writeAppMeta: replaces a planted symlink, never writes through it",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("meta-atomic-");
     try {
@@ -119,7 +118,6 @@ Deno.test({
 // only an OLDER-than-this-process regular file of exactly that shape.
 Deno.test({
   name: "writeAppMeta: sweeps a dead writer's meta.json tmp, keeps a live one",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("meta-sweep-");
     try {
@@ -153,15 +151,9 @@ Deno.test({
 Deno.test({
   name:
     "legacy migration: refuses under a live OTHER instance, not under itself",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("mig-live-");
-    const holder = new Deno.Command("sleep", {
-      args: ["60"],
-      stdin: "null",
-      stdout: "null",
-      stderr: "null",
-    }).spawn();
+    const holder = sleeper({ stdin: "null", stdout: "null", stderr: "null" });
     try {
       const lockMod = toFileUrl(
         join(REPO, "src/server/single-instance-lock.ts"),
@@ -234,11 +226,10 @@ Deno.test({
 // first (a `--home`-pinned lookup never lists instances at all).
 Deno.test({
   name: "removePid: a dead maintenance holder is named before its lock goes",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("rmpid-dead-");
     try {
-      const gone = new Deno.Command("true").spawn();
+      const gone = exits0();
       await gone.status;
       const lockMod = toFileUrl(
         join(REPO, "src/server/single-instance-lock.ts"),
@@ -285,11 +276,10 @@ Deno.test({
 Deno.test({
   name:
     "removePid: a dead app is not a killed op; malformed/escaped holds print safely",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("rmpid-shapes-");
     try {
-      const gone = new Deno.Command("true").spawn();
+      const gone = exits0();
       await gone.status;
       const lockMod = toFileUrl(
         join(REPO, "src/server/single-instance-lock.ts"),

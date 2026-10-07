@@ -16,8 +16,8 @@ import {
   lockDir,
   lockKey,
   lockPath,
+  ownerIdentity,
   parseLockKey,
-  processStartToken,
   readLock,
   removeLock,
   writeLock,
@@ -36,6 +36,7 @@ import {
 import { cell } from "../src/state/cell-create.ts";
 import { testServer } from "../src/testing/server-test.ts";
 import { tempDir } from "../src/testing/temp-dir.ts";
+import { sleeper } from "./proc-helper.ts";
 
 const uid = () => crypto.randomUUID().slice(0, 8);
 
@@ -61,6 +62,9 @@ Deno.test({
     const homeB = join(await tempDir("aio-homeB-"));
     const a = new AppLock(id, homeA);
     const b = new AppLock(id, homeB);
+    // Somebody else's live process, on every OS (pid 1 is no process on
+    // Windows, so a lock naming it read as stale there).
+    const other = sleeper();
     try {
       assert(a.key !== b.key, "two homes, two keys");
       assertEquals((await a.acquire(4101)).ok, true);
@@ -95,16 +99,19 @@ Deno.test({
       // A TRUE duplicate (same home) is refused, and `existing` is the
       // same-home instance — its port is this caller's own, never home B's.
       const dup = new AppLock(id, homeA);
-      // An alive owner. `startToken` must be pid 1's, not the one this
+      // An alive owner. `startToken` must be that pid's, not the one this
       // process's own lock carries: a lock whose pid and start-time disagree
       // is EXACTLY the recycled-pid signature `isLockOwnerAlive` exists to
       // catch, so pairing them would make this "alive owner" read as stale and
       // the duplicate would be allowed in.
       writeLock({
         ...readLock(a.key)!,
-        pid: 1,
+        pid: other.pid,
         port: 4101,
-        startToken: processStartToken(1) ?? undefined,
+        // …in whichever field this platform records (macOS: `startEpoch`).
+        startToken: undefined,
+        startEpoch: undefined,
+        ...ownerIdentity(other.pid),
       });
       const r = await dup.acquire(4103);
       assert(!r.ok);
@@ -117,6 +124,8 @@ Deno.test({
       removeLock(b.key);
       a.release();
       b.release();
+      other.kill();
+      await other.status;
     }
   },
 });
@@ -128,12 +137,14 @@ Deno.test({
     const id = `foreign-home-${uid()}`;
     const foreignHome = await tempDir("aio-foreign-");
     const myHome = await tempDir("aio-mine-");
-    // An alive foreign instance (pid 1 counts as alive) on a real port.
+    // An alive foreign instance (a live child: pid 1 is no process on
+    // Windows) on a real port.
+    const other = sleeper();
     const l = Deno.listen({ port: 0, hostname: "127.0.0.1" });
     const fport = (l.addr as Deno.NetAddr).port;
     writeLock({
       appId: id,
-      pid: 1,
+      pid: other.pid,
       port: fport,
       startedAt: Date.now() - 60_000,
       status: "started",
@@ -171,6 +182,8 @@ Deno.test({
       mine?.release();
       removeLock(lockKey(id, foreignHome));
       l.close();
+      other.kill();
+      await other.status;
     }
   },
 });

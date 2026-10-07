@@ -39,6 +39,11 @@ import {
   writeServiceFile,
 } from "./build/build-compile.ts";
 import { buildElectron } from "./build/build-electron.ts";
+import {
+  appSources,
+  checkedGuestPreloads,
+  guestPreloadFindings,
+} from "./build/guest-preloads.ts";
 import { bakesElectronVersion } from "./build/electron-bake.ts";
 import {
   reportElectronDrift,
@@ -88,6 +93,26 @@ export async function build(cfg?: BuildConfig): Promise<void> {
   // recoverInterruptedLinks).
   await recoverInterruptedLinks(join(root, "node_modules"));
 
+  // ── Guest preloads: every declared file exists, and the source asks only
+  //    for declared ones ────────────────────────────────────────────────────
+  // Before anything is built: a `<webview>` preload the package does not
+  // carry is a guest with no bridge, found by a user and not by the build.
+  try {
+    const declared = await checkedGuestPreloads(
+      root,
+      (await readDenoJson(root))?.config,
+    );
+    const found = guestPreloadFindings(await appSources(cfg.appDir), declared);
+    // Said where it bites: only an Electron package has a `<webview>`.
+    if (doElectron) {
+      for (const w of found.warnings) console.warn(`${HEY} ${w}`);
+    }
+    if (found.errors.length) throw new Error(found.errors.join("\n  "));
+  } catch (e) {
+    console.error(`✗ ${e instanceof Error ? e.message : e}`);
+    Deno.exit(1);
+  }
+
   // ── Step 1: Bundle dist/app.js ───────────────────────────────────────────
   // Skip for targets that don't need browser bundles
   const skipsBundle = doCli || cfg.doHeadless || doClient || doIos ||
@@ -116,7 +141,10 @@ export async function build(cfg?: BuildConfig): Promise<void> {
   // `-dirty.<hash8>` included. The APK / Xcode project carry it as their
   // versionName instead (build-android.ts). Written for every packaging path,
   // never for a bundle-only build.
-  await writeBuildStamp(root, cfg.version, VERSION);
+  await writeBuildStamp(root, cfg.version, VERSION, {
+    title: cfg.appTitle,
+    windowsShortcut: cfg.windowsShortcut,
+  });
   staged(BUILD_STAMP_FILE, cfg.version.version);
 
   // ── Bake the Electron version into dist/ ────────────────────────────────

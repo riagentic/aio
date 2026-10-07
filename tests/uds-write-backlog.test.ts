@@ -14,11 +14,16 @@ import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { createUDSListener } from "../src/server/aio.ts";
 import { _resetDegraded, degradedReport } from "../src/diagnostics/degraded.ts";
+import {
+  connectRW,
+  localEndpoint,
+  localIdle,
+} from "./local-endpoint-helper.ts";
 
 /** A real listener, and a real client that connects and never reads. */
 async function wedgedPeer() {
   const dir = await Deno.makeTempDir({ prefix: "aio-backlog-" });
-  const socketPath = join(dir, "backlog.sock");
+  const socketPath = localEndpoint(join(dir, "backlog.sock"));
   const uds = createUDSListener(
     socketPath,
     () => ({ big: "x".repeat(2000) }),
@@ -27,16 +32,17 @@ async function wedgedPeer() {
   );
   // Connect, then read NOTHING — the kernel buffer fills and every further
   // write parks in the queue this test is about.
-  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  const conn = await connectRW(socketPath);
   // Let the accept-time frame land before measuring.
   await new Promise((r) => setTimeout(r, 50));
   return {
     uds,
-    stop: () => {
+    stop: async () => {
       try {
         conn.close();
       } catch { /* already gone */ }
       uds.shutdown();
+      await localIdle();
       // The dir goes with it: `check:orphans` counts every temp home a test
       // leaves behind, and they are invisible one at a time and GBs together.
       Deno.removeSync(dir, { recursive: true });
@@ -76,7 +82,7 @@ Deno.test({
         }`,
       );
     } finally {
-      stop();
+      await stop();
       _resetDegraded();
     }
   },
@@ -89,14 +95,14 @@ Deno.test({
   async fn() {
     _resetDegraded();
     const dir = await Deno.makeTempDir({ prefix: "aio-quiet-" });
-    const socketPath = join(dir, "quiet.sock");
+    const socketPath = localEndpoint(join(dir, "quiet.sock"));
     const uds = createUDSListener(
       socketPath,
       () => ({ n: 1 }),
       () => {},
       () => {},
     );
-    const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+    const conn = await connectRW(socketPath);
     // A client that DOES read — the ordinary case.
     const reader = (async () => {
       const buf = new Uint8Array(65536);
@@ -118,6 +124,7 @@ Deno.test({
         conn.close();
       } catch { /* already gone */ }
       uds.shutdown();
+      await localIdle();
       await reader;
       await Deno.remove(dir, { recursive: true }).catch(() => {});
       _resetDegraded();

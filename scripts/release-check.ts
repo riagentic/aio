@@ -26,8 +26,9 @@ import { HEAP_FLOOR_MB } from "../src/server/heap-policy.ts";
 import { STAMP_PATH, writeStamp } from "./release-stamp.ts";
 import { descendantPids } from "../src/server/single-instance-lock.ts";
 import { machineFence } from "./test-shards.ts";
+import { fromFileUrl } from "@std/path";
 
-const root = new URL("../", import.meta.url).pathname;
+const root = fromFileUrl(new URL("../", import.meta.url));
 const FAST_ONLY = Deno.args.includes("--fast");
 
 /** One gate's answer. `skipped` marks a gate that did not RUN — it does not
@@ -382,6 +383,11 @@ const HEAVY: [string, string[]][] = [
   // After test:electron, which has already fetched the Electron runtime.
   // Two data bugs were live in 1.0.9 when this lane first ran.
   ["test:hosts", ["deno", "task", "test:hosts"]],
+  // AGAIN, last: the fast run above sees what EARLIER runs left; only this one
+  // sees what the gates above just wrote. `test:onboard` installed four
+  // programs into the real `~/app` per run for seven weeks (794, ~140 GB) and
+  // every release check that made them was green.
+  ["check:home-clean (after)", ["deno", "task", "check:home-clean"]],
 ];
 
 /** Is there a container runtime for the onboarding lab?

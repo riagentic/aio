@@ -16,7 +16,8 @@
 // a ratchet: MAX_WITHOUT_EXAMPLE may only go down — add an `@example` to the
 // JSDoc and lower it.
 
-const ROOT = new URL("..", import.meta.url).pathname;
+import { fromFileUrl } from "@std/path";
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 const OUT = "docs/basics/every-option.md";
 
 /** Entries with no example today. Lower it when you add one; never raise it. */

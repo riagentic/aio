@@ -5,6 +5,7 @@
 // mask shows and over the raw text where the mask says "not code" — so a
 // mask that takes code for text can cost a fix, never cause a rewrite.
 import { assert, assertEquals } from "@std/assert";
+import { resolve } from "@std/path";
 import {
   blockingUses,
   callTimeoutScan,
@@ -177,14 +178,15 @@ Deno.test("aiol useCell: a call under an alias or with type arguments is a call"
 });
 
 Deno.test("aiol: a name the app's own barrel hands out under another name is followed to aio", () => {
+  // `specKinds` asks for a held file by the path the HOST resolves.
   const files: Record<string, string> = {
-    "/app/src/b.ts":
+    [resolve("/app/src/b.ts")]:
       `export { schedule as sched, call as invoke } from "aio";\n` +
       `export { mine as other } from "./mine.ts";\n`,
   };
   const kinds = specKinds({}, {
-    root: "/app",
-    from: "/app/src/a.ts",
+    root: resolve("/app"),
+    from: resolve("/app/src/a.ts"),
     source: (p) => files[p],
   });
   assertEquals(kinds.origin?.("./b.ts", "sched"), "schedule");

@@ -14,6 +14,9 @@ import { join } from "@std/path";
 import { preflight } from "../src/am/am-cmd-pin.ts";
 import { REMOVALS } from "../src/state/removals.ts";
 
+/** `where` is a path the user reads: the host's separator. */
+const CELL_TS = join("src", "cell.ts");
+
 const machine = REMOVALS.find((r) => r.key === "machine")!;
 
 async function app(files: Record<string, string>): Promise<string> {
@@ -49,7 +52,7 @@ Deno.test("preflight: a forward move that would break the app is reported", asyn
     assertEquals(blocking[0]!.hit.removal.key, "machine");
     assertEquals(
       blocking[0]!.where,
-      "src/cell.ts:4",
+      `${CELL_TS}:4`,
       "the author needs file:line, not just a key name",
     );
   } finally {
@@ -140,7 +143,7 @@ export const app = cell("demo", {
         [r.key],
         `preflight missed '${r.key}:'`,
       );
-      assertStringIncludes(blocking[0]!.where, "src/cell.ts:");
+      assertStringIncludes(blocking[0]!.where, `${CELL_TS}:`);
     } finally {
       await Deno.remove(dir, { recursive: true });
     }
@@ -277,8 +280,8 @@ export const app = cell("demo", {
   try {
     const blocking = await preflight(dir, "main");
     assertEquals(blocking.map((b) => b.where), [
-      "src/cell.ts:4",
-      "src/cell.ts:12",
+      `${CELL_TS}:4`,
+      `${CELL_TS}:12`,
     ]);
   } finally {
     await Deno.remove(dir, { recursive: true });

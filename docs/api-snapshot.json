@@ -87,7 +87,7 @@
         },
         "AioMeta": {
           "kind": "typeAlias",
-          "sig": "461843efeac536d7",
+          "sig": "be0e47f17b3317c0",
           "members": {
             "title": "opt:2fb40568533c1a6d",
             "width": "opt:f6522636230fa080",
@@ -95,15 +95,20 @@
             "childWindows": "opt:0ecca0fe3beba89b",
             "requireSandbox": "opt:0ecca0fe3beba89b",
             "unsandboxedChildWindows": "opt:0ecca0fe3beba89b",
+            "webviewTag": "opt:0ecca0fe3beba89b",
+            "guestDownloads": "opt:0ecca0fe3beba89b",
             "permissions": "opt:8da42e37586d60a5",
             "allowLocalPeers": "opt:0ecca0fe3beba89b",
             "chrome": "opt:0cb8e5493e58cfb7",
             "tray": "opt:bb7b2f54156b6da6",
             "profileName": "opt:2fb40568533c1a6d",
+            "guestPreloads": "opt:object",
+            "guestPreloads.dir": "req:2fb40568533c1a6d",
+            "guestPreloads.files": "req:1a1f5c423a7cdab2",
             "showFile": "opt:2fb40568533c1a6d"
           },
           "sigs": [
-            "461843efeac536d7"
+            "be0e47f17b3317c0"
           ]
         },
         "AioUser": {
@@ -267,7 +272,7 @@
         },
         "CellAio": {
           "kind": "typeAlias",
-          "sig": "e9424e6afc11bbe0",
+          "sig": "05932501420ab166",
           "members": {
             "typeParams": "req:b4d1afd901b76a44",
             "state": "req:754ca6fcde94b4a0",
@@ -306,6 +311,7 @@
             "syncOptOut": "opt:0ecca0fe3beba89b",
             "enableSync": "opt:87896faa5ede022f",
             "worker": "opt:0ecca0fe3beba89b",
+            "workerRespawn": "opt:0ecca0fe3beba89b",
             "version": "req:f6522636230fa080",
             "onMigrate": "opt:2bf4fbe774ccd8a2",
             "onRestore": "opt:0fe4c0d4b3d589c1",
@@ -313,7 +319,7 @@
             "stateType": "opt:754ca6fcde94b4a0"
           },
           "sigs": [
-            "e9424e6afc11bbe0"
+            "05932501420ab166"
           ]
         },
         "CellDef": {
@@ -795,15 +801,17 @@
         },
         "ElectronConfig": {
           "kind": "typeAlias",
-          "sig": "cf8f209751c5822b",
+          "sig": "c08730a11fcdc54c",
           "members": {
             "requireSandbox": "opt:0ecca0fe3beba89b",
             "unsandboxedChildWindows": "opt:0ecca0fe3beba89b",
+            "webviewTag": "opt:0ecca0fe3beba89b",
+            "guestDownloads": "opt:0ecca0fe3beba89b",
             "permissions": "opt:d09e2eedb122e382",
             "allowLocalPeers": "opt:0ecca0fe3beba89b"
           },
           "sigs": [
-            "cf8f209751c5822b"
+            "c08730a11fcdc54c"
           ]
         },
         "errorCode": {
@@ -1083,7 +1091,7 @@
         },
         "MethodsCellConfig": {
           "kind": "typeAlias",
-          "sig": "6c686483e35328cb",
+          "sig": "d3d66aba941b821d",
           "members": {
             "typeParams": "req:e45ed71e42b8e9ff",
             "state": "req:a0f0b90d711a3904",
@@ -1103,6 +1111,7 @@
             "visible": "opt:d811577bb4dc2ec2",
             "sync": "opt:6c1af94af41ba4ee",
             "worker": "opt:0ecca0fe3beba89b",
+            "workerRespawn": "opt:0ecca0fe3beba89b",
             "transaction": "opt:object",
             "transaction.serialize": "opt:0ecca0fe3beba89b",
             "transaction.conflict": "opt:fe22d148aa2f525a",
@@ -1114,7 +1123,7 @@
             "onDestroy": "opt:6190ad991ab4d7a0"
           },
           "sigs": [
-            "6c686483e35328cb"
+            "d3d66aba941b821d"
           ]
         },
         "Msg": {
@@ -4730,7 +4739,7 @@
         },
         "LockData": {
           "kind": "typeAlias",
-          "sig": "2735279b1e7625ec",
+          "sig": "b7b459be2f25cb06",
           "members": {
             "appId": "req:2fb40568533c1a6d",
             "pid": "req:f6522636230fa080",
@@ -4744,6 +4753,7 @@
             "waiting": "opt:object",
             "waiting.reason": "req:2fb40568533c1a6d",
             "waiting.since": "req:f6522636230fa080",
+            "supervisor": "opt:f6522636230fa080",
             "cwd": "req:2fb40568533c1a6d",
             "home": "opt:2fb40568533c1a6d",
             "socketPath": "opt:2fb40568533c1a6d",
@@ -4766,7 +4776,7 @@
             "settings": "opt:09b94ba87da5c3f0"
           },
           "sigs": [
-            "2735279b1e7625ec"
+            "b7b459be2f25cb06"
           ]
         },
         "markAsync": {
@@ -6482,6 +6492,17 @@
             "1023dc9f0cb35c9d"
           ]
         },
+        "crashWorker": {
+          "kind": "function",
+          "sig": "1d90447b104239f9",
+          "members": {
+            "param0": "req:04dd9db5f643cbbf|c7e645c3501b4066~typeLiteral",
+            "return": "req:b5f6ae1b8a43e31d"
+          },
+          "sigs": [
+            "53438c4667212431"
+          ]
+        },
         "createCassette": {
           "kind": "function",
           "sig": "c28816d34136e846",
@@ -7166,11 +7187,12 @@
         },
         "BrowserProps": {
           "kind": "interface",
-          "sig": "b0e178ae79b47386",
+          "sig": "8fb462763ca02d7d",
           "members": {
             "src": "req:2fb40568533c1a6d",
             "keepAlive": "opt:2fb40568533c1a6d",
             "partition": "opt:2fb40568533c1a6d",
+            "preload": "opt:2fb40568533c1a6d",
             "onNavigate": "opt:db1e2795ea17ab9d",
             "class": "opt:2fb40568533c1a6d",
             "style": "opt:13f82d5fa6ff79be",
@@ -7179,7 +7201,7 @@
             "onHostKey": "opt:8795c442147c672a"
           },
           "sigs": [
-            "b0e178ae79b47386"
+            "8fb462763ca02d7d"
           ]
         },
         "Button": {
@@ -7426,6 +7448,17 @@
         "Fragment": {
           "kind": "variable",
           "sig": "unpinned"
+        },
+        "guestPreload": {
+          "kind": "function",
+          "sig": "2e0a73460384afcf",
+          "members": {
+            "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
+            "return": "req:2fb40568533c1a6d"
+          },
+          "sigs": [
+            "ed9024ebadf31d79"
+          ]
         },
         "HostKey": {
           "kind": "interface",
@@ -8706,6 +8739,10 @@
         "build --service": {
           "kind": "flag",
           "sig": "bool"
+        },
+        "build --smoke": {
+          "kind": "flag",
+          "sig": "value"
         },
         "build --src": {
           "kind": "flag",

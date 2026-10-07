@@ -11,16 +11,17 @@
 import { assert, assertStringIncludes } from "@std/assert";
 import { join, toFileUrl } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const SECRET = "hunter2-EXEC-MARKER";
 const repo = join(import.meta.dirname!, "..");
 const root = toFileUrl(repo).href;
 
 const app = (effects: boolean) => `
-import { cell } from "${root}/src/state/cell-create.ts";
-import { schedule } from "${root}/src/state/schedule.ts";
-import { self } from "${root}/src/state/self.ts";
-import { testServer } from "${root}/src/testing/server-test.ts";
+import { cell } from "${spec(root)}/src/state/cell-create.ts";
+import { schedule } from "${spec(root)}/src/state/schedule.ts";
+import { self } from "${spec(root)}/src/state/self.ts";
+import { testServer } from "${spec(root)}/src/testing/server-test.ts";
 const dir = Deno.env.get("T_DIR");
 const vault = cell("vault", {
   state: { unlocked: false },

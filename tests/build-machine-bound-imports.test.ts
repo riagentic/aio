@@ -7,7 +7,7 @@
 // artifact does run where it was built), naming the key, the value and the
 // relative spelling that fixes it.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { join, toFileUrl } from "@std/path";
 import {
   isMachineBoundSpecifier,
   machineBoundImports,
@@ -117,22 +117,27 @@ async function warned(fn: () => Promise<void>): Promise<string> {
 
 Deno.test("machine-bound imports: warnMachineBoundImports reads deno.json and an external importMap", async () => {
   const dir = await tempDir("aio-machine-bound-");
+  // The two machine-bound spellings, as someone on this OS writes them into
+  // JSON: an absolute path (`C:/…` on Windows — `\\` would be an escape) and
+  // a `file:` URL.
+  const abs = `${dir.replaceAll("\\", "/")}/fw/mod.ts`;
+  const url = toFileUrl(join(dir, "dep", "mod.ts")).href;
   try {
     await Deno.writeTextFile(
       join(dir, "deno.json"),
       `{ // JSONC, as Deno reads it
-  "imports": { "aio": "${dir}/fw/mod.ts", "ok": "./dep/aio/mod.ts" },
+  "imports": { "aio": "${abs}", "ok": "./dep/aio/mod.ts" },
   "importMap": "./maps/import_map.json" }`,
     );
     await Deno.mkdir(join(dir, "maps"));
     await Deno.writeTextFile(
       join(dir, "maps", "import_map.json"),
-      JSON.stringify({ imports: { dep: `file://${dir}/dep/mod.ts` } }),
+      JSON.stringify({ imports: { dep: url } }),
     );
     const out = await warned(() => warnMachineBoundImports(dir));
-    assertStringIncludes(out, `imports["aio"] = "${dir}/fw/mod.ts"`);
+    assertStringIncludes(out, `imports["aio"] = "${abs}"`);
     assertStringIncludes(out, `"./fw/mod.ts"`);
-    assertStringIncludes(out, `imports["dep"] = "file://${dir}/dep/mod.ts"`);
+    assertStringIncludes(out, `imports["dep"] = "${url}"`);
     assertStringIncludes(out, `"../dep/mod.ts"`); // relative to the MAP file
     assert(!out.includes(`"ok"`), out);
 

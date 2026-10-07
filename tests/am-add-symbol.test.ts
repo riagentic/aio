@@ -6,8 +6,10 @@
 import { assertEquals } from "@std/assert";
 import { scaffoldSymbol } from "../src/am/am-cmd-meta.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { fromFileUrl } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("..", import.meta.url));
 
 Deno.test("scaffoldSymbol: a valid binding for every accepted name", () => {
   assertEquals(scaffoldSymbol("todo-list", "cell"), "todoList");
@@ -29,7 +31,7 @@ Deno.test("am add: the generated modules type-check for awkward names", async ()
     await Deno.writeTextFile(
       `${dir}/deno.json`,
       JSON.stringify({
-        imports: { aio: `${REPO}mod.ts` },
+        imports: { aio: `${spec(REPO)}mod.ts` },
         compilerOptions: {
           lib: ["deno.ns", "deno.unstable", "dom", "dom.iterable"],
         },

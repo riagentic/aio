@@ -17,6 +17,7 @@
  * ```
  */
 import { readDenoJson } from "./server/deno-json.ts";
+import { resolveEntryPath } from "./server/paths.ts";
 import {
   unknownBuildKeys,
   VALID_BUILD_KEYS,
@@ -314,6 +315,7 @@ import {
   foreignOutEntries,
 } from "./build/build-shape.ts";
 import { iosArtifactName } from "./build/build-ios.ts";
+import { smokeBuild, type SmokeMode, smokeMode } from "./build/smoke.ts";
 import { webArtifactName } from "./build/build-web.ts";
 import {
   artifactVersion,
@@ -338,6 +340,9 @@ interface TargetResult {
    *  two-app repo's dist/ says which artifact is which app. */
   binary: string;
   entry?: string;
+  /** The placed name of this target's compiled binary, when it has one —
+   *  what `--smoke` starts. */
+  placedBinary?: string;
   ok: boolean;
   /** Set when the combination was deliberately not built (e.g. Electron for a
    *  foreign OS) — a SKIP is reported, never silently omitted. */
@@ -663,11 +668,13 @@ async function placeServiceUnit(
     );
   }
   const unitFile = unitPath.slice(unitPath.lastIndexOf(SEPARATOR) + 1);
+  // Typed on the Linux box the unit is for: `/`, whatever host built it.
+  const src = (file: string) => join(outRel, file).replaceAll(SEPARATOR, "/");
   return [
     ...(placedBin
-      ? [`sudo cp ${join(outRel, placedBin)} /usr/local/bin/${binary}`]
+      ? [`sudo cp ${src(placedBin)} /usr/local/bin/${binary}`]
       : []),
-    `sudo cp ${join(outRel, unitFile)} /etc/systemd/system/${binary}.service`,
+    `sudo cp ${src(unitFile)} /etc/systemd/system/${binary}.service`,
     `sudo systemctl enable --now ${binary}`,
   ];
 }
@@ -1112,6 +1119,18 @@ export async function buildAll(): Promise<number> {
   await recordOutput(root, outDir);
   const release = Deno.args.includes("--release");
   const force = Deno.args.includes("--force");
+  // Decided BEFORE anything is built: a mistyped value is refused now, not
+  // after ten minutes of compiling.
+  let smoke: SmokeMode;
+  try {
+    smoke = smokeMode(
+      { bare: Deno.args.includes("--smoke"), value: flag("smoke") },
+      (denoJson.build as { smoke?: unknown } | undefined)?.smoke,
+    );
+  } catch (e) {
+    console.error(`${C.red}${e instanceof Error ? e.message : e}${C.r}`);
+    return 1;
+  }
   // THE app version, resolved ONCE for the whole fleet and handed to every
   // per-target build (AIO_BUILD_VERSION) — so every artifact of one run
   // carries one version, and the notes print once.
@@ -1234,7 +1253,7 @@ export async function buildAll(): Promise<number> {
   );
 
   const results: TargetResult[] = [];
-  const rel = (p: string) => p.replace(root + "/", "");
+  const rel = (p: string) => p.replace(root + SEPARATOR, "");
   /** Install steps for each placed systemd unit, printed with the summary. */
   const serviceInstalls: { target: string; lines: string[] }[] = [];
   /** Placed binaries that boot `aio.run()`, asked for their identity below. */
@@ -1502,6 +1521,7 @@ export async function buildAll(): Promise<number> {
         }
         const kind = targetList.find((t) => t.name === r.target)?.kind;
         const bin = renamed.get(artifactName(r.binary, r.platform));
+        r.placedBinary = bin;
         if (
           bin && kind && IDENTITY_KINDS.has(kind) && isHostPlatform(r.platform)
         ) {
@@ -1696,7 +1716,24 @@ export async function buildAll(): Promise<number> {
       [failed.length, "failed", "bad"],
     ]) + style.dim("  → ") + style.underline(rel(outDir) + "/"),
   );
-  return failed.length ? 1 : 0;
+  if (failed.length) return 1;
+  // …and then START them. Only after a fully green build: a smoke table
+  // under a failed one would read as the verdict on the wrong problem.
+  if (!smoke) return 0;
+  return await smokeBuild({
+    root,
+    outDir,
+    mode: smoke,
+    hostPlatform: hostPlatform(),
+    targets: results.filter((r) => !r.skipped).map((r) => ({
+      target: r.target,
+      kind: targetList.find((t) => t.name === r.target)?.kind ?? r.target,
+      platform: isHostPlatform(r.platform) ? hostPlatform() : r.platform,
+      entry: r.entry ?? resolveEntryPath(denoJson, undefined),
+      files: r.artifacts.map((a) => a.file),
+      binary: r.placedBinary,
+    })),
+  });
 }
 
 if (import.meta.main) Deno.exit(await buildAll());

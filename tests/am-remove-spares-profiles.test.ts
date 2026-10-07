@@ -9,11 +9,11 @@
 // AIO_INSTALL_ROOT, … in one temp dir, environment cleared) — nothing here can
 // reach a real home.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const AM = new URL("../src/am.ts", import.meta.url).pathname;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const AM = fromFileUrl(new URL("../src/am.ts", import.meta.url));
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 const APP = "amrmprofiles";
 
 async function denoDirOf(): Promise<string> {

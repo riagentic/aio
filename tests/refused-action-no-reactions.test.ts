@@ -18,13 +18,14 @@ import type { Msg } from "../src/state/cell-types.ts";
 import { createServerSyncHandler } from "../src/sync/server-handler.ts";
 import { _resetServerTsForTest } from "../src/sync/server-store.ts";
 import { createTestDb, recordingSocket } from "./sync/_test-db.ts";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const PROBE = new URL("./fixtures/refused-probe/app.js", import.meta.url)
-  .pathname;
-const TREE = new URL("..", import.meta.url).pathname;
+const PROBE = fromFileUrl(
+  new URL("./fixtures/refused-probe/app.js", import.meta.url),
+);
+const TREE = fromFileUrl(new URL("..", import.meta.url));
 
 const noop = { debug: () => {}, warn: () => {}, error: () => {} };
 

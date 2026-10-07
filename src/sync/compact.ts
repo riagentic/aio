@@ -203,7 +203,8 @@ export const SYNC_SCHEMA: string[] = [
     id TEXT PRIMARY KEY, cell TEXT NOT NULL, action TEXT NOT NULL,
     payload TEXT NOT NULL, hlc_phys INTEGER NOT NULL, hlc_cnt INTEGER NOT NULL,
     hlc_node TEXT NOT NULL, server_ts INTEGER NOT NULL,
-    version INTEGER NOT NULL DEFAULT ${SYNC_VERSION_UNKNOWN})`,
+    version INTEGER NOT NULL DEFAULT ${SYNC_VERSION_UNKNOWN},
+    settled INTEGER)`,
   `CREATE INDEX IF NOT EXISTS idx_sync_ops_cell_hlc
     ON sync_ops(cell, hlc_phys, hlc_cnt, hlc_node)`,
   // Delivery reads by server_ts (`loadOpsSince`), and the cursor reservation
@@ -247,6 +248,11 @@ export const SYNC_MIGRATIONS: string[] = [
   // this upgrade. Fresh rows are always stamped explicitly.
   `ALTER TABLE sync_ops ADD COLUMN version INTEGER NOT NULL DEFAULT ${SYNC_VERSION_UNKNOWN}`,
   `ALTER TABLE sync_snapshots ADD COLUMN cell_version INTEGER NOT NULL DEFAULT ${SYNC_VERSION_UNKNOWN}`,
+  // Whether the op's dispatch SETTLED (see `settleOp`, server-store.ts): 0 =
+  // stored, its dispatch not yet accepted — nobody was told it landed; 1 =
+  // accepted. NULL = the row predates the mark, or a build that does not
+  // write it inserted it: unknown, and the boot replay decides nothing by it.
+  `ALTER TABLE sync_ops ADD COLUMN settled INTEGER`,
 ];
 
 /** Apply {@linkcode SYNC_MIGRATIONS}, tolerating the already-applied case.

@@ -9,17 +9,18 @@
 // holds the lock. Pinned end to end: `aio.run` in a directory holding a
 // legacy data.db moves it, bytes intact, and says nothing about "running".
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { DatabaseSync } from "node:sqlite";
 import { childEnv, freePort, kill } from "./e2e-app-harness.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { askToStop } from "./proc-helper.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const APP_ID = `legacy-db-${Deno.pid}`;
-const REPO = new URL("../", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("../", import.meta.url));
 
 Deno.test({
   name: "boot: a legacy ./data.db is moved into data/state.db, data intact",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("boot-legacy-db-");
     const apps = join(dir, "apps");
@@ -34,8 +35,8 @@ Deno.test({
       join(cwd, "deno.json"),
       JSON.stringify({
         imports: {
-          "aio": `${REPO}mod.ts`,
-          "aio/": `${REPO}src/`,
+          "aio": `${spec(REPO)}mod.ts`,
+          "aio/": `${spec(REPO)}src/`,
           "immer": "npm:immer@10.2.0",
           "@std/path": "jsr:@std/path@1.1.2",
         },
@@ -77,7 +78,7 @@ await aio.run({ appId: ${JSON.stringify(APP_ID)}, cells: [c],
         if (!up) await new Promise((r) => setTimeout(r, 100));
       }
       assert(up, `app never started:\n${log}`);
-      proc.kill("SIGTERM");
+      await askToStop(proc.pid, port, join(home, "data", "control.key"));
       const st = await proc.status;
       await Promise.all(pumps);
       assertEquals(st.code, 0, log);

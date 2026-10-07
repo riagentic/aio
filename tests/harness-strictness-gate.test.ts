@@ -18,6 +18,7 @@
 // the flag, not by grepping source), and it fails when a NEW harness appears
 // that nobody has classified.
 import { assert, assertEquals } from "@std/assert";
+import { fromFileUrl } from "@std/path";
 
 const G = globalThis as Record<string, unknown>;
 
@@ -51,6 +52,8 @@ async function armsDevStrict(fn: () => unknown): Promise<boolean> {
 const EXEMPT: Record<string, string> = {
   _armTestStrict: "is the arming function itself",
   freePort: "pure helper — allocates a port, runs no app code",
+  crashWorker:
+    "acts on a cell some harness already booted (and armed); boots nothing",
   findChromium: "pure helper — locates a binary",
   setDocument: "pure helper — swaps the document reference",
   testGen: "codegen — emits types, never boots an app",
@@ -241,7 +244,7 @@ Deno.test("testCell refuses a cell aio.run() would refuse", async () => {
 
   // …and that `testCell` really calls it, on the path a test takes.
   const src = await Deno.readTextFile(
-    new URL("../src/testing/cell-test.ts", import.meta.url).pathname,
+    fromFileUrl(new URL("../src/testing/cell-test.ts", import.meta.url)),
   );
   const body = src.slice(src.indexOf("export function testCell("));
   assert(

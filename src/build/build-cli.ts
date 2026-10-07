@@ -12,7 +12,9 @@ import {
   bakedClientArgs,
   compileModuleRoots,
   dbWorkerInclude,
+  includeDirModules,
   keepPackagesDeclared,
+  refuseUnembeddedReads,
   smokeRunArtifact,
   v8FlagsArg,
   withDevExcluded,
@@ -145,6 +147,7 @@ export async function buildCli(cfg: BuildConfig): Promise<void> {
   // entry scopes the `*.server.ts` walk to what THIS binary can load (remote-desktop
   // report §4) — the same rule the app compile follows.
   const assets = await assetIncludes(root, cliEntry);
+  const dirModules = await includeDirModules(root);
   const v8Flags = await v8FlagsArg(root);
   if (v8Flags.length) console.log(`${v8Flags[0]}`);
   // Absolute / file: import-map values pin the binary to this machine.
@@ -154,6 +157,31 @@ export async function buildCli(cfg: BuildConfig): Promise<void> {
   const dj = (await readDenoJson(root))?.config;
   const declaredClient = dj?.client ?? dj?.target;
 
+  const argvOpts = {
+    doRemote,
+    out: cliTarget,
+    entry: cliEntry,
+    assets,
+    v8Flags,
+    target: cfg.targetTriple,
+    declaredClient,
+  };
+  const moduleRoots = compileModuleRoots(cliEntry, [
+    ...(doRemote ? [] : dbWorkerInclude()),
+    ...assets,
+  ], dirModules);
+  // The same rule `runDenoCompile` applies: a read of a file this binary will
+  // not hold stops the build, judged against the compile's own argv.
+  if (
+    !(await refuseUnembeddedReads(
+      root,
+      cliCompileArgs({ ...argvOpts, excludes: [] }),
+      moduleRoots,
+    ))
+  ) {
+    console.error(`${NO} compile refused`);
+    Deno.exit(1);
+  }
   const minify = await minifyDeclared(root);
   const keepPackages = await keepPackagesDeclared(root);
   const ok = await withDevExcluded(
@@ -161,16 +189,7 @@ export async function buildCli(cfg: BuildConfig): Promise<void> {
     async (excludes) => {
       const result = await runCompile(
         root,
-        cliCompileArgs({
-          doRemote,
-          out: cliTarget,
-          entry: cliEntry,
-          assets,
-          excludes,
-          v8Flags,
-          target: cfg.targetTriple,
-          declaredClient,
-        }),
+        cliCompileArgs({ ...argvOpts, excludes }),
         minify,
       );
       if (!result.success) return false;
@@ -203,7 +222,8 @@ export async function buildCli(cfg: BuildConfig): Promise<void> {
     // is otherwise embedded as before.
     {
       cwd: root,
-      roots: compileModuleRoots(cliEntry, [
+      roots: moduleRoots,
+      installRoots: compileModuleRoots(cliEntry, [
         ...(doRemote ? [] : dbWorkerInclude()),
         ...assets,
       ]),

@@ -8,7 +8,7 @@
 // yes for such a name on an EMPTY object — so the selector was called as
 // `(own, fullState, …args)` and its first argument arrived as the full state.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { toFileUrl } from "@std/path";
+import { fromFileUrl, toFileUrl } from "@std/path";
 import { cell } from "../mod.ts";
 import { bindCell } from "../src/state/cell-catalog.ts";
 import { bindCellReactive } from "../src/state/cell-reactive.ts";
@@ -16,6 +16,7 @@ import { _applyFullState } from "../src/state/state-signals.ts";
 import { _resetSubs } from "../src/state/state-subs.ts";
 import { renderHeadlessSurface } from "../src/server/server-surface.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
 type Item = { id: string; n: number };
 const NAMES = ["isPrototypeOf", "valueOf", "toString", "hasOwnProperty"];
@@ -47,12 +48,12 @@ Deno.test("reactive binding: a plain selector named like an Object.prototype mem
 });
 
 Deno.test("headless surface: a plain selector named like an Object.prototype member receives its argument", async () => {
-  const repo = new URL("..", import.meta.url).pathname;
+  const repo = fromFileUrl(new URL("..", import.meta.url));
   const dir = await tempDir("selector-proto-name-");
   try {
     await Deno.writeTextFile(
       `${dir}/shelf.ts`,
-      `import { cell } from "${repo}mod.ts";
+      `import { cell } from "${spec(repo)}mod.ts";
 type Item = { id: string; n: number };
 const pick = (s: { items: Item[] }, id: string) =>
   s.items.find((x) => x.id === id)?.n ?? -1;
@@ -65,7 +66,7 @@ export const shelf = cell("shelf_proto_surface", {
     );
     await Deno.writeTextFile(
       `${dir}/App.ts`,
-      `import { h } from "${repo}src/air/vdom.ts";
+      `import { h } from "${spec(repo)}src/air/vdom.ts";
 import { shelf } from "./shelf.ts";
 const api = shelf as unknown as Record<string, (id: string) => number>;
 export default function App() {

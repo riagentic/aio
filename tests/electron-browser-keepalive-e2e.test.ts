@@ -9,14 +9,14 @@
 // It now keeps the page the guest was on. Opt-in like every real-window test
 // (ELECTRON_E2E=1), and ONLY on the nested test display.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import * as esbuild from "esbuild";
 import { stopEsbuildService } from "../src/build/esbuild-shared.ts";
 import { testDisplayEnv } from "../src/testing/test-display.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const REPO = new URL("../", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("../", import.meta.url));
 const ELECTRON_BIN = join(REPO, "node_modules/.bin/electron");
 
 function e2eSkip(): string | null {
@@ -31,10 +31,14 @@ function e2eSkip(): string | null {
 }
 
 // The host app: the real AIR renderer, the real `<Browser>`, two signals.
+// esbuild bundles this entry, and esbuild resolves PATHS: it has never taken
+// a file:// specifier (measured, 0.24.2 and 0.25.12 — "Could not resolve"),
+// so no `spec()` here. Forward slashes are a path on Windows too.
+const SRC = REPO.replaceAll("\\", "/");
 const entry = (src: string) => `
-import { mount, signal } from "${REPO}src/air/aio-renderer.ts";
-import { h } from "${REPO}src/air/vdom.ts";
-import { Browser } from "${REPO}src/ui/browser.ts";
+import { mount, signal } from "${SRC}src/air/aio-renderer.ts";
+import { h } from "${SRC}src/air/vdom.ts";
+import { Browser } from "${SRC}src/ui/browser.ts";
 const show = signal(true);
 const cls = signal("a");
 const guest = ${JSON.stringify(src)};

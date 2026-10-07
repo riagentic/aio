@@ -8,6 +8,8 @@
 // it cannot resolve), which is how it shipped. This test checks the doc's own
 // block with `zod` swapped for a type-only stand-in.
 import { assert, assertEquals } from "@std/assert";
+import { fromFileUrl } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 
 Deno.test("air-forms: the documented parsed() call type-checks", async () => {
   const md = await Deno.readTextFile(
@@ -19,7 +21,7 @@ Deno.test("air-forms: the documented parsed() call type-checks", async () => {
   assert(block, "the Standard Schema example is still in the doc");
   assert(block.includes('import { z } from "zod";'));
 
-  const repo = new URL("..", import.meta.url).pathname;
+  const repo = fromFileUrl(new URL("..", import.meta.url));
   const program = [
     'import { useForm } from "aio/air";',
     "declare const api: { signup(v: unknown): Promise<void> };",
@@ -49,7 +51,7 @@ Deno.test("air-forms: the documented parsed() call type-checks", async () => {
         imports: {
           "aio/jsx-runtime": `${repo}src/jsx-runtime.ts`,
           "aio/air": `${repo}src/air.ts`,
-          "aio": `${repo}mod.ts`,
+          "aio": `${spec(repo)}mod.ts`,
         },
       }),
     );

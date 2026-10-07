@@ -19,13 +19,15 @@
 // a filesystem view with the test runner, so it cannot tell our writes from the
 // runner's.
 import { assert, assertEquals } from "@std/assert";
-import { join, relative } from "@std/path";
+import { fromFileUrl, join, relative } from "@std/path";
 import { stopChild } from "./stop-child.ts";
 import { childCoverageDir } from "../src/testing/temp-dir.ts";
 import { permissiveUmask } from "./permissive-umask.ts";
 import { freePort } from "../src/testing/server-test.ts";
+import { spec } from "./module-spec-helper.ts";
+import { modeBitsAreMeaningful } from "../src/server/dir-permissions.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 const dec = new TextDecoder();
 const APP_ID = "seam-probe";
 const _childCovDir = childCoverageDir();
@@ -111,7 +113,7 @@ async function sandbox(): Promise<Sandbox> {
       version: "0.0.1",
       unstable: ["kv"],
       imports: {
-        "aio": `${ROOT}mod.ts`,
+        "aio": `${spec(ROOT)}mod.ts`,
         "immer": "npm:immer@10.2.0",
         "@std/path": "jsr:@std/path@^1",
       },
@@ -206,7 +208,6 @@ const mode = async (p: string) => (await Deno.stat(p)).mode! & 0o777;
 
 Deno.test({
   name: "seam: an app writes under its two homes and nowhere else",
-  ignore: Deno.build.os === "windows", // POSIX modes + $XDG_RUNTIME_DIR
   fn: () =>
     permissiveUmask(async () => {
       const sb = await sandbox();
@@ -275,17 +276,20 @@ Deno.test({
 
         // ⑤ modes — the part that makes the location matter. $HOME is 0755 on
         // most distros, so "moved it into the home directory" is not privacy.
-        assertEquals(
-          await mode(join(sb.appHome, "data")),
-          0o700,
-          "data/ holds auth.db, the TLS key and app.key — owner-only",
-        );
-        assertEquals(
-          await mode(join(sb.run, "aio")),
-          0o700,
-          "the runtime dir holds the control socket — owner-only, or any local " +
-            "user can connect and dispatch into this app",
-        );
+        // (Where there are mode bits: `stat().mode` is a constant on Windows.)
+        if (modeBitsAreMeaningful()) {
+          assertEquals(
+            await mode(join(sb.appHome, "data")),
+            0o700,
+            "data/ holds auth.db, the TLS key and app.key — owner-only",
+          );
+          assertEquals(
+            await mode(join(sb.run, "aio")),
+            0o700,
+            "the runtime dir holds the control socket — owner-only, or any " +
+              "local user can connect and dispatch into this app",
+          );
+        }
         // The journal records action payloads verbatim (passphrases included —
         // see redactActions), so it is a secret file, not a log.
         const journal = join(sb.appHome, "data", "journal");
@@ -293,7 +297,9 @@ Deno.test({
           await Deno.stat(journal).catch(() => null),
           "the journal was never written — the mode assertion below proves nothing",
         );
-        assertEquals(await mode(journal), 0o600, "the journal is owner-only");
+        if (modeBitsAreMeaningful()) {
+          assertEquals(await mode(journal), 0o600, "the journal is owner-only");
+        }
         // `app.key` and `data/tls` only exist under --expose; the second test
         // covers those.
       } finally {
@@ -310,7 +316,7 @@ Deno.test({
 
 Deno.test({
   name: "seam: the secrets --expose creates are unreachable by other users",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // the claim is POSIX mode bits; `stat().mode` is a constant on Windows
   fn: () =>
     permissiveUmask(async () => {
       // `app.key` and the TLS private key only exist on the exposed path — which

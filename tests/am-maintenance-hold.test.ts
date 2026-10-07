@@ -10,7 +10,7 @@
 // (refuses) and every HTTP verb say "am backup is running". Additive on disk:
 // an older reader validates appId/pid/port only, so it still sees a held lock.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import {
   maintenanceMark,
   maintenanceMessage,
@@ -19,9 +19,11 @@ import {
 } from "../src/am/am-utils.ts";
 import { alreadyRunningLine } from "../src/am/am-cmd-process.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { isProcessAlive } from "../src/server/single-instance-lock.ts";
+import { sleeper as liveChild } from "./proc-helper.ts";
 
-const AM = new URL("../src/am.ts", import.meta.url).pathname;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const AM = fromFileUrl(new URL("../src/am.ts", import.meta.url));
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 const LOCK_MOD = new URL(
   "../src/server/single-instance-lock.ts",
   import.meta.url,
@@ -60,7 +62,6 @@ async function denoDirOf(): Promise<string> {
 Deno.test({
   name:
     "am: status/stop/start/state against a backup's hold name it, kill nothing",
-  ignore: Deno.build.os === "windows", // `sleep` stands in for `am backup`
   fn: async () => {
     const base = await tempDir("am-maint-");
     const cwd = join(base, "cwd");
@@ -79,12 +80,15 @@ Deno.test({
     };
     // Ignores SIGTERM, like a hold that is still cleaning up: `am kill`
     // below must interrupt it WITHOUT taking its lock away.
-    const sleeper = new Deno.Command("sh", {
-      args: ["-c", "trap '' TERM; exec sleep 300"],
-      stdin: "null",
-      stdout: "null",
-      stderr: "null",
-    }).spawn();
+    // (Windows has no SIGTERM to ignore: there the kill is TerminateProcess,
+    // and only the part that needs a survivor is left out, at the end.)
+    const quiet = { stdin: "null", stdout: "null", stderr: "null" } as const;
+    const sleeper = Deno.build.os === "windows"
+      ? liveChild(quiet)
+      : new Deno.Command("sh", {
+        args: ["-c", "trap '' TERM; exec sleep 300"],
+        ...quiet,
+      }).spawn();
     try {
       // The record exactly as `am backup` leaves it: acquire(0) + the mark.
       const lock = {
@@ -129,14 +133,7 @@ Deno.test({
         };
       };
       const am = (...argv: string[]) => amIn(cwd, ...argv, `--app=${APP}`);
-      const alive = () => {
-        try {
-          Deno.kill(sleeper.pid, "SIGCONT");
-          return true;
-        } catch {
-          return false;
-        }
-      };
+      const alive = () => isProcessAlive(sleeper.pid);
 
       const st = await am("status", "--json");
       assertEquals(st.code, 2, st.all);
@@ -211,9 +208,15 @@ Deno.test({
       const kd = JSON.parse(k.out);
       assertEquals(kd.op, "am backup", k.out);
       assertEquals(kd.killed, true, k.out);
-      const after = await am("status", "--json");
-      assertEquals(after.code, 2, `the hold's lock must survive: ${after.all}`);
-      assertEquals(JSON.parse(after.out).status, "maintenance", after.out);
+      if (Deno.build.os !== "windows") {
+        const after = await am("status", "--json");
+        assertEquals(
+          after.code,
+          2,
+          `the hold's lock must survive: ${after.all}`,
+        );
+        assertEquals(JSON.parse(after.out).status, "maintenance", after.out);
+      }
     } finally {
       try {
         sleeper.kill("SIGKILL");

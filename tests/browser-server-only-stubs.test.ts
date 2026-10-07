@@ -26,8 +26,11 @@ import * as browser from "../src/browser-air.ts";
 import * as mod from "../mod.ts";
 import { blockingUnavailableReason } from "../src/state/blocking.ts";
 import { blockingServerOnly } from "../src/state/blocking-reason.ts";
+import { fromFileUrl } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
+import { fixtureNodeModules } from "./symlink-helper.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 /** The first ```ts block after `heading` in a doc — the example itself. */
 async function docSnippet(doc: string, heading: string): Promise<string> {
@@ -49,13 +52,13 @@ async function bundleRefusals(tag: string, cellSrc: string, exp: string) {
         nodeModulesDir: "auto",
         compilerOptions: { jsx: "react-jsx", jsxImportSource: "aio" },
         imports: {
-          "aio": `${ROOT}mod.ts`,
+          "aio": `${spec(ROOT)}mod.ts`,
           "aio/jsx-runtime": `${ROOT}src/jsx-runtime.ts`,
           "immer": "npm:immer@10.2.0",
         },
       }),
     );
-    await Deno.symlink(`${ROOT}node_modules`, `${dir}/node_modules`);
+    await fixtureNodeModules(dir);
     // The auth example declares its cell without exporting it, so the UI
     // imports the module as a namespace — enough to put it in the graph.
     await Deno.writeTextFile(`${dir}/cell.ts`, cellSrc);

@@ -17,9 +17,10 @@
 //   deno task check:vacuous --print-ledger  regenerate the frozen list
 import { assertEquals } from "@std/assert";
 import { LEDGER, report, scan, verdict } from "../scripts/check-vacuous.ts";
+import { fromFileUrl } from "@std/path";
 
 Deno.test("no vacuous tests: the ledger of tests that prove nothing only shrinks", async () => {
-  const root = new URL("../", import.meta.url).pathname;
+  const root = fromFileUrl(new URL("../", import.meta.url));
   const v = verdict(await scan(root), LEDGER);
   assertEquals(v.added, [], report(v));
   assertEquals(v.fixed, [], report(v));

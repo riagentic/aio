@@ -8,9 +8,11 @@
 // renamed a file onto ITSELF and logged "rolled back", and the electron-zip
 // layout hit `AlreadyExists` on every attempt and then cleared the marker so it
 // never retried. Everything here is a real directory with real artifacts.
+import { EXE, writeProgram } from "./fake-program-helper.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import {
+  _confirm,
   beginUpdates,
   confirmPendingUpdate,
   judgePendingUpdate,
@@ -168,7 +170,13 @@ Deno.test("boot: the VERSIONED layout restores the SYMLINK — it does not renam
   }
 });
 
-Deno.test("boot: the electron-zip layout restores a DIRECTORY", async () => {
+Deno.test("boot: the electron-zip layout restores a DIRECTORY", {
+  // Restoring it IN this process is the Unix path. A Windows install runs
+  // from that folder and cannot move it: the boot hands the rollback to the
+  // detached swap helper (which this would really start) —
+  // tests/updates-rollback-directory-record.test.ts.
+  ignore: Deno.build.os === "windows", // the in-process restore is the Unix path; Windows hands it to the swap helper
+}, async () => {
   // `previous` is a whole unpacked install here, and `rename` onto an existing
   // directory is `AlreadyExists (os error 17)` on every platform — so this path
   // failed on EVERY attempt, and the marker was then cleared so it never
@@ -258,6 +266,7 @@ Deno.test("boot: a healthy app confirms the update and clears the marker", async
 
     const log = recorder();
     confirmPendingUpdate(data, log);
+    await _confirm.pruned; // its background prune, read to the end
     assertEquals(readPending(data), null);
     assert(
       log.lines.some((l) => l.includes("confirmed healthy")),
@@ -267,6 +276,7 @@ Deno.test("boot: a healthy app confirms the update and clears the marker", async
     // Confirming when nothing is pending is a no-op, not an error — it runs on
     // every boot.
     confirmPendingUpdate(data, recorder());
+    await _confirm.pruned; // its background prune, read to the end
   } finally {
     await Deno.remove(dir, { recursive: true });
     await Deno.remove(data, { recursive: true });
@@ -321,8 +331,7 @@ Deno.test("in-app swap: installed.json follows the version that was installed", 
     const vdir = join(dir, "versions", "1.0.0");
     await Deno.mkdir(vdir, { recursive: true });
     const target = join(vdir, "notes");
-    await Deno.writeTextFile(target, "#!/bin/sh\necho 1.0.0\n");
-    await Deno.chmod(target, 0o755);
+    await writeProgram(target, "#!/bin/sh\necho 1.0.0\n");
     const link = join(dir, "notes");
     await Deno.symlink(target, link);
     await Deno.writeTextFile(
@@ -334,9 +343,8 @@ Deno.test("in-app swap: installed.json follows the version that was installed", 
         source: "https://example.invalid/notes.git",
       }),
     );
-    const staged = join(dir, "staged");
-    await Deno.writeTextFile(staged, "#!/bin/sh\necho 2.0.0\n");
-    await Deno.chmod(staged, 0o755);
+    const staged = join(dir, `staged${EXE}`);
+    await writeProgram(staged, "#!/bin/sh\necho 2.0.0\n");
 
     await swapArtifact({
       current: link,
@@ -365,11 +373,9 @@ Deno.test("in-app swap: a binary nobody installed gets no invented record", asyn
   const dir = await tmp();
   try {
     const current = join(dir, "app");
-    await Deno.writeTextFile(current, "#!/bin/sh\necho v1\n");
-    await Deno.chmod(current, 0o755);
+    await writeProgram(current, "#!/bin/sh\necho v1\n");
     const staged = join(dir, "app.new");
-    await Deno.writeTextFile(staged, "#!/bin/sh\necho v2\n");
-    await Deno.chmod(staged, 0o755);
+    await writeProgram(staged, "#!/bin/sh\necho v2\n");
 
     await swapArtifact({
       current,
@@ -588,11 +594,9 @@ Deno.test("boot: confirming a directory update keeps only the newest KEEP_OLD ro
     await Deno.utime(join(dir, "Counter.app.staged-0.9.9"), ago, ago);
     writePending(data, mark({ artifact: current, attempts: 1 }));
     confirmPendingUpdate(data, recorder());
+    await _confirm.pruned; // its background prune, read to the end
     const left = async () =>
       (await Array.fromAsync(Deno.readDir(dir))).map((e) => e.name).sort();
-    for (let i = 0; i < 100 && (await left()).length > 5; i++) {
-      await new Promise((r) => setTimeout(r, 20));
-    }
     assertEquals(await left(), [
       "Counter.app",
       "Counter.app.old-0.0.1",

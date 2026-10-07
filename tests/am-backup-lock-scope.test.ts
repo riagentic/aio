@@ -13,7 +13,7 @@
 // — an in-process claim would not prove the cross-process refusal), under its
 // own AIO_APPS_DIR, on the very home this `am` resolves.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { cmdBackup, cmdRestore } from "../src/am/am-cmd-data.ts";
 import {
   _resetAppDirs,
@@ -25,7 +25,7 @@ import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const APP = "scopeapp";
 const SUITE_HOME = Deno.env.get("AIO_APPS_DIR");
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 const LOCK_MOD = new URL(
   "../src/server/single-instance-lock.ts",
   import.meta.url,

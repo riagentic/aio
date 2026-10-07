@@ -32,7 +32,8 @@
 // Non-aio variables (HOME, TMPDIR, CI, ANDROID_HOME…) are the platform's, not
 // ours to document — they are listed on the page anyway, and this gate only
 // requires the `AIO_*` ones.
-const HERE = new URL("..", import.meta.url).pathname;
+import { fromFileUrl } from "@std/path";
+const HERE = fromFileUrl(new URL("..", import.meta.url));
 /** THE page — the one that promises to name every variable. */
 const PAGE = "docs/build/environment.md";
 

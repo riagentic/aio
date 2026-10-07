@@ -13,10 +13,11 @@
 // `startFeedback`) is off under `libraryMode`, which every in-process harness
 // sets.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 Deno.test({
   name:
@@ -27,7 +28,7 @@ Deno.test({
     await Deno.writeTextFile(
       join(root, "two.ts"),
       `
-import { aio, cell } from "${ROOT}mod.ts";
+import { aio, cell } from "${spec(ROOT)}mod.ts";
 const mk = () => cell("c", { state: { n: 0 }, methods: { inc(s: { n: number }) { s.n++; } } });
 const boot = (id: string, port: number, channel: string) =>
   aio.run({
@@ -36,9 +37,9 @@ const boot = (id: string, port: number, channel: string) =>
     client: "server-only",
     persist: false,
     port,
-    baseDir: "${root}/" + id,
+    baseDir: ${JSON.stringify(root)} + "/" + id,
     feedback: { auto: false },
-    updates: { source: "file://${root}/rel-" + id, channel, check: false },
+    updates: { source: "${spec(root)}/rel-" + id, channel, check: false },
   });
 const a = await boot("twoa", ${pa}, "alpha");
 const b = await boot("twob", ${pb}, "beta");

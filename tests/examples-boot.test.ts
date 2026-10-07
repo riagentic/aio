@@ -14,8 +14,9 @@
 import { assert } from "@std/assert";
 import { childCoverageDir } from "../src/testing/temp-dir.ts";
 import { freePort } from "../src/testing/server-test.ts";
+import { fromFileUrl } from "@std/path";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 const _childCovDir = childCoverageDir();
 
 /** Every example app in the repo: a directory holding `app.ts` or `src/app.ts`

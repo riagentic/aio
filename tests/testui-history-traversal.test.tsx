@@ -129,6 +129,107 @@ testUI(
   },
 );
 
+// happy-dom 20.14.5 queues a `hashchange` for every URL write that moves the
+// fragment — `pushState`/`replaceState` included, for which a browser fires
+// none. Measured raw: `pushState(null, "", "/b#x")` → one `hashchange`. A
+// router that pushes `/list#top` heard its own navigation back as an event.
+testUI(
+  App,
+  "pushState/replaceState never fire hashchange; a real fragment change still does",
+  async (ui) => {
+    const w = ui.window;
+    const seen: string[] = [];
+    w.addEventListener(
+      "hashchange",
+      (e: Event) => {
+        const h = e as Event & { oldURL: string; newURL: string };
+        seen.push(`${new URL(h.oldURL).hash}>${new URL(h.newURL).hash}`);
+      },
+    );
+    g.history.pushState(null, "", "/h#x");
+    g.history.replaceState(null, "", "/h#y");
+    g.history.replaceState(null, "", "/h");
+    await ui.settle();
+    await new Promise((r) => setTimeout(r, 0));
+    assertEquals(seen, [], "the History API fires no hashchange");
+
+    // The same pair again, this time from the address itself: it arrives —
+    // and the one `pushState` owes right after it is still dropped.
+    g.location.hash = "x";
+    g.history.pushState(null, "", "/h#z");
+    await ui.settle();
+    await new Promise((r) => setTimeout(r, 0));
+    assertEquals(seen, [">#x"]);
+
+    // A traversal across a fragment: exactly one, the browser's.
+    g.history.pushState(null, "", "/k");
+    g.history.pushState(null, "", "/k#q");
+    g.history.back();
+    await ui.settle();
+    await new Promise((r) => setTimeout(r, 0));
+    assertEquals(seen, [">#x", "#q>"]);
+  },
+);
+
+// A fragment navigation made OUTSIDE the History API — `location.hash = …`,
+// a click on `<a href="#a">` (which `<Link>` leaves to the browser) — is a
+// new session-history entry with no state. The shim kept its own entry list
+// and never heard of it, so `back()` skipped the entry the app was on and
+// went one too far.
+testUI(
+  App,
+  "location.hash = … is a history entry: back() lands on the pushState before it",
+  async (ui) => {
+    const w = ui.window;
+    const events: string[] = [];
+    w.addEventListener(
+      "popstate",
+      () => events.push("popstate:" + g.location.pathname + g.location.hash),
+    );
+    w.addEventListener("hashchange", (e: Event) => {
+      const h = e as Event & { oldURL: string; newURL: string };
+      events.push(
+        `hashchange:${new URL(h.oldURL).hash}>${new URL(h.newURL).hash}`,
+      );
+    });
+    const tick = async () => {
+      await ui.settle();
+      await new Promise((r) => setTimeout(r, 0));
+    };
+    g.history.pushState({ n: 0 }, "", "/o");
+    g.history.pushState({ n: 1 }, "", "/p");
+    const base = g.history.length;
+    g.location.hash = "#a";
+    assertEquals(g.history.length, base + 1);
+    assertEquals(g.history.state, null, "a fragment entry carries no state");
+    g.location.hash = "#a"; // the same fragment: no navigation, no entry
+    assertEquals(g.history.length, base + 1);
+    await tick();
+    assertEquals(events, ["hashchange:>#a"]);
+
+    g.history.back();
+    await tick();
+    assertEquals(g.location.pathname + g.location.hash, "/p");
+    assertEquals(g.history.state, { n: 1 });
+    assertEquals(events, ["hashchange:>#a", "popstate:/p", "hashchange:#a>"]);
+
+    g.history.forward();
+    await tick();
+    assertEquals(g.location.pathname + g.location.hash, "/p#a");
+    assertEquals(g.history.state, null);
+
+    // A fragment navigation after a back truncates the forward entries.
+    g.history.back();
+    await tick();
+    g.location.hash = "#b";
+    assertEquals(g.history.length, base + 1);
+    g.history.go(-2);
+    await tick();
+    assertEquals(g.location.pathname + g.location.hash, "/o");
+    assertEquals(g.history.state, { n: 0 });
+  },
+);
+
 const nav = cell("testui-history-traversal", {
   state: { n: 0 },
   methods: {

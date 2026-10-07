@@ -18,7 +18,7 @@ const App = () => (
 mount(document.getElementById("root")!, App);
 ```
 
-Zero external dependencies. A page that renders an aio component downloads **82
+Zero external dependencies. A page that renders an aio component downloads **84
 KB gzipped** (71 KB brotli); the counter app — that page plus one cell — is **84
 KB gzipped** (73 KB brotli). That is the whole client: the renderer, the signal
 runtime, the WebSocket protocol, the offline queue and the CRDT merge, not a

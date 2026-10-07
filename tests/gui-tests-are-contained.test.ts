@@ -19,6 +19,7 @@
 //
 // The rules are cheap to follow and easy to forget, which is exactly what a
 // gate is for.
+import { SLEEP_ARGS } from "./proc-helper.ts";
 import { assert, assertEquals } from "@std/assert";
 import { mayOpenExternal } from "../src/server/open-external.ts";
 import { testDisplayEnv } from "../src/testing/test-display.ts";
@@ -230,9 +231,17 @@ Deno.test("browser tests: own process, own profile, killed afterwards", async ()
 // still holding its port and its singleton lock. The next run then refuses to
 // start ("Already running") and the developer has to hunt the process down
 // before they can work.
+/** A program that starts a long-lived child, prints the child's pid and waits
+ *  for it — `sh -c "sleep 300 & echo $! ; wait"`, on every OS. */
+const PARENT_OF_A_SLEEPER =
+  `const c = new Deno.Command(Deno.execPath(), { args: ${
+    JSON.stringify(SLEEP_ARGS)
+  }, stdin: "null", stdout: "null", stderr: "null" }).spawn();` +
+  `console.log(c.pid); await c.status;`;
+
 Deno.test("kill(): a grandchild does not survive its parent", async () => {
-  const proc = new Deno.Command("sh", {
-    args: ["-c", "sleep 300 & echo $! ; wait"],
+  const proc = new Deno.Command(Deno.execPath(), {
+    args: ["eval", PARENT_OF_A_SLEEPER],
     stdout: "piped",
     stderr: "null",
   }).spawn();
@@ -244,7 +253,7 @@ Deno.test("kill(): a grandchild does not survive its parent", async () => {
 
   const alive = (pid: number) => {
     try {
-      Deno.kill(pid, "SIGCONT" as Deno.Signal);
+      Deno.kill(pid, 0); // probe: signals nothing
       return true;
     } catch {
       return false;
@@ -273,8 +282,13 @@ Deno.test("kill(): a grandchild does not survive its parent", async () => {
 Deno.test("killProcess: a hung app does not orphan the window it opened", async () => {
   // A parent that ignores SIGTERM is exactly the "hung app" case: it forces the
   // SIGKILL path, which is the one that used to leave children behind.
-  const proc = new Deno.Command("sh", {
-    args: ["-c", "trap '' TERM; sleep 300 & echo $! ; wait"],
+  // (Windows has no SIGTERM to ignore: every kill there is the hard one.)
+  const proc = new Deno.Command(Deno.execPath(), {
+    args: [
+      "eval",
+      `if (Deno.build.os !== "windows") Deno.addSignalListener("SIGTERM", () => {});` +
+      PARENT_OF_A_SLEEPER,
+    ],
     stdout: "piped",
     stderr: "null",
   }).spawn();

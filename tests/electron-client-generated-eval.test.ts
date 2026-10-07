@@ -41,8 +41,14 @@ type Client = {
 /** Runs the generated main with `electron` replaced by recorders. Everything
  *  else (`https`, `crypto`, `path`, `fs`) is the real Node module. */
 function boot(
-  opts: { env?: Record<string, string>; argv?: string[]; userData?: string } =
-    {},
+  opts: {
+    env?: Record<string, string>;
+    argv?: string[];
+    userData?: string;
+    /** A stand-in for `require('dgram')`; without one no socket can be made. */
+    dgram?: unknown;
+    platform?: string;
+  } = {},
 ): Client {
   const handlers: Client["handlers"] = {};
   const errors: string[] = [];
@@ -60,6 +66,7 @@ function boot(
       on: (n: string, f: (...a: unknown[]) => void) =>
         (this.w.listeners[n] ??= []).push(f),
       session: {},
+      setWindowOpenHandler() {}, // pinned by electron-web-isolation.test.ts
     };
     constructor() {
       windows.push(this.w);
@@ -95,6 +102,8 @@ function boot(
       },
       getPath: () => opts.userData ?? "/nonexistent-aio-client-test",
       quit() {},
+      // Asked for only on darwin (the dock); never ready in a unit test.
+      whenReady: () => new Promise(() => {}),
     },
     BrowserWindow,
     Menu: { setApplicationMenu() {} },
@@ -106,7 +115,7 @@ function boot(
     // No LAN broadcast from a unit test: discoverApps answers [] when the
     // socket cannot be made.
     if (name === "dgram") {
-      return {
+      return opts.dgram ?? {
         createSocket() {
           throw new Error("no dgram in this test");
         },
@@ -117,7 +126,7 @@ function boot(
   const proc = {
     env: opts.env ?? {},
     argv: opts.argv ?? [],
-    platform: "linux",
+    platform: opts.platform ?? "linux",
     stdout: { on() {} },
     stderr: { on() {} },
     on() {},
@@ -136,10 +145,66 @@ function boot(
     "console",
     "setInterval",
     electronClientScript(null) +
-      "\nreturn { DISCOVERY_PORT, pinCert, _trustedHosts, fetchPage };",
+      "\nreturn { DISCOVERY_PORT, pinCert, _trustedHosts, fetchPage, " +
+      "discoverApps };",
   )(req, proc, con, () => 0);
   return { api, handlers, errors, windows };
 }
+
+// ── a discovery probe that could not be sent ─────────────────────────────
+
+Deno.test("aio-client: a discovery probe that could not be sent is said once, with no address", async () => {
+  // Node hands a send failure to the callback (macOS without the Local
+  // Network permission: EHOSTUNREACH), or throws it; both were `catch {}`.
+  const socket = (fail: "callback" | "throw") => ({
+    createSocket: () => ({
+      on() {},
+      bind: (f: () => void) => f(),
+      setBroadcast() {},
+      close() {},
+      send(_p: unknown, _port: number, _to: string, cb: (e: unknown) => void) {
+        const e = Object.assign(new Error("send EHOSTUNREACH"), {
+          code: "EHOSTUNREACH",
+        });
+        if (fail === "throw") throw e;
+        cb(e);
+      },
+    }),
+  });
+  for (const fail of ["callback", "throw"] as const) {
+    for (const platform of ["darwin", "linux"]) {
+      const c = boot({ dgram: socket(fail), platform });
+      const sweep = () =>
+        new Promise<unknown[]>((res) => c.api.discoverApps(5, res));
+      assertEquals(await sweep(), []);
+      assertEquals(await sweep(), [], "the sweep still answers");
+      const said = c.errors.filter((l) => l.includes("discovery"));
+      assertEquals(said.length, 1, `${fail}/${platform}: ${c.errors}`);
+      assertMatch(said[0]!, /could not be sent \(EHOSTUNREACH\)/);
+      assertEquals(
+        said[0]!.includes("Local Network"),
+        platform === "darwin",
+        said[0],
+      );
+      assert(!/255\.255|:\/\//.test(said[0]!), `an address: ${said[0]}`);
+    }
+  }
+  // A probe that WAS sent says nothing.
+  const ok = boot({
+    dgram: {
+      createSocket: () => ({
+        on() {},
+        bind: (f: () => void) => f(),
+        setBroadcast() {},
+        close() {},
+        send: (_p: unknown, _n: number, _t: string, cb: (e: unknown) => void) =>
+          cb(null),
+      }),
+    },
+  });
+  await new Promise((res) => ok.api.discoverApps(5, res));
+  assertEquals(ok.errors, []);
+});
 
 // ── K1: AIO_DISCOVERY_PORT ───────────────────────────────────────────────
 

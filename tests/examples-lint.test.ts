@@ -21,10 +21,10 @@
 // `tests/scaffold-lints-clean.test.ts`, and two config hints are allowlisted
 // below because they are inherent to a build smoke fixture, not drift.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { lintProject } from "../aiol/mod.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 /** The only config hints an example may carry: `examples/targets/*` exist to be
  *  BUILT and BOOTED by CI, not to be a template — they have no test suite.

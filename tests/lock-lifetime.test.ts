@@ -7,12 +7,16 @@
 // lock, opened the same state.db and overwrote the first app's final write.
 //
 // This pins both halves end to end on a real process: an app with an async
-// `onStop` (awaited — the other half) is SIGTERMed; its lock must still be
+// `onStop` (awaited — the other half) is asked to stop (SIGTERM; on Windows
+// the shutdown request `am stop` sends); its lock must still be
 // there, marked `stopping`, while the hook runs, and gone once it has exited.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { lockPath, readLock } from "../src/server/single-instance-lock.ts";
 import { childEnv, freePort, kill } from "./e2e-app-harness.ts";
+import { spec } from "./module-spec-helper.ts";
+import { askToStop } from "./proc-helper.ts";
+import { appDirs } from "../src/server/app-dirs.ts";
 
 const APP_ID = `lock-lifetime-${Deno.pid}`;
 
@@ -32,16 +36,15 @@ await aio.run({
 Deno.test({
   name:
     "lock lifetime: still held (status stopping) while onStop runs; gone at exit",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await Deno.makeTempDir({ prefix: "aio-lock-lifetime-" });
-    const repo = new URL("../", import.meta.url).pathname;
+    const repo = fromFileUrl(new URL("../", import.meta.url));
     await Deno.writeTextFile(
       join(dir, "deno.json"),
       JSON.stringify({
         imports: {
-          "aio": `${repo}mod.ts`,
-          "aio/": `${repo}src/`,
+          "aio": `${spec(repo)}mod.ts`,
+          "aio/": `${spec(repo)}src/`,
           "immer": "npm:immer@10.2.0",
           "@std/path": "jsr:@std/path@1.1.2",
         },
@@ -73,7 +76,11 @@ Deno.test({
 
       // SIGTERM, then look while the 1.5 s onStop is running.
       const t0 = Date.now();
-      proc.kill("SIGTERM");
+      await askToStop(
+        proc.pid,
+        port,
+        join(appDirs(APP_ID).data, "control.key"),
+      );
       await new Promise((r) => setTimeout(r, 400));
       const mid = readLock(APP_ID);
       assert(
@@ -82,11 +89,16 @@ Deno.test({
           `(${lockPath(APP_ID)})`,
       );
       assertEquals(mid.pid, proc.pid);
-      assertEquals(
-        mid.status,
-        "stopping",
-        "the signal marks the lock stopping",
-      );
+      // The mark is the SIGNAL handler's. A stop asked over the control API
+      // is marked by its asker (`am stop` writes "stopping" itself before it
+      // asks), so on Windows — no signal — there is no mark of the app's own.
+      if (Deno.build.os !== "windows") {
+        assertEquals(
+          mid.status,
+          "stopping",
+          "the signal marks the lock stopping",
+        );
+      }
 
       const status = await proc.status;
       const took = Date.now() - t0;

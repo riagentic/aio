@@ -69,8 +69,15 @@ import {
   tunnelArgv,
   UNREACHABLE_FIX,
 } from "../src/am/am-cmd-lab.ts";
+import { fromFileUrl, join } from "@std/path";
 
-const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const REPO = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
+/** The facts, judged as the Linux host they are fixtures of — on every OS
+ *  this suite runs on. (What another host is told has its own test.) */
+const preflightOnLinux = (
+  spec: Parameters<typeof preflight>[0],
+  f: Parameters<typeof preflight>[1],
+) => preflight(spec, f, "linux");
 const WIN = LAB_SPECS.windows;
 const MAC = LAB_SPECS.macos;
 const LIN = LAB_SPECS.linux;
@@ -188,94 +195,97 @@ Deno.test("stop/rm/images argv", () => {
 Deno.test("labRoot: XDG_CACHE_HOME wins, ~/.cache/aio/labs otherwise", () => {
   assertEquals(
     labRoot({ XDG_CACHE_HOME: "/big", HOME: "/h" }),
-    "/big/aio/labs",
+    join("/big", "aio", "labs"),
   );
-  assertEquals(labRoot({ HOME: "/h" }), "/h/.cache/aio/labs");
+  assertEquals(labRoot({ HOME: "/h" }), join("/h", ".cache", "aio", "labs"));
   assertEquals(
     labRoot({ XDG_CACHE_HOME: "", HOME: "/h" }),
-    "/h/.cache/aio/labs",
+    join("/h", ".cache", "aio", "labs"),
   );
 });
 
 Deno.test("labDirs: one directory per OS, so --reset cannot cross them", () => {
   const env = { HOME: "/h" };
   assertEquals(labDirs("windows", env), {
-    root: "/h/.cache/aio/labs/windows",
-    storage: "/h/.cache/aio/labs/windows/storage",
+    root: join("/h", ".cache", "aio", "labs", "windows"),
+    storage: join("/h", ".cache", "aio", "labs", "windows", "storage"),
   });
-  assertEquals(labDirs("macos", env).root, "/h/.cache/aio/labs/macos");
+  assertEquals(
+    labDirs("macos", env).root,
+    join("/h", ".cache", "aio", "labs", "macos"),
+  );
 });
 
 // ── Preflight: cause AND fix, every time ───────────────────
 
 Deno.test("preflight: a clean machine refuses nothing", () => {
-  const v = preflight(WIN, OK);
+  const v = preflightOnLinux(WIN, OK);
   assertEquals(v.errors, []);
   assertEquals(v.warnings, []);
 });
 
 Deno.test("preflight: no docker names the install command", () => {
-  const [e] = preflight(WIN, { ...OK, docker: "missing" }).errors;
+  const [e] = preflightOnLinux(WIN, { ...OK, docker: "missing" }).errors;
   assertStringIncludes(e!, "not on PATH");
   assertStringIncludes(e!, "docker.io");
 });
 
 Deno.test("preflight: a refused docker socket is a GROUP problem, and says so", () => {
-  const [e] = preflight(WIN, { ...OK, docker: "denied" }).errors;
+  const [e] = preflightOnLinux(WIN, { ...OK, docker: "denied" }).errors;
   assertStringIncludes(e!, "usermod -aG docker");
   assertStringIncludes(e!, "newgrp docker");
 });
 
 Deno.test("preflight: a dead daemon names systemctl", () => {
   assertStringIncludes(
-    preflight(WIN, { ...OK, docker: "down" }).errors[0]!,
+    preflightOnLinux(WIN, { ...OK, docker: "down" }).errors[0]!,
     "systemctl start docker",
   );
 });
 
 Deno.test("preflight: missing /dev/kvm explains WHY it is fatal, not just that", () => {
-  const [e] = preflight(WIN, { ...OK, kvm: "missing" }).errors;
+  const [e] = preflightOnLinux(WIN, { ...OK, kvm: "missing" }).errors;
   assertStringIncludes(e!, "/dev/kvm does not exist");
   assertStringIncludes(e!, "modprobe kvm_amd");
   assertStringIncludes(e!, "nested virtualisation");
 });
 
 Deno.test("preflight: an unreadable /dev/kvm is a PERMISSION fix, not a module one", () => {
-  const [e] = preflight(WIN, { ...OK, kvm: "denied" }).errors;
+  const [e] = preflightOnLinux(WIN, { ...OK, kvm: "denied" }).errors;
   assertStringIncludes(e!, "setfacl -m u:$USER:rw /dev/kvm");
   assert(!e!.includes("modprobe kvm"), "wrong fix: it is present, just closed");
 });
 
 Deno.test("preflight: no /dev/net/tun names modprobe tun", () => {
   assertStringIncludes(
-    preflight(WIN, { ...OK, tun: false }).errors[0]!,
+    preflightOnLinux(WIN, { ...OK, tun: false }).errors[0]!,
     "modprobe tun",
   );
 });
 
 Deno.test("preflight: an unpulled image is refused, not pulled mid-start", () => {
-  const [e] = preflight(WIN, { ...OK, image: false }).errors;
+  const [e] = preflightOnLinux(WIN, { ...OK, image: false }).errors;
   assertStringIncludes(e!, "docker pull dockurr/windows");
   // The namespace typo costs a confused half hour: dockur/* does not exist.
   assertStringIncludes(e!, 'double r in "dockurr"');
 });
 
 Deno.test("preflight: disk — refuse below MIN, warn below NEED, silent above", () => {
-  const tooSmall = preflight(WIN, { ...OK, freeGb: MIN_GB - 1 });
+  const tooSmall = preflightOnLinux(WIN, { ...OK, freeGb: MIN_GB - 1 });
   assertEquals(tooSmall.warnings, []);
   assertStringIncludes(tooSmall.errors[0]!, "XDG_CACHE_HOME");
   assertStringIncludes(tooSmall.errors[0]!, "--reset");
 
-  const tight = preflight(WIN, { ...OK, freeGb: NEED_GB - 1 });
+  const tight = preflightOnLinux(WIN, { ...OK, freeGb: NEED_GB - 1 });
   assertEquals(tight.errors, [], "a tight disk is a warning, not a refusal");
   assertStringIncludes(tight.warnings[0]!, `${NEED_GB} GB`);
 
-  assertEquals(preflight(WIN, { ...OK, freeGb: NEED_GB }).warnings, []);
+  assertEquals(preflightOnLinux(WIN, { ...OK, freeGb: NEED_GB }).warnings, []);
 });
 
 Deno.test("preflight: an unknown free space judges nothing", () => {
-  assertEquals(preflight(WIN, { ...OK, freeGb: null }).errors, []);
-  assertEquals(preflight(WIN, { ...OK, freeGb: null }).warnings, []);
+  assertEquals(preflightOnLinux(WIN, { ...OK, freeGb: null }).errors, []);
+  assertEquals(preflightOnLinux(WIN, { ...OK, freeGb: null }).warnings, []);
 });
 
 Deno.test("preflight: every refusal carries a fix, not just a complaint", () => {
@@ -286,11 +296,40 @@ Deno.test("preflight: every refusal carries a fix, not just a complaint", () => 
     image: false,
     freeGb: 1,
   } as const;
-  const { errors } = preflight(WIN, broken);
+  const { errors } = preflightOnLinux(WIN, broken);
   assertEquals(errors.length, 5, "one refusal per broken fact");
   for (const e of errors) {
     assertStringIncludes(e, "Fix:", `no named fix in: ${e}`);
   }
+});
+
+// A lab is Linux devices behind Docker. On Windows `am lab` used to die on
+// `Failed to spawn 'df'` (measured on a real Windows 11) before it judged
+// anything; the preflight says what the machine cannot do, first and alone.
+Deno.test("preflight: a host that cannot run the lab is refused for THAT, with the fix, and nothing else", () => {
+  const broken = { ...OK, docker: "missing", image: false } as const;
+  for (const spec of [WIN, MAC, LIN, AND]) {
+    const v = preflight(spec, broken, "windows");
+    assertEquals(v.errors.length, 1, v.errors.join("\n"));
+    assertStringIncludes(v.errors[0]!, "needs a Linux host");
+    assertStringIncludes(v.errors[0]!, "this is Windows");
+    assertStringIncludes(
+      v.errors[0]!,
+      `Fix: run \`am lab ${spec.os}\` on a Linux`,
+    );
+    // Not the Linux fixes for a machine the reader is not on.
+    assert(!/apt|modprobe|docker pull/.test(v.errors[0]!), v.errors[0]);
+  }
+  // macOS has no /dev/kvm to enable: the KVM labs are refused the same way…
+  for (const spec of [WIN, MAC, AND]) {
+    const [e, ...more] = preflight(spec, OK, "darwin").errors;
+    assertStringIncludes(e!, "needs a Linux host, and this is macOS");
+    assertEquals(more, []);
+  }
+  // …and the container lab, which needs none, is judged on its facts.
+  assertEquals(preflight(LIN, OK, "darwin").errors, []);
+  // Linux is judged on its facts, as before.
+  assertEquals(preflight(WIN, OK, "linux").errors, []);
 });
 
 Deno.test("parseDfAvailKb: the POSIX column, or null", () => {
@@ -684,15 +723,15 @@ Deno.test("the macOS licence notice is ONE line and names the restriction", () =
   // throws the OS away) shows it again.
   assertEquals(
     noticeStamp("/h/.cache/aio/labs/macos"),
-    "/h/.cache/aio/labs/macos/licence-notice-shown",
+    join("/h/.cache/aio/labs/macos", "licence-notice-shown"),
   );
 });
 
 Deno.test("diskDirs: macOS keeps one disk per VERSION, Windows one disk", () => {
   // The macOS image sets STORAGE=$STORAGE/<version> for a fresh install, so
   // looking only at the top level told every returning operator "first run".
-  assertEquals(diskDirs(MAC, "/s", "14"), ["/s", "/s/14"]);
-  assertEquals(diskDirs(MAC, "/s", "Sonoma"), ["/s", "/s/sonoma"]);
+  assertEquals(diskDirs(MAC, "/s", "14"), ["/s", join("/s", "14")]);
+  assertEquals(diskDirs(MAC, "/s", "Sonoma"), ["/s", join("/s", "sonoma")]);
   assertEquals(diskDirs(WIN, "/s", "11"), ["/s"]);
 });
 
@@ -836,34 +875,43 @@ Deno.test("tunnelArgv follows the spec's viewer port", () => {
 
 Deno.test("preflight linux: a container needs docker and the image, nothing else", () => {
   // No KVM, no tun, 3 GB free: a VM would refuse three times; a webtop runs.
-  const v = preflight(LIN, { ...OK, kvm: "missing", tun: false, freeGb: 3 });
+  const v = preflightOnLinux(LIN, {
+    ...OK,
+    kvm: "missing",
+    tun: false,
+    freeGb: 3,
+  });
   assertEquals(v.errors, []);
   assertEquals(v.warnings, []);
-  const [e] = preflight(LIN, { ...OK, image: false }).errors;
+  const [e] = preflightOnLinux(LIN, { ...OK, image: false }).errors;
   assertStringIncludes(e!, `docker pull ${LIN.image}`);
   // The dockurr typo note is for dockurr images only.
   assert(!e!.includes("dockurr"), e);
   assertStringIncludes(
-    preflight(LIN, { ...OK, docker: "missing" }).errors[0]!,
+    preflightOnLinux(LIN, { ...OK, docker: "missing" }).errors[0]!,
     "Fix:",
   );
 });
 
 Deno.test("preflight android: refuses without KVM — the emulator is KVM-accelerated", () => {
-  const [e] = preflight(AND, { ...OK, kvm: "missing", tun: false }).errors;
+  const [e] =
+    preflightOnLinux(AND, { ...OK, kvm: "missing", tun: false }).errors;
   assertStringIncludes(e!, "/dev/kvm does not exist");
   assertStringIncludes(e!, "emulator");
   assertStringIncludes(e!, "modprobe kvm_amd");
   assertEquals(
-    preflight(AND, { ...OK, kvm: "missing", tun: false }).errors.length,
+    preflightOnLinux(AND, { ...OK, kvm: "missing", tun: false }).errors.length,
     1,
   );
   assertStringIncludes(
-    preflight(AND, { ...OK, kvm: "denied" }).errors[0]!,
+    preflightOnLinux(AND, { ...OK, kvm: "denied" }).errors[0]!,
     "setfacl",
   );
   // No tun, no disk floor for the emulator either.
-  assertEquals(preflight(AND, { ...OK, tun: false, freeGb: 1 }).errors, []);
+  assertEquals(
+    preflightOnLinux(AND, { ...OK, tun: false, freeGb: 1 }).errors,
+    [],
+  );
 });
 
 Deno.test("diskDirs: a container has no disk to look for", () => {
@@ -1122,7 +1170,14 @@ Deno.test("bootTimeoutMessage: names how to check, how to watch, and the restart
 
 // ── The CLI, against a FAKE docker on PATH ─────────────────
 
-/** A `docker` shim that answers from a script the test writes. */
+/** `am lab` runs its guests under docker on a LINUX host (QEMU on /dev/kvm,
+ *  /dev/net/tun, `df` for the disk check): there is no such lab on a Windows
+ *  host, so the CLI is not driven there — and the shim below is a shell
+ *  script. The pure tests above run everywhere. */
+const LAB_HOST = { ignore: Deno.build.os === "windows" }; // am lab is a Linux microVM host (docker, /dev/kvm)
+
+/** A `docker` shim that answers from a script the test writes. (`printf`,
+ *  never `echo -n`: macOS's /bin/sh prints the `-n`.) */
 async function fakeDocker(body: string): Promise<string> {
   const dir = await Deno.makeTempDir({ prefix: "aio-lab-fake-" });
   const bin = `${dir}/docker`;
@@ -1207,81 +1262,99 @@ Deno.test("am lab bsd: an unknown OS names the two that exist", async () => {
   assertStringIncludes(r.out + r.err, "am lab android");
 });
 
-Deno.test("am lab --status: absent container, against a fake docker", async () => {
-  const dir = await fakeDocker(`
+Deno.test(
+  "am lab --status: absent container, against a fake docker",
+  LAB_HOST,
+  async () => {
+    const dir = await fakeDocker(`
 case "$1" in
   inspect) echo "no such object" >&2; exit 1;;
   *) exit 1;;
 esac`);
-  const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
-  const r = await am(["lab", "windows", "--status", "--json"], {
-    PATH: `${dir}:${Deno.env.get("PATH")}`,
-    XDG_CACHE_HOME: home,
-  });
-  assertEquals(r.code, 0);
-  const j = amJson(r, "am lab");
-  assertEquals(j.running, false);
-  assertEquals(j.status, "absent");
-  assertEquals(j.viewer, null);
-  assertEquals(j.storage, `${home}/aio/labs/windows/storage`);
-  await Deno.remove(dir, { recursive: true });
-  await Deno.remove(home, { recursive: true });
-});
+    const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
+    const r = await am(["lab", "windows", "--status", "--json"], {
+      PATH: `${dir}:${Deno.env.get("PATH")}`,
+      XDG_CACHE_HOME: home,
+    });
+    assertEquals(r.code, 0);
+    const j = amJson(r, "am lab");
+    assertEquals(j.running, false);
+    assertEquals(j.status, "absent");
+    assertEquals(j.viewer, null);
+    assertEquals(j.storage, `${home}/aio/labs/windows/storage`);
+    await Deno.remove(dir, { recursive: true });
+    await Deno.remove(home, { recursive: true });
+  },
+);
 
-Deno.test("am lab --status: a running container reports its ACTUAL port", async () => {
-  // Read back from docker, never remembered: the container outlives am, and a
-  // remembered port goes stale the moment someone restarts it by hand.
-  const dir = await fakeDocker(`
+Deno.test(
+  "am lab --status: a running container reports its ACTUAL port",
+  LAB_HOST,
+  async () => {
+    // Read back from docker, never remembered: the container outlives am, and a
+    // remembered port goes stale the moment someone restarts it by hand.
+    const dir = await fakeDocker(`
 case "$1" in
   inspect) echo "true|2026-08-27T00:00:00Z|running";;
   port) echo "127.0.0.1:45123";;
   *) exit 1;;
 esac`);
-  const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
-  const r = await am(["lab", "windows", "--status", "--json"], {
-    PATH: `${dir}:${Deno.env.get("PATH")}`,
-    XDG_CACHE_HOME: home,
-  });
-  const j = amJson(r, "am lab");
-  assertEquals(j.running, true);
-  assertEquals(j.viewer, "http://127.0.0.1:45123/");
-  await Deno.remove(dir, { recursive: true });
-  await Deno.remove(home, { recursive: true });
-});
+    const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
+    const r = await am(["lab", "windows", "--status", "--json"], {
+      PATH: `${dir}:${Deno.env.get("PATH")}`,
+      XDG_CACHE_HOME: home,
+    });
+    const j = amJson(r, "am lab");
+    assertEquals(j.running, true);
+    assertEquals(j.viewer, "http://127.0.0.1:45123/");
+    await Deno.remove(dir, { recursive: true });
+    await Deno.remove(home, { recursive: true });
+  },
+);
 
-Deno.test("am lab --stop: graceful stop THEN remove, in that order", async () => {
-  const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
-  const log = `${home}/calls`;
-  const dir = await fakeDocker(`
+Deno.test(
+  "am lab --stop: graceful stop THEN remove, in that order",
+  LAB_HOST,
+  async () => {
+    const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
+    const log = `${home}/calls`;
+    const dir = await fakeDocker(`
 echo "$@" >> ${log}
 case "$1" in
   inspect) echo "true|2026-08-27T00:00:00Z|running";;
   *) exit 0;;
 esac`);
-  const r = await am(["lab", "windows", "--stop", "--json"], {
-    PATH: `${dir}:${Deno.env.get("PATH")}`,
-    XDG_CACHE_HOME: home,
-  });
-  assertEquals(r.code, 0);
-  assertEquals(amJson(r, "am lab").stopped, true);
-  const calls = (await Deno.readTextFile(log)).trim().split("\n");
-  const stop = calls.findIndex((c) => c.startsWith("stop "));
-  const rm = calls.findIndex((c) => c.startsWith("rm "));
-  assert(stop >= 0 && rm > stop, `stop must precede rm: ${calls.join(" / ")}`);
-  assertStringIncludes(calls[stop]!, `--time ${STOP_TIMEOUT_SEC}`);
-  // The operator has to be told a clean shutdown takes a moment, or they ^C it.
-  assertStringIncludes(r.err, "shut down");
-  await Deno.remove(dir, { recursive: true });
-  await Deno.remove(home, { recursive: true });
-});
+    const r = await am(["lab", "windows", "--stop", "--json"], {
+      PATH: `${dir}:${Deno.env.get("PATH")}`,
+      XDG_CACHE_HOME: home,
+    });
+    assertEquals(r.code, 0);
+    assertEquals(amJson(r, "am lab").stopped, true);
+    const calls = (await Deno.readTextFile(log)).trim().split("\n");
+    const stop = calls.findIndex((c) => c.startsWith("stop "));
+    const rm = calls.findIndex((c) => c.startsWith("rm "));
+    assert(
+      stop >= 0 && rm > stop,
+      `stop must precede rm: ${calls.join(" / ")}`,
+    );
+    assertStringIncludes(calls[stop]!, `--time ${STOP_TIMEOUT_SEC}`);
+    // The operator has to be told a clean shutdown takes a moment, or they ^C it.
+    assertStringIncludes(r.err, "shut down");
+    await Deno.remove(dir, { recursive: true });
+    await Deno.remove(home, { recursive: true });
+  },
+);
 
-Deno.test("am lab --stop: a failed docker stop exits 1 — no success, one JSON doc", async () => {
-  // A stop that printed `{error}` then fell through into `docker rm --force`
-  // and `{stopped:true}` with exit 0 left `am lab … --stop && …` claiming
-  // success while a VM mid-write was force-killed — dual JSON, and a lie.
-  const home = await tempDir("aio-lab-home-");
-  const log = `${home}/calls`;
-  const dir = await fakeDocker(`
+Deno.test(
+  "am lab --stop: a failed docker stop exits 1 — no success, one JSON doc",
+  LAB_HOST,
+  async () => {
+    // A stop that printed `{error}` then fell through into `docker rm --force`
+    // and `{stopped:true}` with exit 0 left `am lab … --stop && …` claiming
+    // success while a VM mid-write was force-killed — dual JSON, and a lie.
+    const home = await tempDir("aio-lab-home-");
+    const log = `${home}/calls`;
+    const dir = await fakeDocker(`
 echo "$@" >> ${log}
 case "$1" in
   inspect) echo "true|2026-08-27T00:00:00Z|running";;
@@ -1289,237 +1362,273 @@ case "$1" in
   rm) echo "rm should not run after a failed stop" >&2; exit 0;;
   *) exit 0;;
 esac`);
-  const r = await am(["lab", "windows", "--stop", "--json"], {
-    PATH: `${dir}:${Deno.env.get("PATH")}`,
-    XDG_CACHE_HOME: home,
-  });
-  assertEquals(
-    r.code,
-    1,
-    `expected exit 1 after a failed stop, got ${r.code}\n${r.out}\n${r.err}`,
-  );
-  const text = r.out.trim();
-  // WHOLE of stdout is ONE document — the failure, not a success after it.
-  const doc = amJson(r, "am lab --stop");
-  assertEquals("error" in doc, true, text);
-  assertEquals(
-    "stopped" in doc && doc.stopped === true,
-    false,
-    `must not claim stopped:true after a failed stop — got ${text}`,
-  );
-  const calls = (await Deno.readTextFile(log)).trim().split("\n").filter(
-    Boolean,
-  );
-  assertEquals(
-    calls.some((c) => c.startsWith("rm ")),
-    false,
-    `rm must not run after a failed stop: ${calls.join(" / ")}`,
-  );
-  await Deno.remove(dir, { recursive: true });
-  await dropTempDir(home);
-});
+    const r = await am(["lab", "windows", "--stop", "--json"], {
+      PATH: `${dir}:${Deno.env.get("PATH")}`,
+      XDG_CACHE_HOME: home,
+    });
+    assertEquals(
+      r.code,
+      1,
+      `expected exit 1 after a failed stop, got ${r.code}\n${r.out}\n${r.err}`,
+    );
+    const text = r.out.trim();
+    // WHOLE of stdout is ONE document — the failure, not a success after it.
+    const doc = amJson(r, "am lab --stop");
+    assertEquals("error" in doc, true, text);
+    assertEquals(
+      "stopped" in doc && doc.stopped === true,
+      false,
+      `must not claim stopped:true after a failed stop — got ${text}`,
+    );
+    const calls = (await Deno.readTextFile(log)).trim().split("\n").filter(
+      Boolean,
+    );
+    assertEquals(
+      calls.some((c) => c.startsWith("rm ")),
+      false,
+      `rm must not run after a failed stop: ${calls.join(" / ")}`,
+    );
+    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(home);
+  },
+);
 
-Deno.test("am lab --reset: a failed docker rm exits 1 — no reset:true", async () => {
-  // An ignored rm left the container listed and still printed `{reset:true}`
-  // with exit 0, so `am lab … --reset && …` claimed the lab was gone.
-  const home = await tempDir("aio-lab-home-");
-  const dir = await fakeDocker(`
+Deno.test(
+  "am lab --reset: a failed docker rm exits 1 — no reset:true",
+  LAB_HOST,
+  async () => {
+    // An ignored rm left the container listed and still printed `{reset:true}`
+    // with exit 0, so `am lab … --reset && …` claimed the lab was gone.
+    const home = await tempDir("aio-lab-home-");
+    const dir = await fakeDocker(`
 case "$1" in
   inspect) echo "false|2026-08-27T00:00:00Z|exited";;
   rm) echo "busy" >&2; exit 1;;
   *) exit 0;;
 esac`);
-  await Deno.mkdir(`${home}/aio/labs/windows/storage`, { recursive: true });
-  await Deno.writeTextFile(
-    `${home}/aio/labs/windows/storage/data.img`,
-    "x".repeat(64),
-  );
-  const r = await am(["lab", "windows", "--reset", "--json"], {
-    PATH: `${dir}:${Deno.env.get("PATH")}`,
-    XDG_CACHE_HOME: home,
-  });
-  assertEquals(
-    r.code,
-    1,
-    `expected exit 1 after a failed rm, got ${r.code}\n${r.out}\n${r.err}`,
-  );
-  const doc = amJson(r, "am lab --reset");
-  assertEquals("error" in doc, true, r.out);
-  assertEquals(
-    "reset" in doc && doc.reset === true,
-    false,
-    `must not claim reset:true after a failed rm — got ${r.out}`,
-  );
-  // Disk must still be there — we never reached the delete.
-  assertEquals(
-    (await Deno.stat(`${home}/aio/labs/windows/storage/data.img`)).isFile,
-    true,
-    "a failed rm must not delete the disk",
-  );
-  await Deno.remove(dir, { recursive: true });
-  await dropTempDir(home);
-});
+    await Deno.mkdir(`${home}/aio/labs/windows/storage`, { recursive: true });
+    await Deno.writeTextFile(
+      `${home}/aio/labs/windows/storage/data.img`,
+      "x".repeat(64),
+    );
+    const r = await am(["lab", "windows", "--reset", "--json"], {
+      PATH: `${dir}:${Deno.env.get("PATH")}`,
+      XDG_CACHE_HOME: home,
+    });
+    assertEquals(
+      r.code,
+      1,
+      `expected exit 1 after a failed rm, got ${r.code}\n${r.out}\n${r.err}`,
+    );
+    const doc = amJson(r, "am lab --reset");
+    assertEquals("error" in doc, true, r.out);
+    assertEquals(
+      "reset" in doc && doc.reset === true,
+      false,
+      `must not claim reset:true after a failed rm — got ${r.out}`,
+    );
+    // Disk must still be there — we never reached the delete.
+    assertEquals(
+      (await Deno.stat(`${home}/aio/labs/windows/storage/data.img`)).isFile,
+      true,
+      "a failed rm must not delete the disk",
+    );
+    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(home);
+  },
+);
 
-Deno.test("am lab --stop: nothing to stop is not an error", async () => {
-  const dir = await fakeDocker(`exit 1`);
-  const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
-  const r = await am(["lab", "windows", "--stop"], {
-    PATH: `${dir}:${Deno.env.get("PATH")}`,
-    XDG_CACHE_HOME: home,
-  });
-  assertEquals(r.code, 0);
-  await Deno.remove(dir, { recursive: true });
-  await Deno.remove(home, { recursive: true });
-});
+Deno.test(
+  "am lab --stop: nothing to stop is not an error",
+  LAB_HOST,
+  async () => {
+    const dir = await fakeDocker(`exit 1`);
+    const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
+    const r = await am(["lab", "windows", "--stop"], {
+      PATH: `${dir}:${Deno.env.get("PATH")}`,
+      XDG_CACHE_HOME: home,
+    });
+    assertEquals(r.code, 0);
+    await Deno.remove(dir, { recursive: true });
+    await Deno.remove(home, { recursive: true });
+  },
+);
 
-Deno.test("am lab --reset: refuses under a LIVE VM, and names the fix", async () => {
-  const dir = await fakeDocker(`
+Deno.test(
+  "am lab --reset: refuses under a LIVE VM, and names the fix",
+  LAB_HOST,
+  async () => {
+    const dir = await fakeDocker(`
 case "$1" in
   inspect) echo "true|2026-08-27T00:00:00Z|running";;
   *) exit 0;;
 esac`);
-  const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
-  await Deno.mkdir(`${home}/aio/labs/windows/storage`, { recursive: true });
-  const r = await am(["lab", "windows", "--reset"], {
-    PATH: `${dir}:${Deno.env.get("PATH")}`,
-    XDG_CACHE_HOME: home,
-  });
-  assertEquals(r.code, 1);
-  assertStringIncludes(r.out + r.err, "--stop");
-  // …and the disk is still there.
-  assertEquals(
-    (await Deno.stat(`${home}/aio/labs/windows/storage`)).isDirectory,
-    true,
-  );
-  await Deno.remove(dir, { recursive: true });
-  await Deno.remove(home, { recursive: true });
-});
+    const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
+    await Deno.mkdir(`${home}/aio/labs/windows/storage`, { recursive: true });
+    const r = await am(["lab", "windows", "--reset"], {
+      PATH: `${dir}:${Deno.env.get("PATH")}`,
+      XDG_CACHE_HOME: home,
+    });
+    assertEquals(r.code, 1);
+    assertStringIncludes(r.out + r.err, "--stop");
+    // …and the disk is still there.
+    assertEquals(
+      (await Deno.stat(`${home}/aio/labs/windows/storage`)).isDirectory,
+      true,
+    );
+    await Deno.remove(dir, { recursive: true });
+    await Deno.remove(home, { recursive: true });
+  },
+);
 
-Deno.test("am lab --reset: a stopped lab loses its disk, and only its own", async () => {
-  const dir = await fakeDocker(`
+Deno.test(
+  "am lab --reset: a stopped lab loses its disk, and only its own",
+  LAB_HOST,
+  async () => {
+    const dir = await fakeDocker(`
 case "$1" in
   inspect) exit 1;;
   *) exit 0;;
 esac`);
-  const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
-  await Deno.mkdir(`${home}/aio/labs/windows/storage`, { recursive: true });
-  await Deno.writeTextFile(
-    `${home}/aio/labs/windows/storage/data.img`,
-    "x".repeat(1024),
-  );
-  await Deno.mkdir(`${home}/aio/labs/macos/storage`, { recursive: true });
-  const r = await am(["lab", "windows", "--reset", "--json"], {
-    PATH: `${dir}:${Deno.env.get("PATH")}`,
-    XDG_CACHE_HOME: home,
-  });
-  assertEquals(r.code, 0);
-  // Allocated blocks, not apparent size (see fileCost) — so this is "at least
-  // the file", never an exact byte count.
-  assert(amJson(r, "am lab").freedBytes >= 1024, r.out);
-  assertEquals(await exists(`${home}/aio/labs/windows`), false);
-  assertEquals(await exists(`${home}/aio/labs/macos/storage`), true);
-  await Deno.remove(dir, { recursive: true });
-  await Deno.remove(home, { recursive: true });
-});
+    const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
+    await Deno.mkdir(`${home}/aio/labs/windows/storage`, { recursive: true });
+    await Deno.writeTextFile(
+      `${home}/aio/labs/windows/storage/data.img`,
+      "x".repeat(1024),
+    );
+    await Deno.mkdir(`${home}/aio/labs/macos/storage`, { recursive: true });
+    const r = await am(["lab", "windows", "--reset", "--json"], {
+      PATH: `${dir}:${Deno.env.get("PATH")}`,
+      XDG_CACHE_HOME: home,
+    });
+    assertEquals(r.code, 0);
+    // Allocated blocks, not apparent size (see fileCost) — so this is "at least
+    // the file", never an exact byte count.
+    assert(amJson(r, "am lab").freedBytes >= 1024, r.out);
+    assertEquals(await exists(`${home}/aio/labs/windows`), false);
+    assertEquals(await exists(`${home}/aio/labs/macos/storage`), true);
+    await Deno.remove(dir, { recursive: true });
+    await Deno.remove(home, { recursive: true });
+  },
+);
 
-Deno.test("am lab --reset: nothing installed yet is not an error", async () => {
-  const dir = await fakeDocker(`exit 1`);
-  const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
-  const r = await am(["lab", "macos", "--reset"], {
-    PATH: `${dir}:${Deno.env.get("PATH")}`,
-    XDG_CACHE_HOME: home,
-  });
-  assertEquals(r.code, 0);
-  await Deno.remove(dir, { recursive: true });
-  await Deno.remove(home, { recursive: true });
-});
+Deno.test(
+  "am lab --reset: nothing installed yet is not an error",
+  LAB_HOST,
+  async () => {
+    const dir = await fakeDocker(`exit 1`);
+    const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
+    const r = await am(["lab", "macos", "--reset"], {
+      PATH: `${dir}:${Deno.env.get("PATH")}`,
+      XDG_CACHE_HOME: home,
+    });
+    assertEquals(r.code, 0);
+    await Deno.remove(dir, { recursive: true });
+    await Deno.remove(home, { recursive: true });
+  },
+);
 
-Deno.test("am lab: preflight refusal reaches the CLI before any docker run", async () => {
-  const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
-  const log = `${home}/calls`;
-  // docker is alive but the image was never pulled.
-  const dir = await fakeDocker(`
+Deno.test(
+  "am lab: preflight refusal reaches the CLI before any docker run",
+  LAB_HOST,
+  async () => {
+    const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
+    const log = `${home}/calls`;
+    // docker is alive but the image was never pulled.
+    const dir = await fakeDocker(`
 echo "$@" >> ${log}
 case "$1" in
   info) echo "29.1.3";;
   inspect) exit 1;;
-  images) echo -n "";;
+  images) printf '';;
   *) exit 0;;
 esac`);
-  const r = await am(["lab", "windows"], {
-    PATH: `${dir}:${Deno.env.get("PATH")}`,
-    XDG_CACHE_HOME: home,
-  });
-  assertEquals(r.code, 1);
-  assertStringIncludes(r.out + r.err, "preflight failed");
-  assertStringIncludes(r.out + r.err, "docker pull dockurr/windows");
-  const calls = await Deno.readTextFile(log);
-  assert(!calls.includes("\nrun "), "a refused preflight must not start a VM");
-  await Deno.remove(dir, { recursive: true });
-  await Deno.remove(home, { recursive: true });
-});
+    const r = await am(["lab", "windows"], {
+      PATH: `${dir}:${Deno.env.get("PATH")}`,
+      XDG_CACHE_HOME: home,
+    });
+    assertEquals(r.code, 1);
+    assertStringIncludes(r.out + r.err, "preflight failed");
+    // The missing image is looked for once the host can run a VM at all: off
+    // Linux the refusal is already the absent /dev/kvm.
+    if (Deno.build.os === "linux") {
+      assertStringIncludes(r.out + r.err, "docker pull dockurr/windows");
+    }
+    const calls = await Deno.readTextFile(log);
+    assert(
+      !calls.includes("\nrun "),
+      "a refused preflight must not start a VM",
+    );
+    await Deno.remove(dir, { recursive: true });
+    await Deno.remove(home, { recursive: true });
+  },
+);
 
-Deno.test("am lab --tunnel: the process HOLDS the port open", async () => {
-  // Regression: --tunnel printed "started" and then exited, leaving the
-  // operator with a URL that answers nothing. The tunnel IS the process, so
-  // "did it stay alive and bind the port" is the whole contract.
-  //
-  // Lab already UP: start's preflight probes THIS host's /dev/kvm, which a CI
-  // box without the kvm group fails even under a fake docker. The android
-  // install tests use the same "already running" shape for that reason. The
-  // tunnel path after an existing container is the one that must hold the port.
-  const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
-  const dir = await fakeDocker(`
+Deno.test(
+  "am lab --tunnel: the process HOLDS the port open",
+  LAB_HOST,
+  async () => {
+    // Regression: --tunnel printed "started" and then exited, leaving the
+    // operator with a URL that answers nothing. The tunnel IS the process, so
+    // "did it stay alive and bind the port" is the whole contract.
+    //
+    // Lab already UP: start's preflight probes THIS host's /dev/kvm, which a CI
+    // box without the kvm group fails even under a fake docker. The android
+    // install tests use the same "already running" shape for that reason. The
+    // tunnel path after an existing container is the one that must hold the port.
+    const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
+    const dir = await fakeDocker(`
 case "$1" in
   info) echo "29.1.3";;
   images) echo "sha256:abc";;
   inspect) echo "true|2026-08-27T00:00:00Z|running";;
-  exec) echo -n "200";;
+  exec) printf 200;;
   logs) echo "booting";;
   *) exit 0;;
 esac`);
-  const port = freePort();
-  const child = new Deno.Command(Deno.execPath(), {
-    args: [
-      "run",
-      "-A",
-      `${REPO}/src/am.ts`,
-      "lab",
-      "windows",
-      "--tunnel",
-      `--port=${port}`,
-      `--dist=${home}/dist`,
-    ],
-    env: {
-      ...Deno.env.toObject(),
-      AIO_AM_NO_DELEGATE: "1",
-      PATH: `${dir}:${Deno.env.get("PATH")}`,
-      XDG_CACHE_HOME: home,
-    },
-    cwd: REPO,
-    stdout: "null",
-    stderr: "null",
-  }).spawn();
+    const port = freePort();
+    const child = new Deno.Command(Deno.execPath(), {
+      args: [
+        "run",
+        "-A",
+        `${REPO}/src/am.ts`,
+        "lab",
+        "windows",
+        "--tunnel",
+        `--port=${port}`,
+        `--dist=${home}/dist`,
+      ],
+      env: {
+        ...Deno.env.toObject(),
+        AIO_AM_NO_DELEGATE: "1",
+        PATH: `${dir}:${Deno.env.get("PATH")}`,
+        XDG_CACHE_HOME: home,
+      },
+      cwd: REPO,
+      stdout: "null",
+      stderr: "null",
+    }).spawn();
 
-  let bound = false;
-  for (let i = 0; i < 60 && !bound; i++) {
-    await new Promise((r) => setTimeout(r, 500));
+    let bound = false;
+    for (let i = 0; i < 60 && !bound; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      try {
+        const c = await Deno.connect({ hostname: "127.0.0.1", port });
+        c.close();
+        bound = true;
+      } catch { /* not yet */ }
+    }
     try {
-      const c = await Deno.connect({ hostname: "127.0.0.1", port });
-      c.close();
-      bound = true;
-    } catch { /* not yet */ }
-  }
-  try {
-    child.kill("SIGKILL");
-  } catch {
-    // Already exited — the assert below names that as the real failure.
-  }
-  await child.status;
-  assert(bound, `--tunnel exited without binding ${port}`);
-  await Deno.remove(dir, { recursive: true });
-  await Deno.remove(home, { recursive: true });
-});
+      child.kill("SIGKILL");
+    } catch {
+      // Already exited — the assert below names that as the real failure.
+    }
+    await child.status;
+    assert(bound, `--tunnel exited without binding ${port}`);
+    await Deno.remove(dir, { recursive: true });
+    await Deno.remove(home, { recursive: true });
+  },
+);
 
 /** A fake docker for a lab that is UP with a working share: it answers the
  *  state, the published port, the image's gateway file, the in-container health
@@ -1536,7 +1645,7 @@ case "$1" in
   exec)
     case "$*" in
       *qemu.gw*) echo "172.30.0.1";;
-      *curl*) echo -n "200";;
+      *curl*) printf 200;;
       *tail*) echo '172.30.0.2 - - [27/Aug/2026 01:42:19] "GET /app-macos HTTP/1.1" 200 -';;
       *) exit 0;;
     esac;;
@@ -1544,104 +1653,123 @@ case "$1" in
 esac`;
 }
 
-Deno.test("am lab macos: the hand-off is a COMMAND, in the machine output too", async () => {
-  const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
-  const dist = `${home}/dist`;
-  await Deno.mkdir(dist, { recursive: true });
-  await Deno.writeTextFile(`${dist}/app-macos`, "mach-o");
-  const dir = await fakeDocker(upWithShare(dist));
-  const r = await am(["lab", "macos", `--dist=${dist}`, "--json"], {
-    PATH: `${dir}:${Deno.env.get("PATH")}`,
-    XDG_CACHE_HOME: home,
-  });
-  assertEquals(r.code, 0);
-  const j = amJson(r, "am lab");
-  assertEquals(j.shareServing, true);
-  assertEquals(j.shareUrl, SHARE_URL);
-  assertEquals(j.artifact.file, "app-macos");
-  // The whole point: a line to paste, naming the actual file.
-  assertEquals(j.fetchCommand, fetchCommand("macos", "app-macos"));
-  await Deno.remove(dir, { recursive: true });
-  await Deno.remove(home, { recursive: true });
-});
+Deno.test(
+  "am lab macos: the hand-off is a COMMAND, in the machine output too",
+  LAB_HOST,
+  async () => {
+    const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
+    const dist = `${home}/dist`;
+    await Deno.mkdir(dist, { recursive: true });
+    await Deno.writeTextFile(`${dist}/app-macos`, "mach-o");
+    const dir = await fakeDocker(upWithShare(dist));
+    const r = await am(["lab", "macos", `--dist=${dist}`, "--json"], {
+      PATH: `${dir}:${Deno.env.get("PATH")}`,
+      XDG_CACHE_HOME: home,
+    });
+    assertEquals(r.code, 0);
+    const j = amJson(r, "am lab");
+    assertEquals(j.shareServing, true);
+    assertEquals(j.shareUrl, SHARE_URL);
+    assertEquals(j.artifact.file, "app-macos");
+    // The whole point: a line to paste, naming the actual file.
+    assertEquals(j.fetchCommand, fetchCommand("macos", "app-macos"));
+    await Deno.remove(dir, { recursive: true });
+    await Deno.remove(home, { recursive: true });
+  },
+);
 
-Deno.test("am lab macos: the licence line is printed ONCE, on stderr", async () => {
-  const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
-  const dist = `${home}/dist`;
-  await Deno.mkdir(dist, { recursive: true });
-  const dir = await fakeDocker(upWithShare(dist));
-  const env = {
-    PATH: `${dir}:${Deno.env.get("PATH")}`,
-    XDG_CACHE_HOME: home,
-  };
-  const first = await am(["lab", "macos", `--dist=${dist}`, "--json"], env);
-  // stderr, so --json stdout stays parseable — the notice must never be data.
-  assertStringIncludes(first.err, MACOS_LICENCE);
-  assert(!first.out.includes("Apple"), first.out);
-  JSON.parse(first.out);
+Deno.test(
+  "am lab macos: the licence line is printed ONCE, on stderr",
+  LAB_HOST,
+  async () => {
+    const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
+    const dist = `${home}/dist`;
+    await Deno.mkdir(dist, { recursive: true });
+    const dir = await fakeDocker(upWithShare(dist));
+    const env = {
+      PATH: `${dir}:${Deno.env.get("PATH")}`,
+      XDG_CACHE_HOME: home,
+    };
+    const first = await am(["lab", "macos", `--dist=${dist}`, "--json"], env);
+    // stderr, so --json stdout stays parseable — the notice must never be data.
+    assertStringIncludes(first.err, MACOS_LICENCE);
+    assert(!first.out.includes("Apple"), first.out);
+    JSON.parse(first.out);
 
-  const second = await am(["lab", "macos", `--dist=${dist}`, "--json"], env);
-  assert(
-    !second.err.includes(MACOS_LICENCE),
-    "a notice shown every time is a notice nobody reads",
-  );
-  // Windows never shows it at all.
-  const win = await am(["lab", "windows", `--dist=${dist}`, "--json"], env);
-  assert(!win.err.includes("Apple"), win.err);
-  await Deno.remove(dir, { recursive: true });
-  await Deno.remove(home, { recursive: true });
-});
+    const second = await am(["lab", "macos", `--dist=${dist}`, "--json"], env);
+    assert(
+      !second.err.includes(MACOS_LICENCE),
+      "a notice shown every time is a notice nobody reads",
+    );
+    // Windows never shows it at all.
+    const win = await am(["lab", "windows", `--dist=${dist}`, "--json"], env);
+    assert(!win.err.includes("Apple"), win.err);
+    await Deno.remove(dir, { recursive: true });
+    await Deno.remove(home, { recursive: true });
+  },
+);
 
-Deno.test("am lab --status: the share is REPORTED, never started", async () => {
-  const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
-  const log = `${home}/calls`;
-  const dir = await fakeDocker(`
+Deno.test(
+  "am lab --status: the share is REPORTED, never started",
+  LAB_HOST,
+  async () => {
+    const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
+    const log = `${home}/calls`;
+    const dir = await fakeDocker(`
 echo "$@" >> ${log}
 ${upWithShare(`${home}/dist`).trim()}`);
-  const r = await am(["lab", "macos", "--status", "--json"], {
-    PATH: `${dir}:${Deno.env.get("PATH")}`,
-    XDG_CACHE_HOME: home,
-  });
-  assertEquals(r.code, 0);
-  const j = amJson(r, "am lab");
-  assertEquals(j.share.serving, true);
-  assertEquals(j.share.url, SHARE_URL);
-  // …and it says whether the GUEST has ever fetched anything, which is the
-  // only evidence that host.lan resolves in there.
-  assertStringIncludes(j.share.lastGuestFetch, "app-macos");
-  // `--status` must not be a command that changes things.
-  const calls = await Deno.readTextFile(log);
-  assert(!calls.includes("--detach"), `--status started something: ${calls}`);
-  await Deno.remove(dir, { recursive: true });
-  await Deno.remove(home, { recursive: true });
-});
+    const r = await am(["lab", "macos", "--status", "--json"], {
+      PATH: `${dir}:${Deno.env.get("PATH")}`,
+      XDG_CACHE_HOME: home,
+    });
+    assertEquals(r.code, 0);
+    const j = amJson(r, "am lab");
+    assertEquals(j.share.serving, true);
+    assertEquals(j.share.url, SHARE_URL);
+    // …and it says whether the GUEST has ever fetched anything, which is the
+    // only evidence that host.lan resolves in there.
+    assertStringIncludes(j.share.lastGuestFetch, "app-macos");
+    // `--status` must not be a command that changes things.
+    const calls = await Deno.readTextFile(log);
+    assert(!calls.includes("--detach"), `--status started something: ${calls}`);
+    await Deno.remove(dir, { recursive: true });
+    await Deno.remove(home, { recursive: true });
+  },
+);
 
-Deno.test("am lab: --dist on a LIVE lab warns instead of pretending", async () => {
-  // A bind mount is fixed at `docker run`. Silently reporting the requested
-  // directory would send someone to build into a folder the guest cannot see.
-  const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
-  const mounted = `${home}/mounted`;
-  const asked = `${home}/asked`;
-  await Deno.mkdir(mounted, { recursive: true });
-  await Deno.mkdir(asked, { recursive: true });
-  const dir = await fakeDocker(upWithShare(mounted));
-  const r = await am(["lab", "windows", `--dist=${asked}`, "--json"], {
-    PATH: `${dir}:${Deno.env.get("PATH")}`,
-    XDG_CACHE_HOME: home,
-  });
-  assertStringIncludes(r.err, mounted);
-  assertStringIncludes(r.err, "--stop");
-  assertEquals(amJson(r, "am lab").share, mounted);
-  await Deno.remove(dir, { recursive: true });
-  await Deno.remove(home, { recursive: true });
-});
+Deno.test(
+  "am lab: --dist on a LIVE lab warns instead of pretending",
+  LAB_HOST,
+  async () => {
+    // A bind mount is fixed at `docker run`. Silently reporting the requested
+    // directory would send someone to build into a folder the guest cannot see.
+    const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
+    const mounted = `${home}/mounted`;
+    const asked = `${home}/asked`;
+    await Deno.mkdir(mounted, { recursive: true });
+    await Deno.mkdir(asked, { recursive: true });
+    const dir = await fakeDocker(upWithShare(mounted));
+    const r = await am(["lab", "windows", `--dist=${asked}`, "--json"], {
+      PATH: `${dir}:${Deno.env.get("PATH")}`,
+      XDG_CACHE_HOME: home,
+    });
+    assertStringIncludes(r.err, mounted);
+    assertStringIncludes(r.err, "--stop");
+    assertEquals(amJson(r, "am lab").share, mounted);
+    await Deno.remove(dir, { recursive: true });
+    await Deno.remove(home, { recursive: true });
+  },
+);
 
-Deno.test("am lab: a share that will not serve is SAID, with the next command", async () => {
-  // The macOS first run reaches this: the image builds the guest network only
-  // after the installer download, so there is no gateway yet. Printing a URL
-  // that answers nothing is the failure the whole command exists to avoid.
-  const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
-  const dir = await fakeDocker(`
+Deno.test(
+  "am lab: a share that will not serve is SAID, with the next command",
+  LAB_HOST,
+  async () => {
+    // The macOS first run reaches this: the image builds the guest network only
+    // after the installer download, so there is no gateway yet. Printing a URL
+    // that answers nothing is the failure the whole command exists to avoid.
+    const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
+    const dir = await fakeDocker(`
 case "$1" in
   inspect)
     case "$*" in
@@ -1652,28 +1780,32 @@ case "$1" in
   exec) exit 1;;
   *) exit 0;;
 esac`);
-  const r = await am(["lab", "macos", "--json"], {
-    PATH: `${dir}:${Deno.env.get("PATH")}`,
-    XDG_CACHE_HOME: home,
-  });
-  const j = amJson(r, "am lab");
-  assertEquals(j.shareServing, false);
-  assertEquals(j.fetchCommand, null);
-  assertStringIncludes(j.shareReason, "am lab macos");
-  await Deno.remove(dir, { recursive: true });
-  await Deno.remove(home, { recursive: true });
-});
+    const r = await am(["lab", "macos", "--json"], {
+      PATH: `${dir}:${Deno.env.get("PATH")}`,
+      XDG_CACHE_HOME: home,
+    });
+    const j = amJson(r, "am lab");
+    assertEquals(j.shareServing, false);
+    assertEquals(j.fetchCommand, null);
+    assertStringIncludes(j.shareReason, "am lab macos");
+    await Deno.remove(dir, { recursive: true });
+    await Deno.remove(home, { recursive: true });
+  },
+);
 
-Deno.test("am lab linux: starts a CONTAINER — fuse+shm, no kvm, port 3000, no storage", async () => {
-  // Through the CLI and the fake docker: the whole chain from parseLabOs to
-  // the `docker run` line, for the lab that is not a VM. `/dev/kvm` may not
-  // exist on this host — for a webtop that must not matter.
-  const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
-  const log = `${home}/calls`;
-  const dist = `${home}/dist`;
-  await Deno.mkdir(dist, { recursive: true });
-  await Deno.writeTextFile(`${dist}/app-x64.AppImage`, "elf");
-  const dir = await fakeDocker(`
+Deno.test(
+  "am lab linux: starts a CONTAINER — fuse+shm, no kvm, port 3000, no storage",
+  LAB_HOST,
+  async () => {
+    // Through the CLI and the fake docker: the whole chain from parseLabOs to
+    // the `docker run` line, for the lab that is not a VM. `/dev/kvm` may not
+    // exist on this host — for a webtop that must not matter.
+    const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
+    const log = `${home}/calls`;
+    const dist = `${home}/dist`;
+    await Deno.mkdir(dist, { recursive: true });
+    await Deno.writeTextFile(`${dist}/app-x64.AppImage`, "elf");
+    const dir = await fakeDocker(`
 echo "$@" >> ${log}
 case "$1" in
   info) echo "29.1.3";;
@@ -1685,63 +1817,71 @@ case "$1" in
     esac;;
   run) touch ${home}/ran; echo "cid";;
   port) echo "127.0.0.1:45123";;
-  exec) echo -n "200";;
+  exec) printf 200;;
   logs) echo "starting";;
   *) exit 0;;
 esac`);
-  // The lab polls the published viewer port until it answers; stand in for
-  // the desktop with a 200 on a port of our choosing.
-  const port = freePort();
-  const viewer = Deno.serve(
-    { hostname: "127.0.0.1", port, onListen() {} },
-    () => new Response("ok"),
-  );
-  const r = await am(
-    ["lab", "linux", `--dist=${dist}`, `--port=${port}`, "--json"],
-    { PATH: `${dir}:${Deno.env.get("PATH")}`, XDG_CACHE_HOME: home },
-  );
-  await viewer.shutdown();
-  assertEquals(r.code, 0, r.err);
-  const calls = (await Deno.readTextFile(log)).trim().split("\n");
-  const run = calls.find((c) => c.startsWith("run "))!;
-  assert(run, `no docker run in: ${calls.join(" / ")}`);
-  assertStringIncludes(run, "--device=/dev/fuse");
-  assertStringIncludes(run, "--shm-size=1g");
-  assertStringIncludes(run, ":3000");
-  assertStringIncludes(run, `PUID=${Deno.uid()}`);
-  assert(!run.includes("/dev/kvm"), run);
-  assert(!run.includes(":/storage"), run);
-  assert(!run.includes("RAM_SIZE"), run);
-  assertEquals(await exists(`${home}/aio/labs/linux/storage`), false);
-  const j = amJson(r, "am lab");
-  assertEquals(j.artifact.file, "app-x64.AppImage");
-  assertEquals(j.fetchCommand, fetchCommand("linux", "app-x64.AppImage"));
-  assertEquals(j.shareUrl, shareUrl(LIN));
-  await Deno.remove(dir, { recursive: true });
-  await Deno.remove(home, { recursive: true });
-});
+    // The lab polls the published viewer port until it answers; stand in for
+    // the desktop with a 200 on a port of our choosing.
+    const port = freePort();
+    const viewer = Deno.serve(
+      { hostname: "127.0.0.1", port, onListen() {} },
+      () => new Response("ok"),
+    );
+    const r = await am(
+      ["lab", "linux", `--dist=${dist}`, `--port=${port}`, "--json"],
+      { PATH: `${dir}:${Deno.env.get("PATH")}`, XDG_CACHE_HOME: home },
+    );
+    await viewer.shutdown();
+    assertEquals(r.code, 0, r.err);
+    const calls = (await Deno.readTextFile(log)).trim().split("\n");
+    const run = calls.find((c) => c.startsWith("run "))!;
+    assert(run, `no docker run in: ${calls.join(" / ")}`);
+    assertStringIncludes(run, "--device=/dev/fuse");
+    assertStringIncludes(run, "--shm-size=1g");
+    assertStringIncludes(run, ":3000");
+    assertStringIncludes(run, `PUID=${Deno.uid()}`);
+    assert(!run.includes("/dev/kvm"), run);
+    assert(!run.includes(":/storage"), run);
+    assert(!run.includes("RAM_SIZE"), run);
+    assertEquals(await exists(`${home}/aio/labs/linux/storage`), false);
+    const j = amJson(r, "am lab");
+    assertEquals(j.artifact.file, "app-x64.AppImage");
+    assertEquals(j.fetchCommand, fetchCommand("linux", "app-x64.AppImage"));
+    assertEquals(j.shareUrl, shareUrl(LIN));
+    await Deno.remove(dir, { recursive: true });
+    await Deno.remove(home, { recursive: true });
+  },
+);
 
-Deno.test("am lab linux --ram=16G: refused at the CLI, before docker is asked", async () => {
-  const dir = await fakeDocker(`exit 1`);
-  const r = await am(["lab", "linux", "--ram=16G"], {
-    PATH: `${dir}:${Deno.env.get("PATH")}`,
-  });
-  assertEquals(r.code, 1);
-  assertStringIncludes(r.out + r.err, "container, not a VM");
-  await Deno.remove(dir, { recursive: true });
-});
+Deno.test(
+  "am lab linux --ram=16G: refused at the CLI, before docker is asked",
+  LAB_HOST,
+  async () => {
+    const dir = await fakeDocker(`exit 1`);
+    const r = await am(["lab", "linux", "--ram=16G"], {
+      PATH: `${dir}:${Deno.env.get("PATH")}`,
+    });
+    assertEquals(r.code, 1);
+    assertStringIncludes(r.out + r.err, "container, not a VM");
+    await Deno.remove(dir, { recursive: true });
+  },
+);
 
-Deno.test("am lab android: on a booted emulator, am INSTALLS and reports it", async () => {
-  // The lab is already up (so no preflight against this host's /dev/kvm):
-  // re-running `am lab android` is the dev loop — poll boot, adb install -r,
-  // print the result in the machine output too.
-  const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
-  const log = `${home}/calls`;
-  const dist = `${home}/dist`;
-  await Deno.mkdir(dist, { recursive: true });
-  await Deno.writeTextFile(`${dist}/app.apk`, "zip");
-  await Deno.writeTextFile(`${dist}/app-client.apk`, "zip");
-  const dir = await fakeDocker(`
+Deno.test(
+  "am lab android: on a booted emulator, am INSTALLS and reports it",
+  LAB_HOST,
+  async () => {
+    // The lab is already up (so no preflight against this host's /dev/kvm):
+    // re-running `am lab android` is the dev loop — poll boot, adb install -r,
+    // print the result in the machine output too.
+    const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
+    const log = `${home}/calls`;
+    const dist = `${home}/dist`;
+    await Deno.mkdir(dist, { recursive: true });
+    await Deno.writeTextFile(`${dist}/app.apk`, "zip");
+    await Deno.writeTextFile(`${dist}/app-client.apk`, "zip");
+    const dir = await fakeDocker(`
 echo "$@" >> ${log}
 case "$1" in
   inspect)
@@ -1754,54 +1894,61 @@ case "$1" in
     case "$*" in
       *getprop*) echo "1";;
       *"adb install"*) echo "Success";;
-      *curl*) echo -n "200";;
+      *curl*) printf 200;;
       *) exit 0;;
     esac;;
   *) exit 0;;
 esac`);
-  const env = { PATH: `${dir}:${Deno.env.get("PATH")}`, XDG_CACHE_HOME: home };
-  const r = await am(["lab", "android", `--dist=${dist}`, "--json"], env);
-  assertEquals(r.code, 0, r.err);
-  const j = amJson(r, "am lab");
-  assertEquals(
-    j.artifact.file,
-    "app-client.apk",
-    "the client APK is preferred",
-  );
-  assertEquals(j.installed, true);
-  assertStringIncludes(j.installResult, "app-client.apk");
-  const calls = await Deno.readTextFile(log);
-  assertStringIncludes(calls, "adb shell getprop sys.boot_completed");
-  assertStringIncludes(calls, "adb install -r /shared/app-client.apk");
-  // --apk picks the other one.
-  await Deno.writeTextFile(log, "");
-  const r2 = await am([
-    "lab",
-    "android",
-    `--dist=${dist}`,
-    "--apk=app.apk",
-    "--json",
-  ], env);
-  assertEquals(JSON.parse(r2.out).artifact.file, "app.apk");
-  assertStringIncludes(
-    await Deno.readTextFile(log),
-    "adb install -r /shared/app.apk",
-  );
-  // --status says booted, and does not install.
-  await Deno.writeTextFile(log, "");
-  const st = await am(["lab", "android", "--status", "--json"], env);
-  assertEquals(JSON.parse(st.out).booted, true);
-  assert(!(await Deno.readTextFile(log)).includes("adb install"));
-  await Deno.remove(dir, { recursive: true });
-  await Deno.remove(home, { recursive: true });
-});
+    const env = {
+      PATH: `${dir}:${Deno.env.get("PATH")}`,
+      XDG_CACHE_HOME: home,
+    };
+    const r = await am(["lab", "android", `--dist=${dist}`, "--json"], env);
+    assertEquals(r.code, 0, r.err);
+    const j = amJson(r, "am lab");
+    assertEquals(
+      j.artifact.file,
+      "app-client.apk",
+      "the client APK is preferred",
+    );
+    assertEquals(j.installed, true);
+    assertStringIncludes(j.installResult, "app-client.apk");
+    const calls = await Deno.readTextFile(log);
+    assertStringIncludes(calls, "adb shell getprop sys.boot_completed");
+    assertStringIncludes(calls, "adb install -r /shared/app-client.apk");
+    // --apk picks the other one.
+    await Deno.writeTextFile(log, "");
+    const r2 = await am([
+      "lab",
+      "android",
+      `--dist=${dist}`,
+      "--apk=app.apk",
+      "--json",
+    ], env);
+    assertEquals(JSON.parse(r2.out).artifact.file, "app.apk");
+    assertStringIncludes(
+      await Deno.readTextFile(log),
+      "adb install -r /shared/app.apk",
+    );
+    // --status says booted, and does not install.
+    await Deno.writeTextFile(log, "");
+    const st = await am(["lab", "android", "--status", "--json"], env);
+    assertEquals(JSON.parse(st.out).booted, true);
+    assert(!(await Deno.readTextFile(log)).includes("adb install"));
+    await Deno.remove(dir, { recursive: true });
+    await Deno.remove(home, { recursive: true });
+  },
+);
 
-Deno.test("am lab android: a failed install is SAID in the output, exit stays usable", async () => {
-  const home = await Deno.makeTempDir({ prefix: "aio-lab-home-" });
-  const dist = `${home}/dist`;
-  await Deno.mkdir(dist, { recursive: true });
-  await Deno.writeTextFile(`${dist}/app.apk`, "zip");
-  const dir = await fakeDocker(`
+Deno.test(
+  "am lab android: a failed install is SAID in the output, exit stays usable",
+  LAB_HOST,
+  async () => {
+    const home = await tempDir("aio-lab-home-");
+    const dist = `${home}/dist`;
+    await Deno.mkdir(dist, { recursive: true });
+    await Deno.writeTextFile(`${dist}/app.apk`, "zip");
+    const dir = await fakeDocker(`
 case "$1" in
   inspect)
     case "$*" in
@@ -1813,22 +1960,23 @@ case "$1" in
     case "$*" in
       *getprop*) echo "1";;
       *"adb install"*) echo "Failure [INSTALL_FAILED_NO_MATCHING_ABIS]" >&2; exit 1;;
-      *curl*) echo -n "200";;
+      *curl*) printf 200;;
       *) exit 0;;
     esac;;
   *) exit 0;;
 esac`);
-  const r = await am(["lab", "android", `--dist=${dist}`, "--json"], {
-    PATH: `${dir}:${Deno.env.get("PATH")}`,
-    XDG_CACHE_HOME: home,
-  });
-  const j = amJson(r, "am lab");
-  assertEquals(j.installed, false);
-  assertStringIncludes(j.installResult, "NO_MATCHING_ABIS");
-  assertStringIncludes(j.installResult, "x86_64");
-  await Deno.remove(dir, { recursive: true });
-  await Deno.remove(home, { recursive: true });
-});
+    const r = await am(["lab", "android", `--dist=${dist}`, "--json"], {
+      PATH: `${dir}:${Deno.env.get("PATH")}`,
+      XDG_CACHE_HOME: home,
+    });
+    const j = amJson(r, "am lab");
+    assertEquals(j.installed, false);
+    assertStringIncludes(j.installResult, "NO_MATCHING_ABIS");
+    assertStringIncludes(j.installResult, "x86_64");
+    await Deno.remove(dir, { recursive: true });
+    await Deno.remove(home, { recursive: true });
+  },
+);
 
 async function exists(p: string): Promise<boolean> {
   try {

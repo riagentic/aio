@@ -2,7 +2,7 @@
 // outside it is disposable, and three override levels each take one line.
 // See docs/specs/2026-07-26-data-dir-and-updates.md.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { join, resolve, SEPARATOR } from "@std/path";
 import {
   appDirs,
   appHome,
@@ -42,8 +42,9 @@ Deno.test("appHome: default is ~/.<appId> — the convention users already know"
 
 Deno.test("appHome: AIO_APPS_DIR groups EVERY app under one root", () => {
   withEnv({ AIO_APPS_DIR: "/srv/aio" }, () => {
-    assertEquals(appHome("wallet"), "/srv/aio/wallet");
-    assertEquals(appHome("notes"), "/srv/aio/notes");
+    // `resolve`: an absolute path carries a drive on Windows.
+    assertEquals(appHome("wallet"), resolve("/srv/aio/wallet"));
+    assertEquals(appHome("notes"), resolve("/srv/aio/notes"));
   });
 });
 
@@ -52,9 +53,9 @@ Deno.test("appHome: the root wins over the default, and adds no dot", () => {
   // already yields `/var/lib/wallet`, and a third spelling of "put it here" is
   // what made the names unreadable. The author's `appDir` covers the rest.
   withEnv({ AIO_APPS_DIR: "/srv/aio" }, () => {
-    assertEquals(appHome("wallet"), "/srv/aio/wallet");
+    assertEquals(appHome("wallet"), resolve("/srv/aio/wallet"));
     // The dot is a home-directory convention only — a dedicated root needn't hide.
-    assert(!appHome("wallet").includes("/.wallet"));
+    assert(!appHome("wallet").includes(`${SEPARATOR}.wallet`));
     // The author still outranks the operator.
     assertEquals(appHome("wallet", "/opt/wallet"), "/opt/wallet");
   });
@@ -65,15 +66,18 @@ Deno.test("appDirs: everything critical is inside data/, nothing else is", () =>
   // ① the backup unit
   for (const p of [d.stateDb, d.authDb, d.journal, d.tls, d.files, d.meta]) {
     assert(
-      p.startsWith("/tmp/x-wallet/data/"),
+      p.startsWith(join("/tmp/x-wallet", "data") + SEPARATOR),
       `critical path must live in data/: ${p}`,
     );
   }
   // ② disposable — deliberately OUTSIDE data/, so `cp -r data/` is exact
-  assertEquals(d.logs, "/tmp/x-wallet/logs");
-  assertEquals(d.launch, "/tmp/x-wallet/launch.json");
+  assertEquals(d.logs, join("/tmp/x-wallet", "logs"));
+  assertEquals(d.launch, join("/tmp/x-wallet", "launch.json"));
   for (const p of [d.logs, d.launch]) {
-    assert(!p.includes("/data/"), `must not be in the backup unit: ${p}`);
+    assert(
+      !p.includes(`${SEPARATOR}data${SEPARATOR}`),
+      `must not be in the backup unit: ${p}`,
+    );
   }
 });
 
@@ -137,7 +141,7 @@ Deno.test("resolveAppDirs: libraryMode never resolves into the home", () => {
       libraryMode: true,
       baseDir: base,
     });
-    assertEquals(lib.home, join(base, ".aio"));
+    assertEquals(lib.home, resolve(base, ".aio"));
     assert(
       !lib.logs.startsWith(homedir()),
       `libraryMode logs must stay under baseDir, got ${lib.logs}`,
@@ -224,7 +228,12 @@ Deno.test("sweepAppPayloadDir: a never-unpacked app is not an error", () => {
   sweepAppPayloadDir(d); // must not throw
 });
 
-Deno.test("unsafeUnpackWarning: warns only for a shared unpack location", async (t) => {
+Deno.test({
+  name: "unsafeUnpackWarning: warns only for a shared unpack location",
+  ignore: Deno.build.os === "windows", // AppImage is Linux-only
+  // An AppImage is a Linux artifact: its unpack directory is a POSIX path,
+  // and that is what the rule compares.
+}, async (t) => {
   const expected = "/home/u/.wallet/app";
 
   await t.step("not packaged → nothing to say", () => {

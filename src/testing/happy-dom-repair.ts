@@ -26,6 +26,13 @@
 // applied only after PROVING the defect on a throwaway element, so the day
 // happy-dom fixes this it becomes a no-op rather than a competing
 // implementation.
+//
+// RE-MEASURED (happy-dom 20.14.5, what aio pins now): fixed upstream — the
+// proof below finds a working DOM and nothing is patched (the form tests stay
+// green with this file disabled). It stays for the document a CALLER hands
+// in (`testUI(App, { document })`, `testComponent`): that window comes from
+// the app's own `"happy-dom"` import, which may still pin 17 — measured: an
+// app-made 17.6.3 window through this harness needs the repair and gets it.
 
 // deno-lint-ignore-file no-explicit-any
 
@@ -128,4 +135,58 @@ export function repairProxiedSiblings(win: AnyNode): string[] {
     patched.push(ctorName);
   }
   return patched;
+}
+
+/**
+ * Let the test DOM dispatch an `Event` made by the HOST's constructor again.
+ *
+ * MEASURED (happy-dom 20.14.5; 17.6.3 has no such check): `dispatchEvent`
+ * throws "parameter 1 is not of type 'Event'" for anything that is not an
+ * instance of happy-dom's OWN `Event`. Under the harness `globalThis.Event` is
+ * Deno's — `document` and `window` are the test window's, the event
+ * constructors are not — so the most ordinary line a component can hold,
+ * `window.dispatchEvent(new Event("resize"))`, started throwing; inside an
+ * error-guarded lifecycle hook that is a handler that silently does nothing.
+ * In a browser there is one `Event` and the line works.
+ *
+ * The repair widens that one `instanceof` — happy-dom's base `Event` also
+ * answers true for the host's — and nothing else: the code after the check is
+ * the code 17.6.3 ran with no check at all, so a host event is delivered
+ * exactly as it was before aio moved (measured side by side: same listeners,
+ * same return value). Proven on a throwaway element first, so an engine that
+ * accepts host events, or a browser, is left untouched.
+ *
+ * Returns whether anything was patched.
+ */
+export function acceptHostEvents(win: AnyNode): boolean {
+  const Host = (globalThis as AnyNode).Event;
+  let Base = win?.Event;
+  const doc = win?.document;
+  if (
+    typeof Host !== "function" || typeof Base !== "function" ||
+    !doc?.createElement
+  ) return false;
+  try {
+    doc.createElement("div").dispatchEvent(new Host("aio-host-event-probe"));
+    return false; // upstream behaves — leave it alone
+  } catch {
+    // aio-ok: the throw IS the answer — the defect, proven. A window's `Event` may be a per-window subclass;
+    // the check is against the class at the bottom of that chain.
+  }
+  for (
+    let up = Object.getPrototypeOf(Base);
+    typeof up === "function" && up.name === "Event";
+    up = Object.getPrototypeOf(Base)
+  ) Base = up;
+  const isInstance = Function.prototype[Symbol.hasInstance];
+  Object.defineProperty(Base, Symbol.hasInstance, {
+    configurable: true,
+    // Inherited by every subclass (`x instanceof CustomEvent` lands here with
+    // `this === CustomEvent`), and only the base may be widened.
+    value(this: unknown, v: unknown): boolean {
+      return isInstance.call(this, v) ||
+        (this === Base && v instanceof Host);
+    },
+  });
+  return true;
 }

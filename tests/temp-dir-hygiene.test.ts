@@ -18,8 +18,10 @@ import {
   tempDirSync,
 } from "../src/testing/temp-dir.ts";
 import { aioTestDir, aioTestRoot } from "../src/testing/test-strict.ts";
+import { fromFileUrl, isAbsolute } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 Deno.test("temp-dir: a dir made by a FAILING test is gone when the process exits", async () => {
   const work = await tempDir("aio-tdh-");
@@ -28,7 +30,7 @@ Deno.test("temp-dir: a dir made by a FAILING test is gone when the process exits
   // cleanup call at the end of the happy path never reaches.
   await Deno.writeTextFile(
     `${work}/leaky.test.ts`,
-    `import { tempDir } from "${ROOT}src/testing/temp-dir.ts";\n` +
+    `import { tempDir } from "${spec(ROOT)}src/testing/temp-dir.ts";\n` +
       `Deno.test("throws after making a temp dir", async () => {\n` +
       `  const d = await tempDir("aio-tdh-child-");\n` +
       `  await Deno.writeTextFile(${JSON.stringify(marker)}, d);\n` +
@@ -48,7 +50,7 @@ Deno.test("temp-dir: a dir made by a FAILING test is gone when the process exits
   );
 
   const leaked = (await Deno.readTextFile(marker)).trim();
-  assert(leaked.startsWith("/"), `child did not report its dir: ${leaked}`);
+  assert(isAbsolute(leaked), `child did not report its dir: ${leaked}`);
   assertEquals(
     await Deno.stat(leaked).then(() => "still there").catch(() => "gone"),
     "gone",

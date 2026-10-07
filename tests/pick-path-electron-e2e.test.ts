@@ -8,6 +8,7 @@
 import { assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import { tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const REPO = dirname(dirname(fromFileUrl(import.meta.url)));
 const DENO_JSON = join(REPO, "deno.json");
@@ -27,8 +28,8 @@ Deno.test({
     const appId = `pick-${crypto.randomUUID().slice(0, 8)}`;
     await Deno.writeTextFile(
       join(dir, "app.ts"),
-      `import { aio, cell } from "${REPO}/mod.ts";
-import { pickFile } from "${REPO}/src/server-entry.ts";
+      `import { aio, cell } from "${spec(REPO)}/mod.ts";
+import { pickFile } from "${spec(REPO)}/src/server-entry.ts";
 const c = cell("c", { state: { picked: [] as string[] }, methods: {
   async pick(s: { picked: string[] }) {
     await new Promise((r) => setTimeout(r, 1)); // a real hop, not a microtask

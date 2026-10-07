@@ -6,11 +6,11 @@
 // dependency rather than promising to be careful with it — the rules become a
 // file in the app's repo. These tests pin the three things that makes true.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { appThemeCss } from "../src/build/app-theme.ts";
 import { generateHTML } from "../src/server/server-html-gen.ts";
 
-const AM = new URL("../src/am.ts", import.meta.url).pathname;
+const AM = fromFileUrl(new URL("../src/am.ts", import.meta.url));
 
 async function fixture(
   files: Record<string, string>,

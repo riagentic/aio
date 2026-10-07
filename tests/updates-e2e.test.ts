@@ -4,6 +4,8 @@
 // and LAN deployments use exactly this. So this drives the shipped code end to
 // end — publish v2, check, apply, assert the artifact was replaced — and then
 // the refusals, which are the half that has to be right.
+import { EXE, programBytes, writeProgram } from "./fake-program-helper.ts";
+import { zipTree } from "./zip-helper.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { basename, join } from "@std/path";
 import {
@@ -76,8 +78,7 @@ async function rig(): Promise<Rig> {
   // Byte-identical to what `publish({version:"1.0.0"})` writes. It has to be:
   // a DIFFERENT build of the same version is now a detectable update, so an
   // artifact whose bytes do not match the published 1.0.0 is not "up to date".
-  await Deno.writeTextFile(artifact, appBody("1.0.0"));
-  await Deno.chmod(artifact, 0o755);
+  await writeProgram(artifact, appBody("1.0.0"));
   return {
     root,
     dataDir,
@@ -109,7 +110,7 @@ async function publish(r: Rig, opts: {
   const dir = join(r.releases, opts.channel);
   await Deno.mkdir(dir, { recursive: true });
   const fileName = `app-${opts.version}`;
-  const bytes = new TextEncoder().encode(opts.body ?? appBody(opts.version));
+  const bytes = await programBytes(opts.body ?? appBody(opts.version));
   const manifest = await buildShipManifest({
     name: "app",
     version: opts.version,
@@ -215,10 +216,13 @@ Deno.test("updates e2e: publish → check → apply replaces the artifact", asyn
 
     // The artifact on disk IS the new version, the old one is kept beside it,
     // and the handover was requested.
-    assertEquals(await Deno.readTextFile(r.artifact), appBody("2.0.0"));
     assertEquals(
-      await Deno.readTextFile(`${r.artifact}.old-1.0.0`),
-      appBody("1.0.0"),
+      await Deno.readFile(r.artifact),
+      await programBytes(appBody("2.0.0")),
+    );
+    assertEquals(
+      await Deno.readFile(`${r.artifact}.old-1.0.0`),
+      await programBytes(appBody("1.0.0")),
     );
     assertEquals(exits, [0]);
     // The successor is started from the SAME path — which now holds v2.
@@ -323,7 +327,10 @@ Deno.test("updates e2e: a corrupted artifact is refused and never installed", as
     assertStringIncludes(failed, "does not match the manifest");
 
     // The running artifact is untouched, and no half-downloaded file survives.
-    assertEquals(await Deno.readTextFile(r.artifact), appBody("1.0.0"));
+    assertEquals(
+      await Deno.readFile(r.artifact),
+      await programBytes(appBody("1.0.0")),
+    );
     assertEquals(readPending(r.dataDir), null);
     const strays = [...Deno.readDirSync(r.root)].filter((e) =>
       e.name.startsWith("app.new-")
@@ -367,7 +374,10 @@ Deno.test("updates e2e: a SAME-SIZE tampered artifact is refused by its digest",
     assertStringIncludes(line, "does not match the manifest");
     assertStringIncludes(line, "keeps running");
     // Nothing was installed, and nothing was left behind.
-    assertEquals(await Deno.readTextFile(r.artifact), appBody("1.0.0"));
+    assertEquals(
+      await Deno.readFile(r.artifact),
+      await programBytes(appBody("1.0.0")),
+    );
     assertEquals(readPending(r.dataDir), null);
   } finally {
     await Deno.remove(r.root, { recursive: true });
@@ -388,7 +398,7 @@ Deno.test("updates e2e: a test build on the prod path is refused by its signatur
     );
     await Deno.writeFile(
       join(dir, "app-2.0.0"),
-      new TextEncoder().encode(appBody("2.0.0")),
+      await programBytes(appBody("2.0.0")),
     );
 
     const got = await runtimeFor(r, { channel: "prod" }).check({
@@ -398,7 +408,10 @@ Deno.test("updates e2e: a test build on the prod path is refused by its signatur
     if (got.kind === "error") {
       assertStringIncludes(got.error, "channel mismatch");
     }
-    assertEquals(await Deno.readTextFile(r.artifact), appBody("1.0.0"));
+    assertEquals(
+      await Deno.readFile(r.artifact),
+      await programBytes(appBody("1.0.0")),
+    );
   } finally {
     await Deno.remove(r.root, { recursive: true });
   }
@@ -425,7 +438,10 @@ Deno.test("updates e2e: a release that cannot migrate the data is BLOCKED, not o
     let failed = "";
     await rt.apply().catch((e) => (failed = String(e)));
     assertStringIncludes(failed, "no verified update");
-    assertEquals(await Deno.readTextFile(r.artifact), appBody("1.0.0"));
+    assertEquals(
+      await Deno.readFile(r.artifact),
+      await programBytes(appBody("1.0.0")),
+    );
   } finally {
     await Deno.remove(r.root, { recursive: true });
   }
@@ -526,7 +542,10 @@ Deno.test("updates e2e: minFrom forces a stepping stone, and never installs", as
     if (got.kind === "blocked") {
       assertStringIncludes(got.blocked.blockers[0]!, "2.0.0");
     }
-    assertEquals(await Deno.readTextFile(r.artifact), appBody("1.0.0"));
+    assertEquals(
+      await Deno.readFile(r.artifact),
+      await programBytes(appBody("1.0.0")),
+    );
   } finally {
     await Deno.remove(r.root, { recursive: true });
   }
@@ -563,11 +582,19 @@ Deno.test("updates e2e: a missing channel reports the reason, not silence", asyn
 async function publishZip(r: Rig, opts: { version: string; channel: string }) {
   const stage = join(r.root, `stage-${opts.version}`);
   await Deno.mkdir(join(stage, "electron"), { recursive: true });
-  await Deno.writeTextFile(
-    join(stage, "run.sh"),
-    `#!/bin/sh\necho ${opts.version}\n`,
-  );
-  await Deno.chmod(join(stage, "run.sh"), 0o755);
+  // The launcher `aio build` writes for this OS — the swap smoke-tests it.
+  if (Deno.build.os === "windows") {
+    await Deno.writeTextFile(
+      join(stage, "run.bat"),
+      `@echo ${opts.version}\r\n`,
+    );
+  } else {
+    await Deno.writeTextFile(
+      join(stage, "run.sh"),
+      `#!/bin/sh\necho ${opts.version}\n`,
+    );
+    await Deno.chmod(join(stage, "run.sh"), 0o755);
+  }
   await Deno.writeTextFile(join(stage, "electron", "electron"), "");
   await Deno.writeTextFile(join(stage, "VERSION"), opts.version);
 
@@ -575,12 +602,7 @@ async function publishZip(r: Rig, opts: { version: string; channel: string }) {
   await Deno.mkdir(dir, { recursive: true });
   const zipName = `app-${opts.version}.zip`;
   const zipPath = join(dir, zipName);
-  const zipped = await new Deno.Command("zip", {
-    args: ["-qr", zipPath, "."],
-    cwd: stage,
-    stderr: "piped",
-  }).output();
-  assert(zipped.success, "zip failed");
+  await zipTree(stage, zipPath);
 
   const bytes = await Deno.readFile(zipPath);
   const manifest = await buildShipManifest({
@@ -603,7 +625,6 @@ async function publishZip(r: Rig, opts: { version: string; channel: string }) {
 }
 
 Deno.test("updates e2e: a .zip release is verified, unpacked, and handed to the swapper", async () => {
-  if (Deno.build.os === "windows") return; // the cmd.exe branch is unit-tested
   const r = await rig();
   try {
     const manifest = await publishZip(r, { version: "2.0.0", channel: "prod" });
@@ -689,7 +710,6 @@ Deno.test("updates e2e: a .zip release is verified, unpacked, and handed to the 
 // relaunched version names it at boot and counts a failed attempt — it is
 // the machine that refused, not the release.
 Deno.test("updates e2e: a swap helper that cannot start — not installed, undone, this version restarts", async () => {
-  if (Deno.build.os === "windows") return;
   const r = await rig();
   try {
     await publishZip(r, { version: "2.0.0", channel: "prod" });
@@ -784,7 +804,6 @@ Deno.test("updates e2e: a swap helper that cannot start — not installed, undon
 });
 
 Deno.test("updates e2e: a corrupted .zip is refused before anything is unpacked", async () => {
-  if (Deno.build.os === "windows") return;
   const r = await rig();
   try {
     const m = await publishZip(r, { version: "2.0.0", channel: "prod" });
@@ -924,43 +943,49 @@ async function macRig(
   return { app, rt, swaps, sealed };
 }
 
-Deno.test("updates e2e: a .app release is unpacked AS the bundle, seal-checked, and relaunched via open -n", async () => {
-  if (Deno.build.os === "windows") return;
-  const r = await rig();
-  try {
-    await publishAppTarball(r, { version: "2.0.0" });
-    const { app, rt, swaps, sealed } = await macRig(r, { ok: true });
-    assertEquals((await rt.check({ dismissed: null })).kind, "offer");
-    await rt.apply();
-    await settle(rt);
+Deno.test(
+  "updates e2e: a .app release is unpacked AS the bundle, seal-checked, and relaunched via open -n",
+  {
+    // A macOS bundle: its executable (Contents/MacOS/Counter) has no extension,
+    // which Windows cannot run — and no Windows release is a .app.
+    ignore: Deno.build.os === "windows", // a macOS .app bundle: its executable has no extension, and no Windows release is one
+  },
+  async () => {
+    const r = await rig();
+    try {
+      await publishAppTarball(r, { version: "2.0.0" });
+      const { app, rt, swaps, sealed } = await macRig(r, { ok: true });
+      assertEquals((await rt.check({ dismissed: null })).kind, "offer");
+      await rt.apply();
+      await settle(rt);
 
-    const staged = `${app}.staged-2.0.0`;
-    // The seal is checked on the staged bundle — before the swap, never after.
-    assertEquals(sealed, [staged]);
-    assertEquals(swaps.length, 1);
-    const s = swaps[0]!;
-    assertEquals([s.current, s.staged], [app, staged]);
-    // The staged dir IS the bundle (the archive's `Counter.app/` stripped).
-    assertEquals(
-      await Deno.readTextFile(join(staged, "Contents", "VERSION")),
-      "2.0.0",
-    );
-    // Back through LaunchServices, a NEW instance, the app's own argv kept.
-    assertEquals(s.launcher, "/usr/bin/open");
-    assertEquals(s.args, ["-n", app, "--args", "--client=electron"]);
-    assertEquals(s.pending?.to, "2.0.0");
-    assertEquals(
-      await Deno.stat(`${app}.zip-2.0.0`).catch(() => null),
-      null,
-      "the downloaded tarball is cleaned up",
-    );
-  } finally {
-    await Deno.remove(r.root, { recursive: true });
-  }
-});
+      const staged = `${app}.staged-2.0.0`;
+      // The seal is checked on the staged bundle — before the swap, never after.
+      assertEquals(sealed, [staged]);
+      assertEquals(swaps.length, 1);
+      const s = swaps[0]!;
+      assertEquals([s.current, s.staged], [app, staged]);
+      // The staged dir IS the bundle (the archive's `Counter.app/` stripped).
+      assertEquals(
+        await Deno.readTextFile(join(staged, "Contents", "VERSION")),
+        "2.0.0",
+      );
+      // Back through LaunchServices, a NEW instance, the app's own argv kept.
+      assertEquals(s.launcher, "/usr/bin/open");
+      assertEquals(s.args, ["-n", app, "--args", "--client=electron"]);
+      assertEquals(s.pending?.to, "2.0.0");
+      assertEquals(
+        await Deno.stat(`${app}.zip-2.0.0`).catch(() => null),
+        null,
+        "the downloaded tarball is cleaned up",
+      );
+    } finally {
+      await Deno.remove(r.root, { recursive: true });
+    }
+  },
+);
 
 Deno.test("updates e2e: a .app whose code signature does not verify is refused and v1 stays", async () => {
-  if (Deno.build.os === "windows") return;
   const r = await rig();
   try {
     await publishAppTarball(r, { version: "2.0.0" });
@@ -988,31 +1013,38 @@ Deno.test("updates e2e: a .app whose code signature does not verify is refused a
   }
 });
 
-Deno.test("updates e2e: a translocated .app refuses before downloading, naming /Applications", async () => {
-  if (Deno.build.os === "windows") return;
-  const r = await rig();
-  try {
-    await publishAppTarball(r, { version: "2.0.0" });
-    const { app, rt, swaps, sealed } = await macRig(
-      r,
-      { ok: true },
-      join("AppTranslocation", "X", "d", "Counter.app"),
-    );
-    assertEquals((await rt.check({ dismissed: null })).kind, "offer");
-    let failed = "";
-    await rt.apply().catch((e) => (failed = String(e)));
-    assertStringIncludes(failed, "App Translocation");
-    assertStringIncludes(failed, "Move Counter.app to /Applications");
-    assertEquals([swaps.length, sealed.length], [0, 0]);
-    assertEquals(
-      await Deno.stat(`${app}.zip-2.0.0`).catch(() => null),
-      null,
-      "refused BEFORE a byte was downloaded",
-    );
-  } finally {
-    await Deno.remove(r.root, { recursive: true });
-  }
-});
+Deno.test(
+  "updates e2e: a translocated .app refuses before downloading, naming /Applications",
+  {
+    // A macOS bundle: its executable (Contents/MacOS/Counter) has no extension,
+    // which Windows cannot run — and no Windows release is a .app.
+    ignore: Deno.build.os === "windows", // a macOS .app bundle: its executable has no extension, and no Windows release is one
+  },
+  async () => {
+    const r = await rig();
+    try {
+      await publishAppTarball(r, { version: "2.0.0" });
+      const { app, rt, swaps, sealed } = await macRig(
+        r,
+        { ok: true },
+        join("AppTranslocation", "X", "d", "Counter.app"),
+      );
+      assertEquals((await rt.check({ dismissed: null })).kind, "offer");
+      let failed = "";
+      await rt.apply().catch((e) => (failed = String(e)));
+      assertStringIncludes(failed, "App Translocation");
+      assertStringIncludes(failed, "Move Counter.app to /Applications");
+      assertEquals([swaps.length, sealed.length], [0, 0]);
+      assertEquals(
+        await Deno.stat(`${app}.zip-2.0.0`).catch(() => null),
+        null,
+        "refused BEFORE a byte was downloaded",
+      );
+    } finally {
+      await Deno.remove(r.root, { recursive: true });
+    }
+  },
+);
 
 // ── repository releases (git) ───────────────────────────────────────────────
 
@@ -1041,16 +1073,22 @@ async function gitRepo(root: string, contract: string): Promise<string> {
       tasks: { compile: "deno run -A make.ts" },
     }),
   );
+  // The artifact's bytes travel in the build script: a real program on every
+  // OS (tests/fake-program-helper.ts), named as that OS names one.
+  const bytes = await programBytes(`#!/bin/sh
+if [ "$1" = "--aio-data-contract" ]; then echo '${contract}'; exit 0; fi
+echo APP 2.0.0
+`);
+  const program = btoa(
+    Array.from(bytes, (b) => String.fromCharCode(b)).join(""),
+  );
   await Deno.writeTextFile(
     join(root, "make.ts"),
     `
-const out = "dist/app";
+const out = "dist/app${EXE}";
 await Deno.mkdir("dist", { recursive: true });
-await Deno.writeTextFile(out, \`#!/bin/sh
-if [ "$1" = "--aio-data-contract" ]; then echo '${contract}'; exit 0; fi
-echo APP 2.0.0
-\`);
-await Deno.chmod(out, 0o755);
+await Deno.writeFile(out, Uint8Array.from(atob("${program}"), (c) => c.charCodeAt(0)));
+if (Deno.build.os !== "windows") await Deno.chmod(out, 0o755);
 `,
   );
   await gitCmd(["init", "-q", "-b", "main"], root);
@@ -1118,8 +1156,8 @@ Deno.test("updates e2e: a moved git ref is rebuilt, gated, and installed", async
     // The git artifact is built by the repo's own `make.ts`, not by `publish`.
     assertStringIncludes(await Deno.readTextFile(r.artifact), "echo APP 2.0.0");
     assertEquals(
-      await Deno.readTextFile(`${r.artifact}.old-1.0.0`),
-      appBody("1.0.0"),
+      await Deno.readFile(`${r.artifact}.old-1.0.0`),
+      await programBytes(appBody("1.0.0")),
     );
     assertEquals(exits, [0]);
     assertEquals(relaunched, [r.artifact]);
@@ -1158,7 +1196,10 @@ Deno.test("updates e2e: a rebuilt commit that cannot migrate is thrown away", as
     let failed = "";
     await rt.apply().catch((e) => (failed = String(e)));
     assertStringIncludes(failed, "cannot migrate");
-    assertEquals(await Deno.readTextFile(r.artifact), appBody("1.0.0"));
+    assertEquals(
+      await Deno.readFile(r.artifact),
+      await programBytes(appBody("1.0.0")),
+    );
     assertEquals(readPending(r.dataDir), null);
     // The commit is NOT recorded — this install did not take it.
     assertEquals(readTrust(r.dataDir).commit, "0".repeat(40));
@@ -1291,7 +1332,10 @@ Deno.test("updates e2e: republishing 1.0.0 with new bytes IS an update", async (
     assertEquals((await rt.check({ dismissed: null })).kind, "offer");
     await rt.apply();
     await settle(rt);
-    assertEquals(await Deno.readTextFile(r.artifact), "#!/bin/sh\nexit 0\n");
+    assertEquals(
+      await Deno.readFile(r.artifact),
+      await programBytes("#!/bin/sh\nexit 0\n"),
+    );
     assertEquals(exits, [0]);
     // The digest recorded is the one that was VERIFIED, so the NEXT rebuild is
     // detectable too — the loop closes.
@@ -1386,7 +1430,10 @@ Deno.test("updates e2e: canApply can refuse the moment, and nothing is installed
     let refused = "";
     await manual.apply().catch((e) => (refused = String(e)));
     assertStringIncludes(refused, "updates.canApply returned false");
-    assertEquals(await Deno.readTextFile(r.artifact), appBody("1.0.0"));
+    assertEquals(
+      await Deno.readFile(r.artifact),
+      await programBytes(appBody("1.0.0")),
+    );
     assertEquals(exits, []);
 
     // The UNATTENDED path goes through the same guard — before this, `auto`
@@ -1396,7 +1443,10 @@ Deno.test("updates e2e: canApply can refuse the moment, and nothing is installed
     refused = "";
     await auto.apply().catch((e) => (refused = String(e)));
     assertStringIncludes(refused, "canApply");
-    assertEquals(await Deno.readTextFile(r.artifact), appBody("1.0.0"));
+    assertEquals(
+      await Deno.readFile(r.artifact),
+      await programBytes(appBody("1.0.0")),
+    );
 
     // A hook that throws is not permission either — fail closed.
     const angry = createUpdatesRuntime({
@@ -1422,7 +1472,10 @@ Deno.test("updates e2e: canApply can refuse the moment, and nothing is installed
     refused = "";
     await angry.apply().catch((e) => (refused = String(e)));
     assertStringIncludes(refused, "cell not ready");
-    assertEquals(await Deno.readTextFile(r.artifact), appBody("1.0.0"));
+    assertEquals(
+      await Deno.readFile(r.artifact),
+      await programBytes(appBody("1.0.0")),
+    );
 
     // …and when the app says yes, it installs.
     busy = false;
@@ -1430,7 +1483,10 @@ Deno.test("updates e2e: canApply can refuse the moment, and nothing is installed
     assertEquals((await ok.check({ dismissed: null })).kind, "offer");
     await ok.apply();
     await settle(ok);
-    assertEquals(await Deno.readTextFile(r.artifact), appBody("2.0.0"));
+    assertEquals(
+      await Deno.readFile(r.artifact),
+      await programBytes(appBody("2.0.0")),
+    );
   } finally {
     await Deno.remove(r.root, { recursive: true });
   }
@@ -1472,7 +1528,10 @@ Deno.test("updates e2e: acceptDataLoss backs the store up FIRST, or refuses", as
       .catch((e) => (refused = String(e)));
     assertStringIncludes(refused, "no state snapshot");
     assertStringIncludes(refused, "accept data loss");
-    assertEquals(await Deno.readTextFile(r.artifact), appBody("1.0.0"));
+    assertEquals(
+      await Deno.readFile(r.artifact),
+      await programBytes(appBody("1.0.0")),
+    );
 
     // With one, the backup is taken BEFORE the download — refusing after
     // 156MB has crossed somebody's network is a refusal in the wrong place —
@@ -1483,14 +1542,20 @@ Deno.test("updates e2e: acceptDataLoss backs the store up FIRST, or refuses", as
     assertEquals((await rt.check({ dismissed: null })).kind, "blocked");
     // Still refused by default: nothing about the gate changed.
     await rt.apply().catch(() => {});
-    assertEquals(await Deno.readTextFile(r.artifact), appBody("1.0.0"));
+    assertEquals(
+      await Deno.readFile(r.artifact),
+      await programBytes(appBody("1.0.0")),
+    );
 
     await rt.apply({ acceptDataLoss: true });
     await settle(rt);
     assertEquals(snapshots.length, 1);
     assertStringIncludes(snapshots[0]!, "pre-1.0.0-state.db");
     assertEquals(await Deno.readTextFile(snapshots[0]!), "SNAPSHOT");
-    assertEquals(await Deno.readTextFile(r.artifact), appBody("2.0.0"));
+    assertEquals(
+      await Deno.readFile(r.artifact),
+      await programBytes(appBody("2.0.0")),
+    );
     assertEquals(exits, [0]);
     // The backup is named in the rollback marker, so the boot that undoes this
     // can tell the user where their data is.
@@ -1616,7 +1681,10 @@ for (
       );
       assertEquals(beside(r), [name]);
       assertEquals(await Deno.readTextFile(join(r.root, name)), mine);
-      assertEquals(await Deno.readTextFile(r.artifact), appBody("1.0.0"));
+      assertEquals(
+        await Deno.readFile(r.artifact),
+        await programBytes(appBody("1.0.0")),
+      );
       assertEquals(readPending(r.dataDir), null);
       // Nothing written down either: a refusal leaves no entry for a
       // download or a tree it never made.
@@ -1661,7 +1729,6 @@ for (
   const name of ["MyApp.staged-2.0.0", "MyApp.zip-2.0.0", "MyApp.old-1.0.0"]
 ) {
   Deno.test(`updates e2e: a folder of the user's named ${name} refuses a .zip update before anything is downloaded — it is not removed`, async () => {
-    if (Deno.build.os === "windows") return;
     const r = await rig();
     try {
       await publishZip(r, { version: "2.0.0", channel: "prod" });
@@ -1691,7 +1758,6 @@ for (
 }
 
 Deno.test("updates e2e: a .zip update's staged tree is on record as the very folder it unpacked into, and its own leftover is replaced", async () => {
-  if (Deno.build.os === "windows") return;
   const r = await rig();
   try {
     await publishZip(r, { version: "2.0.0", channel: "prod" });

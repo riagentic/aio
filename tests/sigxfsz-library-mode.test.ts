@@ -14,20 +14,20 @@
 // `libraryMode` installs it directly. Linux/macOS only: Windows has no such
 // signal.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import {
   _fileSizeGuardHeld,
   holdFileSizeGuard,
 } from "../src/server/single-instance-lock.ts";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("..", import.meta.url));
 const MOD = new URL("../mod.ts", import.meta.url).href;
 
 Deno.test({
   name:
     "libraryMode: a write past `ulimit -f` is reported and the embedded app keeps running",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // SIGXFSZ and `ulimit -f` are POSIX: Windows has no file-size signal
   fn: async () => {
     const dir = await tempDir("aio-sigxfsz-lib-");
     try {
@@ -105,7 +105,7 @@ Deno.exit(0);
 Deno.test({
   name: "file-size guard: refcounted, so a sibling app's shutdown cannot " +
     "un-protect this one",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // SIGXFSZ and `ulimit -f` are POSIX: Windows has no file-size signal
   fn() {
     const base = _fileSizeGuardHeld();
     const a = holdFileSizeGuard();

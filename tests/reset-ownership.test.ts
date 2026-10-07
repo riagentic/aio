@@ -15,6 +15,7 @@
 // is. The ledger is the point — reading it should be uncomfortable where it is
 // still `MANUAL`.
 import { assertEquals } from "@std/assert";
+import { fromFileUrl } from "@std/path";
 
 type Owner =
   /** Called by `_resetAioRuntime` — per-test hygiene, the one call. */
@@ -108,6 +109,12 @@ const OWNERS: Record<string, [Owner, string]> = {
     "RUNTIME entries, and it cannot join them: it lives in src/air/ and the " +
     "one call (_resetAioRuntime) is in src/state/, which may not import air. " +
     "testUI's mount clears it, which is every UI test",
+  ],
+  _resetDevWarnings: [
+    "HARNESS",
+    "the renderer's once-only `_devWarn` ids (duplicate keys, a hydration " +
+    "mismatch…) — see _resetContrastAudit; `setDevMode(false)` clears the " +
+    "same set for a test that drives the renderer without testUI",
   ],
   _resetSelectorAudit: [
     "HARNESS",
@@ -316,7 +323,7 @@ async function exportedResets(dir: string): Promise<Set<string>> {
 
 Deno.test("every module-scope reset in src/ has a declared owner", async () => {
   const actual = await exportedResets(
-    new URL("../src", import.meta.url).pathname,
+    fromFileUrl(new URL("../src", import.meta.url)),
   );
   const undeclared = [...actual].filter((n) => !(n in OWNERS)).sort();
   assertEquals(
@@ -339,7 +346,7 @@ Deno.test("every module-scope reset in src/ has a declared owner", async () => {
 
 Deno.test("_resetAioRuntime actually calls everything filed under RUNTIME", async () => {
   const src = await Deno.readTextFile(
-    new URL("../src/state/runtime-reset.ts", import.meta.url).pathname,
+    fromFileUrl(new URL("../src/state/runtime-reset.ts", import.meta.url)),
   );
   const body = src.slice(src.indexOf("export function _resetAioRuntime"));
   const missing = Object.entries(OWNERS)

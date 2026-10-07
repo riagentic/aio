@@ -16,6 +16,7 @@ import { gitLsRemote } from "../src/server/updates-check.ts";
 import { rebuildFromGit } from "../src/server/updates-rebuild.ts";
 import type { Log } from "../src/diagnostics/logger.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { EXE, programBytes, writeProgram } from "./fake-program-helper.ts";
 
 const silentLog = {
   info: () => {},
@@ -67,16 +68,22 @@ async function repo(
   return await git(["rev-parse", "HEAD"], dir);
 }
 
-/** An app whose build records the GIT_DIR it saw into its data contract. */
+/** An app whose build records the GIT_DIR it saw into its data contract.
+ *  The artifact is a fake program (tests/fake-program-helper.ts): the build
+ *  appends its script to `stub.bin` — nothing on unix, the executable that
+ *  runs such a script on Windows. */
 const app = {
   "deno.json": JSON.stringify({ tasks: { compile: "deno run -A make.ts" } }),
+  "stub.bin": await programBytes(""),
   "make.ts": `
 await Deno.mkdir("dist", { recursive: true });
 const seen = JSON.stringify(Deno.env.get("GIT_DIR") ?? "");
-await Deno.writeTextFile("dist/app", \`#!/bin/sh
+const out = "dist/app${EXE}";
+await Deno.writeFile(out, await Deno.readFile("stub.bin"));
+await Deno.writeTextFile(out, \`#!/bin/sh
 echo '{"schema":1,"cells":{},"gitDir":\${seen}}'
-\`);
-await Deno.chmod("dist/app", 0o755);
+\`, { append: true });
+if (Deno.build.os !== "windows") await Deno.chmod(out, 0o755);
 `,
 };
 
@@ -105,7 +112,6 @@ async function withEnv<T>(
 Deno.test({
   name:
     "git rebuild under an inherited GIT_DIR (a hook): records the CLONE's commit, builds without it",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("aio-git-own-repo-");
     try {
@@ -137,7 +143,6 @@ Deno.test({
 
 Deno.test({
   name: "git rebuild under an inherited GIT_WORK_TREE still clones",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("aio-git-own-tree-");
     try {
@@ -164,7 +169,7 @@ Deno.test({
 Deno.test({
   name:
     "git over ssh under an inherited GIT_DIR: another repo's core.sshCommand does not switch off BatchMode",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // OPEN(windows): git there never ran the stand-in `ssh` put first on PATH, so what it is handed went unseen
   async fn() {
     const dir = await tempDir("aio-git-own-ssh-");
     try {
@@ -176,11 +181,10 @@ Deno.test({
       const argv = join(dir, "argv");
       const bin = join(dir, "bin");
       await Deno.mkdir(bin);
-      await Deno.writeTextFile(
-        join(bin, "ssh"),
+      await writeProgram(
+        join(bin, "ssh" + EXE),
         `#!/bin/sh\necho "$@" >> "${argv}"\nexit 255\n`,
       );
-      await Deno.chmod(join(bin, "ssh"), 0o755);
       await withEnv(
         {
           PATH: `${bin}${DELIMITER}${Deno.env.get("PATH") ?? ""}`,
@@ -211,7 +215,7 @@ Deno.test({
 Deno.test({
   name:
     "git rebuild: a clone slower than the deadline but still MOVING completes",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // the slow transport is an sh pipeline (dd, sleep) behind git's ext:: helper — not ported
   async fn() {
     const dir = await tempDir("aio-git-slow-clone-");
     try {

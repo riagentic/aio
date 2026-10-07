@@ -9,13 +9,14 @@
 // Each case runs `declaredPort()` in a child whose cwd is a throwaway project,
 // because the entry it reads is resolved from the cwd and cached per process.
 import { assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const AM_UTILS = new URL("../src/am/am-utils.ts", import.meta.url).href;
 // The repo's import map, so the child resolves `@std/*` the way the suite does;
 // the throwaway project's own deno.json is still what `am` finds from the cwd.
-const REPO_CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const REPO_CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 async function declaredIn(
   entryPort: number | undefined,
@@ -33,7 +34,7 @@ async function declaredIn(
     );
     await Deno.writeTextFile(
       join(proj, "probe.ts"),
-      `import { declaredPort } from "${AM_UTILS}";\n` +
+      `import { declaredPort } from "${spec(AM_UTILS)}";\n` +
         `console.log(String(declaredPort()));\n`,
     );
     const base = Deno.env.toObject();

@@ -17,7 +17,7 @@
 //     op cost on a 2 MB listener; a line is now what the reaction changed
 //     (a delta chain from a keyframe), and recovery is still exact.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import {
   parseJournal,
   SYNC_REACTION_TYPE,
@@ -27,12 +27,13 @@ import {
 } from "../src/server/journal.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const MOD = new URL("../mod.ts", import.meta.url).href;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 const CHILD = `
-import { aio, cell } from "${MOD}";
+import { aio, cell } from "${spec(MOD)}";
 const DIR = Deno.env.get("DIR");
 const PORT = Number(Deno.env.get("PORT"));
 const PHASE = Deno.env.get("PHASE");
@@ -40,7 +41,7 @@ const SIZE = 4000;
 // Every byte the journal is ever given, before any compaction drops it.
 const write = Deno.writeTextFileSync;
 Deno.writeTextFileSync = (p, d, o) => {
-  if (String(p).endsWith("/journal")) write(DIR + "/journal-all.log", d, { append: true });
+  if (/[\\\\/]journal$/.test(String(p))) write(DIR + "/journal-all.log", d, { append: true });
   return write(p, d, o);
 };
 const notes = cell("notes", { sync: true, version: 1, state: { items: [] },

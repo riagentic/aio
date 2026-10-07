@@ -46,12 +46,15 @@ import {
 } from "../src/build/esbuild-shared.ts";
 import { BUNDLE_ENTRY_KEY } from "../src/build/client-bundle.ts";
 import { childCoverageDir } from "../src/testing/temp-dir.ts";
+import { fromFileUrl } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
+import { fixtureNodeModules } from "./symlink-helper.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 const _childCovDir = childCoverageDir();
 
 const IMPORTS = {
-  "aio": `${ROOT}mod.ts`,
+  "aio": `${spec(ROOT)}mod.ts`,
   "aio/jsx-runtime": `${ROOT}src/jsx-runtime.ts`,
   "aio/server": `${ROOT}src/server.ts`,
   "immer": "npm:immer@10.2.0",
@@ -70,7 +73,7 @@ async function makeApp(files: Record<string, string>): Promise<string> {
       imports: IMPORTS,
     }),
   );
-  await Deno.symlink(`${ROOT}node_modules`, `${dir}/node_modules`);
+  await fixtureNodeModules(dir);
   for (const [name, body] of Object.entries(files)) {
     await Deno.writeTextFile(`${dir}/${name}`, body);
   }
@@ -101,8 +104,8 @@ async function builderVerdict(
   await Deno.mkdir(`${dir}/.aio-build`, { recursive: true });
   await Deno.writeTextFile(
     runner,
-    `import { runBundle } from "${ROOT}src/build/build-bundle.ts";
-import { resolveAppDir } from "${ROOT}src/build/build-config.ts";
+    `import { runBundle } from "${spec(ROOT)}src/build/build-bundle.ts";
+import { resolveAppDir } from "${spec(ROOT)}src/build/build-config.ts";
 const root = ${JSON.stringify(dir)};
 const mainConfig = JSON.parse(await Deno.readTextFile(root + "/deno.json"));
 const configEntry = "app.ts";

@@ -12,16 +12,17 @@
 // kill took the reduce (the random sweep over real kills is
 // tests/journal-crash-sweep.test.ts).
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { parseJournal } from "../src/server/journal.ts";
 // @ts-ignore node:sqlite types unavailable when an old @types/node shadows them
 import { DatabaseSync } from "node:sqlite";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const APP = new URL("./fixtures/v1.0.9-sweep/app.js", import.meta.url)
-  .pathname;
-const TREE = new URL("..", import.meta.url).pathname;
+const APP = fromFileUrl(
+  new URL("./fixtures/v1.0.9-sweep/app.js", import.meta.url),
+);
+const TREE = fromFileUrl(new URL("..", import.meta.url));
 
 type Snap = {
   notes: string[];
@@ -450,7 +451,7 @@ Deno.test("a reduced op's mark and its reaction lines land in ONE journal write 
         "-A",
         "--config",
         join(TREE, "deno.json"),
-        new URL("./fixtures/crash-sweep/app.js", import.meta.url).pathname,
+        fromFileUrl(new URL("./fixtures/crash-sweep/app.js", import.meta.url)),
       ],
       env: {
         DIR: dir,

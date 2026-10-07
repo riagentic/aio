@@ -6,10 +6,11 @@
 // discovered is indistinguishable from a missing feature, and it is worse than
 // one: the cost was already paid, and the user still writes the workaround.
 import { assert, assertEquals } from "@std/assert";
+import { fromFileUrl } from "@std/path";
 // deno-lint-ignore no-control-regex — help paints glyphs; the contract is the words
 const stripAnsi = (s: string) => s.replace(/\u001b\[[0-9;]*m/g, "");
 
-const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const REPO = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 
 /** Aliases: the canonical spelling is documented, the alias deliberately is
  *  not — listing both doubles the help for no new capability.

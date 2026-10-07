@@ -18,6 +18,8 @@ import { createUDSListener } from "../src/server/aio.ts";
 import { enc } from "../src/protocol/envelope.ts";
 import { join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
+import { connectLocal } from "../src/server/local-listen.ts";
 
 type Ack = { cid: string; ok: boolean; error?: string; code?: string };
 
@@ -33,7 +35,7 @@ async function udsSend(
   frame: string,
   ms = 250,
 ): Promise<Ack[]> {
-  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  const conn = await connectLocal(socketPath);
   const w = conn.writable.getWriter();
   await w.write(new TextEncoder().encode(frame + "\n"));
   w.releaseLock();
@@ -66,7 +68,7 @@ async function udsSend(
 
 Deno.test("uds: a refused action carrying a cid is answered, never dropped", async () => {
   const dir = await tempDir("uds-refused-");
-  const sock = join(dir, "r.sock");
+  const sock = localEndpoint(join(dir, "r.sock"));
   const dispatched: unknown[] = [];
   const uds = createUDSListener(
     sock,
@@ -128,13 +130,14 @@ Deno.test("uds: a refused action carrying a cid is answered, never dropped", asy
     assert(dispatched.length === before + 1, "the good frame was dispatched");
   } finally {
     uds.shutdown();
+    await localIdle();
     await dropTempDir(dir);
   }
 });
 
 Deno.test("uds: a refused action WITHOUT a cid stays quiet (no ack noise)", async () => {
   const dir = await tempDir("uds-refused-nocid-");
-  const sock = join(dir, "q.sock");
+  const sock = localEndpoint(join(dir, "q.sock"));
   const uds = createUDSListener(
     sock,
     () => ({ ok: true }),
@@ -151,6 +154,7 @@ Deno.test("uds: a refused action WITHOUT a cid stays quiet (no ack noise)", asyn
     assertEquals(acks.length, 0, "no cid registered, so nothing to settle");
   } finally {
     uds.shutdown();
+    await localIdle();
     await dropTempDir(dir);
   }
 });

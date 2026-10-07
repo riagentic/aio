@@ -17,6 +17,7 @@ import {
   missingFrom,
   readVars,
 } from "../scripts/check-env.ts";
+import { fromFileUrl } from "@std/path";
 
 const consts = envConstants(
   new Map([["a.ts", `export const BUILD_VERSION_ENV = "AIO_BUILD_VERSION";`]]),
@@ -106,7 +107,7 @@ Deno.test("check:env requires THE page, not any page", () => {
 });
 
 Deno.test("check:env: the repo's own motivating case is actually seen", async () => {
-  const vars = await readVars(new URL("../", import.meta.url).pathname);
+  const vars = await readVars(fromFileUrl(new URL("../", import.meta.url)));
   const at = vars.get("AIO_BUILD_VERSION");
   assert(
     at && at.length >= 2,

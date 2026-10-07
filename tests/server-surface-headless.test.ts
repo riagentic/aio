@@ -2,14 +2,14 @@
 // the server renders the UI entry in-process against live cell state and
 // returns the same semantic surface a client would report.
 import { assert, assertEquals } from "@std/assert";
-import { join, toFileUrl } from "@std/path";
+import { fromFileUrl, join, toFileUrl } from "@std/path";
 import { renderHeadlessSurface } from "../src/server/server-surface.ts";
 import {
   handleTrojan,
   resetTrojanRateLimit,
 } from "../src/server/server-trojan.ts";
 
-const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const REPO = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 
 Deno.test("renderHeadlessSurface: renders a UI entry against live cells", async () => {
   const dir = await Deno.makeTempDir({ prefix: "surface-headless-" });

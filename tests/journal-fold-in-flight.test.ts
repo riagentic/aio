@@ -10,16 +10,17 @@
 // `alsoSnapshot` is the newest, waits for ITS fold's watermark to be on disk,
 // and dies before any later fold. Recovery must hold every acked write.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const MOD = new URL("../mod.ts", import.meta.url).href;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 const APP = "fold-in-flight-probe";
 
 const CHILD = `
-import { aio, cell } from "${MOD}";
+import { aio, cell } from "${spec(MOD)}";
 import { DatabaseSync } from "node:sqlite";
 const DIR = Deno.env.get("DIR");
 const PORT = Number(Deno.env.get("PORT"));

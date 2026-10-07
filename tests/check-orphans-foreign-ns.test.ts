@@ -9,11 +9,11 @@
 // owner is never an orphan to signal. Pinned by running the real script against
 // a throwaway root (`AIO_ORPHANS_LOCK_ROOTS`), never the machine's real dirs.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { ownPidNs } from "../src/server/single-instance-lock.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 const OLD = new Date(Date.now() - 60 * 60_000);
 const exists = (p: string) => Deno.stat(p).then(() => true).catch(() => false);
 
@@ -35,7 +35,7 @@ async function run(root: string, ...args: string[]): Promise<string> {
 Deno.test({
   name:
     "check-orphans: a foreign-namespace lock is judged by its hold — a live host pid is never reported (signalled), a live container's lock never removed",
-  ignore: Deno.build.os !== "linux",
+  ignore: Deno.build.os !== "linux", // pid namespaces are a Linux kernel feature
   fn: async () => {
     const root = await tempDir("orphans-ns-");
     const dir = join(root, `aio-ns-${crypto.randomUUID().slice(0, 8)}`);

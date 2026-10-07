@@ -7,8 +7,9 @@
 // added to the release check without a CI step is red here, on the same push.
 import { assertEquals } from "@std/assert";
 import { MIN_DENO } from "../src/server/deno-version.ts";
+import { fromFileUrl } from "@std/path";
 
-const REPO = new URL("../", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("../", import.meta.url));
 
 /** The gate commands `release-check.ts` runs, read off its FAST/HEAVY lists
  *  as `deno task <name>` or `deno <verb> …` strings. */

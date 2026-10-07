@@ -16,13 +16,14 @@
 // middle and a clock that disagrees are not simulated here, and this comment is
 // the honest boundary of the claim.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { childEnv } from "./e2e-app-harness.ts";
 import { stopChild } from "./stop-child.ts";
 import { childCoverageDir } from "../src/testing/temp-dir.ts";
 import { freePort } from "../src/testing/server-test.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 const dec = new TextDecoder();
 const _childCovDir = childCoverageDir();
 
@@ -87,8 +88,8 @@ Deno.test({
         version: "0.0.1",
         unstable: ["kv"],
         imports: {
-          "aio": `${ROOT}mod.ts`,
-          "aio/server": `${ROOT}src/server-entry.ts`,
+          "aio": `${spec(ROOT)}mod.ts`,
+          "aio/server": `${spec(ROOT)}src/server-entry.ts`,
           "immer": "npm:immer@10.2.0",
           "@std/path": "jsr:@std/path@^1",
         },

@@ -13,11 +13,12 @@
 // `aio.run` turns updates off under `libraryMode`, which every in-process
 // harness sets.
 import { assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join, toFileUrl } from "@std/path";
 import { buildShipManifest, generateSigningKey } from "../src/build/ship.ts";
 import { freePort } from "../src/testing/server-test.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 const platform = { os: Deno.build.os, arch: Deno.build.arch };
 
 async function git(dir: string, ...args: string[]) {
@@ -51,8 +52,8 @@ Deno.test({
     await Deno.writeTextFile(
       join(root, "app.ts"),
       `
-import { aio } from "${ROOT}mod.ts";
-import { cell } from "${ROOT}src/state/cell-create.ts";
+import { aio } from "${spec(ROOT)}mod.ts";
+import { cell } from "${spec(ROOT)}src/state/cell-create.ts";
 cell("notes", {
   version: 1,
   state: { items: [] as string[] },
@@ -61,7 +62,9 @@ cell("notes", {
 await aio.run({
   appId: "updates-gate-first-run",
   client: "server-only",
-  updates: { source: "file://${releases}", channel: "prod", auto: false },
+  updates: { source: "${
+        toFileUrl(releases).href
+      }", channel: "prod", auto: false },
 });
 `,
     );
@@ -134,8 +137,13 @@ await aio.run({
       return await r.text();
     };
     try {
+      // A child that died at boot ends the wait at once, with its output: a
+      // refused connect costs ~2 s on Windows, so 300 polls of a dead port
+      // read as a ten-minute hang.
+      let exited = false;
+      child.status.then(() => exited = true);
       let up = false;
-      for (let i = 0; i < 300 && !up; i++) {
+      for (let i = 0; i < 300 && !up && !exited; i++) {
         try {
           const r = await fetch(`http://127.0.0.1:${port}/__aio/health`);
           await r.body?.cancel();
@@ -143,6 +151,7 @@ await aio.run({
         } catch { /* not listening yet */ }
         if (!up) await new Promise((r) => setTimeout(r, 100));
       }
+      if (exited) await pumps;
       assertEquals(up, true, `the app never served\n${out}`);
 
       // The first run writes v1 data…

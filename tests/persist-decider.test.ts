@@ -15,8 +15,9 @@ import {
   report,
   type Source,
 } from "../scripts/check-persist-decider.ts";
+import { fromFileUrl } from "@std/path";
 
-const REPO = new URL("../", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("../", import.meta.url));
 
 Deno.test("persist-decider: src/ is clean — every host routes through cell-persist-filter.ts", async () => {
   const findings = check(await readSrc(REPO));

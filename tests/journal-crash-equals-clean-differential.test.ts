@@ -15,9 +15,11 @@ import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { fuzzEnvInt } from "./fuzz-seed.ts";
 import { mulberry32 } from "./sync/properties/_prop.ts";
+import { fromFileUrl } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 
 const MOD = new URL("../mod.ts", import.meta.url).href;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 type Op = [
   kind: "set" | "del" | "push" | "splice",
@@ -26,7 +28,7 @@ type Op = [
 ];
 
 const CHILD = `
-import { aio, cell } from "${MOD}";
+import { aio, cell } from "${spec(MOD)}";
 const DIR = Deno.env.get("DIR");
 const d = cell("d", {
   state: {

@@ -10,7 +10,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 
-const ROOT = dirname(fromFileUrl(import.meta.url)).replace(/\/tests$/, "");
+const ROOT = dirname(dirname(fromFileUrl(import.meta.url)));
 const dec = new TextDecoder();
 
 Deno.test("am fix: electron repair goes through electron-install.ts, never the bare deno install", async () => {

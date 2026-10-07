@@ -20,6 +20,10 @@ import {
 import { upstreamNoiseMatcherSource } from "../diagnostics/upstream-noise.ts";
 import { redactUrlTokenSource } from "../diagnostics/redact.ts";
 import {
+  GUEST_PRELOAD_REFUSED_EVENT,
+  GUEST_PRELOAD_URL,
+} from "../protocol/guest-preload.ts";
+import {
   HOST_KEY_EVENT,
   HOST_KEY_MAX_LEN,
   HOST_KEYS_ATTR,
@@ -89,6 +93,10 @@ export type AioMeta = {
    *  Chromium sandbox of a window this app opens is the app's decision, never
    *  the page's. See ElectronConfig. */
   unsandboxedChildWindows?: boolean;
+  /** `electron: { webviewTag }` — `<webview>` without `openWindow`. */
+  webviewTag?: boolean;
+  /** `electron: { guestDownloads }` — a guest or child page may save files. */
+  guestDownloads?: boolean;
   /** `electron: { permissions }` — the app page's exact allow-list; null ⇒
    *  the default (the app page keeps every permission). See ElectronConfig. */
   permissions?: ElectronPermissions | null;
@@ -104,6 +112,10 @@ export type AioMeta = {
    *  this window uses. `electronProfileName`; absent ⇒ the title's slug, which
    *  is what a default-home app has always had. */
   profileName?: string;
+  /** The `<webview>` guest preloads this run may load by name — deno.json
+   *  `build.guestPreloads`, resolved by the server (`resolveGuestPreloads`):
+   *  the directory they are in and the declared paths inside it. */
+  guestPreloads?: { dir: string; files: readonly string[] };
   /** Where a SECOND launch of this app asks the running window to come to
    *  the front (`showRequestPath`, beside the lock): the window watches for
    *  the file, removes it — the answer the second launch waits for — and
@@ -126,12 +138,16 @@ export function electronMetaPolicy(
   AioMeta,
   | "requireSandbox"
   | "unsandboxedChildWindows"
+  | "webviewTag"
+  | "guestDownloads"
   | "permissions"
   | "allowLocalPeers"
 > {
   return {
     requireSandbox: !!cfg?.requireSandbox,
     unsandboxedChildWindows: !!cfg?.unsandboxedChildWindows,
+    webviewTag: !!cfg?.webviewTag,
+    guestDownloads: !!cfg?.guestDownloads,
     permissions: cfg?.permissions ?? null,
     allowLocalPeers: cfg?.allowLocalPeers === true,
   };
@@ -328,6 +344,11 @@ function __aioAppPage(wc, requesting) {
   // An openWindow child window keeps its own origin's permissions by default
   // (1.0.12); electron.permissions says it is never the app.
   if (__aioPermAllow !== null && __aioChildWindows.has(wc)) return false;
+  // Once the shell has said which window is the app's, no OTHER window is the
+  // app — a pop-up a child window opened was (it is a window, showing its own
+  // origin), and held the permissions scoped "app". Only the 1.0.12 child
+  // window above keeps what it had.
+  if (__aioAppWc !== null && wc !== __aioAppWc && !__aioChildWindows.has(wc)) return false;
   const cur = wc.getURL();
   if (__aioAppWc !== null && wc === __aioAppWc && cur && __aioOrigin(cur) !== __aioAppOrigin) return false;
   return !requesting || __aioOrigin(requesting) === __aioOrigin(cur);
@@ -415,6 +436,230 @@ app.on('web-contents-created', (_e, wc) => {
 });
 app.on('session-created', __aioGuardSession);
 app.on('ready', () => __aioGuardSession(require('electron').session.defaultSession));`;
+}
+
+/** How many different lines of one kind the web guard says before it says
+ *  that it stops (`__aioWebSay`). */
+const WEB_SAY_CAP = 32;
+
+/** 🔒 Embedded and child web content: what a page that is not the app may do.
+ *
+ *  A `<webview>` guest and an `openWindow` child window show somebody else's
+ *  site. Beside permissions (tmplPermissionGuard) and IPC (tmplIpcGuard), a
+ *  field report's audit found the rest was Electron's defaults:
+ *   • pop-ups — a guest's `window.open` went to the system browser with no
+ *     limit, a child window's opened a real window that counted as the app.
+ *     Both are denied; an http(s) link goes to the system browser only after
+ *     a real click or key press in that page (`input-event`: main-process
+ *     input, which a page cannot synthesize — measured, Electron 44), one per
+ *     2 s;
+ *   • navigation — a child window goes where 1.0.18 let it (any site), but
+ *     never to the app's own scheme or to a file; `openWindow(url, {
+ *     origins: [...] })` turns a restriction ON: the listed origins and the
+ *     one it was opened on (the redirects of its first load are its own);
+ *   • downloads — cancelled unless `electron.guestDownloads`;
+ *   • devices — no HID/USB/serial/Bluetooth device is chosen for a guest or
+ *     a child window. The app's own page is left to Electron, as in 1.0.18:
+ *     nothing answers its request, so Electron cancels it (measured, HID).
+ *  Every refusal is one line, once per origin and reason — at most
+ *  `WEB_SAY_CAP` per kind of line, then one line that says so.
+ *  Expects `app`, `__aioOrigin`, `__aioAppWc` and `__aioChildWindows`
+ *  (tmplPermissionGuard), and `ipcMain` (tmplIpcGuard) by `ready`. */
+export function tmplWebGuard(meta?: AioMeta): string {
+  return `
+const __aioGuestDownloads = ${JSON.stringify(!!meta?.guestDownloads)};
+// Once per kind and key. The KIND is a word of this file; the key is an
+// origin plus words of this file — never text a page chose (a pop-up's
+// scheme, say): one shared set keyed on that was filled by a page with 256
+// made-up schemes, and no later refusal was said. Each kind has its own
+// ${WEB_SAY_CAP}, and says once that it is full.
+const __aioWebSaid = new Map();
+function __aioWebSay(kind, key, line) {
+  let said = __aioWebSaid.get(kind);
+  if (!said) __aioWebSaid.set(kind, said = new Set());
+  key = String(key).slice(0, 300);
+  if (said.has(key)) return;
+  if (said.size >= ${WEB_SAY_CAP}) {
+    if (said.has('')) return;
+    said.add('');
+    console.warn('[aio:electron] further ' + kind + ' lines are not said (${WEB_SAY_CAP} different ones so far) — the refusals themselves continue');
+    return;
+  }
+  said.add(key);
+  console.warn('[aio:electron] ' + line);
+}
+// Is this partition NAME the app's own session? Judged by identity, never by
+// spelling: Electron resolves both '' and 'persist:' to the default session
+// (measured, 44) — the one that serves the app.
+function __aioAppSessionName(name) {
+  if (/^(persist:)?\\s*$/.test(name)) return true;
+  const E = require('electron');
+  const ses = E.session.fromPartition(name);
+  return ses === E.session.defaultSession || (__aioAppWc !== null && ses === __aioAppWc.session);
+}
+// What a page is when it is not the app's own window; '' when it is.
+function __aioWebKind(wc) {
+  if (!wc || typeof wc.getType !== 'function') return '';
+  if (wc.getType() === 'webview') return '<webview> guest';
+  if (__aioChildWindows.has(wc)) return 'openWindow child window';
+  return __aioAppWc !== null && wc !== __aioAppWc ? 'window that is not the app' : '';
+}
+function __aioWebFrom(wc) {
+  let url = '';
+  try { url = wc.getURL(); } catch {}
+  return __aioOrigin(url) || '(unknown origin)';
+}
+// Real input per page: when it last had a click or a key, when it last
+// opened a link.
+const __aioWebInput = new WeakMap();
+function __aioWebTrack(wc) {
+  if (__aioWebInput.has(wc)) return;
+  const st = { input: 0, opened: 0 };
+  __aioWebInput.set(wc, st);
+  wc.on('input-event', (_e, input) => {
+    if (input && /^(mouseDown|mouseUp|rawKeyDown|keyDown|touchStart|touchEnd|gestureTap)$/.test(input.type)) st.input = Date.now();
+  });
+}
+function __aioWebPopup(wc, url) {
+  const from = (__aioWebKind(wc) || 'page') + ' ' + __aioWebFrom(wc);
+  const no = (rule, why) => __aioWebSay('pop-up', rule + ' ' + from, 'pop-up BLOCKED from ' + from + ' — ' + why);
+  let u;
+  try { u = new URL(url); } catch { return no('url', 'not a URL'); }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    return no('scheme', 'only http/https links open in the system browser, got ' + u.protocol.slice(0, 32));
+  }
+  const st = __aioWebInput.get(wc);
+  const now = Date.now();
+  if (!st || now - st.input > 5000) {
+    return no('input', 'no click or key press in that page in the last 5 s: a page may not open the system browser by itself');
+  }
+  if (now - st.opened < 2000) return no('rate', 'more than one link in 2 s');
+  st.opened = now;
+  require('electron').shell.openExternal(u.href);
+}
+// An openWindow child window. Where it may navigate:
+//   • no origins (or '*', the same thing spelled out) — wherever 1.0.18 let
+//     it: any site, any scheme the OS handles. An app's login flow in a child
+//     window crosses origins after it has landed (the identity provider's
+//     chain), and the window is no longer in the app's session. Never the
+//     app's own scheme, a file or javascript: — what would reach the app or
+//     the disk. (1.0.18 loaded aio:// there, in the app's session — the hole;
+//     Chromium itself refuses file: from a web page — measured, 44.)
+//   • origins: [...] — the restriction, ON: the listed origins and the one it
+//     was opened on, http(s) only.
+function __aioGuardChild(child, start, origins) {
+  const wc = child.webContents;
+  __aioChildWindows.add(wc); // never "app" (tmplPermissionGuard)
+  __aioWebTrack(wc);
+  __aioNoBluetooth(wc);
+  wc.setWindowOpenHandler(({ url }) => {
+    __aioWebPopup(wc, url);
+    return { action: 'deny' };
+  });
+  const listed = Array.isArray(origins);
+  const ok = new Set([__aioOrigin(start)].concat(listed ? origins.map((o) => __aioOrigin(String(o))) : []));
+  // Until the first document is there, the redirects are the opened URL's
+  // own (http to https, to www): where they land is the window's origin.
+  let landed = false;
+  wc.once('did-navigate', (_e, url) => { landed = true; ok.add(__aioOrigin(url)); });
+  const guard = (event, url) => {
+    let u = null;
+    try { u = new URL(url); } catch {}
+    const http = !!u && (u.protocol === 'http:' || u.protocol === 'https:');
+    const inner = !u || u.protocol === 'aio:' || u.protocol === 'file:' || u.protocol === 'javascript:';
+    if (listed ? http && (!landed || ok.has(__aioOrigin(url))) : !inner) return;
+    event.preventDefault();
+    // The key: an origin, or one of four fixed words — not the page's scheme.
+    const where = http ? __aioOrigin(url) : !u ? 'an unparsable URL' : inner ? u.protocol : 'another scheme';
+    const to = http || !u ? where : u.protocol.slice(0, 32);
+    __aioWebSay('navigation', __aioOrigin(start) + ' ' + where,
+      'navigation BLOCKED in openWindow child window ' + __aioOrigin(start) + ' to ' + to + (listed
+        ? ' — this window was opened with origins: it stays on the origin it was opened on and the listed ones (http/https only). ' +
+          'List more in openWindow(url, { preload, origins: ["https://…"] }), or leave origins out for any site.'
+        : " — a child window never navigates to the app's own scheme or to a file."));
+  };
+  wc.on('will-navigate', (event, url) => guard(event, url));
+  wc.on('will-redirect', (event, legacyUrl, _inPlace, legacyMain) => {
+    const isMainFrame = typeof event.isMainFrame === 'boolean' ? event.isMainFrame : legacyMain;
+    if (isMainFrame === false) return;
+    guard(event, typeof event.url === 'string' ? event.url : legacyUrl);
+  });
+}
+const __aioWebSeen = new WeakSet();
+function __aioWebSession(ses) {
+  if (!ses || __aioWebSeen.has(ses)) return;
+  __aioWebSeen.add(ses);
+  ses.on('will-download', (event, _item, wc) => {
+    const kind = __aioWebKind(wc);
+    if (__aioGuestDownloads || !kind) return;
+    event.preventDefault();
+    const from = kind + ' ' + __aioWebFrom(wc);
+    __aioWebSay('download', from, 'download CANCELLED from ' + from +
+      ' — a page that is not the app may not save files. Allow it with aio.run({ electron: { guestDownloads: true } }).');
+  });
+  // Nothing is ever chosen (below), so nothing is ever granted — to any
+  // origin. The same answer Electron gives with no handler (1.0.18): it
+  // grants only what a chooser chose.
+  ses.setDevicePermissionHandler(() => false);
+  // A guest's or a child window's request is cancelled here, by name. The
+  // app's OWN page is not touched — no preventDefault, so Electron does what
+  // it did in 1.0.18, when aio had no listener: it cancels a request nothing
+  // answers (measured, HID, Electron 44). Said either way.
+  const device = (what, wc, origin, event, cancel) => {
+    const own = !!wc && !__aioWebKind(wc) && __aioAppPage(wc, origin);
+    if (!own) { event.preventDefault(); cancel(); }
+    __aioWebSay('device', what + (own ? ' app ' : ' ') + origin, what + ' device request ' + (own
+      ? "from the app's own page (" + origin + ') was left to Electron, which cancels it: aio has no device chooser'
+      : 'CANCELLED for ' + (origin || '(unknown origin)') + ' — a page that is not the app gets no device'));
+  };
+  for (const [ev, what] of [['select-hid-device', 'HID'], ['select-usb-device', 'USB']]) {
+    ses.on(ev, (event, details, cb) => {
+      const frame = details && details.frame;
+      const from = require('electron').webContents.fromFrame;
+      let wc = null;
+      try { wc = frame && typeof from === 'function' ? from(frame) : null; } catch {}
+      device(what, wc, __aioOrigin((frame && frame.url) || ''), event, () => cb());
+    });
+  }
+  ses.on('select-serial-port', (event, _ports, wc, cb) => device('serial', wc, __aioWebFrom(wc), event, () => cb('')));
+}
+app.on('session-created', __aioWebSession);
+app.on('ready', () => {
+  __aioWebSession(require('electron').session.defaultSession);
+  // The guarded ipcMain (tmplIpcGuard): the app's own page only.
+  ipcMain.handle('__aio:clearPartition', (_event, partition) => __aioClearPartition(partition));
+});
+// Web Bluetooth, for a guest and a child window only: cancelled by name. The
+// app's own window gets NO listener — a listener that does not answer makes
+// Electron pick the first device, and with none Electron cancels the request
+// itself, which is what 1.0.18 did.
+function __aioNoBluetooth(wc) {
+  wc.on('select-bluetooth-device', (event, _devices, cb) => {
+    event.preventDefault();
+    cb('');
+    __aioWebSay('device', 'Bluetooth ' + __aioWebFrom(wc), 'Bluetooth device request CANCELLED for ' + __aioWebFrom(wc) +
+      ' — a page that is not the app gets no device');
+  });
+}
+app.on('web-contents-created', (_e, wc) => {
+  if (!wc || typeof wc.getType !== 'function' || wc.getType() !== 'webview') return;
+  __aioWebTrack(wc);
+  __aioNoBluetooth(wc);
+});
+// __aioShell.clearPartition: an app that locks drops what its guests stored.
+function __aioClearPartition(name) {
+  if (typeof name !== 'string' || !name) {
+    throw new Error("clearPartition refused — pass the partition's name (a <webview>'s partition, or the one given to openWindow); the app's own session is not a partition");
+  }
+  if (__aioAppSessionName(name)) {
+    throw new Error('clearPartition refused — ' + JSON.stringify(name) + " resolves to the app's own session, not a partition: clearing it would sign the app itself out. Pass a guest's partition, like \\"persist:name\\"");
+  }
+  const ses = require('electron').session.fromPartition(name);
+  return Promise.all([ses.clearStorageData(), ses.clearCache(), ses.clearAuthCache()]).then(() => {
+    console.warn('[aio:electron] partition ' + JSON.stringify(name) + ' cleared (cookies, storage, cache, HTTP auth)');
+    return { ok: true, partition: name };
+  });
+}`;
 }
 
 /** 🔒 aio's IPC answers the app's own page only.
@@ -668,7 +913,9 @@ export function tmplWindowShape(
     // webviewTag rides the same childWindows opt-in as openWindow: both are
     // "render remote content inside the app". Off by default; a <webview>
     // without the gate simply does not render.
-    `webviewTag: ${JSON.stringify(!!meta?.childWindows)}`,
+    // electron.webviewTag is the tag alone, for an app that must not have
+    // openWindow.
+    `webviewTag: ${JSON.stringify(!!meta?.childWindows || !!meta?.webviewTag)}`,
     ...Object.entries(extra).map(([k, v]) => `${k}: ${v}`),
   ];
   return `  b.webPreferences = { ${prefs.join(", ")} };
@@ -772,7 +1019,83 @@ export function tmplKeyboardShortcuts(): string {
   });`;
 }
 
+/** Declared `<webview>` guest preloads — emits `__aioGuestPreload(want)`,
+ *  which the `will-attach-webview` hook ({@linkcode tmplWillNavigate}) asks
+ *  first. Top-level in both shells; expects `fs` and `path`.
+ *
+ *  A page names a declared file with `guestPreload("src/guest/preload.cjs")`
+ *  — {@linkcode GUEST_PRELOAD_URL} plus the declared path — and this maps the
+ *  name onto the file: in `g.dir`, which is the project in dev and the
+ *  package's `dist/guest-preloads/` when built. Returns null for anything
+ *  that is not such a name, `{ ok: true, real }`, or `{ ok: false, why }`.
+ *
+ *  Only a DECLARED path resolves — an exact match against the list, never a
+ *  path computed from what the page sent, so nothing the page writes can
+ *  climb out of `g.dir` — and the file is realpath-checked inside it, so a
+ *  link cannot point out of it either. In dev the list is the declaration
+ *  itself: an undeclared name is refused there too, rather than working
+ *  until the app is packaged. */
+export function tmplGuestPreloads(g: AioMeta["guestPreloads"]): string {
+  return `
+// ── declared <webview> guest preloads (deno.json build.guestPreloads) ──
+const __aioGuestPreloads = ${JSON.stringify(g ?? { dir: "", files: [] })};
+const __aioGuestPreload = (want) => {
+  const pfx = ${JSON.stringify(GUEST_PRELOAD_URL)};
+  if (typeof want !== 'string' || !want.startsWith(pfx)) return null;
+  const rel = want.slice(pfx.length);
+  const g = __aioGuestPreloads;
+  if (!g.files.includes(rel)) {
+    return { ok: false, why: JSON.stringify(rel) + ' is not a declared guest preload (declared: ' +
+      (g.files.join(', ') || 'none') + ')' };
+  }
+  try {
+    const root = fs.realpathSync(g.dir);
+    const real = fs.realpathSync(path.join(root, ...rel.split('/')));
+    if (real.startsWith(root + path.sep)) return { ok: true, real };
+    return { ok: false, why: 'it is a link that resolves to ' + real + ', outside ' + root };
+  } catch (e) {
+    return { ok: false, why: 'the declared file could not be read in ' + g.dir + ': ' + String((e && e.message) || e) };
+  }
+};
+// What a refused preload's "Fix:" names: the REFUSED file, added to what is
+// declared — never a list the app already has. A path that is no app-relative
+// name (absolute, a URL) has no name to add: the example stands in.
+const __aioGuestPreloadFix = (want) => {
+  const pfx = ${JSON.stringify(GUEST_PRELOAD_URL)};
+  const g = __aioGuestPreloads;
+  let rel = 'src/guest/preload.cjs';
+  if (typeof want === 'string' && want.startsWith(pfx)) rel = want.slice(pfx.length);
+  else if (typeof want === 'string' && want && !path.isAbsolute(want) && !want.includes(':')) {
+    rel = want.split(path.sep).join('/');
+  }
+  // './x', '../x': no declarable name (refused, or never matched) — the example.
+  if (rel.startsWith('.')) rel = 'src/guest/preload.cjs';
+  // The name is the PAGE's text: quoted, so it cannot break the line it is printed in.
+  return { rel: JSON.stringify(rel), list: JSON.stringify(g.files.includes(rel) ? g.files : g.files.concat(rel)) };
+};
+// Every declared file, asked ONCE at startup through the resolver an attach
+// uses — a run that lost one (a package staged without it) says so now, not
+// when a guest first attaches. The "present" line names what this run CAN
+// attach; build --smoke compares it with the declaration.
+{
+  const pfx = ${JSON.stringify(GUEST_PRELOAD_URL)};
+  const g = __aioGuestPreloads;
+  const bad = g.files.map((f) => [f, __aioGuestPreload(pfx + f)]).filter((x) => !x[1].ok);
+  for (const [f, r] of bad) {
+    console.warn('[aio:electron] declared guest preload missing — REFUSED at startup: ' + f + ' — ' + r.why +
+      '. A <webview> or child window that names it will get no preload.');
+  }
+  const ok = g.files.filter((f) => !bad.some((x) => x[0] === f));
+  if (ok.length) {
+    console.log('[aio:electron] guest preloads present in ' + g.dir + ': ' + ok.join(', '));
+  }
+}`;
+}
+
 /** will-navigate interception — blocks cross-origin nav, relays via IPC.
+ *  Expects `win`, and `__aioWebSay` / `__aioWebPopup` /
+ *  `__aioAppSessionName` ({@linkcode tmplWebGuard}) — both app shells emit
+ *  that guard before this.
  *  @param originExpr JS expression that evaluates to the app origin string */
 export function tmplWillNavigate(
   originExpr: string,
@@ -879,6 +1202,28 @@ ${
     console.warn('[aio:electron] a redirect took the app window to ' + site +
       " — it loads there, but it is not the app: aio's IPC and the app's permissions are refused to it");
   });
+  // ⚠ A foreign <iframe> in the app's OWN window is in the app's session. The
+  // default CSP has no frame-src, so it loads; measured (Electron 44) it then
+  // reads and POSTs to aio://app, from a worker too — and neither the aio://
+  // handler (no Origin header; a Referer the page can withhold) nor webRequest
+  // (it never sees the worker's request) can tell such a request from the
+  // app's own. Refusing foreign frames by default would break every app that
+  // embeds a video player, so it is SAID, once per site, with both ways out.
+  // The same holds one level down: a <webview> with no partition that shows
+  // the app's own page is in that session too (the guest hook below).
+  const _aioScheme = String(${originExpr}).startsWith('aio:');
+  const _foreignFrame = (where) => (_event, frameUrl, _code, _text, isMainFrame) => {
+    if (isMainFrame) return;
+    let u;
+    try { u = new URL(frameUrl); } catch { return; }
+    if ((u.protocol !== 'http:' && u.protocol !== 'https:') || _sameApp(u)) return;
+    const site = u.protocol + '//' + u.host;
+    __aioWebSay('iframe', where + ' ' + site, "an <iframe> from " + site + ' loaded in ' + where + ": it shares the app's session, " +
+      'and a page in it can read, and POST to, everything the app serves on aio://app. Embed another site with ' +
+      '<webview partition="persist:name"> instead (docs/clients/webview.md), or refuse foreign frames: ' +
+      "aio.run({ security: { cspDirectives: { 'frame-src': \\"'self'\\" } } }).");
+  };
+  if (_aioScheme) win.webContents.on('did-frame-navigate', _foreignFrame("the app's own window"));
   win.webContents.setWindowOpenHandler(({ url }) => {
     // window.open / target=_blank to an external site → system browser, not a
     // rogue Electron window.
@@ -912,18 +1257,60 @@ ${
   // realpath so a symlink cannot point out of it. Everything else about the
   // guest is forced, not merely defaulted: an app that genuinely needs a
   // privileged guest should open a window, where the request is explicit.
+  const _wvSessionSaid = [false, false];
+  let _wvHeld = false;
   win.webContents.on('will-attach-webview', (_ev, webPreferences, params) => {
     webPreferences.nodeIntegration = false;
     webPreferences.nodeIntegrationInSubFrames = false;
     webPreferences.contextIsolation = true;
     webPreferences.webSecurity = true;
+    // Electron copies the embedder's sandbox onto a guest today (measured,
+    // 44); said here so it does not depend on that.
+    webPreferences.sandbox = true;
+    // A guest with NO partition lives in the app's own session — the one that
+    // serves aio://app. Measured (Electron 44): a page there reads, and POSTs
+    // to, everything the app serves on aio://, from a worker too, with no
+    // header saying who asked. So another site's page gets a session of its
+    // own; one the app pointed at its own origin (or at a data:/file:/blob:
+    // URL — the app's own content) stays, is told once what it shares, and
+    // may not leave for another site (did-attach-webview below). about:blank
+    // is nobody's content — the start of a guest that browses — so it gets
+    // the guests' session like a guest with no src at all.
+    // "No partition" is judged by the SESSION the name resolves to: '' and
+    // 'persist:' both name the app's own (webpreferences="partition=persist:"
+    // gets one past the tag's own check).
+    const _part = webPreferences.partition || params.partition;
+    if (!_part || __aioAppSessionName(String(_part))) {
+      let own = false;
+      try {
+        const s = new URL(String(params.src));
+        own = (s.protocol !== 'http:' && s.protocol !== 'https:' && s.protocol !== 'about:') || _sameApp(s);
+      } catch { own = false; }
+      if (!own) webPreferences.partition = 'persist:aio-webview';
+      if (!_wvSessionSaid[own ? 1 : 0]) {
+        _wvSessionSaid[own ? 1 : 0] = true;
+        console.warn(own
+          ? "[aio:electron] a <webview> with no partition shows the app's own page (or a data:/file: URL): it stays in the app's session, and its navigation to another http(s) site is blocked — a page there could read what the app serves on aio://. Give it partition=\\"persist:name\\" if it must leave the app."
+          : '[aio:electron] a <webview> with no partition gets the session "persist:aio-webview", not the app\\'s own — a page in the app\\'s session can read what the app serves on aio://. Set partition="persist:name" to choose one.');
+      }
+    }
     delete webPreferences.preloadURL;
     const want = params.preload || webPreferences.preload;
     let ok = false;
     let root = '';
     let why = '';
+    // A DECLARED guest preload (deno.json build.guestPreloads), asked for by
+    // name — guestPreload() — and resolved where this run keeps the file
+    // (tmplGuestPreloads). null: not such a name, the path rule below decides.
+    const named = want && typeof __aioGuestPreload === 'function'
+      ? __aioGuestPreload(want)
+      : null;
     if (want) {
-      try {
+      if (named) {
+        ok = named.ok;
+        if (ok) webPreferences.preload = named.real;
+        else why = named.why;
+      } else try {
         // The same root the openWindow handler uses. typeof guarded because
         // this template is shared with the WebSocket window, whose generated
         // script does not declare BASE_DIR — and a throw here would be a
@@ -963,14 +1350,37 @@ ${
         // bridge. Reported from the field as "the embedded page renders but
         // cannot see the app" — found by reading aio's source, because there
         // was no line anywhere, on either side, naming a rule.
-        console.warn(
-          '[aio:electron] <webview> preload REFUSED: ' + want +
-            ' — a guest preload must resolve (realpath) inside the app directory ' +
+        // With the FIX: this line is all a packaged app (no terminal) ever
+        // says about it — it reaches the app's log through the main-process
+        // tag (tmplCrashGuard) — and the rule alone told nobody what to do.
+        const reason = named
+          ? why
+          : 'a guest preload must resolve (realpath) inside the app directory ' +
             (root || '(which could not be resolved either)') +
-            (why ? ' — ' + why : '') +
+            (why ? ' — ' + why : '');
+        const fix = typeof __aioGuestPreloadFix === 'function'
+          ? __aioGuestPreloadFix(want)
+          : { rel: '"src/guest/preload.cjs"', list: '["src/guest/preload.cjs"]' };
+        console.warn(
+          '[aio:electron] <webview> preload REFUSED: ' + want + ' — ' + reason +
             '. The guest will load with NO preload and NO bridge: it will not ' +
-            'crash, and nothing else will be logged about it.',
+            'crash, and nothing else will be logged about it. ' +
+            'Fix: declare the file in deno.json "build": { "guestPreloads": ' +
+            fix.list + ' } and name it in the page with ' +
+            'guestPreload(' + fix.rel + ') from aio/ui — the one ' +
+            'form that loads in dev AND in a packaged build.',
         );
+        // …and the PAGE is told, so the app can surface it: a CustomEvent on
+        // window. executeJavaScript, not IPC — the WebSocket shell has no
+        // preload, and this must work in both.
+        try {
+          win.webContents.executeJavaScript(
+            'window.dispatchEvent(new CustomEvent(${
+    JSON.stringify(GUEST_PRELOAD_REFUSED_EVENT)
+  }, { detail: ' +
+              JSON.stringify({ preload: String(want), reason }) + ' }))',
+          ).catch(() => {});
+        } catch {}
       }
     }
     if (!ok) {
@@ -981,7 +1391,14 @@ ${
     params.nodeintegration = 'off';
     params.nodeintegrationinsubframes = 'off';
     params.disablewebsecurity = 'off';
-    params.allowpopups = 'off';
+    // allowpopups is NOT forced off, and cannot be from here: setting
+    // params.allowpopups = 'off' changes nothing (measured, Electron 44 — a
+    // guest with the attribute still reaches its window-open handler; only
+    // webPreferences.disablePopups = true stops it). The documented contract
+    // is that a guest with allowpopups may open links: no window ever, an
+    // http(s) link to the system browser after a real click (the handler in
+    // did-attach-webview below). Without the attribute Electron drops
+    // window.open itself.
   });
   // Local hotfix: <webview> GUESTS need the same popup policy — the guest's
   // 'new-window' DOM event was removed in Electron 22, so a renderer-side
@@ -989,15 +1406,60 @@ ${
   // nothing at all (no window, no external open). The guest's own
   // setWindowOpenHandler is the supported route.
   win.webContents.on('did-attach-webview', (_ev, guest) => {
+    // http(s) only, after a real click or key press in the guest, one per
+    // 2 s — and every refusal said (tmplWebGuard's __aioWebPopup).
     guest.setWindowOpenHandler(({ url }) => {
-      try {
-        const u = new URL(url);
-        if (u.protocol === 'http:' || u.protocol === 'https:') {
-          require('electron').shell.openExternal(url);
-        }
-      } catch {}
+      __aioWebPopup(guest, url);
       return { action: 'deny' };
     });
+    // 🔒 A guest in the APP'S OWN session (no partition, started on the app's
+    // own page — will-attach-webview above) stays on the app. Measured
+    // (Electron 44): once it is on another site, that site reads and POSTs to
+    // aio://app. What a guest's main-frame navigation fires, measured too:
+    //   • the page itself (a link, location=) → will-navigate;
+    //   • a redirect → will-redirect;
+    //   • the EMBEDDER (webview.src = …, loadURL) → neither, only
+    //     did-start-navigation — which cannot be prevented, crashes the
+    //     process when the load is stopped inside it (SIGTRAP), and loses
+    //     the race when stopped after it (the request was already sent).
+    // So the one place all three pass is the session's request filter: the
+    // main-frame request of a guest, to another http(s) site, is cancelled
+    // before it is sent. It is the app session's only webRequest listener.
+    //
+    // A main-frame request with NO webContents is cancelled too: it cannot be
+    // shown not to be a guest's. Measured (Electron 44): every main-frame
+    // request — a window's or a guest's load, reload, redirect, a prerender —
+    // names its webContents; the ones that name none are a service worker's
+    // script and its fetches, which are not main-frame requests and are not
+    // filtered here. The app window's own main-frame requests always name it.
+    const _inApp = !!guest.session && guest.session === win.webContents.session;
+    // …and a foreign <iframe> inside such a guest reads aio://app exactly as
+    // one in the app's window does: said the same way.
+    if (_inApp && _aioScheme) guest.on('did-frame-navigate', _foreignFrame("a <webview> with no partition (the app's session)"));
+    if (_inApp && !_wvHeld) {
+      _wvHeld = true;
+      guest.session.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*'], types: ['mainFrame'] }, (d, cb) => {
+        let cancel = false;
+        try {
+          const u = new URL(d.url);
+          const from = d.webContents;
+          cancel = d.resourceType === 'mainFrame' && !_sameApp(u) && (!from || from.getType() === 'webview');
+          if (cancel) {
+            const site = u.protocol + '//' + u.host;
+            __aioWebSay('guest navigation', (from ? '' : 'unnamed ') + site, from
+              ? 'navigation BLOCKED in <webview> guest to ' + site +
+                " — this <webview> has no partition, so it lives in the app's own session, where a page of another site " +
+                'can read what the app serves on aio://. Fix: give the <webview> a partition (partition="persist:name") and it may go anywhere.'
+              : 'a page load of ' + site + " in the app's session named no window or <webview> and was CANCELLED — " +
+                'while a <webview> with no partition lives in that session, a load that cannot be shown not to be its own does not go out.');
+          }
+        } catch (e) {
+          cancel = true; // a request that cannot be judged does not load
+          console.warn('[aio:electron] a <webview> navigation could not be checked and was cancelled: ' + ((e && e.message) || e));
+        }
+        cb({ cancel });
+      });
+    }
 ${tmplHostKeyRelay()}
   });`;
 }
@@ -1791,6 +2253,9 @@ export function shellBridgePreload(
   }contextBridge.exposeInMainWorld('__aioShell', {
   focus:  ()   => ipcRenderer.send('__aio:focus'),
   onTray: (fn) => ipcRenderer.on('__aio:tray', (_e, item) => fn(item)),
+  // Wipe a partition (a <webview>'s, or one given to openWindow): cookies,
+  // storage, cache, HTTP auth. Resolves { ok, partition } or rejects with why.
+  clearPartition: (partition) => ipcRenderer.invoke('__aio:clearPartition', partition),
 });
 // Window controls for ui.chrome "themed"/"none": a frameless window loses
 // minimise, maximise and close along with its frame, and a page cannot get

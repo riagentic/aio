@@ -17,9 +17,11 @@ import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { replayJournal } from "../src/server/journal.ts";
 import type { JournalEntry } from "../src/server/journal.ts";
+import { fromFileUrl } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 
 const MOD = new URL("../mod.ts", import.meta.url).href;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 const V1 = `const w = cell("w", {
   state: { units: 0 },
@@ -36,7 +38,7 @@ const V2 = `const w = cell("w", {
 });`;
 
 const child = (cellSrc: string) => `
-import { aio, cell } from "${MOD}";
+import { aio, cell } from "${spec(MOD)}";
 const DIR = Deno.env.get("DIR");
 ${cellSrc}
 const app = await aio.run({

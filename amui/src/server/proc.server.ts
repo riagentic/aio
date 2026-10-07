@@ -1,11 +1,30 @@
 // Process + filesystem control for a project — server-side, dynamic-imported.
 // Every path operation is confined to the project dir (no traversal), spawns
 // are detached so a started app survives amui, and outputs are size-capped.
-import { isAbsolute, join, normalize, relative } from "@std/path";
+import {
+  fromFileUrl,
+  isAbsolute,
+  join,
+  normalize,
+  relative,
+  SEPARATOR,
+  SEPARATOR_PATTERN,
+} from "@std/path";
 import { appDirs } from "aio/server";
-// THE entry rule, imported rather than restated — see `resolveEntry` below.
-import { resolveEntryPath } from "../../../src/server/paths.ts";
-import { readProjectMeta } from "./scan.server.ts";
+// THE entry rule and THE home rule, imported rather than restated — see
+// `resolveEntry` and `findRepoRoot` below.
+import { homedir, resolveEntryPath } from "../../../src/server/paths.ts";
+// THE name `am start` tells a child its stdout is a log file by.
+import { STDOUT_IS_LOG_ENV } from "../../../src/diagnostics/logger-format.ts";
+// THE detached launch and THE reader of what it captured — `am start`'s own.
+import {
+  childSaid,
+  detachedSpawnSpec,
+  launchDetached,
+} from "../../../src/am/am-cmd-process.ts";
+import { pathKey, pathOf, readProjectMeta } from "./scan.server.ts";
+
+type OS = typeof Deno.build.os;
 
 const LOG_MAX = 200_000; // cap captured task output
 const VIEW_MAX = 2_000_000; // 2 MB — files larger than this show a size notice
@@ -14,7 +33,7 @@ const VIEW_MAX = 2_000_000; // 2 MB — files larger than this show a size notic
 function safeJoin(root: string, rel: string): string | null {
   const abs = normalize(join(root, rel));
   const r = relative(root, abs);
-  if (r.startsWith("..") || r.startsWith("/")) return null;
+  if (r.startsWith("..") || isAbsolute(r)) return null;
   return abs;
 }
 
@@ -102,27 +121,38 @@ export async function startApp(
   if (!resolved.ok) return { ok: false, error: resolved.error };
   const entry = resolved.entry;
   const logFile = startLogPath(dir);
-  const esc = (s: string) => "'" + s.replace(/'/g, "'\\''") + "'";
   const home = !profile && instance?.home && instance.appId &&
       normalize(instance.home) !== normalize(appDirs(instance.appId).home)
     ? instance.home
     : undefined;
-  const inner = `deno run -A --unstable-kv ${esc(entry)} --client=${client}${
-    profile ? ` ${esc(`--profile=${profile}`)}` : ""
-  }${home ? ` ${esc(`--home=${home}`)}` : ""}`;
-  const cmd = `nohup ${inner} >${esc(logFile)} 2>&1 & echo $!`;
+  // THE launcher `am start` uses, called rather than restated: amui built its
+  // own `sh -c "nohup … & echo $!"` line here, and there is no `sh` on
+  // Windows — Start and Restart failed outright there. `"deno"` from PATH, not
+  // the default `Deno.execPath()`: a compiled amui's execPath is amui itself.
+  const spec = detachedSpawnSpec(
+    Deno.build.os,
+    [
+      "run",
+      "-A",
+      "--unstable-kv",
+      entry,
+      `--client=${client}`,
+      ...(profile ? [`--profile=${profile}`] : []),
+      ...(home ? [`--home=${home}`] : []),
+    ],
+    logFile,
+    "deno",
+  );
   try {
-    const out = await new Deno.Command("sh", {
-      args: ["-c", cmd],
+    const pid = await launchDetached(spec, logFile, {
       cwd: dir,
-      env: projectEnv(),
+      // Told, exactly as `am start` tells it, that its stdout is a log FILE:
+      // without this an `--expose` banner's share-link token and pair code
+      // were written to `.aio-amui-start.log` in clear.
+      env: { ...projectEnv(), [STDOUT_IS_LOG_ENV]: "1" },
       clearEnv: true,
-      stdin: "null",
-      stdout: "piped",
-      stderr: "null",
-    }).output();
-    const pid = parseInt(new TextDecoder().decode(out.stdout).trim(), 10);
-    return { ok: true, pid: Number.isFinite(pid) ? pid : undefined };
+    });
+    return { ok: true, pid };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
@@ -231,12 +261,12 @@ export function startFailureReason(text: string, n = 6): string {
  *  {@link startFailureReason}. The launcher's capture is the only place that
  *  reason exists (the app died before it could write its own logs). Empty when
  *  nothing was captured. */
-export async function startLogTail(dir: string, n = 6): Promise<string> {
-  try {
-    return startFailureReason(await Deno.readTextFile(startLogPath(dir)), n);
-  } catch {
-    return "";
-  }
+export function startLogTail(dir: string, n = 6): Promise<string> {
+  // Both files: on Windows the launcher splits stderr into `<log>.err`, and
+  // the reason a boot failed is there.
+  return Promise.resolve(
+    startFailureReason(childSaid(startLogPath(dir)).text, n),
+  );
 }
 
 /** Wait for a freshly-spawned app to REGISTER as running. Resolves as soon as
@@ -416,23 +446,17 @@ export interface RuntimeInfo {
   label: string; // human summary for the header
 }
 
-/** Inspect a running app's process to describe its RUNTIME (what's actually
- *  executing), from /proc on Linux: dev = deno running source (runtime = its
- *  cwd), AppImage = the mounted squashfs (unpacked contents + location), a
- *  `deno compile` binary = the binary's dir. Falls back to the project dir. */
-export async function runtimeInfo(
-  pid: number,
+/** A running app's RUNTIME (what's actually executing), from its executable
+ *  and cwd: dev = deno running source (runtime = its cwd), AppImage = the
+ *  mounted squashfs (unpacked contents + location), a `deno compile` binary =
+ *  the binary's dir. No executable known → the project dir. Pure; `os` is the
+ *  OS the paths come from. */
+export function runtimeOf(
+  os: OS,
+  exe: string | null,
+  cwd: string | null,
   projectDir: string,
-): Promise<RuntimeInfo> {
-  const readLink = async (p: string) => {
-    try {
-      return await Deno.readLink(p);
-    } catch {
-      return null;
-    }
-  };
-  const exe = await readLink(`/proc/${pid}/exe`);
-  const cwd = await readLink(`/proc/${pid}/cwd`);
+): RuntimeInfo {
   if (!exe) {
     return {
       kind: "unknown",
@@ -451,8 +475,8 @@ export async function runtimeInfo(
       label: `AppImage — unpacked at ${mount[1]}`,
     };
   }
-  const base = exe.split("/").pop() ?? "";
-  if (base === "deno" || base.startsWith("deno")) {
+  const P = pathOf(os);
+  if (P.basename(exe).startsWith("deno")) {
     return {
       kind: "dev",
       root: cwd ?? projectDir,
@@ -463,10 +487,55 @@ export async function runtimeInfo(
   // Standalone compiled binary — its own directory is the runtime root.
   return {
     kind: "compiled",
-    root: exe.split("/").slice(0, -1).join("/"),
+    root: P.dirname(exe),
     exe,
     label: `compiled binary — ${exe}`,
   };
+}
+
+/** The executable and cwd of `pid`, asked the way each OS answers: `/proc` on
+ *  Linux; kernel32 on Windows and `ps -o comm=` on macOS, neither of which
+ *  gives the cwd away (the caller's project dir stands in — for a dev app that
+ *  IS the cwd its lock recorded). */
+async function processPaths(
+  pid: number,
+): Promise<{ exe: string | null; cwd: string | null }> {
+  if (Deno.build.os === "windows") {
+    const { winProcExe } = await import("./win-proc.server.ts");
+    return { exe: winProcExe(pid), cwd: null };
+  }
+  if (Deno.build.os === "darwin") {
+    const out = await new Deno.Command("ps", {
+      args: ["-o", "comm=", "-p", String(pid)],
+      stdout: "piped",
+      stderr: "null",
+    }).output();
+    return {
+      exe: new TextDecoder().decode(out.stdout).trim() || null,
+      cwd: null,
+    };
+  }
+  const readLink = async (p: string) => {
+    try {
+      return await Deno.readLink(p);
+    } catch {
+      return null;
+    }
+  };
+  return {
+    exe: await readLink(`/proc/${pid}/exe`),
+    cwd: await readLink(`/proc/${pid}/cwd`),
+  };
+}
+
+/** Inspect a running app's process to describe its RUNTIME — see
+ *  {@linkcode runtimeOf}. Falls back to the project dir. */
+export async function runtimeInfo(
+  pid: number,
+  projectDir: string,
+): Promise<RuntimeInfo> {
+  const { exe, cwd } = await processPaths(pid);
+  return runtimeOf(Deno.build.os, exe, cwd, projectDir);
 }
 
 /** How far above the app amui will look for an enclosing repo. A monorepo puts
@@ -474,37 +543,53 @@ export async function runtimeInfo(
  *  bound, it was "keep going". */
 const REPO_WALK_MAX = 6;
 
+/** The directories {@linkcode findRepoRoot} may accept, nearest first: `dir`
+ *  and its ancestors, at most `max` of them, never the home directory or
+ *  anything above it, never the filesystem root. Pure — `os` decides what a
+ *  parent is and whether case tells two paths apart. */
+export function repoCandidates(
+  os: OS,
+  dir: string,
+  home: string,
+  max = REPO_WALK_MAX,
+): string[] {
+  const P = pathOf(os);
+  const out: string[] = [];
+  let cur = dir;
+  for (let i = 0; i < max; i++) {
+    if (home && pathKey(os, cur) === pathKey(os, home)) break;
+    out.push(cur);
+    const parent = P.dirname(cur);
+    if (parent === cur || parent === P.parse(parent).root) break;
+    cur = parent;
+  }
+  return out;
+}
+
 /** Walk up from `dir` to the enclosing git repository root (first ancestor with
  *  a `.git`). Returns null when the app isn't inside a repo. Lets the Codebase
  *  tab show the whole repo when the app is a subdir of a larger monorepo.
  *
- *  It STOPS at $HOME, and never accepts $HOME (or anything above it) as a repo
- *  root. Plenty of people keep their dotfiles in git, and for them this walked
- *  twelve levels up, found `~/.git`, and made the Codebase tab a browser of the
- *  entire home directory — `.ssh/id_rsa` and `.aws/credentials` listed in the
- *  tree, readable in the viewer, and copied into amui's cell state (and from
- *  there into the DOM, and into every synced client). "The repo that contains
- *  the app" is never the home directory; treating it as one is not a wider
- *  view, it is a different thing entirely. */
+ *  It STOPS at the home directory, and never accepts it (or anything above it)
+ *  as a repo root. Plenty of people keep their dotfiles in git, and for them
+ *  this walked twelve levels up, found `~/.git`, and made the Codebase tab a
+ *  browser of the entire home directory — `.ssh/id_rsa` and `.aws/credentials`
+ *  listed in the tree, readable in the viewer, and copied into amui's cell
+ *  state (and from there into the DOM, and into every synced client). "The
+ *  repo that contains the app" is never the home directory; treating it as one
+ *  is not a wider view, it is a different thing entirely. */
 export async function findRepoRoot(
   dir: string,
   homeDir?: string,
 ): Promise<string | null> {
-  // Taken as an argument (defaulting to the env) so a test can pin a fake home
-  // WITHOUT mutating `Deno.env` — that is process-global, and this module runs
-  // in the same process as every other amui test.
-  const home = homeDir ?? Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE") ??
-    "";
-  let cur = dir;
-  for (let i = 0; i < REPO_WALK_MAX; i++) {
-    if (home && cur === home) break; // at $HOME — a repo root cannot be here
+  // Taken as an argument (defaulting to the framework's home rule) so a test
+  // can pin a fake home WITHOUT mutating `Deno.env` — that is process-global,
+  // and this module runs in the same process as every other amui test.
+  for (const cur of repoCandidates(Deno.build.os, dir, homeDir ?? homedir())) {
     try {
       const st = await Deno.stat(join(cur, ".git"));
       if (st.isDirectory || st.isFile) return cur; // .git dir or worktree file
     } catch { /* keep walking up */ }
-    const parent = cur.split("/").slice(0, -1).join("/");
-    if (!parent || parent === cur) break;
-    cur = parent;
   }
   return null;
 }
@@ -552,7 +637,9 @@ export async function listFiles(
 
 /** Does any segment of `rel` (or of `dir` itself) name a secret directory? */
 export function touchesSecretDir(dir: string, rel: string): boolean {
-  return `${dir}/${rel}`.split("/").some((seg) => SECRET_DIRS.has(seg));
+  return `${dir}/${rel}`.split(SEPARATOR_PATTERN).some((seg) =>
+    SECRET_DIRS.has(seg)
+  );
 }
 
 /** Read a file's content (text; oversized/binary files are refused with a
@@ -591,7 +678,7 @@ export async function readFile(
     // readable through the viewer.
     const real = await Deno.realPath(abs);
     const root = await Deno.realPath(dir);
-    if (real !== root && !real.startsWith(root + "/")) {
+    if (real !== root && !real.startsWith(root + SEPARATOR)) {
       return { ok: false, error: "path outside project" };
     }
     const info = await Deno.stat(real);
@@ -639,13 +726,12 @@ export async function createApp(
     // decodeURIComponent: a repo path with spaces arrives as %20 in .pathname;
     // passed raw as CLI args it would resolve to a non-existent path.
     const amPath = decodeURIComponent(
-      new URL("../../../src/am.ts", import.meta.url).pathname,
+      fromFileUrl(new URL("../../../src/am.ts", import.meta.url)),
     );
     const repoPath = decodeURIComponent(
-      new URL("../../../", import.meta.url).pathname,
+      fromFileUrl(new URL("../../../", import.meta.url)),
     );
-    const home = Deno.env.get("HOME") ?? ".";
-    const workspace = `${home}/aio-apps`;
+    const workspace = join(homedir(), "aio-apps");
     await Deno.mkdir(workspace, { recursive: true });
     const out = await new Deno.Command("deno", {
       args: [
@@ -660,7 +746,7 @@ export async function createApp(
       stdout: "piped",
       stderr: "piped",
     }).output();
-    return out.code === 0 ? { ok: true, dir: `${workspace}/${name}` } : {
+    return out.code === 0 ? { ok: true, dir: join(workspace, name) } : {
       ok: false,
       error: new TextDecoder().decode(out.stderr).slice(0, 200),
     };
@@ -691,6 +777,36 @@ async function cpuSeconds(pid: number, psTime: string): Promise<number> {
     Number(m[3]) * 60 + Number(m[4]);
 }
 
+/** One reading of `pid`: the lifetime-average cpu%, RSS, the cumulative cpu
+ *  seconds, and when it was taken. `ps` everywhere it exists (the flags are
+ *  POSIX; macOS's `ps` takes them too); kernel32 on Windows. */
+async function procSample(
+  pid: number,
+): Promise<{ cpuPct: number; rssKb: number; cpuSec: number; at: number }> {
+  if (Deno.build.os === "windows") {
+    const { winProcSample } = await import("./win-proc.server.ts");
+    const w = winProcSample(pid);
+    return {
+      ...(w ?? { cpuPct: NaN, rssKb: NaN, cpuSec: NaN }),
+      at: performance.now(),
+    };
+  }
+  const out = await new Deno.Command("ps", {
+    args: ["-o", "%cpu=,rss=,time=", "-p", String(pid)],
+    stdout: "piped",
+    stderr: "null",
+  }).output();
+  const at = performance.now();
+  const line = new TextDecoder().decode(out.stdout).trim();
+  const [cpu, rss, time] = line.split(/\s+/);
+  return {
+    cpuPct: Number(cpu),
+    rssKb: Number(rss),
+    cpuSec: line ? await cpuSeconds(pid, time ?? "") : NaN,
+    at,
+  };
+}
+
 /** cpu% and RSS of `pid`. The cpu% is the rate SINCE THE PREVIOUS SAMPLE of the
  *  same pid — `ps -o %cpu` is the lifetime average (cpu time / elapsed), so a
  *  chart of it could not show what the app is doing now: idle after a busy
@@ -700,17 +816,8 @@ export async function psStats(
   pid: number,
 ): Promise<{ cpuPct: number; memMb: number } | null> {
   try {
-    const out = await new Deno.Command("ps", {
-      args: ["-o", "%cpu=,rss=,time=", "-p", String(pid)],
-      stdout: "piped",
-      stderr: "null",
-    }).output();
-    const at = performance.now();
-    const line = new TextDecoder().decode(out.stdout).trim();
-    const [cpu, rss, time] = line.split(/\s+/);
-    let cpuPct = Number(cpu);
-    const rssKb = Number(rss);
-    const cpuSec = line ? await cpuSeconds(pid, time ?? "") : NaN;
+    const { rssKb, cpuSec, at, ...s } = await procSample(pid);
+    let cpuPct = s.cpuPct;
     const prev = lastCpu.get(pid);
     if (Number.isFinite(cpuSec)) {
       lastCpu.set(pid, { cpuSec, at });
@@ -826,6 +933,41 @@ function logCandidates(
   }
 }
 
+/** The last LOG_TAIL_MAX bytes of the file at `p` (`size` bytes long), from
+ *  the first whole line. */
+async function tailText(
+  p: string,
+  size: number,
+): Promise<{ text: string; bytesDropped: boolean }> {
+  if (size <= LOG_TAIL_MAX) {
+    return { text: await Deno.readTextFile(p), bytesDropped: false };
+  }
+  using f = await Deno.open(p, { read: true });
+  // One byte EARLIER than the window: if it is a newline, the window
+  // starts on a whole line and that line is kept (see below).
+  await f.seek(size - LOG_TAIL_MAX - 1, Deno.SeekMode.Start);
+  const buf = new Uint8Array(LOG_TAIL_MAX + 1);
+  let off = 0;
+  while (off < buf.length) {
+    const n = await f.read(buf.subarray(off));
+    if (n === null) break;
+    off += n;
+  }
+  // The seek lands mid-line (and possibly mid-UTF-8-sequence): the
+  // first line of the window is a FRAGMENT. It used to be shown as a
+  // raw, unparseable line at the top of the tail — a half timestamp or
+  // a word cut in two, with replacement characters. Start at the first
+  // whole line. (No newline in the whole window = one giant line: show
+  // what there is rather than nothing.)
+  const firstNl = buf.subarray(0, off).indexOf(0x0a);
+  return {
+    text: new TextDecoder().decode(
+      buf.subarray(firstNl === -1 ? 0 : firstNl + 1, off),
+    ),
+    bytesDropped: true,
+  };
+}
+
 /** Tail an app's logs. `cwd` is the app's working dir (== project path for a
  *  dev app; the lock cwd for a running instance); `appId` (when known) unlocks
  *  the app's own log directory, under `home` (the running instance's data
@@ -851,35 +993,21 @@ export async function readLogs(
     let text: string;
     let bytesDropped = false;
     try {
-      if (stat.size > LOG_TAIL_MAX) {
-        using f = await Deno.open(p, { read: true });
-        // One byte EARLIER than the window: if it is a newline, the window
-        // starts on a whole line and that line is kept (see below).
-        await f.seek(stat.size - LOG_TAIL_MAX - 1, Deno.SeekMode.Start);
-        const buf = new Uint8Array(LOG_TAIL_MAX + 1);
-        let off = 0;
-        while (off < buf.length) {
-          const n = await f.read(buf.subarray(off));
-          if (n === null) break;
-          off += n;
-        }
-        // The seek lands mid-line (and possibly mid-UTF-8-sequence): the
-        // first line of the window is a FRAGMENT. It used to be shown as a
-        // raw, unparseable line at the top of the tail — a half timestamp or
-        // a word cut in two, with replacement characters. Start at the first
-        // whole line. (No newline in the whole window = one giant line: show
-        // what there is rather than nothing.)
-        const firstNl = buf.subarray(0, off).indexOf(0x0a);
-        text = new TextDecoder().decode(
-          buf.subarray(firstNl === -1 ? 0 : firstNl + 1, off),
-        );
-        bytesDropped = true;
-      } else {
-        text = await Deno.readTextFile(p);
-      }
+      ({ text, bytesDropped } = await tailText(p, stat.size));
     } catch {
       continue;
     }
+    // A launcher capture on Windows is TWO files — stderr is split into
+    // `<log>.err` (`detachedSpawnSpec`), and that is where stack traces go.
+    // Absent everywhere else.
+    try {
+      const err = await tailText(
+        `${p}.err`,
+        (await Deno.stat(`${p}.err`)).size,
+      );
+      text += (text && !text.endsWith("\n") ? "\n" : "") + err.text;
+      bytesDropped ||= err.bytesDropped;
+    } catch { /* no stderr split beside this log */ }
     const all = logLinesOf(text);
     const lines = all.slice(-tailLines);
     return {

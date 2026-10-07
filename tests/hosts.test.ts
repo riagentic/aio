@@ -183,7 +183,24 @@ const app = await aio.run({
   // absence of a handler.
   routes: { "/hosts-ping": () => new Response("pong") },
 });
-await drive(app, () => Deno.kill(Deno.pid, "SIGTERM"), true);
+// Windows has no SIGTERM to deliver (kill there is TerminateProcess: exit 1,
+// no drain) — the app is asked the way "am stop" asks it there: the shutdown
+// request, with this boot's control credential.
+const stop = Deno.build.os !== "windows"
+  ? () => Deno.kill(Deno.pid, "SIGTERM")
+  : async () => {
+    const port = Deno.args.find((a) => a.startsWith("--port="))!.slice(7);
+    const key = Deno.readTextFileSync(
+      Deno.env.get("AIO_APPS_DIR") + "/${APP_ID}/data/control.key",
+    ).trim();
+    const r = await fetch(
+      "http://127.0.0.1:" + port + "/__aio/trojan/shutdown",
+      { method: "POST", headers: { "X-AIO": "1", "X-Aio-Control": key } },
+    );
+    const said = await r.text();
+    if (!r.ok) throw new Error("stop refused: " + r.status + " " + said);
+  };
+await drive(app, stop, true);
 `,
   // The Android shape: the same cells, \`aio\` resolved to standalone-air (the
   // build's own alias, esbuild-shared.ts), and the store the APK injects.
@@ -353,6 +370,17 @@ async function tree(pid: number): Promise<number[]> {
 
 /** TCP LISTEN sockets held by any process in `pids` → "addr:port" list. */
 function tcpListeners(pids: number[]): string[] {
+  if (Deno.build.os === "darwin") {
+    // No /proc: lsof, ANDing (`-a`) the pid list with "TCP, listening".
+    // `-Fn` prints one `n<addr>:<port>` line per socket found.
+    const r = new Deno.Command("lsof", {
+      args: ["-nP", "-a", "-p", pids.join(","), "-iTCP", "-sTCP:LISTEN", "-Fn"],
+      stdout: "piped",
+      stderr: "null",
+    }).outputSync();
+    return new TextDecoder().decode(r.stdout).split("\n")
+      .filter((l) => l.startsWith("n")).map((l) => l.slice(1));
+  }
   const inodes = new Set(pids.flatMap((p) => [...socketInodes(p)]));
   const found: string[] = [];
   for (const table of ["/proc/net/tcp", "/proc/net/tcp6"]) {
@@ -449,7 +477,27 @@ type Run = {
   log: () => string;
   /** Both output pumps, drained — awaited on teardown so nothing leaks. */
   done: Promise<unknown>;
+  /** The TCP port the host was started on, when it has one. */
+  port?: number;
 };
+
+/** Ask a running host to stop, gracefully. SIGTERM where there is one;
+ *  Windows has none to deliver (\`kill\` there is TerminateProcess — exit 1,
+ *  no drain), so the app is asked the way \`am stop\` asks it there: the
+ *  shutdown request, with this boot's control credential. */
+async function askToStop(pid: number, run: Run, root: string): Promise<void> {
+  if (Deno.build.os !== "windows") return Deno.kill(pid, "SIGTERM");
+  assert(run.port, "no port to ask on — this host has no stop on Windows");
+  const key = Deno.readTextFileSync(
+    join(root, "data", "apps", APP_ID, "data", "control.key"),
+  ).trim();
+  const r = await fetch(
+    `http://127.0.0.1:${run.port}/__aio/trojan/shutdown`,
+    { method: "POST", headers: { "X-AIO": "1", "X-Aio-Control": key } },
+  );
+  const said = await r.text();
+  assert(r.ok, `stop refused: ${r.status} ${said}`);
+}
 
 type Host = {
   name: string;
@@ -537,22 +585,24 @@ const server = (mode: "single" | "multi"): Host => ({
         `nothing: ${JSON.stringify(hits)}`,
     );
   },
-  launch: (fx, _root, env) =>
-    start(
-      "deno",
-      [
-        "run",
-        "-A",
-        "src/app.ts",
-        `--port=${freePort()}`,
-        "--client=browser",
-      ],
-      fx,
-      { ...env, AIO_HOSTS_PERSIST_MODE: mode },
-    ),
+  launch: (fx, _root, env) => {
+    const port = freePort();
+    return {
+      ...start(
+        "deno",
+        ["run", "-A", "src/app.ts", `--port=${port}`, "--client=browser"],
+        fx,
+        { ...env, AIO_HOSTS_PERSIST_MODE: mode },
+      ),
+      port,
+    };
+  },
   // Instrument control: the same socket reader must SEE a listener where
   // one exists, or its "none" on the electron row proves nothing.
   whileUp: async (run) => {
+    // The reader is /proc (lsof on macOS), and the only row it is a control
+    // for is the packaged AppImage — neither exists on Windows.
+    if (Deno.build.os === "windows") return;
     const tcp = tcpListeners(await tree(run.proc.pid));
     assert(
       tcp.length > 0,
@@ -727,13 +777,13 @@ async function runStep(
     );
     if (step === "boot") {
       await live?.();
-      Deno.kill(report.pid, "SIGTERM");
+      await askToStop(report.pid, run, root);
     }
     if (step === "read" && host.whileUp) {
       await host.whileUp(run, root);
       // The APP process (the pid it reported), not whatever wraps it: an
       // AppImage runtime dies of a SIGTERM (143) without passing it on.
-      Deno.kill(report.pid, "SIGTERM");
+      await askToStop(report.pid, run, root);
     }
     let timer: ReturnType<typeof setTimeout> | undefined;
     const status = await Promise.race([

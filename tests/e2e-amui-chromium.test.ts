@@ -23,9 +23,10 @@ import {
   tempDir,
 } from "../src/testing/temp-dir.ts";
 import { freePort } from "../src/testing/server-test.ts";
+import { fromFileUrl } from "@std/path";
 const _childCovDir = childCoverageDir();
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 function findBrowser(): string | null {
   if (Deno.env.get("AIO_E2E") === "0") return null;

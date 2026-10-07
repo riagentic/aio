@@ -16,7 +16,7 @@
  */
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { join, resolve } from "@std/path";
 import {
   createStaticHandler,
   devModuleUrl,
@@ -179,18 +179,19 @@ Deno.test("dev import outside the app root: only the imported graph is served, w
 });
 
 Deno.test("dev import outside the app root: a file outside every root and the source tree has no dev url", () => {
-  const src = "/p";
-  const base = "/p/src/pro";
+  // Host paths, as the dev server passes them (`C:\\p\\…` on Windows).
+  const src = resolve("/p");
+  const base = resolve("/p/src/pro");
   // Inside the source tree: one url under the source prefix.
   assertEquals(
-    devModuleUrl("/p/src/ui/Shell.tsx", base, [], src),
+    devModuleUrl(resolve("/p/src/ui/Shell.tsx"), base, [], src),
     "/__aio-src/src/ui/Shell.tsx",
   );
   // Outside it (a sibling of the project, or anywhere on disk): no url, so
   // the dev server never rewrites to it and smoke() names the file instead.
-  assertEquals(devModuleUrl("/other/x.ts", base, [], src), null);
-  assertEquals(devModuleUrl("/pother/x.ts", base, [], src), null);
-  assertEquals(devModuleUrl("/other/x.ts", base, [], null), null);
+  assertEquals(devModuleUrl(resolve("/other/x.ts"), base, [], src), null);
+  assertEquals(devModuleUrl(resolve("/pother/x.ts"), base, [], src), null);
+  assertEquals(devModuleUrl(resolve("/other/x.ts"), base, [], null), null);
 });
 
 Deno.test("dev import outside the app root: a .js/.mjs module outside the app root has its own relative imports rewritten and served", async () => {

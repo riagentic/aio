@@ -33,15 +33,15 @@ time. They looked for the kit on this page, and it was not here.
 import { Button, Card, Field, Input, Table, toast, UiStyles } from "aio/ui";
 ```
 
-|              |                                                                                                    |
-| ------------ | -------------------------------------------------------------------------------------------------- |
-| **Forms**    | `Button` `Input` `Textarea` `Select` `Checkbox` `RadioGroup` `Switch` `Field`                      |
-| **Layout**   | `Card` `Stack` `Row` `Tabs` `Breadcrumb`                                                           |
-| **Data**     | `Table` `Pagination` `Markdown` `Avatar`                                                           |
-| **Feedback** | `Alert` `Progress` `Spinner` `Skeleton` `EmptyState` `Tooltip` `toast` / `ToastHost`               |
-| **Overlay**  | `Modal` `Confirm` `ConfirmButton` `Menu`                                                           |
-| **Embed**    | `Browser` (a web page inside your app — see [webview](../clients/webview.md))                      |
-| **Styles**   | `UiStyles` (render once) · `UI_CSS` (the raw sheet) · `css` / `cx` / `collectCss` (scoped classes) |
+|              |                                                                                                                                |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| **Forms**    | `Button` `Input` `Textarea` `Select` `Checkbox` `RadioGroup` `Switch` `Field`                                                  |
+| **Layout**   | `Card` `Stack` `Row` `Tabs` `Breadcrumb`                                                                                       |
+| **Data**     | `Table` `Pagination` `Markdown` `Avatar`                                                                                       |
+| **Feedback** | `Alert` `Progress` `Spinner` `Skeleton` `EmptyState` `Tooltip` `toast` / `ToastHost`                                           |
+| **Overlay**  | `Modal` `Confirm` `ConfirmButton` `Menu`                                                                                       |
+| **Embed**    | `Browser` (a web page inside your app), `guestPreload` (names a declared guest preload) — see [webview](../clients/webview.md) |
+| **Styles**   | `UiStyles` (render once) · `UI_CSS` (the raw sheet) · `css` / `cx` / `collectCss` (scoped classes)                             |
 
 Every component takes the `Common` props (`class`, `id`, `style`, `t`) and
 renders through AIR — no wrapper, no runtime. The kit is
@@ -90,7 +90,7 @@ Everything below is the full reference, organized by category.
 | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `freezeState`     | Extra full-tree deep-freeze after every reduce (default: `true` in dev, `false` in prod). Committed state is frozen in every mode regardless (Immer), so an illegal mutation throws in prod too                                                                 |
 | `guardDispatches` | Supervised runtime: an unhandled promise rejection is logged, checkpointed and the process SURVIVES (default `true` since alpha61; `false` = fail-fast). A rejected top-level `await` of the script itself still exits 1                                        |
-| `childWindows`    | Let the Electron client open CHILD windows to arbitrary http(s) URLs via `__aioIPC.openWindow` (default `false` -- real attack surface, opt in)                                                                                                                 |
+| `childWindows`    | Electron: enable BOTH `__aioIPC.openWindow` (child windows to http(s) URLs) and the `<webview>` tag (default `false` -- real attack surface, opt in). For the tag alone: `electron: { webviewTag: true }`                                                       |
 | `refusalsReject`  | A write the reduce REFUSED (a `validate` hook) rejects `await cell.method()` in process, the way the wire already answers it (`ACTION_REFUSED`). Default `false`, because it changes what an in-process `await` does; dev warns once per method while it is off |
 
 ### Dispatch introspection

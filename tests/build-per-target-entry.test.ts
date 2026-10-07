@@ -163,8 +163,9 @@ Deno.test("out-dir: an ABSOLUTE path is honoured, and then refused if it escapes
   const root = "/proj";
   // Resolution is what the orchestrator does with the flag; `resolve` honours
   // an absolute path where `join` does not.
-  assertEquals(resolve(root, "/srv/release"), "/srv/release");
-  assertEquals(resolve(root, "release"), "/proj/release");
+  // (On Windows every absolute path here gains the current drive.)
+  assertEquals(resolve(root, "/srv/release"), resolve("/srv/release"));
+  assertEquals(resolve(root, "release"), resolve("/proj/release"));
   // …and an absolute path outside the project is then REFUSED, like any other
   // escape.
   assert(unsafeOutDir("/srv/release", root), "an absolute escape");

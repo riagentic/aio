@@ -11,8 +11,9 @@ import { assert, assertEquals } from "@std/assert";
 import { walk } from "@std/fs/walk";
 import { HELP_TEXT } from "../src/am/am-cmd-meta.ts";
 import { commandIssues, loadTaskNames } from "../scripts/check-docs.ts";
+import { fromFileUrl } from "@std/path";
 
-const ROOT = new URL("../", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("../", import.meta.url));
 
 /** The verbs the help text documents: the first word of each entry line, plus
  *  every `am <word>` its prose names (short spellings such as `am tt`). */
@@ -38,7 +39,7 @@ Deno.test("help documents the verbs the docs teach", async () => {
   for await (
     const e of walk(`${ROOT}docs`, { exts: [".md"], includeDirs: false })
   ) {
-    const rel = e.path.replace(ROOT, "");
+    const rel = e.path.replace(ROOT, "").replaceAll("\\", "/");
     // Dated specs, release notes and upgrade guides are history — they quote
     // the spellings that were retired. A guide teaches the current one.
     if (

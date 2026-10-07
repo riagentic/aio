@@ -13,7 +13,7 @@
 // assert that no process is left in the app's cwd and the launch never
 // happened. Linux-only: `/proc/<pid>/cwd` is how the survivors are found.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
 import { tempDir } from "../src/testing/temp-dir.ts";
 import { testDisplayEnv } from "../src/testing/test-display.ts";
@@ -31,7 +31,7 @@ async function within<T>(p: Promise<T>, ms: number): Promise<T | null> {
   }
 }
 
-const ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const ROOT = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 
 /** Every live pid whose cwd is `dir` (the installer runs in the app's cwd). */
 function pidsIn(dir: string): number[] {
@@ -54,7 +54,7 @@ for (const sig of ["SIGTERM", "SIGHUP"] as const) {
   Deno.test({
     name:
       `electron launch: ${sig} mid-boot (installer running) — no child survives, no window after shutdown`,
-    ignore: Deno.build.os !== "linux",
+    ignore: Deno.build.os !== "linux", // a signal the app catches mid-boot: Linux process groups, and Windows has neither signal
     fn: async () => {
       const dir = await Deno.realPath(await tempDir("aio-elstop"));
       // The registry that never answers — held connections prove the installer
@@ -200,7 +200,6 @@ for (const sig of ["SIGTERM", "SIGHUP"] as const) {
 Deno.test({
   name:
     "electron launch: an aborted stop signal spawns nothing, even with a runtime at hand",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     const { launchElectron } = await import(
       "../src/electron/electron-spawn.ts"
@@ -254,7 +253,6 @@ Deno.test({
 Deno.test({
   name:
     "electron install: aborting kills the installer's WHOLE group (install.js is a grandchild)",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     const { runInstaller } = await import("../src/electron/electron-spawn.ts");
     const dir = await tempDir("aio-elstop-group");
@@ -265,7 +263,7 @@ Deno.test({
     const run = runInstaller(
       [
         "eval",
-        `const g = new Deno.Command("sleep", { args: ["60"] }).spawn();
+        `const g = new Deno.Command(Deno.execPath(), { args: ["eval", "setTimeout(() => {}, 60000)"] }).spawn();
          Deno.writeTextFileSync(${JSON.stringify(pidFile)}, String(g.pid));
          await g.status;`,
       ],
@@ -310,7 +308,6 @@ for (const [how, exit] of Object.entries(EXITS)) {
   Deno.test({
     name:
       `electron install: a process ending by ${how} still kills the installer group`,
-    ignore: Deno.build.os === "windows",
     fn: async () => {
       const dir = await tempDir("aio-elstop-exit");
       const pidFile = join(dir, "grandchild.pid");
@@ -324,7 +321,7 @@ for (const [how, exit] of Object.entries(EXITS)) {
          const stop = new AbortController();
          void runInstaller(["eval", ${
             JSON.stringify(
-              `const g = new Deno.Command("sleep", { args: ["60"] }).spawn();
+              `const g = new Deno.Command(Deno.execPath(), { args: ["eval", "setTimeout(() => {}, 60000)"] }).spawn();
              Deno.writeTextFileSync(${
                 JSON.stringify(pidFile)
               }, String(g.pid)); await g.status;`,
@@ -381,7 +378,6 @@ Deno.test("mayTakeSighup: exact from procfs, else only on a terminal stdout (noh
 Deno.test({
   name:
     "electron launch: a stop landing WHILE the runtime is looked up spawns nothing",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     const { launchElectron } = await import(
       "../src/electron/electron-spawn.ts"

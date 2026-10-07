@@ -9,6 +9,7 @@ import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { assetIncludes } from "../src/build/build-compile.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { linkDir } from "./symlink-helper.ts";
 import { HEY } from "../src/diagnostics/fmt.ts";
 
 async function project(dir: string): Promise<void> {
@@ -38,7 +39,7 @@ Deno.test("assetIncludes: a symlinked project root embeds the same *.server.ts a
     const real = join(base, "real");
     const link = join(base, "link");
     await project(real);
-    await Deno.symlink(real, link);
+    await linkDir(real, link);
     console.warn = (...a: unknown[]) => void warned.push(a.join(" "));
     console.log = (...a: unknown[]) => void logged.push(a.join(" "));
     const viaReal = included(await assetIncludes(real, "app/main.ts"));

@@ -8,8 +8,9 @@
 // there: the FAILED line was unreachable and the failure silent. Pinned in two
 // halves — the runtime's reaction, and aio.ts handing it the unswallowed
 // shutdown.
+import { programBytes, writeProgram } from "./fake-program-helper.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { buildShipManifest, generateSigningKey } from "../src/build/ship.ts";
 import { createUpdatesRuntime } from "../src/server/updates-runtime.ts";
 import { resolveUpdates } from "../src/server/updates-core.ts";
@@ -17,7 +18,7 @@ import type { Log } from "../src/diagnostics/logger.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const platform = { os: Deno.build.os, arch: Deno.build.arch };
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 const appBody = (v: string) =>
   `#!/bin/sh\nif [ "$1" = "--version" ]; then echo ${v}; exit 0; fi\necho APP ${v}\n`;
 
@@ -27,12 +28,11 @@ Deno.test("updates handover: a shutdown that rejects logs 'update handover FAILE
     const dataDir = join(root, "data");
     await Deno.mkdir(dataDir);
     const artifact = join(root, "app");
-    await Deno.writeTextFile(artifact, appBody("1.0.0"));
-    await Deno.chmod(artifact, 0o755);
+    await writeProgram(artifact, appBody("1.0.0"));
     const keys = await generateSigningKey();
     const dir = join(root, "releases", "prod");
     await Deno.mkdir(dir, { recursive: true });
-    const bytes = new TextEncoder().encode(appBody("2.0.0"));
+    const bytes = await programBytes(appBody("2.0.0"));
     const manifest = await buildShipManifest({
       name: "app",
       version: "2.0.0",

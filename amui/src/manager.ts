@@ -435,6 +435,7 @@ export function reconcileDetail(
 interface ScanTarget {
   projects: DiscoveredProject[];
   scanRoots: string[];
+  rootsExample: string;
   lastScan: string | null;
   selectedId: string | null;
   selectedPath: string | null;
@@ -487,9 +488,11 @@ function applyScan(
   s: ScanTarget,
   found: DiscoveredProject[],
   roots: string[],
+  rootsExample: string,
 ): void {
   s.projects = found;
   s.scanRoots = roots;
+  s.rootsExample = rootsExample;
   s.lastScan = new Date().toISOString();
   const sel = s.selectedId ? followSelection(found, s.selectedId) : undefined;
   if (s.selectedId && !sel) {
@@ -576,8 +579,8 @@ function followSelection(
  *  and the post-action refreshes). Throws only if the scan import fails. */
 async function rescanInto(s: ScanTarget): Promise<void> {
   const { discoverProjects } = await import("./server/scan.server.ts");
-  const { projects, roots } = await discoverProjects();
-  applyScan(s, projects, roots);
+  const { projects, roots, rootsExample } = await discoverProjects();
+  applyScan(s, projects, roots, rootsExample);
 }
 
 /** amui must never start/stop/restart ITSELF: starting spawns a second manager,
@@ -638,6 +641,9 @@ export const manager = cell("manager", {
     scanning: false,
     lastScan: null as string | null,
     scanRoots: [] as string[],
+    // How to spell `AMUI_ROOTS` on the SERVER's OS — set by the scan, shown
+    // beside the roots it searched.
+    rootsExample: "",
     // charts (rolling, cap HIST)
     cpuHistory: [] as number[],
     memHistory: [] as number[], // process RSS, MB

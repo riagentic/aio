@@ -31,8 +31,11 @@ import {
   stopEsbuildService,
 } from "../src/build/esbuild-shared.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { fromFileUrl } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
+import { fixtureNodeModules } from "./symlink-helper.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 /** The modules a production page must not download, and why each one may go.
  *  Every entry is category (a) of the dev==prod rule — observe-only, or a
@@ -74,7 +77,7 @@ async function bundleProbe(): Promise<
   try {
     await Deno.mkdir(`${dir}/src`, { recursive: true });
     const imports = {
-      "aio": `${ROOT}mod.ts`,
+      "aio": `${spec(ROOT)}mod.ts`,
       "aio/jsx-runtime": `${ROOT}src/jsx-runtime.ts`,
       "immer": "npm:immer@10.2.0",
       "@std/path": "jsr:@std/path@^1",
@@ -92,7 +95,7 @@ async function bundleProbe(): Promise<
         imports,
       }),
     );
-    await Deno.symlink(`${ROOT}node_modules`, `${dir}/node_modules`);
+    await fixtureNodeModules(dir);
     await Deno.writeTextFile(
       `${dir}/src/cell.ts`,
       `import { cell } from "aio";

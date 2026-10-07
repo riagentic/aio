@@ -93,18 +93,19 @@ Deno.test("resolveSocketPath: unix rows are files under the lock dir, and unchan
     assert(!isPipePath(p));
     // Under a long runtime dir a path that does not fit takes the hashed
     // `/tmp/aio` fallback — named for the same app, never another's.
+    // (`join` is the host's, so on a Windows host the separator is `\\`.)
     const fits = (f: string) => join(lockDir(), f).length <= 100;
     assertMatch(
       p,
       fits("some-app.sock")
-        ? /\/some-app\.sock$/
-        : /\/some-app-[0-9a-f]{8}\.sock$/,
+        ? /[\\/]some-app\.sock$/
+        : /[\\/]some-app-[0-9a-f]{8}\.sock$/,
     );
     assertMatch(
       h,
       fits("some-app.http.sock")
-        ? /\/some-app\.http\.sock$/
-        : /\/some-app-[0-9a-f]{8}\.http\.sock$/,
+        ? /[\\/]some-app\.http\.sock$/
+        : /[\\/]some-app-[0-9a-f]{8}\.http\.sock$/,
     );
   }
   assertEquals(

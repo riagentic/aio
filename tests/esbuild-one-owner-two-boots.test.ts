@@ -9,7 +9,7 @@
 // The sanitizers are the oracle: the child alive when the test returns, or
 // its pending wait, fails it.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import {
@@ -18,6 +18,29 @@ import {
   transpileCache,
 } from "../src/server/server-transpile.ts";
 import { createProdGraphCheck } from "../src/server/graph-validator.ts";
+import { spec } from "./module-spec-helper.ts";
+import { fixtureNodeModules } from "./symlink-helper.ts";
+
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
+
+/** What makes `dir` an app the judge can bundle: a deno.json and its own
+ *  node_modules (the framework checkout has none of its own to fall back on). */
+async function project(dir: string): Promise<void> {
+  await Deno.writeTextFile(
+    join(dir, "deno.json"),
+    JSON.stringify({
+      nodeModulesDir: "auto",
+      compilerOptions: { jsx: "react-jsx", jsxImportSource: "aio" },
+      imports: {
+        "aio": `${spec(ROOT)}mod.ts`,
+        "aio/jsx-runtime": `${spec(ROOT)}src/jsx-runtime.ts`,
+        "immer": "npm:immer@10.2.0",
+        "@std/path": "jsr:@std/path@^1",
+      },
+    }),
+  );
+  await fixtureNodeModules(dir);
+}
 
 /** The boot's import-graph verdict, from the server itself — `pending`
  *  until the validation (walk + prod-bundle judge) has landed. */
@@ -43,6 +66,7 @@ Deno.test({
     const { aio, cell } = await import("../mod.ts");
     const dir = await tempDir("aio-two-boots-");
     const entry = join(dir, "App.tsx");
+    await project(dir);
     await Deno.writeTextFile(
       entry,
       "export default function App() { return <main>hi</main>; }\n",
@@ -98,6 +122,7 @@ Deno.test({
   fn: async () => {
     const dir = await tempDir("aio-judge-build-");
     try {
+      await project(dir);
       await Deno.writeTextFile(
         join(dir, "App.tsx"),
         "export default function App() { return <main>hi</main>; }\n",

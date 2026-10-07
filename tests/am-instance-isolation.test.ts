@@ -14,8 +14,9 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { writeLock } from "../src/server/single-instance-lock.ts";
+import { fromFileUrl } from "@std/path";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("..", import.meta.url));
 
 async function am(
   args: string[],

@@ -20,11 +20,13 @@ import { getLogger, setLogger } from "../src/diagnostics/logger-api.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { join } from "@std/path";
 import type { PatchEntry } from "../src/protocol/broadcast-utils.ts";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
+import { connectLocal, type LocalConn } from "../src/server/local-listen.ts";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Read NDJSON frames off a UDS client connection. */
-function readFrames(conn: Deno.Conn): { kinds: () => string[] } {
+function readFrames(conn: LocalConn): { kinds: () => string[] } {
   const kinds: string[] = [];
   const dec = new TextDecoder();
   let buf = "";
@@ -52,7 +54,7 @@ function readFrames(conn: Deno.Conn): { kinds: () => string[] } {
 Deno.test("uds: a patch JSON cannot carry does not silently lose the round", async () => {
   _resetDegraded();
   const dir = await tempDir("uds-thrown-");
-  const socketPath = join(dir, "t.sock");
+  const socketPath = localEndpoint(join(dir, "t.sock"));
   // Large on purpose — see the assertion below: a small patch against a big
   // state must NOT trip the "patch bigger than half the full state" guard, or
   // the full frame would arrive for a reason unrelated to what is being tested.
@@ -70,7 +72,7 @@ Deno.test("uds: a patch JSON cannot carry does not silently lose the round", asy
     },
     // deno-lint-ignore no-explicit-any
   } as any);
-  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  const conn = await connectLocal(socketPath);
   const frames = readFrames(conn);
   try {
     await wait(80);
@@ -135,6 +137,7 @@ Deno.test("uds: a patch JSON cannot carry does not silently lose the round", asy
       conn.close();
     } catch { /* aio-ok: already closed */ }
     uds.shutdown();
+    await localIdle();
     setLogger(prevLogger);
     await dropTempDir(dir);
     _resetDegraded();
@@ -144,11 +147,11 @@ Deno.test("uds: a patch JSON cannot carry does not silently lose the round", asy
 Deno.test("uds: one client's failed round does not cost the others theirs", async () => {
   _resetDegraded();
   const dir = await tempDir("uds-isolate-");
-  const socketPath = join(dir, "i.sock");
+  const socketPath = localEndpoint(join(dir, "i.sock"));
   const state = { list: { items: ["one"] } };
   const uds = createUDSListener(socketPath, () => state, () => {}, () => {});
-  const a = await Deno.connect({ path: socketPath, transport: "unix" });
-  const b = await Deno.connect({ path: socketPath, transport: "unix" });
+  const a = await connectLocal(socketPath);
+  const b = await connectLocal(socketPath);
   const fa = readFrames(a), fb = readFrames(b);
   try {
     await wait(100);
@@ -166,6 +169,7 @@ Deno.test("uds: one client's failed round does not cost the others theirs", asyn
       } catch { /* aio-ok: already closed */ }
     }
     uds.shutdown();
+    await localIdle();
     await dropTempDir(dir);
     _resetDegraded();
   }

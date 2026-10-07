@@ -16,19 +16,20 @@ import {
   assertFalse,
   assertStringIncludes,
 } from "@std/assert";
-import { toFileUrl } from "@std/path";
+import { fromFileUrl, toFileUrl } from "@std/path";
 import { renderHeadlessSurface } from "../src/server/server-surface.ts";
 import { bindCell } from "../src/state/cell-catalog.ts";
 import { _liveRoots } from "../src/air/renderer-state.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("..", import.meta.url));
 
 async function fixture(): Promise<string> {
   const dir = await tempDir("surface-client-view-");
   await Deno.writeTextFile(
     `${dir}/settings.ts`,
-    `import { cell } from "${REPO}mod.ts";
+    `import { cell } from "${spec(REPO)}mod.ts";
 export const settings = cell("sv-settings", {
   state: { theme: "light", apiKey: "", account: { name: "", key: "" },
            rooms: {} as Record<string, { name: string; key: string }> },
@@ -40,7 +41,7 @@ export const settings = cell("sv-settings", {
   );
   await Deno.writeTextFile(
     `${dir}/notes.ts`,
-    `import { cell } from "${REPO}mod.ts";
+    `import { cell } from "${spec(REPO)}mod.ts";
 export const notes = cell("sv-notes", {
   state: { text: "hello" },
   selectors: { upper: (s: { text: string }) => s.text.toUpperCase() },
@@ -51,7 +52,7 @@ export const notes = cell("sv-notes", {
   const component = (name: string, body: string) =>
     Deno.writeTextFile(
       `${dir}/${name}.ts`,
-      `import { h } from "${REPO}src/air/vdom.ts";
+      `import { h } from "${spec(REPO)}src/air/vdom.ts";
 import { settings } from "./settings.ts";
 import { notes } from "./notes.ts";
 void settings; void notes;

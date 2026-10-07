@@ -7,15 +7,16 @@
 // `am create`. The boot check is structural: an existing, non-empty home with
 // none of aio's own entries is not this app's, whatever it is called.
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import {
   _resetAppDirs,
   foreignAppHomeError,
   resolveAppDirs,
 } from "../src/server/app-dirs.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 Deno.test("foreignAppHomeError: absent, empty and aio-owned homes pass; another program's directory does not", async () => {
   const dir = await tempDir("aio-foreign-home-");
@@ -87,7 +88,6 @@ Deno.test("resolveAppDirs: a DERIVED home that is another program's is refused; 
 Deno.test({
   name:
     'boot: aio.run({ appId: "ssh" }) under a HOME with ~/.ssh refuses and writes nothing there',
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("aio-foreign-boot-");
     try {
@@ -101,7 +101,7 @@ Deno.test({
         join(proj, "deno.json"),
         JSON.stringify({
           imports: {
-            "aio": `${ROOT}mod.ts`,
+            "aio": `${spec(ROOT)}mod.ts`,
             "immer": "npm:immer@10.2.0",
             "@std/path": "jsr:@std/path@^1",
           },

@@ -7,7 +7,7 @@
 // as ordered candidate lists; this file refuses a raw merge anywhere else, and
 // pins that the source label and the value come from the same list.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import {
   dbPathOf,
   isolateOf,
@@ -21,7 +21,7 @@ import {
 import { bootLines, buildFacts } from "../src/server/boot-facts.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const SRC = new URL("../src/", import.meta.url).pathname;
+const SRC = fromFileUrl(new URL("../src/", import.meta.url));
 // A flag read merged with anything by `??`, in either order.
 const RAW_MERGE =
   /\b(?:cli|parseCli\([^)]*\))\.\w+\s*\?\?|\?\?\s*(?:cli|parseCli\([^)]*\))\.\w+/;
@@ -210,7 +210,7 @@ Deno.exit(0);
         "run",
         "-A",
         "--config",
-        new URL("../deno.json", import.meta.url).pathname,
+        fromFileUrl(new URL("../deno.json", import.meta.url)),
         app,
         "--verbose",
         `--db-path=${join(dir, "x.db")}`,
@@ -227,9 +227,13 @@ Deno.exit(0);
         /\bclient\s+server-only \(config\)/,
         /setting persist\s+false \(config\)/,
         new RegExp(
-          `setting dbPath\\s+"${
-            join(dir, "x.db").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-          }" \\(flag\\)`,
+          // The value is printed as JSON — a Windows path's `\\` is doubled.
+          `setting dbPath\\s+${
+            JSON.stringify(join(dir, "x.db")).replace(
+              /[.*+?^${}()|[\]\\]/g,
+              "\\$&",
+            )
+          } \\(flag\\)`,
         ),
         /setting expose\s+false \(default\)/,
       ]

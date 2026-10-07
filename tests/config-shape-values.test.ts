@@ -36,8 +36,9 @@ import {
   VALID_UI_KEYS,
   validateConfig,
 } from "../src/server/config.ts";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const SRC = new URL("../src/server/aio-types.ts", import.meta.url);
 
@@ -315,9 +316,11 @@ Deno.test("a value JSON cannot print is still refused by name, not a TypeError",
 // claim and nothing short of running it can check that.
 Deno.test({
   name: "the shape is settled before the plugin merge reads it",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
-    const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+    const root = fromFileUrl(new URL("..", import.meta.url)).replace(
+      /[\\/]$/,
+      "",
+    );
     const dir = await tempDir("aio-shape-plugins-");
     try {
       const boot = async (withPlugin: boolean) => {
@@ -328,8 +331,8 @@ Deno.test({
           : "";
         await Deno.writeTextFile(
           file,
-          `import { aio, cell } from "${root}/mod.ts";
-import { definePlugin } from "${root}/src/server/plugin.ts";
+          `import { aio, cell } from "${spec(root)}/mod.ts";
+import { definePlugin } from "${spec(root)}/src/server/plugin.ts";
 const c = cell("shapeplug", { state: { n: 0 }, methods: {} });
 const app = await aio.run({
   cells: [c],

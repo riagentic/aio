@@ -8,6 +8,7 @@ import { buildContext } from "../aiol/context.ts";
 import { checkImports } from "../aiol/checks.ts";
 import { AIO_LIBRARY_ENTRIES } from "../src/entries.ts";
 import { frameworkSpecs } from "../src/am/am-cmd-create.ts";
+import { spec } from "./module-spec-helper.ts";
 
 async function project(
   imports: Record<string, string>,
@@ -118,7 +119,9 @@ Deno.test("scaffold: `am create` maps every public aio entry point", async () =>
     await Deno.writeTextFile(
       join(dir, "src", "cell.ts"),
       Object.keys(AIO_LIBRARY_ENTRIES)
-        .map((s, i) => `import * as _e${i} from "${s}";\nexport { _e${i} };`)
+        .map((s, i) =>
+          `import * as _e${i} from "${spec(s)}";\nexport { _e${i} };`
+        )
         .join("\n"),
     );
     assertEquals(

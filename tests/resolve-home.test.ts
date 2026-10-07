@@ -8,7 +8,7 @@
 // the SAME folder aio.run() registers (on the main isolate and in a worker
 // cell's thread), and that the split dbPath is refused at boot.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import {
   _resetAppDirs,
@@ -17,15 +17,20 @@ import {
   registeredProfile,
 } from "../src/server/app-dirs.ts";
 import { homeWasRequested, resolveHome } from "../src/server/resolve-home.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const REPO = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 
 /** Prints resolveHome() before aio.run(), then the dirs aio.run registered —
  *  and, with a worker cell, what resolveHome() answers in the worker. */
-const PROBE = `import { aio, cell, isCellWorker } from "${REPO}/mod.ts";
-import { homeWasRequested, resolveHome } from "${REPO}/src/server-entry.ts";
-import { appDirs, registeredProfile } from "${REPO}/src/server/app-dirs.ts";
-import { resolveAppId } from "${REPO}/src/server/single-instance-lock.ts";
+const PROBE = `import { aio, cell, isCellWorker } from "${spec(REPO)}/mod.ts";
+import { homeWasRequested, resolveHome } from "${
+  spec(REPO)
+}/src/server-entry.ts";
+import { appDirs, registeredProfile } from "${
+  spec(REPO)
+}/src/server/app-dirs.ts";
+import { resolveAppId } from "${spec(REPO)}/src/server/single-instance-lock.ts";
 const cfg = JSON.parse(Deno.env.get("PROBE_CFG") ?? "{}");
 const ask = () => {
   try {
@@ -376,8 +381,10 @@ Deno.test("a refused dbPath leaves no profile recorded — a second app that cat
     // dbPath outside ITS profile home — refused by a throw (a runtime is up).
     await Deno.writeTextFile(
       join(root, "src", "app.ts"),
-      `import { aio, cell } from "${REPO}/mod.ts";
-import { homeRequested, registeredProfile } from "${REPO}/src/server/app-dirs.ts";
+      `import { aio, cell } from "${spec(REPO)}/mod.ts";
+import { homeRequested, registeredProfile } from "${
+        spec(REPO)
+      }/src/server/app-dirs.ts";
 const c = (n: string) => cell(n, { state: { n: 0 }, methods: {} });
 const base = { persist: false, client: "server-only", port: 0 } as const;
 await aio.run({ appId: "rh-a", cells: [c("a")], ...base });

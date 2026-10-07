@@ -4,31 +4,15 @@
 // stops it (it is not "the app" — adoptRunningHome skips profiles); and
 // `am stop pr@dev` / `--app=pr@dev` / `--profile dev` all reach it.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { reapUnder } from "./proc-helper.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
-
-/** Last resort: SIGKILL whatever still runs a file under `dir` — a stop that
- *  missed an instance must not leave it running after its home is deleted. */
-async function reapUnder(dir: string): Promise<void> {
-  const o = await new Deno.Command("ps", {
-    args: ["-axo", "pid=,args="],
-    stdout: "piped",
-    stderr: "null",
-  }).output();
-  for (const line of new TextDecoder().decode(o.stdout).split("\n")) {
-    const m = line.trim().match(/^(\d+)\s+(.*)$/);
-    if (!m || !m[2]!.includes(`${dir}/`) || Number(m[1]) === Deno.pid) continue;
-    try {
-      Deno.kill(Number(m[1]), "SIGKILL");
-    } catch { /* gone between ps and kill */ }
-  }
-}
+const REPO = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 
 Deno.test({
   name: "am --profile: start, list, bare stop spares it, pr@dev stops it",
-  ignore: Deno.build.os === "windows",
   sanitizeOps: false, // aio-ok: the app am starts is stopped below, by am
   sanitizeResources: false, // aio-ok: same
   async fn() {
@@ -55,7 +39,7 @@ Deno.test({
     );
     await Deno.writeTextFile(
       join(proj, "src", "app.ts"),
-      `import { aio, cell } from "${REPO}/mod.ts";
+      `import { aio, cell } from "${spec(REPO)}/mod.ts";
 const c = cell("c", { state: { n: 1 }, methods: {} });
 await aio.run({ cells: [c], appId: "pr", persist: false, client: "server-only" });
 `,

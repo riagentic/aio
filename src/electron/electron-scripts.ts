@@ -8,6 +8,7 @@ import {
   tmplBounds,
   tmplBoundsTracking,
   tmplCrashGuard,
+  tmplGuestPreloads,
   tmplIpcGuard,
   tmplKeyboardShortcuts,
   tmplParentWatch,
@@ -16,6 +17,7 @@ import {
   tmplPreloadWrite,
   tmplRendererDiagnostics,
   tmplTray,
+  tmplWebGuard,
   tmplWillNavigate,
   tmplWindowShape,
   udsPreloadDiagnostics,
@@ -60,7 +62,9 @@ ${
   }
 ${tmplCrashGuard()}
 ${tmplPermissionGuard(meta?.permissions)}
+${tmplWebGuard(meta)}
 ${tmplIpcGuard()}
+${tmplGuestPreloads(meta?.guestPreloads)}
 ${tmplParentWatch()}
 
 // ── Window state persistence ──

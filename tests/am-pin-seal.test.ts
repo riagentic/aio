@@ -12,7 +12,7 @@
 // Driven as a SUBPROCESS against a real clone with real tags and real
 // worktrees: the whole claim is about a machine that has never seen the app.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { join, resolve } from "@std/path";
 import { latestTag, readPin } from "../src/am/am-versions.ts";
 import {
   linkSatisfiesPin,
@@ -45,6 +45,15 @@ async function sandbox(
     stderr: "piped",
   }).output();
   assert(clone.success, new TextDecoder().decode(clone.stderr));
+  // Said ONCE, here, by name: without it a depth-1 clone two commits past the
+  // tag failed nine tests nine different ways ("no releases in the 1.x line",
+  // a TypeError on `undefined.startsWith`, "alpha26 is behind null").
+  assert(
+    await latestTag(install),
+    "this checkout has no release tag reachable from HEAD — these tests pin " +
+      "real releases, so they need the tags and the history (a shallow clone " +
+      "past the last release has neither): `git fetch --unshallow --tags`",
+  );
   await Deno.mkdir(join(app, "src"), { recursive: true });
   await Deno.writeTextFile(
     join(app, "deno.json"),
@@ -230,7 +239,11 @@ Deno.test("am pin refuses a move that would break the app, and says where", asyn
   try {
     const r = await am(s, "pin", "--latest");
     assertEquals(r.code, 1, `expected a refusal, got:\n${r.out}`);
-    assertStringIncludes(r.out, "src/cell.ts:4");
+    // The refusal arrives inside a JSON string: a Windows `\\` is escaped.
+    assertStringIncludes(
+      r.out,
+      JSON.stringify(join("src", "cell.ts")).slice(1, -1) + ":4",
+    );
     assertStringIncludes(r.out, "machine");
     assertStringIncludes(r.out, "--force");
     assertEquals(
@@ -357,7 +370,7 @@ Deno.test("am fix seals a local-checkout link with a path: pin, and the pin deci
 Deno.test("pin hint: a version pin over a checkout offers BOTH ways out", () => {
   const hint = pinDisagreementHint("1.0.0-alpha56", "/opt/aio-checkout");
   assert(hint, "a checkout link must produce a hint");
-  assertStringIncludes(hint, "am pin path:/opt/aio-checkout");
+  assertStringIncludes(hint, `am pin path:${resolve("/opt/aio-checkout")}`);
   assertStringIncludes(hint, "am fix");
   assert(
     hint.indexOf("am pin path:") < hint.indexOf("am fix"),

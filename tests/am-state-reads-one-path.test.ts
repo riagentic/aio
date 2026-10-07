@@ -20,6 +20,7 @@ import {
   _extraPathError,
   _pathOfArgs,
 } from "../src/am/am-cmd-state.ts";
+import { fromFileUrl } from "@std/path";
 
 Deno.test("am state: one path is read, several are refused", () => {
   // [args as the handler sees them, the refusal it must make]
@@ -125,8 +126,8 @@ Deno.test("am state: the refusal is made before an app is even looked for", asyn
   // It is a question about the COMMAND LINE, so it must not depend on there
   // being an app to ask — and a script must read it as a refusal, on stdout,
   // with a non-zero exit like every other one.
-  const AM = new URL("../src/am.ts", import.meta.url).pathname;
-  const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+  const AM = fromFileUrl(new URL("../src/am.ts", import.meta.url));
+  const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
   const o = await new Deno.Command(Deno.execPath(), {
     args: [
       "run",

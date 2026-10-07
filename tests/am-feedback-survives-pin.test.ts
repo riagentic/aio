@@ -20,8 +20,9 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { feedbackDir, feedbackFile } from "../src/am/am-cmd-feedback.ts";
 import { versionsDir } from "../src/server/framework-pin.ts";
+import { fromFileUrl, join, normalize, SEPARATOR } from "@std/path";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("..", import.meta.url));
 
 async function am(
   args: string[],
@@ -69,7 +70,9 @@ Deno.test("am feedback: the findings location is NOT inside the version store", 
 });
 
 Deno.test("am feedback: a name becomes a filename, never a path", () => {
-  const dir = feedbackDir();
+  // Normalized: the harness names the sandbox with `/` in it, and a file
+  // under it comes back from `join` in the host's separators.
+  const dir = normalize(feedbackDir());
   // A findings file is named after an app, and an app name is user input. It
   // must reduce to one filename inside the directory — anything that escapes
   // it turns a note into an overwrite.
@@ -77,6 +80,8 @@ Deno.test("am feedback: a name becomes a filename, never a path", () => {
     const hostile of [
       "../../etc/passwd",
       "/etc/passwd",
+      "..\\..\\etc\\passwd",
+      "C:\\etc\\passwd",
       "a/b/c",
       "..",
       ".",
@@ -86,16 +91,16 @@ Deno.test("am feedback: a name becomes a filename, never a path", () => {
   ) {
     const f = feedbackFile(hostile);
     assert(
-      f.startsWith(dir + "/"),
+      f.startsWith(dir + SEPARATOR),
       `"${hostile}" escaped the feedback dir: ${f}`,
     );
     const base = f.slice(dir.length + 1);
     assert(
-      !base.includes("/") && base !== ".md" && base.endsWith(".md"),
+      !/[\\/]/.test(base) && base !== ".md" && base.endsWith(".md"),
       `"${hostile}" produced a bad filename: ${base}`,
     );
   }
-  assertEquals(feedbackFile("My App!"), `${dir}/my-app.md`);
+  assertEquals(feedbackFile("My App!"), join(dir, "my-app.md"));
 });
 
 Deno.test("am feedback: reports the directory, and creates a file on request", async () => {
@@ -121,7 +126,7 @@ Deno.test("am feedback: reports the directory, and creates a file on request", a
     const made = await am(["feedback", "demo", "--create"], dir);
     assertEquals(made.code, 0, made.out);
     const file = (JSON.parse(made.out) as { file: string }).file;
-    assertEquals(file, `${dir}/demo.md`);
+    assertEquals(file, join(dir, "demo.md"));
     const body = await Deno.readTextFile(file);
     assertStringIncludes(body, "demo");
     assertStringIncludes(body, "am pin");

@@ -15,8 +15,9 @@
 import { assert, assertEquals } from "@std/assert";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { instances, writeLock } from "../src/server/single-instance-lock.ts";
+import { fromFileUrl } from "@std/path";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("..", import.meta.url));
 
 Deno.test("am instances --json reports dataDir, and null when unrecorded", async () => {
   const appsDir = await tempDir("am-instances-data-");

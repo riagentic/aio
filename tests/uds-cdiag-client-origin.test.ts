@@ -17,13 +17,18 @@ import {
 import { getLogger, setLogger } from "../src/diagnostics/logger-api.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { join } from "@std/path";
+import {
+  connectRW,
+  localEndpoint,
+  localIdle,
+} from "./local-endpoint-helper.ts";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 Deno.test("uds cdiag: impossible numbers are not reported as fact, the report is attributed once per name, and a gone peer's report is cleared", async () => {
   _resetDegraded();
   const dir = await tempDir("uds-cdiag-origin-");
-  const socketPath = join(dir, "t.sock");
+  const socketPath = localEndpoint(join(dir, "t.sock"));
   const uds = createUDSListener(socketPath, () => ({}), () => {}, () => {});
   const warns: string[] = [];
   const prevLogger = getLogger();
@@ -33,7 +38,7 @@ Deno.test("uds cdiag: impossible numbers are not reported as fact, the report is
     },
     // deno-lint-ignore no-explicit-any
   } as any);
-  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  const conn = await connectRW(socketPath);
   let closed = false;
   // Drain server frames so the write queue keeps moving.
   const drained = (async () => {
@@ -100,6 +105,7 @@ Deno.test("uds cdiag: impossible numbers are not reported as fact, the report is
     }
     await drained;
     uds.shutdown();
+    await localIdle();
     setLogger(prevLogger);
     await dropTempDir(dir);
     _resetDegraded();

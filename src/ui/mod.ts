@@ -1262,6 +1262,9 @@ export { Markdown, type MarkdownProps } from "./markdown.ts";
 // An embedded web page, with the two traps closed (a reactive `src` is a
 // navigation loop; unmounting destroys the guest's login). See ./browser.ts.
 export { Browser, type BrowserProps, type HostKey } from "./browser.ts";
+// A <webview> guest's preload, declared in deno.json `build.guestPreloads`
+// and named the same way in dev and in every packaged build.
+export { guestPreload } from "../protocol/guest-preload.ts";
 // Scoped styles: a class name nobody else can collide with, content-addressed
 // so it is stable across server and client. See ./css.ts.
 export { collectCss, css, cx } from "./css.ts";

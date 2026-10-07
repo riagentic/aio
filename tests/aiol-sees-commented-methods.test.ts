@@ -23,9 +23,10 @@
 // page advertises three enforced gates.
 import { assert, assertEquals } from "@std/assert";
 import { childCoverageDir, tempDir } from "../src/testing/temp-dir.ts";
+import { fromFileUrl } from "@std/path";
 
-const AIOL = new URL("../aiol/mod.ts", import.meta.url).pathname;
-const AIO = new URL("../mod.ts", import.meta.url).pathname;
+const AIOL = fromFileUrl(new URL("../aiol/mod.ts", import.meta.url));
+const AIO = fromFileUrl(new URL("../mod.ts", import.meta.url));
 const _cov = childCoverageDir();
 
 /** Lint a throwaway project through the REAL linter — the thing a reader runs.

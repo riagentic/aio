@@ -93,6 +93,10 @@ export const SDDL_REVISION_1 = 1;
  *  buffers whether or not anything consumes them — so seconds here are
  *  generous for every live peer and a bound for every dead one. */
 export const PIPE_DRAIN_TIMEOUT_MS = 3000;
+/** After the peer has taken our bytes: how long its own unfinished upload is
+ *  waited for before the close. The unix side's `LINGER_MS`, restated here
+ *  because `local-listen.ts` imports this module, not the other way round. */
+export const PIPE_LINGER_MS = 2000;
 
 /** How many completion packets one `GetQueuedCompletionStatusEx` may take. */
 export const IOCP_BATCH = 64;
@@ -336,6 +340,25 @@ function advapi(): Deno.DynamicLibrary<typeof ADVAPI_SYMBOLS>["symbols"] {
   return _adv;
 }
 
+// Both libraries are opened when this module LOADS, not at the first call.
+// They are held for the life of the process either way; opened lazily, the
+// first caller is charged with them — and under `deno test` that caller is
+// whichever test first asked who owns a lock or how a directory is protected.
+// Measured on a real Windows 11: `--sanitize-resources` failed 167 test files
+// with "A dynamic library was loaded during the test, but not unloaded", none
+// of which had opened anything. Only where FFI is already granted: asking
+// here would put a permission prompt in front of an app that never uses a
+// pipe. A refusal stays the lazy path's to report, at the call that needs it.
+if (
+  Deno.build.os === "windows" &&
+  Deno.permissions.querySync({ name: "ffi" }).state === "granted"
+) {
+  try {
+    k32();
+    advapi();
+  } catch { /* aio-ok: the first real call opens it again and throws there */ }
+}
+
 function handleValue(h: Handle): bigint {
   return h === null ? 0n : BigInt(Deno.UnsafePointer.value(h));
 }
@@ -422,6 +445,18 @@ class IoPort {
   #entries = new Uint8Array(OVERLAPPED_ENTRY_SIZE * IOCP_BATCH);
   #removed = new Uint8Array(4);
   #pumping = false;
+  #idleWaiters: (() => void)[] = [];
+
+  /** Resolve once no operation is pending on the port and its one parked
+   *  wait has returned. `close()` is synchronous but a cancelled operation
+   *  still COMPLETES, as a packet, a moment later — this is where a caller
+   *  that must not outlive its own I/O (a test under `--sanitize-ops`) waits
+   *  for that. Never resolves while a connection is left open and reading. */
+  async idle(): Promise<void> {
+    while (this.#pumping) {
+      await new Promise<void>((r) => this.#idleWaiters.push(r));
+    }
+  }
 
   #port(): Handle {
     if (this.#h === null) {
@@ -514,12 +549,20 @@ class IoPort {
         // Synchronous with the loop's exit: a `completion()` registered after
         // this restarts the loop, one registered before kept it running.
         this.#pumping = false;
+        for (const wake of this.#idleWaiters.splice(0)) wake();
       }
     })();
   }
 }
 
 const ioPort = new IoPort();
+
+/** See {@linkcode IoPort.idle}: every pipe operation of this process has
+ *  completed. */
+// aio-ok: a test seam — the product closes and moves on; a test under the op sanitizer has to wait for the cancelled I/O (tests/local-endpoint-helper.ts)
+export function pipeIoIdle(): Promise<void> {
+  return ioPort.idle();
+}
 
 /** The address of a buffer, as the kernel will report it back. */
 function pointerOf(buf: Uint8Array): bigint {
@@ -695,6 +738,16 @@ class PipeConn implements LocalConn {
    *     belongs to. */
   async drain(): Promise<void> {
     if (!this.server || this.#closed) return;
+    // Take what the peer is still SENDING while it is given what we wrote.
+    // A route that answers without reading a large upload leaves the client
+    // blocked in its own write — the pipe's buffer is full and nobody reads —
+    // so it never gets to our answer, the flush below waits out its timeout,
+    // and the close then fails the client's write (ERROR_NO_DATA): the window
+    // showed `write EPIPE` / a 502 in place of the route's 401. Measured on
+    // Windows 11 with a 400,000-byte POST; 1 KB fits the buffer and was fine.
+    // The unix side has always done this (`lingerUnix`). Started before the
+    // flush is awaited, because the flush is what it unblocks.
+    const input = this.#discardInput();
     const flush = k32().FlushFileBuffers(this.#o.h).catch(() => {
       // aio-ok(silent-catch): FlushFileBuffers fails only when the peer is
       // already gone — the case this drain exists to tolerate, never to report.
@@ -706,9 +759,26 @@ class PipeConn implements LocalConn {
     try {
       if (
         await Promise.race([flush.then(() => "flushed"), timeout]) !== "timeout"
-      ) return;
+      ) {
+        // Our bytes are with the peer. Its own may still be on the way, and a
+        // close under an unfinished write fails that write — so wait for it
+        // to finish and close, as the unix side does, and no longer than that
+        // side does. Only for a peer that WAS still sending: one that sent
+        // its whole request and reads to our close (a close-delimited body)
+        // would otherwise wait out the linger on every response — a pipe has
+        // no half-close to tell it we are done. A blocked sender is always
+        // seen: the flush cannot finish before its bytes were taken.
+        clearTimeout(timer);
+        if (!input.took()) return;
+        const linger = new Promise<void>((r) => {
+          timer = setTimeout(r, PIPE_LINGER_MS);
+        });
+        await Promise.race([input.done, linger]);
+        return;
+      }
     } finally {
       clearTimeout(timer);
+      input.stop();
     }
     log.warn(
       "pipe",
@@ -718,6 +788,44 @@ class PipeConn implements LocalConn {
         `waits on it.`,
     );
     this.close();
+  }
+
+  /** Read and drop whatever the peer still sends, until it closes, the
+   *  connection does, or `stop()`. Through the connection's own stream, so
+   *  "one outstanding read" stays the stream's to guarantee; a stream some
+   *  reader still holds is left alone (`done` is then already settled). */
+  #discardInput(): {
+    done: Promise<void>;
+    stop: () => void;
+    /** Whether the peer sent anything since this began. */
+    took: () => boolean;
+  } {
+    if (this.readable.locked) {
+      return { done: Promise.resolve(), stop() {}, took: () => false };
+    }
+    const reader = this.readable.getReader();
+    let stopped = false;
+    let took = false;
+    const done = (async () => {
+      try {
+        while (!stopped && !(await reader.read()).done) took = true;
+      } catch {
+        // aio-ok: a read that fails is a connection that ended — what is awaited
+      } finally {
+        try {
+          reader.releaseLock();
+        } catch {
+          /* aio-ok: a read still pending when the connection closed */
+        }
+      }
+    })();
+    return {
+      done,
+      stop() {
+        stopped = true;
+      },
+      took: () => took,
+    };
   }
 
   /** One write, complete: WriteFile until every byte is accepted. Serialized

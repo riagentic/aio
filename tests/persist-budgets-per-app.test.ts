@@ -10,11 +10,12 @@
 //
 // A child process, booted the way a host really boots two apps: at once.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 Deno.test({
   name:
@@ -25,7 +26,7 @@ Deno.test({
     await Deno.writeTextFile(
       join(root, "two.ts"),
       `
-import { aio, cell } from "${ROOT}mod.ts";
+import { aio, cell } from "${spec(ROOT)}mod.ts";
 const mk = (name: string, size: number) => cell(name, {
   state: { blob: "" },
   methods: { grow(s: { blob: string }) { s.blob = "x".repeat(size); } },

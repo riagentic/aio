@@ -310,7 +310,8 @@ Deno.test("permissions: electron.permissions reaches both app mains (dev and pac
   assertStringIncludes(uds, want);
   // …and the one place a child window is made marks it as not the app.
   assertEquals(uds.split("new BrowserWindow(").length - 1, 2);
-  assertStringIncludes(uds, "__aioChildWindows.add(child.webContents);");
+  assertStringIncludes(uds, "__aioGuardChild(child, u.href, payload.origins);");
+  assertStringIncludes(uds, "__aioChildWindows.add(wc); // never");
 });
 
 Deno.test("permissions: with electron.permissions the app page gets exactly the list, a guest nothing — each denial said", async () => {

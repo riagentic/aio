@@ -8,13 +8,14 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { findChromium } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { fromFileUrl } from "@std/path";
 
 function stripAnsi(s: string): string {
   return s.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
 const CHROME = findChromium();
-const TODO = new URL("../examples/todo/", import.meta.url).pathname;
+const TODO = fromFileUrl(new URL("../examples/todo/", import.meta.url));
 
 async function hasFfprobe(): Promise<boolean> {
   try {

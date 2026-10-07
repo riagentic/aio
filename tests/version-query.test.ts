@@ -8,9 +8,10 @@
 // `detail=` field. `--help` was hoisted out of `_run` for exactly this reason
 // and `--version` was left behind.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 
-const ROOT = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
+const ROOT = fromFileUrl(new URL("../", import.meta.url)).replace(/[\\/]$/, "");
 
 /** This machine's deno module cache, so a cleared environment does not send
  *  the child to the network. */
@@ -27,8 +28,8 @@ async function appDir(): Promise<string> {
       title: "versionprobe",
       version: "3.7",
       imports: {
-        "aio": `${ROOT}/mod.ts`,
-        "aio/": `${ROOT}/src/`,
+        "aio": `${spec(ROOT)}/mod.ts`,
+        "aio/": `${spec(ROOT)}/src/`,
         "immer": "npm:immer@10.2.0",
         "@std/path": "jsr:@std/path@1.1.2",
       },
@@ -56,7 +57,6 @@ function run(dir: string, env: Record<string, string>, clearEnv: boolean) {
 
 Deno.test({
   name: "--version: answers with no HOME at all, and never with a stack trace",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await appDir();
     try {
@@ -85,7 +85,6 @@ Deno.test({
 
 Deno.test({
   name: "--version: one clean line, no boot lines, no log files touched",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await appDir();
     const home = join(dir, "home");

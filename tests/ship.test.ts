@@ -1,5 +1,6 @@
 // `aio ship` core: a verifiable release manifest (SHA-256 +
 // least-privilege capabilities + optional Ed25519 signature over the digest).
+import { EXE, writeProgram } from "./fake-program-helper.ts";
 import {
   assert,
   assertEquals,
@@ -7,7 +8,7 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { stripAnsi } from "../src/diagnostics/fmt.ts";
 import {
   artifactFormat,
@@ -31,6 +32,7 @@ import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import type { DataContract, ShipManifest } from "../src/build/ship.ts";
 import { manifestUrl } from "../src/server/updates-core.ts";
 import { permissiveUmask } from "./permissive-umask.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const bin = (s: string) => new TextEncoder().encode(s);
 
@@ -358,7 +360,10 @@ Deno.test("shipApp: scans THE app dir (from the entry) and refuses an unmeasured
       Error,
       "never measured",
     );
-    assert(err.message.includes("apps/web"), `names the dir: ${err.message}`);
+    assert(
+      err.message.includes(join("apps", "web")),
+      `names the dir: ${err.message}`,
+    );
 
     // An explicitly named source dir that does not exist is loud too — it used
     // to be swallowed into "no capabilities".
@@ -961,11 +966,11 @@ async function contractFixture(): Promise<
   { dir: string; script: string; entry: string }
 > {
   const dir = await tempDir("aio-contract-");
-  const repo = new URL("../", import.meta.url).pathname;
+  const repo = fromFileUrl(new URL("../", import.meta.url));
   const entry = join(dir, "app.ts");
   await Deno.writeTextFile(
     entry,
-    `import { aio, cell } from "${repo}mod.ts";\n` +
+    `import { aio, cell } from "${spec(repo)}mod.ts";\n` +
       `export const notes = cell("notes", {\n` +
       `  version: 3,\n` +
       `  state: { items: [] as string[] },\n` +
@@ -979,12 +984,11 @@ async function contractFixture(): Promise<
   );
   // A file `probeDataContract` can spawn — the shape a compiled binary has.
   const script = join(dir, "app.bin");
-  await Deno.writeTextFile(
+  await writeProgram(
     script,
     `#!/bin/sh\nexec "${Deno.execPath()}" run -A --config "${repo}deno.json" ` +
       `"${entry}" "$@"\n`,
   );
-  await Deno.chmod(script, 0o755);
   return { dir, script, entry };
 }
 
@@ -998,7 +1002,7 @@ Deno.test({
           "run",
           "-A",
           "--config",
-          new URL("../deno.json", import.meta.url).pathname,
+          fromFileUrl(new URL("../deno.json", import.meta.url)),
           entry,
           "--aio-data-contract",
         ],
@@ -1055,11 +1059,7 @@ Deno.test("shipApp: an unreadable data contract FAILS the publish", async () => 
     // bare text, i.e. a file that cannot execute at all; that is a BROKEN
     // BUILD and now gets its own refusal, with no `--no-data` in it. See "the
     // not-runnable refusal does NOT offer --no-data".)
-    await Deno.writeTextFile(
-      binaryPath,
-      "#!/bin/sh\necho 'nope' >&2\nexit 3\n",
-    );
-    await Deno.chmod(binaryPath, 0o755);
+    await writeProgram(binaryPath, "#!/bin/sh\necho 'nope' >&2\nexit 3\n");
     await Deno.mkdir(join(dir, "src"), { recursive: true });
     await Deno.writeTextFile(join(dir, "src", "a.ts"), `fetch("x");`);
     const err = await assertRejects(
@@ -1179,8 +1179,8 @@ async function runShip(
       "run",
       "-A",
       "--config",
-      new URL("../deno.json", import.meta.url).pathname,
-      new URL("../src/build/ship.ts", import.meta.url).pathname,
+      fromFileUrl(new URL("../deno.json", import.meta.url)),
+      fromFileUrl(new URL("../src/build/ship.ts", import.meta.url)),
       ...args,
     ],
     cwd: opts.cwd,
@@ -1234,7 +1234,11 @@ Deno.test({
         assert(!ok.stdout.includes('"d"'), "no private scalar on stdout");
         assertEquals(doc.publicKey.key_ops, ["verify"]);
         const st = await Deno.stat(doc.keyPath);
-        if (st.mode !== null) assertEquals(st.mode & 0o777, 0o600);
+        // (A POSIX mode: Windows has none — the file is under the user's
+        // profile, whose ACL is what keeps it private there.)
+        if (st.mode !== null && Deno.build.os !== "windows") {
+          assertEquals(st.mode & 0o777, 0o600);
+        }
         const pair = JSON.parse(await Deno.readTextFile(doc.keyPath)) as {
           privateKey: JsonWebKey;
         };
@@ -1577,11 +1581,10 @@ Deno.test("ship: a program that RAN and failed keeps --data= and --no-data", asy
       join(dir, "src", "app.ts"),
       "export const x = 1;\n",
     );
-    await Deno.writeTextFile(
-      join(dir, "app"),
+    await writeProgram(
+      join(dir, `app${EXE}`),
       "#!/bin/sh\necho 'boom' >&2\nexit 3\n",
     );
-    await Deno.chmod(join(dir, "app"), 0o755);
 
     const ship = join(
       import.meta.dirname ?? ".",
@@ -1591,7 +1594,7 @@ Deno.test("ship: a program that RAN and failed keeps --data= and --no-data", asy
       "ship.ts",
     );
     const r = await new Deno.Command(Deno.execPath(), {
-      args: ["run", "-A", ship, "./app"],
+      args: ["run", "-A", ship, `./app${EXE}`],
       cwd: dir,
       stdout: "piped",
       stderr: "piped",

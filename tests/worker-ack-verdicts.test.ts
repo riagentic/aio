@@ -9,7 +9,7 @@
 //  · a noted verdict is never pushed out by a burst of others before its ack
 //    reads it, and a call whose owed saves were pushed out is `unsaved`.
 import { assert, assertEquals, assertMatch } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import {
   _collect,
   _collector,
@@ -25,6 +25,7 @@ import { registerCall, resolveCall } from "../src/state/cell-impl.ts";
 import { PERSIST_REFUSED } from "../src/server/server-trojan.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
 Deno.test("worker ack: a collector keeps settled verdicts and lets go of every batch", async () => {
   const running = new Set([_collector()]);
@@ -115,7 +116,7 @@ Deno.test("worker ack: unread notes are capped, and a capped-out one still reads
 
 const MOD = new URL("../mod.ts", import.meta.url).href;
 const APP = `
-import { aio, cell } from "${MOD}";
+import { aio, cell } from "${spec(MOD)}";
 const DIR = Deno.env.get("DIR");
 const PORT = Number(Deno.env.get("PORT"));
 const J = DIR + "/data/journal";
@@ -142,8 +143,12 @@ ws.onmessage = (e) => {
   const f = JSON.parse(e.data);
   if (f.t === "ack") Deno.writeTextFileSync(DIR + "/acks.jsonl", JSON.stringify(f.d) + "\\n", { append: true });
   if (f.t === "ack" && f.d.cid === "L0") {
-    // The method is running: stop the app under it.
-    Deno.kill(Deno.pid, "SIGTERM");
+    // The method is running: stop the app under it. Windows has no SIGTERM
+    // to deliver (\`kill\` there ends the process outright) — the app is asked
+    // the way \`am stop\` asks it.
+    if (Deno.build.os !== "windows") Deno.kill(Deno.pid, "SIGTERM");
+    else fetch("http://127.0.0.1:" + PORT + "/__aio/trojan/shutdown", { method: "POST",
+      headers: { "X-AIO": "1", "X-Aio-Control": Deno.readTextFileSync(DIR + "/data/control.key").trim() } });
   }
 };
 await new Promise((r) => (ws.onopen = r));
@@ -167,7 +172,7 @@ Deno.test("worker ack: an async call that ends during shutdown is answered with 
         "run",
         "-A",
         "--config",
-        new URL("../deno.json", import.meta.url).pathname,
+        fromFileUrl(new URL("../deno.json", import.meta.url)),
         join(dir, "app.ts"),
       ],
       env: { DIR: dir, PORT: String(freePort()), AIO_APPS_DIR: dir },

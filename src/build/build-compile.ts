@@ -33,6 +33,7 @@ import {
   relative,
   resolve,
 } from "@std/path";
+import { normalize as posixNormalize } from "@std/path/posix";
 import {
   artifactName,
   hostPlatform,
@@ -42,6 +43,7 @@ import {
   runsOn,
 } from "./platforms.ts";
 import { BUILD_STAMP_FILE } from "./build-version.ts";
+import { LINK_JOURNAL_RE, TRIM_JOURNAL_RE } from "./build-journals.ts";
 import { BUILD_VERSION_ENV } from "../server/app-version.ts";
 import { DEFAULT_PORT_ENV } from "../server/aio-cli.ts";
 import {
@@ -55,6 +57,7 @@ import { compiled } from "./build-say.ts";
 import { electronStagingDir, freshElectronStaging } from "./build-electron.ts";
 import { writeWindowsIcon } from "./build-helpers.ts";
 import { warnMachineBoundImports } from "./machine-bound-imports.ts";
+import { unembeddedReadMessage, unembeddedReads } from "./unembedded-reads.ts";
 import { minifyDeclared, runCompile } from "./minify-server.ts";
 import {
   INSTALL_BIN_DIR,
@@ -445,13 +448,17 @@ export function unreachableNpmEntries(
   return [...out].sort();
 }
 
-/** `deno info --json` for each module root, or null if any cannot be read. */
+/** `deno info --json` for each module root, or null if any cannot be read.
+ *  A root an earlier root's graph already loads is not asked again: its
+ *  whole graph is in that one (an included directory is one root per file). */
 async function denoInfoGraphs(
   cwd: string,
   roots: readonly string[],
 ): Promise<DenoInfoGraph[] | null> {
   const out: DenoInfoGraph[] = [];
+  const seen = new Set<string>();
   for (const r of roots) {
+    if (seen.has(resolve(cwd, r))) continue;
     try {
       const p = await new Deno.Command("deno", {
         args: ["info", "--json", r],
@@ -460,7 +467,9 @@ async function denoInfoGraphs(
         stderr: "null",
       }).output();
       if (!p.success) return null;
-      out.push(JSON.parse(new TextDecoder().decode(p.stdout)));
+      const g = JSON.parse(new TextDecoder().decode(p.stdout)) as DenoInfoGraph;
+      out.push(g);
+      for (const m of g.modules ?? []) if (m.local) seen.add(m.local);
     } catch {
       return null;
     }
@@ -468,19 +477,63 @@ async function denoInfoGraphs(
   return out;
 }
 
-/** The module files a compile embeds as ROOTS: the entry and every
- *  `--include` that is itself a module (the DB worker, `.server.ts` assets).
- *  Pure. */
+const MODULE_FILE_RE = /\.(m?[jt]sx?)$/;
+
+/** The module files a compile embeds as ROOTS: the entry, every `--include`
+ *  that is itself a module (the DB worker, `.server.ts` assets), and
+ *  `dirModules` — the modules under an included directory
+ *  ({@link includeDirModules}). Pure. */
 export function compileModuleRoots(
   entry: string,
   includeArgs: readonly string[],
+  dirModules: readonly string[] = [],
 ): string[] {
   const roots = [entry];
   includeArgs.forEach((a, i) => {
     const v = includeArgs[i + 1];
-    if (a === "--include" && v && /\.(m?[jt]sx?)$/.test(v)) roots.push(v);
+    if (a === "--include" && v && MODULE_FILE_RE.test(v)) roots.push(v);
   });
-  return roots;
+  return [...new Set([...roots, ...dirModules])];
+}
+
+/** The module files under each DIRECTORY deno.json `compile.include` names,
+ *  root-relative. `deno compile` makes every one of them a module root, so
+ *  the build must too: read as data only, a package one of them imports was
+ *  "unreachable", left out of the binary, and missing when the app loaded
+ *  that module (`build.keepPackages` was the only way to say it). Not the
+ *  `assets` mounts — those are served to a browser, never loaded here. A
+ *  nested `node_modules` and a symlink are not walked. A deno.json that does
+ *  not parse, or a bad entry, is `assetIncludes`' to report (it runs first). */
+export async function includeDirModules(root: string): Promise<string[]> {
+  let decl: unknown;
+  try {
+    decl = ((await readDenoJson(root))?.config as
+      | { compile?: { include?: unknown } }
+      | undefined)?.compile?.include;
+  } catch {
+    return []; // aio-ok: said by assetIncludes' compile.include read
+  }
+  const out: string[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    let entries: Deno.DirEntry[];
+    try {
+      entries = await Array.fromAsync(Deno.readDir(dir));
+    } catch {
+      return; // aio-ok: a file (a root by its own name already) or not there — deno compile refuses a missing include itself
+    }
+    for (const e of entries) {
+      const p = join(dir, e.name);
+      if (e.isDirectory) {
+        if (e.name !== "node_modules") await walk(p);
+      } else if (e.isFile && MODULE_FILE_RE.test(e.name)) {
+        out.push(relative(root, p).split("\\").join("/"));
+      }
+    }
+  };
+  for (const p of Array.isArray(decl) ? decl : []) {
+    if (typeof p === "string" && p.trim()) await walk(join(root, p.trim()));
+  }
+  return out.sort();
 }
 
 /** `build.keepPackages` — npm package names the app needs at RUNTIME even
@@ -535,7 +588,17 @@ export async function withDevExcluded(
    *  every npm package none of them reaches is left out too — unless
    *  `keepUnreached`, which reads the graph for its warnings and name rules
    *  only (the `cli` targets, whose package set this never narrowed). */
-  graph?: { cwd: string; roots: readonly string[]; keepUnreached?: boolean },
+  graph?: {
+    cwd: string;
+    roots: readonly string[];
+    keepUnreached?: boolean;
+    /** The roots a cross build INSTALLS for (default: `roots`). The modules
+     *  under an included directory are read for what they reach, never
+     *  installed for: `deno install --entrypoint` refuses a file whose import
+     *  does not resolve, and such a file under `compile.include` is data the
+     *  compile itself accepts. */
+    installRoots?: readonly string[];
+  },
   /** Package names to KEEP even when {@link DEV_ONLY_PACKAGES} lists them
    *  (deno.json `build.keepPackages`). `keepRoots` still wins for everything
    *  reachable from a non-dev root. */
@@ -667,8 +730,12 @@ export function isTrimmedDir(rel: string): boolean {
 }
 
 /** The `node_modules/.deno`-relative paths of the modules the binary's graph
- *  loads from there (`deno info` lists a `local` file for everything but an
- *  npm package's internals). {@link collectTrim} holds none of them aside. Pure. */
+ *  loads from there: a module's `local` file, and — an npm package being ONE
+ *  entry, with no file — the file an import names INSIDE one
+ *  (`npm:/x@1.0.0/test/run.js`, laid over the package's `localPath`; with an
+ *  `exports` map that is a key, not a file — {@link packageOwnRefs} reads the
+ *  map). What a package loads from itself the graph never shows.
+ *  {@link collectTrim} holds none of them aside. Pure. */
 export function reachedDenoRels(
   graphs: readonly DenoInfoGraph[],
   denoDir: string,
@@ -676,8 +743,13 @@ export function reachedDenoRels(
   const out: string[] = [];
   for (const g of graphs) {
     for (const m of g.modules ?? []) {
-      if (!m.local) continue;
-      const rel = relative(denoDir, m.local);
+      const sub = m.kind === "npm"
+        ? m.specifier?.replace(/^npm:\/?(?:@[^/]+\/)?[^/]+/, "")
+        : "";
+      const pkg = sub && g.npmPackages?.[m.npmPackage ?? ""]?.localPath;
+      const file = m.local ?? (pkg ? join(pkg, sub!) : undefined);
+      if (!file) continue;
+      const rel = relative(denoDir, file);
       if (!rel.startsWith("..") && !isAbsolute(rel)) {
         out.push(rel.split("\\").join("/"));
       }
@@ -704,8 +776,6 @@ function trimPaths(nmDir: string, id: string): TrimPaths {
     journal: join(aio, id ? `trim-journal.${id}.json` : "trim-journal.json"),
   };
 }
-const TRIM_JOURNAL_RE =
-  /^trim-journal(?:\.((\d+)-([0-9a-f]+)))?\.json(?:\.tmp)?$/;
 
 async function pathExists(p: string): Promise<boolean> {
   return await Deno.lstat(p).then(() => true).catch(() => false);
@@ -720,12 +790,81 @@ async function writeTrimJournal(
   await Deno.rename(`${journal}.tmp`, journal);
 }
 
+/** `rel`'s innermost package directory — `…/node_modules/<pkg>` or
+ *  `…/node_modules/@scope/<pkg>`. Pure. */
+function packageDirOf(rel: string): string | null {
+  // aio-ok: path-split — a `.deno`-relative path this module builds with `/` (collectTrim walk)
+  const s = rel.split("/");
+  const i = s.lastIndexOf("node_modules");
+  const n = i + (s[i + 1]?.startsWith("@") ? 3 : 2);
+  return i < 0 || s.length < n ? null : s.slice(0, n).join("/");
+}
+
+/** A relative specifier written as a literal: `require("./test/x")`,
+ *  `import … from "../tests/y.js"`, `import("./__tests__/z")`, a template
+ *  whose head is literal (`./test/${name}` names the directory). */
+const LOCAL_SPEC_RE =
+  /(?:\brequire\s*\(|\bimport\s*\(|\bfrom|\bimport)\s*["'`](\.\.?\/[^"'`\n]+)["'`]/g;
+
+/** The `.deno`-relative paths the package at `pkg` names IN ITSELF: every
+ *  literal relative specifier ({@link LOCAL_SPEC_RE}) in its own `.js` /
+ *  `.cjs` / `.mjs` outside its trim directories, and every path its
+ *  `package.json` `main` / `exports` / `imports` hand out. The module graph
+ *  shows none of this (one entry per npm package), and a test directory held
+ *  aside that the package `require`s is `Cannot find module` at that call in
+ *  the user's hands — or nothing at all, where the package guards the call
+ *  (measured). null: the package could not be read, so nothing is known.
+ *
+ *  What this cannot see is a path COMPUTED at run time (`require(dir + name)`,
+ *  `fs.readFileSync(join(__dirname, "test", …))`) and a file named from
+ *  ANOTHER package: `build.keepPackages` keeps such a package whole. */
+async function packageOwnRefs(
+  denoDir: string,
+  pkg: string,
+): Promise<string[] | null> {
+  const out: string[] = [];
+  const walk = async (rel: string): Promise<void> => {
+    for await (const e of Deno.readDir(join(denoDir, rel))) {
+      const child = `${rel}/${e.name}`;
+      if (e.isDirectory) {
+        if (e.name !== "node_modules" && !isTrimmedDir(child)) {
+          await walk(child);
+        }
+      } else if (e.isFile && /\.[cm]?js$/.test(e.name)) {
+        const text = await Deno.readTextFile(join(denoDir, child));
+        for (const m of text.matchAll(LOCAL_SPEC_RE)) {
+          out.push(posixNormalize(`${rel}/${m[1]}`));
+        }
+      } else if (e.isFile && child === `${pkg}/package.json`) {
+        const j = JSON.parse(await Deno.readTextFile(join(denoDir, child)));
+        const paths = (v: unknown): string[] =>
+          typeof v === "string"
+            ? [v]
+            : v && typeof v === "object"
+            ? Object.values(v).flatMap(paths)
+            : [];
+        for (const v of paths([j?.main, j?.exports, j?.imports])) {
+          out.push(posixNormalize(`${pkg}/${v}`));
+        }
+      }
+    }
+  };
+  try {
+    await walk(pkg);
+  } catch {
+    return null; // aio-ok: the caller holds nothing of an unreadable package's directories aside
+  }
+  return out;
+}
+
 /** Every path under `denoDir` to hold aside — source maps, docs, and test
  *  fixture directories ({@link isTrimmedDir}) — relative to `denoDir`.
  *  Top-level entries named in `skipTop` (the packages already `--exclude`d,
  *  and the `build.keepPackages` ones) are not walked, and nothing in `reached`
  *  ({@link reachedDenoRels}) is taken: a module the graph loads is runtime
- *  code whatever its name. Symlinks are never followed. Exported for tests.
+ *  code whatever its name. Nor is a directory its own package names
+ *  ({@link packageOwnRefs}, read once per package into `own`). Symlinks are
+ *  never followed. Exported for tests.
  *  @internal */
 export async function collectTrim(
   dir: string,
@@ -733,7 +872,17 @@ export async function collectTrim(
   rel = "",
   skipTop?: ReadonlySet<string>,
   reached: readonly string[] = [],
+  own = new Map<string, Promise<string[] | null>>(),
+  denoDir = dir,
 ): Promise<string[]> {
+  const named = async (childRel: string): Promise<boolean> => {
+    const pkg = packageDirOf(childRel);
+    if (!pkg) return false;
+    if (!own.has(pkg)) own.set(pkg, packageOwnRefs(denoDir, pkg));
+    const refs = await own.get(pkg)!;
+    return !refs ||
+      refs.some((r) => r === childRel || r.startsWith(`${childRel}/`));
+  };
   try {
     // `Deno.readDir` is lazy: a missing/unreadable dir throws on the FIRST
     // `for await` step, not at the call — so the try must wrap the loop.
@@ -743,12 +892,23 @@ export async function collectTrim(
         if (rel === "" && skipTop?.has(e.name)) continue;
         if (
           isTrimmedDir(childRel) &&
-          !reached.some((r) => r.startsWith(`${childRel}/`))
+          !reached.some((r) =>
+            r === childRel || r.startsWith(`${childRel}/`)
+          ) &&
+          !(await named(childRel))
         ) {
           out.push(childRel);
           continue;
         }
-        await collectTrim(join(dir, e.name), out, childRel, skipTop, reached);
+        await collectTrim(
+          join(dir, e.name),
+          out,
+          childRel,
+          skipTop,
+          reached,
+          own,
+          denoDir,
+        );
       } else if (
         e.isFile && isTrimmedFile(e.name) && !reached.includes(childRel)
       ) {
@@ -1337,6 +1497,7 @@ async function _withDevExcluded(
     cwd: string;
     roots: readonly string[];
     keepUnreached?: boolean;
+    installRoots?: readonly string[];
   },
   keepPackages: readonly string[] = [],
   /** Release the build lock — for the one exit that skips the caller's
@@ -1370,7 +1531,11 @@ async function _withDevExcluded(
   if (
     platform !== hostPlatform() && graph.size > 0 && graphRoots?.roots.length
   ) {
-    const failed = await installFor(graphRoots.cwd, sys, graphRoots.roots);
+    const failed = await installFor(
+      graphRoots.cwd,
+      sys,
+      graphRoots.installRoots ?? graphRoots.roots,
+    );
     if (failed) {
       // The build stops here: a binary compiled without them would be the
       // target's app with another system's native code, or none.
@@ -1506,7 +1671,7 @@ async function _withDevExcluded(
   async function _rm(path: string): Promise<void> {
     if (closing) return;
     try {
-      const t = await Deno.readLink(path);
+      const t = journalTarget(nmDir, path, await Deno.readLink(path));
       saved.push({ path: relative(nmDir, path), target: t, isDir: false });
       await _journal();
       await Deno.remove(path);
@@ -1520,7 +1685,11 @@ async function _withDevExcluded(
         try {
           inner.push({
             name: e.name,
-            target: await Deno.readLink(join(path, e.name)),
+            target: journalTarget(
+              nmDir,
+              join(path, e.name),
+              await Deno.readLink(join(path, e.name)),
+            ),
           });
         } catch { /* not a symlink */ }
       }
@@ -1682,15 +1851,6 @@ async function _withDevExcluded(
   return ok;
 }
 
-/** The links a running build holds aside, written before each removal: ONE
- *  file per build (`.aio-build-links.<pid>-<nonce8><tag>.json`), so two
- *  builds never share a read-modify-write. The name is one an OLDER aio's
- *  pattern (`.<pid>-<hex>`) still reads as its pid's journal; the owner's
- *  start stamp rides in the hex tail. An older build's `.aio-build-links.json`
- *  is still recovered. `<journal>.tmp` is a write killed before its rename. */
-const LINK_JOURNAL_RE =
-  /^\.aio-build-links(?:\.(\d+)-([0-9a-f]+))?\.json(?:\.tmp)?$/;
-
 /** The journal names THIS process holds right now (see pid-lock.ts: our own
  *  pid on one is otherwise a previous run's). */
 const liveJournals = new Set<string>();
@@ -1750,7 +1910,8 @@ function journalOwnerAlive(
  *  `node_modules/<pkg>` link it believes it already wrote (`deno install`
  *  included), so every later bundle failed `Could not resolve "<pkg>"` until
  *  someone deleted node_modules. The journal is written BEFORE each removal;
- *  every build runs this first, and leaves a LIVE build's journal alone (its
+ *  every build runs this first — and every start from source, when a journal
+ *  is there (`recoverInterruptedBuild`) — and leaves a LIVE build's journal alone (its
  *  own `finally` restores those links): all of them while another live
  *  process holds the lock, and any whose own pid is alive. */
 export async function recoverInterruptedLinks(nmDir: string): Promise<void> {
@@ -1852,6 +2013,32 @@ async function readLinkJournal(path: string): Promise<SavedLink[] | null> {
   }
 }
 
+/** A held-aside link's target, as the journal keeps it. deno writes these
+ *  links relative on POSIX and as junctions — ABSOLUTE — on Windows, so there
+ *  a target inside `nmDir` is journaled relative to its link: the journal
+ *  survives the project being moved on every OS, not only where the link was
+ *  relative to begin with. Pure. */
+function journalTarget(nmDir: string, link: string, target: string): string {
+  if (Deno.build.os !== "windows" || !isAbsolute(target)) return target;
+  const inside = relative(nmDir, target);
+  return inside.startsWith("..") || isAbsolute(inside)
+    ? target
+    : relative(dirname(link), target);
+}
+
+/** Re-create one of deno's `node_modules` links — each points at a package
+ *  DIRECTORY. On Windows that is a junction, as deno itself writes it: with
+ *  no `type` Deno made a directory symlink, which needs
+ *  `SeCreateSymbolicLinkPrivilege` — on a stock box every restore failed
+ *  `PermissionDenied` and the build left the project without its dev links
+ *  (same reason as `dirLinkType` in am-utils.ts). A junction's target is
+ *  absolute, so a relative one is resolved against the link's folder. */
+async function linkPackage(target: string, link: string): Promise<void> {
+  await (Deno.build.os === "windows"
+    ? Deno.symlink(resolve(dirname(link), target), link, { type: "junction" })
+    : Deno.symlink(target, link));
+}
+
 /** `path` is node_modules-relative (an absolute one, from an older journal,
  *  is used as is). */
 async function restoreLinks(
@@ -1871,14 +2058,14 @@ async function restoreLinks(
           await Deno.remove(join(path, name)).catch(() => {
             // aio-ok: nothing there to replace — the symlink below is the point
           });
-          await Deno.symlink(t, join(path, name));
+          await linkPackage(t, join(path, name));
         }
       } else {
         await Deno.mkdir(dirname(path), { recursive: true });
         try {
           await Deno.remove(path);
         } catch { /* already gone */ }
-        await Deno.symlink(target, path);
+        await linkPackage(target, path);
       }
     } catch (e) {
       console.warn(`${HEY} failed to restore symlink ${path}: ${e}`);
@@ -2152,13 +2339,14 @@ export async function localModuleGraph(
     // them `../<real>/…` against the link, so the whole graph read as outside
     // the project and a sibling `*.server.ts` the entry imports was left out
     // of the binary — which then dies at the import. Compare real to real.
-    const base = await Deno.realPath(root);
+    // Windows keeps a process's cwd as it was spelled, so there `deno info`
+    // run from the link reports paths THROUGH the link: try that spelling too.
+    const bases = [await Deno.realPath(root), resolve(root)];
     return (j.modules ?? []).flatMap((m) => {
       if (!m.local) return [];
-      const rel = relative(base, m.local);
-      return rel.startsWith("..") || isAbsolute(rel)
-        ? []
-        : [rel.split("\\").join("/")];
+      const rel = bases.map((b) => relative(b, m.local!))
+        .find((r) => !r.startsWith("..") && !isAbsolute(r));
+      return rel === undefined ? [] : [rel.split("\\").join("/")];
     });
   } catch {
     return null;
@@ -2758,8 +2946,36 @@ export async function runDenoCompile(
 
   const graphRoots = {
     cwd: root,
-    roots: compileModuleRoots(configEntry, [...workerInclude, ...assets]),
+    roots: compileModuleRoots(
+      configEntry,
+      [...workerInclude, ...assets],
+      await includeDirModules(root),
+    ),
+    installRoots: compileModuleRoots(configEntry, [
+      ...workerInclude,
+      ...assets,
+    ]),
   };
+  const argvOpts = {
+    hasDist,
+    workerInclude,
+    assets,
+    v8Flags,
+    stamp: BUILD_STAMP_FILE,
+    out: compileTarget,
+    entry: configEntry,
+    target: cfg.targetTriple,
+    runtimeArgs: bakedClientArgs(cfg),
+    windowsGui,
+  };
+  // Judged against the compile's OWN argv — what it embeds is what is covered.
+  if (
+    !(await refuseUnembeddedReads(
+      root,
+      _compileArgv({ ...argvOpts, excludes: [] }),
+      graphRoots.roots,
+    ))
+  ) return false;
   const minify = await minifyDeclared(root);
   const keepPackages = await keepPackagesDeclared(root);
   const ok = await withDevExcluded(
@@ -2767,19 +2983,7 @@ export async function runDenoCompile(
     async (excludes) => {
       const result = await runCompile(
         root,
-        _compileArgv({
-          hasDist,
-          workerInclude,
-          assets,
-          v8Flags,
-          excludes,
-          stamp: BUILD_STAMP_FILE,
-          out: compileTarget,
-          entry: configEntry,
-          target: cfg.targetTriple,
-          runtimeArgs: bakedClientArgs(cfg),
-          windowsGui,
-        }),
+        _compileArgv({ ...argvOpts, excludes }),
         minify,
       );
       if (!result.success) return false;
@@ -2912,6 +3116,94 @@ async function warnUnservableAssets(
           `dev\` and is a broken link in every shipped artifact.`,
     );
   }
+}
+
+/** Stop a compile whose server modules read a file the binary will not hold.
+ *  See `unembeddedReads` for the rule; this is only the I/O around it.
+ *
+ *  `argv` is the `deno compile` argv about to run and `roots` its module
+ *  roots ({@link compileModuleRoots}) — coverage is read from those two, so
+ *  it is the compile's own answer. Scanned: the app's own modules in that
+ *  graph (never `node_modules`, never a vendored framework — the dirs
+ *  `assetIncludes` skips).
+ *
+ *  A read written INSIDE a `Deno.*` read call fails the build: the module
+ *  ships, the file does not, so the read is certain to throw in every
+ *  artifact. The heuristic forms (a name bound earlier,
+ *  `join(import.meta.dirname, …)`, a bare `stat`), a read whose absence the
+ *  code handles (a `.catch`, a `try/catch`, a `Deno.build.standalone` test),
+ *  a `fetch` in a `*.server.ts` module and a target that does not exist at
+ *  all are warnings. A `fetch` anywhere else is the browser's and is not
+ *  judged.
+ *  Returns false when the build must stop. `@internal`. */
+export async function refuseUnembeddedReads(
+  root: string,
+  argv: readonly string[],
+  roots: readonly string[],
+): Promise<boolean> {
+  const graphs = await denoInfoGraphs(root, roots);
+  if (!graphs) {
+    console.warn(
+      `${HEY} could not read the module graph — runtime file reads were NOT ` +
+        `checked against what this binary embeds`,
+    );
+    return true;
+  }
+  const norm = (p: string) => p.split("\\").join("/");
+  // Real path AND the path as spelled — see `localModuleGraph`.
+  const bases = [await Deno.realPath(root), resolve(root)];
+  const relOf = (abs: string): string | undefined => {
+    const rel = bases.map((b) => relative(b, abs))
+      .find((r) => !r.startsWith("..") && !isAbsolute(r));
+    return rel === undefined ? undefined : norm(rel);
+  };
+  const graph = graphs.flatMap((g) => g.modules ?? []).flatMap((m) => {
+    const rel = m.local ? relOf(m.local) : undefined;
+    return rel === undefined ? [] : [rel];
+  });
+  const modules = [...new Set(graph)]
+    // aio-ok: path-split — normalised to `/` by `norm`
+    .filter((p) => !p.split("/").some((seg) => ASSET_SKIP_DIRS.has(seg)))
+    .filter((p) => MODULE_FILE_RE.test(p))
+    .flatMap((path) => {
+      try {
+        return [{ path, content: Deno.readTextFileSync(join(root, path)) }];
+      } catch {
+        return []; // aio-ok: unreadable here — the compile reports it, with the real cause
+      }
+    });
+  const included = argv.flatMap((a, i) =>
+    argv[i - 1] === "--include" ? [relOf(resolve(root, a)) ?? []].flat() : []
+  );
+  let declared: string[] = [];
+  try {
+    const inc = ((await readDenoJson(root))?.config as
+      | { compile?: { include?: unknown } }
+      | undefined)?.compile?.include;
+    if (Array.isArray(inc)) declared = inc.filter((x) => typeof x === "string");
+  } catch {
+    // aio-ok: said by assetIncludes' compile.include read, which ran first
+  }
+  const found = unembeddedReads({
+    modules,
+    included: [...included, ...graph],
+    kind: (rel) => {
+      try {
+        return Deno.statSync(join(root, rel)).isDirectory ? "dir" : "file";
+      } catch {
+        return null;
+      }
+    },
+  });
+  let ok = true;
+  for (const f of found) {
+    const msg = unembeddedReadMessage(f, declared);
+    if (f.certain) {
+      ok = false;
+      console.error(`${NO} ${msg}`);
+    } else console.warn(`${HEY} ${msg}`);
+  }
+  return ok;
 }
 
 /** Runtime flags for the generated systemd unit.

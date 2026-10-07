@@ -10,7 +10,7 @@
 // Real app in a temp dir (dep/aio → this checkout), AIO_APPS_DIR in a temp
 // dir, --client=server-only (no window).
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { join, resolve } from "@std/path";
 import { childEnv, makeApp } from "./e2e-app-harness.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { isProcessAlive } from "../src/server/single-instance-lock.ts";
@@ -20,6 +20,9 @@ const dec = new TextDecoder();
 
 Deno.test("restartEntry: explicit wins, else the recorded entry (against its cwd) while it exists", () => {
   const has = (set: string[]) => (p: string) => set.includes(p);
+  // The entry comes back absolute: on Windows that carries a drive.
+  const pMain = resolve("/p/main.ts");
+  const rMain = resolve("/r/main.ts");
   assertEquals(
     restartEntry("x.ts", { entry: "a.ts", cwd: "/p" }, "/r", has([])),
     { entry: "x.ts" },
@@ -29,18 +32,23 @@ Deno.test("restartEntry: explicit wins, else the recorded entry (against its cwd
       undefined,
       { entry: "main.ts", cwd: "/p" },
       "/r",
-      has(["/p/main.ts"]),
+      has([pMain]),
     ),
-    { entry: "/p/main.ts" },
+    { entry: pMain },
   );
   // No recorded cwd (an older record): the project root.
   assertEquals(
-    restartEntry(undefined, { entry: "main.ts" }, "/r", has(["/r/main.ts"])),
-    { entry: "/r/main.ts" },
+    restartEntry(
+      undefined,
+      { entry: "main.ts" },
+      "/r",
+      has([rMain]),
+    ),
+    { entry: rMain },
   );
   assertEquals(
     restartEntry(undefined, { entry: "main.ts", cwd: "/p" }, "/r", has([])),
-    { gone: "/p/main.ts" },
+    { gone: pMain },
   );
   assertEquals(restartEntry(undefined, null, "/r", has([])), {});
   assertEquals(restartEntry(undefined, { cwd: "/p" }, "/r", has([])), {});
@@ -49,7 +57,6 @@ Deno.test("restartEntry: explicit wins, else the recorded entry (against its cwd
 Deno.test({
   name:
     "am restart: an app started with --entry comes back on it; a restart that cannot start leaves the app UP",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await makeApp("counter", "am-restart-entry-");
     const apps = await tempDir("am-restart-entry-apps-");

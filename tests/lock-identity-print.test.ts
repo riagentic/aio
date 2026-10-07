@@ -157,7 +157,6 @@ Deno.test("maintenanceOp: a record handed in directly is printable too", () => {
 Deno.test({
   name:
     "am status: a control char in home keeps ONE lock (repair under its own key)",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const { tempDir, dropTempDir } = await import("../src/testing/temp-dir.ts");
     const { join, toFileUrl } = await import("@std/path");
@@ -222,7 +221,7 @@ Deno.test({
 // (measured on the macOS VM) — and a timeout is "unknown", never "dead".
 Deno.test({
   name: "processStartEpoch: a hanging ps is cut off → null; a real one answers",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // `ps` is how unix reads a start time; Windows never runs it
   async fn() {
     const { PS_TIMEOUT, processStartEpoch } = await import(
       "../src/server/single-instance-lock.ts"

@@ -35,13 +35,15 @@ async function inChild(dir: string, code: string): Promise<unknown> {
   return JSON.parse(out.trim().split("\n").at(-1)!);
 }
 
-/** A booting "app": a real process (`sleep`) whose lock the child writes,
+/** A booting "app": a real process (an idle deno) whose lock the child writes,
  *  as `am start`'s placeholder would — `starting`, port 1 (nothing listens,
  *  so the stop falls through to SIGTERM). */
 const APP = `
   const m = await import(${url("src/server/single-instance-lock.ts")});
   const boot = (id) => {
-    const p = new Deno.Command("sleep", { args: ["60"] }).spawn();
+    const p = new Deno.Command(Deno.execPath(), {
+      args: ["eval", "setTimeout(() => {}, 60000)"],
+    }).spawn();
     m.writeLock({ appId: id, pid: p.pid, port: 1, startedAt: 1000,
       status: "starting", cwd: Deno.cwd(), ...m.ownerIdentity(p.pid) });
     return p;
@@ -60,7 +62,6 @@ const APP = `
 
 Deno.test({
   name: "am stop: an app that finishes booting mid-stop is still stopped",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("stop-flip-");
     try {
@@ -87,7 +88,6 @@ Deno.test({
 
 Deno.test({
   name: "am stop --all: apps whose locks flip mid-list are all stopped",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("stopall-flip-");
     try {
@@ -129,7 +129,6 @@ Deno.test({
 Deno.test({
   name:
     "am stop: lock gone mid-stop — a live owner is still stopped, a dead one is 'stopped'",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("stop-gone-");
     try {

@@ -7,6 +7,8 @@
 // named.
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
+import { connectLocal, type LocalConn } from "../src/server/local-listen.ts";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
 import { createUDSListener } from "../src/server/aio.ts";
 import {
   _resetBigStateWarnings,
@@ -25,14 +27,14 @@ Deno.test({
     const rows = "x".repeat(BROADCAST_FULL_WARN_BYTES + 1024);
     const listen = (name: string) =>
       createUDSListener(
-        join(dir, `${name}.sock`),
+        localEndpoint(join(dir, `${name}.sock`)),
         () => ({ catalog: { rows } }),
         () => {},
         () => {},
       );
     const a = listen("a");
     const b = listen("b");
-    const conns: Deno.Conn[] = [];
+    const conns: LocalConn[] = [];
     const seen: string[] = [];
     const prev = getLogger();
     setLogger({
@@ -46,10 +48,7 @@ Deno.test({
     try {
       for (const name of ["a", "b"]) {
         conns.push(
-          await Deno.connect({
-            path: join(dir, `${name}.sock`),
-            transport: "unix",
-          }),
+          await connectLocal(localEndpoint(join(dir, `${name}.sock`))),
         );
         await new Promise((r) => setTimeout(r, 80));
       }
@@ -73,6 +72,7 @@ Deno.test({
       }
       a.shutdown();
       b.shutdown();
+      await localIdle();
       await Deno.remove(dir, { recursive: true }).catch(() => {});
       _resetBigStateWarnings();
     }

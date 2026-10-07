@@ -37,9 +37,11 @@ import {
   join,
   relative,
   SEPARATOR,
+  toFileUrl,
 } from "@std/path";
 import { BUNDLE_MAP } from "../server/app-files.ts";
 import { readDenoJson } from "../server/deno-json.ts";
+import { codeMask } from "../diagnostics/code-mask.ts";
 import { HEY, NO } from "../diagnostics/fmt.ts";
 
 /** The staging copy, inside the project (`.aio/` is never scanned for assets
@@ -101,7 +103,7 @@ type Esbuild = {
  *  imports nothing — and pinned by `tests/emitted-source-minified.test.ts`. */
 export const KEEP_NAME = "__aioName";
 
-/** esbuild 0.24's un-minified `keepNames` helper, as it prints it (the
+/** esbuild 0.25's un-minified `keepNames` helper, as it prints it (the
  *  version is pinned exactly — `runCompile`). A user binding called `__name`
  *  makes esbuild number its own (`__name2`), hence the capture — and one
  *  called `target` or `value` makes it number the PARAMETERS
@@ -127,6 +129,73 @@ export class Unminifiable extends Error {
     super(why);
     this.name = "Unminifiable";
   }
+}
+
+/** A statement that is one string literal — a directive, where it opens a
+ *  body (`"use strict";`). */
+const DIRECTIVE = /^ *(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*');$/;
+
+/** The first pass's text with each function DECLARATION's kept-name call
+ *  moved to the top of the body that declares it.
+ *
+ *  esbuild writes the call after the declaration:
+ *  `function f() {…}` + `__name(f, "f");`. A declaration is hoisted and its
+ *  call is not — so after a `return` the call never ran (`return inner.name;
+ *  function inner() {}` gave `"e"` in the built app, `"inner"` in dev), and
+ *  any read above the declaration saw the minified name. At the top of the
+ *  body the name is there as early as the function is. (esbuild does this
+ *  itself for a function in a nested block, which it turns into a `let`.)
+ *
+ *  The body is found by the printer's layout — its statements sit one level
+ *  under the line that opens it — on lines the lexer says start in code (a
+ *  template's text can look like anything). Where the two do not agree the
+ *  module is {@link Unminifiable}: shipped as written, and named. Pure. */
+function hoistKeptNames(named: string, helper: string, jsx: boolean): string {
+  const lines = named.split("\n");
+  const call = new RegExp(`^( *)${helper}\\([^\\s,()]+, "[^"]*"\\);$`);
+  const lost = () =>
+    new Unminifiable(
+      "the kept-name call of a function declaration could not be placed",
+    );
+  let starts: number[] | undefined;
+  let mask: Uint8Array | undefined;
+  /** Does line `i` start in code — not inside a template or shown text? */
+  const inCode = (i: number): boolean => {
+    if (!starts) {
+      starts = [0];
+      for (const l of lines) starts.push(starts.at(-1)! + l.length + 1);
+      mask = codeMask(named, jsx);
+    }
+    return i === 0 || mask![starts[i]! - 1] === 1;
+  };
+  const top = lines.findIndex((l) => NAME_HELPER.test(l));
+  /** Line → the calls to write after it. */
+  const moved = new Map<number, string[]>();
+  const taken = new Set<number>();
+  for (let i = 1; i < lines.length; i++) {
+    const indent = call.exec(lines[i]!)?.[1];
+    // `}` closes a declaration; a function EXPRESSION ends in `};` or `,`.
+    if (indent === undefined || lines[i - 1] !== `${indent}}`) continue;
+    if (!inCode(i)) throw lost();
+    let at = top;
+    if (indent) {
+      at = i - 1;
+      while (
+        at >= 0 &&
+        (!inCode(at) || /^ */.exec(lines[at]!)![0].length >= indent.length)
+      ) at--;
+      if (
+        at < 0 || !lines[at]!.endsWith("{") || !inCode(at + 1) ||
+        /^ */.exec(lines[at]!)![0].length !== indent.length - 2
+      ) throw lost();
+      while (DIRECTIVE.test(lines[at + 1]!)) at++;
+    }
+    moved.set(at, [...(moved.get(at) ?? []), lines[i]!]);
+    taken.add(i);
+  }
+  return lines.flatMap((l, i) =>
+    taken.has(i) ? [] : [l, ...(moved.get(i) ?? [])]
+  ).join("\n");
 }
 
 /** One module's minified text. ESM, whitespace + syntax + local names, no
@@ -212,7 +281,7 @@ export async function minifyModule(
     throw new Unminifiable(`it uses the name ${KEEP_NAME} itself`);
   }
   const global = helper
-    ? named.replace(
+    ? hoistKeptNames(named, helper, loader.endsWith("x")).replace(
       NAME_HELPER,
       () =>
         `globalThis.${KEEP_NAME} ??= (target, value) => ` +
@@ -252,7 +321,13 @@ async function denoInfo(
   module: string,
 ): Promise<{ specifier?: string; error?: string }[]> {
   const o = await new Deno.Command("deno", {
-    args: ["info", "--json", module],
+    // As a `file:` URL: `deno info C:\\app\\x.ts` reads `c:` as a URL scheme
+    // and answers one "external" module — on Windows nothing was minified.
+    args: [
+      "info",
+      "--json",
+      isAbsolute(module) ? toFileUrl(module).href : module,
+    ],
     cwd,
     stdout: "piped",
     stderr: "piped",
@@ -501,6 +576,39 @@ export async function stageMinified(
   }
 }
 
+/** The compile's output file when it is there and cannot be opened for
+ *  writing — said after a FAILED compile on Windows, the one system that
+ *  refuses to replace a program that is running. deno's own words for that
+ *  are `error: Access is denied. (os error 5)`, with no file named (measured:
+ *  `deno compile -o app.exe` while `app.exe` runs), so a rebuild of an app
+ *  left running failed without saying what to stop. Null anywhere else: a
+ *  running binary is replaced without complaint on Linux and macOS, and a
+ *  line about it under some other failure would point the wrong way. */
+export async function outputHeld(
+  root: string,
+  argv: readonly string[],
+  os: typeof Deno.build.os = Deno.build.os,
+): Promise<string | null> {
+  const oi = argv.indexOf("-o");
+  const out = oi < 0 ? undefined : argv[oi + 1];
+  if (os !== "windows" || !out) return null;
+  const abs = isAbsolute(out) ? out : join(root, out);
+  // deno adds the `.exe` a Windows output is spelled without.
+  for (const path of [abs, `${abs}.exe`]) {
+    try {
+      if (!(await Deno.stat(path)).isFile) continue;
+      (await Deno.open(path, { write: true })).close();
+    } catch (e) {
+      if (e instanceof Deno.errors.NotFound) continue;
+      return `${NO} ${path} cannot be replaced: ${
+        e instanceof Error ? e.message : e
+      }\n       It is in use — the app is still running, or the file is ` +
+        `open in another program. Stop it and build again.`;
+    }
+  }
+  return null;
+}
+
 /** THE compile step for every compiled target: `deno <argv>` as-is, or —
  *  with `build.minify` — from the minified stage. `{ success: false }` after
  *  saying why when staging fails. */
@@ -509,17 +617,23 @@ export async function runCompile(
   argv: string[],
   minify: boolean,
 ): Promise<{ success: boolean }> {
-  const run = (args: string[], cwd?: string) =>
-    new Deno.Command("deno", {
+  const run = async (args: string[], cwd?: string) => {
+    const r = await new Deno.Command("deno", {
       args,
       cwd,
       stdout: "inherit",
       stderr: "inherit",
     }).output();
+    if (!r.success) {
+      const held = await outputHeld(root, argv);
+      if (held) console.error(held);
+    }
+    return r;
+  };
   if (!minify) return await run(argv);
   // Pinned exactly as the bundle step pins it (build-bundle.ts).
   // deno-lint-ignore no-import-prefix
-  const esbuild = await import("npm:esbuild@0.24.2");
+  const esbuild = await import("npm:esbuild@0.25.12");
   let st;
   try {
     st = await stageMinified(esbuild, root, argv);

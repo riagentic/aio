@@ -12,6 +12,7 @@ import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { enc } from "../src/protocol/envelope.ts";
 import { protoHello } from "../src/protocol/protocol-version.ts";
+import { fixtureNodeModules } from "./symlink-helper.ts";
 
 const TEST_PORT = freePort();
 const TEST_PORT_7 = freePort();
@@ -1742,6 +1743,11 @@ Deno.test({
     // `react` resolves nowhere is an app that blank-screens, and dev says so
     // instead of serving it — the same answer `deno check` gives. This fixture
     // is about where the specifier RESOLVES TO, not about a missing dep.
+    // aio's own npm dep, where that bundle looks for it: the app's
+    // node_modules (a framework checkout that happens to have one of its own
+    // answers otherwise — a fresh clone has none). First, so the stub below
+    // is added to what `deno` laid out.
+    await fixtureNodeModules(dir, "npm:immer@10.2.0");
     await Deno.writeTextFile(
       join(dir, "deno.json"),
       JSON.stringify({ imports: { react: "npm:react@^18" } }),

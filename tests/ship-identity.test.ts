@@ -8,15 +8,17 @@
 // publish time. The artifact now reports the id it runs as beside its data
 // contract, and `shipApp` refuses the mismatch on the publisher's machine.
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { shipApp } from "../src/build/ship.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
+import { writeProgram } from "./fake-program-helper.ts";
 
 /** A project whose deno.json says `title: "X Wallet"`, and a real aio app in
  *  it whose code says `aio.run({ appId: "x" })`, spawnable as a binary. */
 async function project(): Promise<{ dir: string; bin: string }> {
   const dir = await tempDir("aio-ship-identity-");
-  const repo = new URL("../", import.meta.url).pathname;
+  const repo = fromFileUrl(new URL("../", import.meta.url));
   await Deno.writeTextFile(
     join(dir, "deno.json"),
     JSON.stringify({ title: "X Wallet", version: "1.0.0" }),
@@ -26,18 +28,17 @@ async function project(): Promise<{ dir: string; bin: string }> {
   const entry = join(dir, "app.ts");
   await Deno.writeTextFile(
     entry,
-    `import { aio, cell } from "${repo}mod.ts";\n` +
+    `import { aio, cell } from "${spec(repo)}mod.ts";\n` +
       `const notes = cell("notes", { version: 1, state: { n: 0 }, methods: {} });\n` +
       `await aio.run({ cells: [notes], appId: "x", libraryMode: true, ` +
-      `baseDir: "${dir}" });\n`,
+      `baseDir: ${JSON.stringify(dir)} });\n`,
   );
   const bin = join(dir, "app.bin");
-  await Deno.writeTextFile(
+  await writeProgram(
     bin,
     `#!/bin/sh\nexec "${Deno.execPath()}" run -A --config "${repo}deno.json" ` +
       `"${entry}" "$@"\n`,
   );
-  await Deno.chmod(bin, 0o755);
   return { dir, bin };
 }
 
@@ -54,7 +55,6 @@ async function inProject<T>(dir: string, fn: () => Promise<T>): Promise<T> {
 Deno.test({
   name:
     "shipApp: refuses a release named for an id the artifact does not run as",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     const { dir, bin } = await project();
     try {
@@ -90,17 +90,15 @@ Deno.test({
 
 Deno.test({
   name: "shipApp: an older artifact that reports no id is published as before",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     const { dir } = await project();
     try {
       // A pre-1.0.13 binary: the contract on stdout, no identity marker.
       const old = join(dir, "old.bin");
-      await Deno.writeTextFile(
+      await writeProgram(
         old,
         `#!/bin/sh\necho '{"schema":1,"cells":{}}'\n`,
       );
-      await Deno.chmod(old, 0o755);
       const warned: string[] = [];
       const warn = console.warn;
       console.warn = (m: string) => void warned.push(m);

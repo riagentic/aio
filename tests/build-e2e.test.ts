@@ -39,6 +39,7 @@ import {
 import { versionStamp } from "../src/build/build-bundle.ts";
 import { VERSION } from "../src/server/aio-cli.ts";
 import { MOUNT_LINE } from "../src/electron/electron-renderer-log.ts";
+import { testDisplayEnv } from "../src/testing/test-display.ts";
 import {
   embeddedFilesOf,
   needlePackage,
@@ -1002,10 +1003,16 @@ Deno.test({
   },
 });
 
-/** How to put a window somewhere: the real display, or a virtual one. */
+/** How to put a window somewhere: the suite's contained display, else the
+ *  real one, else a virtual one. */
 async function displayFor(): Promise<
   { wrap: string[]; env: Record<string, string> } | null
 > {
+  // `testDisplayEnv` first, as every other real-window test: with `$DISPLAY`
+  // taken as-is the packaged window opened on the developer's own desktop and
+  // took focus (measured — `deno task test:electron` on a workstation).
+  const contained = testDisplayEnv();
+  if (contained["DISPLAY"]) return { wrap: [], env: contained };
   const real = Deno.env.get("DISPLAY") || Deno.env.get("WAYLAND_DISPLAY");
   if (real) return { wrap: [], env: {} };
   const which = await new Deno.Command("sh", {

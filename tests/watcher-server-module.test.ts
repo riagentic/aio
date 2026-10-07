@@ -11,7 +11,7 @@
 // The reload is the moment the question is being asked, so it is where the
 // answer belongs.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { basename, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import {
   createFileWatcher,
@@ -216,7 +216,7 @@ Deno.test({
         await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 500));
       });
       watcher?.shutdown();
-      assertEquals(restarted.map((p) => p.split("/").pop()), ["pricing.ts"]);
+      assertEquals(restarted.map((p) => basename(p)), ["pricing.ts"]);
     } finally {
       await dropTempDir(tmp);
     }

@@ -17,7 +17,7 @@
 //  4. With the cwd's app down and some OTHER app up, the "one running instance"
 //     fallback let a MUTATION reach that other app after a note on stderr.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import {
   alreadyRunningLine,
   foreignCheckout,
@@ -274,8 +274,8 @@ Deno.test("am: a MUTATION over a discovered target is refused", async () => {
 // A real process, a real lock and a real `am` — an in-process test cannot show
 // that `am kill --port=1` sent SIGTERM to the wrong pid.
 
-const AM = new URL("../src/am.ts", import.meta.url).pathname;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const AM = fromFileUrl(new URL("../src/am.ts", import.meta.url));
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 async function runAm(
   cwd: string,

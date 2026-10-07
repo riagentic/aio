@@ -15,7 +15,7 @@
 //  • `b.SVG` / `f.CSS` → `application/octet-stream` + `nosniff`: the MIME and
 //    text lookups were case-sensitive while the anonymous gate lower-cased.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { join, resolve } from "@std/path";
 import { cell } from "../mod.ts";
 import { testServer } from "../src/testing/server-test.ts";
 import {
@@ -34,7 +34,8 @@ function deps(over: Partial<StaticDeps>): StaticDeps {
     prod: false,
     debug: () => {},
     title: "T",
-    absBaseDir: "/nonexistent",
+    // Absolute on the host, as server.ts hands it over (`resolve()`).
+    absBaseDir: resolve("/nonexistent"),
     absDistDir: null,
     hasCSS: false,
     importMap: "{}",

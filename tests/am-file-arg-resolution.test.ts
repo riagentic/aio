@@ -8,11 +8,12 @@
 // spelling (`ui/Card.tsx`). One rule now (`resolveFileArg`): the cwd first,
 // then the fallbacks in order, first that exists wins.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { resolveFileArg } from "../src/am/am-project.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("..", import.meta.url));
 
 async function app(): Promise<string> {
   const dir = await tempDir("am-file-arg-");
@@ -22,7 +23,7 @@ async function app(): Promise<string> {
   // No JSX, so the component needs no app-side jsx config to import.
   await Deno.writeTextFile(
     `${dir}/src/ui/Card.ts`,
-    `import { h } from "${REPO}src/air/vdom.ts";\n` +
+    `import { h } from "${spec(REPO)}src/air/vdom.ts";\n` +
       `export function Card(p: { title: string }) {\n` +
       `  return h("h2", { t: "title" }, p.title);\n}\n`,
   );

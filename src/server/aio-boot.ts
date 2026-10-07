@@ -102,7 +102,10 @@ import {
   loadOpsSince,
   loadSnapshot,
   seedSyncSnapshot,
+  settleOp,
 } from "../sync/server-store.ts";
+import { takeRejectionFor } from "../state/rejection-tracker.ts";
+import { opKey } from "./op-placement.ts";
 import { count } from "../diagnostics/fmt.ts";
 import {
   bootStoreGen,
@@ -443,6 +446,11 @@ export async function replaySyncOps<S>(
      *  but never reduced (see journal.ts `SYNC_APPLIED_TYPE`): left out of
      *  the cell's own fold, for the caller to reduce whole. */
     defer?: Map<string, number>;
+    /** The ops whose COMMIT the journal holds (`opKey` — journal.ts
+     *  `SYNC_APPLIED_TYPE`): reduced by the run that wrote them, their
+     *  reactions replayed from the journal. Never one a kill caught in
+     *  flight, whatever its row's mark says. */
+    committed?: ReadonlySet<string>;
   } = {},
 ): Promise<S> {
   const ctx: SyncReplayContext = {
@@ -602,6 +610,33 @@ export async function replaySyncOps<S>(
     }
 
     let applied = 0;
+    // The cell's LAST row, stored and never settled (`settleOp`): the process
+    // died between its persist and the answer to its author — nobody was
+    // told it landed. A refusal of it here is the refusal the live server
+    // was about to give (or gave, and died before deleting the row): the row
+    // goes, as the live server removes it, and its author's resend meets the
+    // same decision. Only the last row: a cell's next op is persisted after
+    // this one's dispatch settled, so an unmarked row with one after it was
+    // decided by a run that went on — its mark or its delete failed, said
+    // then — and is folded as any other. A row no build marked (NULL) is
+    // never taken for one: nothing proves it was not acknowledged.
+    const last = ops.at(-1);
+    const lastId = last?.id;
+    /** The last row's mark: 0 unsettled, 1 settled, null no build marked it. */
+    const lastMark = last === undefined
+      ? undefined
+      : (await db.query<{ settled: number | null }>(
+        "SELECT settled FROM sync_ops WHERE id = ?",
+        [last.id],
+      )).rows[0]?.settled;
+    // …and never one the journal holds the COMMIT of: that run reduced it
+    // and journalled its reactions (a kill between the commit and the mark).
+    const inFlight = lastMark === 0 &&
+      !opts.committed?.has(opKey(last!.id, last!.serverTs ?? NaN));
+    let refusedInFlight: string | undefined;
+    /** Ops a method threw on, and whether the cell's last row is one. */
+    let threw = 0;
+    let lastThrew = false;
     if (failures.length === 0 && ops.length > 0) {
       // CHRONOLOGICAL order — `server_ts`, which is the order the live server
       // applied them and the order `loadOpsSince` already returns. Nothing is
@@ -662,16 +697,35 @@ export async function replaySyncOps<S>(
           // re-applied every surviving op to every non-sync listener on every
           // restart (a tally of 2 came back 4, then 6), and let one sync
           // cell's replay write into another's slice.
-          const folded = unwrapReduced(reduce(next, {
+          const action = {
             type: `${op.cell}:${op.action}`,
             payload: op.payload,
-          })) as Record<string, unknown>;
+          };
+          const folded = unwrapReduced(reduce(next, action)) as Record<
+            string,
+            unknown
+          >;
+          if (inFlight && op.id === lastId) {
+            // A `validate` refusal does not throw — the live server reads it
+            // here too (D11).
+            const refusal = takeRejectionFor(action, cell)?.reason;
+            if (refusal !== undefined) {
+              refusedInFlight = refusal;
+              continue;
+            }
+          }
           next = {
             ...(next as Record<string, unknown>),
             [cell]: folded[cell],
           } as S;
           applied++;
         } catch (e) {
+          if (inFlight && op.id === lastId) {
+            refusedInFlight = String(e);
+            continue;
+          }
+          threw++;
+          lastThrew = op.id === lastId;
           failures.push(`op ${op.id} (${op.cell}:${op.action}) threw: ${e}`);
         }
       }
@@ -691,8 +745,27 @@ export async function replaySyncOps<S>(
           `is taken as that same shape`,
       );
     }
-    const total = ops.length;
+    const total = ops.length - (refusedInFlight === undefined ? 0 : 1);
     const bad = failures.length > 0 || skipped.older > 0 || skipped.newer > 0;
+    // Nothing is written for a cell that does not fold (below).
+    if (!bad && inFlight) {
+      if (refusedInFlight !== undefined) {
+        await db.execute("DELETE FROM sync_ops WHERE id = ?", [lastId]);
+        log.warn(
+          `sync: "${cell}"'s op ${lastId} was persisted but not yet settled ` +
+            `when the server stopped, and its reduce is refused ` +
+            `(${refusedInFlight}) — removed from the op-log and not ` +
+            `acknowledged: this build refuses it`,
+        );
+      }
+    }
+    // Folded here (a deferred one is the caller's to reduce, and to mark):
+    // it is in the state this boot serves, and its author's resend is
+    // acknowledged as a duplicate.
+    if (
+      !bad && lastMark === 0 && refusedInFlight === undefined &&
+      opts.defer?.get(cell) !== last!.serverTs
+    ) await settleOp(db, last!.id);
     if (!bad) {
       if (total === 0) {
         if (seeded) {
@@ -709,7 +782,19 @@ export async function replaySyncOps<S>(
     // Three different remedies for three different causes — a wrong fix line
     // is worse than none (the reader trusts it and bumps a version that only
     // needed the newer build back).
-    const fix = downgradeWrites > 0
+    // The last row threw and no build marked it (NULL — `settleOp`): a kill
+    // between storing an op and removing a refused one leaves exactly this.
+    const unmarkedLast = lastThrew && lastMark == null;
+    const lastHint = unmarkedLast
+      ? ` If "${cell}" refuses op ${lastId} BY DESIGN (a guard, a validate): ` +
+        `an older aio build stored it, and a server killed between storing ` +
+        `an op and removing a refused one leaves exactly this row — its ` +
+        `author was never told it landed. That build marked nothing that ` +
+        `tells such a row from an accepted one, so it is not removed for ` +
+        `you: stop the app, run \`DELETE FROM sync_ops WHERE id = ` +
+        `'${lastId!.replaceAll("'", "''")}'\` on its state.db, and restart.`
+      : "";
+    const fix = (downgradeWrites > 0
       ? `An OLDER build wrote to "${cell}"'s op-log after a newer one — its ` +
         `ops cannot be folded onto a shape already migrated forward. Run only ` +
         `the newer build (or restore the log from before the downgrade), then ` +
@@ -721,7 +806,13 @@ export async function replaySyncOps<S>(
       : hook
       ? `Fix "${cell}"'s onMigrate/methods so the op-log folds, then restart.`
       : `Bump "${cell}"'s \`version\` and add an onMigrate(state, from) that ` +
-        `converts the older shape, then restart.`;
+        `converts the older shape, then restart.` +
+        // No shape need be older for a throw: a version bump converts nothing.
+        (threw > 0 && skipped.older === 0
+          ? ` (If "${cell}"'s shape did not change, a method throws on an ` +
+            `op it accepted when the op was written — fix the method so ` +
+            `the op-log folds.)`
+          : "")) + lastHint;
     const what =
       `${failed}/${count(total, "op")} could not be folded into "${cell}" ` +
       `(${skipped.older} older-shape skipped, ${skipped.newer} newer-shape ` +
@@ -1907,6 +1998,38 @@ export function persistOffButStored(
 export async function bootStorage<S>(
   cfg: BootConfig<S>,
 ): Promise<BootResult<S>> {
+  // A REFUSAL RELEASES WHAT THIS BOOT OPENED — every refusal, in one place.
+  // The caller's undo list gets the database only when this function RETURNS,
+  // so a throw anywhere below (a failed migration, `journal: true` with
+  // nothing to journal to, a table load that fails) left `state.db` open and
+  // its worker thread alive: the process could not exit, and on Windows the
+  // "remove this directory" a refusal advises failed with "being used by
+  // another process" (os error 32). `close()` on a closed handle is a no-op.
+  const opened: DB[] = [];
+  try {
+    return await bootStorageOpening(cfg, opened);
+  } catch (e) {
+    await closeOpened(opened);
+    throw e;
+  }
+}
+
+/** Close every database a boot opened and is not going to hand over. */
+async function closeOpened(opened: DB[]): Promise<void> {
+  for (const db of opened.splice(0)) {
+    await db.close().catch(() => {
+      // aio-ok(silent-catch): the boot is already refusing, or degrading, for
+      // the reason it reports; a close that fails has nothing to add.
+    });
+  }
+}
+
+/** {@link bootStorage}'s sequence. Every database it opens goes into
+ *  `opened`, which the caller closes when this throws. */
+async function bootStorageOpening<S>(
+  cfg: BootConfig<S>,
+  opened: DB[],
+): Promise<BootResult<S>> {
   const {
     appId,
     dbPath: dbPathOverride,
@@ -2069,8 +2192,11 @@ export async function bootStorage<S>(
         );
       }
     }
-    const open = () =>
-      createDB(dbPath, dbPragmas ? { pragmas: dbPragmas } : {});
+    const open = () => {
+      const db = createDB(dbPath, dbPragmas ? { pragmas: dbPragmas } : {});
+      opened.push(db);
+      return db;
+    };
     const onDisk = dbPath !== ":memory:" && !dbPath.startsWith("file::memory:");
     const recover = async (): Promise<DB> => {
       // BEFORE the open, and whatever `checkIntegrityOnBoot` says now: opening
@@ -2161,10 +2287,10 @@ export async function bootStorage<S>(
       const workerHint = dbWorkerMissingHint(e);
       if (workerHint) throw new Error(workerHint, { cause: e });
       log.warn(`sqlite: unavailable — ${e}`);
-      if (asyncDb) {
-        await asyncDb.close().catch(() => {});
-        asyncDb = null;
-      }
+      // The app runs on from memory: a handle the failed open left behind
+      // (an integrity check that threw after its first statement) is closed
+      // here, not carried for the life of the process.
+      await closeOpened(opened);
     }
     // ONE ordered, fatal schema runner (src/db/ddl.ts → runSchemaSetup):
     //   1. "ladder"  — aio's own versioned moves (private `aio_schema` table,
@@ -2752,13 +2878,16 @@ export async function bootStorage<S>(
       if (isDevBoot() && structural.length > 0) {
         const dirs = appDirs(appId, cfg.appDir);
         const appsDir = appsDirEnv();
-        throw new Error(shapeDriftRefusal(structural, summary, {
+        const refusal = shapeDriftRefusal(structural, summary, {
           dataDir: dirs.data,
           dbPath: openedDbPath ?? dirs.stateDb,
           appsDir: appsDir && dirs.home === join(appsDir, appId)
             ? appsDir
             : undefined,
-        }));
+        });
+        // The database is released by `bootStorage` (every refusal's one
+        // exit), so the removal this message advises can succeed.
+        throw new Error(refusal);
       }
       log.warn(summary);
     }
@@ -3752,7 +3881,16 @@ export type DriftStore = {
  *  minutes in whole-disk `find` for a directory `appHome()` already knew.
  *  The path printed is the one opened, never re-derived. */
 function driftStoreLines(store: DriftStore): string {
-  const q = (p: string) => /^[\w./~:@+-]+$/.test(p) ? p : JSON.stringify(p);
+  // A Windows path's `\\` is a plain character to its shells: quoted as JSON
+  // every one was doubled (`rm -r "C:\\\\Users\\\\…"`), so there the path is
+  // printed as it is, in plain quotes when it needs any.
+  const win = Deno.build.os === "windows";
+  const q = (p: string) =>
+    (win ? /^[\w.\\/~:@+-]+$/ : /^[\w./~:@+-]+$/).test(p)
+      ? p
+      : win
+      ? `"${p}"`
+      : JSON.stringify(p);
   const inData = resolve(store.dbPath).startsWith(
     resolve(store.dataDir) + SEPARATOR,
   );
@@ -3766,8 +3904,11 @@ function driftStoreLines(store: DriftStore): string {
     `start fresh (DISCARDS the stored state): \`am backup\`, then ` +
     (inData
       ? `\`rm -r ${q(store.dataDir)}\``
-      : `\`rm ${q(store.dbPath)} ${q(store.dbPath + "-wal")} ${
-        q(store.dbPath + "-shm")
+      // PowerShell's `rm` takes its paths as ONE comma-separated list: three
+      // words were "a positional parameter cannot be found" there.
+      : `\`rm ${
+        [store.dbPath, store.dbPath + "-wal", store.dbPath + "-shm"].map(q)
+          .join(win ? ", " : " ")
       }\``) +
     `\n` +
     // The escape that keeps this data untouched. Not under AIO_APPS_DIR:

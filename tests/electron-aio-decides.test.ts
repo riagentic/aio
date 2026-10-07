@@ -18,6 +18,12 @@ import {
 import { syncFrameworkDeps } from "../src/am/am-versions.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
+/** The dev launcher `deno install` writes, as `findElectronBin` answers it —
+ *  cwd-relative, and a `.cmd` shim on Windows. */
+const LAUNCHER = Deno.build.os === "windows"
+  ? "node_modules\\.bin\\electron.cmd"
+  : "node_modules/.bin/electron";
+
 /** A fake installed runtime of `version` under `root` (unpacked + launcher). */
 async function fakeRuntime(root: string, version: string): Promise<void> {
   await Deno.mkdir(join(root, "node_modules", "electron", "dist"), {
@@ -28,7 +34,7 @@ async function fakeRuntime(root: string, version: string): Promise<void> {
     JSON.stringify({ version }),
   );
   await Deno.mkdir(join(root, "node_modules", ".bin"), { recursive: true });
-  await Deno.writeTextFile(join(root, "node_modules", ".bin", "electron"), "");
+  await Deno.writeTextFile(join(root, LAUNCHER), "");
 }
 
 /** A fake aio tree whose tested Electron is `version`. */
@@ -73,7 +79,7 @@ Deno.test("dev launcher: a stale node_modules Electron is replaced by the tested
         return true;
       },
     });
-    assertEquals(bin, "node_modules/.bin/electron");
+    assertEquals(bin, LAUNCHER);
     assertEquals(installs, 1);
     assert(
       errors.some((e) =>
@@ -92,7 +98,7 @@ Deno.test("dev launcher: offline, the old runtime still runs — and says so", a
       { info: () => {}, error: (m) => errors.push(m) },
       { compiled: false, denoInstall: () => Promise.resolve(false) },
     );
-    assertEquals(bin, "node_modules/.bin/electron");
+    assertEquals(bin, LAUNCHER);
     assert(
       errors.some((e) => e.includes("running 42.0.0") && e.includes("am fix")),
       errors.join("\n"),
@@ -115,7 +121,7 @@ Deno.test("dev launcher: the tested Electron installed → no install, no noise"
         },
       },
     );
-    assertEquals(bin, "node_modules/.bin/electron");
+    assertEquals(bin, LAUNCHER);
     assertEquals(installs, 0);
     assertEquals(errors, []);
   });
@@ -124,41 +130,49 @@ Deno.test("dev launcher: the tested Electron installed → no install, no noise"
 // An Electron AppImage's AppRun exports $ELECTRON_PATH into its own mount, and
 // an app started from that AppImage's terminal inherited it: it ran the HOST's
 // Electron, from a mount that vanishes when the host exits.
-Deno.test("findElectronBin: a host AppImage's inherited $ELECTRON_PATH is ignored, said once", async () => {
-  await inTmp(async (tmp) => {
-    await fakeRuntime(tmp, DEFAULT_ELECTRON_VERSION);
-    const host = join(tmp, "host-mount");
-    await Deno.mkdir(host);
-    await Deno.writeTextFile(join(host, "electron"), "");
-    const saved = ["APPIMAGE", "APPDIR"].map((k) => [k, Deno.env.get(k)]);
-    const find = async () => {
-      const errors: string[] = [];
-      const bin = await findElectronBin(
-        { info: () => {}, error: (m) => errors.push(m) },
-        { compiled: false, denoInstall: () => Promise.resolve(false) },
-      );
-      return { bin, errors };
-    };
-    try {
-      Deno.env.set("ELECTRON_PATH", join(host, "electron"));
-      Deno.env.set("APPIMAGE", join(tmp, "host.AppImage"));
-      Deno.env.set("APPDIR", host);
-      const inherited = await find();
-      assertEquals(inherited.bin, "node_modules/.bin/electron");
-      assertEquals(inherited.errors.length, 1);
-      assertStringIncludes(inherited.errors[0]!, "inherited from the AppImage");
-      // Set by hand, outside any AppImage: used as before.
-      Deno.env.delete("APPIMAGE");
-      Deno.env.delete("APPDIR");
-      assertEquals((await find()).bin, join(host, "electron"));
-    } finally {
-      Deno.env.delete("ELECTRON_PATH");
-      for (const [k, v] of saved) {
-        if (v === undefined) Deno.env.delete(k!);
-        else Deno.env.set(k!, v);
+Deno.test({
+  name:
+    "findElectronBin: a host AppImage's inherited $ELECTRON_PATH is ignored, said once",
+  ignore: Deno.build.os === "windows", // AppImage is Linux-only
+  // An AppImage (and the $APPDIR mount its AppRun exports) is Linux's.
+  fn: () =>
+    inTmp(async (tmp) => {
+      await fakeRuntime(tmp, DEFAULT_ELECTRON_VERSION);
+      const host = join(tmp, "host-mount");
+      await Deno.mkdir(host);
+      await Deno.writeTextFile(join(host, "electron"), "");
+      const saved = ["APPIMAGE", "APPDIR"].map((k) => [k, Deno.env.get(k)]);
+      const find = async () => {
+        const errors: string[] = [];
+        const bin = await findElectronBin(
+          { info: () => {}, error: (m) => errors.push(m) },
+          { compiled: false, denoInstall: () => Promise.resolve(false) },
+        );
+        return { bin, errors };
+      };
+      try {
+        Deno.env.set("ELECTRON_PATH", join(host, "electron"));
+        Deno.env.set("APPIMAGE", join(tmp, "host.AppImage"));
+        Deno.env.set("APPDIR", host);
+        const inherited = await find();
+        assertEquals(inherited.bin, LAUNCHER);
+        assertEquals(inherited.errors.length, 1);
+        assertStringIncludes(
+          inherited.errors[0]!,
+          "inherited from the AppImage",
+        );
+        // Set by hand, outside any AppImage: used as before.
+        Deno.env.delete("APPIMAGE");
+        Deno.env.delete("APPDIR");
+        assertEquals((await find()).bin, join(host, "electron"));
+      } finally {
+        Deno.env.delete("ELECTRON_PATH");
+        for (const [k, v] of saved) {
+          if (v === undefined) Deno.env.delete(k!);
+          else Deno.env.set(k!, v);
+        }
       }
-    }
-  });
+    }),
 });
 
 Deno.test("testedElectronOf: read from the PINNED aio's source; null when it does not say", async () => {

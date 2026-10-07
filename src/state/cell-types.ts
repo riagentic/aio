@@ -321,6 +321,8 @@ export type CellAio<
   enableSync?: (sync: true | Record<string, unknown>) => void;
   /** This cell's methods run in their own worker (cell-workers). */
   worker?: boolean;
+  /** `workerRespawn: true` — a crashed worker is started again (cell-workers). */
+  workerRespawn?: boolean;
   /** State version — increment when state shape changes. Default: 0. */
   version: number;
   /** Migration hook — called when persisted version < current version.

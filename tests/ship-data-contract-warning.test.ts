@@ -12,6 +12,7 @@
 // count was in the wrapper, not in the thing that builds the manifest.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { unpublishableReason } from "../src/server/app-version.ts";
+import { fromFileUrl } from "@std/path";
 
 // ── the refusal names a remedy ITS READER can perform ────────────────
 //
@@ -54,7 +55,7 @@ Deno.test("a persisting app prints its cell count beside the contract", async ()
         "run",
         "-A",
         "--config",
-        new URL("../deno.json", import.meta.url).pathname,
+        fromFileUrl(new URL("../deno.json", import.meta.url)),
         `${dir}/app.ts`,
         "--aio-data-contract",
       ],

@@ -1,9 +1,9 @@
 import { assert, assertEquals } from "@std/assert";
 import { buildContext } from "../aiol/context.ts";
 import { checkUI } from "../aiol/checks.ts";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 
-const AIOL = new URL("../aiol/mod.ts", import.meta.url).pathname;
+const AIOL = fromFileUrl(new URL("../aiol/mod.ts", import.meta.url));
 
 async function withTmpDir(fn: (dir: string) => Promise<void>): Promise<void> {
   const dir = await Deno.makeTempDir();

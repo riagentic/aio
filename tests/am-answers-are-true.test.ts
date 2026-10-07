@@ -3,6 +3,7 @@
 // looking right — `{"ok":true}` for something that did nothing, `healthy:true`
 // for a stranger's web server, a flag the table lists and the command refuses.
 import { assert, assertEquals } from "@std/assert";
+import { dirname } from "@std/path";
 import {
   AppLock,
   lockKey,
@@ -26,7 +27,7 @@ Deno.test("an unreadable lock is reclaimed, not treated as an owner", async () =
   const home = await Deno.makeTempDir({ prefix: "unreadable-lock-" });
   const key = lockKey("unreadablelockapp", home);
   try {
-    await Deno.mkdir(lockPath(key).replace(/\/[^/]+$/, ""), {
+    await Deno.mkdir(dirname(lockPath(key)), {
       recursive: true,
     }).catch(() => {});
     await Deno.writeTextFile(lockPath(key), ""); // the crash's leftover

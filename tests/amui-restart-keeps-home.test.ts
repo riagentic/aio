@@ -9,6 +9,7 @@
 //
 // Sandboxed exactly like tests/amui-multi-instance.test.ts: the "instance" is
 // a `sleep` holding a hand-written lock; the relaunched "app" records its argv.
+import { SLEEP_ARGS } from "./proc-helper.ts";
 import { assert } from "@std/assert";
 import { testCell } from "../src/testing/cell-test.ts";
 import { manager } from "../amui/src/manager.ts";
@@ -48,8 +49,8 @@ testCell(
     Deno.env.set("AIO_APPS_DIR", `${sandbox}/apps`);
     Deno.env.set("AMUI_ROOTS", dir);
     Deno.env.set("HOME", sandbox);
-    const child = new Deno.Command("sleep", {
-      args: ["120"],
+    const child = new Deno.Command(Deno.execPath(), {
+      args: SLEEP_ARGS,
       stdin: "null",
       stdout: "null",
       stderr: "null",

@@ -24,6 +24,7 @@ import { electronMainScriptUDS } from "../src/electron/electron-uds.ts";
 import { electronMainScript } from "../src/electron/electron-scripts.ts";
 import { udsPreloadScript } from "../src/electron/electron-shared.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { modeBitsAreMeaningful } from "../src/server/dir-permissions.ts";
 import * as nodeFs from "node:fs";
 import * as nodePath from "node:path";
 import { permissiveUmask } from "./permissive-umask.ts";
@@ -147,16 +148,24 @@ Deno.test("preload: the emitted block RUNS and leaves 0600 in a 0700 dir", () =>
         );
         const file = Deno.statSync(preloadFile);
         const dir = Deno.statSync(preloadDir);
-        assertEquals(
-          (file.mode ?? 0) & 0o777,
-          0o600,
-          `${name}: the preload is readable by someone else`,
-        );
-        assertEquals(
-          (dir.mode ?? 0) & 0o777,
-          0o700,
-          `${name}: the preload's directory is readable by someone else`,
-        );
+        // Windows has no mode bits to read: `stat().mode` is 0o666 for every
+        // file there, the ACL-private profile included (measured, see
+        // `modeBitsAreMeaningful`). The boundary on Windows is the ACL of
+        // `userData` (under the user's own %APPDATA%), which the block does
+        // not set and Deno cannot read — so the mode is asserted where it is
+        // a fact, and everything else below runs on every OS.
+        if (modeBitsAreMeaningful()) {
+          assertEquals(
+            (file.mode ?? 0) & 0o777,
+            0o600,
+            `${name}: the preload is readable by someone else`,
+          );
+          assertEquals(
+            (dir.mode ?? 0) & 0o777,
+            0o700,
+            `${name}: the preload's directory is readable by someone else`,
+          );
+        }
         assert(
           Deno.readTextFileSync(preloadFile).includes("__aio"),
           `${name}: the preload written is not the preload generated`,
@@ -183,7 +192,9 @@ Deno.test("preload: the emitted block RUNS and leaves 0600 in a 0700 dir", () =>
           `${name}: the launch did not clear what dead windows left, or ` +
             `removed a live window's preload`,
         );
-        assertEquals((Deno.statSync(preloadFile).mode ?? 0) & 0o777, 0o600);
+        if (modeBitsAreMeaningful()) {
+          assertEquals((Deno.statSync(preloadFile).mode ?? 0) & 0o777, 0o600);
+        }
         assert(Deno.readTextFileSync(preloadFile).includes("__aio"));
         Deno.removeSync(preloadDir, { recursive: true });
       }
@@ -217,6 +228,7 @@ module.exports = {
     quit: () => {},
     exit: (c) => process.exit(c),
     name: 'stub',
+    whenReady: () => new Promise((r) => setTimeout(r, 0)),
   },
   BrowserWindow: class {
     constructor(o) { this.opts = o; this.webContents = { on(){}, send(){}, setWindowOpenHandler(){}, session: {} }; }
@@ -224,7 +236,9 @@ module.exports = {
     isDestroyed(){ return false; } isVisible(){ return true; } isMinimized(){ return false; }
     getBounds(){ return { x: 0, y: 0, width: 800, height: 600 }; }
   },
-  Menu: { setApplicationMenu: () => {} },
+  // macOS: the generated main builds its menu after whenReady (tmplAppMenu;
+  // the menu itself is pinned by electron-window-close-and-menu.test.ts).
+  Menu: { setApplicationMenu: () => {}, buildFromTemplate: (t) => t },
   ipcMain: { on: () => {} },
   shell: { openExternal: () => {} },
   net: { fetch: () => Promise.resolve({ ok: false }) },
@@ -284,7 +298,7 @@ const preloadFiles = (home: string): string[] => {
 
 Deno.test({
   name: "preload: the file does not outlive a SIGTERM'd window",
-  ignore: Deno.build.os === "windows", // no SIGTERM to send
+  ignore: Deno.build.os === "windows", // no SIGTERM there: a killed window's preload is swept by the next launch
   fn: async () => {
     const home = await tempDir("secB-preload-kill");
     try {

@@ -108,6 +108,9 @@ export type { Patch } from "./testing/multi-client-test.ts";
 /** `bootCells`'s own options bag — the harness's boot knobs (`cellDefaults`,
  *  refusal behaviour), also embedded in `testUI`'s options. */
 export type { HarnessBootOptions } from "./testing/boot-refusals.ts";
+/** Crash a `worker: true` cell's worker from a test — a field report asked
+ *  for the hook that proves "crash → the next call works" (or is refused). */
+export { crashWorker } from "./testing/boot-refusals.ts";
 /** `testUI`'s FIRST parameter — the component under test — and the
  *  element-vs-component discriminator its queries take. */
 // The addressable-name list, without provoking a miss (report 6 §5a). A free

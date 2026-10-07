@@ -15,6 +15,7 @@ import { join } from "@std/path";
 import {
   tmplIpcGuard,
   tmplPermissionGuard,
+  tmplWebGuard,
   tmplWillNavigate,
 } from "../src/electron/electron-shared.ts";
 import { testDisplayEnv } from "../src/testing/test-display.ts";
@@ -51,6 +52,7 @@ ${
       : ""
   }
 ${tmplPermissionGuard(null)}
+${tmplWebGuard()}
 ${tmplIpcGuard()}
 ipcMain.handle('probe', (_e, tag) => 'ok:' + tag);
 // Never the real system browser: record what the shell would open.

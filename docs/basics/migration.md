@@ -37,7 +37,7 @@ an old stable).
     "aio": "jsr:@riagentic/aio@^1.0.0-alpha",
     "aio/air": "jsr:@riagentic/aio@^1.0.0-alpha/air",
     "aio/jsx-runtime": "jsr:@riagentic/aio@^1.0.0-alpha/jsx-runtime",
-    "esbuild": "npm:esbuild@^0.24"
+    "esbuild": "npm:esbuild@^0.25"
   },
   "tasks": {
     "dev": "deno run -A src/app.ts",

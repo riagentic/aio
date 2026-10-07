@@ -16,7 +16,11 @@
 //     and the same signal state;
 //   · the live component instances (onMount minus onUnmount, per instance)
 //     are exactly the components the model says are mounted — none twice,
-//     none missing, no instance unmounted twice;
+//     none missing;
+//   · so are the instances that HOLD something (body ran, onUnmount has not):
+//     an instance thrown away before it mounted is released, not leaked;
+//   · each instance's hooks come in order — onMount at most once, onUnmount
+//     exactly once and last, no afterRender for an instance already gone;
 //   · no dev desync tripwire fired;
 // and after unmount: no instance, no portal content, no signal subscriber.
 //
@@ -36,6 +40,7 @@ import type { ComponentFn, VNode } from "../src/air/vdom.ts";
 import {
   _setDocument,
   _unmount,
+  afterRender,
   mount,
   onMount,
   onUnmount,
@@ -85,9 +90,15 @@ const sig = (id: number) => {
 /** Live instances of the WORLD under test (the reference mount records none).
  *  Keyed by instance, labelled with the spec id it currently renders — a
  *  component instance is positional, so it may be re-labelled by a diff. */
-type Inst = { sid: number; n: number };
+type Inst = { sid: number; mounted: boolean; gone: boolean };
 const LIVE = new Set<Inst>();
-const DOUBLE: number[] = [];
+/** Body ran, `onUnmount` has not: what `useRef(queue.take(id))` would hold.
+ *  An instance may leave this set without ever entering LIVE — a hydration
+ *  that fell back threw it away before any commit, and `onUnmount` is the
+ *  release that still runs (docs/ui/air-lifecycle.md). */
+const HELD = new Set<Inst>();
+/** Hooks out of order, as `<spec id>: <what>`. */
+const BROKEN: string[] = [];
 let TRACK = true;
 
 // deno-lint-ignore no-explicit-any
@@ -98,17 +109,28 @@ type P = any;
 const C: ComponentFn = (p: P) => {
   const track = TRACK;
   const id = p.sid as number;
-  const r = useRef<Inst>({ sid: 0, n: 0 });
-  r.current.sid = id;
+  const me = useRef<Inst>({ sid: 0, mounted: false, gone: false }).current;
+  me.sid = id;
+  if (track) {
+    if (me.gone) BROKEN.push(id + ": rendered after onUnmount");
+    else HELD.add(me);
+  }
   onMount(() => {
     if (!track) return;
-    r.current.n++;
-    LIVE.add(r.current);
+    if (me.gone) BROKEN.push(id + ": onMount after onUnmount");
+    if (me.mounted) BROKEN.push(id + ": onMount twice");
+    me.mounted = true;
+    LIVE.add(me);
   });
   onUnmount(() => {
     if (!track) return;
-    if (--r.current.n < 0) DOUBLE.push(id);
-    LIVE.delete(r.current);
+    if (me.gone) BROKEN.push(id + ": onUnmount twice");
+    me.gone = true;
+    LIVE.delete(me);
+    HELD.delete(me);
+  });
+  afterRender(() => {
+    if (track && me.gone) BROKEN.push(id + ": afterRender after onUnmount");
   });
   const kids = (p.children ?? []) as VNode[];
   switch (sig(id).value % 5) {
@@ -125,6 +147,26 @@ const C: ComponentFn = (p: P) => {
   }
 };
 const rendersKids = (id: number) => [0, 1, 4].includes(sig(id).value % 5);
+
+/** Every boundary's LAST child: throws while the boundary's own signal is
+ *  odd. Last, so every sibling before it has run by then — the boundary
+ *  discards them all, at mount (never committed) or on an update (live). What
+ *  a discarded instance may still be handed is the per-instance order oracle
+ *  in `C`; the thrower's own `afterRender` has no commit to run after.
+ *
+ *  Told by a PROP, read by nobody: a component that throws on its OWN
+ *  re-render is contained in place (its siblings stay, AIO-138), which a
+ *  fresh mount of the same model cannot show. The model re-renders instead. */
+const X: ComponentFn = (p: P) => {
+  const track = TRACK;
+  const id = p.sid as number;
+  if (!p.boom) return null;
+  afterRender(() => {
+    if (track) BROKEN.push(id + ": afterRender of a body that threw");
+  });
+  throw new Error("x" + id);
+};
+const caught = (id: number) => sig(id).peek() % 2 === 1;
 
 type World = { doc: Document; targets: Map<number, Element> };
 let W: World;
@@ -159,7 +201,12 @@ function build(s: Spec, key?: string): VNode | string {
     case "f":
       return h(Fragment, key !== undefined ? kp : null, ...kids);
     case "b":
-      return h(ErrorBoundary as never, { ...kp, fallback: () => "!" }, ...kids);
+      return h(
+        ErrorBoundary as never,
+        { ...kp, fallback: () => "!" },
+        ...kids,
+        h(X, { sid: s.id, boom: caught(s.id) }),
+      );
     case "p":
       return h(Portal as never, { ...kp, target: targetOf(s.id) }, ...kids);
   }
@@ -169,14 +216,15 @@ function build(s: Spec, key?: string): VNode | string {
 function expectedLive(s: Spec, on = true, out = new Map<number, number>()) {
   if (s.k === "c" && on) out.set(s.id, 1);
   if ("kids" in s) {
-    const childOn = on && (s.k !== "c" || rendersKids(s.id));
+    const childOn = on && (s.k !== "c" || rendersKids(s.id)) &&
+      !(s.k === "b" && caught(s.id));
     for (const k of s.kids) expectedLive(k, childOn, out);
   }
   return out;
 }
-const liveMap = () => {
+const liveMap = (set = LIVE) => {
   const m = new Map<number, number>();
-  for (const x of LIVE) m.set(x.sid, (m.get(x.sid) ?? 0) + 1);
+  for (const x of set) m.set(x.sid, (m.get(x.sid) ?? 0) + 1);
   return m;
 };
 const sorted = (m: Map<number, number>) =>
@@ -213,7 +261,12 @@ async function run(mode: "mount" | "hydrate") {
     if (r < 7) return { k: "f", id: nextId++, km: rand() < 0.4, kids };
     if (r < 8) return { k: "b", id: nextId++, km: rand() < 0.4, kids };
     if (r < 9) return { k: "p", id: nextId++, kids };
-    const tag = ["p", "i"][pick(2)]!;
+    // `section`, not `p`: a `<p>` is CLOSED by a `<div>` or `<p>` inside it
+    // when the SSR string is parsed (in a browser, and in happy-dom since 20;
+    // 17 kept the nesting), so those models are markup no DOM can hold — a
+    // hydrate mismatch by construction, pinned on its own in
+    // tests/hydrate-parser-restructured.test.ts.
+    const tag = ["section", "i"][pick(2)]!;
     return { k: "e", id: nextId++, tag, km: rand() < 0.4, kids };
   };
   const mutate = (root: Spec) => {
@@ -269,7 +322,7 @@ async function run(mode: "mount" | "hydrate") {
   const origWarn = console.warn, origErr = console.error;
   console.warn = (...a: unknown[]) => warns.push(a.map(String).join(" "));
   console.error = (...a: unknown[]) => warns.push(a.map(String).join(" "));
-  let checks = 0, selfRenders = 0, hydrated = 0;
+  let checks = 0, selfRenders = 0, hydrated = 0, broken = 0;
   setDevMode(true);
   try {
     for (let round = 0; round < ROUNDS; round++) {
@@ -279,7 +332,8 @@ async function run(mode: "mount" | "hydrate") {
       doc.body.innerHTML = `<div id="a"></div><div id="b"></div>`;
       W = { doc, targets: new Map() };
       LIVE.clear();
-      DOUBLE.length = 0;
+      HELD.clear();
+      BROKEN.length = 0;
       SIG.clear();
       GS.forEach((g, i) => g.set("g" + i));
       warns.length = 0;
@@ -297,12 +351,38 @@ async function run(mode: "mount" | "hydrate") {
       if (mode === "hydrate") {
         for (const x of all(spec)) {
           if (x.k === "c" && rand() < 0.5) sig(x.id).set(pick(5));
+          if (x.k === "b" && rand() < 0.3) sig(x.id).set(1);
         }
         TRACK = false;
         host.innerHTML = renderToString(h(App, null));
         TRACK = true;
+        // One round in four hydrates against markup that is NOT the model's:
+        // an element anywhere in it becomes a `<u>`, a tag no model writes.
+        // Every component before it in document order has run by the time the
+        // walk gets there, so the fallback discards anything from none of
+        // them (`<main>`) to all of them (`<footer>`).
+        const breakIt = rand() < 0.25;
+        if (breakIt) {
+          const els = [...host.querySelectorAll("*")];
+          els[pick(els.length)]!.replaceWith(doc.createElement("u"));
+          broken++;
+        }
+        // By identity, not by the dev warning: `_devWarn` says it once a
+        // process, so the warning counted every round after the first as
+        // hydrated.
+        const server = host.firstChild;
         hA = hydrate(host, App);
-        if (!warns.some((w) => /hydrate\(\) found DOM/.test(w))) hydrated++;
+        const adopted = host.firstChild === server;
+        assertEquals(
+          adopted,
+          !breakIt,
+          `FUZZ_SEED=${SEED} round ${round}: ` +
+            (breakIt
+              ? "markup that does not match was adopted"
+              : "the model's own markup was discarded") +
+            `\n  model: ${JSON.stringify(history[0])}`,
+        );
+        if (adopted) hydrated++;
       } else {
         hA = mount(host, App);
       }
@@ -323,10 +403,12 @@ async function run(mode: "mount" | "hydrate") {
             g.set(["", "q", "g" + pick(9)][pick(3)]);
             history.push(`gs=${GS.map((x) => x.value)}`);
           } else {
-            const cs = all(spec).filter((s) => s.k === "c");
+            const cs = all(spec).filter((s) => s.k === "c" || s.k === "b");
             if (cs.length) {
-              const s = sig(cs[pick(cs.length)]!.id);
+              const c = cs[pick(cs.length)]!;
+              const s = sig(c.id);
               s.set(s.value + 1 + pick(4));
+              if (c.k === "b") MODEL.set(clone(spec)); // see `X`
               selfRenders++;
               history.push(
                 `sigs=${[...SIG].map(([k, v]) => k + ":" + v.value)}`,
@@ -373,9 +455,18 @@ async function run(mode: "mount" | "hydrate") {
             ),
           );
           assertEquals(
-            DOUBLE,
+            sorted(liveMap(HELD)),
+            sorted(expectedLive(spec)),
+            repro(
+              step,
+              "an instance that is not on the page was never released " +
+                "(its body ran; its onUnmount did not)",
+            ),
+          );
+          assertEquals(
+            BROKEN,
             [],
-            repro(step, "an instance was unmounted twice"),
+            repro(step, "an instance's hooks ran out of order"),
           );
           assertEquals(
             warns.filter((w) => TRIPWIRE.test(w)),
@@ -388,10 +479,11 @@ async function run(mode: "mount" | "hydrate") {
         _unmount(hA);
       }
       assertEquals(
-        sorted(liveMap()),
-        "[]",
+        sorted(liveMap()) + sorted(liveMap(HELD)),
+        "[][]",
         repro(99, "instances outlived unmount"),
       );
+      assertEquals(BROKEN, [], repro(99, "hooks out of order at unmount"));
       assertEquals(
         snapTargets(W.targets),
         "",
@@ -411,7 +503,7 @@ async function run(mode: "mount" | "hydrate") {
     console.error = origErr;
     setDevMode(false);
   }
-  return { checks, selfRenders, hydrated };
+  return { checks, selfRenders, hydrated, broken };
 }
 
 Deno.test("lifecycle differential: mount + self re-renders keep the document, the instances and the subscriptions true", async () => {
@@ -426,8 +518,10 @@ Deno.test("lifecycle differential: mount + self re-renders keep the document, th
 Deno.test("lifecycle differential: the same through SSR + hydrate", async () => {
   const r = await run("hydrate");
   assertEquals(r.checks, ROUNDS * STEPS, "a step was skipped");
+  assertEquals(r.hydrated + r.broken, ROUNDS);
   assert(
-    r.hydrated > ROUNDS * 0.8,
-    `only ${r.hydrated}/${ROUNDS} rounds hydrated without falling back`,
+    r.broken >= ROUNDS / 8 && r.hydrated > ROUNDS / 2,
+    `${r.hydrated} adopted, ${r.broken} fell back of ${ROUNDS} — one of the ` +
+      `two hydrate paths is not exercised`,
   );
 });

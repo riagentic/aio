@@ -12,15 +12,16 @@
 //     (`seedSyncReactions`) — the route a build that leaves the journal where
 //     it is (1.0.9 with the journal off) still opens.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 // @ts-ignore node:sqlite types unavailable when an old @types/node shadows them
 import { DatabaseSync } from "node:sqlite";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const APP = new URL("./fixtures/journal-toggle/app.js", import.meta.url)
-  .pathname;
-const TREE = new URL("..", import.meta.url).pathname;
+const APP = fromFileUrl(
+  new URL("./fixtures/journal-toggle/app.js", import.meta.url),
+);
+const TREE = fromFileUrl(new URL("..", import.meta.url));
 
 type Snap = { s: string[]; k: number; tally: number };
 
@@ -95,7 +96,10 @@ Deno.test("journal on → killed → journal OFF, clean → journal on: the off 
       !liveJournal,
       "the live journal must be moved aside — a copy leaves it in place for the next journal-on boot to replay",
     );
-    assertEquals(r2.live!.s.length, 13, r2.log);
+    // The off run starts from what the killed run had SAVED — none of its
+    // three writes when the kill beats the 50 ms save debounce, the first two
+    // on a loaded machine (seen on Windows) — and adds its own 13.
+    assertEquals(r2.live!.s.length - r2.boot!.s.length, 13, r2.log);
     const r3 = await run(dir, "read", { J: "1" });
     // Nothing of the off run rolled back: sync cell and store cell alike.
     assertEquals(r3.boot, r2.live, r3.log);
@@ -210,8 +214,9 @@ Deno.test("an app's own INSERT into a SQL-only db: table is not a foreign save �
   // The bulk pattern (docs/persistence/big-data.md): `app.db.execute` into a
   // table no state mirrors. Watching it (store-gen.ts) read that insert as
   // someone else's save, and the next boot moved the whole journal aside.
-  const app = new URL("./fixtures/sql-only-table/app.js", import.meta.url)
-    .pathname;
+  const app = fromFileUrl(
+    new URL("./fixtures/sql-only-table/app.js", import.meta.url),
+  );
   const dir = await tempDir("aio-sql-only-table-");
   const go = async (phase: string) => {
     const out = await new Deno.Command(Deno.execPath(), {

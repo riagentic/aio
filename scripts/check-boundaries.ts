@@ -112,6 +112,10 @@ const ALLOWED: Record<string, string[]> = {
     // module scope through THE code mask (code-mask.ts) — the one "is this
     // offset real code?" decider every regex scanner in the repo shares.
     "diagnostics",
+    // media: `build --smoke` (build/smoke.ts) asks the packaged desktop
+    // app's page whether it loaded, through THE CDP client (media/cdp.ts,
+    // dependency-free) — the one `am shot` / `am eval` speak through.
+    "media",
   ],
   am: [
     "server", // talks to running apps via the server's client/trojan APIs

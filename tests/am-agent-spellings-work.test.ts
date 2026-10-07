@@ -26,6 +26,7 @@ import {
   BRIEF_SECTIONS,
   BRIEF_TASKS,
 } from "../src/am/am-agent-text.ts";
+import { fromFileUrl } from "@std/path";
 
 const BRIEF = agentBrief({ version: "test", task: "all" });
 
@@ -46,8 +47,8 @@ Deno.test("am agent --task with no section is refused", async () => {
         "run",
         "-A",
         "--config",
-        new URL("../deno.json", import.meta.url).pathname,
-        new URL("../src/am.ts", import.meta.url).pathname,
+        fromFileUrl(new URL("../deno.json", import.meta.url)),
+        fromFileUrl(new URL("../src/am.ts", import.meta.url)),
         "agent",
         ...args,
       ],

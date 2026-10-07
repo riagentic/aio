@@ -18,7 +18,7 @@
 // harness sets. So the only way to observe the real wiring is to run a real
 // app the way a user does, and ask it over its own control API.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join, toFileUrl } from "@std/path";
 import { buildShipManifest, generateSigningKey } from "../src/build/ship.ts";
 import {
   type BuildVersion,
@@ -26,8 +26,9 @@ import {
   resolveBuildVersion,
 } from "../src/build/build-version.ts";
 import { freePort } from "../src/testing/server-test.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 const platform = { os: Deno.build.os, arch: Deno.build.arch };
 
 /** An app that is a real aio app: one cell, updates configured, nothing else.
@@ -39,8 +40,8 @@ const platform = { os: Deno.build.os, arch: Deno.build.arch };
  *  build would derive it — see {@link project}. */
 function appSource(releases: string, withUpdates: boolean): string {
   return `
-import { aio } from "${ROOT}mod.ts";
-import { cell } from "${ROOT}src/state/cell-create.ts";
+import { aio } from "${spec(ROOT)}mod.ts";
+import { cell } from "${spec(ROOT)}src/state/cell-create.ts";
 
 cell("notes", {
   state: { items: [] as string[] },
@@ -52,7 +53,9 @@ await aio.run({
   client: "server-only",
 ${
     withUpdates
-      ? `  updates: { source: "file://${releases}", channel: "prod", auto: false },`
+      ? `  updates: { source: "${
+        toFileUrl(releases).href
+      }", channel: "prod", auto: false },`
       : ""
   }
 });
@@ -189,8 +192,12 @@ async function boot(dir: string, src: string): Promise<App> {
   const pumps = Promise.all([pump(child.stdout), pump(child.stderr)]);
 
   const base = `http://127.0.0.1:${port}/__aio/trojan`;
+  // A child that died at boot ends the wait at once: a refused connect costs
+  // ~2 s on Windows, so 300 polls of a dead port read as a ten-minute hang.
+  let exited = false;
+  child.status.then(() => exited = true);
   let up = false;
-  for (let i = 0; i < 300 && !up; i++) {
+  for (let i = 0; i < 300 && !up && !exited; i++) {
     try {
       const r = await fetch(`http://127.0.0.1:${port}/__aio/health`);
       await r.body?.cancel();

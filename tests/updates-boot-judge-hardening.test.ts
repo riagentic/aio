@@ -14,6 +14,7 @@ import {
   writePending,
 } from "../src/server/updates-apply.ts";
 import {
+  _confirm,
   confirmPendingUpdate,
   judgePendingUpdate,
   startUpdates,
@@ -73,6 +74,7 @@ Deno.test("judge: the OLD version finding the marker is not the new one's boot â
       /did not take effect â€” this is still 1\.0\.0/,
     );
     confirmPendingUpdate(dir, log);
+    await _confirm.pruned; // its background prune, read to the end
     assert(!lines.join("\n").includes("confirmed healthy"));
   } finally {
     await dropTempDir(dir);

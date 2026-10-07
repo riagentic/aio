@@ -72,6 +72,7 @@ export type Mutation = {
 // ─── the ledger ────────────────────────────────────────────────────────────
 
 import { LEDGER_1 } from "./mutations/ledger-1.ts";
+import { fromFileUrl } from "@std/path";
 
 export const LEDGER: readonly Mutation[] = [
   // The oldest rows live in scripts/mutations/ledger-1.ts (this file must
@@ -1451,17 +1452,13 @@ export const LEDGER: readonly Mutation[] = [
     filter:
       "a keyed row turning from a Portal into an element keeps its place in the list",
   },
-  {
-    what:
-      "tearing down a never-mounted portal walks its target from firstChild and deletes the target's own content on a hydration fallback",
-    file: "src/air/vdom-remove.ts",
-    find:
-      "    if (target && vnode._anchor) {\n      // Walk from the portal's own region anchor, not `target.firstChild` —\n      // that is the OTHER portal's content when two share a target, and\n      // removing this portal by it deleted their nodes instead of its own.\n      let cursor: Node | null = _advance(vnode._anchor, 1);",
-    replace:
-      "    if (target) {\n      // Walk from the portal's own region anchor, not `target.firstChild` —\n      // that is the OTHER portal's content when two share a target, and\n      // removing this portal by it deleted their nodes instead of its own.\n      let cursor: Node | null = vnode._anchor\n        ? _advance(vnode._anchor, 1)\n        : target.firstChild;",
-    test: "tests/air-hydrate-fallback-unmounted-portal.test.ts",
-    filter: "hydrate mismatch fallback leaves the target's own content alone",
-  },
+  // No row for `if (target && vnode._anchor)` in vdom-remove.ts (a
+  // never-mounted portal must not walk its target from firstChild): since
+  // 90d743fc9 the walk's own `gone` skip holds the same case — no anchor is
+  // "gone", and a child with no live node under the target is released, not
+  // removed. Either one alone keeps the target's content; with both off
+  // tests/air-hydrate-fallback-unmounted-portal.test.ts is red (measured
+  // 2026-10-07). One line cannot be disabled to show it, so it has no row.
   {
     what:
       "a boundary retiring its region steps the cursor from a child the failed diff already detached, firing a false lost-cursor dev warning",
@@ -1852,8 +1849,8 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "a symlinked root makes the whole graph look outside the project, so the binary dies at a sibling server-module import",
     file: "src/build/build-compile.ts",
-    find: "    const base = await Deno.realPath(root);",
-    replace: "    const base = root;",
+    find: "    const bases = [await Deno.realPath(root), resolve(root)];",
+    replace: "    const bases = [resolve(root)];",
     test: "tests/build-server-module-symlink-root.test.ts",
     filter:
       "assetIncludes: a symlinked project root embeds the same *.server.ts as the real one, and says loudly what it skips",
@@ -2552,9 +2549,8 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "the packaged shell never marks its openWindow child windows, so they pass as the app's own page",
-    file: "src/electron/electron-uds.ts",
-    find:
-      '      __aioChildWindows.add(child.webContents); // never "app" (tmplPermissionGuard)',
+    file: "src/electron/electron-shared.ts",
+    find: '  __aioChildWindows.add(wc); // never "app" (tmplPermissionGuard)',
     replace: "",
     test: "tests/electron-permission-guard.test.ts",
     filter:
@@ -3058,8 +3054,9 @@ export const LEDGER: readonly Mutation[] = [
       "each directory update (electron-zip, a macOS .app) leaks one whole old install, forever",
     file: "src/server/updates-boot.ts",
     find:
-      "  void pruneOld(pending!.artifact ?? artifactPath(), KEEP_OLD, dataDir).catch((",
-    replace: "  void [KEEP_OLD, pruneOld]; void Promise.resolve().catch((",
+      "  _confirm.pruned = pruneOld(\n    pending!.artifact ?? artifactPath(),\n    KEEP_OLD,\n    dataDir,\n  ).catch(",
+    replace:
+      "  _confirm.pruned = Promise.resolve(void [KEEP_OLD, pruneOld]).catch(",
     test: "tests/updates-rollback.test.ts",
     filter:
       "boot: confirming a directory update keeps only the newest KEEP_OLD rollbacks",
@@ -5197,6 +5194,26 @@ export const LEDGER: readonly Mutation[] = [
     filter:
       "older builds: a leftover younger than an hour is not taken yet — somebody may be making it — and the look stays open until it can be",
   },
+  {
+    what:
+      "a test that installs programs into the developer's real home passes every release check while the disk fills",
+    file: "scripts/check-home-clean.ts",
+    find: "      if (INSTALL_SHAPE.test(n)) out.push(join(dir, n));",
+    replace: "      if (!n) out.push(join(dir, n));",
+    test: "tests/check-home-clean-stores.test.ts",
+    filter:
+      "check:home-clean: a test-shaped INSTALL in the real home is RED, named — the user's own apps are not",
+  },
+  {
+    what:
+      "the home-clean gate stops looking in the default install root, where each leaked test program is 110 MB",
+    file: "scripts/check-home-clean.ts",
+    find: '    home ? join(home, "app") : undefined,',
+    replace: "    undefined,",
+    test: "tests/check-home-clean-stores.test.ts",
+    filter:
+      "check:home-clean: a test-shaped INSTALL in the real home is RED, named — the user's own apps are not",
+  },
 ];
 
 // ─── the runner ────────────────────────────────────────────────────────────
@@ -5229,7 +5246,7 @@ const COPY = [
   "run.ps1",
 ];
 
-const ROOT = new URL("../", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("../", import.meta.url));
 
 async function sh(
   cmd: string,

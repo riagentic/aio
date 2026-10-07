@@ -15,10 +15,11 @@
 //     `am stop myapp` stops the dev profile, `am state` reads its data;
 //   - two profiles and no default → refused ("running from 2 data homes").
 import { assert, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { sleeper as liveChild } from "./proc-helper.ts";
 
-const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const REPO = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 const CONFIG = join(REPO, "deno.json");
 const LOCK_MOD = new URL(
   "../src/server/single-instance-lock.ts",
@@ -77,7 +78,7 @@ async function oldLiveLock(
   homes: ("default" | "dev" | "qa")[],
 ): Promise<string> {
   const base = await tempDir("old-am-");
-  const sleeper = new Deno.Command("sleep", { args: ["60"] }).spawn();
+  const sleeper = liveChild();
   try {
     const old = join(base, "old");
     await Deno.mkdir(old);
@@ -138,7 +139,8 @@ Deno.test({
   ignore: !tagged,
   async fn() {
     const out = await oldLiveLock(["default", "dev"]);
-    assert(/TAKES \S*\/apps\/myapp\s*$/m.test(out), out);
+    // The home is printed as a host path: `\` separators on Windows.
+    assert(/TAKES \S*[\\/]apps[\\/]myapp\s*$/m.test(out), out);
   },
 });
 

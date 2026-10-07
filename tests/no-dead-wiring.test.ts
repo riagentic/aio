@@ -24,7 +24,7 @@ import { assertEquals } from "@std/assert";
 import { LEDGER, report, scan, verdict } from "../scripts/check-dead-wiring.ts";
 
 Deno.test("no dead wiring: the ledger of exports nothing in src/ reaches only shrinks", async () => {
-  const root = new URL("../", import.meta.url).pathname;
+  const root = fromFileUrl(new URL("../", import.meta.url));
   const v = verdict(await scan(root), LEDGER);
   assertEquals(v.added, [], report(v));
   assertEquals(v.fixed, [], report(v));
@@ -37,9 +37,9 @@ Deno.test("no dead wiring: the ledger of exports nothing in src/ reaches only sh
 // plus `src/` — never from the other peer, never from `tests/`.
 
 import { PEER_ENTRIES, ROOTS } from "../scripts/check-dead-wiring.ts";
-import { dirname, join } from "@std/path";
+import { dirname, fromFileUrl, join } from "@std/path";
 
-const REPO = new URL("../", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("../", import.meta.url));
 
 Deno.test("dead-wiring: the scan walks src/, aiol/ and amui/ — not just src/", () => {
   assertEquals([...ROOTS].sort(), ["aiol", "amui", "src"]);

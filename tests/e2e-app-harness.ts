@@ -134,7 +134,10 @@ export function childEnv(
     // sandbox clobbered the one a test had chosen for itself, and two LAN
     // tests then looked for their app's TLS cert in a directory the app had
     // never been pointed at. A caller that pins its own passes it in `own`.
-    AIO_APPS_DIR: own.AIO_APPS_DIR ?? Deno.env.get("AIO_APPS_DIR") ??
+    // `||`, not `??`: an EMPTY value reads as unset to the app, which then
+    // takes `~/.<appId>` — so `AIO_APPS_DIR= deno test …` walked out of the
+    // sandbox through the one variable that is the sandbox.
+    AIO_APPS_DIR: own.AIO_APPS_DIR || Deno.env.get("AIO_APPS_DIR") ||
       _childAppsDir(),
     ...own,
   };

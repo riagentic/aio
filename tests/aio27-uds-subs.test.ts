@@ -11,14 +11,16 @@
 import { assertEquals } from "@std/assert";
 import { createUDSListener } from "../src/server/aio.ts";
 import { join } from "@std/path";
+import { connectLocal, type LocalConn } from "../src/server/local-listen.ts";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // Helper: connect to UDS and read all NDJSON lines
 async function connectAndRead(
   socketPath: string,
-): Promise<{ conn: Deno.Conn; lines: string[]; reader: () => string[] }> {
-  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+): Promise<{ conn: LocalConn; lines: string[]; reader: () => string[] }> {
+  const conn = await connectLocal(socketPath);
   const lines: string[] = [];
   const decoder = new TextDecoder();
   let buf = "";
@@ -46,7 +48,7 @@ async function connectAndRead(
 }
 
 // Helper: write NDJSON to conn
-function send(conn: Deno.Conn, msg: string): void {
+function send(conn: LocalConn, msg: string): void {
   const w = conn.writable.getWriter();
   w.write(new TextEncoder().encode(msg + "\n")).catch(() => {});
   w.releaseLock();
@@ -55,7 +57,9 @@ function send(conn: Deno.Conn, msg: string): void {
 // ── AIO-27: subs frame not dropped ───────────────────────────────
 
 Deno.test("aio27: subs frame is handled (not dropped as malformed)", async () => {
-  const socketPath = join(await Deno.makeTempDir(), "aio27-subs.sock");
+  const socketPath = localEndpoint(
+    join(await Deno.makeTempDir(), "aio27-subs.sock"),
+  );
   const debugMsgs: string[] = [];
   const uds = createUDSListener(
     socketPath,
@@ -85,12 +89,15 @@ Deno.test("aio27: subs frame is handled (not dropped as malformed)", async () =>
   conn.close();
   await wait(50);
   uds.shutdown();
+  await localIdle();
 });
 
 // ── AIO-27: filtered state sent on subscription change ───────────
 
 Deno.test("aio27: subs frame sends filtered state immediately", async () => {
-  const socketPath = join(await Deno.makeTempDir(), "aio27-filter.sock");
+  const socketPath = localEndpoint(
+    join(await Deno.makeTempDir(), "aio27-filter.sock"),
+  );
   const uds = createUDSListener(
     socketPath,
     () => ({
@@ -144,12 +151,15 @@ Deno.test("aio27: subs frame sends filtered state immediately", async () => {
   conn.close();
   await wait(50);
   uds.shutdown();
+  await localIdle();
 });
 
 // ── AIO-27: * subscription = subscribe-all ───────────────────────
 
 Deno.test("aio27: subs with '*' means subscribe-all (no filtering)", async () => {
-  const socketPath = join(await Deno.makeTempDir(), "aio27-star.sock");
+  const socketPath = localEndpoint(
+    join(await Deno.makeTempDir(), "aio27-star.sock"),
+  );
   const uds = createUDSListener(
     socketPath,
     () => ({ a: 1, b: 2, c: 3 }),
@@ -181,12 +191,15 @@ Deno.test("aio27: subs with '*' means subscribe-all (no filtering)", async () =>
   conn.close();
   await wait(50);
   uds.shutdown();
+  await localIdle();
 });
 
 // ── AIO-27: broadcastState respects subscriptions ────────────────
 
 Deno.test("aio27: broadcastState sends filtered state per client subscription", async () => {
-  const socketPath = join(await Deno.makeTempDir(), "aio27-bcast.sock");
+  const socketPath = localEndpoint(
+    join(await Deno.makeTempDir(), "aio27-bcast.sock"),
+  );
   let stateVal = 1;
   const uds = createUDSListener(
     socketPath,
@@ -245,12 +258,15 @@ Deno.test("aio27: broadcastState sends filtered state per client subscription", 
   conn.close();
   await wait(50);
   uds.shutdown();
+  await localIdle();
 });
 
 // ── AIO-27: broadcastState force resets delta tracking ───────────
 
 Deno.test("aio27: broadcastState(true) forces full state (resets delta tracking)", async () => {
-  const socketPath = join(await Deno.makeTempDir(), "aio27-force.sock");
+  const socketPath = localEndpoint(
+    join(await Deno.makeTempDir(), "aio27-force.sock"),
+  );
   let stateVal = 1;
   const uds = createUDSListener(
     socketPath,
@@ -288,12 +304,15 @@ Deno.test("aio27: broadcastState(true) forces full state (resets delta tracking)
   conn.close();
   await wait(50);
   uds.shutdown();
+  await localIdle();
 });
 
 // ── AIO-27: multiple subscriptions changes accumulate correctly ──
 
 Deno.test("aio27: changing subscriptions updates filter correctly", async () => {
-  const socketPath = join(await Deno.makeTempDir(), "aio27-resub.sock");
+  const socketPath = localEndpoint(
+    join(await Deno.makeTempDir(), "aio27-resub.sock"),
+  );
   const uds = createUDSListener(
     socketPath,
     () => ({ a: { x: 1 }, b: { y: 2 }, c: { z: 3 } }),
@@ -324,4 +343,5 @@ Deno.test("aio27: changing subscriptions updates filter correctly", async () => 
   conn.close();
   await wait(50);
   uds.shutdown();
+  await localIdle();
 });

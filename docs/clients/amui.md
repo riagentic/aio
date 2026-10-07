@@ -32,8 +32,9 @@ at the first `deno.json`, skips dot-dirs and `node_modules`, and never walks
 system paths (`/proc`, `/sys`, `/var`, network mounts under `/mnt`, `/media`,
 …).
 
-Point it somewhere specific with `AMUI_ROOTS` (colon-separated, used verbatim —
-an explicit root is honoured even if it's a network mount):
+Point it somewhere specific with `AMUI_ROOTS` (separated like `PATH`: `:`, and
+`;` on Windows — `AMUI_ROOTS=C:\work\apps;D:\experiments`; used verbatim — an
+explicit root is honoured even if it's a network mount):
 
 ```sh
 AMUI_ROOTS=/work/apps:/experiments deno task amui

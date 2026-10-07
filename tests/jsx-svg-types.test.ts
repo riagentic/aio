@@ -4,6 +4,8 @@
 // <iframe> must be accepted. Verified by running `deno check` on a fixture
 // compiled with jsxImportSource=aio — a type error there fails the test.
 import { assertEquals } from "@std/assert";
+import { fromFileUrl } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 
 const FIXTURE = `
 const gradient = (
@@ -30,7 +32,7 @@ export const _ = [gradient, link, image, frame];
 
 Deno.test("jsx types: SVG elements + referrerPolicy/iframe type-check", async () => {
   const dir = await Deno.makeTempDir();
-  const repo = new URL("..", import.meta.url).pathname;
+  const repo = fromFileUrl(new URL("..", import.meta.url));
   try {
     await Deno.writeTextFile(
       `${dir}/deno.jsonc`,
@@ -41,8 +43,8 @@ Deno.test("jsx types: SVG elements + referrerPolicy/iframe type-check", async ()
           lib: ["deno.ns", "dom"],
         },
         imports: {
-          "aio/jsx-runtime": `${repo}src/jsx-runtime.ts`,
-          "aio": `${repo}mod.ts`,
+          "aio/jsx-runtime": `${spec(repo)}src/jsx-runtime.ts`,
+          "aio": `${spec(repo)}mod.ts`,
         },
       }),
     );

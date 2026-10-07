@@ -19,7 +19,7 @@
 //   • an UNINSTALL did not exist at all, so the only way back was to remember
 //     three locations and delete them by hand.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { basename, join, SEPARATOR } from "@std/path";
 import {
   restoreArtifact,
   swapArtifact,
@@ -216,8 +216,14 @@ Deno.test("install paths: one decider, and `am remove` reads the same one", () =
   // the wrong thing.
   const p = installedAppPaths("demo");
   assertEquals(p.dir, join(installRoot(), "demo"));
-  assertEquals(p.desktop.endsWith("/applications/demo.desktop"), true);
-  assertEquals(p.binLink.endsWith("/.local/bin/demo"), true);
+  assertEquals(
+    p.desktop.endsWith(SEPARATOR + join("applications", "demo.desktop")),
+    true,
+  );
+  assertEquals(
+    p.binLink.endsWith(SEPARATOR + join(".local", "bin", "demo")),
+    true,
+  );
 });
 
 Deno.test("am remove: the footprint is the three things an install creates", async () => {
@@ -425,8 +431,8 @@ Deno.test("update: the swap prunes, keeping the new one and its predecessor", as
       join(dir, "versions", "0.4.0", "demo.AppImage"),
     );
     assertEquals(
-      (await Deno.realPath(link)).endsWith("/demo.AppImage"),
-      true,
+      basename(await Deno.realPath(link)),
+      "demo.AppImage",
       "the running file is still called demo.AppImage — the app's identity " +
         "must not change because it was updated",
     );

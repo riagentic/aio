@@ -8,7 +8,7 @@
 // at `am data`.
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import {
   cmdCreate,
   priorAppData,
@@ -16,7 +16,7 @@ import {
 } from "../src/am/am-cmd-create.ts";
 import type { GlobalFlags } from "../src/am/am-types.ts";
 
-const ROOT = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
+const ROOT = fromFileUrl(new URL("../", import.meta.url)).replace(/[\\/]$/, "");
 
 async function withAppsDir<T>(fn: (apps: string) => Promise<T>): Promise<T> {
   const apps = await tempDir("aio-create-apps-");

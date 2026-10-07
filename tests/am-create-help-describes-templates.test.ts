@@ -24,6 +24,7 @@ import {
 } from "../src/am/am-help-text.ts";
 import { helpBlock } from "../src/am/am-cmd-meta.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { fromFileUrl } from "@std/path";
 
 Deno.test("am create --help and am agent describe templates from ONE object", () => {
   // Not "equal contents" — the SAME object. Two records that happen to match
@@ -83,7 +84,7 @@ Deno.test("am create with no name: its usage line offers every template", async 
       args: [
         "run",
         "-A",
-        new URL("../src/am.ts", import.meta.url).pathname,
+        fromFileUrl(new URL("../src/am.ts", import.meta.url)),
         "create",
         "--json",
       ],

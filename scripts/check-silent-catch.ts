@@ -23,6 +23,7 @@
 import { codeText } from "../src/diagnostics/code-mask.ts";
 import { justified as okMarker } from "../src/diagnostics/ok-marker.ts";
 import { likelyNew, mtimeUnder } from "./ratchet-kit.ts";
+import { fromFileUrl } from "@std/path";
 
 /** The number of UNJUSTIFIED silent catches allowed in `src/`.
  *
@@ -53,7 +54,7 @@ import { likelyNew, mtimeUnder } from "./ratchet-kit.ts";
 // fixes (ratcheted to the measured count).
 // 308 → 306 measured when the bug-class ratchets (check-proto-in and
 // friends) joined check:ratchets: the round's fixes had already removed two.
-const CEILING = 298;
+const CEILING = 295;
 
 /** The budget for the PROMISE spelling, counted separately.
  *
@@ -63,9 +64,9 @@ const CEILING = 298;
 // 74 → 73 when the dev server's close stopped awaiting the boot's graph
 // validation behind a `.catch(() => {})`: the stop that waits for it is the
 // bounded one, and it reports what it gives up on.
-const HANDLER_CEILING = 69;
+const HANDLER_CEILING = 68;
 
-const ROOT = new URL("../src/", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("../src/", import.meta.url));
 
 async function walk(dir: string, out: string[]): Promise<string[]> {
   for await (const e of Deno.readDir(dir)) {

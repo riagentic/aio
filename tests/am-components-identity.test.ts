@@ -12,7 +12,7 @@
 // server's `resolveAppId()` exactly as `aio.run()` does, launched the way
 // `am start` launches it (cwd = the project root).
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import {
   componentAppId,
   componentConflict,
@@ -24,7 +24,7 @@ import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const LOCK = new URL("../src/server/single-instance-lock.ts", import.meta.url)
   .href;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 const PROBE = `import { resolveAppId } from ${JSON.stringify(LOCK)};\n` +
   `console.log(resolveAppId());\n`;
 

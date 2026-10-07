@@ -8,9 +8,13 @@ import { createUDSListener } from "../src/server/aio.ts";
 import { _noteUnsaved } from "../src/server/action-ack.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { join } from "@std/path";
+import { connectLocal } from "../src/server/local-listen.ts";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
 
 Deno.test("aio-402: UDS server acks a dispatch that carries a cid", async () => {
-  const socketPath = join(await Deno.makeTempDir(), "aio402.sock");
+  const socketPath = localEndpoint(
+    join(await Deno.makeTempDir(), "aio402.sock"),
+  );
   const uds = createUDSListener(
     socketPath,
     () => ({ ok: true }),
@@ -18,7 +22,7 @@ Deno.test("aio-402: UDS server acks a dispatch that carries a cid", async () => 
     () => {},
   );
   await new Promise((r) => setTimeout(r, 50));
-  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  const conn = await connectLocal(socketPath);
 
   const enc = new TextEncoder();
   const dec = new TextDecoder();
@@ -47,10 +51,13 @@ Deno.test("aio-402: UDS server acks a dispatch that carries a cid", async () => 
   writer.releaseLock();
   conn.close();
   uds.shutdown();
+  await localIdle();
 });
 
 Deno.test("aio-402: UDS dispatch without a cid produces no ack (no noise)", async () => {
-  const socketPath = join(await Deno.makeTempDir(), "aio402b.sock");
+  const socketPath = localEndpoint(
+    join(await Deno.makeTempDir(), "aio402b.sock"),
+  );
   const uds = createUDSListener(
     socketPath,
     () => ({ ok: true }),
@@ -58,7 +65,7 @@ Deno.test("aio-402: UDS dispatch without a cid produces no ack (no noise)", asyn
     () => {},
   );
   await new Promise((r) => setTimeout(r, 50));
-  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  const conn = await connectLocal(socketPath);
   const enc = new TextEncoder();
   const dec = new TextDecoder();
   const writer = conn.writable.getWriter();
@@ -86,6 +93,7 @@ Deno.test("aio-402: UDS dispatch without a cid produces no ack (no noise)", asyn
   writer.releaseLock();
   conn.close();
   uds.shutdown();
+  await localIdle();
 });
 
 Deno.test("uds: forged trusted provenance is stripped and _source re-stamped", async () => {
@@ -94,7 +102,9 @@ Deno.test("uds: forged trusted provenance is stripped and _source re-stamped", a
   // UDS strip alone would keep the whole suite green (the two-of-three-
   // surfaces trap). `_user`/`_syncOp` must be gone; `_source:"Effect"` (the
   // drain-gate spoof) must arrive re-stamped as plain client input.
-  const socketPath = join(await Deno.makeTempDir(), "aio402c.sock");
+  const socketPath = localEndpoint(
+    join(await Deno.makeTempDir(), "aio402c.sock"),
+  );
   const seen: Record<string, unknown>[] = [];
   const uds = createUDSListener(
     socketPath,
@@ -105,7 +115,7 @@ Deno.test("uds: forged trusted provenance is stripped and _source re-stamped", a
     () => {},
   );
   await new Promise((r) => setTimeout(r, 50));
-  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  const conn = await connectLocal(socketPath);
   const enc = new TextEncoder();
   const writer = conn.writable.getWriter();
   await writer.write(
@@ -152,6 +162,7 @@ Deno.test("uds: forged trusted provenance is stripped and _source re-stamped", a
   writer.releaseLock();
   conn.close();
   uds.shutdown();
+  await localIdle();
 });
 
 Deno.test("aio-402: a UDS ack carries `unsaved` when what the call wrote could not be saved — same as the WS ack", async () => {
@@ -162,7 +173,7 @@ Deno.test("aio-402: a UDS ack carries `unsaved` when what the call wrote could n
   // verdict is filed under: the action itself (a sync method's commit) and
   // its call id (an async method's settlement).
   const dir = await tempDir("aio402d-");
-  const socketPath = join(dir, "aio402d.sock");
+  const socketPath = localEndpoint(join(dir, "aio402d.sock"));
   const uds = createUDSListener(
     socketPath,
     () => ({ ok: true }),
@@ -186,7 +197,7 @@ Deno.test("aio-402: a UDS ack carries `unsaved` when what the call wrote could n
     },
     () => {},
   );
-  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  const conn = await connectLocal(socketPath);
   const writer = conn.writable.getWriter();
   const reader = conn.readable.getReader();
   try {
@@ -224,6 +235,7 @@ Deno.test("aio-402: a UDS ack carries `unsaved` when what the call wrote could n
     writer.releaseLock();
     conn.close();
     uds.shutdown();
+    await localIdle();
     await dropTempDir(dir);
   }
 });

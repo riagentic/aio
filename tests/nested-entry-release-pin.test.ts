@@ -19,10 +19,11 @@ import { dirname, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
 import { childCoverageDir, tempDir } from "../src/testing/temp-dir.ts";
 import { stopChild } from "./stop-child.ts";
+import { fixtureNodeModules } from "./symlink-helper.ts";
 
 const ROOT = join(import.meta.dirname ?? ".", "..");
 
-/** Copy a tree, following symlinks (node_modules entries may be links). */
+/** Copy a tree. */
 async function copyTree(from: string, to: string): Promise<void> {
   await Deno.mkdir(to, { recursive: true });
   for await (const e of Deno.readDir(from)) {
@@ -63,14 +64,11 @@ Deno.test({
   for (const f of ["mod.ts", "deno.json", "deno.lock"]) {
     await Deno.copyFile(join(ROOT, f), join(fw, f));
   }
-  // `immer` lives in the APP's node_modules only (nodeModulesDir: "auto"
-  // would put it there; copied, so the test runs offline).
-  await copyTree(
-    await Deno.realPath(join(ROOT, "node_modules", "immer")),
-    join(app, "node_modules", "immer"),
-  );
   const ui = join(app, "src", "agent");
   await Deno.mkdir(ui, { recursive: true });
+  // `immer` lives in the APP's node_modules only — installed there from the
+  // module cache (a fresh checkout has no node_modules of its own to copy).
+  await fixtureNodeModules(app, "npm:immer@10.2.0");
   await Deno.mkdir(home);
   await Deno.writeTextFile(
     join(app, "deno.json"),
@@ -86,7 +84,12 @@ Deno.test({
         "aio": "../fw/mod.ts",
         "aio/jsx-runtime": "../fw/src/jsx-runtime.ts",
         "immer": "npm:immer@10.2.0",
-        "esbuild": "npm:esbuild@0.24.2",
+        // The app's own alias, read from THIS file only: what tells the
+        // project root from the UI folder now that the bundle also looks in
+        // the enclosing project's node_modules (`bundleNodePaths`) and finds
+        // `immer` from either.
+        "app-label": "./src/label.ts",
+        "esbuild": "npm:esbuild@0.25.12",
         "@std/path": "jsr:@std/path@1.1.3",
         "@std/jsonc": "jsr:@std/jsonc@1.0.2",
       },
@@ -99,9 +102,13 @@ Deno.test({
       `export const c = cell("probe", { state: { n: 0 }, methods: { inc(s) { s.n++; } } });\n`,
   );
   await Deno.writeTextFile(
+    join(app, "src", "label.ts"),
+    `export const label = "n";\n`,
+  );
+  await Deno.writeTextFile(
     join(ui, "App.tsx"),
-    `import { c } from "./cell.ts";\n` +
-      `export default function App() { return <main>n = {c.n}</main>; }\n`,
+    `import { c } from "./cell.ts";\nimport { label } from "app-label";\n` +
+      `export default function App() { return <main>{label} = {c.n}</main>; }\n`,
   );
   await Deno.writeTextFile(
     join(ui, "app.ts"),

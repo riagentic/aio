@@ -19,7 +19,7 @@
 // three, and the wording is pure — so each shape is a unit test, plus a real
 // boot to prove the wiring carries it.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import {
   bindLabel,
   firstLanIPv4,
@@ -28,8 +28,9 @@ import {
 } from "../src/server/aio-lifecycle.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { childCoverageDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 const _childCovDir = childCoverageDir();
 
 // ── The wording ───────────────────────────────────────────────────────
@@ -108,7 +109,10 @@ async function scaffold(appId: string, runOpts = ""): Promise<string> {
   await Deno.mkdir(join(dir, "src"), { recursive: true });
   await Deno.writeTextFile(
     join(dir, "deno.json"),
-    JSON.stringify({ title: appId, imports: { aio: join(ROOT, "mod.ts") } }),
+    JSON.stringify({
+      title: appId,
+      imports: { aio: spec(join(ROOT, "mod.ts")) },
+    }),
   );
   await Deno.writeTextFile(
     join(dir, "src", "app.ts"),
@@ -139,17 +143,21 @@ async function boot(
   return { out: dec.decode(r.stdout) + dec.decode(r.stderr), code: r.code };
 }
 
+// A loopback address that is not 127.0.0.1 and binds without privileges:
+// Linux answers on all of 127/8; macOS's lo0 carries only 127.0.0.1 and ::1.
+const ALT = Deno.build.os === "darwin" ? "::1" : "127.0.0.2";
+
 Deno.test({
-  name: "boot report: --host=127.0.0.2 reports 127.0.0.2, not 127.0.0.1",
+  name: `boot report: --host=${ALT} reports ${ALT}, not 127.0.0.1`,
   async fn() {
     const dir = await scaffold(`bind-${crypto.randomUUID().slice(0, 8)}`);
     try {
       const { out, code } = await boot(dir, [
-        "--host=127.0.0.2",
+        `--host=${ALT}`,
         `--port=${freePort()}`,
       ]);
       assertEquals(code, 0, out);
-      assertStringIncludes(out, "127.0.0.2 — loopback only");
+      assertStringIncludes(out, `${ALT} — loopback only`);
       assert(
         !out.includes("127.0.0.1 — loopback only"),
         `the bind line named an address the listener is not on\n${out}`,

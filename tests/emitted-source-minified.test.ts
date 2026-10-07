@@ -107,7 +107,8 @@ Deno.test("emitted source: every `fn.toString()` emission in src/ is a listed, e
       skip: [/node_modules/],
     })
   ) {
-    texts[relative(ROOT, e.path)] = await Deno.readTextFile(e.path);
+    texts[relative(ROOT, e.path).replaceAll("\\", "/")] = await Deno
+      .readTextFile(e.path);
   }
   const allFns = new Set(Object.values(texts).flatMap(topFns));
   const found: Record<string, string[]> = {};
@@ -159,40 +160,48 @@ Deno.test("emitted source: the guard sees every spelling of 'this function as te
   );
 });
 
-Deno.test("emitted source: the Electron main script's reconnect curve and line reader RUN when aio is minified", async () => {
-  await using copy = await minifiedCopy("src/electron/electron-uds.ts");
-  const { electronMainScriptUDS } = await copy.load(
-    "src/electron/electron-uds.ts",
-  );
-  const script: string = electronMainScriptUDS(
-    "http://localhost:3000",
-    "/tmp/t.sock",
-    { title: "minified" },
-  );
-  // The block the generator emits, exactly as generated — every emitted
-  // function and the call sites' own wiring — up to the first connection state.
-  const from = script.indexOf("const BACKOFF_BASE_MS");
-  const to = script.indexOf("let retry = 0");
-  assert(from > 0 && to > from, "the emitted block is not where this looks");
-  // (KEEP_NAME shadowed: Electron's main process is not this process, and
-  // has none of the globals a minified aio module defines here.)
-  const run = new Function(
-    KEEP_NAME,
-    script.slice(from, to) +
-      `;return {
+Deno.test({
+  name:
+    "emitted source: the Electron main script's reconnect curve and line reader RUN when aio is minified",
+  // Windows: the mirror holds its OWN copy of src/server/win-pipe.ts, which
+  // opens kernel32/advapi32 for the life of the process when it loads (what
+  // tests/preload-ffi.ts does for the real one, before any test).
+  sanitizeResources: Deno.build.os !== "windows",
+  fn: async () => {
+    await using copy = await minifiedCopy("src/electron/electron-uds.ts");
+    const { electronMainScriptUDS } = await copy.load(
+      "src/electron/electron-uds.ts",
+    );
+    const script: string = electronMainScriptUDS(
+      "http://localhost:3000",
+      "/tmp/t.sock",
+      { title: "minified" },
+    );
+    // The block the generator emits, exactly as generated — every emitted
+    // function and the call sites' own wiring — up to the first connection state.
+    const from = script.indexOf("const BACKOFF_BASE_MS");
+    const to = script.indexOf("let retry = 0");
+    assert(from > 0 && to > from, "the emitted block is not where this looks");
+    // (KEEP_NAME shadowed: Electron's main process is not this process, and
+    // has none of the globals a minified aio module defines here.)
+    const run = new Function(
+      KEEP_NAME,
+      script.slice(from, to) +
+        `;return {
         delays: [0, 1, 2, 3, 9].map((r) => backoffDelay(r)),
         lines: [lineBuf.push("a\\nb"), lineBuf.push("c\\n"), lineBuf.pending()],
       };`,
-  ) as () => { delays: number[]; lines: unknown[] };
-  const { delays, lines } = run();
-  [0, 1, 2, 3, 9].forEach((retry, i) => {
-    const base = Math.min(BACKOFF_BASE_MS * 2 ** retry, BACKOFF_MAX_MS);
-    assert(
-      delays[i]! >= base * 0.8 && delays[i]! <= base * 1.2,
-      `retry ${retry}: ${delays[i]} is not ${base} ±20%`,
-    );
-  });
-  assertEquals(lines, [["a"], ["bc"], 0]);
+    ) as () => { delays: number[]; lines: unknown[] };
+    const { delays, lines } = run();
+    [0, 1, 2, 3, 9].forEach((retry, i) => {
+      const base = Math.min(BACKOFF_BASE_MS * 2 ** retry, BACKOFF_MAX_MS);
+      assert(
+        delays[i]! >= base * 0.8 && delays[i]! <= base * 1.2,
+        `retry ${retry}: ${delays[i]} is not ${base} ±20%`,
+      );
+    });
+    assertEquals(lines, [["a"], ["bc"], 0]);
+  },
 });
 
 Deno.test("emitted source: the video encoder's page script RUNS its inlined fitFrame when aio is minified", async () => {

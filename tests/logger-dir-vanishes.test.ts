@@ -64,11 +64,15 @@ Deno.test("logger: a genuinely unwritable path still reports (bounded)", async (
   const errors: string[] = [];
   const origError = console.error;
   console.error = (...a: unknown[]) => errors.push(a.map(String).join(" "));
+  // A directory UNDER A REGULAR FILE can be created on no OS (`/proc`, the old
+  // prop, is Linux-only — on Windows it is `C:\\proc`, and writable).
+  // Recreation cannot rescue this, so the failure must still be reported
+  // rather than swallowed by the new path.
+  const base = await tempDir("logger-unwritable-");
+  await Deno.writeTextFile(join(base, "a-file"), "");
   try {
-    // /proc is real and not writable — recreation cannot rescue this, so the
-    // failure must still be reported rather than swallowed by the new path.
     const logger = new AioLogger({
-      dir: "/proc/aio-cannot-write-here",
+      dir: join(base, "a-file", "logs"),
       console: false,
       level: "info",
     });
@@ -78,10 +82,11 @@ Deno.test("logger: a genuinely unwritable path still reports (bounded)", async (
     await sleep(50);
     assert(
       errors.some((e) => e.includes("[logger]")),
-      "a real permission failure is still loud",
+      "a real write failure is still loud",
     );
   } finally {
     console.error = origError;
+    await dropTempDir(base);
   }
 });
 

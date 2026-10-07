@@ -16,11 +16,13 @@ import { assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { createUDSListener } from "../src/server/aio.ts";
 import { MAX_SUB_LEN, MAX_SUBS } from "../src/protocol/broadcast-utils.ts";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
+import { connectLocal, type LocalConn } from "../src/server/local-listen.ts";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function connectAndRead(socketPath: string) {
-  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  const conn = await connectLocal(socketPath);
   const lines: string[] = [];
   const decoder = new TextDecoder();
   let buf = "";
@@ -40,7 +42,7 @@ async function connectAndRead(socketPath: string) {
   return { conn, lines };
 }
 
-function send(conn: Deno.Conn, msg: string): void {
+function send(conn: LocalConn, msg: string): void {
   const w = conn.writable.getWriter();
   w.write(new TextEncoder().encode(msg + "\n")).catch(() => {});
   w.releaseLock();
@@ -56,7 +58,9 @@ const frames = (lines: string[]) =>
   });
 
 Deno.test("uds: a subs frame past the cap is refused, not held per connection", async () => {
-  const socketPath = join(await Deno.makeTempDir(), "uds-subs-cap.sock");
+  const socketPath = localEndpoint(
+    join(await Deno.makeTempDir(), "uds-subs-cap.sock"),
+  );
   const uds = createUDSListener(
     socketPath,
     () => ({ a: { v: 1 }, b: { v: 2 } }),
@@ -99,10 +103,13 @@ Deno.test("uds: a subs frame past the cap is refused, not held per connection", 
   conn.close();
   await wait(50);
   uds.shutdown();
+  await localIdle();
 });
 
 Deno.test("uds: fullStateThreshold decides patch-vs-full, as it does on WS", async () => {
-  const socketPath = join(await Deno.makeTempDir(), "uds-threshold.sock");
+  const socketPath = localEndpoint(
+    join(await Deno.makeTempDir(), "uds-threshold.sock"),
+  );
   // A patch worth ~60% of full state: above the 0.5 default, below 1.0.
   const state = { c: { pad: "p".repeat(200), items: [] as number[] } };
   const uds = createUDSListener(
@@ -139,10 +146,13 @@ Deno.test("uds: fullStateThreshold decides patch-vs-full, as it does on WS", asy
   conn.close();
   await wait(50);
   uds.shutdown();
+  await localIdle();
 });
 
 Deno.test("uds: a threshold of 1 keeps the old behaviour (patch unless bigger than full)", async () => {
-  const socketPath = join(await Deno.makeTempDir(), "uds-threshold-1.sock");
+  const socketPath = localEndpoint(
+    join(await Deno.makeTempDir(), "uds-threshold-1.sock"),
+  );
   const state = { c: { pad: "p".repeat(200), items: [] as number[] } };
   const uds = createUDSListener(
     socketPath,
@@ -172,4 +182,5 @@ Deno.test("uds: a threshold of 1 keeps the old behaviour (patch unless bigger th
   conn.close();
   await wait(50);
   uds.shutdown();
+  await localIdle();
 });

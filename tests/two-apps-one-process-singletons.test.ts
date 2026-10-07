@@ -4,7 +4,7 @@
 // case here boots a second app beside a first and asks whether the FIRST one
 // still behaves as it did alone.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { aio, cell, log } from "../mod.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import {
@@ -325,7 +325,7 @@ if (Deno.env.get("MODE") === "stray") {
           "-A",
           "--no-check",
           "--config",
-          new URL("../deno.json", import.meta.url).pathname,
+          fromFileUrl(new URL("../deno.json", import.meta.url)),
           script,
         ],
         env: { MODE: mode, AIO_APPS_DIR: join(dir, "apps") },

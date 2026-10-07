@@ -10,8 +10,9 @@
 //
 // The victim is a real process (`sleep`) holding a real lock whose cwd sits
 // under the non-project directory. Without the fix `am` SIGTERMs it.
+import { SLEEP_ARGS } from "./proc-helper.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import {
   type LockData,
   writeLock,
@@ -19,8 +20,8 @@ import {
 import { isProcessAlive } from "../src/server/single-instance-lock.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const AM = new URL("../src/am.ts", import.meta.url).pathname;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const AM = fromFileUrl(new URL("../src/am.ts", import.meta.url));
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 Deno.test("am stop --all outside a project refuses, and stops nothing", async () => {
   const base = await tempDir("am-stopall-noproj-");
@@ -30,8 +31,8 @@ Deno.test("am stop --all outside a project refuses, and stops nothing", async ()
   await Deno.mkdir(apps, { recursive: true });
   await Deno.mkdir(launched, { recursive: true });
 
-  const victim = new Deno.Command("sleep", {
-    args: ["60"],
+  const victim = new Deno.Command(Deno.execPath(), {
+    args: SLEEP_ARGS,
     stdout: "null",
     stderr: "null",
   }).spawn();

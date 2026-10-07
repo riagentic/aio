@@ -6,8 +6,9 @@
 // The wiring is the part a generator is actually for.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { fromFileUrl } from "@std/path";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("..", import.meta.url));
 
 async function am(args: string[], cwd: string) {
   const p = await new Deno.Command(Deno.execPath(), {

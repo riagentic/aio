@@ -520,12 +520,7 @@ export function detachedSpawnSpec(
   denoBin: string = Deno.execPath(),
 ): { cmd: string; args: string[] } {
   if (os === "windows") {
-    // PowerShell ends a single-quoted string at ANY of its quote characters,
-    // not only U+0027: the typographic ‘ ’ ‚ ‛ (U+2018/2019/201A/201B) close
-    // it too, so `--title=Don’t` ran whatever followed as PowerShell. Each is
-    // escaped the same way — doubled.
-    const q = (v: string) =>
-      "'" + v.replace(/['\u2018\u2019\u201A\u201B]/g, "$&$&") + "'";
+    const q = psQuote;
     // ONE pre-quoted command line, not an ARRAY of values. `Start-Process`
     // joins `-ArgumentList` elements into a single string with spaces and does
     // NOT quote them (the single quotes above are PowerShell syntax and are
@@ -535,13 +530,21 @@ export function detachedSpawnSpec(
     // process that exec'd nothing. `windowsCommandLine` is the same MSVC
     // quoting the update swap already uses.
     const argLine = windowsCommandLine(denoArgs);
-    const ps = `$p = Start-Process -FilePath ${q(denoBin)} -ArgumentList ${
-      q(argLine)
-    } -RedirectStandardOutput ${q(logFile)} -RedirectStandardError ${
+    // A launch that fails (no such binary, access denied) says why in
+    // `<log>.err`, where a child's own stderr would be: PowerShell's error
+    // went to the launcher's null stderr, so `am start` reported a dead pid
+    // and quoted an empty log.
+    const ps = `try { $p = Start-Process -FilePath ${
+      q(denoBin)
+    } -ArgumentList ${q(argLine)} -RedirectStandardOutput ${
+      q(logFile)
+    } -RedirectStandardError ${
       q(logFile + ".err")
-    } -PassThru -WindowStyle Hidden; [IO.File]::WriteAllText(${
+    } -PassThru -WindowStyle Hidden -ErrorAction Stop; [IO.File]::WriteAllText(${
       q(logFile + ".pid")
-    }, [string]$p.Id)`;
+    }, [string]$p.Id) } catch { [IO.File]::WriteAllText(${
+      q(logFile + ".err")
+    }, [string]$_); exit 1 }`;
     return {
       cmd: "powershell",
       args: ["-NoProfile", "-NonInteractive", "-Command", ps],
@@ -585,7 +588,7 @@ export const LAUNCHER_TIMEOUT_MS = 30_000;
 export async function launchDetached(
   spec: { cmd: string; args: string[] },
   logFile: string,
-  opts: { cwd?: string; env?: Record<string, string> } = {},
+  opts: { cwd?: string; env?: Record<string, string>; clearEnv?: boolean } = {},
   timeoutMs = LAUNCHER_TIMEOUT_MS,
 ): Promise<number> {
   const pidFile = logFile + ".pid";
@@ -1325,6 +1328,19 @@ function childLockOf(appId: string, pid: number): LockData | null {
   return instances(appId).find((i) => i.pid === pid) ?? own;
 }
 
+/** Is `l` the lock of the launch am made (`pid`)? That process's own — or,
+ *  once a cell edit turned it into the dev supervisor, the app it supervises
+ *  (`LockData.supervisor`). Anything else under the app's key is ANOTHER
+ *  launch, whatever answers on the port. Pure. @internal */
+export function _ofLaunch(
+  l: Pick<LockData, "pid" | "ns" | "supervisor">,
+  pid: number,
+): boolean {
+  return isOwnLock(l, pid) ||
+    (l.supervisor !== undefined &&
+      isOwnLock({ pid: l.supervisor, ns: l.ns }, pid));
+}
+
 /** Wait for `pid` — a child `am start` just spawned, or a booting instance it
  *  attached to — to answer, then print the verdict: `started` (returns), a
  *  crash (exit 1, with what the log said), or the truth about a wait that ran
@@ -1419,7 +1435,7 @@ async function awaitStarted(o: {
       // Our own child's lock — and only if it IS our child's (same pid):
       // `childLockOf` falls back to whatever sits under the key.
       const found = childLockOf(appId, pid);
-      const written = found?.pid === pid ? found : null;
+      const written = found && _ofLaunch(found, pid) ? found : null;
       // A SOCKET-ONLY app never binds a port, and `port: 0` is falsy — so
       // `livePort` never resolved, the loop always ran out, and `am start`
       // exited 1 with "not responding on port 0 after 10s" for a desktop app
@@ -1437,6 +1453,21 @@ async function awaitStarted(o: {
       if (livePort === undefined) continue; // no port chosen yet
     }
     if (await doorAnswers(resolveControlPort(livePort, appId), appId)) {
+      // WHOSE door? A declared (or reused) port is answered by whichever
+      // launch of this app serves there — its dev watcher relaunching, a
+      // second `am start` — while our child is alive only until its own
+      // acquire is refused; read as ours, the doomed child was reported as
+      // the started app, pid and all. The lock says who holds the app, and
+      // it is read AFTER the answer: an app takes its lock before it
+      // listens, so whoever answered is in it by now. (Read before, it was
+      // stale — a refused connect takes ~0.5 s on Windows, and the winner
+      // locked and bound inside that one probe: measured, 10 runs in 10.)
+      // Not ours: wait — the child exits (the verdict below names the
+      // winner), or the holder goes and the child takes the lock.
+      const holder = childLockOf(appId, pid);
+      if (holder && !_ofLaunch(holder, pid) && isLockOwnerAlive(holder)) {
+        continue;
+      }
       healthy = true;
       break;
     }
@@ -1530,6 +1561,15 @@ async function awaitStarted(o: {
     //    socket-only desktop shape — "not responding on port 0" sent a
     //    reader after a port that never existed).
     const lock = readPid(appId);
+    if (lock && !_ofLaunch(lock, pid) && isLockOwnerAlive(lock)) {
+      outError(
+        `${appId} is held by another launch (pid ${lock.pid}) and this ` +
+          `start's child (pid ${pid}) has neither taken over nor stood down ` +
+          `after ${timeout / 1000}s — check am status and ${logPath()}`,
+        mode,
+      );
+      Deno.exit(1);
+    }
     const socketOnly = !!lock?.socketPath && !lock.port;
     const doorPort = lock?.port || livePort;
     const bound = socketOnly
@@ -3403,8 +3443,21 @@ export function instanceAioMismatch(v: string | undefined): boolean {
   return v !== undefined && v !== VERSION;
 }
 
-/** One shell word: bare when it needs no quoting, else single-quoted. */
-function shellWord(s: string): string {
+/** A PowerShell single-quoted string.
+ *
+ *  PowerShell ends one at ANY of its quote characters, not only U+0027: the
+ *  typographic ‘ ’ ‚ ‛ (U+2018/2019/201A/201B) close it too, so
+ *  `--title=Don’t` ran whatever followed as PowerShell. Each is escaped the
+ *  same way — doubled. */
+function psQuote(v: string): string {
+  return "'" + v.replace(/['\u2018\u2019\u201A\u201B]/g, "$&$&") + "'";
+}
+
+/** One shell word: bare when it needs no quoting, else single-quoted — for
+ *  the shell a user of `os` pastes into (PowerShell on Windows, where `\` is
+ *  a plain character and a path is bare as it is). */
+function shellWord(s: string, os: typeof Deno.build.os): string {
+  if (os === "windows") return /^[\w+=:./\\-]+$/.test(s) ? s : psQuote(s);
   return /^[\w@%+=:,./-]+$/.test(s) ? s : `'${s.replaceAll("'", `'\\''`)}'`;
 }
 
@@ -3418,7 +3471,9 @@ function shellWord(s: string): string {
  *  same app instead of the agent's, or found nothing. The command has to carry
  *  every part of the address the list was read with:
  *   - the scope: `--instance=<name>` when that is what set it, otherwise the
- *     `AIO_APPS_DIR=<dir>` it came from (a variable, so it prefixes);
+ *     `AIO_APPS_DIR=<dir>` it came from (a variable, so it prefixes — as
+ *     `$env:AIO_APPS_DIR='<dir>'; ` on Windows: `VAR=x cmd` is POSIX shell
+ *     syntax, and ran in neither PowerShell nor cmd);
  *   - the home: `--profile=<name>` for a profile, `--profile=<dir>` for any
  *     other folder than the scope's default home for its id — two boots of
  *     one id are two locks.
@@ -3428,6 +3483,7 @@ function shellWord(s: string): string {
 export function stopCommandFor(
   inst: { appId: string; home?: string; profile?: string },
   scope: { instance?: string; appsDir?: string; defaultHome: string },
+  os: typeof Deno.build.os = Deno.build.os,
 ): string {
   const parts = ["am", "stop", `--app=${inst.appId}`];
   let prefix = "";
@@ -3436,7 +3492,11 @@ export function stopCommandFor(
       resolve(scope.appsDir) ===
         resolve(join(homedir(), ".aio-instances", scope.instance));
     if (fromInstance) parts.push(`--instance=${scope.instance}`);
-    else prefix = `AIO_APPS_DIR=${shellWord(scope.appsDir)} `;
+    else {
+      prefix = os === "windows"
+        ? `$env:AIO_APPS_DIR=${psQuote(scope.appsDir)}; `
+        : `AIO_APPS_DIR=${shellWord(scope.appsDir, os)} `;
+    }
   }
   if (inst.home && resolve(inst.home) !== resolve(scope.defaultHome)) {
     // A profile by its NAME (what was typed to start it); any other folder
@@ -3446,7 +3506,9 @@ export function stopCommandFor(
         ? profileOfHome(inst.appId, inst.home, scope.defaultHome)
         : undefined);
     parts.push(
-      name ? `--profile=${shellWord(name)}` : `--home=${shellWord(inst.home)}`,
+      name
+        ? `--profile=${shellWord(name, os)}`
+        : `--home=${shellWord(inst.home, os)}`,
     );
   }
   return prefix + parts.join(" ");
@@ -3700,6 +3762,19 @@ function pidCommandLine(pid: number): string | null {
       }).outputSync();
       return r.success
         ? new TextDecoder().decode(r.stdout).trim() || null
+        : null;
+    }
+    if (Deno.build.os === "windows") {
+      // The IMAGE name (`deno.exe`) is what Windows says without a privilege
+      // or a second of PowerShell. With none, `am kill --stale` ended whatever
+      // pid a loopback health answer named — the check below never ran.
+      const r = new Deno.Command("tasklist", {
+        args: ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"],
+        stdout: "piped",
+        stderr: "null",
+      }).outputSync();
+      return r.success
+        ? /^"([^"]+)"/.exec(new TextDecoder().decode(r.stdout))?.[1] ?? null
         : null;
     }
   } catch { /* aio-ok: gone, or not ours to read */ }

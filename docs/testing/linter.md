@@ -172,6 +172,16 @@ Static analysis of `cell()` calls:
 - `createRoot` in user code (framework handles mounting)
 - Unnecessary `import React` (automatic with jsx transform)
 - Cell access without connection check
+- **A state hook after an early `return`, behind a condition, or in a loop**
+  (warn) — `useRef`, `useSignal`, `useLocal`, `useId`, `useResource`, `useHead`,
+  `onUnmount`, `onGlobalKey`, the compat hooks, and any `use…` function of the
+  same file that calls one. They are matched across renders by call order, so a
+  render that skips one hands every later hook another hook's state. `onMount`,
+  `onCleanup` and `afterRender` take no slot and are not reported; neither is
+  `onUnmount` inside an `onMount` callback. A name counts only when the file
+  imports it from aio. See [AIR lifecycle](../ui/air-lifecycle.md)
+- A body-level `onCleanup` that tears down something the body did not create
+  (use `onUnmount`)
 
 ### 8. Testing
 

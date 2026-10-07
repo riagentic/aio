@@ -678,6 +678,7 @@ export function createCellFromMethods<
     // so it has to survive as more than a falsy value.
     syncOptOut: config.sync === false,
     worker: config.worker === true,
+    workerRespawn: config.workerRespawn === true,
     version: config.version ?? 0,
     onMigrate: config.onMigrate as
       | ((
@@ -786,6 +787,7 @@ const CELL_AIO_KEYS: ReadonlySet<string> = new Set([
   "syncOptOut",
   "enableSync",
   "worker",
+  "workerRespawn",
   "version",
   "onMigrate",
   "onRestore",

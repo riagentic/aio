@@ -9,6 +9,7 @@
 // clears it: a stopped app shows a banner about panels that were just emptied,
 // quoting a transport error from a process that no longer exists.
 import { assertEquals } from "@std/assert";
+import { join } from "@std/path";
 import { testCell } from "../src/testing/cell-test.ts";
 import { manager } from "../amui/src/manager.ts";
 import type { DiscoveredProject, ProjectDetail } from "../amui/src/manager.ts";
@@ -20,15 +21,15 @@ testCell(
   "amui: an app noticed dead by the rescan drops its control-plane error",
   async (t) => {
     const sandbox = await tempDir("amui-r9-ctlerr-");
-    const dir = `${sandbox}/proj`;
+    const dir = join(sandbox, "proj");
     await Deno.mkdir(dir);
     await Deno.writeTextFile(
-      `${dir}/deno.json`,
+      join(dir, "deno.json"),
       JSON.stringify({ name: "gone", imports: { aio: "../mod.ts" } }),
     );
     const keys = ["AIO_APPS_DIR", "AMUI_ROOTS", "HOME"] as const;
     const prev = keys.map((k) => Deno.env.get(k));
-    Deno.env.set("AIO_APPS_DIR", `${sandbox}/apps`); // empty registry
+    Deno.env.set("AIO_APPS_DIR", join(sandbox, "apps")); // empty registry
     Deno.env.set("AMUI_ROOTS", dir);
     Deno.env.set("HOME", sandbox);
     _resetInstanceVerify();

@@ -12,8 +12,9 @@
 // the gate's message is what a person actually reads at the moment they are
 // about to break something.
 import { assert, assertStringIncludes } from "@std/assert";
+import { fromFileUrl } from "@std/path";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("..", import.meta.url));
 
 Deno.test("freeze: check:api offers no approval path for a break", async () => {
   const src = await Deno.readTextFile(`${REPO}scripts/api-snapshot.ts`);

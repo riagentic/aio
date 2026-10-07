@@ -21,8 +21,9 @@ import { HELP_TEXT } from "../src/am/am-help-text.ts";
 // compat gate disagree about which verbs exist.
 import { helpEntryVerbs } from "../scripts/api-snapshot.ts";
 import { AIO_RUNTIME_FLAG_SPECS } from "../src/diagnostics/runtime-flags.ts";
+import { fromFileUrl } from "@std/path";
 
-const ROOT = new URL("../", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("../", import.meta.url));
 const read = (rel: string) => Deno.readTextFile(`${ROOT}${rel}`);
 
 /** The runtime flags, read from the ONE table aio-cli.ts itself parses

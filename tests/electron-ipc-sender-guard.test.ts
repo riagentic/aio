@@ -127,8 +127,11 @@ Deno.test("permission guard: the app window on a foreign site is not the app", (
   h.go("https://idp.example/login");
   assertEquals(h.perm(h.wc, "notifications", "https://idp.example"), false);
   assertEquals(h.perm(h.wc, "fullscreen", "https://idp.example"), true);
-  // Another window keeps its 1.0.12 answer.
-  assertEquals(h.perm(other, "notifications", "https://idp.example"), true);
+  // Another window is NOT the app once the shell has said which one is: a
+  // pop-up a child window opened was (a field report's audit), and held
+  // every permission scoped "app".
+  assertEquals(h.perm(other, "notifications", "https://idp.example"), false);
+  assertEquals(h.perm(other, "fullscreen", "https://idp.example"), true);
   // Back home, the app again.
   h.go(APP + "/done");
   assertEquals(h.perm(h.wc, "notifications", APP), true);

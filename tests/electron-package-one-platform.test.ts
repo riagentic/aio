@@ -15,6 +15,7 @@ import {
   freshElectronStaging,
 } from "../src/build/build-electron.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { linkFile } from "./symlink-helper.ts";
 
 const bytes = (...b: number[]) => new Uint8Array(b);
 const ELF = bytes(0x7f, 0x45, 0x4c, 0x46);
@@ -46,7 +47,7 @@ Deno.test("package: foreignBinaries names every other platform's executable", as
     await Deno.writeFile(join(dir, "electron/locales/x.dylib"), MACHO64);
     await Deno.writeTextFile(join(dir, "run.bat"), "@echo off\n");
     await Deno.writeFile(join(dir, "empty"), new Uint8Array(0));
-    await Deno.symlink("electron/electron", join(dir, "link"));
+    await linkFile("electron/electron", join(dir, "link"));
 
     assertEquals(await foreignBinaries(dir, "windows"), [
       { path: "app", format: "elf" },

@@ -13,7 +13,12 @@ import {
   resolve,
 } from "@std/path";
 import { privateDirRefusal, selfUid } from "./dir-permissions.ts";
-import { connectLocal, isPipePath } from "./local-listen.ts";
+import {
+  connectLocal,
+  isPipePath,
+  listenLocal,
+  type LocalListener,
+} from "./local-listen.ts";
 import {
   appDirs,
   appHome,
@@ -169,6 +174,14 @@ export type LockData = {
     /** When the wait began (epoch ms). */
     since: number;
   };
+  /** Present when the holder runs UNDER a dev supervisor: that supervisor's
+   *  pid. A cell edit turns the process that was launched into a thin
+   *  supervisor and the app into its child (dev-restart.ts), so the lock's
+   *  `pid` is then no longer the process `am start` (or a terminal) launched —
+   *  this names it. How `am` tells "the launch I made, relaunched" from
+   *  "another launch that took the lock". Absent outside a supervised dev
+   *  session and on locks written by an aio older than this field. */
+  supervisor?: number;
   cwd: string; // working directory (for am/instances display)
   /** The resolved data home this instance runs from. Part of the lock's
    *  IDENTITY (see {@linkcode lockKey}): two boots of one appId from two homes
@@ -306,6 +319,19 @@ function handoffSecret(): string | undefined {
     if (_secret !== undefined) Deno.env.delete(HANDOFF_ENV);
   }
   return _secret;
+}
+
+/** The dev supervisor this process runs under (dev-restart.ts hands its
+ *  child both variables), or undefined — see {@linkcode LockData}
+ *  `supervisor`. */
+function devSupervisorPid(): number | undefined {
+  try {
+    if (Deno.env.get("AIO_DEV_SUPERVISED") !== "1") return undefined;
+    const pid = Number(Deno.env.get("AIO_PARENT_PID"));
+    return Number.isInteger(pid) && pid > 0 ? pid : undefined;
+  } catch {
+    return undefined; // aio-ok: no env permission — then nothing supervises it
+  }
 }
 
 /** Was `lock` filed FOR this process — does it carry the hand-off secret
@@ -1011,14 +1037,109 @@ function remakeLockDir(dir: string): void {
  *  `singleton: false` app (no lock to keep it) then bound its socket into a
  *  void, ENOENT. No-op for a pipe name or a dir that is there. */
 export function ensureLockDirOf(path: string): void {
-  if (isPipePath(path)) return; // a Windows pipe name, not a file
+  if (inLockDir(path)) remakeLockDir(dirname(path));
+}
+
+/** Is `path` a file in a LOCK dir — this one, or the `/tmp` fallback
+ *  `resolveSocketPath` picks (`aio` / `aio-u<uid>`)? Only a lock dir gets
+ *  the lock dir's rules. A socket path a caller chose (`createUDSListener` is
+ *  public) is left as it was: its directory is theirs to make, and chmodding
+ *  it 0700 is not ours to do. Never a Windows pipe name, which is no file. */
+function inLockDir(path: string): boolean {
+  if (isPipePath(path)) return false;
   const dir = dirname(path);
-  // Only a LOCK dir gets the lock dir's rules — this one, or the `/tmp`
-  // fallback `resolveSocketPath` picks (`aio` / `aio-u<uid>`). A socket path
-  // a caller chose (`createUDSListener` is public) is left as it was: its
-  // directory is theirs to make, and chmodding it 0700 is not ours to do.
-  if (dir !== lockDir() && !/^aio(-u\d+)?$/.test(basename(dir))) return;
-  remakeLockDir(dir);
+  return dir === lockDir() || /^aio(-u\d+)?$/.test(basename(dir));
+}
+
+/** Is `e` a create's answer to "the directory is not there"? ENOENT on every
+ *  OS, macOS's EINVAL too ({@linkcode removedUnderCreate}) — for a unix
+ *  socket's bind as for a file (measured on macOS 26.5: 3 processes, 5 000
+ *  rounds each of mkdir + bind + unlink + rmdir — 1 653 EINVAL beside 1 158
+ *  ENOENT; Linux, ENOENT only). `node:net` says it as a `code`. */
+function dirGone(e: unknown): boolean {
+  return e instanceof Deno.errors.NotFound ||
+    (e as { code?: unknown } | null)?.code === "ENOENT" ||
+    removedUnderCreate(e);
+}
+
+/** A create at `path`, first tried at `since` (`performance.now()`), failed
+ *  with `e`: was its lock dir removed under it (a sibling's exit prune of the
+ *  momentarily empty scoped dir), and is the dir made again — try once more?
+ *  False for any other error, for a directory that is not a lock dir (never
+ *  made here), and past the wait. THE answer for every create that has no
+ *  file of its own in the dir yet to keep it ({@linkcode createInLockDir}; a
+ *  bind that fails later, `listenLocal`'s `rebind`).
+ *
+ *  Bounded by TIME, as the mutex's open is, not by a count: six processes
+ *  making and pruning one scoped dir in a loop lost a count of three in 1.3 %
+ *  of 18 000 creates, and none of them under the wait. */
+export function lockDirRemade(
+  path: string,
+  e: unknown,
+  since: number,
+): boolean {
+  // Windows: a create in a directory that is BEING removed is refused
+  // (ACCESS_DENIED) until the removal is done — the same prune, caught a
+  // moment earlier (6 processes making and pruning one dir: 8 of 18 000
+  // creates). Waited out as the mutex's open waits out a file being deleted.
+  const gone = dirGone(e) || (_lockDeps.windows() && isHeldOpenError(e));
+  if (
+    !gone || !inLockDir(path) || performance.now() - since > MUTEX_WAIT_MS
+  ) return false;
+  pauseSync(1);
+  ensureLockDirOf(path);
+  return true;
+}
+
+/** `create()` something at `path` in the lock dir — a socket, the watcher's
+ *  sentinel — with the dir made first and made AGAIN when it is pruned
+ *  between the two ({@linkcode lockDirRemade}). What still fails is thrown
+ *  as it came; a "no such directory" that does not say where gets the path. */
+export function createInLockDir<T>(path: string, create: () => T): T {
+  const since = performance.now();
+  ensureLockDirOf(path);
+  for (;;) {
+    try {
+      return create();
+    } catch (e) {
+      if (lockDirRemade(path, e, since)) continue;
+      if (dirGone(e) && e instanceof Error && !e.message.includes(path)) {
+        e.message += `: ${path}`;
+      }
+      throw e;
+    }
+  }
+}
+
+/** {@linkcode listenLocal} at a socket `path` in the lock dir, by
+ *  {@linkcode createInLockDir}'s rule — also for the peer listener, whose
+ *  bind fails after this returns. */
+export function listenInLockDir(path: string, peer: boolean): LocalListener {
+  const since = performance.now();
+  return createInLockDir(
+    path,
+    () =>
+      _lockDeps.listen(path, {
+        peer,
+        rebind: (e) => lockDirRemade(path, e, since),
+      }),
+  );
+}
+
+/** Remove, from `dir`, the `watch-<pid>.tmp` sentinels of watchers whose
+ *  process is gone ({@linkcode taggedOwnerGone}) — an app killed, or one
+ *  that exited without stopping its server. Nothing else took them out of
+ *  the shared dir (232 found in one after a week of test runs), and one
+ *  keeps a scoped dir from pruning. Called by a watcher making its own. */
+export function sweepDeadSentinels(dir: string): void {
+  const name = new RegExp(`^watch-${PID_TAG}\\.tmp$`);
+  try {
+    for (const e of [...Deno.readDirSync(dir)]) {
+      const m = e.isFile ? name.exec(e.name) : null;
+      const path = join(dir, e.name);
+      if (m && taggedOwnerGone(path, Number(m[1]), m[2])) Deno.removeSync(path);
+    }
+  } catch { /* aio-ok: no dir, or a sibling swept first — nothing to remove */ }
 }
 
 /** Scoped lock dirs THIS process created, removed (when empty) at exit. */
@@ -1136,12 +1257,29 @@ export function _prepareLockDir(
   const chmod = ops.chmod ?? Deno.chmodSync;
   const stat = ops.stat ?? Deno.statSync;
   const lstat = ops.lstat ?? Deno.lstatSync;
-  try {
-    Deno.mkdirSync(dir, { recursive: true });
-  } catch { /* already exists — the stat below is the real check */ }
-  try {
-    if (Deno.build.os !== "windows") chmod(dir, 0o700);
-  } catch { /* not ours to chmod — precisely what the stat is for */ }
+  /** Make it and narrow it; false when it could not be made. */
+  const make = (): boolean => {
+    let made = true;
+    try {
+      // Made 0700, not made and THEN narrowed: a sibling that looks between
+      // the two saw a dir of ours at the umask's 0755 and refused it as
+      // "not owner-only" (macOS, 3 processes making and pruning one dir: 39
+      // of 9 000). The chmod below is for one that was already there.
+      Deno.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    } catch (e) {
+      // "Exists" or "not there" from a recursive mkdir: the dir was pruned
+      // inside the call itself (it found the dir, then looked at it) — as
+      // good as made and gone. (A FILE of that name is "exists" too; the
+      // stat below finds it.) Anything else could not be made.
+      made = e instanceof Deno.errors.NotFound ||
+        e instanceof Deno.errors.AlreadyExists;
+    }
+    try {
+      if (Deno.build.os !== "windows") chmod(dir, 0o700);
+    } catch { /* not ours to chmod — precisely what the stat is for */ }
+    return made;
+  };
+  let made = make();
   if (Deno.build.os === "windows") return null; // no POSIX mode to read
   // The LOOK must not be pointed somewhere else. `stat` FOLLOWS a symlink, so
   // on the host this rule exists for — no `$XDG_RUNTIME_DIR`, base `/tmp`, a
@@ -1176,12 +1314,28 @@ export function _prepareLockDir(
     // that was always the one saying yes.
   }
   let st: Deno.FileInfo;
-  try {
-    st = stat(dir);
-  } catch (e) {
-    return `${dir} cannot be created or read (${
-      e instanceof Error ? e.message : e
-    })`;
+  for (const since = performance.now();;) {
+    try {
+      st = stat(dir);
+      break;
+    } catch (e) {
+      // MADE a moment ago and not there: a sibling's exit pruned the (empty)
+      // scoped dir between the two — made again, for as long as the mutex
+      // waits. It was refused instead, and the next candidate taken: an app
+      // then kept its lock where `am` does not look (six processes making
+      // and pruning one dir: 1 150 of 18 000 looks). One that could not be
+      // made is refused at once, as ever.
+      if (
+        made && e instanceof Deno.errors.NotFound &&
+        performance.now() - since < MUTEX_WAIT_MS
+      ) {
+        made = make();
+        continue;
+      }
+      return `${dir} cannot be created or read (${
+        e instanceof Error ? e.message : e
+      })`;
+    }
   }
   if (!st.isDirectory) return `${dir} exists and is not a directory`;
   return privateDirRefusal(dir, st.mode, st.uid);
@@ -1476,7 +1630,8 @@ export function isProcessAlive(pid: number): boolean {
  *  Linux: field 22 of `/proc/<pid>/stat` — the process's start time in clock
  *  ticks since boot. (Field 2, `comm`, may contain spaces and parentheses, so
  *  it is cut at the LAST `)` before splitting — a bug every naive parse of
- *  this file has.) Linux only: macOS's identity is {@linkcode
+ *  this file has.) Windows: the process creation time, see {@linkcode
+ *  winProcessStartToken}. macOS's identity is {@linkcode
  *  processStartEpoch} in its own field (`startEpoch`). Its token used to be
  *  `ps -o lstart=` TEXT, which varies with the reader's TZ and locale — a
  *  reader in another zone than the writer judged a live owner's pid
@@ -1496,10 +1651,56 @@ export function processStartToken(pid: number): string | null {
       const ticks = f[19];
       return ticks && /^\d+$/.test(ticks) ? ticks : null;
     }
+    if (Deno.build.os === "windows") return winProcessStartToken(pid);
   } catch { /* no /proc entry, no permission — we simply cannot say */ }
   // macOS: see `processStartEpoch` / `LockData.startEpoch` — its token was
   // reader-locale text, so there is deliberately none any more.
   return null;
+}
+
+/** Windows: the process's CREATION time (`GetProcessTimes`, a FILETIME —
+ *  100 ns ticks since 1601, UTC) as decimal text. The kernel sets it once, so
+ *  it is the same for the process's whole life and for every reader, and a
+ *  recycled pid has another one.
+ *
+ *  Null — "cannot say", exactly as an unreadable `/proc/<pid>` on Linux — for
+ *  a pid that is gone, one this user may not open (a protected system
+ *  process), or when FFI is not granted: asking would put a permission prompt
+ *  in front of a lock check. kernel32 is opened and closed here, the way
+ *  `esbuild-shared.ts` reads the process table: nothing is held, so no caller
+ *  (and no test, under `--sanitize-resources`) is charged with a library. The
+ *  process handle is closed on every path. */
+function winProcessStartToken(pid: number): string | null {
+  if (Deno.permissions.querySync({ name: "ffi" }).state !== "granted") {
+    return null;
+  }
+  const lib = Deno.dlopen("kernel32.dll", {
+    OpenProcess: { parameters: ["u32", "i32", "u32"], result: "pointer" },
+    GetProcessTimes: {
+      parameters: ["pointer", "buffer", "buffer", "buffer", "buffer"],
+      result: "i32",
+    },
+    CloseHandle: { parameters: ["pointer"], result: "i32" },
+  });
+  try {
+    const k = lib.symbols;
+    const h = k.OpenProcess(
+      0x1000,
+      /* PROCESS_QUERY_LIMITED_INFORMATION */ 0,
+      pid,
+    );
+    if (h === null) return null;
+    try {
+      const t = new BigUint64Array(4); // creation, exit, kernel, user
+      const at = (i: number) => new Uint8Array(t.buffer, i * 8, 8);
+      if (!k.GetProcessTimes(h, at(0), at(1), at(2), at(3))) return null;
+      return t[0]! > 0n ? String(t[0]) : null;
+    } finally {
+      k.CloseHandle(h);
+    }
+  } finally {
+    lib.close();
+  }
 }
 
 const _MONTHS = [
@@ -1582,7 +1783,8 @@ export function processStartEpoch(
 }
 
 /** The identity fields a lock records for its owner `pid`: Linux's kernel
- *  start ticks (`startToken`), macOS's UTC start second (`startEpoch`),
+ *  start ticks or Windows' creation time (`startToken`), macOS's UTC start
+ *  second (`startEpoch`),
  *  nothing where neither is available. */
 export function ownerIdentity(
   pid: number,
@@ -1604,7 +1806,7 @@ export function ownerIdentity(
  *  else, and SIGTERM does not ask who it is talking to.
  *
  *  Fails SAFE in the only direction that is safe: when either token is
- *  unavailable (an old lock, Windows, a pid we cannot read) this falls back to
+ *  unavailable (an old lock, no FFI on Windows, a pid we cannot read) this falls back to
  *  liveness — which is exactly the old behaviour, never worse. When both are
  *  known and they DIFFER, the pid was recycled and the answer is no.
  *  @decider */
@@ -1815,8 +2017,11 @@ export async function probeEndpoint(
     } catch (e) {
       const why = e instanceof Error ? e.message : String(e);
       if (noRoute(e)) return { state: "busy", why, noRoute: true };
+      // ENOTSOCK: macOS's answer for a plain file at a socket path (Linux
+      // says ECONNREFUSED) — not a socket, so nothing listens there.
       const nothingThere = e instanceof Deno.errors.NotFound ||
-        e instanceof Deno.errors.ConnectionRefused;
+        e instanceof Deno.errors.ConnectionRefused ||
+        (e as { code?: unknown }).code === "ENOTSOCK";
       return { state: nothingThere ? "gone" : "busy", why };
     }
   };
@@ -2150,7 +2355,27 @@ export const _lockDeps = {
   open: (path: string): Deno.FsFile =>
     Deno.openSync(path, { read: true, write: true }),
   windows: (): boolean => Deno.build.os === "windows",
+  /** Create a file in the lock dir (0600) — the mutex, a record's temp. */
+  create: (path: string, how: Deno.OpenOptions): Deno.FsFile =>
+    Deno.openSync(path, { ...how, mode: 0o600 }),
+  darwin: (): boolean => Deno.build.os === "darwin",
+  /** Bind a socket in the lock dir. */
+  listen: listenLocal,
 };
+
+/** Is `e` macOS's OTHER answer to creating a file in a directory that was
+ *  removed under it — a sibling's exit prune of the (momentarily empty)
+ *  scoped lock dir? Every OS answers ENOENT when the directory is gone before
+ *  the lookup; macOS answers EINVAL when it goes between the lookup and the
+ *  create (measured, APFS on macOS 26.5: 6 processes, 5 000 rounds each of
+ *  create + unlink + rmdir — 26 020 EINVAL beside 63 704 ENOENT; none
+ *  without the rmdir, and ENOENT only on Linux). The directory IS gone by
+ *  then, so the next try gets the plain answer. */
+function removedUnderCreate(e: unknown): boolean {
+  return _lockDeps.darwin() && e instanceof Error &&
+    (/\(os error 22\)/.test(e.message) ||
+      (e as { code?: unknown }).code === "EINVAL"); // `node:net`'s spelling
+}
 
 /** Open the lock file at `path` to rewrite it. On Windows a process that has
  *  it open without write sharing refuses this for as long as it looks — the
@@ -2230,16 +2455,21 @@ function publishExclusive(
   const tmp = `${path}.${ownPidTag()}.${_nonce()}.tmp`;
   const bytes = new TextEncoder().encode(text);
   const fill = (at: string): Deno.FsFile => {
-    const f = Deno.openSync(at, {
+    const f = _lockDeps.create(at, {
       read: true,
       write: true,
       createNew: true,
-      mode: 0o600,
     });
     try {
       for (let n = 0; n < bytes.length;) n += f.writeSync(bytes.subarray(n));
     } catch (e) {
+      // Created here and cut short: not left behind — a temp nobody would
+      // remove (and the try after a remade dir found it "already there"),
+      // or half a record at the lock's own name.
       f.close();
+      try {
+        Deno.removeSync(at);
+      } catch { /* aio-ok: gone with its directory */ }
       throw e;
     }
     return f;
@@ -2256,8 +2486,9 @@ function publishExclusive(
   } catch (e) {
     // The directory can vanish between `lockDir()` and this write: a sibling
     // app's shutdown pruned its (momentarily empty) scoped dir. Re-create and
-    // try once more — an ENOENT here is never "someone holds the lock".
-    if (!(e instanceof Deno.errors.NotFound)) throw e;
+    // try once more — an ENOENT here is never "someone holds the lock"
+    // (nor is macOS's EINVAL for the same thing: `removedUnderCreate`).
+    if (!(e instanceof Deno.errors.NotFound) && !removedUnderCreate(e)) throw e;
     remakeLockDir(dirname(path));
     f = fill(tmp);
   }
@@ -2334,18 +2565,37 @@ export function withLockMutexAt<T>(
   // MONOTONIC: a wall-clock jump must neither stretch nor skip this wait.
   const deadline = performance.now() + MUTEX_WAIT_MS;
   let f: Deno.FsFile;
+  let deniedUntil = 0; // the end of the current streak of refused opens
   for (;;) {
-    const open = () =>
-      Deno.openSync(mx, { read: true, write: true, create: true, mode: 0o600 });
     try {
-      f = open();
+      f = _lockDeps.create(mx, { read: true, write: true, create: true });
     } catch (e) {
+      // Windows: the name of a file that is being deleted — the last holder's
+      // unlink, while another waiter still has it open — refuses a new open
+      // (ACCESS_DENIED) until that handle closes, milliseconds later. That is
+      // a holder leaving, not a failure (measured: 6 processes taking the
+      // mutex 3 000 times each died on it every run). A refusal that outlasts
+      // the wait is a real one, and is thrown.
+      //
+      // macOS: the lock dir was pruned while this create was inside it
+      // (`removedUnderCreate` — 2 of 30 runs of those 6 processes died on
+      // it). Asked again, the open says so plainly (NotFound, below) or
+      // works; the same bound, so an EINVAL that stays is thrown, path and
+      // all.
+      if (
+        (_lockDeps.windows() ? isHeldOpenError(e) : removedUnderCreate(e)) &&
+        performance.now() < (deniedUntil ||= performance.now() + MUTEX_WAIT_MS)
+      ) {
+        pauseSync(1 + Math.floor(Math.random() * 3));
+        continue;
+      }
       // A sibling's shutdown pruned the (momentarily empty) scoped lock dir.
       if (!(e instanceof Deno.errors.NotFound)) throw e;
       if (!recreate) return undefined;
       remakeLockDir(dirname(mx));
       continue;
     }
+    deniedUntil = 0;
     let locked = false;
     while (!(locked = f.tryLockSync(true)) && performance.now() < deadline) {
       pauseSync(1 + Math.floor(Math.random() * 3));
@@ -2373,6 +2623,15 @@ function sameFile(f: Deno.FsFile, path: string): boolean {
     return false; // aio-ok: unlinked since we opened it — not the mutex
   }
   const mine = f.statSync();
+  // A file with no name left is at no path — asked of the HANDLE, which is
+  // exact. The numbers below are not, on Windows: a file id is 64 bits (16
+  // of sequence over 48 of record) and arrives as a JS number, 53 — two
+  // files in neighbouring records read as one. A waiter that locked the
+  // mutex file its holder had just unlinked then took the NEW file at the
+  // path for its own, and two processes were inside (measured, Windows 11,
+  // 3 × 6 processes × 3 000 rounds: a clash in 8 of 39 runs; every OS says
+  // 0 links for an unlinked file that is still open).
+  if (mine.nlink === 0) return false;
   // No file identity on this filesystem: the mutex file is then never
   // unlinked (`unlinkHeldMutex`), so the path cannot have moved under us.
   if (mine.ino === null || at.ino === null) return true;
@@ -2998,6 +3257,9 @@ export class AppLock {
       ...(meta.settings !== undefined ? { settings: meta.settings } : {}),
       ...(meta.host !== undefined ? { host: meta.host } : {}),
       ...(meta.handoff !== undefined ? { handoff: meta.handoff } : {}),
+      ...(devSupervisorPid() !== undefined
+        ? { supervisor: devSupervisorPid() }
+        : {}),
     });
 
     handoffSecret(); // out of the environment before anything is spawned

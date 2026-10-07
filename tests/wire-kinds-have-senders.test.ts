@@ -12,10 +12,10 @@
 // A declared kind with no sender is dead wiring that reads as a working
 // feature. This makes that class unshippable.
 import { assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { SERVES } from "../src/protocol/envelope.ts";
 
-const SRC = new URL("../src/", import.meta.url).pathname;
+const SRC = fromFileUrl(new URL("../src/", import.meta.url));
 
 /** Kinds sent by a call whose kind is a VARIABLE, not a literal — each with
  *  the site that sends it. A literal scan cannot see these; leaving them out

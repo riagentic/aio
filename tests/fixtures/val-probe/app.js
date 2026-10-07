@@ -78,5 +78,26 @@ while (frames.length < want && Date.now() < until) {
 }
 report();
 // KILL=1: no clean stop — only what the boot itself saved survives.
-Deno.kill(Deno.pid, Deno.env.get("KILL") === "1" ? "SIGKILL" : "SIGTERM");
+if (Deno.env.get("KILL") === "1") Deno.kill(Deno.pid, "SIGKILL");
+else if (Deno.build.os !== "windows") Deno.kill(Deno.pid, "SIGTERM");
+else {
+  // Windows has no SIGTERM — `Deno.kill` is TerminateProcess there, a kill —
+  // so the clean stop is the request `am stop` sends, with this boot's
+  // control credential (a build before 1.0.17 mints none, and asks for none).
+  let key;
+  try {
+    key = Deno.readTextFileSync(DIR + "/data/control.key").trim();
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  }
+  const res = await fetch(
+    "http://127.0.0.1:" + PORT + "/__aio/trojan/shutdown",
+    {
+      method: "POST",
+      headers: { "X-AIO": "1", ...(key ? { "X-Aio-Control": key } : {}) },
+    },
+  );
+  const text = await res.text();
+  if (res.status !== 200) throw new Error(res.status + " " + text);
+}
 await sleep(5000);

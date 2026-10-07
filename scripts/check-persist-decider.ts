@@ -43,6 +43,7 @@
 
 import { justified as okMarker } from "../src/diagnostics/ok-marker.ts";
 import { mask } from "./source-mask.ts";
+import { fromFileUrl } from "@std/path";
 
 export const GATE = "persist-decider";
 
@@ -397,7 +398,7 @@ export function report(findings: readonly Finding[]): string {
 }
 
 if (import.meta.main) {
-  const root = new URL("../", import.meta.url).pathname;
+  const root = fromFileUrl(new URL("../", import.meta.url));
   const findings = check(await readSrc(root));
   if (findings.length) {
     console.error(

@@ -5,11 +5,11 @@
 // therefore reported the default file and ended with a false "GONE" alarm
 // about a file it never used. A child process, because the flag is argv.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const MOD = new URL("../mod.ts", import.meta.url).href;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 async function boot(dir: string, cfgDbPath: string | null, flag: string) {
   const app = join(dir, "app.ts");

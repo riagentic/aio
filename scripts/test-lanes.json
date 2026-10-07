@@ -83,6 +83,7 @@
     "tests/transport-differential-browser.test.ts",
     "tests/transport-differential.test.ts",
     "tests/transport-exactly-once.test.ts",
+    "tests/wire-harness-differential.test.tsx",
     "tests/wire-patch-differential.test.ts",
     "tests/ws-burst-no-lost-writes.test.ts",
     "tests/ws-dropped-frame-settles-call.test.ts",

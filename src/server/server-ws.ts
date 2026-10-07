@@ -177,6 +177,11 @@ const BP_RECOVERY_PINGS = 3; // consecutive low-staleness pings before stepping 
 
 /** Consecutive drop threshold before client is flagged as abusive (H3/H4 fix). */
 const CONSECUTIVE_DROP_THRESHOLD = 50;
+/** A socket being closed for cause is closed once a tick this long passes
+ *  with nothing READ from it — or at the ceiling, for a peer that never stops
+ *  writing. See `_closeAfterRead`. */
+const FLOOD_DRAIN_TICK_MS = 20;
+const FLOOD_DRAIN_MAX_MS = 500;
 
 /** The LONGEST an abusive client key stays denylisted after a forced close.
  *  Plugs F-4: per-socket strike counters get reset on reconnect, so an IP
@@ -412,6 +417,10 @@ export type ClientMeta = {
   bpLastSentAt: number;
   // H3/H4 fix: track consecutive drops for abuse detection (backpressure deadlock prevention)
   consecutiveDrops: number;
+  /** Set when this socket is about to be closed for cause — flooding, a
+   *  protocol mismatch (`_closeAfterRead`): nothing it sends is handled any
+   *  more. `read` is whether a frame arrived since the last tick. */
+  closing?: { read: boolean; timer?: ReturnType<typeof setTimeout> };
   /** Said once: a frame this connection sent was over `maxMessageBytes` in
    *  UTF-8 bytes and under it in code units, so it was accepted (see the
    *  inbound size check — the decision is deliberately unchanged). */
@@ -1671,6 +1680,51 @@ export function createWsManager(deps: WsDeps): WsManager {
       clearTimeout(meta.typeDetectTimer);
       meta.typeDetectTimer = undefined;
     }
+    if (meta.closing?.timer) {
+      clearTimeout(meta.closing.timer);
+      meta.closing.timer = undefined;
+    }
+  }
+
+  /** Close a socket for cause — AFTER the frames it already sent have been
+   *  read. Closing at once, from inside the handler of the frame that decided
+   *  it, leaves whatever the peer sent behind that frame unread, and the
+   *  runtime's close handshake fails on unread data: measured (Deno 2.9), the
+   *  peer then never receives the code or its reason — only an abrupt end.
+   *  A flood closed with 50 frames unread lost its 1008 on Linux and macOS,
+   *  and on macOS the peer was sometimes told nothing at all and went on
+   *  believing it was connected; a mismatched hello with 30 frames behind it
+   *  lost its 4505 on macOS (300 on Linux). So the socket is marked
+   *  (`meta.closing`: every further frame is discarded unparsed, exactly as
+   *  unread as before) and closed on the first quiet tick. A peer that never
+   *  stops writing is closed at the ceiling, as abruptly as it always was.
+   *
+   *  NOT the revocation closes: they also take the socket out of
+   *  `connections` at once, and measured clean as they are — a revocation is
+   *  acted on by a sweep or by the sign-out itself, not inside the handler of
+   *  a frame with more behind it. */
+  function _closeAfterRead(
+    socket: WebSocket,
+    meta: ClientMeta,
+    code: number,
+    reason: string,
+  ): void {
+    if (meta.closing) return;
+    const until = Date.now() + FLOOD_DRAIN_MAX_MS;
+    const f: NonNullable<ClientMeta["closing"]> = { read: false };
+    meta.closing = f;
+    const tick = () => {
+      if (f.read && Date.now() < until) {
+        f.read = false;
+        f.timer = setTimeout(tick, FLOOD_DRAIN_TICK_MS);
+        return;
+      }
+      f.timer = undefined;
+      try {
+        socket.close(code, reason);
+      } catch { /* already closed */ }
+    };
+    f.timer = setTimeout(tick, FLOOD_DRAIN_TICK_MS);
   }
 
   function _cleanupVitals(meta: ClientMeta): void {
@@ -1692,6 +1746,11 @@ export function createWsManager(deps: WsDeps): WsManager {
     meta: ClientMeta,
     e: MessageEvent,
   ): void {
+    // About to be closed for cause: read, never handled (`_closeAfterRead`).
+    if (meta.closing) {
+      meta.closing.read = true;
+      return;
+    }
     // Before ANYTHING else: a socket whose session died acts zero more times.
     if (!_revalidate(socket, meta)) return;
 
@@ -1759,9 +1818,7 @@ export function createWsManager(deps: WsDeps): WsManager {
           ts: Date.now(),
           source: "server-ws",
         });
-        try {
-          socket.close(1008, "Rate limit exceeded");
-        } catch { /* already closed */ }
+        _closeAfterRead(socket, meta, 1008, "Rate limit exceeded");
         return;
       }
       // The drops BEFORE the threshold used to be silent on both ends — the
@@ -2053,8 +2110,13 @@ export function createWsManager(deps: WsDeps): WsManager {
         socket.send(
           "__proto-err:this server speaks wire protocol v2+ — rebuild/update the client",
         );
-        socket.close(PROTOCOL_MISMATCH_CLOSE_CODE, "protocol mismatch");
       } catch { /* already closed */ }
+      _closeAfterRead(
+        socket,
+        meta,
+        PROTOCOL_MISMATCH_CLOSE_CODE,
+        "protocol mismatch",
+      );
       return;
     }
     const frame = dec(e.data);
@@ -2127,8 +2189,13 @@ export function createWsManager(deps: WsDeps): WsManager {
             // for the v1 readers that only know it (`am`'s UDS client).
             socket.send(enc("proto-err", { reason: result.reason }));
             socket.send("__proto-err:" + result.reason);
-            socket.close(PROTOCOL_MISMATCH_CLOSE_CODE, "protocol mismatch");
           } catch { /* already closed */ }
+          _closeAfterRead(
+            socket,
+            meta,
+            PROTOCOL_MISMATCH_CLOSE_CODE,
+            "protocol mismatch",
+          );
           return;
         }
         meta.protocolVersion = result.effective;

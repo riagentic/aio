@@ -28,6 +28,8 @@ import {
   previousReleaseNote,
 } from "../src/build/dist-staging.ts";
 import { tempDir } from "../src/testing/temp-dir.ts";
+import { modeBitsAreMeaningful } from "../src/server/dir-permissions.ts";
+import { linkFile } from "./symlink-helper.ts";
 
 /** The identity of a directory as a bind mount sees it. */
 async function inode(path: string): Promise<number | null> {
@@ -105,7 +107,6 @@ function listing(dir: string, at = ""): Record<string, string> {
 Deno.test({
   name:
     "build out dir: on another filesystem its contents are still set aside, and put back whole",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     // An out dir on its own mount (or a bind-mounted dist/): every rename out
     // of it is refused. The previous release used to stay where it was — said
@@ -118,7 +119,7 @@ Deno.test({
     await Deno.writeTextFile(`${dist}/notes-1.2.3`, "binary");
     await Deno.chmod(`${dist}/notes-1.2.3`, 0o755);
     await Deno.writeTextFile(`${dist}/site-web/assets/app.js`, "js");
-    await Deno.symlink("assets/app.js", `${dist}/site-web/latest.js`);
+    await linkFile("assets/app.js", `${dist}/site-web/latest.js`);
     const release = listing(dist);
     assertEquals(Object.keys(release).length, 4);
 
@@ -127,17 +128,25 @@ Deno.test({
     assertEquals(await inode(dist), before, "the directory stayed put");
     assertEquals(listing(dist), {}, "nothing is left behind");
     assertEquals(listing(aside), release);
-    assertEquals(
-      (await Deno.stat(`${aside}/notes-1.2.3`)).mode! & 0o111,
-      0o111,
-    );
+    // (The execute bit: where the OS keeps one.)
+    if (modeBitsAreMeaningful()) {
+      assertEquals(
+        (await Deno.stat(`${aside}/notes-1.2.3`)).mode! & 0o111,
+        0o111,
+      );
+    }
 
     // …and back, the way a build that produced nothing restores it.
     assert(await moveDirContents(aside, dist, crossDevice));
     assertEquals(await inode(dist), before);
     assertEquals(listing(dist), release);
     assertEquals(listing(aside), {});
-    assertEquals((await Deno.stat(`${dist}/notes-1.2.3`)).mode! & 0o111, 0o111);
+    if (modeBitsAreMeaningful()) {
+      assertEquals(
+        (await Deno.stat(`${dist}/notes-1.2.3`)).mode! & 0o111,
+        0o111,
+      );
+    }
   },
 });
 

@@ -59,7 +59,6 @@ Deno.test("writeScaffold: seeds deno.lock from the framework, never over the app
 Deno.test({
   name:
     "am create → deno task doctor: a fresh scaffold passes its own lock check",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("create-doctor-");
     // A private HOME, but the machine's Deno cache: this must pass offline.

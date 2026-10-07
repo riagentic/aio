@@ -23,7 +23,8 @@ import {
   assertRejects,
   assertStringIncludes,
 } from "@std/assert";
-import { basename, join } from "@std/path";
+import { basename, DELIMITER, fromFileUrl, join } from "@std/path";
+import { EXE, writeProgram } from "./fake-program-helper.ts";
 import {
   buildVersionFor,
   GIT_STDOUT_MAX_BYTES,
@@ -42,6 +43,7 @@ import {
   TreeRefusal,
   unresolvedTreeVersion,
 } from "../src/server/app-version.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const GiB = 1024 * 1024 * 1024;
 
@@ -632,7 +634,7 @@ Deno.test("dirty set: git's listing is bounded — an enormous status is refused
   });
 });
 
-/** Run `fn` with a stand-in `git` (a shell script) first on PATH. */
+/** Run `fn` with a stand-in `git` (a fake program) first on PATH. */
 async function withFakeGit(
   dir: string,
   script: string,
@@ -640,10 +642,9 @@ async function withFakeGit(
 ): Promise<void> {
   const bin = join(dir, "bin");
   await Deno.mkdir(bin);
-  await Deno.writeTextFile(join(bin, "git"), `#!/bin/sh\n${script}\n`);
-  await Deno.chmod(join(bin, "git"), 0o755);
+  await writeProgram(join(bin, `git${EXE}`), `#!/bin/sh\n${script}\n`);
   const path = Deno.env.get("PATH") ?? "";
-  Deno.env.set("PATH", `${bin}:${path}`);
+  Deno.env.set("PATH", `${bin}${DELIMITER}${path}`);
   try {
     await fn();
   } finally {
@@ -657,14 +658,18 @@ for (
     ["the process", "exec sleep 30"],
     // The shell is killed and its CHILD lives on, holding the pipe: the read
     // has to be cancelled too, or it waits for as long as the child does.
-    ["a child it started", "sleep 30"],
+    // (Windows' stand-in sleeps in-process, so there the child is a deno.)
+    [
+      "a child it started",
+      Deno.build.os === "windows"
+        ? `exec "${Deno.execPath()}" eval 'setTimeout(() => {}, 30000)'`
+        : "sleep 30",
+    ],
   ] as const
 ) {
   Deno.test({
     name:
       `dirty set: a git that does not answer (${what}) is stopped AT the timeout and refused by name`,
-    // The stand-in git is a shell script.
-    ignore: Deno.build.os === "windows",
     async fn() {
       await withDir("aio-tree-gitslow-", async (dir) => {
         await withFakeGit(dir, script, async () => {
@@ -677,9 +682,12 @@ for (
             e.reason,
             "`git rev-parse` did not answer within 50 ms",
           );
-          // Far under the 30 s the stand-in sleeps: it was stopped, not
-          // waited for.
-          assert(took < 5000, `refused after ${Math.round(took)} ms`);
+          // Under the 30 s the stand-in sleeps: it was stopped, not waited
+          // for. (Windows: starting — and ending — a program that was
+          // written a moment ago takes seconds on a busy machine; measured
+          // 10.7 s there, so the bound is 20 s rather than 5.)
+          const bound = Deno.build.os === "windows" ? 20_000 : 5000;
+          assert(took < bound, `refused after ${Math.round(took)} ms`);
         });
       });
     },
@@ -859,7 +867,7 @@ Deno.test("unknown version: a refused tree is ONE line with no path — the root
 
 // ── the real boot path ───────────────────────────────────────────────────────
 
-const ROOT = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
+const ROOT = fromFileUrl(new URL("../", import.meta.url)).replace(/[\\/]$/, "");
 
 /** An app whose project tree nests past the depth cap — the cheapest tree the
  *  reader refuses with its PRODUCTION limits. */
@@ -870,8 +878,8 @@ async function deepApp(dir: string, version: string): Promise<void> {
       title: "treeprobe",
       version,
       imports: {
-        "aio": `${ROOT}/mod.ts`,
-        "aio/": `${ROOT}/src/`,
+        "aio": `${spec(ROOT)}/mod.ts`,
+        "aio/": `${spec(ROOT)}/src/`,
         "immer": "npm:immer@10.2.0",
         "@std/path": "jsr:@std/path@1.1.2",
       },
@@ -902,7 +910,6 @@ async function versionOf(dir: string): Promise<string> {
 Deno.test({
   name:
     "--version: a refused tree prints one short `unknown (…)` line, and the full reason once",
-  ignore: Deno.build.os === "windows",
   async fn() {
     await withDir("aio-tree-e2e-", async (dir) => {
       await deepApp(dir, "3.7");
@@ -926,7 +933,6 @@ Deno.test({
 
 Deno.test({
   name: "--version: the same tree with a PINNED version just prints it",
-  ignore: Deno.build.os === "windows",
   async fn() {
     await withDir("aio-tree-e2e-pinned-", async (dir) => {
       await deepApp(dir, "3.7.1");

@@ -13,21 +13,25 @@ import { connectCliUDS } from "../src/server/cli-client.ts";
 import { enc } from "../src/protocol/envelope.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { waitFor } from "./fake-ws.ts";
+import { listenLocal, type LocalConn } from "../src/server/local-listen.ts";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
 
 Deno.test("uds: a connection cut mid-character does not corrupt the next connection's first frame", async () => {
   const dir = await tempDir("aio-uds-dec-");
-  const path = join(dir, "a.sock");
-  const listener = Deno.listen({ transport: "unix", path });
+  const path = localEndpoint(join(dir, "a.sock"));
+  const listener = listenLocal(path);
+  const accepts = listener[Symbol.asyncIterator]();
+  const accept = async () => (await accepts.next()).value as LocalConn;
   const served = (async () => {
     // Connection 1: the first byte of "é" (0xC3 0xA9), then hang up.
-    const c1 = await listener.accept();
+    const c1 = await accept();
     const w1 = c1.writable.getWriter();
     await w1.write(new Uint8Array([0xc3]));
     try {
       c1.close();
     } catch { /* client gone */ }
     // Connection 2: a clean snapshot as its first frame.
-    const c2 = await listener.accept();
+    const c2 = await accept();
     const w2 = c2.writable.getWriter();
     await w2.write(new TextEncoder().encode(enc("state", { n: 2 }) + "\n"));
     return c2;
@@ -47,6 +51,7 @@ Deno.test("uds: a connection cut mid-character does not corrupt the next connect
     try {
       c2?.close();
     } catch { /* already closed */ }
+    await localIdle();
     await dropTempDir(dir);
   }
 });

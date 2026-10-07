@@ -17,19 +17,20 @@
 // cannot reproduce the defect. The app below reports what happened INSIDE the
 // worker over HTTP.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
 import { childEnv } from "./e2e-app-harness.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const REPO = new URL("../", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("../", import.meta.url));
 
 async function writeApp(dir: string, port: number): Promise<void> {
   await Deno.writeTextFile(
     join(dir, "deno.json"),
     JSON.stringify({
       imports: {
-        "aio": `${REPO}mod.ts`,
-        "aio/": `${REPO}src/`,
+        "aio": `${spec(REPO)}mod.ts`,
+        "aio/": `${spec(REPO)}src/`,
         "immer": "npm:immer@10.2.0",
         "@std/path": "jsr:@std/path@1.1.2",
       },
@@ -141,7 +142,6 @@ const text = async (url: string) => (await fetch(url)).text();
 
 Deno.test({
   name: "cell worker: own.set really acquires — in the worker's own isolate",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await Deno.makeTempDir({ prefix: "aio-worker-own-" });
     const port = freePort();
@@ -191,7 +191,6 @@ Deno.test({
 
 Deno.test({
   name: "cell worker: a worker's owned resources are disposed on shutdown",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await Deno.makeTempDir({ prefix: "aio-worker-own-close-" });
     const port = freePort();

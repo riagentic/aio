@@ -12,6 +12,8 @@
 // saw it: diverged with health green, until the next unrelated force round.
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
+import { connectLocal } from "../src/server/local-listen.ts";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
 import { createBroadcaster } from "../src/server/server-broadcast.ts";
 import { createUDSListener } from "../src/server/uds.ts";
 import type { ClientMeta } from "../src/server/server-ws.ts";
@@ -98,10 +100,10 @@ Deno.test("ws: a force round whose snapshot fails owes the client whole state", 
 });
 
 Deno.test("uds: a force round whose snapshot fails owes the peer whole state", async () => {
-  const socketPath = join(
+  const socketPath = localEndpoint(join(
     await tempDir("aio-broadcast-failed-snapshot-owes-full-"),
     "owes-full.sock",
-  );
+  ));
   const state = { c: { v: 1, pad: PAD }, f: { x: 1 } };
   let broken = false;
   const uds = createUDSListener(
@@ -114,7 +116,7 @@ Deno.test("uds: a force round whose snapshot fails owes the peer whole state", a
     () => {},
   );
   await wait(30);
-  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  const conn = await connectLocal(socketPath);
   const lines: string[] = [];
   const reader = conn.readable.getReader();
   const decoder = new TextDecoder();
@@ -155,5 +157,6 @@ Deno.test("uds: a force round whose snapshot fails owes the peer whole state", a
     conn.close();
     await wait(30);
     uds.shutdown();
+    await localIdle();
   }
 });

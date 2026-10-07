@@ -13,7 +13,8 @@
 // Resolution is now relative to the entry module, and `deno compile` embeds
 // deno.json, so the same lookup answers in both worlds.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { aioTestDir } from "../src/testing/test-strict.ts";
 
@@ -89,7 +90,7 @@ Deno.test("app identity: title AND client come from the app's own deno.json, not
   const other = await Deno.makeTempDir({ prefix: "aio-ident-other-" });
   const empty = await Deno.makeTempDir({ prefix: "aio-ident-empty-" });
   try {
-    const aioRoot = new URL("..", import.meta.url).pathname;
+    const aioRoot = fromFileUrl(new URL("..", import.meta.url));
     await Deno.mkdir(join(proj, "src"), { recursive: true });
     await Deno.writeTextFile(
       join(proj, "deno.json"),
@@ -97,7 +98,7 @@ Deno.test("app identity: title AND client come from the app's own deno.json, not
         title: "PROBE OWN TITLE",
         version: "4.5.6",
         client: "browser",
-        imports: { aio: join(aioRoot, "mod.ts") },
+        imports: { aio: spec(join(aioRoot, "mod.ts")) },
       }),
     );
     // The probe imports the two deciders directly: a compiled binary cannot be
@@ -105,9 +106,11 @@ Deno.test("app identity: title AND client come from the app's own deno.json, not
     await Deno.writeTextFile(
       join(proj, "src", "app.ts"),
       `import { resolveTitle } from "${
-        join(aioRoot, "src/server/aio-run-helpers.ts")
+        spec(join(aioRoot, "src/server/aio-run-helpers.ts"))
       }";
-import { _denoJsonTargetClient } from "${join(aioRoot, "src/server/aio.ts")}";
+import { _denoJsonTargetClient } from "${
+        spec(join(aioRoot, "src/server/aio.ts"))
+      }";
 console.log(JSON.stringify({
   title: await resolveTitle(undefined, undefined),
   client: _denoJsonTargetClient() ?? null,
@@ -143,7 +146,7 @@ Deno.test("appVersion: resolved from the app's own deno.json, not the cwd's", as
   const proj = await Deno.makeTempDir({ prefix: "aio-ver-app-" });
   const other = await Deno.makeTempDir({ prefix: "aio-ver-other-" });
   try {
-    const aioRoot = new URL("..", import.meta.url).pathname;
+    const aioRoot = fromFileUrl(new URL("..", import.meta.url));
     // A fresh identity per run — two apps sharing an appId contend for the
     // single-instance lock, which has nothing to do with what is under test.
     const appId = `ver-probe-${crypto.randomUUID().slice(0, 8)}`;
@@ -153,7 +156,7 @@ Deno.test("appVersion: resolved from the app's own deno.json, not the cwd's", as
       JSON.stringify({
         title: appId,
         version: "4.5.6",
-        imports: { aio: join(aioRoot, "mod.ts") },
+        imports: { aio: spec(join(aioRoot, "mod.ts")) },
       }),
     );
     await Deno.writeTextFile(

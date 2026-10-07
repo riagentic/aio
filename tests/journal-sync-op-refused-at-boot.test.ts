@@ -9,14 +9,16 @@
 // marked, and its resend was acked as a known op — while the state never
 // held it (reviewer repros v1–v3).
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 // @ts-ignore node:sqlite types unavailable when an old @types/node shadows them
 import { DatabaseSync } from "node:sqlite";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const APP = new URL("./fixtures/val-probe/app.js", import.meta.url).pathname;
-const TREE = new URL("..", import.meta.url).pathname;
+const APP = fromFileUrl(
+  new URL("./fixtures/val-probe/app.js", import.meta.url),
+);
+const TREE = fromFileUrl(new URL("..", import.meta.url));
 
 type Report = { frames: string[]; notes: string[]; tally: number };
 

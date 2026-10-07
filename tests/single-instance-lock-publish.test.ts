@@ -12,16 +12,20 @@
 //     without hard links publication IS create-then-write, so an empty lock
 //     can be a live racer's, mid-write. Planted empty and filled 300 ms later
 //     by a "racer": acquire must still find the racer's lock, not its own.
+import { sleeper } from "./proc-helper.ts";
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { tempDir } from "../src/testing/temp-dir.ts";
 import {
+  _lockDeps,
   AppLock,
   type LockData,
   lockDir,
   lockKey,
   lockPath,
   readLock,
+  removeLock,
+  writeLock,
 } from "../src/server/single-instance-lock.ts";
 
 async function withAppsDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
@@ -88,7 +92,7 @@ Deno.test("lock publish: an EMPTY lock younger than 1 s is a racer mid-write, ne
     const home = join(dir, "home");
     const key = lockKey("floor", home);
     Deno.mkdirSync(lockDir(), { recursive: true });
-    const racer = new Deno.Command("sleep", { args: ["30"] }).spawn();
+    const racer = sleeper();
     try {
       // The racer's create-then-write: the file first, its record 300 ms on.
       Deno.writeTextFileSync(lockPath(key), "");
@@ -121,4 +125,68 @@ Deno.test("lock publish: an EMPTY lock younger than 1 s is a racer mid-write, ne
       await racer.status;
     }
   });
+});
+
+// The record's temp is created, then filled. A fill that fails AFTER the
+// create left the temp behind — and when the failure read as "the dir was
+// pruned" (macOS's EINVAL), the second try's create-new found its own temp
+// and died `AlreadyExists`, the temp still there.
+Deno.test("lock publish: a temp whose fill fails is not left behind, and the second try gets a new one", () => {
+  const appId = `pub-fill-${crypto.randomUUID().slice(0, 8)}`;
+  const data: LockData = {
+    appId,
+    pid: Deno.pid,
+    port: 0,
+    startedAt: Date.now(),
+    status: "started",
+    cwd: Deno.cwd(),
+  };
+  const temps = () =>
+    [...Deno.readDirSync(lockDir())].map((e) => e.name)
+      .filter((n) => n.startsWith(`${appId}.lock.`) && n.endsWith(".tmp"));
+  const real = { ..._lockDeps };
+  let fills = 0;
+  const failing = (times: number) => {
+    fills = 0;
+    _lockDeps.darwin = () => true;
+    _lockDeps.create = (path, how) => {
+      const f = real.create(path, how);
+      if (!path.endsWith(".tmp") || ++fills > times) return f;
+      return new Proxy(f, {
+        get(t, k) {
+          if (k === "writeSync") {
+            return () => {
+              throw new TypeError(`Invalid argument (os error 22)`);
+            };
+          }
+          const v = Reflect.get(t, k, t);
+          return typeof v === "function" ? v.bind(t) : v;
+        },
+      });
+    };
+  };
+  try {
+    failing(1);
+    writeLock(data);
+    assertEquals(fills, 2, "the fill failed once, then the record was written");
+    assertEquals(readLock(appId)?.pid, Deno.pid);
+    assertEquals(temps(), []);
+    removeLock(appId);
+    failing(Infinity);
+    let threw: unknown;
+    try {
+      writeLock(data);
+    } catch (e) {
+      threw = e;
+    }
+    assert(
+      threw instanceof TypeError && /os error 22/.test(threw.message),
+      `the write's own error, not a leftover's: ${threw}`,
+    );
+    assertEquals(temps(), [], "no temp outlives a publish that failed");
+    assertEquals(readLock(appId), null);
+  } finally {
+    Object.assign(_lockDeps, real);
+    removeLock(appId);
+  }
 });

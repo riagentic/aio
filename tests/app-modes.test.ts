@@ -7,6 +7,7 @@ import { createServer } from "../src/server/server.ts";
 import { createUDSListener } from "../src/server/aio.ts";
 import { connectCli, connectCliUDS } from "../src/server/cli-client.ts";
 import { join } from "@std/path";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -119,7 +120,7 @@ Deno.test({
   // sanitizers disabled: UDS listener has async accept loop that outlives test
   fn: async () => {
     const dir = await makeTempBase();
-    const socketPath = join(dir, "electron.sock");
+    const socketPath = localEndpoint(join(dir, "electron.sock"));
     const app = createApp({ count: 0, label: "electron-local" });
 
     const uds = createUDSListener(
@@ -149,6 +150,7 @@ Deno.test({
       cli.close();
     } finally {
       uds.shutdown();
+      await localIdle();
       await Deno.remove(dir, { recursive: true });
     }
   },

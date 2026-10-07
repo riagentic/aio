@@ -14,8 +14,10 @@
 import { assert, assertEquals } from "@std/assert";
 import { tempDir } from "../src/testing/temp-dir.ts";
 import { VERSION } from "../src/server/aio-cli.ts";
+import { fromFileUrl } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 
-const AIO = new URL("..", import.meta.url).pathname;
+const AIO = fromFileUrl(new URL("..", import.meta.url));
 
 async function boot(aioVersion: string | null): Promise<string> {
   const dir = await tempDir("aio-pin-");
@@ -30,7 +32,7 @@ async function boot(aioVersion: string | null): Promise<string> {
     );
     await Deno.writeTextFile(
       `${dir}/src/app.ts`,
-      `import { aio, cell } from "${AIO}mod.ts";\n` +
+      `import { aio, cell } from "${spec(AIO)}mod.ts";\n` +
         `cell("pinprobe", { state: { n: 0 }, methods: {} });\n` +
         `const app = await aio.run({ cells: [], port: 0, client: "server-only", singleton: false });\n` +
         `await app.stop?.();\nDeno.exit(0);\n`,

@@ -13,8 +13,10 @@ import { tempDir } from "../src/testing/temp-dir.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { cdpConnect } from "../src/media/cdp.ts";
 import { stopChild } from "./stop-child.ts";
+import { fromFileUrl } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 function findBrowser(): string | null {
   if (Deno.env.get("AIO_E2E") === "0") return null;
@@ -142,7 +144,7 @@ Deno.test({
           lib: ["deno.ns", "deno.unstable", "dom", "dom.iterable"],
         },
         imports: {
-          "aio": `${ROOT}mod.ts`,
+          "aio": `${spec(ROOT)}mod.ts`,
           "aio/air": `${ROOT}src/air.ts`,
           "aio/jsx-runtime": `${ROOT}src/jsx-runtime.ts`,
           "immer": "npm:immer@10.2.0",

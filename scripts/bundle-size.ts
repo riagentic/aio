@@ -18,8 +18,9 @@ import { resolveAppDir } from "../src/build/build-config.ts";
 import { ESBUILD_JSX, ESBUILD_SPEC } from "../src/build/esbuild-shared.ts";
 import { aioBrowserPlugin } from "../src/build/esbuild-plugin.ts";
 import { BROTLI_QUALITY } from "../src/server/http-encoding.ts";
+import { fromFileUrl } from "@std/path";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 /** What a size report contains. Bytes, always — KB is a presentation choice. */
 export interface BundleSizes {

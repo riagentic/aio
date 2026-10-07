@@ -138,6 +138,11 @@ function sandboxEnv(h: string): Record<string, string> {
     AIO_FEEDBACK_DIR: join(h, "feedback"),
     AIO_INSTALL_ROOT: join(h, "install"),
     AIO_APPS_DIR: join(h, "apps"),
+    // Windows: the home is USERPROFILE, and sockets do not load without
+    // SystemRoot (`Deno.serve` → "os error 10106") — the server never came up.
+    ...(Deno.build.os === "windows"
+      ? { USERPROFILE: h, SystemRoot: Deno.env.get("SystemRoot")! }
+      : {}),
   };
 }
 

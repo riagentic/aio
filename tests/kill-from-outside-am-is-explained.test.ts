@@ -20,10 +20,11 @@
 // Observe-only in dev and prod alike: the shutdown that follows is byte-for-
 // byte the one that happened before this line existed.
 import { assert } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { readLock } from "../src/server/single-instance-lock.ts";
 import { childEnv, freePort } from "./e2e-app-harness.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
 // One identity per test. The singleton lock is on the appId, so two tests
 // sharing one could never both boot — and the second would fail for a reason
@@ -46,13 +47,13 @@ async function bootApp(APP_ID: string): Promise<
   { proc: Deno.ChildProcess; err: () => string; dir: string; port: number }
 > {
   const dir = await tempDir("aio-killexplain-");
-  const repo = new URL("../", import.meta.url).pathname;
+  const repo = fromFileUrl(new URL("../", import.meta.url));
   await Deno.writeTextFile(
     join(dir, "deno.json"),
     JSON.stringify({
       imports: {
-        "aio": `${repo}mod.ts`,
-        "aio/": `${repo}src/`,
+        "aio": `${spec(repo)}mod.ts`,
+        "aio/": `${spec(repo)}src/`,
         "immer": "npm:immer@10.2.0",
         "@std/path": "jsr:@std/path@1.1.2",
       },
@@ -89,7 +90,7 @@ async function bootApp(APP_ID: string): Promise<
 
 Deno.test({
   name: "a SIGTERM nobody asked for names the command that stops one app",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // Windows has no SIGTERM to catch: Deno.kill is TerminateProcess
   async fn() {
     const APP_ID = appId("sig");
     const { proc, err, dir } = await bootApp(APP_ID);
@@ -121,7 +122,7 @@ Deno.test({
 
 Deno.test({
   name: "Ctrl-C says nothing — the person already knows what they pressed",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // no SIGINT can be sent to another process on Windows: Deno.kill is TerminateProcess
   async fn() {
     const { proc, err, dir } = await bootApp(appId("sigint"));
     try {

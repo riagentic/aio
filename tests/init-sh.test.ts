@@ -14,9 +14,16 @@
 // No network here: `AIO_RAW` accepts a `file://` URL, which is also why it is
 // read at all rather than hardcoded.
 import { assert, assertEquals } from "@std/assert";
-import { dirname, fromFileUrl, join } from "@std/path";
+import { join } from "@std/path";
 
-const REPO_ROOT = dirname(fromFileUrl(import.meta.url)).replace(/\/tests$/, "");
+const REPO_ROOT = join(import.meta.dirname!, "..");
+
+// These tests RUN a POSIX shell script with `sh`. Windows has neither: its
+// installer and runner are install.ps1 / run.ps1 (see the note in
+// tests/run-sh.test.ts).
+const NEEDS_SH = {
+  ignore: Deno.build.os === "windows", // init.sh is a POSIX sh script; Windows has install.ps1
+};
 const INIT = join(REPO_ROOT, "init.sh");
 const dec = new TextDecoder();
 
@@ -42,7 +49,7 @@ async function runInit(
   };
 }
 
-Deno.test("init.sh: valid POSIX syntax (sh -n)", async () => {
+Deno.test("init.sh: valid POSIX syntax (sh -n)", NEEDS_SH, async () => {
   const p = await new Deno.Command("sh", {
     args: ["-n", INIT],
     stderr: "piped",
@@ -50,37 +57,53 @@ Deno.test("init.sh: valid POSIX syntax (sh -n)", async () => {
   assertEquals(p.code, 0, dec.decode(p.stderr));
 });
 
-Deno.test("init.sh: a download that fails is a failure, not a silent success", async () => {
-  const r = await runInit(null); // nothing at that URL → curl 404/37
-  assertEquals(r.code, 1, `expected a refusal, got:\n${r.out}${r.err}`);
-  assert(r.err.includes("could not download the installer"), r.err);
-});
+Deno.test(
+  "init.sh: a download that fails is a failure, not a silent success",
+  NEEDS_SH,
+  async () => {
+    const r = await runInit(null); // nothing at that URL → curl 404/37
+    assertEquals(r.code, 1, `expected a refusal, got:\n${r.out}${r.err}`);
+    assert(r.err.includes("could not download the installer"), r.err);
+  },
+);
 
-Deno.test("init.sh: an EMPTY installer is refused rather than run", async () => {
-  // The shape that made `sh -c "$(curl …)"` report success: nothing to run.
-  const r = await runInit("");
-  assertEquals(r.code, 1, `expected a refusal, got:\n${r.out}${r.err}`);
-  assert(r.err.includes("EMPTY"), r.err);
-});
+Deno.test(
+  "init.sh: an EMPTY installer is refused rather than run",
+  NEEDS_SH,
+  async () => {
+    // The shape that made `sh -c "$(curl …)"` report success: nothing to run.
+    const r = await runInit("");
+    assertEquals(r.code, 1, `expected a refusal, got:\n${r.out}${r.err}`);
+    assert(r.err.includes("EMPTY"), r.err);
+  },
+);
 
-Deno.test("init.sh: the installer's own exit code is propagated", async () => {
-  const r = await runInit("#!/bin/sh\necho doing work\nexit 7\n");
-  assertEquals(r.code, 1);
-  assert(r.out.includes("doing work"), r.out);
-  assert(r.err.includes("exit 7"), "the real status is named: " + r.err);
-});
+Deno.test(
+  "init.sh: the installer's own exit code is propagated",
+  NEEDS_SH,
+  async () => {
+    const r = await runInit("#!/bin/sh\necho doing work\nexit 7\n");
+    assertEquals(r.code, 1);
+    assert(r.out.includes("doing work"), r.out);
+    assert(r.err.includes("exit 7"), "the real status is named: " + r.err);
+  },
+);
 
-Deno.test("init.sh: a successful install forwards cleanly and leaves nothing", async () => {
-  const before = await tmpLeftovers();
-  const r = await runInit("#!/bin/sh\necho installed am\n");
-  assertEquals(r.code, 0, r.err);
-  assert(r.out.includes("installed am"), r.out);
-  assertEquals(
-    await tmpLeftovers(),
-    before,
-    "a downloaded installer was left behind",
-  );
-});
+Deno.test(
+  "init.sh: a successful install forwards cleanly and leaves nothing",
+  NEEDS_SH,
+  async () => {
+    const before = await tmpLeftovers();
+    const r = await runInit("#!/bin/sh\necho installed am\n");
+    assertEquals(r.code, 0, r.err);
+    assert(r.out.includes("installed am"), r.out);
+    assertEquals(
+      await tmpLeftovers(),
+      before,
+      "a downloaded installer was left behind",
+    );
+  },
+);
 
 /** Count `aio-init.*.sh` files in the temp dir — the script must clean up on
  *  every path, including the one where it succeeds. */

@@ -23,6 +23,7 @@
 //   No tracked source file contains a raw C0 control byte other than tab,
 //   LF and CR. Spell it `\x00` / `\u0000` and the file stays text.
 import { assertEquals } from "@std/assert";
+import { fromFileUrl } from "@std/path";
 
 const ROOTS = [
   "src",
@@ -51,7 +52,10 @@ async function* files(dir: string): AsyncGenerator<string> {
 }
 
 async function scan(): Promise<string[]> {
-  const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+  const root = fromFileUrl(new URL("..", import.meta.url)).replace(
+    /[\\/]$/,
+    "",
+  );
   const bad: string[] = [];
   for (const r of ROOTS) {
     let dir: string;

@@ -15,25 +15,21 @@
 // Deterministic: the relaunched child sleeps before it boots (a slow module
 // graph, stretched), so the window is seconds wide instead of milliseconds.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
+import { processList } from "./proc-helper.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { lockPath } from "../src/server/single-instance-lock.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const REPO = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 const SLOW_CHILD_MS = 5_000;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Pids of every process running `file`. */
 async function procs(file: string): Promise<number[]> {
-  const o = await new Deno.Command("ps", {
-    args: ["-axo", "pid=,args="],
-    stdout: "piped",
-    stderr: "null",
-  }).output();
-  return new TextDecoder().decode(o.stdout).split("\n")
-    .map((l) => l.trim().match(/^(\d+)\s+(.*)$/))
-    .filter((m) => m && m[2]!.includes(file) && !m[2]!.startsWith("ps "))
-    .map((m) => Number(m![1]))
+  return (await processList())
+    .filter((p) => p.cmd.includes(file) && !p.cmd.startsWith("ps "))
+    .map((p) => p.pid)
     .filter((p) => p !== Deno.pid);
 }
 
@@ -59,7 +55,7 @@ async function world() {
   );
   await Deno.writeTextFile(
     join(proj, "src", "cell.ts"),
-    `import { cell } from "${REPO}/mod.ts";
+    `import { cell } from "${spec(REPO)}/mod.ts";
 export const c = cell("c", { state: { n: 1 }, methods: {} });
 `,
   );
@@ -70,7 +66,7 @@ export const c = cell("c", { state: { n: 1 }, methods: {} });
 if (Deno.env.get("AIO_DEV_SUPERVISED") === "1") {
   await new Promise((r) => setTimeout(r, ${SLOW_CHILD_MS}));
 }
-const { aio } = await import("${REPO}/mod.ts");
+const { aio } = await import("${spec(REPO)}/mod.ts");
 const { c } = await import("./cell.ts");
 await aio.run({ cells: [c], appId: "dr", persist: false, client: "server-only" });
 `,
@@ -199,7 +195,6 @@ await aio.run({ cells: [c], appId: "dr", persist: false, client: "server-only" }
 Deno.test({
   name:
     "dev restart race: am restart during the watcher's relaunch leaves ONE process, on the same port",
-  ignore: Deno.build.os === "windows",
   sanitizeOps: false, // aio-ok: every process is stopped, then reaped, below
   sanitizeResources: false, // aio-ok: same
   async fn() {
@@ -233,7 +228,6 @@ Deno.test({
 Deno.test({
   name:
     "dev restart race: when another start wins the lock, the watcher's supervisor steps aside",
-  ignore: Deno.build.os === "windows",
   sanitizeOps: false, // aio-ok: every process is stopped, then reaped, below
   sanitizeResources: false, // aio-ok: same
   async fn() {
@@ -279,7 +273,7 @@ Deno.test({
 Deno.test({
   name:
     "dev restart: a relaunched child killed by SIGKILL leaves its lock, so the next run says it did not shut down cleanly",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // a killed child is exit code 1 there, no signal: the crash the supervisor waits on
   sanitizeOps: false, // aio-ok: every process is stopped, then reaped, below
   sanitizeResources: false, // aio-ok: same
   async fn() {
@@ -297,6 +291,9 @@ Deno.test({
         else await sleep(100);
       }
       assert(child, `the child never took its lock: ${w.lockRaw()}`);
+      // …which names the process am launched — the supervisor now — so am
+      // can tell its own launch, relaunched, from another launch.
+      assertEquals(JSON.parse(w.lockRaw()).supervisor, first, w.lockRaw());
       Deno.kill(child, "SIGKILL"); // an OOM kill, a kill -9
       await sleep(1_500);
       assertEquals(await procs(w.entry), [], "the supervisor outlived it");

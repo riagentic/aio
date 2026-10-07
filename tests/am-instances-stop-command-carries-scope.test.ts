@@ -6,8 +6,9 @@
 // `am` as a user.
 //
 // And `--instance` itself did nothing, silently, when AIO_APPS_DIR was set.
+import { SLEEP_ARGS } from "./proc-helper.ts";
 import { assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { stopCommandFor } from "../src/am/am-cmd-process.ts";
 import { homedir } from "../src/server/paths.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
@@ -39,7 +40,7 @@ Deno.test("stopWith: an AIO_APPS_DIR scope carries the variable", () => {
     stopCommandFor({ appId: "notes", home: "/srv/apps/notes" }, {
       appsDir: "/srv/apps",
       defaultHome: "/srv/apps/notes",
-    }),
+    }, "linux"),
     "AIO_APPS_DIR=/srv/apps am stop --app=notes",
   );
   // A path that needs quoting is quoted, so the line runs as printed.
@@ -47,7 +48,7 @@ Deno.test("stopWith: an AIO_APPS_DIR scope carries the variable", () => {
     stopCommandFor({ appId: "notes" }, {
       appsDir: "/tmp/my apps",
       defaultHome: "",
-    }),
+    }, "linux"),
     "AIO_APPS_DIR='/tmp/my apps' am stop --app=notes",
   );
   // --instance given but AIO_APPS_DIR won (see below): the variable is the
@@ -57,8 +58,43 @@ Deno.test("stopWith: an AIO_APPS_DIR scope carries the variable", () => {
       instance: "agent1",
       appsDir: "/srv/apps",
       defaultHome: "",
-    }),
+    }, "linux"),
     "AIO_APPS_DIR=/srv/apps am stop --app=notes",
+  );
+});
+
+// `VAR=x cmd` is POSIX shell syntax: on Windows the printed line ran in
+// neither PowerShell nor cmd (measured on a real Windows 11). There it is a
+// line PowerShell runs as pasted.
+Deno.test("stopWith on Windows: the scope is a PowerShell assignment, and every value is quoted for PowerShell", () => {
+  assertEquals(
+    stopCommandFor({ appId: "notes" }, {
+      appsDir: "C:\\Users\\dev\\my apps",
+      defaultHome: "",
+    }, "windows"),
+    "$env:AIO_APPS_DIR='C:\\Users\\dev\\my apps'; am stop --app=notes",
+  );
+  // PowerShell closes a single-quoted string at ’ as well as at '.
+  assertEquals(
+    stopCommandFor({ appId: "notes" }, {
+      appsDir: "C:\\it's Don\u2019t",
+      defaultHome: "",
+    }, "windows"),
+    "$env:AIO_APPS_DIR='C:\\it''s Don\u2019\u2019t'; am stop --app=notes",
+  );
+  // A second home: a plain path is bare (`\\` is no escape there), one with a
+  // space is quoted the PowerShell way.
+  assertEquals(
+    stopCommandFor({ appId: "notes", home: "C:\\data\\other" }, {
+      defaultHome: "C:\\data\\notes",
+    }, "windows"),
+    "am stop --app=notes --home=C:\\data\\other",
+  );
+  assertEquals(
+    stopCommandFor({ appId: "notes", home: "C:\\my data\\it's" }, {
+      defaultHome: "C:\\data\\notes",
+    }, "windows"),
+    "am stop --app=notes --home='C:\\my data\\it''s'",
   );
 });
 
@@ -96,8 +132,8 @@ Deno.test("am --instance with a different AIO_APPS_DIR says it was ignored", asy
         "run",
         "-A",
         "--config",
-        new URL("../deno.json", import.meta.url).pathname,
-        new URL("../src/am.ts", import.meta.url).pathname,
+        fromFileUrl(new URL("../deno.json", import.meta.url)),
+        fromFileUrl(new URL("../src/am.ts", import.meta.url)),
         "instances",
         "--instance=agent1",
         "--json",
@@ -124,8 +160,8 @@ Deno.test("am --instance with a different AIO_APPS_DIR says it was ignored", asy
 Deno.test("am instances --json: stopWith, as printed, names the scope it was listed in", async () => {
   const { writeLock } = await import("../src/server/single-instance-lock.ts");
   const apps = await tempDir("am-inst-scope-");
-  const alive = new Deno.Command("sleep", {
-    args: ["60"],
+  const alive = new Deno.Command(Deno.execPath(), {
+    args: SLEEP_ARGS,
     stdout: "null",
     stderr: "null",
   }).spawn();
@@ -149,8 +185,8 @@ Deno.test("am instances --json: stopWith, as printed, names the scope it was lis
         "run",
         "-A",
         "--config",
-        new URL("../deno.json", import.meta.url).pathname,
-        new URL("../src/am.ts", import.meta.url).pathname,
+        fromFileUrl(new URL("../deno.json", import.meta.url)),
+        fromFileUrl(new URL("../src/am.ts", import.meta.url)),
         "instances",
         "--json",
       ],
@@ -170,7 +206,9 @@ Deno.test("am instances --json: stopWith, as printed, names the scope it was lis
     const row = rows.find((r) => r.appId === "scoped-notes");
     assertEquals(
       row?.stopWith,
-      `AIO_APPS_DIR=${apps} am stop --app=scoped-notes`,
+      Deno.build.os === "windows"
+        ? `$env:AIO_APPS_DIR='${apps}'; am stop --app=scoped-notes`
+        : `AIO_APPS_DIR=${apps} am stop --app=scoped-notes`,
       "the printed command must reach THIS scope's instance, not the default's",
     );
   } finally {

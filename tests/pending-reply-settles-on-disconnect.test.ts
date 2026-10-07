@@ -21,6 +21,8 @@ import {
   createUDSListener,
 } from "../src/server/uds.ts";
 import { tempDir } from "../src/testing/temp-dir.ts";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
+import { connectLocal } from "../src/server/local-listen.ts";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** Well under the reply ceiling: a disconnect must answer long before it. */
@@ -79,10 +81,10 @@ Deno.test("ws: a pending control reply settles when its client disconnects", asy
 });
 
 Deno.test("uds: a pending control reply settles when its client disconnects", async () => {
-  const socketPath = join(
+  const socketPath = localEndpoint(join(
     await tempDir("aio-pending-reply-settles-on-disconnect-"),
     "pending-gone.sock",
-  );
+  ));
   const uds = createUDSListener(
     socketPath,
     () => ({ c: { n: 1 } }),
@@ -90,7 +92,7 @@ Deno.test("uds: a pending control reply settles when its client disconnects", as
     () => {},
   );
   await wait(30);
-  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  const conn = await connectLocal(socketPath);
   const reader = conn.readable.getReader();
   (async () => {
     try {
@@ -114,5 +116,6 @@ Deno.test("uds: a pending control reply settles when its client disconnects", as
     assert(Date.now() - started < PROMPT_MS);
   } finally {
     uds.shutdown();
+    await localIdle();
   }
 });

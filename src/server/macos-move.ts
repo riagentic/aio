@@ -116,11 +116,14 @@ export function moveAnswer(
 type Run = (
   cmd: string,
   args: string[],
+  /** Aborted → the child is ended (SIGTERM). */
+  signal?: AbortSignal,
 ) => Promise<{ code: number; stdout: string; stderr: string }>;
 
-const run: Run = async (cmd, args) => {
+const run: Run = async (cmd, args, signal) => {
   const o = await new Deno.Command(cmd, {
     args,
+    signal,
     cwd: neutralCwd(),
     stdin: "null",
     stdout: "piped",
@@ -237,6 +240,10 @@ export async function offerMoveToApplications(deps: {
    *  launch's entry in the system's application list — the entry the Dock
    *  and "quit" address — and the window got a second one. */
   windowUp: () => Promise<boolean>;
+  /** Aborted when the app's shutdown begins: the question goes with the app.
+   *  Measured on macOS 26: without it the dialog stayed on screen, for up to
+   *  its ten minutes, after the app that asked had quit. */
+  stopSignal?: AbortSignal;
   /** Test seams. */
   os?: string;
   execPath?: string;
@@ -264,6 +271,9 @@ export async function offerMoveToApplications(deps: {
     });
     if (!offer) return "none";
     if (!await deps.windowUp()) return "none";
+    // Checked here too: a child spawned on an already-aborted signal is not
+    // promised to be ended by it.
+    if (deps.stopSignal?.aborted) return "none";
     const exec = deps.run ?? run;
     let answer: MoveAnswer = "move";
     if ((env ?? "").trim().toLowerCase() !== "move") {
@@ -272,6 +282,7 @@ export async function offerMoveToApplications(deps: {
         await exec(
           "/usr/bin/osascript",
           moveDialogArgs(deps.title, isThere(icon) ? icon : null),
+          deps.stopSignal,
         ),
       );
     }

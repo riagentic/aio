@@ -18,6 +18,22 @@ import {
   writeLock,
 } from "../src/server/single-instance-lock.ts";
 import { appHome } from "../src/server/app-dirs.ts";
+import { resolve } from "@std/path";
+import { sleeper } from "./proc-helper.ts";
+
+/** A pid that is alive and not ours: pid 1 (EPERM counts as alive) where there
+ *  is one; Windows has no pid 1, so a child that does nothing. */
+function liveOwner(): { pid: number; end(): Promise<void> } {
+  if (Deno.build.os !== "windows") return { pid: 1, end: async () => {} };
+  const p = sleeper({ stdin: "null", stdout: "null", stderr: "null" });
+  return {
+    pid: p.pid,
+    async end() {
+      p.kill();
+      await p.status;
+    },
+  };
+}
 
 Deno.test({
   name:
@@ -28,9 +44,10 @@ Deno.test({
     // answers, so the lock is neither stale nor a zombie: a genuine refusal.
     const l = Deno.listen({ port: 0, hostname: "127.0.0.1" });
     const port = (l.addr as Deno.NetAddr).port;
+    const owner = liveOwner();
     writeLock({
       appId,
-      pid: 1,
+      pid: owner.pid,
       port,
       startedAt: Date.now() - 60_000,
       status: "started",
@@ -60,6 +77,7 @@ Deno.test({
       unregister();
       removeLock(appId);
       l.close();
+      await owner.end();
     }
   },
 });
@@ -202,13 +220,14 @@ Deno.test({
     if (realApps !== undefined) Deno.env.delete("AIO_APPS_DIR");
     const l = Deno.listen({ port: 0, hostname: "127.0.0.1" });
     const port = (l.addr as Deno.NetAddr).port;
+    const owner = liveOwner();
     // The holder's $HOME. Its home IS its `appHome`, so its lock key is the
     // bare appId — which is exactly why the second boot collides with it.
-    Deno.env.set("HOME", "/tmp/r5a-other-home");
+    Deno.env.set("HOME", resolve("/tmp/r5a-other-home"));
     const other = appHome(appId);
     writeLock({
       appId,
-      pid: 1,
+      pid: owner.pid,
       port,
       startedAt: Date.now() - 60_000,
       status: "started",
@@ -217,7 +236,7 @@ Deno.test({
     });
     const unregister = registerRuntime(() => Promise.resolve());
     try {
-      Deno.env.set("HOME", "/tmp/r5a-this-home"); // the second boot
+      Deno.env.set("HOME", resolve("/tmp/r5a-this-home")); // the second boot
       const err = await assertRejects(
         () => acquireSingletonLock(appId, undefined, port, true, false),
         Error,
@@ -228,7 +247,7 @@ Deno.test({
         `home ${other}`,
         "the head must name the home of the process that HOLDS the lock",
       );
-      assertStringIncludes(err.message, "/tmp/r5a-this-home");
+      assertStringIncludes(err.message, resolve("/tmp/r5a-this-home"));
     } finally {
       unregister();
       // Both spellings: the key depends on $HOME at the moment it is computed,
@@ -236,6 +255,7 @@ Deno.test({
       removeLock(lockKey(appId, other));
       removeLock(appId);
       l.close();
+      await owner.end();
       if (realHome !== undefined) Deno.env.set("HOME", realHome);
       if (realApps !== undefined) Deno.env.set("AIO_APPS_DIR", realApps);
     }

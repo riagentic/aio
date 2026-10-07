@@ -14,6 +14,8 @@ import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { createUDSListener } from "../src/server/uds.ts";
 import { join } from "@std/path";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
+import { connectLocal, type LocalConn } from "../src/server/local-listen.ts";
 
 Deno.test("ws: a subscription to an unknown cell id is warned once, naming the known ids", async () => {
   const todos = cell("subtodos", {
@@ -93,15 +95,15 @@ Deno.test("uds: a subscription to an unknown cell id is warned, naming the known
   }
   const dir = await tempDir("aio-uds-subs-unknown-");
   const uds = createUDSListener(
-    join(dir, "s.sock"),
+    localEndpoint(join(dir, "s.sock")),
     () => ({ udscounter: { value: 1 } }),
     () => {},
     () => {},
   );
-  let conn: Deno.Conn | undefined;
+  let conn: LocalConn | undefined;
   try {
     await new Promise((r) => setTimeout(r, 50));
-    conn = await Deno.connect({ path: join(dir, "s.sock"), transport: "unix" });
+    conn = await connectLocal(localEndpoint(join(dir, "s.sock")));
     const w = conn.writable.getWriter();
     await w.write(
       new TextEncoder().encode(
@@ -119,6 +121,7 @@ Deno.test("uds: a subscription to an unknown cell id is warned, naming the known
   } finally {
     conn?.close();
     uds.shutdown();
+    await localIdle();
     Object.assign(console, orig);
     await dropTempDir(dir);
   }

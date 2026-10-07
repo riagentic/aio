@@ -605,10 +605,11 @@ Deno.test("older builds: what 1.0.16 left beside a directory install is taken on
     );
     assertEquals(typeof adopted(data), "string");
     assertEquals(
+      // By name: the record lists them in the order the folder was read.
       readOwned(data).filter((e) => e.role === "kept").map((e) => [
         basename(e.path),
         e.is,
-      ]),
+      ]).sort(([a], [b]) => a! < b! ? -1 : 1),
       kept.map((n) => [n, identity(join(root, n))!]),
     );
     // Counted now: the oldest goes, a hand copy older still does not.
@@ -783,8 +784,11 @@ Deno.test("kept copies: one cut off while it was being written is no version —
     for (const [i, p] of whole.entries()) {
       record(data, p, "file", { role: "kept" });
       await Deno.writeTextFile(p, `\x7fELF notes ${basename(p)}`);
-      made(data, p);
+      // Aged BEFORE it is written down: on macOS setting a file's time to
+      // before its creation moves its creation time too — and that is half
+      // of the identity the record keeps.
       await aged(p, 10 - i);
+      made(data, p);
     }
     assertEquals(readOwned(data).map((e) => e.state), Array(3).fill(undefined));
     // The update to 0.1.4 was killed half-way through copying 0.1.3 aside:

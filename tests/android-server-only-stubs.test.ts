@@ -18,6 +18,7 @@
 // the wrong sentence to read out of an APK.
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { fixtureNodeModules } from "./symlink-helper.ts";
 import {
   bundleFrameworkEntries,
   ESBUILD_SPEC,
@@ -25,8 +26,9 @@ import {
 import * as android from "../src/standalone-air.ts";
 import * as mod from "../mod.ts";
 import { blockingServerOnly } from "../src/state/blocking-reason.ts";
+import { fromFileUrl } from "@std/path";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 /** The first ```ts block after `heading` in a doc — the example itself. */
 async function docSnippet(doc: string, heading: string): Promise<string> {
@@ -51,6 +53,8 @@ async function bundleFor(
   const esbuild = await import(ESBUILD_SPEC) as any;
   try {
     await Deno.writeTextFile(`${dir}/cell.ts`, src);
+    // The framework's own npm dep: this bare esbuild finds it where told.
+    await fixtureNodeModules(dir, "npm:immer@10.2.0");
     const alias = Object.fromEntries(
       Object.entries(bundleFrameworkEntries(target === "android")).map((
         [spec, rel],
@@ -65,6 +69,7 @@ async function bundleFor(
       metafile: true,
       alias,
       absWorkingDir: ROOT,
+      nodePaths: [`${dir}/node_modules`],
     });
     return {
       errors: (r.errors as { text: string }[]).map((e) => e.text),

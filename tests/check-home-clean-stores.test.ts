@@ -9,16 +9,18 @@
 // real one: a positive control that plants an entry in the developer's store
 // is the incident itself.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import {
+  installDirs,
   isTestGitdir,
   realStoreDirs,
   storeChanges,
 } from "../scripts/check-home-clean.ts";
 
-const GATE = new URL("../scripts/check-home-clean.ts", import.meta.url)
-  .pathname;
+const GATE = fromFileUrl(
+  new URL("../scripts/check-home-clean.ts", import.meta.url),
+);
 
 /** Run the gate as `deno task check:home-clean` does, in a CLEARED env whose
  *  only home is `home` — so neither the real HOME nor this process's sandboxed
@@ -148,18 +150,19 @@ Deno.test("check:home-clean: storeChanges names every added, changed and removed
 });
 
 Deno.test("check:home-clean: the real stores watched are the version store and the install's worktree registry", () => {
+  // The store paths are the host's own spelling (they are stat'ed).
   assertEquals(realStoreDirs({ HOME: "/h" }), [
-    "/h/.local/lib/aio-versions",
-    "/h/.local/lib/aio/.git/worktrees",
+    join("/h", ".local", "lib", "aio-versions"),
+    join("/h", ".local", "lib", "aio", ".git", "worktrees"),
   ]);
   // A user's own relocation is watched too, beside the default.
   assertEquals(
     realStoreDirs({ HOME: "/h", AIO_VERSIONS_DIR: "/v", AIO_HOME: "/i" }),
     [
       "/v",
-      "/h/.local/lib/aio-versions",
-      "/i/.git/worktrees",
-      "/h/.local/lib/aio/.git/worktrees",
+      join("/h", ".local", "lib", "aio-versions"),
+      join("/i", ".git", "worktrees"),
+      join("/h", ".local", "lib", "aio", ".git", "worktrees"),
     ],
   );
   assert(
@@ -173,4 +176,93 @@ Deno.test("check:home-clean: the real stores watched are the version store and t
   );
   assert(!isTestGitdir("/h/.local/lib/aio/.git/worktrees/v", { HOME: "/h" }));
   assert(!isTestGitdir("/h/tmp/aiox/.git", { HOME: "/h" }));
+  // Windows: the home is spelled `\\`, and git writes a gitdir with `/`.
+  const winHome = { USERPROFILE: "C:\\Users\\dev" };
+  assert(isTestGitdir("C:/Users/dev/tmp/aio/aio-pin-1/install/.git", winHome));
+  assert(
+    isTestGitdir("C:\\Users\\dev\\tmp\\aio\\aio-pin-1\\.git", winHome),
+  );
+  assert(!isTestGitdir("C:/Users/dev/.local/lib/aio/.git", winHome));
+});
+
+// MEASURED 2026-10-07: tests/run-sh-e2e.test.ts ran run.sh with the real HOME —
+// 794 installed programs in `~/app` (~140 GB) and their `~/.local/bin` links.
+// The gate looked only at `~/.<appId>`, and an install is not dot-prefixed.
+Deno.test("check:home-clean: a test-shaped INSTALL in the real home is RED, named — the user's own apps are not", async () => {
+  const home = await tempDir("aio-fakehome-");
+  try {
+    // The user's own: real names, and near-misses of the random-id shape.
+    for (
+      const d of [
+        "app/quant",
+        "app/app-store",
+        "app/app-1a2b3c4", // 7 hex
+        "app/app-1a2b3c4g", // not hex
+        ".local/bin",
+        ".config/apple",
+        ".cache/e2e-tools",
+        ".local/share/applications",
+      ]
+    ) await Deno.mkdir(join(home, d), { recursive: true });
+    await Deno.writeTextFile(join(home, ".local/bin/app-runner"), "");
+    await Deno.writeTextFile(
+      join(home, ".local/share/applications/quant.desktop"),
+      "",
+    );
+    const clean = await gate(home);
+    assertEquals(clean.code, 0, clean.out);
+
+    // What run.sh leaves for one headless and one GUI test app.
+    const strays = [
+      "app/app-1a2b3c4d",
+      ".local/bin/app-1a2b3c4d",
+      ".local/share/applications/e2e-0f9e8d7c.desktop",
+      ".config/ver-probe-0f9e8d7c",
+    ];
+    for (const s of strays) {
+      const red1 = join(home, s);
+      await Deno.mkdir(red1, { recursive: true });
+      const red = await gate(home);
+      assertEquals(red.code, 1, `${s} was not flagged:\n${red.out}`);
+      assertStringIncludes(red.out, red1);
+      assertStringIncludes(red.out, "AIO_INSTALL_ROOT");
+      assert(!red.out.includes("quant"), red.out);
+      await Deno.remove(red1);
+    }
+    assertEquals((await gate(home)).code, 0);
+  } finally {
+    await dropTempDir(home);
+  }
+});
+
+Deno.test("check:home-clean: the install directories watched are every one installRoot() and run.sh can produce", () => {
+  assertEquals(installDirs({ HOME: "/h" }), [
+    join("/h", "app"),
+    join("/h", ".local", "bin"),
+    join("/h", ".local", "share", "applications"),
+    join("/h", ".config"),
+    join("/h", ".cache"),
+  ]);
+  // The user's own relocations are watched beside the defaults.
+  assertEquals(
+    installDirs({
+      HOME: "/h",
+      AIO_INSTALL_ROOT: "/opt/apps",
+      XDG_CONFIG_HOME: "/x/config",
+      XDG_CACHE_HOME: "/x/cache",
+    }),
+    [
+      "/opt/apps",
+      join("/h", "app"),
+      join("/h", ".local", "bin"),
+      join("/h", ".local", "share", "applications"),
+      "/x/config",
+      "/x/cache",
+    ],
+  );
+  // Windows: installRoot() is %LOCALAPPDATA%\\Programs.
+  assert(
+    installDirs({ USERPROFILE: "C:\\U\\d", LOCALAPPDATA: "C:\\U\\d\\L" })
+      .includes(join("C:\\U\\d\\L", "Programs")),
+  );
 });

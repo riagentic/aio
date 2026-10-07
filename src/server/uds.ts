@@ -93,9 +93,10 @@ import {
   protoHello,
 } from "../protocol/protocol-version.ts";
 import type { ServerSyncHandler } from "../sync/server-handler.ts";
-import { isPipePath, listenLocal, type LocalConn } from "./local-listen.ts";
+import { isPipePath, type LocalConn } from "./local-listen.ts";
 import {
   createLocalPeerGate,
+  darwinProcessStart,
   foreignCtlAllowed,
   foreignHealthView,
   type LocalPeerGate,
@@ -103,7 +104,7 @@ import {
   requireLocalPeer,
 } from "./local-peer.ts";
 import { selfUid } from "./dir-permissions.ts";
-import { ensureLockDirOf, processStartToken } from "./single-instance-lock.ts";
+import { listenInLockDir, processStartToken } from "./single-instance-lock.ts";
 import { flushAllUrgent } from "./broadcast-coalescer.ts";
 import {
   filterPatchesBySubs,
@@ -258,7 +259,9 @@ export function createAppPeerGate(): LocalPeerGate {
   requireLocalPeer();
   return createLocalPeerGate({
     selfUid: selfUid(),
-    startOf: processStartToken,
+    // macOS has no `processStartToken` (its lock identity is `startEpoch`,
+    // a bounded `ps`); the gate asks the kernel directly there.
+    startOf: (pid) => processStartToken(pid) ?? darwinProcessStart(pid),
     warn: (m) => log.warn("uds", m),
     error: (m) => log.error("uds", m),
     debug: (m) => log.debug("uds", m),
@@ -341,12 +344,9 @@ export function createUDSListener(
 
   // The lock dir may have been pruned since `lockDir()` cached it — a
   // sibling's exit removes it whenever it is empty, and a `singleton: false`
-  // app holds no lock to keep it: the bind then failed ENOENT.
-  ensureLockDirOf(socketPath);
-  const listener = listenLocal(
-    socketPath,
-    peer?.required ? { peer: true } : undefined,
-  );
+  // app holds no lock to keep it: the bind then failed ENOENT. Made first,
+  // and again when it goes under the bind itself.
+  const listener = listenInLockDir(socketPath, peer?.required === true);
   const connSet = new Set<LocalConn>();
   const clientMap = new Map<LocalConn, UDSClient>();
   const counter = clientCounter ?? { value: 0 };

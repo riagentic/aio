@@ -996,7 +996,16 @@ export async function cmdDiscover(
     Deno.exit(1);
   }
   const timeoutMs = t.value;
-  const apps = await discoverAioApps({ timeoutMs });
+  const unsent: string[] = [];
+  const apps = await discoverAioApps({
+    timeoutMs,
+    onNote: (m) => unsent.push(m),
+  });
+  // A probe that never left is not "no apps found": nothing was asked.
+  if (unsent.length > 0 && apps.length === 0) {
+    outError(unsent[0]!, mode);
+    Deno.exit(1);
+  }
   if (mode === "json") {
     out(apps, mode);
     return;

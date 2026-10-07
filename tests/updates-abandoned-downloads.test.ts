@@ -186,7 +186,9 @@ Deno.test("downloads: a folder of the old name goes only with the exact shape, u
       await stage(5, { age: 2 * HOUR, fileAge: 0 }), // the file is fresh
       await stage(6, { age: 0, fileAge: 2 * HOUR }), // the folder is fresh
       await stage(".aio-update-notes", { age: 2 * HOUR }), // not the name
-      await stage(".aio-update-0A1B2C3D", { age: 2 * HOUR }),
+      // Its own digit: on a case-insensitive disk (macOS) `0A1B2C3D` IS
+      // stage 0's folder.
+      await stage(".aio-update-9A1B2C3D", { age: 2 * HOUR }),
     ];
     // `artifact` is a folder; the whole thing is a file; a link.
     const dirArtifact = join(root, ".aio-update-3a1b2c3d");
@@ -201,8 +203,17 @@ Deno.test("downloads: a folder of the old name goes only with the exact shape, u
       const link = join(root, ".aio-update-8a1b2c3d");
       await Deno.symlink(yes[0]!, link);
       // The link itself is old too: what refuses it is that it is a link.
+      // `-t` with a local stamp: BSD touch has no `-d "3 hours ago"`.
+      const t = at(3 * HOUR);
+      const p2 = (n: number) => String(n).padStart(2, "0");
       await new Deno.Command("touch", {
-        args: ["-h", "-d", "3 hours ago", link],
+        args: [
+          "-h",
+          "-t",
+          `${t.getFullYear()}${p2(t.getMonth() + 1)}${p2(t.getDate())}` +
+          `${p2(t.getHours())}${p2(t.getMinutes())}`,
+          link,
+        ],
       })
         .output();
       assert(Deno.lstatSync(link).mtime!.getTime() < Date.now() - 2 * HOUR);

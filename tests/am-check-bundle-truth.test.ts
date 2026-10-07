@@ -18,8 +18,13 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { standardTasks } from "../src/am/am-cmd-create.ts";
+import { fromFileUrl } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
+import { fixtureNodeModules } from "./symlink-helper.ts";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("..", import.meta.url));
+// The same place as an import map names it: a specifier, not a path.
+const AIO = spec(REPO);
 
 async function amCheck(
   dir: string,
@@ -39,10 +44,10 @@ async function amCheck(
 }
 
 const AIO_IMPORTS = (): Record<string, string> => ({
-  "aio": `${REPO}mod.ts`,
-  "aio/air": `${REPO}src/air.ts`,
-  "aio/server": `${REPO}src/server-entry.ts`,
-  "aio/jsx-runtime": `${REPO}src/jsx-runtime.ts`,
+  "aio": `${AIO}mod.ts`,
+  "aio/air": `${AIO}src/air.ts`,
+  "aio/server": `${AIO}src/server-entry.ts`,
+  "aio/jsx-runtime": `${AIO}src/jsx-runtime.ts`,
 });
 
 // What the scaffold writes. `lib` matters here: without it `deno check` on a
@@ -85,6 +90,10 @@ async function makeApp(
   await Deno.writeTextFile(`${dir}/src/App.tsx`, appTsx);
   await Deno.writeTextFile(`${dir}/src/app.ts`, "export const x = 1;\n");
   if (extra) await Deno.writeTextFile(`${dir}/src/cell.ts`, extra);
+  // aio's own npm dep, where the bundler looks for it: the app's
+  // node_modules. (A framework checkout that happens to have one of its own
+  // answers for it otherwise — and a fresh clone has none.)
+  await fixtureNodeModules(dir, "npm:immer@10.2.0");
 }
 
 Deno.test("am check: a clean client graph passes", async () => {
@@ -251,7 +260,7 @@ Deno.test("am check: the `aio` mapping missing from deno.json FAILS the check", 
     assertEquals(e!.line, 1, "the import's own line");
     // Named BY NAME, with the line that fixes it — inferred from the app's own
     // aio source, never a guess.
-    assertStringIncludes(e!.fix, `"aio": "${REPO}mod.ts"`);
+    assertStringIncludes(e!.fix, `"aio": "${AIO}mod.ts"`);
   } finally {
     await dropTempDir(dir);
   }
@@ -357,7 +366,7 @@ Deno.test("am check: a deno.jsonc app with a REALLY missing import still FAILS",
     const e = j.errors.find((e) => e.message.includes('"aio/air" is missing'));
     assert(e, `the missing mapping was not named: ${r.out}`);
     // Inferred from the app's OWN aio source, read out of the .jsonc.
-    assertStringIncludes(e!.fix, `"aio/air": "${REPO}src/air.ts"`);
+    assertStringIncludes(e!.fix, `"aio/air": "${AIO}src/air.ts"`);
   } finally {
     await dropTempDir(dir);
   }
@@ -401,6 +410,7 @@ Deno.test("am check: a workspace member inherits the root's import map", async (
         `}\n`,
     );
     await Deno.writeTextFile(`${app}/src/app.ts`, "export const x = 1;\n");
+    await fixtureNodeModules(app, "npm:immer@10.2.0");
 
     const run = await new Deno.Command(Deno.execPath(), {
       args: ["check", `${app}/src/App.tsx`],

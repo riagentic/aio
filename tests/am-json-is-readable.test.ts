@@ -12,8 +12,9 @@
 // output makes, on the same fact.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { tempDir } from "../src/testing/temp-dir.ts";
+import { fromFileUrl } from "@std/path";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("..", import.meta.url));
 
 /** Run `am` and capture stdout through a PIPE — never a terminal.
  *

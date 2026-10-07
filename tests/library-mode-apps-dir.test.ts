@@ -25,12 +25,14 @@ function withAppsDir(v: string | null, fn: () => void): void {
   }
 }
 
+// The homes are the HOST's absolute paths: `resolve`, so that on Windows a
+// POSIX-spelled fixture (`/tmp/b`) is expected with its drive letter.
 Deno.test("libraryMode + AIO_APPS_DIR, no baseDir: one home per appId under the root", () => {
   withAppsDir("/tmp/aio-libmode-root", () => {
     const a = resolveAppDirs({ appId: "lib-a", libraryMode: true });
     const b = resolveAppDirs({ appId: "lib-b", libraryMode: true });
-    assertEquals(a.home, join("/tmp/aio-libmode-root", "lib-a"));
-    assertEquals(b.home, join("/tmp/aio-libmode-root", "lib-b"));
+    assertEquals(a.home, resolve("/tmp/aio-libmode-root", "lib-a"));
+    assertEquals(b.home, resolve("/tmp/aio-libmode-root", "lib-b"));
     assertNotEquals(a.stateDb, b.stateDb);
   });
 });
@@ -40,12 +42,12 @@ Deno.test("libraryMode: an explicit baseDir or appDir still wins over AIO_APPS_D
     assertEquals(
       resolveAppDirs({ appId: "lib-a", libraryMode: true, baseDir: "/tmp/b" })
         .home,
-      join("/tmp/b", ".aio"),
+      resolve("/tmp/b", ".aio"),
     );
     assertEquals(
       resolveAppDirs({ appId: "lib-a", libraryMode: true, appDir: "/srv/x" })
         .home,
-      "/srv/x",
+      "/srv/x", // an appDir is taken as written
     );
   });
 });

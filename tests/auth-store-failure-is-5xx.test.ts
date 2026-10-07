@@ -45,6 +45,7 @@ Deno.test("auth: a store that cannot write answers 503 + an error log; a bad req
       (await handleAuthFlow(req, new URL(req.url), cfg, `10.0.1.${++n}`))!;
     return { status: r.status, j: await r.json() };
   };
+  const closeInstead = Deno.build.os === "windows";
   const errors: string[] = [];
   const prev = getLogger();
   setLogger({
@@ -60,10 +61,17 @@ Deno.test("auth: a store that cannot write answers 503 + an error log; a bad req
     await users.create("alice", PW);
     const token = sessions.issue({ id: "alice", role: "user" });
     const reset = users.issueToken("reset", "alice", 60_000);
-    for (const f of ["auth.db", "auth.db-wal", "auth.db-shm"]) {
-      await Deno.remove(join(dir, f)).catch((e) => {
-        if (!(e instanceof Deno.errors.NotFound)) throw e;
-      });
+    // The store stops working under the running flows: auth.db deleted —
+    // or, where an open file cannot be deleted (Windows), closed under them.
+    if (closeInstead) {
+      users.close();
+      sessions.close();
+    } else {
+      for (const f of ["auth.db", "auth.db-wal", "auth.db-shm"]) {
+        await Deno.remove(join(dir, f)).catch((e) => {
+          if (!(e instanceof Deno.errors.NotFound)) throw e;
+        });
+      }
     }
     // A genuinely bad request is still the client's fault.
     const bad = await post("signup", { id: "bob", password: "short" });
@@ -90,8 +98,10 @@ Deno.test("auth: a store that cannot write answers 503 + an error log; a bad req
     }
   } finally {
     setLogger(prev);
-    users.close();
-    sessions.close();
+    if (!closeInstead) {
+      users.close();
+      sessions.close();
+    }
     await dropTempDir(dir);
     _resetAuthFails();
   }

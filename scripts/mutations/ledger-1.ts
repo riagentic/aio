@@ -1413,8 +1413,8 @@ export const LEDGER_1: readonly Mutation[] = [
     find:
       // aio-ok: ledger text is SOURCE, matched verbatim — never interpolated
       // aio-ok: ledger text is SOURCE, matched verbatim — never interpolated
-      "        t ? { headers: { authorization: `Bearer ${t}` } } : undefined,",
-    replace: "        undefined,",
+      "          ...(t ? { headers: { authorization: `Bearer ${t}` } } : {}),",
+    replace: "          ...{},",
     test: "tests/no-token-in-logs.test.ts",
     filter:
       "cli health probe: the key (opts.token) rides as Bearer, never in the URL",
@@ -2278,18 +2278,28 @@ export const LEDGER_1: readonly Mutation[] = [
       "worker close: the worker's own loop drains — new work it starts itself is refused, the in-flight write lands",
   },
   {
+    what:
+      "the lock dir is there at the umask's mode until its chmod — a sibling that looks in between refuses it",
+    file: "src/server/single-instance-lock.ts",
+    find: "      Deno.mkdirSync(dir, { recursive: true, mode: 0o700 });",
+    replace: "      Deno.mkdirSync(dir, { recursive: true });",
+    test: "tests/lock-dir-removed-under-create.test.ts",
+    filter:
+      "lock dir: it is never there wider than 0700, even before the chmod",
+  },
+  {
     what: "the lock file is world-readable on filesystems without hard links",
     file: "src/server/single-instance-lock.ts",
-    find: "      createNew: true,\n      mode: 0o600,\n    });",
-    replace: "      createNew: true,\n    });",
+    find: "    Deno.openSync(path, { ...how, mode: 0o600 }),",
+    replace: "    Deno.openSync(path, { ...how }),",
     test: "tests/single-instance-lock-file-mode.test.ts",
     filter: "lock file mode: 0600 on the no-hard-link fallback",
   },
   {
     what: "the lock file is world-readable on the normal path",
     file: "src/server/single-instance-lock.ts",
-    find: "      createNew: true,\n      mode: 0o600,\n    });",
-    replace: "      createNew: true,\n    });",
+    find: "    Deno.openSync(path, { ...how, mode: 0o600 }),",
+    replace: "    Deno.openSync(path, { ...how }),",
     test: "tests/single-instance-lock-file-mode.test.ts",
     filter: "lock file mode: 0600 on the hard-link path",
   },
@@ -2474,7 +2484,7 @@ export const LEDGER_1: readonly Mutation[] = [
   // file modes: the tests can fail under any umask
   {
     what:
-      "the lock and control-socket folder is not narrowed to 0700 — any local user can reach the socket and dispatch into the app",
+      "a lock folder of ours that is already there wider than 0700 is refused as not owner-only instead of narrowed — every start warns, and the lock and control socket leave the shared folder for the uid sibling",
     file: "src/server/single-instance-lock.ts",
     find: 'if (Deno.build.os !== "windows") chmod(dir, 0o700);',
     replace: "void chmod;",
@@ -3542,7 +3552,7 @@ export const LEDGER_1: readonly Mutation[] = [
     what:
       "the home-clean gate misses a version-store entry whose worktree points into a test sandbox",
     file: "scripts/check-home-clean.ts",
-    find: "  return roots.some((r) => gitdir.startsWith(r)) ||",
+    find: "  return roots.some((r) => fwd(gitdir).startsWith(r)) ||",
     replace: "  return roots.length < 0 ||",
     test: "tests/check-home-clean-stores.test.ts",
     filter:

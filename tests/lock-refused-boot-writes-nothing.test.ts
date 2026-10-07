@@ -15,6 +15,8 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join, toFileUrl } from "@std/path";
 import { childEnv } from "./e2e-app-harness.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
+import { sleeper } from "./proc-helper.ts";
 
 const REPO = join(import.meta.dirname!, "..");
 const APP_ID = `refused-boot-${Deno.pid}`;
@@ -47,18 +49,12 @@ function snapshot(dir: string): string {
 
 Deno.test({
   name: "refused boot: a maintenance hold's app launch leaves data/ untouched",
-  ignore: Deno.build.os === "windows", // `sleep` stands in for the holder
   async fn() {
     const dir = await tempDir("refused-boot-");
     const apps = join(dir, "apps");
     const home = join(apps, APP_ID);
     const data = join(home, "data");
-    const holder = new Deno.Command("sleep", {
-      args: ["60"],
-      stdin: "null",
-      stdout: "null",
-      stderr: "null",
-    }).spawn();
+    const holder = sleeper({ stdin: "null", stdout: "null", stderr: "null" });
     try {
       await Deno.mkdir(data, { recursive: true, mode: 0o700 });
       await Deno.writeTextFile(
@@ -89,8 +85,8 @@ Deno.test({
         join(dir, "deno.json"),
         JSON.stringify({
           imports: {
-            "aio": `${REPO}/mod.ts`,
-            "aio/": `${REPO}/src/`,
+            "aio": `${spec(REPO)}/mod.ts`,
+            "aio/": `${spec(REPO)}/src/`,
             "immer": "npm:immer@10.2.0",
             "@std/path": "jsr:@std/path@1.1.2",
           },

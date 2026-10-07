@@ -172,9 +172,13 @@ export async function oncePerStart<T>(
     } catch {
       // aio-ok: an unreadable claim is no claim — the pass runs, as before.
     }
-    // A claim "from the future" (a clock that stepped back) is not recent.
+    // A claim from beyond the window in the FUTURE (a clock that stepped back)
+    // is not recent. One a moment ahead is: a file system stamps from its own
+    // clock, and on Windows a file written just now reads up to 2 ms ahead of
+    // `Date.now()` (measured) — the claim the start before this one made while
+    // this one waited on the lock, which is the case this exists for.
     const age = at === undefined ? Infinity : (who.now?.() ?? Date.now()) - at;
-    if (last !== "" && last !== me && age >= 0 && age < START_ONCE_MS) {
+    if (last !== "" && last !== me && Math.abs(age) < START_ONCE_MS) {
       return skipped;
     }
     const out = await run();

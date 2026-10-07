@@ -14,10 +14,10 @@
 // in-process harness skips the boot and shutdown phases, which are precisely
 // where a stray `log.error` would live.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("..", import.meta.url));
 const MOD = new URL("../mod.ts", import.meta.url).href;
 
 /** Boot a persisting app, do ordinary work, close it. Returns its `app.log`

@@ -26,8 +26,11 @@ import { assert, assertEquals } from "@std/assert";
 import { createProdGraphCheck } from "../src/server/graph-validator.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { ESBUILD_SPEC } from "../src/build/esbuild-shared.ts";
+import { fromFileUrl } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
+import { fixtureNodeModules } from "./symlink-helper.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 /** name → a method body using it the way a cell module does. */
 const CELL_MODULE_NAMES: Record<string, string> = {
@@ -61,13 +64,13 @@ async function bundleRefusals(name: string, body: string): Promise<string[]> {
         nodeModulesDir: "auto",
         compilerOptions: { jsx: "react-jsx", jsxImportSource: "aio" },
         imports: {
-          "aio": `${ROOT}mod.ts`,
+          "aio": `${spec(ROOT)}mod.ts`,
           "aio/jsx-runtime": `${ROOT}src/jsx-runtime.ts`,
           "immer": "npm:immer@10.2.0",
         },
       }),
     );
-    await Deno.symlink(`${ROOT}node_modules`, `${dir}/node_modules`);
+    await fixtureNodeModules(dir);
     const extra = name === "race"
       ? ", sleep"
       : name === "self"

@@ -32,6 +32,13 @@ registry before the first shard and fails, naming the entry, if anything was
 added, changed or removed; `check:home-clean` also fails on a store entry whose
 worktree points into a test sandbox.
 
+`check:home-clean` also fails on a test-shaped install (`app-<8 hex>`,
+`e2e-<8 hex>`, `ver-probe-<8 hex>`) in `~/app`, `~/.local/bin`,
+`~/.local/share/applications`, `~/.config` or `~/.cache`, and the release check
+runs it again after the heavy gates. A test that runs `run.sh` or `install.sh`
+gives it a HOME of its own (`ownHome()` in `tests/deno-dir-helper.ts`);
+`AIO_APPS_DIR` moves an app's data, never where it is installed.
+
 - **Real-window tests run one at a time**, all in shard 0, beside the others. A
   test is one when its own source names `testDisplayEnv`, `Xephyr`,
   `ELECTRON_E2E`, `ffmpeg` or `DISPLAY` (`REAL_WINDOW`): two windows on one

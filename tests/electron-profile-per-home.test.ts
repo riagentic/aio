@@ -13,29 +13,31 @@
 // a real boot with a non-default home, its Electron binary replaced by a
 // script that captures the generated main, read back out of what the launch
 // actually produced.
+import { writeDenoProgram } from "./fake-program-helper.ts";
+import { spec } from "./module-spec-helper.ts";
 import { assert, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
 import { tempDir } from "../src/testing/temp-dir.ts";
 import { electronProfileName } from "../src/electron/electron-shared.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const ROOT = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 
 Deno.test({
   name:
     "electron launch: a non-default home opens its OWN Chromium profile (keyed like the lock)",
-  ignore: Deno.build.os === "windows",
   sanitizeOps: false, // aio-ok: a child deno process, waited for and killed below
   sanitizeResources: false, // aio-ok: same
   fn: async () => {
     const dir = await tempDir("aio-elprofile");
     const captured = join(dir, "captured-main.cjs");
-    const fake = join(dir, "electron");
-    await Deno.writeTextFile(
-      fake,
-      `#!/bin/sh\ncp "$1" "${captured}"\nsleep 4\nexit 0\n`,
+    // (A program whose body the real deno runs: `cp` and `sleep` are a
+    // shell's, which Windows does not have.)
+    const fake = await writeDenoProgram(
+      join(dir, "electron"),
+      `Deno.copyFileSync(Deno.args[0], ${JSON.stringify(captured)});\n` +
+        `await new Promise((r) => setTimeout(r, 4000));\n`,
     );
-    await Deno.chmod(fake, 0o755);
 
     const app = join(dir, "app");
     // The app's home: NOT where `AIO_APPS_DIR` would put it — a second copy of
@@ -47,7 +49,7 @@ Deno.test({
     for (
       const [k, v] of Object.entries(head.imports as Record<string, string>)
     ) {
-      imports[k] = v.startsWith("./") ? `${ROOT}/${v.slice(2)}` : v;
+      imports[k] = v.startsWith("./") ? `${spec(ROOT)}/${v.slice(2)}` : v;
     }
     await Deno.writeTextFile(
       join(app, "deno.json"),

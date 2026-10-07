@@ -6,11 +6,11 @@
 // answer on its own is not an inspection. A page with no origin and no bridge
 // has no session: anonymous, resolved, from the first render.
 import { assert, assertEquals } from "@std/assert";
-import { join, toFileUrl } from "@std/path";
+import { fromFileUrl, join, toFileUrl } from "@std/path";
 import { renderHeadlessSurface } from "../src/server/server-surface.ts";
 import { tempDir } from "../src/testing/temp-dir.ts";
 
-const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const REPO = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 
 Deno.test("headless surface: an auth app renders the same anonymous branch on every call", async () => {
   const dir = await tempDir("surface-auth-");

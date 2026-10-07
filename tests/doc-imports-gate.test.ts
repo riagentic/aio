@@ -78,7 +78,9 @@ Deno.test("every aio import in doc code blocks names a real exported symbol", as
         // unknown entries are themselves a finding.
         const entry = snap.entries[entryKey];
         if (!entry) {
-          problems.push(`${rel}: import from "${spec}" — no such entry point`);
+          problems.push(
+            `${rel}: import from "${spec}" — no such entry point`,
+          );
           continue;
         }
         checkedImports++;
@@ -102,7 +104,9 @@ Deno.test("every aio import in doc code blocks names a real exported symbol", as
         }
         for (const n of names) {
           if (!(n in entry.symbols)) {
-            problems.push(`${rel}: "${n}" is not exported from "${spec}"`);
+            problems.push(
+              `${rel}: "${n}" is not exported from "${spec}"`,
+            );
           }
         }
       }

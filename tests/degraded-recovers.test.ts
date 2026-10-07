@@ -20,8 +20,9 @@
 // must be able to recover. It reads source, because the alternative is
 // booting every subsystem and provoking each failure.
 import { assertEquals } from "@std/assert";
+import { fromFileUrl } from "@std/path";
 
-const ROOT = new URL("../src/", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("../src/", import.meta.url));
 
 /** Every `.ts` under src/. */
 async function sources(dir: string, out: string[] = []): Promise<string[]> {

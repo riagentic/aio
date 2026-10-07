@@ -26,7 +26,7 @@ import {
 import type { Style } from "../diagnostics/fmt.ts";
 import { repoRoot } from "./am-cmd-create.ts";
 import { resolve } from "@std/path";
-import { gitEnvFor, isClone } from "./am-versions.ts";
+import { cloneProblem, gitEnvFor } from "./am-versions.ts";
 
 const PKG = "@riagentic/aio";
 
@@ -144,7 +144,9 @@ export function dirtyLines(porcelain: string): string[] {
  *  a plain install inside any enclosing repo (a dotfiles repo at `~`) had
  *  `am upgrade` fetch into THAT repo and `git checkout --force <tag>` there. */
 async function notCloneRefusal(root: string): Promise<string | null> {
-  if (await isClone(root)) return null;
+  const problem = await cloneProblem(root);
+  if (problem === null) return null;
+  if (problem.spawn) return problem.spawn;
   const oneLiner = Deno.build.os === "windows"
     ? "irm https://raw.githubusercontent.com/riagentic/aio/main/install.ps1 | iex"
     : "curl -fsSL https://raw.githubusercontent.com/riagentic/aio/main/install.sh | sh";

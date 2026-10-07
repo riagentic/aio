@@ -178,8 +178,8 @@ Deno.test("regression: login reveals neither existence nor lock state to a guess
 Deno.test("regression: concurrent wrong passwords cannot outrun the lockout", async () => {
   const { openUserStore } = await import("../src/server/auth-users.ts");
   const dir = await Deno.makeTempDir({ prefix: "aio-lockrace-" });
+  const store = openUserStore(`${dir}/users.db`);
   try {
-    const store = openUserStore(`${dir}/users.db`);
     await store.create("alice", "correct-horse-battery");
 
     // The attack: no waiting, all in flight together.
@@ -193,6 +193,7 @@ Deno.test("regression: concurrent wrong passwords cannot outrun the lockout", as
       "20 concurrent wrong passwords must lock the account (LOCK_AFTER=5)",
     );
   } finally {
+    store.close(); // an open database cannot be deleted on Windows
     await Deno.remove(dir, { recursive: true });
   }
 });
@@ -202,9 +203,9 @@ Deno.test("regression: a lockout is never extended by later failures", async () 
   // @ts-ignore node:sqlite types unavailable when an old @types/node shadows them
   const { DatabaseSync } = await import("node:sqlite");
   const dir = await Deno.makeTempDir({ prefix: "aio-lockext-" });
+  const path = `${dir}/users.db`;
+  const store = openUserStore(path);
   try {
-    const path = `${dir}/users.db`;
-    const store = openUserStore(path);
     for (let i = 0; i < 5; i++) await store.verify("bob", "wrong");
     await store.create("bob2", "correct-horse-battery");
     for (let i = 0; i < 5; i++) await store.verify("bob2", "wrong");
@@ -224,6 +225,7 @@ Deno.test("regression: a lockout is never extended by later failures", async () 
     assertEquals(read(), first, "lock expiry unchanged by further guesses");
     assertEquals(await store.verify("bob2", "correct-horse-battery"), "locked");
   } finally {
+    store.close();
     await Deno.remove(dir, { recursive: true });
   }
 });

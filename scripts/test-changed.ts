@@ -15,10 +15,10 @@
  * does not import (a fixture it reads, a script it spawns), and those are
  * invisible here. The full `deno task test` stays the release gate.
  */
-import { dirname, join, relative, resolve } from "@std/path";
+import { dirname, fromFileUrl, join, relative, resolve } from "@std/path";
 import { discover } from "./test-shards.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const ROOT = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 
 /** Relative import/export/dynamic-import specifiers in a module. Pure. */
 export function relativeImports(src: string): string[] {

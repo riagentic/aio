@@ -21,13 +21,15 @@ import {
 import { createUDSListener } from "../src/server/aio.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { join } from "@std/path";
+import { connectLocal } from "../src/server/local-listen.ts";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 Deno.test("uds: state that cannot serialize reaches /__aio/health", async () => {
   _resetDegraded();
   const dir = await tempDir("uds-degraded-");
-  const socketPath = join(dir, "d.sock");
+  const socketPath = localEndpoint(join(dir, "d.sock"));
   // A BigInt is what a real app produces; `JSON.stringify` throws on it.
   let poisoned = false;
   const uds = createUDSListener(
@@ -36,7 +38,7 @@ Deno.test("uds: state that cannot serialize reaches /__aio/health", async () => 
     () => {},
     () => {},
   );
-  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  const conn = await connectLocal(socketPath);
   const reader = conn.readable.getReader();
   (async () => {
     try {
@@ -82,6 +84,7 @@ Deno.test("uds: state that cannot serialize reaches /__aio/health", async () => 
       conn.close();
     } catch { /* aio-ok: already closed */ }
     uds.shutdown();
+    await localIdle();
     await dropTempDir(dir);
     _resetDegraded();
   }

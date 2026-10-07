@@ -10,7 +10,7 @@
 // The kill is announced: `Deno.renameSync` is hooked in the child so the rename
 // of the `-wal` itself SIGKILLs the process, after a marker the test asserts.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { DatabaseSync } from "node:sqlite";
 import { appDirs } from "../src/server/app-dirs.ts";
 import {
@@ -18,11 +18,12 @@ import {
   movingRecordFor,
 } from "../src/server/app-dirs-migrate.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const MIGRATE = new URL("../src/server/app-dirs-migrate.ts", import.meta.url)
   .href;
 const DIRS = new URL("../src/server/app-dirs.ts", import.meta.url).href;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 const APP_ID = "stranded-wal-probe";
 
 // A legacy app that committed and then died: its writes are in the WAL only.
@@ -38,8 +39,8 @@ Deno.kill(Deno.pid, "SIGKILL");
 
 // The migration exactly as boot runs it, dying at the sidecar's rename.
 const MOVE = `
-import { migrateLegacyLayout } from "${MIGRATE}";
-import { appDirs } from "${DIRS}";
+import { migrateLegacyLayout } from "${spec(MIGRATE)}";
+import { appDirs } from "${spec(DIRS)}";
 const ROOT = Deno.env.get("ROOT");
 const rename = Deno.renameSync;
 Deno.renameSync = (from, to) => {

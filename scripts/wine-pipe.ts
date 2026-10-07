@@ -22,8 +22,9 @@
 // container instead of running).
 
 import { join } from "jsr:@std/path@^1";
+import { fromFileUrl } from "@std/path";
 
-const HERE = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const HERE = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 const IMAGE = "aio-lab:windows-pipe";
 /** Current Node 22 LTS. Bump deliberately: the client half is "what Electron's
  *  libuv does", and Electron tracks Node LTS. */

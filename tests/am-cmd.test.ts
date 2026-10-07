@@ -749,7 +749,7 @@ Deno.test("am: cmdStop — by default waits until the process is gone", async ()
 
 // ── cmdLink (am link / am fix) — make a cloned dep/aio app buildable ─────────
 import { cmdLink } from "../src/am/am-cmd-link.ts";
-import { join as joinPath } from "@std/path";
+import { fromFileUrl, join as joinPath } from "@std/path";
 
 Deno.test("cmdLink: links a fresh dep/aio clone, idempotent, skips JSR apps", async () => {
   const orig = Deno.cwd();
@@ -847,9 +847,14 @@ Deno.test("cmdFix: fixes dep/aio link, .env, and non-exec scripts", async () => 
       await Deno.stat(joinPath(dir, ".env")).then(() => true),
       ".env created",
     );
-    const mode = (await Deno.stat(joinPath(dir, "scripts", "seed.sh"))).mode ??
-      0;
-    assert((mode & 0o111) !== 0, "script made executable");
+    // Windows has no executable bit: `am fix` has no such repair there (see
+    // step 5 in am-cmd-fix.ts), and the link and .env above are the test.
+    if (Deno.build.os !== "windows") {
+      const mode =
+        (await Deno.stat(joinPath(dir, "scripts", "seed.sh"))).mode ??
+          0;
+      assert((mode & 0o111) !== 0, "script made executable");
+    }
   } finally {
     console.log = realLog;
     Deno.chdir(orig);
@@ -1419,7 +1424,7 @@ Deno.test("am delegates to a path-pinned checkout's am (toolchain coherence)", a
         unstable: ["kv"],
       }),
     );
-    const REPO = new URL("..", import.meta.url).pathname;
+    const REPO = fromFileUrl(new URL("..", import.meta.url));
     const run = (env: Record<string, string> = {}) =>
       new Deno.Command(Deno.execPath(), {
         args: [

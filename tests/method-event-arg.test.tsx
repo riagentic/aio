@@ -6,9 +6,10 @@
 // Warned, NEVER refused: `onClick={counter.inc}` passes an Event too and has
 // always worked (inc declares no parameter), and a client cell may take the
 // Event on purpose. Refusing broke the first shape — caught before release.
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertRejects } from "@std/assert";
 import { cell } from "../mod.ts";
 import { testUI } from "../src/testing/ui-test.ts";
+import { bootCells } from "../src/testing/cell-test.ts";
 import { eventArgWarning } from "../src/state/event-arg.ts";
 import { getLogger, setLogger } from "../src/diagnostics/logger-api.ts";
 
@@ -83,11 +84,31 @@ function Form() {
   );
 }
 
-Deno.test("a raw <input onInput={cell.method}> is named FIRST, before the confusing aftermath", async () => {
-  const got = await warnings(async () => {
-    await using ui = await testUI(Form);
+Deno.test('a raw <input onInput={cell.method}> fails the test, with the hint — the app\'s server would get {"isTrusted":true}', async () => {
+  const ui = await testUI(Form);
+  try {
     ui.TitleInput.type("hi");
-    await ui.settle().catch(() => {}); // what follows is unchanged, and may throw
+    const err = await assertRejects(() => ui.settle(), Error);
+    assert(
+      err.message.includes("args[0]: InputEvent → object") &&
+        err.message.includes(
+          'evarg-form.setTitle() got a DOM InputEvent ("input") as argument 1',
+        ),
+      err.message,
+    );
+    assertEquals(form.title, "", "the method did not run on the Event");
+  } finally {
+    await ui.dispose().catch(() => {});
+  }
+});
+
+Deno.test("an Event handed to a method by SERVER-side code is named FIRST, before the confusing aftermath", async () => {
+  const got = await warnings(async () => {
+    await using h = await bootCells([form]);
+    // what follows is unchanged, and may throw
+    await (form.setTitle as (e: unknown) => Promise<unknown>)(new InputEvent())
+      .catch(() => {});
+    await h.settle().catch(() => {});
   });
   assert(got.length > 0, "a warning is said");
   assert(

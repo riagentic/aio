@@ -16,7 +16,7 @@
 // Electron e2e here uses) — it never opens a window. It waits for the app's
 // write to land, then ends the way each row says.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import {
   electronClosedPlan,
   electronExitIsCrash,
@@ -25,8 +25,10 @@ import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { testDisplayEnv } from "../src/testing/test-display.ts";
 import { childEnv } from "./e2e-app-harness.ts";
+import { EXE, writeProgram } from "./fake-program-helper.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const ROOT = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 
 Deno.test("electronExitIsCrash: stop signals and code 0 are ends, the rest crashes", () => {
   const is = (code: number, signal: Deno.Signal | null) =>
@@ -76,22 +78,46 @@ const ROWS: Row[] = [
 for (const row of ROWS) {
   Deno.test({
     name: `electron window ${row.name} → app exit ${row.code}, state saved`,
-    ignore: Deno.build.os !== "linux", // a sh stub + DISPLAY-gated launch
+    // macOS: left out as it was (the launch is DISPLAY-gated). Windows: a
+    // process cannot die of a signal there, so the SIGTRAP row has no subject.
+    ignore: Deno.build.os === "darwin" ||
+      (Deno.build.os === "windows" && row.end.startsWith("kill")), // no signal to die of on Windows
     async fn() {
       const dir = await tempDir("el-crash-");
       try {
         const ready = join(dir, "ready");
-        const stub = join(dir, "electron");
-        await Deno.writeTextFile(
-          stub,
-          `#!/bin/sh
+        const stub = join(dir, `electron${EXE}`);
+        if (Deno.build.os === "windows") {
+          // The same stand-in without a shell: a program that hands over to
+          // a script the real deno runs.
+          await Deno.writeTextFile(
+            join(dir, "electron.ts"),
+            `for (let i = 0; i < 300; i++) {
+  try { Deno.statSync(${JSON.stringify(ready)}); break; }
+  catch { await new Promise((r) => setTimeout(r, 100)); }
+}
+console.error("Authorization required, but no authorization protocol specified");
+Deno.exit(${row.code});
+`,
+          );
+          await writeProgram(
+            stub,
+            `#!/bin/sh\nexec "${Deno.execPath()}" run -A --no-config "${
+              join(dir, "electron.ts")
+            }" "$@"\n`,
+          );
+        } else {
+          await Deno.writeTextFile(
+            stub,
+            `#!/bin/sh
 i=0
 while [ ! -f '${ready}' ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done
 echo "Authorization required, but no authorization protocol specified" >&2
 ${row.end}
 `,
-        );
-        await Deno.chmod(stub, 0o755);
+          );
+          await Deno.chmod(stub, 0o755);
+        }
         const app = join(dir, "app");
         await Deno.mkdir(join(app, "src"), { recursive: true });
         const head = JSON.parse(
@@ -101,7 +127,7 @@ ${row.end}
         for (
           const [k, v] of Object.entries(head.imports as Record<string, string>)
         ) {
-          imports[k] = v.startsWith("./") ? `${ROOT}/${v.slice(2)}` : v;
+          imports[k] = v.startsWith("./") ? `${spec(ROOT)}/${v.slice(2)}` : v;
         }
         await Deno.writeTextFile(
           join(app, "deno.json"),

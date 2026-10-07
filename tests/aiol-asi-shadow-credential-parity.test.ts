@@ -14,7 +14,7 @@
 //    `refuseUnsafeComposition` `aio.run()` does) and aiol the same question
 //    about the same source text.
 import { assertEquals, assertStringIncludes } from "@std/assert";
-import { join, toFileUrl } from "@std/path";
+import { fromFileUrl, join, toFileUrl } from "@std/path";
 import { buildContext } from "../aiol/context.ts";
 import {
   checkCredentialFieldName,
@@ -25,6 +25,7 @@ import type { Checker, Issue } from "../aiol/types.ts";
 import { _refuseUnsafeCells } from "../src/testing/boot-refusals.ts";
 import { getRegisteredCells } from "../src/state/cell-reactive.ts";
 import type { CellDef } from "../src/state/cell-types.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const DENO_JSON = JSON.stringify({
   imports: { aio: "jsr:@riagentic/aio@1.0.0" },
@@ -155,14 +156,17 @@ const VARIANTS: Record<string, string> = {
 
 Deno.test("credential rule: aiol reports exactly what the boot refuses", async () => {
   const dir = await Deno.makeTempDir({ prefix: "aiol-cred-parity-" });
-  const mod = toFileUrl(new URL("../mod.ts", import.meta.url).pathname).href;
+  const mod =
+    toFileUrl(fromFileUrl(new URL("../mod.ts", import.meta.url))).href;
   const disagree: string[] = [];
   const refusedBy: string[] = [];
   try {
     for (const [name, cfg] of Object.entries(VARIANTS)) {
       const id = `credparity${name.toLowerCase()}`;
       const src = (from: string) =>
-        `import { cell } from "${from}";\nexport const x = cell("${id}", { ${cfg}, methods: { noop(_s) {} } });\n`;
+        `import { cell } from "${
+          spec(from)
+        }";\nexport const x = cell("${id}", { ${cfg}, methods: { noop(_s) {} } });\n`;
 
       const issues = await lint(checkCredentialFieldName, {
         "src/x.ts": src("aio"),

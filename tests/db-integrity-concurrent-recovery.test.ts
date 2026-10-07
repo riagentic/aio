@@ -12,7 +12,7 @@
 // Both children are released by one barrier file, so their recoveries run
 // side by side; a large snapshot keeps the copy window wide.
 import { assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { aio, cell, pk, table, text } from "../mod.ts";
 import {
   recoveryLockPathFor,
@@ -21,12 +21,13 @@ import {
 } from "../src/server/db-integrity.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const MOD = new URL("../mod.ts", import.meta.url).href;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 const CHILD = `
-import { aio, cell, pk, table, text } from "${MOD}";
+import { aio, cell, pk, table, text } from "${spec(MOD)}";
 const DIR = Deno.env.get("DIR");
 const ME = Deno.env.get("ME");
 while (true) {

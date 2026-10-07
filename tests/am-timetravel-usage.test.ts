@@ -6,8 +6,9 @@
 // what the error told them got a second error.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { freePort } from "../src/testing/server-test.ts";
+import { fromFileUrl } from "@std/path";
 
-const AM = new URL("../src/am.ts", import.meta.url).pathname;
+const AM = fromFileUrl(new URL("../src/am.ts", import.meta.url));
 
 Deno.test("am timetravel goto: the usage error spells the command as help does", async () => {
   // Refused before anything is asked of an app: no server is needed, and the

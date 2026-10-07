@@ -17,12 +17,23 @@ import {
   waitForHttp,
 } from "./e2e-app-harness.ts";
 import { permissiveUmask } from "./permissive-umask.ts";
+import { ownHome } from "./deno-dir-helper.ts";
 
 const GATE = Deno.env.get("AIO_ONBOARD_E2E") === "1";
 const dec = new TextDecoder();
 
 function stripAnsi(s: string): string {
   return s.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+/** Every entry of `dir` (none when it does not exist). */
+function entries(dir: string): string[] {
+  try {
+    return [...Deno.readDirSync(dir)].map((e) => e.name);
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) return [];
+    throw e;
+  }
 }
 
 /** One sandbox for the whole file: am installed from this checkout. */
@@ -51,6 +62,7 @@ async function sandbox(): Promise<
   );
   const env = {
     ...Deno.env.toObject(),
+    ...await ownHome(root),
     AIO_HOME: REPO_ROOT, // a git checkout of aio — run.sh's prereq is satisfied
     // run.sh runs install.sh EVERY time now. Without this it would curl the
     // PUBLISHED install.sh — a network call in an offline suite, and one that
@@ -126,6 +138,21 @@ Deno.test({
           st.mode! & 0o777,
           0o700,
           "the unpack dir must be owner-only",
+        );
+        // …and the INSTALL landed in the sandbox: the program under the pinned
+        // root, its PATH link under the sandbox HOME. `root` is removed below,
+        // so nothing of it outlives the test.
+        assertEquals(
+          entries(env.AIO_INSTALL_ROOT!).length,
+          1,
+          `run.sh did not install into ${env.AIO_INSTALL_ROOT}:\n${
+            log.slice(-2000)
+          }`,
+        );
+        assertEquals(
+          entries(join(env.HOME!, ".local", "bin")),
+          entries(env.AIO_INSTALL_ROOT!),
+          "the PATH link must sit under the sandbox HOME",
         );
       } finally {
         await kill(proc);
@@ -377,6 +404,7 @@ Deno.test({
         cwd: dir,
         env: {
           ...Deno.env.toObject(),
+          ...await ownHome(base),
           AIO_HOME: install,
           AIO_INSTALL: noopInstall, // a sabotaged AIO_HOME has no am to install
           DENO_INSTALL: denoHome,

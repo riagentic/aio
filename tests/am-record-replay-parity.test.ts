@@ -22,7 +22,7 @@
 // Proven the only way that counts: record a real app, generate, `deno check`
 // and `deno test` the output, and require the live end state.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join, toFileUrl } from "@std/path";
 import { aio } from "../src/server/aio.ts";
 import { _resetAioRuntime } from "../src/state/runtime-reset.ts";
 import { freePort } from "../src/testing/server-test.ts";
@@ -30,7 +30,7 @@ import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { generateReplayTest, timelineActions } from "../src/am/record.ts";
 import type { TimelineEntry } from "../src/server/timeline.ts";
 
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 const CELL = `import { cell, schedule, self } from "aio";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -69,7 +69,7 @@ Deno.test("am record: an onInit dispatch, an overlapping pair and a timer replay
     await Deno.writeTextFile(cellFile, CELL);
 
     _resetAioRuntime();
-    const { rc } = await import(`file://${cellFile}`);
+    const { rc } = await import(toFileUrl(cellFile).href);
     const port = freePort();
     const app = await aio.run({
       cells: [rc],
@@ -215,7 +215,7 @@ Deno.test("timeline: a nested call's write-set names the OUTER call; a timer it 
     await Deno.writeTextFile(
       cellFile,
       `import { cell, schedule, self } from "${
-        new URL("../mod.ts", import.meta.url).pathname
+        new URL("../mod.ts", import.meta.url).href
       }";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 export const nest = cell("nest", {
@@ -229,7 +229,7 @@ export const nest = cell("nest", {
 `,
     );
     _resetAioRuntime();
-    const { nest } = await import(`file://${cellFile}`);
+    const { nest } = await import(toFileUrl(cellFile).href);
     const port = freePort();
     const app = await aio.run({
       cells: [nest],
@@ -300,7 +300,7 @@ export const sc = cell("sc", {
 `,
     );
     _resetAioRuntime();
-    const { sc } = await import(`file://${cellFile}`);
+    const { sc } = await import(toFileUrl(cellFile).href);
     const port = freePort();
     const app = await aio.run({
       cells: [sc],

@@ -13,10 +13,12 @@ import {
 } from "@std/assert";
 import { childCoverageDir } from "../src/testing/temp-dir.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 const _childCovDir = childCoverageDir();
 import { cell } from "../src/state/cell.ts";
 import { testCell } from "../src/testing/cell-test.ts";
+import { fromFileUrl } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -212,8 +214,8 @@ Deno.test("a failure nobody awaited fails the test even without settle()", async
     const file = `${dir}/leak.test.ts`;
     await Deno.writeTextFile(
       file,
-      `import { cell } from "${ROOT}src/state/cell.ts";\n` +
-        `import { testCell } from "${ROOT}src/testing/cell-test.ts";\n` +
+      `import { cell } from "${spec(ROOT)}src/state/cell.ts";\n` +
+        `import { testCell } from "${spec(ROOT)}src/testing/cell-test.ts";\n` +
         `const c = cell("unobserved", {\n` +
         `  state: { n: 0 },\n` +
         `  methods: { async boom() { throw new Error("BOOM-UNOBSERVED"); } },\n` +

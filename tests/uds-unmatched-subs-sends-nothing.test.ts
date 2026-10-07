@@ -10,18 +10,20 @@ import { join } from "@std/path";
 import { createUDSListener } from "../src/server/aio.ts";
 import type { PatchEntry } from "../src/protocol/broadcast-utils.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
+import { connectLocal, type LocalConn } from "../src/server/local-listen.ts";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 Deno.test("uds: a round with no patch in a client's subscriptions sends it nothing", async () => {
   const dir = await tempDir("aio-uds-subs-");
-  const socketPath = join(dir, "s.sock");
+  const socketPath = localEndpoint(join(dir, "s.sock"));
   const state = { a: { pad: "p".repeat(5000), v: 1 }, b: { v: 1 } };
   const uds = createUDSListener(socketPath, () => state, () => {}, () => {});
-  let conn: Deno.Conn | undefined;
+  let conn: LocalConn | undefined;
   try {
     await wait(50);
-    conn = await Deno.connect({ path: socketPath, transport: "unix" });
+    conn = await connectLocal(socketPath);
     const frames: string[] = [];
     const r = conn.readable.getReader();
     const dec = new TextDecoder();
@@ -69,6 +71,7 @@ Deno.test("uds: a round with no patch in a client's subscriptions sends it nothi
       conn?.close();
     } catch { /* closed */ }
     uds.shutdown();
+    await localIdle();
     await wait(20);
     await dropTempDir(dir);
   }

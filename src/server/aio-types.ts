@@ -137,6 +137,16 @@ export type ElectronConfig = {
    *  page's, and the page is the part an attacker gets first. Requires
    *  `childWindows: true` like every other child window. Default: false. */
   unsandboxedChildWindows?: boolean;
+  /** Enable the `<webview>` tag — and nothing else. `childWindows: true`
+   *  enables it too, together with `__aioIPC.openWindow`; this is the switch
+   *  for an app that embeds pages (`<Browser>`) and must not be able to open
+   *  child windows. Electron's own name for the preference. Default: false. */
+  webviewTag?: boolean;
+  /** Let a `<webview>` guest or an `openWindow` child window save a file
+   *  (Electron's download dialog). Off by default: a download started by a
+   *  page that is not the app's own is cancelled, and said once per origin in
+   *  the log. The app's own page always downloads. Default: false. */
+  guestDownloads?: boolean;
   /** The app page's permission allow-list — Electron's own names, each
    *  scoped `["app"]` (the app's own page; the only scope).
    *
@@ -653,10 +663,13 @@ export type AioConfig<S, A, E> = {
    *  (`vault:*`), because a list of individual method names is the list that
    *  goes stale the day someone adds another one. */
   redactActions?: readonly string[];
-  /** Allow the electron client to open CHILD windows to arbitrary http(s) URLs
-   *  via `__aioIPC.openWindow(url, { preload, sandbox })`. OFF by default —
-   *  child-window-to-arbitrary-URL is real attack surface no app should carry
-   *  unless it asked for it (maintainer decision, a field report openWindow thread). */
+  /** Electron: let the app show OTHER sites — both ways at once. It enables
+   *  `__aioIPC.openWindow(url, { preload, sandbox })` (child windows to
+   *  arbitrary http(s) URLs) AND the `<webview>` tag (`<Browser>`). OFF by
+   *  default — rendering remote content is real attack surface no app should
+   *  carry unless it asked for it (maintainer decision, a field report
+   *  openWindow thread). For the tag alone, with `openWindow` still refused,
+   *  set `electron: { webviewTag: true }` instead. */
   childWindows?: boolean;
   /** The Electron process's own security decisions (sandbox policy,
    *  permissions, and `allowLocalPeers` — the opt-out of the production
@@ -1226,10 +1239,13 @@ export type CellsConfig = {
    *  (`vault:*`), because a list of individual method names is the list that
    *  goes stale the day someone adds another one. */
   redactActions?: readonly string[];
-  /** Allow the electron client to open CHILD windows to arbitrary http(s) URLs
-   *  via `__aioIPC.openWindow(url, { preload, sandbox })`. OFF by default —
-   *  child-window-to-arbitrary-URL is real attack surface no app should carry
-   *  unless it asked for it (maintainer decision, a field report openWindow thread). */
+  /** Electron: let the app show OTHER sites — both ways at once. It enables
+   *  `__aioIPC.openWindow(url, { preload, sandbox })` (child windows to
+   *  arbitrary http(s) URLs) AND the `<webview>` tag (`<Browser>`). OFF by
+   *  default — rendering remote content is real attack surface no app should
+   *  carry unless it asked for it (maintainer decision, a field report
+   *  openWindow thread). For the tag alone, with `openWindow` still refused,
+   *  set `electron: { webviewTag: true }` instead. */
   childWindows?: boolean;
   /** The Electron process's own security decisions (sandbox policy,
    *  permissions, and `allowLocalPeers` — the opt-out of the production

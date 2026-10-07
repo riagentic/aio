@@ -4,11 +4,11 @@
 // attempt 2/2" and both rollback lines, and a macOS boot that exited never
 // created it at all. Child processes, because the failure is the exit.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const CORE = new URL("../src/diagnostics/logger-core.ts", import.meta.url).href;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 async function run(body: string): Promise<string | null> {
   const dir = await tempDir("aio-log-exit-");

@@ -11,6 +11,7 @@ import { assert, assertStringIncludes } from "@std/assert";
 const stripAnsi = (s: string) => s.replace(/\u001b\[[0-9;]*m/g, "");
 import { compiled, ok, staged } from "../src/build/build-say.ts";
 import { BUILD_VERSION_ENV } from "../src/server/app-version.ts";
+import { fromFileUrl } from "@std/path";
 
 /** Capture stdout for one call. */
 function said(fn: () => void): string {
@@ -71,7 +72,7 @@ Deno.test("build log: a standalone build (no fleet) still says ✓ — nothing m
 Deno.test("build log: every intermediate dist/ artifact goes through `staged`", async () => {
   // Structural, because the failure is one forgotten call site: a `✓` printed
   // for a file the fleet deletes reads exactly like a `✓` for one it keeps.
-  const root = new URL("../", import.meta.url).pathname;
+  const root = fromFileUrl(new URL("../", import.meta.url));
   const offenders: string[] = [];
   for (const file of ["src/build.ts", "src/build/build-bundle.ts"]) {
     const src = await Deno.readTextFile(root + file);

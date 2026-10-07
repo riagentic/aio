@@ -16,7 +16,7 @@
     "aio/server": "../../../src/server-entry.ts",
     "aio/extras": "../../../src/extras/mod.ts",
     "aio/jsx-runtime": "../../../src/jsx-runtime.ts",
-    "esbuild": "npm:esbuild@0.24.2",
+    "esbuild": "npm:esbuild@0.25.12",
     "immer": "npm:immer@10.2.0",
     "@std/path": "jsr:@std/path@1.1.3"
   },

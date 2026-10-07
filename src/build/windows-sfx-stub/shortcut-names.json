@@ -1,0 +1,77 @@
+{
+  "comment": "App titles and the Start-menu shortcut file name (without .lnk) each gives, shared by the two functions that must agree: shortcut_file_name (src/format.rs, the one-click .exe) and shortcutFileName (src/server/sfx-shortcut.ts, the app). An empty name means no shortcut can be named.",
+  "names": [
+    [
+      "My App",
+      "My App"
+    ],
+    [
+      "myapp",
+      "myapp"
+    ],
+    [
+      "  My App  ",
+      "My App"
+    ],
+    [
+      "...hidden...",
+      "hidden"
+    ],
+    [
+      " . My.App . ",
+      "My.App"
+    ],
+    [
+      "a/b\\c:d*e?f\"g<h>i|j",
+      "a_b_c_d_e_f_g_h_i_j"
+    ],
+    [
+      "Tab\there\nnewline\u0000nul\u001fend",
+      "Tab_here_newline_nul_end"
+    ],
+    [
+      "It's $HOME `cmd` %PATH% & (x) ; 'q'",
+      "It's $HOME `cmd` %PATH% & (x) ; 'q'"
+    ],
+    [
+      "Don\u2019t \u2018quote\u2019",
+      "Don\u2019t \u2018quote\u2019"
+    ],
+    [
+      "\u00dcn\u00ef \u2014 \u65e5\u672c\u8a9e \u2603",
+      "\u00dcn\u00ef \u2014 \u65e5\u672c\u8a9e \u2603"
+    ],
+    [
+      "Rocket \ud83d\ude80 App",
+      "Rocket \ud83d\ude80 App"
+    ],
+    [
+      "\u007f del stays",
+      "\u007f del stays"
+    ],
+    [
+      "?",
+      "_"
+    ],
+    [
+      ". .",
+      ""
+    ],
+    [
+      "",
+      ""
+    ],
+    [
+      "...",
+      ""
+    ],
+    [
+      "a\u00a0",
+      "a\u00a0"
+    ],
+    [
+      "CON",
+      "CON"
+    ]
+  ]
+}

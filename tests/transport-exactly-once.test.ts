@@ -18,6 +18,8 @@
 // client code under test is the real one.
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { connectCli, connectCliUDS } from "../src/server/cli-client.ts";
+import { listenLocal } from "../src/server/local-listen.ts";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
 import { cell } from "../src/state/cell-create.ts";
 import type { CellDef } from "../src/state/cell-types.ts";
 import { dec, enc } from "../src/protocol/envelope.ts";
@@ -320,11 +322,14 @@ Deno.test({
     // A bare UDS server: send a snapshot, then a patch that cannot apply.
     // Pre-fix the client swallowed the failure and froze at its last good
     // state — no log, no request, permanent silent divergence.
-    const path = `/tmp/aio-uds-resync-${crypto.randomUUID()}.sock`;
-    const listener = Deno.listen({ transport: "unix", path });
+    const path = localEndpoint(
+      `/tmp/aio-uds-resync-${crypto.randomUUID()}.sock`,
+    );
+    const listener = listenLocal(path);
     const fromClient: string[] = [];
     const served = (async () => {
-      const conn = await listener.accept();
+      const { value: conn } = await listener[Symbol.asyncIterator]().next();
+      assert(conn, "the listener closed before the client connected");
       const w = conn.writable.getWriter();
       const enc8 = new TextEncoder();
       await w.write(enc8.encode(enc("state", { n: 1 }) + "\n"));
@@ -366,6 +371,7 @@ Deno.test({
         listener.close();
       } catch { /* already closed */ }
       await served.catch(() => {});
+      await localIdle();
       await Deno.remove(path).catch(() => {});
     }
   },

@@ -9,6 +9,7 @@
 // endings, told apart: picked · cancelled · missing · broken. They run against
 // a FAKE provider on PATH, which is the only way to exercise a native dialog in
 // CI without a human clicking.
+import { tempDirSync } from "../src/testing/temp-dir.ts";
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { pickDirectory, pickFile, pickSpec } from "../src/server/pick-path.ts";
@@ -207,8 +208,16 @@ Deno.test("pickSpec: zenity opens IN a directory (trailing separator)", () => {
   // Without the trailing slash zenity pre-fills the last segment as a FILE
   // NAME instead of opening the folder — a one-character bug that makes the
   // start directory look ignored.
-  const s = pickSpec("linux", "zenity", "file", { startIn: "/var/tmp" })!;
-  assertEquals(s.args.includes("--filename=/var/tmp/"), true);
+  // A directory that EXISTS on the host (`/var/tmp` does not on Windows, and
+  // a start path that is not a directory is read as a file), spelled the way
+  // the "linux" row spells paths.
+  const dir = tempDirSync("aio-pick-").replaceAll("\\", "/");
+  try {
+    const s = pickSpec("linux", "zenity", "file", { startIn: dir })!;
+    assertEquals(s.args.includes(`--filename=${dir}/`), true);
+  } finally {
+    Deno.removeSync(dir);
+  }
 });
 
 Deno.test("pickSpec: kdialog's filter is the mirror of zenity's", () => {

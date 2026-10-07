@@ -471,6 +471,27 @@ outcomes:
   is also served no catch-up state, so no client is handed the pre-quarantine
   snapshot as if it were current. Fix the version/hook and restart.
 
+One op is never a failed fold: the one a **kill caught in flight**. An op's row
+is written before its dispatch and a refusal deletes it after, so a server
+killed in between leaves the row of an op it refused (or had not decided). Each
+row carries a `settled` mark, written once the dispatch accepted the op and
+before anyone is told it landed. A cell's last row without the mark — and with
+no commit in the journal — was not acknowledged by the build that wrote it: if
+the method refuses it at boot, the row is removed with a warning naming the op,
+and its author's resend meets the same answer. A marked op that no longer folds
+is still a quarantine. A row an older build wrote has no mark, so it is never
+removed for you; when it is the cell's last row the refusal names the one
+statement that removes it, for the case where the method refuses it by design.
+
+Two limits. An **older build run over this data** (a rollback) folds such an
+unmarked row and acknowledges its resend without marking it; if no later op
+follows and a newer build's method then refuses it, that boot removes an op that
+build acknowledged — run one build over a data folder, as with every downgrade
+above. And the mark is **one more write per accepted op**: not measurable with
+the default `PRAGMA synchronous = NORMAL` (≈0.47 ms per op either way), a second
+`fsync` under `synchronous = FULL` (≈5 ms → ≈10 ms per op on an NVMe disk) — the
+price of the mark being on disk before the ack.
+
 The quarantine exists because of a real incident (a field report, §3.1): a field
 was added to a sync cell, every replayed op threw, the cell came up at its
 defaults, and the next compaction wrote that emptiness into the snapshot while

@@ -41,13 +41,13 @@ import {
   readOwned,
   record,
 } from "../src/server/updates-owned.ts";
+import { EXE, writeProgram } from "./fake-program-helper.ts";
 
 /** A real, runnable program that prints `body` and exits 0 — so a swap under
  *  test is a swap of something that actually runs, which is what the smoke test
  *  in `swapArtifact` measures. */
 async function program(path: string, body: string): Promise<void> {
-  await Deno.writeTextFile(path, `#!/bin/sh\necho ${body}\n`);
-  await Deno.chmod(path, 0o755);
+  await writeProgram(path, `#!/bin/sh\necho ${body}\n`);
 }
 
 async function tmp(): Promise<string> {
@@ -97,39 +97,49 @@ Deno.test("swap: the artifact path is never missing, and the old one is kept", a
   }
 });
 
-Deno.test("swap: on Unix, renaming over a file that is currently open still works", async () => {
-  // The reason the strategy is `rename` and not `writeFile`: the kernel
-  // refuses a write to a busy executable, but a rename only moves a directory
-  // entry, so the running process keeps its inode while the path resolves to
-  // the new version.
-  //
-  // This test used to run on Windows too and PASS — which was a lie. It opens a
-  // DATA file, and a data file opened with Deno's default share mode permits
-  // DELETE, so the rename succeeds. A running .EXE does not: Windows holds it
-  // with no DELETE share and the rename is ERROR_ACCESS_DENIED. The false green
-  // is why `binary` updates on Windows shipped broken. Windows now takes the
-  // rename-self-aside path, pinned by its own tests below.
-  if (Deno.build.os === "windows") return;
-  const dir = await tmp();
-  try {
-    const current = join(dir, "app");
-    await Deno.writeTextFile(current, "v1");
-    const staged = join(dir, "app.new");
-    await Deno.writeTextFile(staged, "v2");
+Deno.test(
+  "swap: on Unix, renaming over a file that is currently open still works",
+  {
+    ignore: Deno.build.os === "windows", // a Unix file-system rule; Windows: "swap: Windows renames the running image ASIDE" below
+  },
+  async () => {
+    // The reason the strategy is `rename` and not `writeFile`: the kernel
+    // refuses a write to a busy executable, but a rename only moves a directory
+    // entry, so the running process keeps its inode while the path resolves to
+    // the new version.
+    //
+    // This test used to run on Windows too and PASS — which was a lie. It opens a
+    // DATA file, and a data file opened with Deno's default share mode permits
+    // DELETE, so the rename succeeds. A running .EXE does not: Windows holds it
+    // with no DELETE share and the rename is ERROR_ACCESS_DENIED. The false green
+    // is why `binary` updates on Windows shipped broken. Windows now takes the
+    // rename-self-aside path, pinned by its own tests below.
+    const dir = await tmp();
+    try {
+      const current = join(dir, "app");
+      await Deno.writeTextFile(current, "v1");
+      const staged = join(dir, "app.new");
+      await Deno.writeTextFile(staged, "v2");
 
-    using open = await Deno.open(current, { read: true });
-    await swapArtifact({ current, staged, fromVersion: "1.0.0", smoke: false });
+      using open = await Deno.open(current, { read: true });
+      await swapArtifact({
+        current,
+        staged,
+        fromVersion: "1.0.0",
+        smoke: false,
+      });
 
-    // The open handle still sees the OLD bytes (its inode is untouched)…
-    const buf = new Uint8Array(2);
-    await open.read(buf);
-    assertEquals(new TextDecoder().decode(buf), "v1");
-    // …while the path now resolves to the new version.
-    assertEquals(await Deno.readTextFile(current), "v2");
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
-});
+      // The open handle still sees the OLD bytes (its inode is untouched)…
+      const buf = new Uint8Array(2);
+      await open.read(buf);
+      assertEquals(new TextDecoder().decode(buf), "v1");
+      // …while the path now resolves to the new version.
+      assertEquals(await Deno.readTextFile(current), "v2");
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+);
 
 Deno.test("swap: Windows renames the running image ASIDE, it never replaces it", async () => {
   // Windows permits renaming a running image; it does not permit replacing one.
@@ -205,13 +215,12 @@ Deno.test("swap: an artifact that cannot exec is REFUSED before anything moves",
   // swap succeeded, the new build died before it could count a boot attempt,
   // and the app crash-looped forever with the rollback marker untouched. The
   // predecessor asks the question while it is still the thing that works.
-  if (Deno.build.os === "windows") return; // no portable "cannot exec" stand-in
   const dir = await tmp();
   try {
     const current = join(dir, "app");
     await program(current, "v1");
     const staged = join(dir, "app.new");
-    // Not a program: no shebang, no ELF header.
+    // Not a program: no shebang, no ELF header, no PE header.
     await Deno.writeTextFile(staged, "\x7fnot-an-executable");
 
     let error = "";
@@ -237,7 +246,6 @@ Deno.test("swap: an artifact that cannot exec is REFUSED before anything moves",
 });
 
 Deno.test("swap: a staged artifact that DOES run is installed", async () => {
-  if (Deno.build.os === "windows") return; // the shell stand-in is Unix-only
   const dir = await tmp();
   try {
     const current = join(dir, "app");
@@ -257,16 +265,17 @@ Deno.test("swap: a staged artifact that DOES run is installed", async () => {
 });
 
 Deno.test("smoke test: a hanging artifact is killed, not waited on forever", async () => {
-  if (Deno.build.os === "windows") return;
   const dir = await tmp();
   try {
-    const hang = join(dir, "hang");
-    await Deno.writeTextFile(hang, "#!/bin/sh\nexec sleep 30\n");
-    await Deno.chmod(hang, 0o755);
+    const hang = join(dir, `hang${EXE}`);
+    await writeProgram(hang, "#!/bin/sh\nexec sleep 30\n");
     const started = Date.now();
     const r = await smokeTestArtifact(hang, { timeoutMs: 300 });
     assertEquals(r.ok, false);
-    assert(Date.now() - started < 10_000, "bounded");
+    // The program runs 30 s: anything well under that is the kill. Not
+    // 10 s — the probe runs off-thread, and that thread's cold start alone
+    // took 8 s on a 4-core Windows VM (10 s under a full suite: red).
+    assert(Date.now() - started < 25_000, "bounded");
     if (!r.ok) assert(r.error.includes("was killed"), r.error);
   } finally {
     await Deno.remove(dir, { recursive: true });
@@ -279,7 +288,6 @@ Deno.test("smoke test: a hanging artifact is killed, not waited on forever", asy
 // `Deno.Command` is replaced by one whose spawn blocks the same way — the probe
 // must not use it: it runs in a worker, and this thread keeps ticking.
 Deno.test("smoke test: the probe's spawn never blocks the app's thread", async () => {
-  if (Deno.build.os === "windows") return;
   const dir = await tmp();
   const real = Deno.Command;
   let gap = 0;
@@ -290,8 +298,8 @@ Deno.test("smoke test: the probe's spawn never blocks the app's thread", async (
     last = now;
   }, 20);
   try {
-    const ok = join(dir, "ok");
-    await Deno.writeTextFile(ok, "#!/bin/sh\necho 2.0.0\n");
+    const ok = join(dir, `ok${EXE}`);
+    await writeProgram(ok, "#!/bin/sh\necho 2.0.0\n");
     (Deno as { Command: unknown }).Command = class extends real {
       override spawn(): Deno.ChildProcess {
         const until = performance.now() + 1500; // CreateProcess + a scan
@@ -326,10 +334,12 @@ async function keptAside(
   record(data, path, kind, { role: "kept" });
   if (kind === "dir") await Deno.mkdir(path);
   else await Deno.writeTextFile(path, "an old version");
-  made(data, path);
-  // Distinct mtimes so "newest" is well-defined.
+  // Distinct mtimes so "newest" is well-defined — set BEFORE it is written
+  // down: on macOS a time before a file's creation moves its creation time
+  // too, which is half of the identity the record keeps.
   const t = new Date(2026, 0, day);
   await Deno.utime(path, t, t);
+  made(data, path);
 }
 
 Deno.test("swap: pruning keeps the N newest rollback targets — of the ones the updater made", async () => {
@@ -482,11 +492,12 @@ Deno.test("install dir: found only when the launcher AND electron/ are both ther
   }
 });
 
-Deno.test("directory swap: a path with a space and a quote survives it", async () => {
+Deno.test("directory swap: a path with a space and a quote survives it", {
+  ignore: Deno.build.os === "windows", // runs the Unix swap script (sh); the Windows helper is PowerShell — tests/updates-swap-windows.test.ts (its text only)
+}, async () => {
   // The old string-concatenated script broke on the first space. An install
   // directory chosen by a user, or a version string from a manifest, is not
   // ours to assume anything about.
-  if (Deno.build.os === "windows") return; // windows: tests/updates-swap-windows.test.ts
   const dir = await tmp();
   try {
     const current = join(dir, `My App "v1"`);
@@ -521,41 +532,47 @@ Deno.test("directory swap: a path with a space and a quote survives it", async (
   }
 });
 
-Deno.test("directory swap: a helper that cannot be started leaves no script behind", async () => {
-  if (Deno.build.os === "windows") return; // no script file there
-  const dir = await tmp();
-  try {
-    const current = join(dir, "MyApp");
-    await Deno.mkdir(current);
-    await Deno.mkdir(`${current}.staged-2.0.0`);
-    let script = "";
-    assertThrows(
-      () =>
-        swapDirectoryDetached({
-          current,
-          staged: `${current}.staged-2.0.0`,
-          fromVersion: "1.0.0",
-          spawn: (_c, args) => {
-            script = args[0]!;
-            throw new Deno.errors.PermissionDenied("blocked by policy");
-          },
-        }),
-      Deno.errors.PermissionDenied,
-    );
-    assertMatch(script, /aio-swap-.*\.sh$/);
-    assertThrows(() => Deno.lstatSync(script), Deno.errors.NotFound);
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
-});
+Deno.test(
+  "directory swap: a helper that cannot be started leaves no script behind",
+  {
+    ignore: Deno.build.os === "windows", // the script FILE is the Unix helper; Windows passes values in the environment, no file
+  },
+  async () => {
+    const dir = await tmp();
+    try {
+      const current = join(dir, "MyApp");
+      await Deno.mkdir(current);
+      await Deno.mkdir(`${current}.staged-2.0.0`);
+      let script = "";
+      assertThrows(
+        () =>
+          swapDirectoryDetached({
+            current,
+            staged: `${current}.staged-2.0.0`,
+            fromVersion: "1.0.0",
+            spawn: (_c, args) => {
+              script = args[0]!;
+              throw new Deno.errors.PermissionDenied("blocked by policy");
+            },
+          }),
+        Deno.errors.PermissionDenied,
+      );
+      assertMatch(script, /aio-swap-.*\.sh$/);
+      assertThrows(() => Deno.lstatSync(script), Deno.errors.NotFound);
+    } finally {
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+);
 
-Deno.test("directory swap: handed to a shell OUTSIDE both directories", async () => {
+Deno.test("directory swap: handed to a shell OUTSIDE both directories", {
+  ignore: Deno.build.os === "windows", // the Unix script file; Windows: tests/updates-swap-windows.test.ts
+}, async () => {
   // The constraint that shapes this: a process cannot move the directory it is
   // running from, and on Windows the running .exe inside it is locked outright.
   // So neither the old install nor the new one can perform the swap.
   // Windows passes values through the environment instead of a script file:
   // tests/updates-swap-windows.test.ts asserts that branch from any OS.
-  if (Deno.build.os === "windows") return;
   const dir = await tmp();
   try {
     const current = join(dir, "MyApp");
@@ -604,8 +621,9 @@ Deno.test("directory swap: handed to a shell OUTSIDE both directories", async ()
   }
 });
 
-Deno.test("directory swap: the generated script really performs the swap", async () => {
-  if (Deno.build.os === "windows") return; // windows: tests/updates-swap-windows.test.ts
+Deno.test("directory swap: the generated script really performs the swap", {
+  ignore: Deno.build.os === "windows", // runs the Unix swap script (sh); the Windows helper is PowerShell — tests/updates-swap-windows.test.ts (its text only)
+}, async () => {
   const dir = await tmp();
   try {
     const current = join(dir, "MyApp");
@@ -801,7 +819,6 @@ Deno.test("swap: the marker goes down BEFORE anything moves, naming the stable p
 });
 
 Deno.test("swap: a refused artifact leaves no marker at all", async () => {
-  if (Deno.build.os === "windows") return;
   const dir = await tmp();
   const data = await tmp();
   try {
@@ -1101,68 +1118,77 @@ Deno.test("swap: the copy a single-file update keeps is recorded as the very fil
   }
 });
 
-Deno.test("swap: the kept copy is done only when it is whole — before the new build goes in; a short one stops the update", async () => {
-  const dir = await tmp();
-  const data = await tmp();
-  const real = _swapDeps.copyFile;
-  try {
-    const current = join(dir, "app"), kept = `${current}.old-1.0.0`;
-    const swap = (to: string) =>
-      swapArtifact({
-        current,
-        staged: join(dir, `app.new-${to}`),
-        fromVersion: "1.0.0",
-        smoke: false,
-        strategy: "rename-over",
-        pending: { dataDir: data, from: "1.0.0", to },
-      });
-    await Deno.writeTextFile(current, "the old build");
-    await Deno.writeTextFile(join(dir, "app.new-2.0.0"), "the new build");
-    // The disk filled half-way through the copy.
-    _swapDeps.copyFile = async (from, to) => {
-      await Deno.writeTextFile(to, (await Deno.readTextFile(from)).slice(0, 4));
-    };
-    await assertRejects(
-      () => swap("2.0.0"),
-      Error,
-      `the copy of the running version (${kept}) has 4 of 13 bytes — ` +
-        `nothing was changed`,
-    );
-    assertEquals(await Deno.readTextFile(current), "the old build");
-    assertEquals(
-      readOwned(data).find((e) => e.path === kept)?.state,
-      "filling",
-    );
+Deno.test(
+  "swap: the kept copy is done only when it is whole — before the new build goes in; a short one stops the update",
+  {
+    ignore: Deno.build.os === "windows", // the COPY strategy (`rename-over`) is Unix's; Windows never copies — it renames the running image aside (`swapStrategy`)
+  },
+  async () => {
+    const dir = await tmp();
+    const data = await tmp();
+    const real = _swapDeps.copyFile;
+    try {
+      const current = join(dir, "app"), kept = `${current}.old-1.0.0`;
+      const swap = (to: string) =>
+        swapArtifact({
+          current,
+          staged: join(dir, `app.new-${to}`),
+          fromVersion: "1.0.0",
+          smoke: false,
+          strategy: "rename-over",
+          pending: { dataDir: data, from: "1.0.0", to },
+        });
+      await Deno.writeTextFile(current, "the old build");
+      await Deno.writeTextFile(join(dir, "app.new-2.0.0"), "the new build");
+      // The disk filled half-way through the copy.
+      _swapDeps.copyFile = async (from, to) => {
+        await Deno.writeTextFile(
+          to,
+          (await Deno.readTextFile(from)).slice(0, 4),
+        );
+      };
+      await assertRejects(
+        () => swap("2.0.0"),
+        Error,
+        `the copy of the running version (${kept}) has 4 of 13 bytes — ` +
+          `nothing was changed`,
+      );
+      assertEquals(await Deno.readTextFile(current), "the old build");
+      assertEquals(
+        readOwned(data).find((e) => e.path === kept)?.state,
+        "filling",
+      );
 
-    // A whole copy is done (no state, the very file) BEFORE the new build
-    // goes in: here the new build cannot be moved in (a folder cannot take
-    // a file's name), and the copy is already recorded as done.
-    _swapDeps.copyFile = real;
-    await Deno.mkdir(join(dir, "app.new-2.0.1"));
-    await assertRejects(() => swap("2.0.1"));
-    assertEquals(await Deno.readTextFile(current), "the old build");
-    assertEquals(
-      readOwned(data).find((e) => e.path === kept)?.state,
-      undefined,
-    );
+      // A whole copy is done (no state, the very file) BEFORE the new build
+      // goes in: here the new build cannot be moved in (a folder cannot take
+      // a file's name), and the copy is already recorded as done.
+      _swapDeps.copyFile = real;
+      await Deno.mkdir(join(dir, "app.new-2.0.1"));
+      await assertRejects(() => swap("2.0.1"));
+      assertEquals(await Deno.readTextFile(current), "the old build");
+      assertEquals(
+        readOwned(data).find((e) => e.path === kept)?.state,
+        undefined,
+      );
 
-    // (A failed swap took its staged build with it.)
-    await Deno.writeTextFile(join(dir, "app.new-2.0.0"), "the new build");
-    await swap("2.0.0");
-    assertEquals(await Deno.readTextFile(current), "the new build");
-    assertEquals(await Deno.readTextFile(kept), "the old build");
-    const done = readOwned(data).find((e) => e.path === kept)!;
-    assertEquals([done.role, done.is, done.state], [
-      "kept",
-      identity(kept)!,
-      undefined,
-    ]);
-  } finally {
-    _swapDeps.copyFile = real;
-    await Deno.remove(dir, { recursive: true });
-    await Deno.remove(data, { recursive: true });
-  }
-});
+      // (A failed swap took its staged build with it.)
+      await Deno.writeTextFile(join(dir, "app.new-2.0.0"), "the new build");
+      await swap("2.0.0");
+      assertEquals(await Deno.readTextFile(current), "the new build");
+      assertEquals(await Deno.readTextFile(kept), "the old build");
+      const done = readOwned(data).find((e) => e.path === kept)!;
+      assertEquals([done.role, done.is, done.state], [
+        "kept",
+        identity(kept)!,
+        undefined,
+      ]);
+    } finally {
+      _swapDeps.copyFile = real;
+      await Deno.remove(dir, { recursive: true });
+      await Deno.remove(data, { recursive: true });
+    }
+  },
+);
 
 Deno.test("rollback: the build that failed is set aside under a name that is on record first, as the very file — with its bytes, and off the record once deleted", async () => {
   const dir = await tmp();
@@ -1207,7 +1233,6 @@ Deno.test("rollback: the build that failed is set aside under a name that is on 
 Deno.test({
   name:
     "versioned install: a file of the user's under a temporary link's name is refused, not removed — a leftover link goes",
-  ignore: Deno.build.os === "windows", // the layout is a symlink
   fn: async () => {
     const dir = await tmp();
     try {

@@ -4,7 +4,7 @@
 // and `--safe-fix` applies the mechanical rewrite. Each fix is verified on
 // file CONTENT (what it rewrote), not just on the fix's return value.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { buildContext } from "../aiol/context.ts";
 import {
   checkAlpha52Surface,
@@ -536,8 +536,8 @@ await aio.run({ appId: "x", expose: true, key: true });
 // --safe-fix exit gating: judged from the POST-fix tree (release review #2)
 // ═════════════════════════════════════════════════════════════════════
 
-const AIOL_MOD = new URL("../aiol/mod.ts", import.meta.url).pathname;
-const REPO_CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const AIOL_MOD = fromFileUrl(new URL("../aiol/mod.ts", import.meta.url));
+const REPO_CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 async function runAiol(
   dir: string,

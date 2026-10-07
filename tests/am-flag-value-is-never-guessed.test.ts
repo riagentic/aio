@@ -24,6 +24,7 @@
 // has to grow its own opinion about them.
 import { assert, assertEquals } from "@std/assert";
 import { parseGlobalFlags } from "../src/am/am-utils.ts";
+import { fromFileUrl } from "@std/path";
 
 Deno.test("an empty value for a flag that names a target is refused", () => {
   // [argv, the flag the message must name]
@@ -171,8 +172,8 @@ Deno.test("the strictness cuts contradictions, not use", () => {
 });
 
 Deno.test("the refusal reaches the caller as a refusal (process-level)", async () => {
-  const AM = new URL("../src/am.ts", import.meta.url).pathname;
-  const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+  const AM = fromFileUrl(new URL("../src/am.ts", import.meta.url));
+  const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
   const run = async (...args: string[]) => {
     const o = await new Deno.Command(Deno.execPath(), {
       args: ["run", "-A", "--config", CONFIG, AM, ...args],

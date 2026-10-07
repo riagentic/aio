@@ -936,17 +936,34 @@ export function unresolvedTreeVersion(e: unknown): string {
 
 // ── the stamp ───────────────────────────────────────────────────────────────
 
-export type BuildStamp = BuildVersion & { aio: string; builtAt: string };
+export type BuildStamp = BuildVersion & {
+  aio: string;
+  builtAt: string;
+  /** The display name this build resolved (a target's `title`, else
+   *  deno.json's) — the name of the Windows one-click install's Start-menu
+   *  shortcut, which the app adds where its `.exe` did not
+   *  (server/sfx-shortcut.ts). Absent: none was set, or an older build. */
+  title?: string;
+  /** `false`: deno.json `build.windows.shortcut` said no shortcut. */
+  windowsShortcut?: boolean;
+};
 
 /** Write the stamp the compiled artifact carries. Returns the path. */
 export async function writeBuildStamp(
   root: string,
   bv: BuildVersion,
   aio: string,
+  shortcut: Pick<BuildStamp, "title" | "windowsShortcut"> = {},
 ): Promise<string> {
   const path = join(root, BUILD_STAMP_FILE);
   await Deno.mkdir(join(root, ".aio"), { recursive: true });
-  const stamp: BuildStamp = { ...bv, aio, builtAt: new Date().toISOString() };
+  const stamp: BuildStamp = {
+    ...bv,
+    aio,
+    builtAt: new Date().toISOString(),
+    ...(shortcut.title ? { title: shortcut.title } : {}),
+    ...(shortcut.windowsShortcut === false ? { windowsShortcut: false } : {}),
+  };
   await Deno.writeTextFile(path, JSON.stringify(stamp, null, 2) + "\n");
   return path;
 }

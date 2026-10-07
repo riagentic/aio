@@ -16,11 +16,13 @@ import { createUdsBroadcastController } from "../src/server/aio-run-helpers.ts";
 import { createCostMeter } from "../src/vitals/cost-meter.ts";
 import type { PatchEntry } from "../src/protocol/broadcast-utils.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
+import { connectLocal, type LocalConn } from "../src/server/local-listen.ts";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const PAD = "p".repeat(400); // keeps a one-field patch under the threshold
 
-function readFrames(conn: Deno.Conn): string[] {
+function readFrames(conn: LocalConn): string[] {
   const lines: string[] = [];
   const reader = conn.readable.getReader();
   const dec = new TextDecoder();
@@ -42,7 +44,7 @@ function readFrames(conn: Deno.Conn): string[] {
 
 async function setup(prefix: string, getUIState: () => unknown) {
   const dir = await tempDir(prefix);
-  const socketPath = join(dir, "debt.sock");
+  const socketPath = localEndpoint(join(dir, "debt.sock"));
   const uds = createUDSListener(socketPath, getUIState, () => {}, () => {});
   const meter = createCostMeter();
   meter.setKnownCells(["c", "f"]);
@@ -55,7 +57,7 @@ async function setup(prefix: string, getUIState: () => unknown) {
     onBroadcastRound: () => rounds++,
   });
   await wait(30);
-  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  const conn = await connectLocal(socketPath);
   const lines = readFrames(conn);
   await wait(80);
   return {
@@ -69,6 +71,7 @@ async function setup(prefix: string, getUIState: () => unknown) {
       conn.close();
       await wait(30);
       uds.shutdown();
+      await localIdle();
       await dropTempDir(dir);
     },
   };

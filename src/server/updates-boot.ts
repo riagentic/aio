@@ -74,6 +74,7 @@ import {
   writeRecordAtomic,
 } from "./updates-apply.ts";
 import type { PendingUpdate } from "./updates-apply.ts";
+import { ensureSfxShortcut } from "./sfx-shortcut.ts";
 // NOTE: updates-runtime.ts and updates-cell.ts are imported DYNAMICALLY below,
 // never at module scope. `cell()` self-registers on import, so a static value
 // import here would register the `updates` cell in every aio app ever written
@@ -499,10 +500,17 @@ export function confirmPendingUpdate(
   // The sweep first: it puts an older build's copies on the record, which is
   // all the pruning counts.
   sweepLeftovers(dataDir, pending!.artifact ?? artifactPath(), log);
-  void pruneOld(pending!.artifact ?? artifactPath(), KEEP_OLD, dataDir).catch((
-    e,
-  ) => log.warn("updates", `could not prune old installs: ${e}`));
+  _confirm.pruned = pruneOld(
+    pending!.artifact ?? artifactPath(),
+    KEEP_OLD,
+    dataDir,
+  ).catch((e) => log.warn("updates", `could not prune old installs: ${e}`));
 }
+
+/** The prune the last confirm started — never awaited by a boot; a test
+ *  waits for it instead of ending with its directory read still open (under
+ *  load: "Leaks detected", in 7 of 96 runs). @internal */
+export const _confirm = { pruned: Promise.resolve() as Promise<void> };
 
 /** What to do about a swap that could not be made, for the line that
  *  dismisses the release: which path was held — the earlier copy when the
@@ -1068,6 +1076,12 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
     deps.appVersion,
     deps.log,
   );
+  // …and gets the Start-menu shortcut its `.exe` did not add (one made by
+  // aio 1.0.17 or older), once — so that download can be deleted.
+  ensureSfxShortcut({
+    install: here ?? deps.artifact ?? artifactPath(),
+    log: deps.log,
+  });
 
   /** One check, plus whatever the policy says to do about the answer. */
   // The release this machine rolled back, for this process's life: never

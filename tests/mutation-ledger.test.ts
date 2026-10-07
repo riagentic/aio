@@ -17,8 +17,9 @@
 // tripwire that says the gate's questions are still being asked.
 import { assertEquals } from "@std/assert";
 import { LEDGER } from "../scripts/check-mutations.ts";
+import { fromFileUrl } from "@std/path";
 
-const ROOT = new URL("../", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("../", import.meta.url));
 
 /** Every test name declared in a file: `Deno.test("…"`, the object form's
  *  `name: "…"`, and template literals — a name built as

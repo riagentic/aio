@@ -299,8 +299,26 @@ export function removeDom(
       // that is the OTHER portal's content when two share a target, and
       // removing this portal by it deleted their nodes instead of its own.
       let cursor: Node | null = _advance(vnode._anchor, 1);
+      // An anchor that has left the target took the region with it: the OTHER
+      // vnode of the same portal retired it (a boundary catching on an update
+      // removes the old tree, then sweeps the half-diffed new one — and the
+      // diff had already moved each signal child's effect onto the NEW vnode).
+      // Nothing is left to remove, everything is left to release: walked as a
+      // removal, a signal child kept its subscription for good (its detached
+      // text is no child of the target) and a bare text was reported as one
+      // that "will stay on the page forever".
+      const gone = !isChildOf(vnode._anchor, target);
+      //
+      // Unless only the ANCHOR left (foreign code stripping comments): a child
+      // whose live node is still under the target is still on the page, and
+      // is removed as ever.
       for (const child of vnode.children) {
-        const at = _liveFirstDom(child) ?? cursor;
+        const live = _liveFirstDom(child);
+        if (gone && !isChildOf(live, target)) {
+          if (typeof child === "object") _removeDomCleanup(child, ctx);
+          continue;
+        }
+        const at = live ?? cursor;
         cursor = _advance(at, _domNodeCount(child));
         removeDom(target, child, ctx, at);
       }

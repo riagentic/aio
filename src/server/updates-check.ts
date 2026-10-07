@@ -706,7 +706,12 @@ export async function fetchManifest(
     // Same rule as unpackArchive / gitLsRemote: a raw ENOENT is the least
     // obvious form of "this path does not exist". A file:// channel that was
     // never published used to surface Deno's fetch wording and nothing else.
-    if (isFile && /No such file|not found|os error 2/i.test(msg)) {
+    // (Windows words a missing FOLDER — a channel never published — its own
+    // way: "The system cannot find the path specified. (os error 3)".)
+    if (
+      isFile &&
+      /No such file|not found|cannot find the path|os error 2/i.test(msg)
+    ) {
       return {
         kind: "error",
         error: missingManifestError(url, "the file does not exist"),
@@ -1072,8 +1077,10 @@ export async function fileSha256(path: string): Promise<string> {
  *  (spawned `detached`, it leads one), `taskkill /T` on Windows, where ending
  *  a process never ends its children. Never blocks: taskkill is spawned, not
  *  awaited — `outputSync` froze the event loop for as long as it ran, and a
- *  spawned taskkill still finishes when this is called on the way out. */
-function killGitTree(pid: number): void {
+ *  spawned taskkill still finishes when this is called on the way out.
+ *  Returns taskkill's own end (Windows), for a caller that has time to see
+ *  its helper out. */
+function killGitTree(pid: number): Promise<unknown> | void {
   const killGit = () => {
     try {
       Deno.kill(pid, "SIGKILL");
@@ -1081,7 +1088,7 @@ function killGitTree(pid: number): void {
   };
   try {
     if (Deno.build.os !== "windows") return Deno.kill(-pid, "SIGKILL");
-    new Deno.Command("taskkill", {
+    return new Deno.Command("taskkill", {
       args: ["/T", "/F", "/PID", String(pid)],
       cwd: neutralCwd(),
       stdin: "null",
@@ -1204,11 +1211,12 @@ export async function runBackgroundGit(
   );
   let timer: ReturnType<typeof setTimeout> | undefined;
   let pid = 0;
+  let killer: Promise<unknown> | void = undefined;
   const arm = () => {
     clearTimeout(timer);
     timer = setTimeout(() => {
       timedOut = true;
-      killGitTree(pid);
+      killer = killGitTree(pid);
       for (const c of cancels) c();
     }, timeoutMs);
   };
@@ -1251,6 +1259,9 @@ export async function runBackgroundGit(
       drain(child.stderr),
       child.status,
     ]);
+    // Windows: taskkill is a child of ours too — "leaves nothing behind"
+    // includes it, so it is gone before the caller hears the verdict.
+    await killer;
     return {
       ok: status.success && !timedOut,
       timedOut,

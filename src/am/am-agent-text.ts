@@ -582,9 +582,10 @@ export const BRIEF_CELL_OPTIONS: readonly {
       'identity: { arr: "id" }, offline: { retention: "4h" } } → DATA',
   },
   {
-    keys: ["worker"],
+    keys: ["worker", "workerRespawn"],
     text:
-      "true: methods on their own Deno thread (not with sync/scope/listensTo/selectors)",
+      "true: methods on their own Deno thread (not with sync/scope/listensTo/selectors);\n" +
+      "+ workerRespawn: true restarts a crashed worker (else dead until restart)",
   },
   {
     keys: ["version", "onMigrate"],
@@ -657,6 +658,7 @@ export const BRIEF_RUN_KEYS: readonly {
       "maxConnections",
       "childWindows",
       "electron { requireSandbox, unsandboxedChildWindows, permissions, allowLocalPeers }",
+      "electron { webviewTag, guestDownloads }",
     ],
   },
   { group: "ui", keys: ["ui (below)"] },

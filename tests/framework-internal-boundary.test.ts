@@ -22,6 +22,8 @@
 // because nothing at all reached dispatch cannot masquerade as enforcement.
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
+import { connectLocal } from "../src/server/local-listen.ts";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
 import { dec, enc } from "../src/protocol/envelope.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { createWsManager } from "../src/server/server-ws.ts";
@@ -197,7 +199,7 @@ async function udsRoundTrip(
 ): Promise<{ actions: string[]; ops: string[] }> {
   const actions: string[] = [];
   const ops: string[] = [];
-  const socketPath = join(await Deno.makeTempDir(), "fi.sock");
+  const socketPath = localEndpoint(join(await Deno.makeTempDir(), "fi.sock"));
   const handler = syncHandler ?? {
     handleOp: (op: unknown) => ops.push((op as { action: string }).action),
     handleSync: () => {},
@@ -214,7 +216,7 @@ async function udsRoundTrip(
     handler as any,
   );
   await settle();
-  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  const conn = await connectLocal(socketPath);
   const writer = conn.writable.getWriter();
   for (const f of frames) {
     await writer.write(new TextEncoder().encode(f + "\n"));
@@ -225,6 +227,7 @@ async function udsRoundTrip(
     conn.close();
   } catch { /* already closed */ }
   uds.shutdown();
+  await localIdle();
   await settle();
   return { actions, ops };
 }

@@ -162,7 +162,6 @@ async function reap(pids: number[]): Promise<void> {
 Deno.test({
   name:
     "am start through a launcher slower than the app's boot: the app takes am's lock over and starts",
-  ignore: Deno.build.os === "windows", // the shim is a shell script
   async fn() {
     const dir = await makeApp("counter", "am-handoff-");
     const apps = await tempDir("am-handoff-apps-");

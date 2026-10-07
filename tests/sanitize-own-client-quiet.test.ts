@@ -24,9 +24,22 @@ import { getLogger, setLogger } from "../src/diagnostics/logger-api.ts";
 import { sanitizeClientAction } from "../src/server/server-ws.ts";
 import { createUDSListener } from "../src/server/uds.ts";
 import { tempDir } from "../src/testing/temp-dir.ts";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
+import { connectLocal } from "../src/server/local-listen.ts";
 
 type Ack = { cid: string; ok: boolean; error?: string; value?: unknown };
 const settle = (ms = 300) => new Promise((r) => setTimeout(r, ms));
+/** The answer, when it comes — not "whatever had arrived after 300 ms": on a
+ *  loaded Windows run the ack took longer and the test read `undefined`. The
+ *  warning under test is written before the ack is sent, so nothing is missed
+ *  by not sleeping. Ten seconds without one is said as that. */
+async function until<T>(find: () => T | undefined): Promise<T> {
+  for (const end = Date.now() + 10_000; Date.now() < end; await settle(10)) {
+    const v = find();
+    if (v !== undefined) return v;
+  }
+  throw new Error("no ack within 10 s");
+}
 
 /** Capture every WARN+ line while `fn` runs, on top of whatever sink is
  *  active (aio.run installs its own, so this wraps rather than replaces). */
@@ -151,8 +164,7 @@ Deno.test("ws: an async call tagged the way aio's client tags it is quiet AND an
         payload: { _callId: "a1" },
       }),
     );
-    await settle();
-    const ack = acks.find((a) => a.cid === "a1");
+    const ack = await until(() => acks.find((a) => a.cid === "a1"));
     assertEquals(ack?.ok, true, JSON.stringify(ack));
     assertEquals(ack?.value, 42, "the return value must still cross");
     const accused = warns.filter((w) => /trusted field/.test(w));
@@ -171,10 +183,10 @@ Deno.test("ws: an async call tagged the way aio's client tags it is quiet AND an
 });
 
 Deno.test("uds: the same call is quiet AND answered on the desktop transport", async () => {
-  const socketPath = join(
+  const socketPath = localEndpoint(join(
     await tempDir("aio-sanitize-own-client-quiet-"),
     "sanitize-quiet.sock",
-  );
+  ));
   const seen: Record<string, unknown>[] = [];
   const uds = createUDSListener(
     socketPath,
@@ -186,7 +198,7 @@ Deno.test("uds: the same call is quiet AND answered on the desktop transport", a
     () => {},
   );
   await settle(50);
-  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  const conn = await connectLocal(socketPath);
   const lines: string[] = [];
   const reader = conn.readable.getReader();
   const decoder = new TextDecoder();
@@ -217,15 +229,15 @@ Deno.test("uds: the same call is quiet AND answered on the desktop transport", a
       ),
     );
     w.releaseLock();
-    await settle();
+    const ack = await until(() =>
+      lines.map((l) => dec(l)).find((f) => f?.t === "ack")?.d as Ack | undefined
+    );
     assertEquals(seen.length, 1);
     assertEquals(
       (seen[0]!.payload as Record<string, unknown>)._callId,
       undefined,
       "still stripped before dispatch",
     );
-    const ack = lines.map((l) => dec(l)).find((f) => f?.t === "ack")
-      ?.d as Ack | undefined;
     assertEquals(ack?.ok, true, JSON.stringify(ack));
     assertEquals(ack?.value, 42);
     const accused = warns.filter((w) => /trusted field/.test(w));
@@ -235,5 +247,6 @@ Deno.test("uds: the same call is quiet AND answered on the desktop transport", a
     conn.close();
     await settle(30);
     uds.shutdown();
+    await localIdle();
   }
 });

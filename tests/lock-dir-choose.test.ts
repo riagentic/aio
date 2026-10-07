@@ -29,6 +29,16 @@ Deno.test({
         assertEquals(_chooseLockDir(base, "-a"), `${base}/aio-a`);
         assertEquals(Deno.statSync(`${base}/aio-a`).mode! & 0o777, 0o700);
 
+        // 1b. A shared directory of OURS that is already there, wider than
+        // 0700 (made by hand, or by anything with no mode under 022): it is
+        // narrowed and kept — not refused as "not owner-only" and left for
+        // the uid sibling, where `am` does not look. A new one is made 0700
+        // in one step, so only this case shows the chmod.
+        await Deno.mkdir(`${base}/aio-wide`);
+        await Deno.chmod(`${base}/aio-wide`, 0o755);
+        assertEquals(_chooseLockDir(base, "-wide"), `${base}/aio-wide`);
+        assertEquals(Deno.statSync(`${base}/aio-wide`).mode! & 0o777, 0o700);
+
         // 2. The shared one is unusable: the uid-scoped sibling, also 0700.
         await Deno.writeTextFile(`${base}/aio-b`, "not a directory");
         assertEquals(_chooseLockDir(base, "-b"), `${base}/aio-u${uid}-b`);

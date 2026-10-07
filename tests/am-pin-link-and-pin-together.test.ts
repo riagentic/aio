@@ -5,11 +5,11 @@
 // the app still declared the old one — the disagreement doctor and aiol flag.
 // Runs against a THROWAWAY framework repo, never this checkout.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const AM = new URL("../src/am.ts", import.meta.url).pathname;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const AM = fromFileUrl(new URL("../src/am.ts", import.meta.url));
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 const GIT_ENV = {
   GIT_AUTHOR_NAME: "aio test",
   GIT_AUTHOR_EMAIL: "test@example.invalid",
@@ -38,10 +38,16 @@ async function denoDir(): Promise<string> {
   return JSON.parse(new TextDecoder().decode(o.stdout)).denoDir;
 }
 
+/** Windows finds `git` on PATH only through PATHEXT (`.EXE`); a cleared
+ *  environment must carry it, as every real one does. */
+const PATHEXT: Record<string, string> = Deno.env.has("PATHEXT")
+  ? { PATHEXT: Deno.env.get("PATHEXT")! }
+  : {};
+
 Deno.test({
   name: "am pin: a pin that cannot be recorded puts dep/aio back",
   // A read-only file stops only a non-root writer.
-  ignore: Deno.build.os === "windows" || Deno.uid() === 0,
+  ignore: Deno.uid() === 0,
   fn: async () => {
     const base = await tempDir("am-pin-together-");
     const app = join(base, "app");
@@ -81,6 +87,7 @@ Deno.test({
         clearEnv: true,
         env: {
           PATH: Deno.env.get("PATH") ?? "/usr/bin:/bin",
+          ...PATHEXT,
           DENO_DIR: await denoDir(),
           HOME: join(base, "home"),
           AIO_APPS_DIR: join(base, "apps"),
@@ -113,7 +120,7 @@ Deno.test({
 // pin still agree". It removes the pin.local (and the `.aio/`) it made now.
 Deno.test({
   name: "am pin <path>: a pin.local it wrote goes too when the pin fails",
-  ignore: Deno.build.os === "windows" || Deno.uid() === 0,
+  ignore: Deno.uid() === 0,
   fn: async () => {
     const base = await tempDir("am-pin-local-");
     const app = join(base, "app");
@@ -139,6 +146,7 @@ Deno.test({
         clearEnv: true,
         env: {
           PATH: Deno.env.get("PATH") ?? "/usr/bin:/bin",
+          ...PATHEXT,
           DENO_DIR: await denoDir(),
           HOME: join(base, "home"),
           AIO_APPS_DIR: join(base, "apps"),

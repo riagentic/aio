@@ -83,6 +83,9 @@ Deno.test("drift refusal: a real dev boot under AIO_APPS_DIR names the data dir 
     assertStringIncludes(msg, "`am data`");
     assertStringIncludes(msg, "`am backup`");
     assertStringIncludes(msg, `\`rm -r ${data}\``);
+    // …and the removal it advises WORKS: the refused boot let go of the
+    // database (Windows refuses to remove a file a process still holds).
+    await Deno.remove(data, { recursive: true });
   } finally {
     Object.defineProperty(Deno, "args", argsDesc);
     _resetParsedCli();
@@ -100,9 +103,13 @@ Deno.test("drift refusal: a dbPath outside the data dir is named, and removing d
   });
   assertStringIncludes(msg, "data: /home/u/.x/data");
   assertStringIncludes(msg, "db: /srv/x/state.db");
+  // As the host's shell takes several paths: PowerShell's `rm` wants one
+  // comma-separated list, and refuses three words.
   assertStringIncludes(
     msg,
-    "`rm /srv/x/state.db /srv/x/state.db-wal /srv/x/state.db-shm`",
+    Deno.build.os === "windows"
+      ? "`rm /srv/x/state.db, /srv/x/state.db-wal, /srv/x/state.db-shm`"
+      : "`rm /srv/x/state.db /srv/x/state.db-wal /srv/x/state.db-shm`",
   );
   assert(!msg.includes("rm -r"), msg);
   assert(!msg.includes("AIO_APPS_DIR"), "no env note when it placed nothing");

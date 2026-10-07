@@ -10,7 +10,7 @@
 // import map and the same entry — `write: false` is the only difference —
 // and refuses exactly what the build refuses, with the same words.
 
-import { basename, join, relative, resolve } from "@std/path";
+import { basename, dirname, join, relative, resolve } from "@std/path";
 import { BUNDLE_JS, UI_ENTRY } from "../server/app-files.ts";
 import type { ShareRoot } from "../server/app-dirs.ts";
 import { matchShare } from "../server/app-dirs.ts";
@@ -333,7 +333,7 @@ export async function bundleClient(
       ...(format === "iife" ? { define: IIFE_META_DEFINE } : {}),
       alias,
       plugins,
-      nodePaths: [join(o.root, "node_modules")],
+      nodePaths: bundleNodePaths(o.root),
       logLevel: o.write ? "warning" : "silent",
       // The module graph esbuild actually read — the freshness cache stats
       // THESE, and the audit judges THESE.
@@ -528,4 +528,84 @@ export async function judgeClientBundle(
         "same throw happens there at load.",
   };
   return refuse([finding], ev.ms);
+}
+
+/** Where esbuild may look for an npm package that a file OUTSIDE the app
+ *  imports — the framework's own files, when aio is path-pinned: the app's
+ *  `node_modules`, then that of the nearest enclosing PROJECT (a directory with a
+ *  `deno.json`, `deno.jsonc` or `package.json`).
+ *
+ *  The enclosing ones are for a workspace: Deno installs a member's packages
+ *  into the workspace ROOT's `node_modules`, so the member's own does not
+ *  exist and the framework's `import "immer"` could not be resolved ("Could
+ *  not resolve "immer"") — while the dev server, which asks Deno
+ *  (`import.meta.resolve`), served the same app. It went unseen because
+ *  aio's own checkout has a `node_modules` that node's walk-up reached from
+ *  the framework files; a checkout without one (a real Mac, a Windows VM,
+ *  a fresh clone) showed it. A stray `node_modules` in a directory that is no
+ *  project (`~/node_modules`) is not taken, nor is anything above the nearest
+ *  enclosing project or above the app's repository. `exists` is a seam for the test. */
+export function bundleNodePaths(
+  root: string,
+  exists: (path: string) => boolean = (p) => {
+    try {
+      Deno.statSync(p);
+      return true;
+    } catch {
+      return false; // aio-ok: absent (or unreadable) is "not there"
+    }
+  },
+): string[] {
+  const out = [join(root, "node_modules")];
+  // An app that is its OWN repository root has nothing enclosing it that is
+  // its: the `.git` stop below is tested on ancestors only, so without this
+  // `~/proj/app/.git` still took `~/node_modules` beside `~/package.json`.
+  // (A workspace member is never its own repository root.)
+  if (exists(join(resolve(root), ".git"))) return out;
+  for (let dir = dirname(resolve(root));; dir = dirname(dir)) {
+    const nm = join(dir, "node_modules");
+    if (
+      exists(nm) &&
+      ["deno.json", "deno.jsonc", "package.json"].some((f) =>
+        exists(join(dir, f))
+      )
+    ) {
+      // The NEAREST enclosing project is the workspace root; one further up
+      // is somebody else's (`~/package.json` beside `~/node_modules`).
+      out.push(nm);
+      break;
+    }
+    // Never above the repository the app lives in.
+    if (exists(join(dir, ".git")) || dirname(dir) === dir) break;
+  }
+  return out;
+}
+
+/** esbuild's `Could not resolve "<pkg>"` for a PACKAGE that no `node_modules`
+ *  the bundle searches holds, said with the command that puts it there: a
+ *  checkout whose packages were never installed (amui before its first run)
+ *  failed with the bundler's bare line, which names no fix. `--entrypoint`
+ *  installs what the UI reaches and adds nothing to the project's lock.
+ *  Null for any other error. `exists` is a seam for the test. */
+export function explainMissingPackage(
+  text: string,
+  root: string,
+  uiEntry: string,
+  exists?: (path: string) => boolean,
+): string | null {
+  const pkg = /Could not resolve "((?:@[\w.-]+\/)?[\w][\w.-]*)(?:\/[^"]*)?"/
+    .exec(text)?.[1];
+  if (!pkg || pkg === "aio") return null; // the framework is an alias, not a package
+  const has = exists ?? ((p: string) => {
+    try {
+      Deno.statSync(p);
+      return true;
+    } catch {
+      return false; // aio-ok: absent (or unreadable) is "not there"
+    }
+  });
+  if (bundleNodePaths(root, has).some((nm) => has(join(nm, pkg)))) return null;
+  return `the package "${pkg}" is not installed in ${
+    join(root, "node_modules")
+  } — run \`deno install --entrypoint ${uiEntry}\` in ${root}, then build again`;
 }

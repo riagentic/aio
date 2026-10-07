@@ -22,6 +22,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { cell, composeCells } from "../src/state/cell.ts";
 import { until } from "../src/state/async-helpers.ts";
+import { fromFileUrl } from "@std/path";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -124,7 +125,7 @@ console.log(JSON.stringify({ allocPerStep, retained, steps: ${steps} }));
   const out = await new Deno.Command(Deno.execPath(), {
     args: ["eval", "--v8-flags=--expose-gc", code],
     // The repo root, so the child resolves the same import map (`immer`).
-    cwd: new URL("../", import.meta.url).pathname,
+    cwd: fromFileUrl(new URL("../", import.meta.url)),
     stdout: "piped",
     stderr: "piped",
   }).output();

@@ -8,11 +8,11 @@
 // one. This lays the output out beside real cells and runs `deno check` and
 // `deno test` on it.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { generateReplayTest } from "../src/am/record.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 async function deno(args: string[], cwd: string) {
   const o = await new Deno.Command(Deno.execPath(), {
@@ -114,7 +114,7 @@ export { timerCell };
         "-A",
         "--config",
         CONFIG,
-        new URL("../src/am.ts", import.meta.url).pathname,
+        fromFileUrl(new URL("../src/am.ts", import.meta.url)),
         "record",
         "tests/rec.test.ts",
         `--from=${journal}`,

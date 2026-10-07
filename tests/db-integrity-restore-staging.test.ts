@@ -14,7 +14,7 @@
 // The kill is announced by the injected copy itself (half the bytes written,
 // then SIGKILL) and asserted through a marker.
 import { assert, assertEquals, assertRejects } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { DatabaseSync } from "node:sqlite";
 import type { DB } from "../src/db/types.ts";
 import {
@@ -24,10 +24,11 @@ import {
   snapshotPathFor,
 } from "../src/server/db-integrity.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const INTEGRITY = new URL("../src/server/db-integrity.ts", import.meta.url)
   .href;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 const quiet = { info() {}, warn() {}, error() {} };
 const damaged = () =>
@@ -50,7 +51,7 @@ async function seed(dir: string) {
 
 // The recovery as boot runs it, dying HALFWAY through the snapshot copy.
 const CRASH = `
-import { checkAndRecover } from "${INTEGRITY}";
+import { checkAndRecover } from "${spec(INTEGRITY)}";
 const dbPath = Deno.env.get("DB");
 await checkAndRecover({
   db: { checkIntegrity: async () => ({ ok: false, problems: ["torn"] }),

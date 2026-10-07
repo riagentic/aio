@@ -7,7 +7,7 @@
 // `a<b,c>(d??0)` in a `.ts` file is a generic CALL of `a`. Dev returned
 // `[true, true]`; the compiled build threw `a is not a function`.
 import { assert, assertEquals, assertRejects } from "@std/assert";
-import { join, toFileUrl } from "@std/path";
+import { join, normalize, toFileUrl } from "@std/path";
 import * as esbuild from "esbuild";
 import {
   KEEP_NAME,
@@ -245,7 +245,8 @@ Deno.test("minify fallback: such a module ships as written with one warning nami
         ]
       ) {
         const said = warns.filter((w) =>
-          w.includes(`${rel} ships UN-minified`)
+          // The warning names the file as this OS spells its path.
+          w.includes(`${normalize(rel!)} ships UN-minified`)
         );
         assertEquals(said.length, 1, `${rel}:\n${warns.join("\n")}`);
         assert(said[0]!.includes(why!), said[0]);

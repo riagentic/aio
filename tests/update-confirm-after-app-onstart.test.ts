@@ -5,7 +5,7 @@
 // 3.0.0 that exits in onStart, and the installed app never started again).
 // Child processes, because the failure is the process ending.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import {
   bakedClient,
   pendingPath,
@@ -17,7 +17,7 @@ import {
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const MOD = new URL("../mod.ts", import.meta.url).href;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 async function bootWithPending(hook: string, exit = 7, bootAgain?: string) {
   const dir = await tempDir("aio-confirm-onstart-");

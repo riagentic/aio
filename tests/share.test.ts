@@ -6,7 +6,7 @@
 // outside the repository, one that does not exist, an UNDECLARED symlink out
 // of the app root, and a symlink out of the share itself.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join, resolve } from "@std/path";
 import {
   matchShare,
   repoRootOf,
@@ -19,31 +19,38 @@ import {
 
 import { _shareRoots } from "../src/server/server.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
-const ROOT = new URL("..", import.meta.url).pathname;
+import { fixtureNodeModules, linkDir } from "./symlink-helper.ts";
+import { spec } from "./module-spec-helper.ts";
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 // ── the resolver ─────────────────────────────────────────────────────────────
 
+// The fixture paths as this OS spells them: `/repo` here, `C:\\repo` on Windows —
+// the resolver answers with `resolve()`d paths, so the fixture is built the
+// same way.
+const P = (p: string) => resolve(p);
+
 Deno.test("share: resolves to /<basename> inside the repo; refuses missing, escaping and colliding entries", () => {
   const dirs = new Set([
-    "/repo/shared",
-    "/repo/lib/shared",
-    "/repo/apps/a",
-    "/elsewhere/shared",
+    P("/repo/shared"),
+    P("/repo/lib/shared"),
+    P("/repo/apps/a"),
+    P("/elsewhere/shared"),
   ]);
   const probe = {
     isDirectory: (p: string) => dirs.has(p),
     realPath: (p: string) => p,
-    repoRoot: "/repo",
+    repoRoot: P("/repo"),
   };
-  assertEquals(resolveShare("/repo/apps/a", undefined, probe), []);
-  assertEquals(resolveShare("/repo/apps/a", ["../../shared"], probe), [
-    { prefix: "/shared", dir: "/repo/shared", declared: "../../shared" },
+  assertEquals(resolveShare(P("/repo/apps/a"), undefined, probe), []);
+  assertEquals(resolveShare(P("/repo/apps/a"), ["../../shared"], probe), [
+    { prefix: "/shared", dir: P("/repo/shared"), declared: "../../shared" },
   ]);
 
   const refuse = (raw: unknown) => {
     let msg = "";
     try {
-      resolveShare("/repo/apps/a", raw, probe);
+      resolveShare(P("/repo/apps/a"), raw, probe);
     } catch (e) {
       msg = String(e);
     }
@@ -51,9 +58,9 @@ Deno.test("share: resolves to /<basename> inside the repo; refuses missing, esca
     return msg;
   };
   assertStringIncludes(refuse(["../../nope"]), "is not a directory");
-  assertStringIncludes(refuse(["../../nope"]), "/repo/nope");
+  assertStringIncludes(refuse(["../../nope"]), P("/repo/nope"));
   const out = refuse(["../../../elsewhere/shared"]);
-  assertStringIncludes(out, "OUTSIDE the repository root /repo");
+  assertStringIncludes(out, `OUTSIDE the repository root ${P("/repo")}`);
   const dup = refuse(["../../shared", "../../lib/shared"]);
   assertStringIncludes(dup, 'would both be served as "/shared/');
   assertStringIncludes(refuse("../shared"), "must be an array");
@@ -62,12 +69,13 @@ Deno.test("share: resolves to /<basename> inside the repo; refuses missing, esca
   // A symlink INSIDE the repo that points OUT is refused by its real path.
   const real = {
     ...probe,
-    realPath: (p: string) => p === "/repo/shared" ? "/elsewhere/shared" : p,
+    realPath: (p: string) =>
+      p === P("/repo/shared") ? P("/elsewhere/shared") : p,
   };
   assertStringIncludes(
     (() => {
       try {
-        resolveShare("/repo/apps/a", ["../../shared"], real);
+        resolveShare(P("/repo/apps/a"), ["../../shared"], real);
         return "";
       } catch (e) {
         return String(e);
@@ -77,7 +85,7 @@ Deno.test("share: resolves to /<basename> inside the repo; refuses missing, esca
   );
 
   // Matching is by prefix + "/", never by string prefix alone.
-  const shares = resolveShare("/repo/apps/a", ["../../shared"], probe);
+  const shares = resolveShare(P("/repo/apps/a"), ["../../shared"], probe);
   assertEquals(matchShare(shares, "/shared/x/y.ts"), {
     share: shares[0]!,
     rel: "x/y.ts",
@@ -87,10 +95,17 @@ Deno.test("share: resolves to /<basename> inside the repo; refuses missing, esca
 });
 
 Deno.test("share: the repository root is the nearest .git, else the project root itself", () => {
-  const has = new Set(["/repo/.git"]);
-  assertEquals(repoRootOf("/repo/apps/a/src", (p) => has.has(p)), "/repo");
-  assertEquals(repoRootOf("/repo", (p) => has.has(p)), "/repo");
-  assertEquals(repoRootOf("/lonely/app", () => false), "/lonely/app");
+  // The inputs, spelled once for this host; what comes back is compared with
+  // the SAME strings, so the function is never its own expectation.
+  const repo = P("/repo");
+  const lonely = P("/lonely/app");
+  const has = new Set([P("/repo/.git")]);
+  assertEquals(
+    repoRootOf(P("/repo/apps/a/src"), (p) => has.has(p)),
+    repo,
+  );
+  assertEquals(repoRootOf(repo, (p) => has.has(p)), repo);
+  assertEquals(repoRootOf(lonely, () => false), lonely);
 });
 
 // ── the dev server ───────────────────────────────────────────────────────────
@@ -123,9 +138,9 @@ Deno.test("share: the dev server serves a declared share, still refuses an undec
     await Deno.writeTextFile(join(repo, "shared", "util.css"), "/* shared */");
     await Deno.writeTextFile(join(outside, "secret.css"), "/* outside */");
     // Undeclared: a symlink from the app root to somewhere outside it.
-    await Deno.symlink(outside, join(app, "linked"));
+    await linkDir(outside, join(app, "linked"));
     // Declared share, but a symlink INSIDE it escapes the repo.
-    await Deno.symlink(outside, join(repo, "shared", "escape"));
+    await linkDir(outside, join(repo, "shared", "escape"));
 
     const share = resolveShare(join(repo, "apps", "a"), ["../../shared"]);
     const { serveStatic } = createStaticHandler(
@@ -189,13 +204,13 @@ async function makeRepo(opts: { share?: string[]; importPath: string }) {
         lib: ["deno.ns", "dom", "dom.iterable"],
       },
       imports: {
-        "aio": `${ROOT}mod.ts`,
-        "aio/jsx-runtime": `${ROOT}src/jsx-runtime.ts`,
+        "aio": `${spec(ROOT)}mod.ts`,
+        "aio/jsx-runtime": `${spec(ROOT)}src/jsx-runtime.ts`,
         "immer": "npm:immer@10.2.0",
       },
     }),
   );
-  await Deno.symlink(`${ROOT}node_modules`, join(app, "node_modules"));
+  await fixtureNodeModules(app);
   await Deno.writeTextFile(
     join(app, "src", "App.tsx"),
     `import { GREETING } from "${opts.importPath}";
@@ -209,8 +224,8 @@ async function bundle(app: string) {
   await Deno.mkdir(join(app, ".aio-build"), { recursive: true });
   await Deno.writeTextFile(
     runner,
-    `import { runBundle } from "${ROOT}src/build/build-bundle.ts";
-import { resolveAppDir } from "${ROOT}src/build/build-config.ts";
+    `import { runBundle } from "${spec(ROOT)}src/build/build-bundle.ts";
+import { resolveAppDir } from "${spec(ROOT)}src/build/build-config.ts";
 const root = ${JSON.stringify(app)};
 const mainConfig = JSON.parse(await Deno.readTextFile(root + "/deno.json"));
 const configEntry = mainConfig.entry ?? "src/app.ts";
@@ -232,7 +247,10 @@ await runBundle({
   const d = new TextDecoder();
   return {
     code: out.code,
-    stderr: d.decode(out.stderr) + d.decode(out.stdout),
+    // The build word-wraps its refusals to the terminal width, so WHERE a
+    // sentence breaks depends on how long this machine's temp path is: the
+    // text is asserted on with the wrapping undone.
+    stderr: (d.decode(out.stderr) + d.decode(out.stdout)).replace(/\s+/g, " "),
     js: await Deno.readTextFile(join(app, "dist", "app.js")).catch(() => ""),
   };
 }

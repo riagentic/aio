@@ -5,13 +5,14 @@
 // "downloading", which also refuses every later check), and the poll — which
 // re-arms only after a check returns — never ran again for the process's life.
 import { assert, assertMatch } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import {
   downloadArtifact,
   fetchManifest,
   gitLsRemote,
 } from "../src/server/updates-check.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
 /** Accepts TCP, reads nothing, answers nothing — until closed. */
 function silentHost() {
@@ -82,7 +83,7 @@ function alive(pid: number): boolean {
 
 Deno.test({
   name: "updates: a timed-out git ls-remote leaves no process behind",
-  ignore: Deno.build.os !== "linux",
+  ignore: Deno.build.os !== "linux", // descendants are read from /proc
   async fn() {
     await using host = silentHost();
     const before = new Set(descendants());
@@ -107,14 +108,14 @@ Deno.test({
   // terminal's Ctrl-C no longer reaches it: an app stopped during its boot
   // check against a stalled host left git + its transport helper behind.
   name: "updates: SIGINT during a stalled boot ls-remote leaves no git behind",
-  ignore: Deno.build.os !== "linux",
+  ignore: Deno.build.os !== "linux", // descendants are read from /proc
   async fn() {
     await using host = silentHost();
     const dir = await tempDir("aio-upd-sigint-");
-    const root = new URL("..", import.meta.url).pathname;
+    const root = fromFileUrl(new URL("..", import.meta.url));
     await Deno.writeTextFile(
       join(dir, "app.ts"),
-      `import { aio } from "${root}mod.ts";
+      `import { aio } from "${spec(root)}mod.ts";
 await aio.run({
   appId: "upd-sigint",
   client: "server-only",
@@ -183,7 +184,6 @@ await aio.run({
 
 Deno.test({
   name: "updates: an auth challenge on a poll never runs an askpass program",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("aio-upd-askpass-");
     const marker = join(dir, "asked");

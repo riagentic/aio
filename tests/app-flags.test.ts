@@ -24,6 +24,7 @@ import {
   declareAppFlags,
   parseCli,
 } from "../src/server/aio-cli.ts";
+import { fromFileUrl } from "@std/path";
 
 function reset() {
   _resetParsedCli();
@@ -98,7 +99,7 @@ Deno.test("appFlags: declaring resets a parse made under the old vocabulary", ()
 // This drives the real binary, because `Deno.args` is the whole point: a
 // harness that hands the parser a fabricated array cannot see this bug. It is
 // the transport-boundary gap in todo.md, in miniature.
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 async function bootWithArgs(
   args: string[],

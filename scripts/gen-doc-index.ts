@@ -3,8 +3,9 @@
 // Generated (never hand-edited) so it CANNOT drift: `deno task update:docs`
 // rewrites it, `deno task update:docs -- --check` gates freshness in CI.
 import { walk } from "jsr:@std/fs@1/walk";
+import { fromFileUrl } from "@std/path";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 const OUT = `${ROOT}docs/content.md`;
 
 /** Section order + display names. Directories not listed sort last. */

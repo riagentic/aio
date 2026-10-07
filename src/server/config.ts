@@ -164,6 +164,14 @@ export const VALID_BUILD_KEYS = new Set<string>([
   // it does nothing". `tests/build-block-shape-and-typos.test.ts` now derives
   // the readers from the source, so the next key cannot be forgotten here.
   "chromiumExtras",
+  // The <webview> guest preload files an Electron package ships — read by
+  // `declaredGuestPreloads` (server/guest-preloads.ts): the build stages
+  // them, the window resolves a `guestPreload()` name against them.
+  "guestPreloads",
+  // `true` | `"strict"` — read by build-all.ts through `smokeMode`
+  // (build/smoke.ts): start each built artifact and fail the build when it
+  // does not come up clean. `--smoke` / `--smoke=strict` on the command line.
+  "smoke",
   // `{ shortcut }` — read by build-config.ts (`resolveWindowsShortcut`):
   // whether the one-click Windows `.exe` adds a Start-menu shortcut.
   "windows",
@@ -566,11 +574,11 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
   ],
   childWindows: [
     "false",
-    "allow Electron child windows via __aioIPC.openWindow (off — real attack surface)",
+    "Electron: allow child windows via __aioIPC.openWindow AND the <webview> tag (off — real attack surface; electron.webviewTag is the tag alone)",
   ],
   electron: [
     "{}",
-    "the Electron process's own security decisions — { requireSandbox } refuses to launch rather than fall back to --no-sandbox, { unsandboxedChildWindows } lets openWindow ask for sandbox:false, { permissions } is the app page's exact permission allow-list (guests then get none), { allowLocalPeers } lets other processes of the same OS user open a production app's local socket (off: only the app's own window may); all default to what aio has always done",
+    "the Electron process's own security decisions — { requireSandbox } refuses to launch rather than fall back to --no-sandbox, { unsandboxedChildWindows } lets openWindow ask for sandbox:false, { webviewTag } enables <webview> without openWindow, { guestDownloads } lets an embedded or child page save files, { permissions } is the app page's exact permission allow-list (guests then get none), { allowLocalPeers } lets other processes of the same OS user open a production app's local socket (off: only the app's own window may); all default to what aio has always done",
   ],
   libraryMode: [
     "false",
@@ -1325,6 +1333,8 @@ export const NESTED_CONFIGS: Record<string, () => Set<string>> = {
 export const VALID_ELECTRON_KEYS: Set<string> = new Set([
   "requireSandbox",
   "unsandboxedChildWindows",
+  "webviewTag",
+  "guestDownloads",
   "permissions",
   "allowLocalPeers",
 ]);

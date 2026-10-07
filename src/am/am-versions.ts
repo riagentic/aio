@@ -127,10 +127,29 @@ export function gitEnvFor(
   });
 }
 
+/** `git` could not be STARTED — which is not "git ran and said no", and was
+ *  reported as that: an `am` run from an environment without `PATHEXT`
+ *  (Windows, a cleared env) said its own install "is not a git clone" and
+ *  told the user to reinstall. What the spawn said, and the one cause that
+ *  is not obvious. Pure. @internal */
+export function gitSpawnFailure(
+  e: unknown,
+  os: typeof Deno.build.os = Deno.build.os,
+  hasPathext: boolean = !!Deno.env.get("PATHEXT"),
+): string {
+  return `could not start git: ${e instanceof Error ? e.message : String(e)}` +
+    ` — git did not run, so this says nothing about the repository.\n` +
+    (os === "windows" && !hasPathext
+      ? `  PATHEXT is not set in this environment, and Windows finds git.exe ` +
+        `from the name "git" only through it.\n  fix: run am from an ` +
+        `environment that keeps PATHEXT (e.g. PATHEXT=.COM;.EXE;.BAT;.CMD).`
+      : `  fix: install git, or put it on PATH.`);
+}
+
 async function git(
   cwd: string,
   args: string[],
-): Promise<{ ok: boolean; out: string }> {
+): Promise<{ ok: boolean; out: string; spawn?: true }> {
   try {
     const p = await new Deno.Command("git", {
       args: ["-C", cwd, ...args],
@@ -154,7 +173,7 @@ async function git(
       out: new TextDecoder().decode(p.success ? p.stdout : p.stderr).trim(),
     };
   } catch (e) {
-    return { ok: false, out: e instanceof Error ? e.message : String(e) };
+    return { ok: false, out: gitSpawnFailure(e), spawn: true };
   }
 }
 
@@ -174,18 +193,30 @@ const exists = async (p: string): Promise<boolean> => {
  *  `~/tmp/.git`). A clone is an aio checkout (`mod.ts`, the identity
  *  `resolveAioRoot` uses) whose OWN top level is `root`. */
 export async function isClone(root: string): Promise<boolean> {
+  return await cloneProblem(root) === null;
+}
+
+/** Why `root` is NOT such a clone — null when it is. `spawn` is set when the
+ *  question could not be asked at all (git did not start): that is not a
+ *  verdict about `root`, and a caller must say IT, never "not a clone". */
+export async function cloneProblem(
+  root: string,
+): Promise<null | { spawn?: string }> {
   let dir: string;
   try {
     dir = await Deno.realPath(root);
   } catch {
-    return false;
+    return {};
   }
   if (!await exists(join(dir, ".git")) || !await exists(join(dir, "mod.ts"))) {
-    return false;
+    return {};
   }
   const top = await git(dir, ["rev-parse", "--show-toplevel"]);
-  if (!top.ok) return false;
-  return await Deno.realPath(top.out).then((t) => t === dir, () => false);
+  if (top.spawn) return { spawn: top.out };
+  if (!top.ok) return {};
+  return await Deno.realPath(top.out).then((t) => t === dir, () => false)
+    ? null
+    : {};
 }
 
 /** Every version tag the clone knows, newest first. */
@@ -554,10 +585,12 @@ export async function ensureVersion(
   const path = versionPath(ref);
   let already = await exists(path);
 
-  if (!await isClone(root)) {
+  const noClone = await cloneProblem(root);
+  if (noClone) {
     // Nothing to cut a worktree from. Say exactly what to do rather than
     // silently linking a different version than the app asked for.
     if (already) return { ok: true, path, created: false, ref };
+    if (noClone.spawn) return { ok: false, error: noClone.spawn };
     return {
       ok: false,
       error:

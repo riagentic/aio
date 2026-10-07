@@ -15,6 +15,7 @@
 // esbuild bundles, which is seconds, not milliseconds.
 import { assert, assertEquals } from "@std/assert";
 import { type BundleSizes, kb, measure } from "../scripts/bundle-size.ts";
+import { fromFileUrl } from "@std/path";
 
 /** Ceilings, in KB gzipped. RATCHET RULE: when a bundle shrinks, lower these
  *  to just above the new number, in the same commit. Raising one costs an
@@ -236,7 +237,18 @@ const CEILING_GZ = {
   // (`air/control-drift.ts`, 5.4 KB raw), which sits in the render path. It is
   // observe-only, so it belongs behind `air/dev-hooks.ts` like the other dev
   // audits — moving it there is in todo.md and should bring this back to 82.
-  air: 83,
+  //
+  // Raised 83 → 84 for 1.0.19-beta (measured 85,5xx B = 84 KB; 83 was
+  // 85,390 B, 34 bytes under the rounding line). +0.2 KB gz, itemised:
+  //   · renderer (+56 B) — `afterRender` never runs for a discarded instance
+  //     (each queued entry knows its owner); a Portal under a caught boundary
+  //     releases its subscriptions;
+  //   · client call encoder (+46 B) — "arguments JSON cannot carry intact" is
+  //     said by a production client too, once per method (it was dev-only,
+  //     and a packaged app stored changed values with no line anywhere);
+  //   · the rest — the same rule for a changed hook count and for lifecycle
+  //     hooks called outside a render, and esbuild 0.25's output (+9 B).
+  air: 84,
   /** The same, plus one cell — measured 2 KB, which is what a cell costs.
    *  84 → 85 for the round after 1.0.12-beta: measured 85.3 (AIR 82.4). Every
    *  byte is a fix with a red-without-it test — SSR/createDom tag-name
@@ -360,7 +372,7 @@ Deno.test({
      *  printed 54. That is the same "boundary passes" defect the ±4 window
      *  had, one size smaller. (50audits §13.) */
     const TOLERANCE = 1;
-    const root = new URL("..", import.meta.url).pathname;
+    const root = fromFileUrl(new URL("..", import.meta.url));
     // Every page that states a bundle size states the same one. The old
     // numbers ("~20 KB gzipped", "~50 KB gzipped") were copied between these
     // files until nobody could find the original; a doc that names a size must

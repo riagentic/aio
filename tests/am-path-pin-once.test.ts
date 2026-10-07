@@ -10,7 +10,7 @@ import { tempDir } from "../src/testing/temp-dir.ts";
 import { fromFileUrl, join, toFileUrl } from "@std/path";
 import { readPinQuiet, runsFrom, sameFile } from "../src/am.ts";
 
-const ROOT = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
+const ROOT = fromFileUrl(new URL("../", import.meta.url)).replace(/[\\/]$/, "");
 
 async function app(): Promise<string> {
   const dir = await tempDir("aio-pin-once-");

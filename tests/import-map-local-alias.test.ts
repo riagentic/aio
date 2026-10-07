@@ -10,7 +10,7 @@
 // build, and a prefix alias gets ONE aio sentence from both.
 
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join, toFileUrl } from "@std/path";
+import { fromFileUrl, join, resolve, toFileUrl } from "@std/path";
 import * as esbuild from "esbuild";
 import { bundleClient, judgeClientBundle } from "../src/build/client-bundle.ts";
 import { stopEsbuildService } from "../src/build/esbuild-shared.ts";
@@ -41,9 +41,10 @@ import { createServer } from "../src/server/server.ts";
 import { stopEsbuild } from "../src/server/server-transpile.ts";
 import { scaffold, writeScaffold } from "../src/am/am-cmd-create.ts";
 import { setLogger } from "../src/diagnostics/logger-api.ts";
+import { fixtureNodeModules } from "./symlink-helper.ts";
 import type { LogSink } from "../src/diagnostics/logger-types.ts";
 
-const REPO = new URL("../", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("../", import.meta.url));
 const passThrough = (s: string) => Promise.resolve(s);
 
 /** A project: deno.json at the root, the UI in `src/`, `lib/fmt.ts`. */
@@ -60,6 +61,9 @@ async function project(app: string): Promise<string> {
     `export const label = (n: number) => "n=" + n;`,
   );
   await Deno.writeTextFile(join(root, "src", "App.tsx"), app);
+  // The framework's `immer`, for the tests that bundle: the project's own
+  // node_modules, as in a real app (the checkout root has none).
+  await fixtureNodeModules(root, "npm:immer@10.2.0");
   return root;
 }
 
@@ -89,7 +93,9 @@ Deno.test("local alias: an exact alias resolves against the deno.json folder in 
 });
 
 Deno.test("local alias: the dev server rewrites an exact alias to its file's url", () => {
-  const aliases = { fmt: toFileUrl("/p/lib/fmt.ts").href, "#lib/": "./lib/" };
+  // The host's absolute path: on Windows a `file:` url holds a drive letter.
+  const file = resolve("/p/lib/fmt.ts");
+  const aliases = { fmt: toFileUrl(file).href, "#lib/": "./lib/" };
   const seen: string[] = [];
   const out = _rewriteAliasImports(
     `import { a } from "fmt";\nimport "fmtx";\nconst m = import("fmt");\n` +
@@ -103,7 +109,7 @@ Deno.test("local alias: the dev server rewrites an exact alias to its file's url
       `const m = import("/__aio-src/lib/fmt.ts");\n` +
       `import { b } from "#lib/x.ts";\nimport c from "./fmt";`,
   );
-  assertEquals(seen, ["/p/lib/fmt.ts", "/p/lib/fmt.ts"]);
+  assertEquals(seen, [file, file]);
 });
 
 Deno.test("local alias: the startup lint does not call a mapped alias unresolvable", async () => {
@@ -294,6 +300,7 @@ Deno.test("local alias: dev and build give every published aio entry the same ve
     await writeScaffold(dir, scaffold("alias-verdict", "counter", true), {
       aioPath: REPO,
     });
+    await fixtureNodeModules(dir, "npm:immer@10.2.0");
     const src = join(dir, "src");
     const imports = readAppDenoImports(src) ?? {};
     const verdicts = async (code: string) => {

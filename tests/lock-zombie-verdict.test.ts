@@ -46,6 +46,7 @@ import type { LogSink } from "../src/diagnostics/logger-types.ts";
 import { childEnv } from "./e2e-app-harness.ts";
 import { stopChild } from "./stop-child.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const REPO = join(import.meta.dirname!, "..");
 /** The repo as a URL — an import map (and an `import`) takes URLs: a bare
@@ -583,8 +584,8 @@ async function withRunningApp<T>(
     join(dir, "deno.json"),
     JSON.stringify({
       imports: {
-        "aio": `${REPO_URL}/mod.ts`,
-        "aio/": `${REPO_URL}/src/`,
+        "aio": `${spec(REPO_URL)}/mod.ts`,
+        "aio/": `${spec(REPO_URL)}/src/`,
         "immer": "npm:immer@10.2.0",
         "@std/path": "jsr:@std/path@1.1.2",
       },
@@ -625,8 +626,10 @@ async function withRunningApp<T>(
     const where = await new Deno.Command(Deno.execPath(), {
       args: [
         "eval",
-        `import { lockKey, lockPath } from "${REPO_URL}/src/server/single-instance-lock.ts";` +
-        `import { appDirs } from "${REPO_URL}/src/server/app-dirs.ts";` +
+        `import { lockKey, lockPath } from "${
+          spec(REPO_URL)
+        }/src/server/single-instance-lock.ts";` +
+        `import { appDirs } from "${spec(REPO_URL)}/src/server/app-dirs.ts";` +
         `const id = ${JSON.stringify(appId)}, dir = ${
           JSON.stringify(first.APP_DIR ?? "")
         };` +
@@ -694,7 +697,6 @@ for (const seam of ["once", "200ms", "busy"]) {
         ? "refuses for 200 ms"
         : "is busy"
     } — the second launch does not take its lock, and never starts`,
-    ignore: Deno.build.os === "windows",
     async fn() {
       await withRunningApp("A", {}, async (a) => {
         const b = await a.launchB({ SEAM: seam, SETTLED: "1" });
@@ -717,9 +719,12 @@ for (const seam of ["once", "200ms", "busy"]) {
 Deno.test({
   name:
     "two launches: a running app whose lock file is GONE still refuses the second launch — the data folder's own lock names it",
-  ignore: Deno.build.os === "windows",
   async fn() {
-    await withRunningApp("A", {}, async (a) => {
+    // REFILE: the running app's own slow tick files its lock again (every
+    // 5 s) — a second launch that came after that tick met the lock FILE and
+    // was refused in its words, not the data folder's. Held off here: this
+    // is the launch that finds no file.
+    await withRunningApp("A", { REFILE: "600000" }, async (a) => {
       // The running app's logs, as they are before the second launch (one
       // line it has written, so there is something a rotation would move).
       const logs = logDirOf(a.dir);
@@ -737,15 +742,15 @@ Deno.test({
       const hourAgo = new Date(Date.now() - 3_600_000);
       Deno.utimeSync(join(logs, ".rotate"), hourAgo, hourAgo);
       const claim = Deno.readTextFileSync(join(logs, ".rotate"));
+      const live = Deno.readTextFileSync(join(logs, "app.log"));
       Deno.removeSync(a.lockFile);
       const b = await a.launchB({});
       // A losing launch touches nothing of the running app: no rotation.
       assertEquals(names(), before, "the running app's logs were archived");
       assertEquals(Deno.readTextFileSync(join(logs, ".rotate")), claim);
       assert(
-        Deno.readTextFileSync(join(logs, "app.log")).startsWith(
-          "the running app\n",
-        ),
+        live.includes("the running app\n") &&
+          Deno.readTextFileSync(join(logs, "app.log")).startsWith(live),
         "the live app.log was replaced",
       );
       assertEquals(b.code, 1, b.out);
@@ -770,7 +775,6 @@ Deno.test({
 Deno.test({
   name:
     "two launches: a running app whose record is fresh is not judged at all — the second launch makes no probe",
-  ignore: Deno.build.os === "windows",
   async fn() {
     await withRunningApp("A", {}, async (a) => {
       // The probes are planted, and would count as they are made.
@@ -789,7 +793,6 @@ Deno.test({
 Deno.test({
   name:
     "a real zombie holding the data folder is ended first, then this launch takes over and starts",
-  ignore: Deno.build.os === "windows",
   async fn() {
     await withRunningApp("Z", {}, async (z) => {
       const b = await z.launchB({ SETTLED: "1" });
@@ -805,7 +808,6 @@ Deno.test({
 Deno.test({
   name:
     "a zombie that cannot be ended: the launch refuses, exit 1, names the pid and what to do — and never opens the database",
-  ignore: Deno.build.os === "windows",
   async fn() {
     await withRunningApp("Z", {}, async (z) => {
       const b = await z.launchB({ SETTLED: "1", END: "cannot" });
@@ -825,7 +827,6 @@ Deno.test({
 Deno.test({
   name:
     "a lock file deleted under a running app is filed again within one tick — the app is found again, and a second launch is a second launch",
-  ignore: Deno.build.os === "windows",
   async fn() {
     await withRunningApp("A", { REFILE: "100" }, async (a) => {
       const before = JSON.parse(Deno.readTextFileSync(a.lockFile));
@@ -882,7 +883,7 @@ Deno.test({
 Deno.test({
   name:
     "a record that names a port but no address (an older aio wrote it) proves nothing: never a zombie — the launch is refused, naming the pid and how to stop it",
-  ignore: Deno.build.os !== "linux",
+  ignore: Deno.build.os !== "linux", // 127.0.0.0/8 is all loopback on Linux
   async fn() {
     await withRunningApp("A", { HOST: "127.0.0.2" }, async (a) => {
       const rec = JSON.parse(Deno.readTextFileSync(a.lockFile));
@@ -1045,7 +1046,6 @@ Deno.test({
 Deno.test({
   name:
     "two DIFFERENT apps on one data folder: the refusal names the app that holds it, not the one launching",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const shared = await tempDir("one-folder-");
     try {
@@ -1099,7 +1099,6 @@ Deno.test("claimHome: a folder that cannot be claimed goes on — and says so, o
 Deno.test({
   name:
     "a dead owner's lock file that cannot be removed: the start goes on under the data folder's lock, a second launch is refused naming the LIVE pid, and the record is filed once the file frees",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const flagDir = await tempDir("held-flag-");
     const flag = join(flagDir, "held");
@@ -1126,7 +1125,14 @@ Deno.test({
           Deno.removeSync(flag);
           let rec: { pid?: number; status?: string; port?: number } = {};
           for (const until = Date.now() + 20_000; Date.now() < until;) {
-            rec = JSON.parse(Deno.readTextFileSync(a.lockFile));
+            try {
+              rec = JSON.parse(Deno.readTextFileSync(a.lockFile));
+            } catch {
+              // Read while the app takes the dead record away and files its
+              // own: gone for a moment, and Windows refuses the read of a
+              // file that is going (ACCESS_DENIED). Looked at again — the
+              // assert below is on the record that ends up there.
+            }
             if (rec.pid === a.pid) break;
             await new Promise((r) => setTimeout(r, 50));
           }
@@ -1277,7 +1283,7 @@ Deno.test("a refused second launch leaves ONE line in the running app's app.log 
 Deno.test({
   name:
     "a lock file that cannot even be read (held open, not shared): the launch says ONCE what it waits for",
-  ignore: Deno.build.os === "windows", // unreadable by mode bits
+  ignore: Deno.build.os === "windows", // OPEN(windows): no stand-in found — a file held open with FileShare.None is still read by Deno there (only its removal fails), and chmod/icacls right after writeLock report the file NotFound
   async fn() {
     const appId = `unreadable-${crypto.randomUUID().slice(0, 8)}`;
     writeLock({

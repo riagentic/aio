@@ -4,6 +4,7 @@
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { cell } from "../mod.ts";
 import { smoke } from "../src/testing/smoke-test.ts";
+import { join } from "@std/path";
 
 // A boot needs one cell; the fixture's App.tsx is what is under test.
 const probe = cell("smoke-probe", { state: { n: 0 }, methods: {} });
@@ -62,7 +63,11 @@ Deno.test(
         Error,
       );
       assert(err.message.includes("blocking module error"), err.message);
-      assert(err.message.includes("lib/label.ts:1"), err.message);
+      // A file, as the host spells it.
+      assert(
+        err.message.includes(join("lib", "label.ts") + ":1"),
+        err.message,
+      );
       assert(err.message.includes("vault.server.ts"), err.message);
     } finally {
       await Deno.remove(dir, { recursive: true });
@@ -95,7 +100,11 @@ Deno.test(
       );
       assert(err.message.includes("HTTP 404"), err.message);
       assert(
-        err.message.includes("App.tsx → lib/label.ts → lib/.private/v.ts"),
+        err.message.includes(
+          `App.tsx → ${join("lib", "label.ts")} → ${
+            join("lib", ".private", "v.ts")
+          }`,
+        ),
         err.message,
       );
     } finally {

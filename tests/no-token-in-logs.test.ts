@@ -15,7 +15,7 @@
 //   • BEHAVIOUR at each fixed site, driven the cheap way (no real Electron
 //     window: a fake binary where one is spawned at all).
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { justified } from "../src/diagnostics/ok-marker.ts";
 import {
   redactUrlToken,
@@ -28,8 +28,9 @@ import { freePort } from "../src/testing/server-test.ts";
 import { getLogger, setLogger } from "../src/diagnostics/logger-api.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { within } from "./within.ts";
+import { EXE, writeProgram } from "./fake-program-helper.ts";
 
-const SRC = new URL("../src/", import.meta.url).pathname;
+const SRC = fromFileUrl(new URL("../src/", import.meta.url));
 const SECRET = "s3cr3t-KEY-9f2a";
 
 // ── the source gate ─────────────────────────────────────────────────────────
@@ -256,16 +257,14 @@ Deno.test("no-token-in-logs: the generated UDS main script logs no token", () =>
 Deno.test({
   name:
     "no-token-in-logs: the thin client's launch line hides a --server-url key",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     const { launchElectronClient } = await import(
       "../src/electron/electron-spawn.ts"
     );
     const dir = await tempDir("aio-token-log");
     // A fake runtime: exits at once, so no window can ever appear.
-    const fake = join(dir, "electron");
-    await Deno.writeTextFile(fake, "#!/bin/sh\nexit 0\n");
-    await Deno.chmod(fake, 0o755);
+    const fake = join(dir, "electron" + EXE);
+    await writeProgram(fake, "#!/bin/sh\nexit 0\n");
     const was = Deno.env.get("ELECTRON_PATH");
     Deno.env.set("ELECTRON_PATH", fake);
     const lines: string[] = [];
@@ -299,15 +298,13 @@ Deno.test({
 
 Deno.test({
   name: "no-token-in-logs: --server-url's 'connecting to' line hides the key",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     const { handleThinClient } = await import(
       "../src/server/aio-run-helpers.ts"
     );
     const dir = await tempDir("aio-token-thin");
-    const fake = join(dir, "electron");
-    await Deno.writeTextFile(fake, "#!/bin/sh\nexit 0\n");
-    await Deno.chmod(fake, 0o755);
+    const fake = join(dir, "electron" + EXE);
+    await writeProgram(fake, "#!/bin/sh\nexit 0\n");
     const was = Deno.env.get("ELECTRON_PATH");
     Deno.env.set("ELECTRON_PATH", fake);
     const cap = captureLog();

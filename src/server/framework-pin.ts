@@ -23,7 +23,7 @@
 // scripts/check-boundaries.ts) and `am` may import `server`, so this is the
 // side both can share.
 
-import { dirname, join, resolve } from "@std/path";
+import { dirname, join, normalize, resolve } from "@std/path";
 import { homedir } from "./paths.ts";
 
 /** A LOCAL-DEV pin: `aioVersion: "path:/abs/checkout"` — the app follows a
@@ -56,7 +56,11 @@ export function versionPath(ref: string): string {
  *  a local checkout), because then it names no version at all. */
 export function refOfLink(target: string): string | null {
   const base = dirname(target);
-  return base === versionsDir() ? target.slice(base.length + 1) : null;
+  // `normalize`: on Windows AIO_VERSIONS_DIR may be spelled `C:/x/versions`,
+  // and a raw compare then called every store link a checkout.
+  return normalize(base) === normalize(versionsDir())
+    ? target.slice(base.length + 1)
+    : null;
 }
 
 /** The directory `dep/aio` must point at for `pin` to be satisfied. */

@@ -13,8 +13,10 @@
 // skips — so this test splices them into a cell and runs `deno check`.
 import { assert, assertEquals } from "@std/assert";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { fromFileUrl } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 
-const repo = new URL("..", import.meta.url).pathname;
+const repo = fromFileUrl(new URL("..", import.meta.url));
 const read = (p: string) =>
   Deno.readTextFile(new URL(`../${p}`, import.meta.url));
 
@@ -28,7 +30,7 @@ async function check(program: string): Promise<{ code: number; err: string }> {
         // The repo's own compiler options (its `lib`, its strictness) — an
         // app built with `am create` gets the same ones.
         compilerOptions: JSON.parse(await read("deno.json")).compilerOptions,
-        imports: { "aio": `${repo}mod.ts` },
+        imports: { "aio": `${spec(repo)}mod.ts` },
       }),
     );
     await Deno.writeTextFile(`${dir}/snippet.ts`, program);

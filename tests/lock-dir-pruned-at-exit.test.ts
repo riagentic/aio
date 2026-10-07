@@ -12,6 +12,8 @@ import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const REPO = join(import.meta.dirname!, "..");
 const MOD = toFileUrl(join(REPO, "src/server/single-instance-lock.ts")).href;
+/** The variable the runtime base is read from (`_lockDirParts`). */
+const BASE = Deno.build.os === "windows" ? "TEMP" : "XDG_RUNTIME_DIR";
 
 /** The runtime base's entries, minus the root registry (`.aio-roots`). */
 function dirsIn(run: string): string[] {
@@ -32,7 +34,7 @@ async function child(dir: string, code: string): Promise<void> {
   const o = await new Deno.Command(Deno.execPath(), {
     args: ["eval", "--config", join(REPO, "deno.json"), code],
     env: {
-      XDG_RUNTIME_DIR: join(dir, "run"),
+      [BASE]: join(dir, "run"),
       AIO_APPS_DIR: join(dir, "apps"),
     },
     stdout: "piped",
@@ -43,7 +45,6 @@ async function child(dir: string, code: string): Promise<void> {
 
 Deno.test({
   name: "lock dir: a creator prunes its empty scoped lock dir at exit",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("lockdir-prune-");
     try {
@@ -92,7 +93,6 @@ Deno.test({
 
 Deno.test({
   name: "lock dir: a sibling's lock keeps it — never removed recursively",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("lockdir-keep-");
     try {
@@ -100,7 +100,8 @@ Deno.test({
       await child(
         dir,
         `const m = await import(${JSON.stringify(MOD)});
-         m.writeLock({ appId: "other", pid: 1, port: 0, startedAt: 0,
+         // Its owner is alive and is not this process: the test runner.
+         m.writeLock({ appId: "other", pid: Deno.ppid, port: 0, startedAt: 0,
            status: "started", cwd: "/", home: ${
           JSON.stringify(join(dir, "apps/other"))
         } });`,
@@ -131,11 +132,10 @@ Deno.test({
 // from `tempDir()`.
 Deno.test({
   name: "lock dir: dropTempDir removes a SIGKILLed child's lock dir",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const run = await tempDir("lockdir-run-"); // the fake runtime base
     const scratch = await tempDir("lockdir-drop-");
-    const was = Deno.env.get("XDG_RUNTIME_DIR");
+    const was = Deno.env.get(BASE);
     try {
       await Deno.chmod(run, 0o700);
       const c = new Deno.Command(Deno.execPath(), {
@@ -151,7 +151,7 @@ Deno.test({
            console.log("HELD");
            setInterval(() => {}, 1000);`,
         ],
-        env: { XDG_RUNTIME_DIR: run, AIO_APPS_DIR: join(scratch, "apps") },
+        env: { [BASE]: run, AIO_APPS_DIR: join(scratch, "apps") },
         stdout: "piped",
         stderr: "null",
       }).spawn();
@@ -167,13 +167,13 @@ Deno.test({
       r.releaseLock();
       await c.stdout.cancel().catch(() => {});
       assertEquals(dirsIn(run).length, 1, "the leak to clean");
-      Deno.env.set("XDG_RUNTIME_DIR", run);
+      Deno.env.set(BASE, run);
       await dropTempDir(scratch);
       assertEquals(dirsIn(run), []);
       assertEquals(registered(run), []);
     } finally {
-      if (was === undefined) Deno.env.delete("XDG_RUNTIME_DIR");
-      else Deno.env.set("XDG_RUNTIME_DIR", was);
+      if (was === undefined) Deno.env.delete(BASE);
+      else Deno.env.set(BASE, was);
       await dropTempDir(run);
     }
   },
@@ -189,7 +189,7 @@ Deno.test({
 Deno.test({
   name:
     "check:orphans: fails on a run's leftover lock dir, sweeps an orphaned one",
-  ignore: Deno.build.os !== "linux",
+  ignore: Deno.build.os !== "linux", // scripts/check-orphans.ts tells live from orphaned by /proc
   async fn() {
     const dir = await tempDir("lockdir-gate-");
     // The fake runtime base is SHORT: a socket is bound under it, and under a
@@ -263,7 +263,7 @@ Deno.test({
 // preferred path, found it "existing", and never pruned the fallback it made.
 Deno.test({
   name: "lock dir: a fallback aio-u<uid> dir this process made is pruned too",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // no uid on Windows: there is no aio-u<uid> fallback dir
   async fn() {
     const dir = await tempDir("lockdir-fb-");
     try {

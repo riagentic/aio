@@ -12,7 +12,9 @@ import {
   assertRejects,
   assertStringIncludes,
 } from "@std/assert";
-import { join } from "@std/path";
+import { basename, join } from "@std/path";
+import { EXE, writeProgram } from "./fake-program-helper.ts";
+import { linkDir } from "./symlink-helper.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import {
   choiceList,
@@ -23,6 +25,10 @@ import {
 import { hostPlatform } from "../src/build/platforms.ts";
 import { appendSfxPayload } from "../src/build/build-windows-exe.ts";
 import { buildVersionFor } from "../src/server/app-version.ts";
+
+/** The artifact this machine can run and ask its data contract. Windows runs
+ *  a file by its extension, and `notes.exe` is the cross-built one here. */
+const HOST_BIN = `notes${EXE && ".bin"}`;
 
 /** Capture stdout (am writes its JSON document to console.log). */
 async function capture(fn: () => Promise<void>): Promise<string[]> {
@@ -132,8 +138,11 @@ Deno.test("am publish: writes the channel layout a client actually fetches", asy
     assertEquals(doc.signed, false, "unsigned unless a key is given");
     // THE thing that was only ever prose: the manifest at the path the client
     // requests, and the artifact BESIDE it.
-    assertEquals(doc.releases[0]!.manifest, "prod/linux-x86_64.json");
-    assertEquals(doc.releases[0]!.artifact, "prod/notes");
+    assertEquals(
+      doc.releases[0]!.manifest,
+      join("prod", "linux-x86_64.json"),
+    );
+    assertEquals(doc.releases[0]!.artifact, join("prod", "notes"));
     // …and the release is named for the APP, not the file that was built.
     assertEquals(doc.releases[0]!.name, "notes");
     for (const f of ["prod/linux-x86_64.json", "prod/notes"]) {
@@ -190,7 +199,7 @@ Deno.test("am publish: refuses two artifacts for one platform, and says how to c
     };
     assertEquals(doc.releases.length, 1);
     assertEquals(doc.releases[0]!.target, "cli");
-    assertEquals(doc.releases[0]!.artifact, "prod/notes-cli");
+    assertEquals(doc.releases[0]!.artifact, join("prod", "notes-cli"));
   } finally {
     // deno-lint-ignore no-explicit-any
     (Deno as any).exit = exit;
@@ -290,13 +299,12 @@ Deno.test("am publish: one build's contract is stamped into every platform", asy
     );
     await Deno.writeTextFile(join(dir, "src", "app.ts"), `fetch("x");`);
     // The host artifact ANSWERS the probe; the other two cannot run here.
-    await Deno.writeTextFile(
-      join(dir, "dist", "notes"),
-      `#!/bin/sh\nif [ "$1" = "--aio-data-contract" ]; then\n  echo '${
+    await writeProgram(
+      join(dir, "dist", HOST_BIN),
+      `#!/bin/sh\nif [ "$1" = "--aio-data-contract" ]; then echo '${
         JSON.stringify(CONTRACT)
-      }'\n  exit 0\nfi\nexit 0\n`,
+      }'; exit 0; fi\nexit 0\n`,
     );
-    await Deno.chmod(join(dir, "dist", "notes"), 0o755);
     await Deno.writeTextFile(join(dir, "dist", "notes.exe"), "MZ fake windows");
     await Deno.writeTextFile(
       join(dir, "dist", "manifest.json"),
@@ -316,7 +324,7 @@ Deno.test("am publish: one build's contract is stamped into every platform", asy
             ok: true,
             host: true,
             platform: "linux",
-            artifacts: [{ file: "notes" }],
+            artifacts: [{ file: HOST_BIN }],
           },
         ],
       }),
@@ -360,7 +368,6 @@ Deno.test("am publish: one build's contract is stamped into every platform", asy
 // artifact was run anyway, and --data=<file> was never read. Without either
 // flag it is still asked, as before.
 Deno.test("am publish: --data and --no-data outrank running the host artifact; no flag still runs it", async () => {
-  if (Deno.build.os === "windows") return; // the stub artifact is a shell script
   const orig = Deno.cwd();
   const dir = await tempDir("am-publish-exec-flags-");
   const asked = { schema: 1, cells: { notes: { version: 4 } } };
@@ -374,13 +381,12 @@ Deno.test("am publish: --data and --no-data outrank running the host artifact; n
       JSON.stringify({ appId: "notes", version: "2.1.0", entry: "src/app.ts" }),
     );
     await Deno.writeTextFile(join(dir, "src", "app.ts"), `fetch("x");`);
-    await Deno.writeTextFile(
-      join(dir, "dist", "notes"),
-      `#!/bin/sh\nif [ "$1" = "--aio-data-contract" ]; then\n  echo x >> '${ran}'\n  echo '${
+    await writeProgram(
+      join(dir, "dist", HOST_BIN),
+      `#!/bin/sh\nif [ "$1" = "--aio-data-contract" ]; then echo x >> '${ran}'; echo '${
         JSON.stringify(asked)
-      }'\nfi\nexit 0\n`,
+      }'; fi\nexit 0\n`,
     );
-    await Deno.chmod(join(dir, "dist", "notes"), 0o755);
     await Deno.writeTextFile(join(dir, "contract.json"), JSON.stringify(given));
     await Deno.writeTextFile(
       join(dir, "dist", "manifest.json"),
@@ -391,7 +397,7 @@ Deno.test("am publish: --data and --no-data outrank running the host artifact; n
           ok: true,
           host: true,
           platform: "linux",
-          artifacts: [{ file: "notes" }],
+          artifacts: [{ file: HOST_BIN }],
         }],
       }),
     );
@@ -821,7 +827,9 @@ Deno.test("am publish: a web build's directory is set aside by name, never relea
       releases: { artifact: string }[];
     };
     assertEquals(doc.directories, ["notes-2.1.0-web"]);
-    assertEquals(doc.releases.map((r) => r.artifact), ["prod/notes"]);
+    assertEquals(doc.releases.map((r) => r.artifact), [
+      join("prod", "notes"),
+    ]);
     // …and the human summary says what to do with it.
     Deno.stdout.isTerminal = () => true;
     const human = await withHome(() =>
@@ -1063,7 +1071,7 @@ Deno.test("am publish: --dir at a source dir is refused before anything is writt
     (await buildVersionFor(dir, "2.1", { env: "" })).bv.version;
   const exists = (rel: string) =>
     Deno.stat(join(dir, rel)).then(() => true, () => false);
-  const base = dir.slice(dir.lastIndexOf("/") + 1);
+  const base = basename(dir);
   try {
     Deno.chdir(dir);
     const refused: string[][] = [
@@ -1082,8 +1090,8 @@ Deno.test("am publish: --dir at a source dir is refused before anything is writt
       ["--dir=srclink"],
       [`--dir=${join(elsewhere, "in")}`],
     ];
-    await Deno.symlink("src", join(dir, "srclink"));
-    await Deno.symlink(join(dir, "src"), join(elsewhere, "in"));
+    await linkDir("src", join(dir, "srclink"));
+    await linkDir(join(dir, "src"), join(elsewhere, "in"));
     for (const args of refused) {
       const r = await publishExit(["--no-build", ...args]);
       assertEquals(r.code, 1, args.join(" "));
@@ -1177,15 +1185,15 @@ async function packMacApp(dir: string, contract: unknown): Promise<void> {
   await Deno.writeTextFile(
     join(stage, "notes.app", "Contents", "Info.plist"),
     `<?xml version="1.0"?><plist><dict>\n<key>CFBundleExecutable</key>\n` +
-      `<string>notes</string>\n</dict></plist>\n`,
+      `<string>notes${EXE}</string>\n</dict></plist>\n`,
   );
-  await Deno.writeTextFile(
-    join(macos, "notes"),
-    `#!/bin/sh\nif [ "$1" = "--aio-data-contract" ]; then\n  echo '${
+  // `EXE`: the bundle's program is RUN by the test, on whatever OS this is.
+  await writeProgram(
+    join(macos, `notes${EXE}`),
+    `#!/bin/sh\nif [ "$1" = "--aio-data-contract" ]; then echo '${
       JSON.stringify(contract)
-    }'\n  exit 0\nfi\nexit 3\n`,
+    }'; exit 0; fi\nexit 3\n`,
   );
-  await Deno.chmod(join(macos, "notes"), 0o755);
   const tar = await new Deno.Command("tar", {
     args: [
       "-czf",

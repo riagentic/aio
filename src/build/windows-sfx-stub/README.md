@@ -41,7 +41,11 @@ unchanged, so an `.exe` built with either stub opens an install the other made.
    an app that has updated itself.
 5. When it extracted, and the header asks for it (`shortcut`), adds a Start-menu
    shortcut to `<name>.exe` named after the app (`title`), so the download can
-   be deleted. A shortcut the user removed is not put back by a later open.
+   be deleted. A shortcut the user removed is not put back by a later open. An
+   install made by an `.exe` that added none (aio 1.0.17 or older) gets it from
+   the app itself, once, at a start after it updated
+   (`../../server/sfx-shortcut.ts`) — under the same file name
+   (`shortcut-names.json`).
 6. Starts `<name>.exe` with the user's arguments and exits (it does not wait for
    the app, so its exit code is the stub's own).
 
@@ -51,17 +55,18 @@ downloaded `.exe` stays a launcher for the updated app.
 
 ## Files
 
-| File                                      | Role                                                              |
-| ----------------------------------------- | ----------------------------------------------------------------- |
-| `src/main.rs`                             | The Windows stub (hash, lock, launch). Windows-only code.         |
-| `src/install.rs`                          | The swap: aside, extract, stamp, rename in, undo. Host-tested.    |
-| `src/extract.rs`                          | Payload extraction (zstd tar, or zip). Host-tested.               |
-| `src/format.rs`                           | Trailer constants (`AIOSFX02`) and parser. Host-tested.           |
-| `src/version.rs`                          | Version order, the updater's (`version-order.json`). Host-tested. |
-| `version-order.json`                      | Version pairs both comparators are tested against.                |
-| `Cargo.toml` / `Cargo.lock`               | The crate and its pinned dependencies — for rebuilding only.      |
-| `prebuilt/aio-windows-sfx-stub-amd64.exe` | The committed PE the build ships.                                 |
-| `THIRD_PARTY_NOTICES`                     | Licenses of what the PE links (Rust, the crates, mingw-w64).      |
+| File                                      | Role                                                                |
+| ----------------------------------------- | ------------------------------------------------------------------- |
+| `src/main.rs`                             | The Windows stub (hash, lock, launch). Windows-only code.           |
+| `src/install.rs`                          | The swap: aside, extract, stamp, rename in, undo. Host-tested.      |
+| `src/extract.rs`                          | Payload extraction (zstd tar, or zip). Host-tested.                 |
+| `src/format.rs`                           | Trailer constants (`AIOSFX02`) and parser. Host-tested.             |
+| `src/version.rs`                          | Version order, the updater's (`version-order.json`). Host-tested.   |
+| `version-order.json`                      | Version pairs both comparators are tested against.                  |
+| `shortcut-names.json`                     | Titles and the shortcut file name each gives, tested on both sides. |
+| `Cargo.toml` / `Cargo.lock`               | The crate and its pinned dependencies — for rebuilding only.        |
+| `prebuilt/aio-windows-sfx-stub-amd64.exe` | The committed PE the build ships.                                   |
+| `THIRD_PARTY_NOTICES`                     | Licenses of what the PE links (Rust, the crates, mingw-w64).        |
 
 The unit tests are in the same files (`cargo test` — runs on any host).
 
@@ -106,8 +111,8 @@ Then update the two pins in `../build-windows-exe.ts`, and the two lines at the
 end of this section, and commit them with the PE:
 
 - `SFX_STUB_SHA256` — the `sha256sum` printed above.
-- `SFX_STUB_SOURCE_SHA256` — a hash over `src/*.rs`, `Cargo.toml`, `Cargo.lock`
-  and `version-order.json`. Run
+- `SFX_STUB_SOURCE_SHA256` — a hash over `src/*.rs`, `Cargo.toml`, `Cargo.lock`,
+  `shortcut-names.json` and `version-order.json`. Run
   `deno test -A tests/build-windows-sfx-stub.test.ts`: the failing "stub
   sources" test prints the new value. It needs no Rust, so it is the gate that
   catches a source edit nobody rebuilt after — the tests that run `cargo` are
@@ -121,8 +126,8 @@ committed file. A new toolchain or dependency changes the bytes: update the
 pins, this README and `THIRD_PARTY_NOTICES` together.
 
 Current build: `rustc 1.98.0`, SHA-256
-`2fd8497fbb7c00cf1cecee664b4e8b1b2bd8c01e0a5c0196f010bf8704d41871`; sources
-`7aa3ce923acd381e4dae5a0c8a8b51e4177b64cf6adaefd4e62f70a2f7c5b3fd`.
+`f685aac7226c59da6500f184899fcdcc95c5399745f28ebe41a62792a31c9d65`; sources
+`2928a44f50f85ba9fde382595e415ca34b3f15a2a4b83efb476fc5f8b90862b9`.
 
 The trailer format is shared with `build-windows-exe.ts`:
 `[stub][payload][JSON header][u32 hdrLen][u64 payloadLen][AIOSFX02]`.

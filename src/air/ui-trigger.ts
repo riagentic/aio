@@ -760,16 +760,18 @@ function stepText(el: AnyEl): string {
 
 /** A control's constraint-validation message, in the browser's own words.
  *
- *  The DOM the harness mounts implements `validity` but leaves
- *  `validationMessage` empty (happy-dom), so a refusal could name the field and
- *  then say nothing about WHY — the one sentence the reader needs. A real DOM's
+ *  The DOM the harness mounts implements `validity` but not the message:
+ *  happy-dom 17 leaves `validationMessage` empty and 20 answers every invalid
+ *  control with one placeholder no browser says (MEASURED 20.14.5:
+ *  "Constraints not satisfied"), so a refusal could name the field and then
+ *  say nothing about WHY — the one sentence the reader needs. A real DOM's
  *  message always wins (a browser, `am trigger` on a live app); these
  *  stand-ins mirror Chromium's wording for the cases it does not fill in. */
 function validationText(el: AnyEl, flags: readonly string[]): string {
   const native = typeof el.validationMessage === "string"
     ? el.validationMessage
     : "";
-  if (native) return native;
+  if (native && native !== "Constraints not satisfied") return native;
   // Only a flag a BROWSER would raise ({@link browserFlags}) may name the
   // reason — the harness DOM's own `validity` holds ones Chromium does not set.
   const v: Record<string, boolean> = {};

@@ -4,7 +4,7 @@
 // (measured on a real AppImage update). On Linux the successor now starts
 // through a shell (bash first), closing everything above stderr before the exec.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import {
   CLOSE_FDS_EXEC,
   CLOSE_FDS_EXEC_ALL,
@@ -15,7 +15,7 @@ import {
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const APPLY = new URL("../src/server/updates-apply.ts", import.meta.url).href;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 const has = (p: string) => {
   try {
@@ -87,6 +87,7 @@ for (const shell of ["/bin/bash", "/bin/dash", "/bin/sh", "busybox"]) {
   Deno.test({
     name:
       `relaunch: the successor does not inherit the predecessor's descriptors (an AppImage keep-alive pipe) — via ${shell}`,
+    // the relaunch goes through a POSIX shell, and descriptors are read from /proc
     ignore: Deno.build.os !== "linux" || !has("/bin/bash") ||
       !has(shell === "busybox" ? "/usr/bin/busybox" : shell),
     fn: async () => {
@@ -159,7 +160,12 @@ Deno.test("relaunch: bash first, then /bin/sh; started directly off Linux or wit
     relaunchCommand("/a=b", o, "linux", sh("/bin/dash"), hop)[1].args,
     ["-c", CLOSE_FDS_EXEC, "/a=b", "--x"],
   );
-  if (has("/bin/bash")) assertEquals(relaunchCommand("/a", o)[0], "/bin/bash");
+  // The defaults, on the machine running this: a shell on Linux, direct off it.
+  if (Deno.build.os !== "linux") {
+    assertEquals(relaunchCommand("/a", o), ["/a", o]);
+  } else if (has("/bin/bash")) {
+    assertEquals(relaunchCommand("/a", o)[0], "/bin/bash");
+  }
 });
 
 Deno.test("envRestoreArgs: the shell-owned names are set or unset as they were; other identifiers ride through untouched", () => {
@@ -178,6 +184,7 @@ for (const shell of ["/bin/bash", "/bin/dash", "busybox"]) {
   Deno.test({
     name:
       `relaunch: the successor gets the environment it would have inherited directly — via ${shell}`,
+    // the relaunch goes through a POSIX shell, and descriptors are read from /proc
     ignore: Deno.build.os !== "linux" || !has("/usr/bin/env") ||
       !has(shell === "busybox" ? "/usr/bin/busybox" : shell),
     fn: async () => {
@@ -222,6 +229,7 @@ for (const shell of ["/bin/bash", "/bin/dash", "busybox"]) {
 Deno.test({
   name:
     "relaunch: bash's -p does not ride an exported SHELLOPTS into the successor",
+  // the relaunch goes through a POSIX shell, and descriptors are read from /proc
   ignore: Deno.build.os !== "linux" || !has("/bin/bash") ||
     !has("/usr/bin/env"),
   fn: async () => {

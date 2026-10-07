@@ -6,7 +6,7 @@
 // h8 F8 — amui maps every aio entry it imports (the rule stays strict: an
 // inherited mapping only resolves while the app sits inside the package).
 import { assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { buildContext } from "../aiol/context.ts";
 import { checkImports, checkPerformance } from "../aiol/checks.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
@@ -105,7 +105,7 @@ Deno.test("aiol: sync I/O fires unsuppressed and is silenced by aio-ok (R-5)", a
 
 Deno.test("aiol: amui maps every aio entry it imports (h8 F8)", async () => {
   const { ctx, report } = await buildContext(
-    new URL("../amui", import.meta.url).pathname,
+    fromFileUrl(new URL("../amui", import.meta.url)),
   );
   await checkImports(ctx);
   assertEquals(

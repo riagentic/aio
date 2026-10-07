@@ -2,7 +2,7 @@
 // Provides: onMount, onCleanup, useRef, useSignal, useId, _resetSsrIdCounter, useOptimistic.
 
 import { type Signal, signal } from "../state/signal.ts";
-import { isDevMode } from "../state/dev-flag.ts";
+import { _wrongPrefix, isDevMode } from "../state/dev-flag.ts";
 import type { ComponentInstance } from "./renderer-types.ts";
 import { _nameHookSignal } from "./untracked-read.ts";
 import {
@@ -38,21 +38,25 @@ function _inServerRender(): boolean {
  *  `afterRender`, `useRef` and `useSignal` all say so for the identical
  *  mistake. The symptom was "my subscription never runs" with nothing to
  *  search for. Observe-only, so dev and prod behave identically — prod drops
- *  it exactly as before, dev additionally names it. */
+ *  it exactly as before, and both name it. */
 /** @internal Is a component body running right now? Hooks that would
  *  otherwise warn "outside a component render" ask this first. */
 export function _inRender(): boolean {
   return _currentCollector !== null;
 }
 
-function _warnOutsideRender(hook: string): void {
-  if (!isDevMode() || _inServerRender()) return;
+/** @internal Shared with `useHead`, whose call is dropped the same way.
+ *
+ *  Prod says it too, once per hook: a dropped subscription is the app doing
+ *  the wrong thing, and a packaged build must not be the quiet one. */
+export function _warnOutsideRender(hook: string): void {
+  const prefix = _inServerRender() ? null : _wrongPrefix(hook + "()");
+  if (prefix === null) return;
   console.warn(
-    `[aio-dev] ${hook}() called outside a component render — there is no ` +
-      `component to attach it to, so the callback was DROPPED. It only works ` +
-      `in a component body (or, for onCleanup, inside an onMount callback); ` +
-      `from a timer, a promise continuation or an event handler there is ` +
-      `nothing to bind its lifetime to.`,
+    `${prefix}${hook}() called outside a component render — there is no ` +
+      `component to attach it to, so it was DROPPED. Call it in a component ` +
+      `body (onCleanup: or inside an onMount callback), not from a timer, a ` +
+      `promise or an event handler.`,
   );
 }
 
@@ -187,9 +191,8 @@ export function onUnmount(fn: () => void): void {
   //                          string 'B'`, from inside the renderer;
   //   slot holds a signal  → it happened to work.
   //
-  // The dev hook-order tripwire does not save this: it runs AFTER the body, so
-  // the TypeError beats it, and it is observe-only, so production never hears
-  // it at all. A fresh slot is recognised by a sentinel only this function
+  // The hook-order tripwire does not save this: it runs AFTER the body, so
+  // the TypeError beats it, and it only sees a count that MOVED. A fresh slot is recognised by a sentinel only this function
   // can produce, a returning one by the box's own brand, and anything else is
   // named here, at the call that did it.
   const slot = useRef<unknown>(_EMPTY_SLOT);

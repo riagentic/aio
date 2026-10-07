@@ -1,7 +1,7 @@
 // Two `am` surfaces that read a project's config or write a machine's output,
 // and got one of them wrong for a jsonc project / a piped stdout.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { cmdFix } from "../src/am/am-cmd-fix.ts";
 import { cmdAdd } from "../src/am/am-cmd-meta.ts";
 import { VERSION } from "../src/server/aio-cli.ts";
@@ -100,13 +100,13 @@ Deno.test({
   fn: async () => {
     const dir = await Deno.makeTempDir({ prefix: "am-create-pipe-" });
     try {
-      const am = new URL("../src/am.ts", import.meta.url).pathname;
+      const am = fromFileUrl(new URL("../src/am.ts", import.meta.url));
       const out = await new Deno.Command(Deno.execPath(), {
         args: [
           "run",
           "-A",
           "--config",
-          new URL("../deno.json", import.meta.url).pathname,
+          fromFileUrl(new URL("../deno.json", import.meta.url)),
           am,
           "create",
           "piped-app",

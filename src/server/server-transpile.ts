@@ -55,7 +55,7 @@ let esbuildStop: (() => Promise<void>) | null = null;
  *
  *  Use what it returns inside {@link esbuildWork}, so a stop waits for it.
  *
- *  B-6: the EXACT version deno.json pins (esbuild@0.24.2) — a `^0.24` range
+ *  B-6: the EXACT version deno.json pins (esbuild@0.25.12) — a `^0.25` range
  *  could resolve a different esbuild than the project tested. The specifier
  *  is COMPUTED (`.join`), not a literal, on purpose: deno's static graph
  *  analysis (`deno install`/`cache`/`compile`) can't resolve it, so the heavy

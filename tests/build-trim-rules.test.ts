@@ -15,6 +15,7 @@ import {
   withDevExcluded,
 } from "../src/build/build-compile.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { linkDir, linkFile } from "./symlink-helper.ts";
 
 const exists = (p: string) => Deno.lstat(p).then(() => true).catch(() => false);
 
@@ -35,7 +36,7 @@ async function denoEntryFile(
 /** Link `node_modules/<name>` at the `.deno` entry, the way deno install does. */
 async function link(nm: string, entry: string, pkg: string): Promise<void> {
   await Deno.mkdir(join(nm, pkg, ".."), { recursive: true });
-  await Deno.symlink(`.deno/${entry}/node_modules/${pkg}`, join(nm, pkg));
+  await linkDir(`.deno/${entry}/node_modules/${pkg}`, join(nm, pkg));
 }
 
 /** Which of `paths` exist DURING the compile window. */
@@ -208,9 +209,9 @@ Deno.test("trim: a symlink is neither moved nor followed", async () => {
     await Deno.writeTextFile(join(outside, "test", "a.js"), "outside");
     await denoEntryFile(nm, "a@1.0.0", "a", "index.js");
     const pkg = join(nm, ".deno", "a@1.0.0", "node_modules");
-    await Deno.symlink(outside, join(pkg, "linked"));
-    await Deno.symlink(join(outside, "README.md"), join(pkg, "a", "R.md"));
-    await Deno.symlink(join(outside, "test"), join(pkg, "a", "test"));
+    await linkDir(outside, join(pkg, "linked"));
+    await linkFile(join(outside, "README.md"), join(pkg, "a", "R.md"));
+    await linkDir(join(outside, "test"), join(pkg, "a", "test"));
     await link(nm, "a@1.0.0", "a");
     assertEquals(
       await seenDuring(nm, [
@@ -282,6 +283,86 @@ Deno.test("trim: nothing the module graph loads is held aside, whatever its name
     );
     // …and without the graph both go (the guard is what kept them).
     assertEquals((await collectTrim(deno, [])).length, 4);
+  } finally {
+    await dropTempDir(tmp);
+  }
+});
+
+Deno.test("trim: a test directory its OWN package names is not held aside — a literal require/import, package.json exports; a computed path is not seen", async () => {
+  const tmp = await tempDir("trim-own-refs-");
+  try {
+    const nm = join(tmp, "node_modules");
+    const put = (pkg: string, rel: string, body = "x") =>
+      denoEntryFile(nm, `${pkg}@1.0.0`, pkg, rel, body);
+    // CJS: the graph has ONE entry for the package, and no file of it.
+    await put("a", "index.js", `module.exports = require("./test/helper.js");`);
+    await put("b", "lib/deep/x.mjs", `import h from "../../tests/h.mjs";`);
+    await put(
+      "c",
+      "package.json",
+      JSON.stringify({
+        name: "c",
+        exports: { "./testing": { default: "./test/index.js" } },
+      }),
+    );
+    await put("f", "src/index.js", "const fx = import(`./__tests__/${n}.js`)");
+    const kept = [
+      await put("a", "test/helper.js"),
+      await put("b", "tests/h.mjs"),
+      await put("c", "test/index.js"),
+      await put("f", "src/__tests__/fx.js"),
+    ];
+    // Named only by a path built at run time, or only by the suite itself:
+    // nothing a build can read says the package loads it.
+    await put("d", "index.js", `exports.load = (n) => require("./te" + n);`);
+    await put("e", "index.js", `module.exports = 1;`);
+    await put("e", "test/a.js", `require("./b.js"); require("../test/b.js");`);
+    const gone = [
+      await put("d", "test/h.js"),
+      await put("e", "test/b.js"),
+      // …and a kept directory is walked like any other: its docs still go.
+      await put("a", "test/README.md"),
+    ];
+    for (const p of "abcdef") await link(nm, `${p}@1.0.0`, p);
+
+    assertEquals(await seenDuring(nm, [...kept, ...gone]), [
+      ...kept.map(() => true),
+      ...gone.map(() => false),
+    ]);
+    for (const p of [...kept, ...gone]) assert(await exists(p), p);
+  } finally {
+    await dropTempDir(tmp);
+  }
+});
+
+Deno.test("trim: a file the app imports from INSIDE an npm package is reached — the graph names it by specifier, not by path", async () => {
+  const tmp = await tempDir("trim-npm-subpath-");
+  try {
+    const deno = join(tmp, "node_modules", ".deno");
+    const nm = join(tmp, "node_modules");
+    await denoEntryFile(nm, "x@1.0.0", "x", "test/run.js");
+    await denoEntryFile(nm, "@s+y@2.0.0", "@s/y", "tests/fixture.bin");
+    const reached = reachedDenoRels([{
+      modules: [
+        {
+          kind: "npm",
+          specifier: "npm:/x@1.0.0/test/run.js",
+          npmPackage: "x@1.0.0",
+        },
+        // the package itself: no file named
+        { kind: "npm", specifier: "npm:/@s/y@2.0.0", npmPackage: "@s/y@2.0.0" },
+      ],
+      npmPackages: {
+        "x@1.0.0": { localPath: join(deno, "x@1.0.0", "node_modules", "x") },
+        "@s/y@2.0.0": {
+          localPath: join(deno, "@s+y@2.0.0", "node_modules", "@s", "y"),
+        },
+      },
+    }], deno);
+    assertEquals(reached, ["x@1.0.0/node_modules/x/test/run.js"]);
+    assertEquals(await collectTrim(deno, [], "", undefined, reached), [
+      "@s+y@2.0.0/node_modules/@s/y/tests",
+    ]);
   } finally {
     await dropTempDir(tmp);
   }

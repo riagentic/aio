@@ -246,6 +246,70 @@ landed, and prints a warning naming any call still in flight, because the reset
 orphans that call and its outcome can no longer be seen. Await the call, or
 `await h.settle()` before teardown, when the outcome matters.
 
+### Calls cross the wire
+
+A component's `todo.add(x)` is a frame on a socket in the app: by the time the
+method runs, `x` has been through JSON. `testUI` puts every call made by the UI
+(a component, a handler, the test body) through the same encode and decode, so
+the method receives exactly what a real server would — and a value that does not
+arrive intact **fails the test**, naming the cell, the method, the argument path
+and what it became:
+
+```
+testUI: dialog.open() was called from the UI with arguments JSON cannot carry
+intact — over the real socket the server receives DIFFERENT values than the
+caller passed:
+  args[1].when: Date → string — send date.toISOString() (or .getTime()) and rebuild it in the method
+```
+
+| Passed                                   | The server receives                        | Send instead                          |
+| ---------------------------------------- | ------------------------------------------ | ------------------------------------- |
+| `Date`                                   | an ISO string                              | `d.toISOString()` or `d.getTime()`    |
+| `Map`, `Set`, `RegExp`, `Error`          | `{}`                                       | `[...map]`, `[...set]`, a string      |
+| a class instance, a typed array          | a plain object                             | its fields; an array or base64 string |
+| `undefined` (an argument, an array slot) | `null`                                     | `null`, or leave the argument out     |
+| a function or symbol member              | the key is gone                            | data, not a function                  |
+| `NaN`, `±Infinity`, `-0`                 | `null`, `null`, `0`                        | `null` or a string                    |
+| `BigInt`, a cyclic value                 | nothing — the call rejects, in the app too | a string; a plain tree                |
+
+An **optional field left unset** — `todo.add({ text, due })` with `due`
+`undefined` — is not a failure: the key is absent on the server, in the app and
+in the test, and the method reads `due` as `undefined` either way. An
+`undefined` **argument** is different: `todo.add(text, undefined)` arrives as
+`null`, so a default parameter does not apply — leave the argument out.
+
+The call is not dispatched: in the app it IS sent, changed, and the only thing
+that says so is a console warning
+(`… was dispatched with arguments JSON cannot
+carry intact`, in dev and in a
+production build), so a test that handed the method the original would be green
+over it. The fix is in the **caller**.
+
+What does not cross, because it does not in the app either:
+
+- a call made by **server code** — another cell's method, an effect, `onInit`;
+- a `scope: "client"` cell, which runs in the browser;
+- `testCell`'s `t.send` and a call under `bootCells`: both drive the method the
+  way server code does, so a rich argument arrives as passed. That is where a
+  method that takes a `Date` from another cell is tested.
+
+`onClick={counter.inc}` hands the method the click Event; a browser sends it as
+`{"isTrusted":true}`. If the method declares no parameter for it, nothing reads
+it and the call is fine. If it does (`onInput={form.setTitle}`), the test fails
+with the fix.
+
+The **return value** crosses back the same way, as the ack carries it:
+`await
+todo.snapshot()` resolves with JSON — a returned `Date` is a string, a
+`Set` is `{}`, a function or a `BigInt` is `undefined` — and the server-side
+warning that names what changed is printed
+(`"todo:snapshot" returned a value JSON cannot
+carry intact`). It is a warning
+and not a failure because that is what the app does: the write is committed and
+the caller gets the converted value. `tests/wire-harness-differential.test.tsx`
+runs one table of values through `testUI` and through a real WebSocket and
+requires the same verdict from both.
+
 ### A call from a disposed mount is refused, naming what started it
 
 Cells are module singletons, so work a mount started can outlive its dispose: an
@@ -1021,8 +1085,9 @@ Deno.test("both windows see the same order", async () => {
   and cell, so a failure says which surface fell behind
 - `m.clients[i].call(cell, method, ...args)` — call a method **the way a client
   does**, over that client's socket: JSON arguments, a JSON-vetted return value,
-  `_source: "UI"` at the server, and a rejection on refusal. The in-process call
-  (`orders.add("widget")`) skips all four; see
+  `_source: "UI"` at the server, and a rejection on refusal. A server-side call
+  (`orders.add("widget")` under `bootCells`) skips all four, and `testUI`
+  reproduces the first two ([Calls cross the wire](#calls-cross-the-wire)); see
   [prod-parity.md](prod-parity.md#a-client-calling-a-method--clientcall)
 - `m.dispatchAll(action)` — the same action from every client at once, which is
   the concurrency case you cannot reason about from the outside:

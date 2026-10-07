@@ -5,7 +5,8 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { buildContext } from "../aiol/context.ts";
 import { checkAlpha52 } from "../aiol/checks.ts";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 
 async function withTmpDir(fn: (dir: string) => Promise<void>): Promise<void> {
   const dir = await Deno.makeTempDir();
@@ -230,14 +231,14 @@ export const t = cell('t', {
 // TS2322 after migration — and stripping it orphans the type import
 // (no-unused-vars). Pinned by running the real gates over the fixed files.
 
-const REPO = new URL("../", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("../", import.meta.url));
 
 async function gateProject(dir: string, source: string) {
   await Deno.mkdir(join(dir, "src"), { recursive: true });
   await Deno.writeTextFile(
     join(dir, "deno.json"),
     JSON.stringify({
-      imports: { "aio": `${REPO}mod.ts` },
+      imports: { "aio": `${spec(REPO)}mod.ts` },
       unstable: ["kv"],
       // The lib set every scaffolded app carries — mod.ts pulls renderer
       // types, which need the DOM lib to type-check.

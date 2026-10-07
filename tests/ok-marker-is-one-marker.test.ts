@@ -15,6 +15,7 @@ import {
   justifiedFor,
   justifiedLoose,
 } from "../src/diagnostics/ok-marker.ts";
+import { fromFileUrl } from "@std/path";
 
 Deno.test("both spellings are the same marker", () => {
   for (const spelling of ["aio-ok", "aiol-ok"]) {
@@ -72,7 +73,10 @@ Deno.test("a caller with no name cannot claim a scoped marker", () => {
 Deno.test("every gate that reads a marker reads THIS one", async () => {
   // The point of the module. A gate with its own copy of the regex is exactly
   // how the two spellings diverged, so a new private one is the regression.
-  const root = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+  const root = fromFileUrl(new URL("..", import.meta.url)).replace(
+    /[\\/]$/,
+    "",
+  );
   const offenders: string[] = [];
   let scanned = 0;
   for (const dir of ["scripts", "aiol"]) {

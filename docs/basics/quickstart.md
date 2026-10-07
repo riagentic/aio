@@ -163,9 +163,9 @@ This is the file it writes for `am create my-app` (browser target):
     "aio/feedback": "./dep/aio/src/feedback.ts",
     "aio/build": "./dep/aio/src/build.ts",
     "aio/ship": "./dep/aio/src/build/ship.ts",
-    "esbuild": "npm:esbuild@0.24.2",
+    "esbuild": "npm:esbuild@0.25.12",
     "immer": "npm:immer@10.2.0",
-    "happy-dom": "npm:happy-dom@17.6.3",
+    "happy-dom": "npm:happy-dom@20.14.5",
     "@std/path": "jsr:@std/path@1.1.3",
     "@std/assert": "jsr:@std/assert@1.0.19"
   },
@@ -185,7 +185,7 @@ This is the file it writes for `am create my-app` (browser target):
 }
 ```
 
-- `"jsxImportSource": "aio"` — uses air, the built-in renderer (82 KB gzipped
+- `"jsxImportSource": "aio"` — uses air, the built-in renderer (84 KB gzipped
   with the client runtime, zero deps)
 - `"aio/jsx-runtime"` entry is required so the JSX compiler can resolve the
   runtime when it rewrites `<div/>` into `jsx()` calls

@@ -1,7 +1,8 @@
 // `am create` as a first-hour user meets it — the scaffold's own commands
 // must be commands that work, and its report must say what it did.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, isAbsolute, join } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 import {
   cmdCreate,
   type GitInit,
@@ -17,7 +18,7 @@ import { h } from "../src/air/vdom.ts";
 import type { ComponentFn } from "../src/air/vdom.ts";
 import { testUI } from "../src/testing/ui-test.ts";
 
-const ROOT = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
+const ROOT = fromFileUrl(new URL("../", import.meta.url)).replace(/[\\/]$/, "");
 const files = scaffold("demo", "counter", true);
 
 /** This machine's REAL module cache, resolved BEFORE any child is handed a
@@ -99,7 +100,7 @@ Deno.test("src/client.ts: no default URL, usage + exit 2 without one, bounded re
     await Deno.writeTextFile(
       join(dir, "deno.json"),
       JSON.stringify({
-        imports: { "aio/server": `${ROOT}/src/server-entry.ts` },
+        imports: { "aio/server": `${spec(ROOT)}/src/server-entry.ts` },
       }),
     );
     const run = (args: string[]) =>
@@ -172,7 +173,7 @@ Deno.test("--template=cli: a CLI with no UI — defaults to target cli, mirrors 
         imports: Object.fromEntries(
           Object.entries(AIO_ENTRY_PATHS).map((
             [k, v],
-          ) => [k, `${ROOT}/${v}`]),
+          ) => [k, `${spec(ROOT)}/${v}`]),
         ),
       }),
     );
@@ -243,7 +244,7 @@ Deno.test("am create --json: absolute dir, and git as a reason — never a bare 
     // Outside one: initialized (or the reason git is unavailable).
     const doc = await createJson(tmp);
     assert(
-      typeof doc.dir === "string" && doc.dir.startsWith("/"),
+      typeof doc.dir === "string" && isAbsolute(doc.dir),
       `dir is absolute: ${doc.dir}`,
     );
     assert(
@@ -267,7 +268,6 @@ Deno.test("am create --json: absolute dir, and git as a reason — never a bare 
 // This scaffolds it, starts the server, and runs a command against it.
 Deno.test({
   name: "--template=cli: `dev` starts the server and a command finds it",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const cli = scaffold("clitool", "cli", true, "cli");
     // The dev task must BE the server. `--client=cli` is not a command word.
@@ -320,7 +320,9 @@ Deno.test({
         // the scaffold's own identity keys, so resolveAppId() finds the lock
         ...JSON.parse(cli["deno.json"]!),
         imports: Object.fromEntries(
-          Object.entries(AIO_ENTRY_PATHS).map(([k, v]) => [k, `${ROOT}/${v}`]),
+          Object.entries(AIO_ENTRY_PATHS).map((
+            [k, v],
+          ) => [k, `${spec(ROOT)}/${v}`]),
         ),
       }),
     );
@@ -394,7 +396,6 @@ Deno.test({
 // the app's OWN dev task, which is the only place it is ever declared.
 Deno.test({
   name: "--template=cli: `am start` boots the server `deno task dev` declares",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const cli = scaffold("clistart", "cli", true, "cli");
     const dir = await tempDir("aio-cli-amstart-");
@@ -411,7 +412,9 @@ Deno.test({
       JSON.stringify({
         ...JSON.parse(cli["deno.json"]!),
         imports: Object.fromEntries(
-          Object.entries(AIO_ENTRY_PATHS).map(([k, v]) => [k, `${ROOT}/${v}`]),
+          Object.entries(AIO_ENTRY_PATHS).map((
+            [k, v],
+          ) => [k, `${spec(ROOT)}/${v}`]),
         ),
       }),
     );

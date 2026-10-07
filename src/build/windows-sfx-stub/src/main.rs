@@ -315,29 +315,12 @@ mod win {
             }
         }
 
-        /// A file name made of `title`: the characters Windows refuses in one
-        /// become `_`.
-        fn file_name(title: &str) -> String {
-            title
-                .chars()
-                .map(|c| {
-                    if c < ' ' || r#"\/:*?"<>|"#.contains(c) {
-                        '_'
-                    } else {
-                        c
-                    }
-                })
-                .collect::<String>()
-                .trim_matches([' ', '.'])
-                .to_owned()
-        }
-
         pub fn add(title: &str, target: &Path, working_dir: &Path) -> Result<(), String> {
             let programs = std::env::var_os("APPDATA")
                 .filter(|v| !v.is_empty())
                 .map(|appdata| Path::new(&appdata).join(r"Microsoft\Windows\Start Menu\Programs"))
                 .ok_or("APPDATA is not set")?;
-            let name = file_name(title);
+            let name = crate::format::shortcut_file_name(title);
             if name.is_empty() {
                 return Err(format!("{title:?} is not a file name"));
             }

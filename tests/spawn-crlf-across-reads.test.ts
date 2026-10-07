@@ -9,11 +9,16 @@ import { spawn } from "../src/server/spawn.ts";
 
 Deno.test({
   name: "spawn: a \\r\\n split across two reads is one line end, not two",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     const lines: string[] = [];
-    const proc = await spawn("sh", {
-      args: ["-c", `printf 'a\\r'; sleep 0.3; printf '\\nb\\n'`],
+    const proc = await spawn(Deno.execPath(), {
+      args: [
+        "eval",
+        `const w = (s) => Deno.stdout.write(new TextEncoder().encode(s));
+         await w("a\\r");
+         await new Promise((r) => setTimeout(r, 300));
+         await w("\\nb\\n");`,
+      ],
       onLine: (l, stream) => {
         if (stream === "stdout") lines.push(l);
       },

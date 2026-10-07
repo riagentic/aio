@@ -1,6 +1,21 @@
 // aiol — project scanner: reads files, extracts cells, builds LintContext
 
-import { basename, extname, join, relative, resolve } from "@std/path";
+import {
+  basename,
+  extname,
+  join,
+  relative as osRelative,
+  resolve,
+  SEPARATOR,
+} from "@std/path";
+
+/** A project-relative path, `/`-separated on EVERY OS. Each rule names files
+ *  that way (`f.relative === "src/app.ts"`, `startsWith("src/")`), so with
+ *  the OS's own `\` a Windows project had "no entry point found (src/app.ts)"
+ *  beside its src\app.ts, and every rule keyed on the entry never fired. */
+function relative(from: string, to: string): string {
+  return osRelative(from, to).replaceAll(SEPARATOR, "/");
+}
 import { codeMatches, codeText, topLevelKeyOffsets } from "./scan.ts";
 import {
   _boundConfigSpans,

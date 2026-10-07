@@ -158,17 +158,22 @@ Deno.test("example disk: the UI renders a scan and drills into a folder", async 
     await disk.open(root);
     await ui.settle();
 
-    assert(
-      ui.surface().text.includes("big"),
+    // Read from each row, not from the root's text: the surface caps a text at
+    // 80 characters and the scanned path leads it — under a long temp
+    // directory (Windows) the folder names fell past the cut.
+    assertEquals(
+      ui.Folders["open-big"].text,
+      "big",
       "the biggest folder is on screen",
     );
-    assert(ui.surface().text.includes("small"));
+    assertEquals(ui.Folders["open-small"].text, "small");
 
     ui.Folders["open-big"].click(); // drill in
     await ui.waitFor(() => disk.path === join(root, "big"), "drilled into big");
     await ui.settle();
-    assert(
-      ui.surface().text.includes("nested"),
+    assertEquals(
+      ui.Folders["open-nested"].text,
+      "nested",
       `the child folder is listed:\n${ui.surface().text}`,
     );
 

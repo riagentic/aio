@@ -13,16 +13,17 @@
 // with every head-shaped key set, and reads them back out of the script the
 // launch actually produced — the instrument, not the config.
 import { assert, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
 import { tempDir } from "../src/testing/temp-dir.ts";
+import { EXE, writeProgram } from "./fake-program-helper.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const ROOT = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 
 Deno.test({
   name:
     "electron launch: chrome, head and tray reach the generated main (the picked ui copy carries every key)",
-  ignore: Deno.build.os === "windows",
   sanitizeOps: false, // aio-ok: a child deno process, waited for and killed below
   sanitizeResources: false, // aio-ok: same
   fn: async () => {
@@ -30,12 +31,20 @@ Deno.test({
     const captured = join(dir, "captured-main.cjs");
     // The fake electron: keep the main script, stay alive briefly so the
     // launch reads as healthy, exit 0 so the app shuts itself down.
-    const fake = join(dir, "electron");
+    // (A program that hands its arguments to a script the real deno runs —
+    // it was a shell script, which Windows cannot run.)
+    const fake = join(dir, `electron${EXE}`);
     await Deno.writeTextFile(
-      fake,
-      `#!/bin/sh\ncp "$1" "${captured}"\nsleep 4\nexit 0\n`,
+      join(dir, "electron.ts"),
+      `Deno.copyFileSync(Deno.args[0], ${JSON.stringify(captured)});\n` +
+        `await new Promise((r) => setTimeout(r, 4000));\n`,
     );
-    await Deno.chmod(fake, 0o755);
+    await writeProgram(
+      fake,
+      `#!/bin/sh\nexec "${Deno.execPath()}" run -A --no-config "${
+        join(dir, "electron.ts")
+      }" "$@"\n`,
+    );
     // A one-cell app with every head-shaped key set.
     const app = join(dir, "app");
     await Deno.mkdir(join(app, "src"), { recursive: true });
@@ -44,7 +53,7 @@ Deno.test({
     for (
       const [k, v] of Object.entries(head.imports as Record<string, string>)
     ) {
-      imports[k] = v.startsWith("./") ? `${ROOT}/${v.slice(2)}` : v;
+      imports[k] = v.startsWith("./") ? `${spec(ROOT)}/${v.slice(2)}` : v;
     }
     await Deno.writeTextFile(
       join(app, "deno.json"),

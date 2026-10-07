@@ -18,6 +18,7 @@
 // `… in …` operators. source-mask walks holes as real code, recursively, which
 // is also what these rules want — `${k in o ? … : …}` is a membership test.
 import { justified as okMarker } from "../src/diagnostics/ok-marker.ts";
+import { fromFileUrl } from "@std/path";
 
 export type Hit = { file: string; line: number };
 
@@ -100,7 +101,7 @@ export function scanRoot(): { root: string; foreign: boolean } {
   const arg = Deno.args.find((a) => a.startsWith("--root="));
   if (!arg) {
     return {
-      root: new URL("../src/", import.meta.url).pathname,
+      root: fromFileUrl(new URL("../src/", import.meta.url)),
       foreign: false,
     };
   }

@@ -30,7 +30,9 @@ export async function minifiedCopy(...entries: string[]): Promise<
   const files = new Set<string>();
   for (const entry of entries) {
     const o = await new Deno.Command(Deno.execPath(), {
-      args: ["info", "--json", join(ROOT, entry)],
+      // A URL: `deno info C:\\x\\y.ts` reads the path as a specifier with the
+      // scheme `c:` and answers a graph of that one unloadable module.
+      args: ["info", "--json", toFileUrl(join(ROOT, entry)).href],
       cwd: ROOT,
       stdout: "piped",
       stderr: "piped",

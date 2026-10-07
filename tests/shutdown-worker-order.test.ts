@@ -14,7 +14,7 @@
 //
 // Now the orchestrator runs `closeWorkers` itself, between the two.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import {
   createShutdownOrchestrator,
   type ShutdownRefs,
@@ -22,8 +22,9 @@ import {
 import { freePort } from "../src/testing/server-test.ts";
 import { childEnv } from "./e2e-app-harness.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const REPO = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
+const REPO = fromFileUrl(new URL("../", import.meta.url)).replace(/[\\/]$/, "");
 
 /** Stub refs whose every phase records itself. */
 function stubRefs(done: string[], over: Partial<ShutdownRefs>): ShutdownRefs {
@@ -86,7 +87,7 @@ Deno.test("shutdown: the worker cells close after onStopping and before dispatch
  *  through the `app` its `onInit` captured) — stopped the documented way:
  *  `onStopping` calls the cell. */
 function appSource(port: number): string {
-  return `import { aio, cell, own } from "${REPO}/mod.ts";
+  return `import { aio, cell, own } from "${spec(REPO)}/mod.ts";
 
 const G = globalThis as any;
 export const w = cell("w", {

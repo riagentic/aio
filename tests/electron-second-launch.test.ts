@@ -11,14 +11,17 @@
 // the request the way the real shell does, by removing it. The real window's
 // half is tests/electron-second-launch-show-e2e.test.ts.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { askRunningToShow } from "../src/server/aio-run-helpers.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { testDisplayEnv } from "../src/testing/test-display.ts";
+import { writeDenoProgram } from "./fake-program-helper.ts";
+import { spec } from "./module-spec-helper.ts";
+import { askToStop } from "./proc-helper.ts";
 import { childEnv } from "./e2e-app-harness.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const ROOT = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 
 Deno.test("askRunningToShow: nobody answers → false, and the request is withdrawn", async () => {
   const dir = await tempDir("show-req-");
@@ -48,7 +51,7 @@ async function scaffold(dir: string): Promise<string> {
   for (
     const [k, v] of Object.entries(head.imports as Record<string, string>)
   ) {
-    imports[k] = v.startsWith("./") ? `${ROOT}/${v.slice(2)}` : v;
+    imports[k] = v.startsWith("./") ? `${spec(ROOT)}/${v.slice(2)}` : v;
   }
   await Deno.writeTextFile(
     join(app, "deno.json"),
@@ -72,6 +75,25 @@ async function scaffold(dir: string): Promise<string> {
 /** A stand-in window: takes show requests (when `answer`) and counts them. */
 async function stub(dir: string, answer: boolean): Promise<string> {
   const path = join(dir, answer ? "electron" : "electron-deaf");
+  if (Deno.build.os === "windows") {
+    // The same stand-in without a shell. (The show file's path is read out of
+    // the main script, where it is a string literal: unescaped as one.)
+    return await writeDenoProgram(
+      path,
+      String.raw`
+const m = /^  const SHOW_FILE = (".*");$/m.exec(Deno.readTextFileSync(Deno.args[0]));
+const f = m ? JSON.parse(m[1]) : "";
+console.log("stub: show file [" + f + "]");
+const there = () => { try { Deno.statSync(f); return true; } catch { return false; } };
+while (true) {
+  if (f && there() && ${
+        String(answer)
+      }) { Deno.removeSync(f); console.log("stub: shown"); }
+  await new Promise((r) => setTimeout(r, 50));
+}
+`,
+    );
+  }
   await Deno.writeTextFile(
     path,
     `#!/bin/sh
@@ -90,13 +112,14 @@ done
 }
 
 function boot(app: string, home: string, electron: string) {
+  const port = freePort();
   const child = new Deno.Command(Deno.execPath(), {
     args: [
       "run",
       "-A",
       "src/app.ts",
       "--client=electron",
-      `--port=${freePort()}`,
+      `--port=${port}`,
     ],
     cwd: app,
     env: childEnv({
@@ -113,7 +136,7 @@ function boot(app: string, home: string, electron: string) {
     for await (const x of s) log += dec.decode(x);
   };
   const pumps = Promise.all([pump(child.stdout), pump(child.stderr)]);
-  return { child, pumps, log: () => log };
+  return { child, port, pumps, log: () => log };
 }
 
 async function until(what: string, f: () => boolean, ms = 60_000) {
@@ -130,24 +153,18 @@ for (const answer of [true, false]) {
     name: answer
       ? "second launch of a desktop app: the running window shows, exit 0"
       : "second launch, window never answers: refused as before, exit 1",
-    ignore: Deno.build.os !== "linux", // a sh stub
+    ignore: Deno.build.os === "darwin", // macOS: left out as it was (never run there)
     async fn() {
       const dir = await tempDir("el-second-");
-      const first = boot(
-        await scaffold(dir),
-        join(dir, "home"),
-        await stub(dir, answer),
-      );
+      // Written once: Windows cannot rewrite a program that is running.
+      const electron = await stub(dir, answer);
+      const first = boot(await scaffold(dir), join(dir, "home"), electron);
       try {
         await until(
           "the first window",
           () => /stub: show file \[.+\.show\]/.test(first.log()),
         );
-        const second = boot(
-          join(dir, "app"),
-          join(dir, "home"),
-          await stub(dir, answer),
-        );
+        const second = boot(join(dir, "app"), join(dir, "home"), electron);
         const st = await second.child.status;
         await second.pumps;
         if (answer) {
@@ -168,7 +185,12 @@ for (const answer of [true, false]) {
           assertEquals(left, false, "the unanswered request stayed behind");
         }
       } finally {
-        first.child.kill("SIGTERM");
+        // A graceful stop (it ends the window too), on every OS.
+        await askToStop(
+          first.child.pid,
+          first.port,
+          join(dir, "home", "elsecond", "data", "control.key"),
+        );
         await first.child.status;
         await first.pumps;
         await dropTempDir(dir);

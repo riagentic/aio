@@ -13,14 +13,16 @@ import { assertEquals, assertStringIncludes } from "@std/assert";
 import { createUDSListener } from "../src/server/aio.ts";
 import { electronMainScriptUDS } from "../src/electron/electron.ts";
 import { join } from "@std/path";
+import { connectLocal } from "../src/server/local-listen.ts";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
 
 // ── UDS: conn.close() on disconnect ────────────────────────────────
 
 Deno.test("aio24: UDS conn closed after client disconnects (no ghost socket)", async () => {
-  const socketPath = join(
+  const socketPath = localEndpoint(join(
     await Deno.makeTempDir(),
     "aio24-test.sock",
-  );
+  ));
   const actions: { type: string }[] = [];
   const uds = createUDSListener(
     socketPath,
@@ -35,7 +37,7 @@ Deno.test("aio24: UDS conn closed after client disconnects (no ghost socket)", a
   await new Promise((r) => setTimeout(r, 50));
 
   // Connect a client
-  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  const conn = await connectLocal(socketPath);
   await new Promise((r) => setTimeout(r, 50));
 
   // Send an action to prove connection works
@@ -53,6 +55,7 @@ Deno.test("aio24: UDS conn closed after client disconnects (no ghost socket)", a
 
   // Cleanup
   uds.shutdown();
+  await localIdle();
 });
 
 // ── UDS: no idle timeout in source ─────────────────────────────────
@@ -75,10 +78,10 @@ Deno.test("aio24: handleUDSConn has no idle timeout race", async () => {
 // ── UDS: ping ignored by server ────────────────────────────────────
 
 Deno.test("aio24: server ignores ping keepalive (not dispatched as action)", async () => {
-  const socketPath = join(
+  const socketPath = localEndpoint(join(
     await Deno.makeTempDir(),
     "aio24-ping.sock",
-  );
+  ));
   const actions: { type: string }[] = [];
   const debugMsgs: string[] = [];
   const uds = createUDSListener(
@@ -92,7 +95,7 @@ Deno.test("aio24: server ignores ping keepalive (not dispatched as action)", asy
 
   await new Promise((r) => setTimeout(r, 50));
 
-  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  const conn = await connectLocal(socketPath);
   const writer = conn.writable.getWriter();
   const encoder = new TextEncoder();
 
@@ -118,6 +121,7 @@ Deno.test("aio24: server ignores ping keepalive (not dispatched as action)", asy
   conn.close();
   await new Promise((r) => setTimeout(r, 50));
   uds.shutdown();
+  await localIdle();
 });
 
 // ── Browser: the LIVE AIR transport (browser-air-transport.ts) ─────

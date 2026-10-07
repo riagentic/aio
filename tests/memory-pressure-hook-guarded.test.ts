@@ -61,3 +61,46 @@ for (const kind of ["throws", "rejects"] as const) {
     }
   });
 }
+
+// An unchanged pressure is SAID once: the log and `onError` had the same
+// MEMORY_PRESSURE every interval for as long as the app sat over its warn
+// threshold. The hook above is not what is said — it still runs each time.
+Deno.test("memory: steady pressure reaches onError once, and onMemoryPressure every interval", async () => {
+  const dir = await tempDir("aio-mem-said-");
+  let calls = 0;
+  const errors: string[] = [];
+  try {
+    const c = cell("memsaid", { state: { n: 0 }, methods: {} });
+    _resetAioRuntime();
+    const app = await aio.run({
+      cells: [c],
+      appId: "memsaid",
+      dbPath: `${dir}/data.db`,
+      libraryMode: true,
+      client: "server-only",
+      baseDir: dir,
+      logging: false,
+      onError: (e: { code: string }) => errors.push(e.code),
+      memory: {
+        interval: 50,
+        warnThreshold: 1e-9, // every tick is over it
+        criticalThreshold: 0.999,
+        onMemoryPressure: () => {
+          calls++;
+        },
+      },
+    } as Any);
+    const deadline = Date.now() + 5_000;
+    while (calls < 4 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert(calls >= 4, `the hook ran ${calls} time(s)`);
+    assertEquals(errors.filter((e) => e === "MEMORY_PRESSURE"), [
+      "MEMORY_PRESSURE",
+    ]);
+    await app.close();
+  } finally {
+    _resetAioRuntime();
+    await dropTempDir(dir);
+  }
+});

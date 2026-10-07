@@ -22,7 +22,7 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 
 import {
   BUILD_BOOL_FLAGS,
@@ -317,7 +317,7 @@ const vocabulary = (
 ): Set<string> => new Set([...bools, ...values]);
 
 Deno.test("build flags: every flag the SOURCE reads is in its table", async () => {
-  const root = new URL("..", import.meta.url).pathname;
+  const root = fromFileUrl(new URL("..", import.meta.url));
   const read = async (rel: string) => await Deno.readTextFile(join(root, rel));
 
   const cases: [string, string[], Set<string>][] = [
@@ -357,7 +357,7 @@ Deno.test("build flags: every flag the SOURCE reads is in its table", async () =
 });
 
 Deno.test("build flags: no table entry is a flag nothing reads", async () => {
-  const root = new URL("..", import.meta.url).pathname;
+  const root = fromFileUrl(new URL("..", import.meta.url));
   const read = async (rel: string) => await Deno.readTextFile(join(root, rel));
   const buildReads = new Set([
     ...flagsReadBy(await read("src/build.ts")),

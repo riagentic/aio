@@ -17,6 +17,8 @@ import {
 } from "../src/server/single-instance-lock.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropFixtureLock } from "./fixture-lock-helper.ts";
+import { listenLocal } from "../src/server/local-listen.ts";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
 
 class ExitSignal extends Error {
   constructor(public code: number) {
@@ -64,14 +66,14 @@ function spawnChild(): Deno.ChildProcess {
 
 Deno.test({
   name: "am: a running UDS app is DETECTED, not killed, by ensureSingleton",
-  ignore: Deno.build.os === "windows", // no unix sockets
   async fn() {
     const appId = `am-uds-singleton-${Deno.pid}`;
     const dir = await Deno.makeTempDir({ prefix: "am-uds-" });
-    const socketPath = join(dir, "app.sock");
-    const listener = Deno.listen({ transport: "unix", path: socketPath });
+    // The app's own local transport: a unix socket, a named pipe on Windows.
+    const socketPath = localEndpoint(join(dir, "app.sock"));
+    const listener = listenLocal(socketPath);
     // Accept and drop — the probe only needs the connect to succeed.
-    (async () => {
+    const accepting = (async () => {
       for await (const conn of listener) {
         try {
           conn.close();
@@ -109,6 +111,8 @@ Deno.test({
       } catch { /* already dead */ }
       await child.status;
       listener.close();
+      await accepting;
+      await localIdle();
       dropFixtureLock(appId);
       await Deno.remove(dir, { recursive: true });
     }
@@ -118,7 +122,6 @@ Deno.test({
 Deno.test({
   name:
     "am: a genuinely dead instance is still reaped (the fallback is not a blanket yes)",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const appId = `am-uds-zombie-${Deno.pid}`;
     const dir = await Deno.makeTempDir({ prefix: "am-uds-z-" });
@@ -132,7 +135,7 @@ Deno.test({
       cwd: Deno.cwd(),
       // A socket path that exists in the lock but has no listener behind it —
       // exactly what a crashed UDS app leaves behind.
-      socketPath: join(dir, "gone.sock"),
+      socketPath: localEndpoint(join(dir, "gone.sock")),
     });
     // Its record has not changed for longer than the startup grace.
     const recordAge = _zombieDeps.recordAge, delay = _zombieDeps.delay;
@@ -144,7 +147,11 @@ Deno.test({
       ).finally(() => {
         Object.assign(_zombieDeps, { recordAge, delay });
       });
-      assertEquals(code, null, "no refusal: nothing is actually serving");
+      assertEquals(
+        code,
+        null,
+        `no refusal: nothing is actually serving — ${JSON.stringify(logs)}`,
+      );
       assert(
         logs.some((l) => l.includes("unresponsive")),
         `the zombie is reported — got ${JSON.stringify(logs)}`,

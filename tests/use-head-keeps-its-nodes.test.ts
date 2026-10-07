@@ -28,7 +28,13 @@ const HEAD = {
 
 async function withDoc(body: (doc: Document, win: Window) => Promise<void>) {
   _resetHead();
-  const win = new Window({ url: "http://localhost/" });
+  // No fetch of the fixture's stylesheet: nothing serves `localhost/fonts.css`,
+  // and where the refusal is not instant (Windows) the connect attempt
+  // outlives the test. Node identity is what is under test, not the load.
+  const win = new Window({
+    url: "http://localhost/",
+    settings: { disableCSSFileLoading: true },
+  });
   const doc = win.document as unknown as Document;
   _setDocument(doc);
   try {

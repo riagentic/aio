@@ -11,10 +11,11 @@
 //     right after the restart; bare `am status` names the profile;
 //     `am logs pc@dev` reads its log.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const REPO = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 
 async function project(dir: string, appId: string, extra = "") {
   const proj = join(dir, `proj-${appId}`);
@@ -34,7 +35,7 @@ async function project(dir: string, appId: string, extra = "") {
   );
   await Deno.writeTextFile(
     join(proj, "src", "app.ts"),
-    `import { aio, cell } from "${REPO}/mod.ts";
+    `import { aio, cell } from "${spec(REPO)}/mod.ts";
 const c = cell("c", { state: { n: 1 }, methods: {} });
 console.log("hello-from-${appId}");
 await aio.run({ cells: [c], appId: "${appId}", persist: false,
@@ -72,6 +73,27 @@ function amIn(proj: string, env: Record<string, string>) {
   };
 }
 
+/** `lockDir()` as a process with `env` computes it. */
+async function lockDirFor(env: Record<string, string>): Promise<string> {
+  const o = await new Deno.Command(Deno.execPath(), {
+    args: [
+      "eval",
+      "--config",
+      join(REPO, "deno.json"),
+      `import { lockDir } from "${
+        spec(REPO)
+      }/src/server/single-instance-lock.ts";
+       console.log(lockDir());`,
+    ],
+    env,
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  const out = new TextDecoder().decode(o.stdout).trim();
+  assert(o.success && out, new TextDecoder().decode(o.stderr));
+  return out;
+}
+
 const tree = (d: string): string[] => {
   const out: string[] = [];
   const walk = (p: string, rel: string) => {
@@ -89,7 +111,6 @@ const tree = (d: string): string[] => {
 Deno.test({
   name:
     "am: a refused home is never written; an appDir app's profile lands in <appDir>-dev",
-  ignore: Deno.build.os === "windows",
   sanitizeOps: false, // aio-ok: the apps am starts are stopped below, by am
   sanitizeResources: false, // aio-ok: same
   async fn() {
@@ -147,10 +168,18 @@ Deno.test({
       const s0 = await pc("start", "--json");
       assertEquals(s0.code, 0, s0.out);
       assertEquals((s0.json as { status?: string }).status, "started");
+      // Every lock dir under the runtime dir — which Windows does not have:
+      // there the one the product names for this environment.
+      const winLocks = Deno.build.os === "windows"
+        ? await lockDirFor(env)
+        : null;
       const keys = () =>
-        [...Deno.readDirSync(rt)].filter((e) => e.isDirectory)
-          .flatMap((e) =>
-            [...Deno.readDirSync(join(rt, e.name))]
+        (winLocks
+          ? [winLocks]
+          : [...Deno.readDirSync(rt)].filter((e) => e.isDirectory)
+            .map((e) => join(rt, e.name)))
+          .flatMap((d) =>
+            [...Deno.readDirSync(d)]
               .map((f) => f.name).filter((n) => n.endsWith(".lock"))
           ).filter((n) => n.startsWith("pc")).sort();
       assertEquals(keys().length, 1, `ghost lock: ${keys()}`);

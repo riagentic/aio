@@ -16,6 +16,7 @@ import {
   initClientLog,
   writeClientLog,
 } from "../src/server/client-log.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const KEY = "Zk3y-THE-APP-KEY-9f2a";
 const PIN = "482913";
@@ -56,7 +57,7 @@ Deno.test("console: masked only when am says stdout is a log file", async () => 
   const printer =
     new URL("../src/diagnostics/logger-format.ts", import.meta.url)
       .href;
-  const code = `import { printConsole } from "${printer}";
+  const code = `import { printConsole } from "${spec(printer)}";
 printConsole({ ts: "t", lvl: "info", cat: "aio", msg: "share: https://h:1?token=${KEY}" });
 printConsole({ ts: "t", lvl: "info", cat: "aio", msg: "pair code: ${PIN}" });
 printConsole({ ts: "t", lvl: "info", cat: "aio", msg: "detail", data: { url: "share: https://h:2?token=${DATA_KEY}" } });`;

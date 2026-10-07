@@ -9,10 +9,10 @@
 // A real process, because the whole point is the file handle the process is
 // holding: nothing in-process can reproduce an unlinked inode.
 import { assert } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("..", import.meta.url));
 const MOD = new URL("../mod.ts", import.meta.url).href;
 
 /** Boot a persisting app, optionally destroy its data dir, then close. */
@@ -59,6 +59,9 @@ Deno.exit(0);
 Deno.test({
   name:
     "persist: a database deleted under a running app is REPORTED at shutdown, not exited clean",
+  ignore: Deno.build.os === "windows", // Windows refuses to delete an open database (os error 32): the case cannot arise
+  // Windows refuses to delete a file a process holds open (os error 32), so a
+  // database cannot vanish under a running app there: no subject.
   fn: async () => {
     const gone = await tempDir("aio-db-vanish-");
     try {

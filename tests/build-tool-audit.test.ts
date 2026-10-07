@@ -28,6 +28,7 @@ import {
   withDevExcluded,
 } from "../src/build/build-compile.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { linkDir, linkText } from "./symlink-helper.ts";
 
 const exists = (p: string) => Deno.lstat(p).then(() => true).catch(() => false);
 
@@ -53,10 +54,7 @@ async function link(
   pkg: string,
 ): Promise<void> {
   await Deno.mkdir(join(nm, name, ".."), { recursive: true });
-  await Deno.symlink(
-    `.deno/${entry}/node_modules/${pkg}`,
-    join(nm, name),
-  );
+  await linkDir(`.deno/${entry}/node_modules/${pkg}`, join(nm, name));
 }
 
 /** A tree the way deno writes it into a binary: the JSON behind its own
@@ -342,7 +340,7 @@ Deno.test("dev closure drops a peer typescript with NO top-level symlink (§3)",
     // the package the list names.
     const sibling = join(nm, ".deno/immer@10.2.0/node_modules/typescript");
     const siblingTarget = "../../typescript@6.0.3/node_modules/typescript";
-    await Deno.symlink(siblingTarget, sibling);
+    await linkDir(siblingTarget, sibling);
 
     let excluded: string[] = [];
     let linkedDuring = true;
@@ -357,7 +355,7 @@ Deno.test("dev closure drops a peer typescript with NO top-level symlink (§3)",
     );
     assertEquals(
       await Deno.readLink(sibling),
-      siblingTarget,
+      linkText(siblingTarget, sibling),
       "…and back after",
     );
     for (

@@ -9,14 +9,16 @@
 // (`libraryMode`), where the app closes and the host process lives on.
 //
 // No window: "Electron" is a script that sleeps, on a display nothing listens
-// on. Linux-only, as the SIGHUP rule reads /proc.
+// on. The signal cases are Linux-only, as the SIGHUP rule reads /proc.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { walk } from "@std/fs/walk";
 import { childEnv, freePort } from "./e2e-app-harness.ts";
 import { tempDir } from "../src/testing/temp-dir.ts";
+import { EXE, writeProgram } from "./fake-program-helper.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const ROOT = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** A one-cell app in a temp dir whose entry is `appTs`, started with `args`.
@@ -28,7 +30,7 @@ async function startApp(appTs: string, args: string[]) {
   for (
     const [k, v] of Object.entries(head.imports as Record<string, string>)
   ) {
-    imports[k] = v.startsWith("./") ? `${ROOT}/${v.slice(2)}` : v;
+    imports[k] = v.startsWith("./") ? `${spec(ROOT)}/${v.slice(2)}` : v;
   }
   await Deno.mkdir(join(dir, "src"));
   await Deno.writeTextFile(
@@ -44,9 +46,8 @@ async function startApp(appTs: string, args: string[]) {
     `import { c } from "./cell.ts";\nexport default function App() { return <p>{c.n}</p>; }\n`,
   );
   await Deno.writeTextFile(join(dir, "src", "app.ts"), appTs);
-  const fake = join(dir, "electron");
-  await Deno.writeTextFile(fake, "#!/bin/sh\nexec sleep 120\n");
-  await Deno.chmod(fake, 0o755);
+  const fake = join(dir, "electron" + EXE);
+  await writeProgram(fake, "#!/bin/sh\nexec sleep 120\n");
   const child = new Deno.Command(Deno.execPath(), {
     args: [
       "run",
@@ -126,7 +127,7 @@ const RUN = `import "./cell.ts";\nimport { aio } from "aio";\n`;
 for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
   Deno.test({
     name: `a desktop app stopped by ${sig} says so, in the console and app.log`,
-    ignore: Deno.build.os !== "linux",
+    ignore: Deno.build.os !== "linux", // a delivered signal (the SIGHUP rule reads /proc); Windows has none to deliver
     fn: async () => {
       await using app = await startApp(
         `${RUN}await aio.run({ ui: { title: "Why" } });\n`,
@@ -170,7 +171,6 @@ const ASKED = "stop requested over the control API (am stop)";
 Deno.test({
   name:
     "an app stopped over the control API says so, in the console and app.log",
-  ignore: Deno.build.os !== "linux",
   fn: async () => {
     const port = freePort();
     await using app = await startApp(
@@ -191,7 +191,6 @@ Deno.test({
 Deno.test({
   name:
     "an embedded app closed over the control API says so, and its host lives on",
-  ignore: Deno.build.os !== "linux",
   fn: async () => {
     const port = freePort();
     await using app = await startApp(

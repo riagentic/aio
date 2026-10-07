@@ -74,7 +74,7 @@ export interface ComponentInstance {
   refs?: { current: any }[];
   /** Current ref index counter (reset each render). */
   refIndex?: number;
-  /** Dev mode: how many state hooks (useRef/useSignal/useId) the PREVIOUS
+  /** How many state hooks (useRef/useSignal/useId) the PREVIOUS
    *  render called — a change means the call order moved (see the hook-order
    *  tripwire in renderer-rerender.ts). */
   _hookCount?: number;
@@ -146,6 +146,10 @@ export interface RootState {
  *  component's frame is gone, and a contained hook error has to say WHERE. */
 export interface AfterRenderEntry {
   fn: () => void;
+  /** What the registering body collected into — a first render's collector,
+   *  or the instance on a re-render. The flush asks it whether the instance
+   *  is still there (`_flushAfterRender`). */
+  owner?: LifecycleCollector | null;
   component?: string;
   /** The registering component's RENDER-TIME dependency set, captured at
    *  registration because the flush happens long after that frame is gone.
@@ -180,6 +184,11 @@ export interface HookState {
 }
 
 export interface LifecycleCollector {
+  /** A first render's collector: the instance it became — or, for a body
+   *  that threw, `{ disposed: true }` (it never becomes one). An instance IS
+   *  its own collector and answers with its own `disposed`. */
+  _inst?: { disposed: boolean };
+  disposed?: boolean;
   /** The RENDER-TIME tracking frame of the body currently executing. Read by
    *  the dev-only untracked-read check, which compares it against what a
    *  lifecycle callback goes on to read: a read outside this set subscribes to

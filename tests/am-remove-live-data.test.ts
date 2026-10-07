@@ -5,6 +5,7 @@
 // or not; the program side and a profile's instance are unaffected.
 //
 // Every case runs with HOME / AIO_APPS_DIR / AIO_INSTALL_ROOT in a temp dir.
+import { sleeper } from "./proc-helper.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { cmdRemove } from "../src/am/am-cmd-remove.ts";
@@ -96,10 +97,10 @@ async function liveApp(name: string, home: string, pid: number) {
 }
 
 async function withHolder(fn: (pid: number) => Promise<void>) {
-  const holder = new Deno.Command("sleep", { args: ["30"] }).spawn();
+  const holder = sleeper();
   try {
     await fn(holder.pid);
-    Deno.kill(holder.pid, "SIGCONT"); // throws if remove killed it
+    Deno.kill(holder.pid, 0); // throws if remove killed it
   } finally {
     try {
       holder.kill("SIGKILL");

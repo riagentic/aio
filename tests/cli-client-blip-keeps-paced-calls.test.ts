@@ -20,6 +20,7 @@ import { WS_MAX_QUEUE } from "../src/protocol/protocol-types.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { childCoverageDir, tempDir } from "../src/testing/temp-dir.ts";
 import { stopChild } from "./stop-child.ts";
+import { fromFileUrl } from "@std/path";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 type Inc = { n: number };
@@ -41,7 +42,7 @@ function serverChild(port: number, dir: string): Deno.ChildProcess {
     });`;
   return new Deno.Command(Deno.execPath(), {
     args: ["eval", "--ext=ts", code],
-    cwd: new URL("..", import.meta.url).pathname,
+    cwd: fromFileUrl(new URL("..", import.meta.url)),
     env: { DENO_COVERAGE_DIR: childCoverageDir() },
     stdin: "null",
     stdout: "null",

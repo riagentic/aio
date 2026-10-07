@@ -394,6 +394,9 @@ Deno.test("integration: unauthenticated WS rejected when users configured", asyn
 
 Deno.test("integration: CSS-only change sends __css signal, not __reload", async () => {
   const dir = await Deno.makeTempDir();
+  /** The watcher's own debug lines — `watch: changed <path>`, `<signal> →
+   *  broadcasting to clients`. */
+  const watched: string[] = [];
   await Deno.writeTextFile(join(dir, "style.css"), "body { color: red }");
   await Deno.writeTextFile(join(dir, "app.ts"), 'console.log("hi")');
 
@@ -403,13 +406,32 @@ Deno.test("integration: CSS-only change sends __css signal, not __reload", async
     getUIState: () => ({}),
     dispatch: () => {},
     baseDir: dir,
-    debug: () => {},
+    debug: (m) => watched.push(String(m)),
     prod: false, // dev mode — enables file watcher
   });
 
   await new Promise((r) => setTimeout(r, 100));
 
   try {
+    // The fixture above was written the instant before the watcher opened,
+    // and macOS's FSEvents may hand a new stream the writes that just preceded
+    // it: the Mac suite run logged `reloaded …/style.css, …/app.ts (102ms)`
+    // 108 ms after boot, and that "reload" reached the socket below as
+    // frame 0. It is the watcher being truthful about a write, not a CSS edit
+    // turned into a reload — and no file time can tell the two apart (a file
+    // renamed in looks the same), so the watcher keeps reporting it. The
+    // event stream is ORDERED, though: once a write made HERE has been
+    // broadcast, everything older is behind it. Only then does the client
+    // connect, so every frame it sees is for an edit below.
+    await Deno.writeTextFile(join(dir, "sync.ts"), "// ordering marker");
+    await waitFor(() => {
+      const at = watched.findIndex((m) =>
+        m.startsWith("watch: changed") && m.endsWith("sync.ts")
+      );
+      return at >= 0 &&
+        watched.slice(at).some((m) => m.includes("→ broadcast"));
+    }, 3000);
+
     const ws = new WebSocket(`ws://127.0.0.1:${PORT}/ws`);
     const received: string[] = [];
     ws.addEventListener("message", (e) => {

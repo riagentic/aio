@@ -9,6 +9,7 @@
 // No real app: the "instances" are `sleep` processes holding hand-written
 // locks whose sockets do not exist, so the socket each call TRIED is named in
 // its error — which is exactly the fact under test.
+import { SLEEP_ARGS } from "./proc-helper.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { testCell } from "../src/testing/cell-test.ts";
 import { manager } from "../amui/src/manager.ts";
@@ -43,8 +44,8 @@ async function withTwoUdsInstances(
   Deno.env.set("AMUI_ROOTS", dir);
   Deno.env.set("HOME", sandbox);
   const spawn = () =>
-    new Deno.Command("sleep", {
-      args: ["120"],
+    new Deno.Command(Deno.execPath(), {
+      args: SLEEP_ARGS,
       stdin: "null",
       stdout: "null",
       stderr: "null",
@@ -154,8 +155,8 @@ Deno.test("controlEndpoint: a pid that names no live instance never falls back t
 Deno.test("amui stop never signals a pid no live instance of the app holds", async () => {
   await withTwoUdsInstances(async () => {
     const { stopApp } = await import("../amui/src/server/proc.server.ts");
-    const stranger = new Deno.Command("sleep", {
-      args: ["60"],
+    const stranger = new Deno.Command(Deno.execPath(), {
+      args: SLEEP_ARGS,
       stdin: "null",
       stdout: "null",
       stderr: "null",

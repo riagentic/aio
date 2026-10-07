@@ -84,6 +84,10 @@ export interface ListenLocalOpts {
    *  natively. This only makes `peerIdentity` available — the accept loop,
    *  the framing and the callers are otherwise unchanged. */
   peer?: boolean;
+  /** The peer listener binds after `listenLocal` returned, so a caller
+   *  cannot retry it: asked when try `tries` of the bind failed with `e` —
+   *  true once the cause is cured, and the bind is tried again. */
+  rebind?: (e: unknown, tries: number) => boolean;
 }
 
 /** The pipe backend, resolved once. Loaded lazily and only on windows: the
@@ -179,7 +183,7 @@ export function listenLocal(
   // expose. The fd-bearing backend is taken ONLY when a caller asks (the
   // production local-peer lockdown); every other unix listener is byte-for-byte
   // the path it always was.
-  if (opts?.peer) return listenUnixPeer(path);
+  if (opts?.peer) return listenUnixPeer(path, opts.rebind);
   const l = Deno.listen({ transport: "unix", path });
   let closed = false;
   return {
@@ -265,7 +269,10 @@ function closeOnExec(fd: number): void {
  *  load only when a gate asks for them, and a bind failure surfaces from the
  *  first `next()` rather than at the call (node binds asynchronously), which is
  *  exactly where every accept loop already reports it. */
-function listenUnixPeer(path: string): LocalListener {
+function listenUnixPeer(
+  path: string,
+  rebind?: ListenLocalOpts["rebind"],
+): LocalListener {
   let closed = false;
   const queue: LocalConn[] = [];
   let wake: (() => void) | null = null;
@@ -394,45 +401,55 @@ function listenUnixPeer(path: string): LocalListener {
         w();
       }
     });
-    await new Promise<void>((resolve, reject) => {
-      srv.once("error", reject);
-      const fail = (why: string) => {
-        srv.off("error", reject);
-        srv.close();
-        reject(
-          new Error(
-            `the listener on ${path} could not be kept from child ` +
-              `processes — ${why}`,
-          ),
-        );
-      };
-      /** Mark the listening socket close-on-exec; false when the server has
-       *  no descriptor (yet) to mark. */
-      const guard = (): boolean => {
-        const fd = (srv as unknown as { _handle?: { fd?: unknown } })._handle
-          ?.fd;
-        if (typeof fd !== "number") return false;
-        try {
-          closeOnExec(fd);
-        } catch (e) {
-          fail((e as Error).message);
-        }
-        return true;
-      };
-      let guarded = false;
-      srv.listen(path, () => {
-        srv.off("error", reject);
-        // Bound, and still nothing to mark: `_handle.fd` is the runtime's
-        // internal, and a runtime that moved it would bring the inherited
-        // listener back unsaid. Then the listener is not handed out.
-        if (!guarded && !guard()) {
-          return fail("the runtime gives no descriptor for it");
-        }
-        resolve();
+    const bind = () =>
+      new Promise<void>((resolve, reject) => {
+        srv.once("error", reject);
+        const fail = (why: string) => {
+          srv.off("error", reject);
+          srv.close();
+          reject(
+            new Error(
+              `the listener on ${path} could not be kept from child ` +
+                `processes — ${why}`,
+            ),
+          );
+        };
+        /** Mark the listening socket close-on-exec; false when the server has
+         *  no descriptor (yet) to mark. */
+        const guard = (): boolean => {
+          const fd = (srv as unknown as { _handle?: { fd?: unknown } })._handle
+            ?.fd;
+          if (typeof fd !== "number") return false;
+          try {
+            closeOnExec(fd);
+          } catch (e) {
+            fail((e as Error).message);
+          }
+          return true;
+        };
+        let guarded = false;
+        srv.listen(path, () => {
+          srv.off("error", reject);
+          // Bound, and still nothing to mark: `_handle.fd` is the runtime's
+          // internal, and a runtime that moved it would bring the inherited
+          // listener back unsaid. Then the listener is not handed out.
+          if (!guarded && !guard()) {
+            return fail("the runtime gives no descriptor for it");
+          }
+          resolve();
+        });
+        // In the same turn as the bind — nothing can be spawned in between.
+        guarded = guard();
       });
-      // In the same turn as the bind — nothing can be spawned in between.
-      guarded = guard();
-    });
+    for (let tries = 1;; tries++) {
+      try {
+        await bind();
+        break;
+      } catch (e) {
+        if (closed || !rebind?.(e, tries)) throw e;
+        failure = null; // parked by the handler above — the bind is asked again
+      }
+    }
     if (closed) srv.close();
     server = srv;
   })();

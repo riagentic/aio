@@ -79,6 +79,7 @@ them:
 | `am fix`                    | same alignment, for the aio the app is pinned to (`dep/aio`) — the fix for any drift                                          |
 | dev start (`am start`, dev) | a stale `node_modules` runtime is replaced once, loudly; offline, the old one runs and says so                                |
 | build                       | ships the tested version; if the app's copies disagree, one line says so and names `am fix`                                   |
+| `am doctor`                 | a copy OLDER than the tested version is a hint that names `am fix` (advisory: exit code unchanged)                            |
 
 Before 1.0.5-beta the app's copies decided (installed runtime > import-map line
 
@@ -527,11 +528,79 @@ breaks nobody, because the value of the promise is that it has none.
 
 With `aio.run({ childWindows: true })` the page can call
 `__aioIPC.openWindow(url, { preload })` to open an http(s) page in a child
-window. `preload` is required and must be a file inside the app directory; a
-relative path is resolved against the app directory, never the process's working
-directory, so dev and a packaged app agree. Every refusal is logged with its
-reason (`[aio:electron] openWindow refused — …`). See [webview](webview.md) for
-the inline alternative.
+window. `preload` is required. Declare the file in deno.json
+`build.guestPreloads` and pass `guestPreload("src/guest/preload.cjs")` from
+`aio/ui` — the same declaration and the same name a `<webview>` uses
+([a preload for the guest](webview.md#a-preload-for-the-guest)), and the one
+form that loads in dev **and** in a packaged app:
+
+```ts
+import { guestPreload } from "aio/ui";
+
+// The bridge is the window's own; declare the part you use.
+declare const __aioIPC: {
+  openWindow(url: string, opts: {
+    preload: string;
+    partition?: string;
+    origins?: string[] | "*";
+    sandbox?: boolean;
+  }): Promise<{ ok: true; url: string }>;
+};
+
+await __aioIPC.openWindow("https://dapp.example/", {
+  preload: guestPreload("src/guest/preload.cjs"),
+});
+```
+
+A plain path still works where the file is inside the directory the window
+serves the app from (a relative one is resolved against that directory, never
+the process's working directory). That is your project in dev; in a package it
+is `dist/`, which holds only aio's own bundle, so a path that works in dev is
+refused there. An Electron build warns about a literal
+`__aioIPC.openWindow(…, { preload: "path" })`. Every refusal is logged with its
+reason (`[aio:electron] openWindow refused — …`) and returned to the caller; a
+refused preload also names the fix and reaches the page as the
+`aio:guest-preload-refused` event. See [webview](webview.md) for the inline
+alternative. An app that only embeds pages sets `electron: { webviewTag: true }`
+instead: `<webview>` works and `openWindow` stays refused.
+
+A child window shows somebody else's site, so it is kept apart from the app:
+
+| What                    | Rule                                                                                                                                                                                                                                                                                                                                                                        |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Session                 | `persist:aio-child`: one session all child windows share, kept across launches, apart from the app's. `partition: "persist:name"` names another; for a throw-away window pass a non-persist name (`partition: "once"` is in memory). A name that resolves to the app's own session is refused: `"persist:"` alone is Electron's default session                             |
+| `aio://app`             | not reachable: the app's scheme is served in the app's own session only                                                                                                                                                                                                                                                                                                     |
+| Navigation              | any site, as before 1.0.19 (a login flow crosses origins), but never the app's own scheme (`aio:`) or a `file:`. `origins: ["https://id.example"]` turns a restriction on: the window stays on the listed origins and the one it was opened on (the redirects of its first load count; `[]` is that origin alone), http(s) only. `origins: "*"` is the default, spelled out |
+| `window.open`, `_blank` | no window. An http(s) link goes to the system browser after a real click or key press, at most one per 2 s                                                                                                                                                                                                                                                                  |
+| Downloads               | cancelled, unless `electron: { guestDownloads: true }`                                                                                                                                                                                                                                                                                                                      |
+| Devices                 | none (HID, USB, serial, Bluetooth): each request is cancelled and logged                                                                                                                                                                                                                                                                                                    |
+
+Each refusal is logged once per origin and reason, by name:
+`navigation BLOCKED in openWindow child window …`, `pop-up BLOCKED from …`,
+`download CANCELLED from …`. A page cannot flood the log or talk it into
+silence: each kind of line stops after 32 different ones and says so once
+(`further pop-up lines are not said`), and the other kinds go on. The line that
+opens a window says which session it got; a window that navigates freely says
+nothing more.
+
+A child window that should not leave a site is opened with `origins`:
+
+```ts
+await __aioIPC.openWindow("https://dapp.example/", {
+  preload: guestPreload("src/guest/preload.cjs"),
+  origins: ["https://id.example"], // dapp.example and id.example, nothing else
+});
+```
+
+`__aioShell.clearPartition("persist:aio-child")` wipes the child windows'
+session (cookies, storage, cache, HTTP auth); any named partition the same way.
+It refuses a name that resolves to the app's own session (`"persist:"`, an empty
+name): clearing that would sign the app itself out.
+
+The app's **own page** is not a guest: its device requests are left to Electron,
+exactly as before 1.0.19. `electron.permissions` decides whether the page may
+ask (`hid`, `usb`, `serial`); aio has no device chooser, so Electron then
+cancels the request, and the window logs that once.
 
 A child window has **no channel back to the app**. Its preload can inject into
 the page, but `ipcRenderer.sendToHost` goes nowhere (that is a `<webview>`
@@ -633,10 +702,10 @@ await aio.run({
 ```
 
 The names are Electron's own (camera and microphone are both `media`). The only
-scope is `"app"`, meaning your app's own page: a window asking from the origin
-it shows. Nothing is ever granted to a guest. An unknown name or scope stops the
-boot. Each denial is logged to `app.log` once per permission and origin, and
-names the entry that would grant it:
+scope is `"app"`, meaning your app's own page: its window, asking from the
+origin it shows. Nothing is ever granted to a guest. An unknown name or scope
+stops the boot. Each denial is logged to `app.log` once per permission and
+origin, and names the entry that would grant it:
 `[aio:electron] permission "clipboard-read" DENIED to the app's own page …`. A
 page that only asks whether it holds a permission
 (`navigator.permissions
@@ -656,8 +725,14 @@ and child windows still hold every permission they ask for. Each permission an
 `openWindow` child window is granted logs once, with its origin:
 `[aio:electron] permission "clipboard-read" GRANTED to openWindow child window …`.
 Both lines name `electron: { permissions }` as the fix. The default itself does
-not change, because that would break apps that rely on it. `--client=electron`
-in CONNECT mode has no app config, so it uses the default.
+not change, because that would break apps that rely on it. No other window is
+ever the app: a window that is neither the app's own nor an `openWindow` child
+window gets nothing but fullscreen. `--client=electron` in CONNECT mode has no
+app config, so it uses the default — with the same line drawn: the app is the
+connect window while it shows the origin it connected to. A site a redirect
+lands it on holds no permission, `window.open` opens no window there either (an
+http(s) link goes to the system browser), and no device is chosen. That shell
+has no `<webview>` and no `openWindow`.
 
 ## Who may use aio's IPC, and where the window may go
 
@@ -995,6 +1070,10 @@ deno run -A jsr:@riagentic/aio/am discover
   LAN/subnet only (broadcast doesn't cross routers), and **best-effort** — UDP
   runs over `node:dgram` (stable, no flags), but it's silently blocked on some
   corporate/guest networks, so manual entry is always the fallback.
+- A probe that could not be **sent** is not "no apps": `am discover` says why
+  and exits 1. On macOS that is the Local Network permission (System Settings →
+  Privacy & Security → Local Network) — the app the command runs under needs it,
+  and a process that outlived the login session that started it has none.
 - **Many apps on one host all show up.** Each exposed app stamps its discovery
   info (`name, port, title, needsAuth, tls`) into its lock file — the same
   per-host registry `am instances` uses. A probe is answered with _every_

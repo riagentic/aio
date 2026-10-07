@@ -16,6 +16,7 @@ import { log } from "../src/diagnostics/logger-api.ts";
 import { testServer } from "../src/testing/server-test.ts";
 import { tempDir } from "../src/testing/temp-dir.ts";
 import type { Plugin } from "../src/server/plugin.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const DOC = new URL("../docs/basics/plugins.md", import.meta.url);
 const MOD = new URL("../mod.ts", import.meta.url).href;
@@ -32,7 +33,7 @@ async function docPlugin(name: string): Promise<Plugin> {
   const file = join(dir, `${name}.ts`);
   await Deno.writeTextFile(
     file,
-    block.replaceAll(`from "aio"`, `from "${MOD}"`),
+    block.replaceAll(`from "aio"`, `from "${spec(MOD)}"`),
   );
   const m = await import(toFileUrl(file).href);
   const p = (m.default ?? m[name]) as Plugin;

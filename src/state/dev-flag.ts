@@ -44,3 +44,19 @@ export function isDevModeExplicit(): boolean {
 export function setDevModeOverride(v: boolean | null): void {
   _override = v;
 }
+
+const _said = new Set<string>();
+
+/** @internal The prefix for a line that reports the app DOING THE WRONG THING
+ *  (state on another hook's slot, a call dropped) — or `null` when it must
+ *  not be said again.
+ *
+ *  Such a line is not a dev nicety: a packaged build that does the same wrong
+ *  thing in silence is the forbidden difference. So prod says it too — once
+ *  per `id`, because a list of 500 rows is one fact — and dev every time. */
+export function _wrongPrefix(id: string): string | null {
+  if (isDevMode()) return "[aio-dev] ";
+  if (_said.has(id)) return null;
+  _said.add(id);
+  return "[aio] ";
+}

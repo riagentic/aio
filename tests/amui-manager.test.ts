@@ -7,11 +7,13 @@
 // method surface (`t.send.*` == what any connected client, `am dispatch`, or
 // the trojan can call) against a fake app whose lock entry + HTTP control plane
 // are real enough for `src/am/am-http.ts` to talk to.
+import { SLEEP_ARGS } from "./proc-helper.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { testCell } from "../src/testing/cell-test.ts";
 import { manager } from "../amui/src/manager.ts";
 import { envelopePayload } from "../src/am/am-cmd-state.ts";
 import { removeLock, writeLock } from "../src/server/single-instance-lock.ts";
+import { isHeldOpenError } from "../src/diagnostics/rename-over.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { _resetInstanceVerify } from "../src/am/am-http.ts";
 import { join, resolve } from "@std/path";
@@ -82,8 +84,8 @@ function fakeApp(
       return Response.json({});
     },
   );
-  const child = new Deno.Command("sleep", {
-    args: ["120"],
+  const child = new Deno.Command(Deno.execPath(), {
+    args: SLEEP_ARGS,
     stdin: "null",
     stdout: "null",
     stderr: "null",
@@ -390,7 +392,19 @@ await new Promise((r) => setTimeout(r, 60_000));
           Deno.kill(pid, "SIGKILL");
         } catch { /* already gone */ }
       }
-      await Deno.remove(dir, { recursive: true });
+      // The kill only ASKS. Windows keeps a dying process's cwd and its open
+      // log locked until the kernel has finished tearing it down — measured:
+      // the pid already answers "no such process" while the remove is still
+      // refused (os error 32). So the wait is on the thing itself, bounded.
+      for (const until = Date.now() + 10_000;;) {
+        try {
+          await Deno.remove(dir, { recursive: true });
+          break;
+        } catch (e) {
+          if (!isHeldOpenError(e) || Date.now() > until) throw e;
+          await new Promise((r) => setTimeout(r, 20));
+        }
+      }
     }
   },
 );

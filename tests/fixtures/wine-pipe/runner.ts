@@ -12,8 +12,9 @@
 // Env: WIN_DIR (deno.exe/node.exe, default /home/aio/win), FIXTURES (this
 // directory as the container sees it), WINEPREFIX (writable).
 
+import { fromFileUrl } from "@std/path";
 const FIX = Deno.env.get("FIXTURES") ??
-  new URL(".", import.meta.url).pathname.replace(/\/$/, "");
+  fromFileUrl(new URL(".", import.meta.url)).replace(/[\\/]$/, "");
 const WIN = Deno.env.get("WIN_DIR") ?? "/home/aio/win";
 const HOME = Deno.env.get("HOME") ?? "/home/aio";
 

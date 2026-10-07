@@ -228,6 +228,10 @@ function attachHandlers(
     "BASE_DIR",
     "_appOrigin",
     "require",
+    // tmplWebGuard's, which every shell emits first: is a partition NAME the
+    // app's own session? Not what these cases are about (its own tests are
+    // in electron-web-isolation.test.ts).
+    "__aioAppSessionName",
     tmplWillNavigate("_appOrigin"),
   )(
     win,
@@ -237,6 +241,7 @@ function attachHandlers(
     baseDir,
     "aio://app",
     () => ({ shell: { openExternal() {} } }),
+    () => false,
   );
   return { handlers, warnings };
 }
@@ -253,7 +258,7 @@ Deno.test("a refused webview preload says so, and names the reason", () => {
   const webPreferences: Record<string, unknown> = {
     preload: "/elsewhere/bridge.js",
   };
-  const params: Record<string, unknown> = {};
+  const params: Record<string, unknown> = { partition: "persist:t" };
   handlers["will-attach-webview"]!(null, webPreferences, params);
 
   // Still refused — the warning is additional, never a replacement.
@@ -274,7 +279,9 @@ Deno.test("a preload resolving OUTSIDE the app directory names where it went", (
     (p) => p === "/app/link.js" ? "/etc/evil.js" : p,
   );
   const webPreferences: Record<string, unknown> = { preload: "/app/link.js" };
-  handlers["will-attach-webview"]!(null, webPreferences, {});
+  handlers["will-attach-webview"]!(null, webPreferences, {
+    partition: "persist:t",
+  });
 
   assertEquals(webPreferences.preload, undefined);
   assertEquals(warnings.length, 1);
@@ -287,11 +294,11 @@ Deno.test("an ACCEPTED preload, and a guest asking for none, say NOTHING", () =>
   // never fires: it teaches the reader to skip the line.
   const good = attachHandlers("/app", (p) => p);
   const wp: Record<string, unknown> = { preload: "/app/bridge.js" };
-  good.handlers["will-attach-webview"]!(null, wp, {});
+  good.handlers["will-attach-webview"]!(null, wp, { partition: "persist:t" });
   assertEquals(wp.preload, "/app/bridge.js"); // accepted, realpath'd
   assertEquals(good.warnings, []);
 
   const none = attachHandlers("/app", (p) => p);
-  none.handlers["will-attach-webview"]!(null, {}, {});
+  none.handlers["will-attach-webview"]!(null, {}, { partition: "persist:t" });
   assertEquals(none.warnings, []);
 });

@@ -48,7 +48,6 @@ Deno.test("slowStartReason: the download line means wait; cached or failed means
 Deno.test({
   name:
     "am start: a child whose log says it is downloading Electron gets more than 10 s, and starts",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await makeApp("counter", "am-slow-start-");
     const apps = await tempDir("am-slow-start-apps-");

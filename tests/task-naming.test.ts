@@ -18,8 +18,9 @@
 // `compile:android`, `install:electron`, `install:android`).
 import { assert, assertEquals } from "@std/assert";
 import { standardTasks } from "../src/am/am-cmd-create.ts";
+import { fromFileUrl } from "@std/path";
 
-const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const REPO = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 
 /** Verbs a task name may lead with. Adding one is a deliberate act: it widens
  *  the vocabulary every reader has to hold. */

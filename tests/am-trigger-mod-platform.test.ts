@@ -100,7 +100,13 @@ Deno.test("am trigger: a client of unknown platform takes am's own OS", async ()
       if (winTemp) await dropTempDir(winTemp);
     }
   };
-  assertEquals(await onOs("darwin"), { metaKey: true });
-  assertEquals(await onOs("linux"), { ctrlKey: true });
+  // A Windows host cannot pose as a POSIX one: the stub also sends am's
+  // lock-directory lookup down the POSIX branch, which reads a file mode NTFS
+  // does not have and refuses. There only the host's own answer is asked; the
+  // other two run on every POSIX host.
+  if (real.value.os !== "windows") {
+    assertEquals(await onOs("darwin"), { metaKey: true });
+    assertEquals(await onOs("linux"), { ctrlKey: true });
+  }
   assertEquals(await onOs("windows"), { ctrlKey: true });
 });

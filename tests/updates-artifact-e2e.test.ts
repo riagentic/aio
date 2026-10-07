@@ -23,7 +23,7 @@
 // Two real `deno compile` runs (~1 min each), so it sits behind the same
 // AIO_BUILD_E2E gate as the other artifact tests — `deno task test:build`.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { join, toFileUrl } from "@std/path";
 import {
   buildFlags,
   freePort,
@@ -113,7 +113,7 @@ Deno.test({
         join(dir, "src", "app.ts"),
         appTs.replace(
           /await aio\.run\(([\s\S]*?)\);/,
-          `await aio.run({ updates: { source: "file://${channel}", ` +
+          `await aio.run({ updates: { source: "${toFileUrl(channel).href}", ` +
             `channel: "prod", auto: false, check: false } });`,
         ),
       );

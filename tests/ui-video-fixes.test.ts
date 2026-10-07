@@ -9,9 +9,11 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { findChromium } from "../src/testing/chromium.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { fromFileUrl } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 
 const CHROME = findChromium();
-const REPO = new URL("../", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("../", import.meta.url));
 const TODO = `${REPO}examples/todo/`;
 
 async function hasTool(name: string): Promise<boolean> {
@@ -156,12 +158,12 @@ Deno.test({
             jsxImportSource: "aio",
           },
           imports: {
-            aio: `${REPO}mod.ts`,
+            aio: `${spec(REPO)}mod.ts`,
             "aio/air": `${REPO}src/air.ts`,
             "aio/ui": `${REPO}src/ui/mod.ts`,
             "aio/jsx-runtime": `${REPO}src/jsx-runtime.ts`,
             "aio/testing": `${REPO}src/cell-test.ts`,
-            "happy-dom": "npm:happy-dom@17.6.3",
+            "happy-dom": "npm:happy-dom@20.14.5",
             "immer": "npm:immer@10.2.0",
             "@std/path": "jsr:@std/path@1.1.3",
             "@std/assert": "jsr:@std/assert@1.0.19",

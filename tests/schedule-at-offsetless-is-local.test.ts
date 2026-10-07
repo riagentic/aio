@@ -63,7 +63,21 @@ Deno.test("schedule.at: an offset-less ISO time keeps the machine-local reading 
     "America/New_York": "2026-01-01T14:00",
     "UTC": "2026-01-01T09:00",
   };
-  for (const [tz, utc] of Object.entries(expected)) {
+  // Windows has no per-process zone (`TZ` is not read there — measured, Deno
+  // 2.9): the one zone that can be exercised is the machine's own, its 09:00
+  // derived from the zone offset rather than from the parse under test.
+  const local9 = new Date(2026, 0, 1, 9, 0);
+  const cases = Deno.build.os === "windows"
+    ? {
+      host: new Date(
+        Date.UTC(2026, 0, 1, 9, 0) + local9.getTimezoneOffset() * MIN,
+      )
+        .toISOString().slice(0, 16),
+    }
+    : expected;
+  // At least the host zone, every time: an empty table would pass unseen.
+  assert(Object.keys(cases).length > 0);
+  for (const [tz, utc] of Object.entries(cases)) {
     const { fired } = await run(tz, [
       ["secs", "2026-01-01T09:00:00"],
       ["mins", "2026-01-01T09:00"],

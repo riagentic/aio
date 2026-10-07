@@ -375,7 +375,10 @@ Deno.test({
         "AppRun": "-rwxr-xr-x",
         "app.desktop": "-rw-r--r--",
         // Stored as a link (`zip -y`), not as a copy of what it points at.
-        "current": "lrwxrwxrwx",
+        // The link's OWN mode is the one thing not stated: on macOS a symlink
+        // carries a mode from the umask it was made under (077 here; on Linux
+        // it is always 777). Nothing reads it — unpacking makes the link anew.
+        "current": Deno.build.os === "darwin" ? "lrwx------" : "lrwxrwxrwx",
         "dist/": "drwxr-xr-x",
         "dist/app.js": "-rw-r--r--",
       });

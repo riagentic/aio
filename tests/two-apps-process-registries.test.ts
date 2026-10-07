@@ -20,6 +20,9 @@ import { aio, cell, serverFns } from "../mod.ts";
 import { spawn } from "../src/server-entry.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { enc } from "../src/protocol/envelope.ts";
+import { spec } from "./module-spec-helper.ts";
+import { SLEEP_ARGS } from "./proc-helper.ts";
+import { isProcessAlive } from "../src/server/single-instance-lock.ts";
 
 // deno-lint-ignore no-explicit-any
 type App = { close(): Promise<void>; port: number; getState(): any };
@@ -64,7 +67,9 @@ serverFns(shared, { read: () => "SHARED" });
 
 const tmp = (p: string) => tempDir(`aio-reg-${p}-`);
 const rmDir = (d: string) => dropTempDir(d).catch(() => {});
+// Windows has no signal that asks without ending: the product's own probe.
 const alive = (pid: number) => {
+  if (Deno.build.os === "windows") return isProcessAlive(pid);
   try {
     Deno.kill(pid, "SIGCONT");
     return true;
@@ -75,14 +80,13 @@ const alive = (pid: number) => {
 
 Deno.test({
   name: "two apps: closing B leaves the children A spawned running",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     const [da, db] = [await tmp("spawn-a"), await tmp("spawn-b")];
     const a = cell("sp", {
       state: { pid: 0 },
       methods: {
         async start(s: { pid: number }) {
-          s.pid = (await spawn("sleep", { args: ["37"] })).pid;
+          s.pid = (await spawn(Deno.execPath(), { args: SLEEP_ARGS })).pid;
         },
       },
     });
@@ -111,7 +115,6 @@ Deno.test({
 Deno.test({
   name:
     "two apps: a server the app starts in onStart carries the app once its handler is wrapped as documented",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     // Deno runs a `Deno.serve` handler in the runtime's ambient context, not
     // the context that started the server — so a server the APP starts is
@@ -128,7 +131,7 @@ Deno.test({
           { port: 0, onListen() {} },
           (req) =>
             asThisApp(async (_r: Request) => {
-              pid = (await spawn("sleep", { args: ["38"] })).pid;
+              pid = (await spawn(Deno.execPath(), { args: SLEEP_ARGS })).pid;
               return new Response("ok");
             }, req),
         );
@@ -230,7 +233,7 @@ Deno.test("serverFns: a namespace an app registered is served by the next app on
   const serverFnsUrl = new URL("../mod.ts", import.meta.url).href;
   await Deno.writeTextFile(
     mod,
-    `import { serverFns } from "${serverFnsUrl}";\n` +
+    `import { serverFns } from "${spec(serverFnsUrl)}";\n` +
       `export const api = serverFns("${ns}", { read: () => "OK" });\n`,
   );
   const onStart = async () => {

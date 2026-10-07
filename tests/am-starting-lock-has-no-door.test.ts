@@ -12,14 +12,15 @@
 // verb that asks the app anything), `stop`, `profile`, `shot` and `eval`.
 // `stop` keeps its meaning for a booting app: it stops it (SIGTERM to the
 // owner), it just no longer asks `:0` for a graceful shutdown first.
+import { exits0, SLEEP_ARGS } from "./proc-helper.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { lockHasNoDoor, noDoorMessage } from "../src/am/am-utils.ts";
 import { stopOne } from "../src/am/am-cmd-process.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const AM = new URL("../src/am.ts", import.meta.url).pathname;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const AM = fromFileUrl(new URL("../src/am.ts", import.meta.url));
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 const LOCK_MOD = new URL(
   "../src/server/single-instance-lock.ts",
   import.meta.url,
@@ -53,7 +54,6 @@ async function denoDirOf(): Promise<string> {
 
 Deno.test({
   name: "am: verbs against a booting app say it is starting, never ask :0",
-  ignore: Deno.build.os === "windows", // `sleep` stands in for the app
   fn: async () => {
     const base = await tempDir("am-no-door-");
     const cwd = join(base, "cwd");
@@ -69,8 +69,8 @@ Deno.test({
       AIO_AM_NO_DELEGATE: "1",
       NO_COLOR: "1",
     };
-    const sleeper = new Deno.Command("sleep", {
-      args: ["300"],
+    const sleeper = new Deno.Command(Deno.execPath(), {
+      args: SLEEP_ARGS,
       stdin: "null",
       stdout: "null",
       stderr: "null",
@@ -159,7 +159,9 @@ Deno.test({
       ]);
       clearTimeout(timer);
       assert(st !== null, "am stop left the booting app running");
-      assertEquals(st.signal, "SIGTERM");
+      // (Windows ends a process without a signal: a non-zero exit code.)
+      if (Deno.build.os === "windows") assert(st.code !== 0, `${st.code}`);
+      else assertEquals(st.signal, "SIGTERM");
     } finally {
       try {
         sleeper.kill("SIGKILL");
@@ -183,7 +185,7 @@ Deno.test("am stop: a no-door lock whose owner is gone is named, not fetched", a
   Deno.env.set("AIO_APPS_DIR", join(base, "apps"));
   Deno.env.set("XDG_RUNTIME_DIR", base);
   try {
-    const gone = new Deno.Command("true").spawn();
+    const gone = exits0();
     await gone.status; // a pid that has exited
     const r = await stopOne({
       appId: APP,

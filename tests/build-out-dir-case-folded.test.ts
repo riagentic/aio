@@ -3,7 +3,8 @@
 // passed, and the build's out-dir wipe deleted the app's source. Protected
 // dirs are compared case-folded.
 import { assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { join, SEPARATOR } from "@std/path";
+import { linkDir } from "./symlink-helper.ts";
 import { unsafeOutDir } from "../src/testing/internal.ts";
 import { apartFrom, foldPath, realDir } from "../src/server/build-outputs.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
@@ -80,16 +81,19 @@ Deno.test("unsafeOutDir: a name the strictest file system reads as a protected d
       JSON.stringify(out),
     );
   }
+  // Segment by segment, on the host's separator.
+  const host = (p: string) => p.replaceAll("/", SEPARATOR);
   assertEquals(
-    ["/p/Src. /A.b./c", "/p/.../x", "/p/.aio", "/"].map(foldPath),
-    ["/p/src/a.b/c", "/p/.../x", "/p/.aio", "/"],
+    ["/p/Src. /A.b./c", "/p/.../x", "/p/.aio", "/"].map((p) =>
+      foldPath(host(p))
+    ),
+    ["/p/src/a.b/c", "/p/.../x", "/p/.aio", "/"].map(host),
   );
 });
 
 Deno.test({
   name:
     "unsafeOutDir: a link is the directory it leads to — to src, into an app dir, out of the project, or the project under another name",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const tmp = await tempDir("aio-out-dir-links-");
     try {
@@ -98,13 +102,13 @@ Deno.test({
         await Deno.mkdir(join(proj, d), { recursive: true });
       }
       await Deno.mkdir(join(tmp, "elsewhere"));
-      await Deno.symlink("src", join(proj, "srclink"));
-      await Deno.symlink("src/gen", join(proj, "genlink"));
-      await Deno.symlink(join(proj, "apps"), join(proj, "appslink"));
-      await Deno.symlink(join(tmp, "elsewhere"), join(proj, "away"));
-      await Deno.symlink("release", join(proj, "rel"));
-      await Deno.symlink(proj, join(tmp, "alias"));
-      await Deno.symlink(join(proj, "src"), join(tmp, "elsewhere", "in"));
+      await linkDir("src", join(proj, "srclink"));
+      await linkDir("src/gen", join(proj, "genlink"));
+      await linkDir(join(proj, "apps"), join(proj, "appslink"));
+      await linkDir(join(tmp, "elsewhere"), join(proj, "away"));
+      await linkDir("release", join(proj, "rel"));
+      await linkDir(proj, join(tmp, "alias"));
+      await linkDir(join(proj, "src"), join(tmp, "elsewhere", "in"));
       const apps = [join(proj, "apps/web")];
       const guard = (out: string, root = proj) =>
         unsafeOutDir(join(root, out), root, apps);

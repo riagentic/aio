@@ -20,6 +20,7 @@ import {
   loadOpsSince,
   persistOp,
   reserveServerTs,
+  settleOp,
 } from "./server-store.ts";
 
 /**
@@ -522,6 +523,25 @@ export function createServerSyncHandler(
           "(not applied, not dropped) and resent",
     );
   }
+  /** The op's dispatch was ACCEPTED: said in its row before anyone is told
+   *  (`settleOp`). One retry; a mark that still cannot be written is an
+   *  error line and nothing else — the row IS saved, so the ack does not say
+   *  `unsaved`. Never throws: the caller's `catch` is for a failed DISPATCH,
+   *  and deletes the row. */
+  async function settle(id: string): Promise<void> {
+    try {
+      await settleOp(deps.db, id).catch(() => settleOp(deps.db, id));
+    } catch (e) {
+      deps.log.error(
+        `[sync:server] op ${id} was applied and is in the op-log, but its ` +
+          `row could not be marked settled (tried twice) — if the server is ` +
+          `killed before this cell's next op AND the next boot's method ` +
+          `refuses it, that boot removes it as one the server never ` +
+          `accepted: ${e}`,
+      );
+    }
+  }
+
   async function dropRow(id: string): Promise<void> {
     await deps.db.execute("DELETE FROM sync_ops WHERE id = ?", [id]).catch(
       (delErr: unknown) =>
@@ -1384,7 +1404,7 @@ export function createServerSyncHandler(
               await deps.db.execute("DELETE FROM sync_ops WHERE id = ?", [
                 op.id,
               ]);
-            }
+            } else await settle(op.id);
           } catch (e) {
             if (isHeldRefusal(e)) {
               // Not poison: the server was not TAKING input (see
@@ -1803,7 +1823,7 @@ export function createServerSyncHandler(
                   await deps.db.execute("DELETE FROM sync_ops WHERE id = ?", [
                     pending.id,
                   ]);
-                }
+                } else await settle(pending.id);
               } catch (e) {
                 if (isHeldRefusal(e)) { // see handleOp
                   heldMid = true;

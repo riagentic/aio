@@ -13,10 +13,10 @@
 // Driven with the REAL script and the REAL deno (the rule under test is
 // deno's own), a HOME of its own, and this checkout as the repo: no network.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const REPO = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 
 /** deno's module cache — a sandboxed HOME would otherwise mean an empty one,
  *  and a download of every dependency. */
@@ -51,7 +51,7 @@ const exists = (p: string) => Deno.lstat(p).then(() => true, () => false);
 Deno.test({
   name:
     "install.sh: a read-only DENO_INSTALL (a system deno) still installs am — into ~/.deno/bin",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // install.sh is a POSIX sh script; Windows has install.ps1
   fn: async () => {
     const dir = await tempDir("aio-install-shim-");
     const opt = join(dir, "opt");
@@ -90,7 +90,7 @@ Deno.test({
 Deno.test({
   name:
     "install.sh: a DENO_INSTALL_ROOT the user set is where am goes, and where it is looked for",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // install.sh is a POSIX sh script; Windows has install.ps1
   fn: async () => {
     const dir = await tempDir("aio-install-shim-");
     try {

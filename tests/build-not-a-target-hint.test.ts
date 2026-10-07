@@ -6,7 +6,7 @@
 // (android is `["--android"]`) matched nothing and the refusal listed target
 // NAMES only. It now says `Did you mean --android (target "android")?`.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { TARGETS } from "../src/build-all.ts";
 import {
   nearestTargets,
@@ -53,8 +53,8 @@ Deno.test("build hint: a direct build.ts --compile --android is refused naming -
         "run",
         "-A",
         "--config",
-        new URL("../deno.json", import.meta.url).pathname,
-        new URL("../src/build.ts", import.meta.url).pathname,
+        fromFileUrl(new URL("../deno.json", import.meta.url)),
+        fromFileUrl(new URL("../src/build.ts", import.meta.url)),
         "--compile",
         "--android",
       ],

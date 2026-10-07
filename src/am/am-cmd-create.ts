@@ -270,9 +270,9 @@ export function frameworkSpecs(source: boolean): {
     // also carry the source's own bare deps (esbuild/immer/@std), which JSR
     // would otherwise resolve transitively.
     Object.assign(imports, {
-      "esbuild": "npm:esbuild@^0.24",
+      "esbuild": "npm:esbuild@^0.25",
       "immer": "npm:immer@^10",
-      "happy-dom": "npm:happy-dom@^17",
+      "happy-dom": "npm:happy-dom@^20",
       "@std/path": "jsr:@std/path@^1",
       "@std/assert": "jsr:@std/assert@^1",
     });
@@ -1672,7 +1672,9 @@ async function tryGitInit(dir: string): Promise<GitInit> {
       ...gitEnvFor(null),
     }).output();
     if (inside.success) {
-      const top = new TextDecoder().decode(inside.stdout).trim();
+      // git answers `C:/x/repo` on Windows; `resolve` gives the host's
+      // spelling — the one `dir` beside it in the same report is written in.
+      const top = resolve(new TextDecoder().decode(inside.stdout).trim());
       return `skipped: inside ${top}`;
     }
     const run = (args: string[]) =>

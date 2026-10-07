@@ -89,6 +89,26 @@ pub fn read_trailer<F: Read + Seek>(f: &mut F, size: u64) -> Result<(Header, u64
     Ok((hdr, payload_off, payload_len))
 }
 
+/// The file name of the Start-menu shortcut of an app titled `title`: the
+/// characters Windows refuses in one become `_`, and the spaces and dots at
+/// either end go. The app names the shortcut it adds itself the same way
+/// (`shortcutFileName`, src/server/sfx-shortcut.ts); both are checked against
+/// ../shortcut-names.json (here, and by a Deno test).
+pub fn shortcut_file_name(title: &str) -> String {
+    title
+        .chars()
+        .map(|c| {
+            if c < ' ' || r#"\/:*?"<>|"#.contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect::<String>()
+        .trim_matches([' ', '.'])
+        .to_owned()
+}
+
 /// The offset just past the magic: the end of the file, or — for an
 /// Authenticode-signed exe — the start of the certificate table that signing
 /// appended (after padding the file to 8 bytes).
@@ -240,6 +260,18 @@ mod tests {
         let at = bad.len() - 16;
         bad[at..at + 8].copy_from_slice(&(1u64 << 40).to_le_bytes());
         assert!(parse(&bad).is_err(), "an oversized payload length");
+    }
+
+    #[test]
+    fn shortcut_names() {
+        let all: serde_json::Value =
+            serde_json::from_str(include_str!("../shortcut-names.json")).unwrap();
+        let names = all["names"].as_array().unwrap();
+        assert!(names.len() > 10);
+        for pair in names {
+            let (title, file) = (pair[0].as_str().unwrap(), pair[1].as_str().unwrap());
+            assert_eq!(shortcut_file_name(title), file, "{title:?}");
+        }
     }
 
     #[test]

@@ -13,7 +13,7 @@ import {
   assertRejects,
   assertStringIncludes,
 } from "@std/assert";
-import { basename, dirname, join } from "@std/path";
+import { basename, dirname, fromFileUrl, join, resolve } from "@std/path";
 import {
   _withRuntimeLock,
   bakedElectronVersion,
@@ -61,8 +61,18 @@ import {
   stageTag,
 } from "../src/electron/electron-runtime-fetch.ts";
 import { cacheEntryKind } from "../src/build/electron-cache.ts";
+import { zipTree } from "./zip-helper.ts";
+import { sleeper } from "./proc-helper.ts";
 
 const silent: Log = { info: () => {}, error: () => {} };
+
+/** An empty stand-in for the Electron executable of a runtime at `dir` — three
+ *  folders deep on macOS (`Electron.app/Contents/MacOS`), so made with them. */
+async function touchElectronBin(dir: string): Promise<void> {
+  const bin = electronBinIn(dir);
+  await Deno.mkdir(join(bin, ".."), { recursive: true });
+  await Deno.writeTextFile(bin, "");
+}
 
 /** Run `fn` in an empty cwd with a private cache — steps 2/3 of the launcher
  *  stat RELATIVE paths, and this repo has a node_modules/.bin/electron. */
@@ -111,11 +121,12 @@ Deno.test("electron-runtime-fetch: pure mapping — slug, url, cache dir, binary
     electronRuntimeDir("1.2.3", "linux-x64"),
   );
   assert(electronRuntimeDir("1.2.3", "linux-x64").startsWith(toolCacheDir()));
-  assertEquals(electronBinIn("/r", "linux"), "/r/electron");
-  assertEquals(electronBinIn("/r", "windows"), "/r/electron.exe");
+  // A path on THIS host (where the runtime is unpacked), whatever the target.
+  assertEquals(electronBinIn("/r", "linux"), join("/r", "electron"));
+  assertEquals(electronBinIn("/r", "windows"), join("/r", "electron.exe"));
   assertEquals(
     electronBinIn("/r", "darwin"),
-    "/r/Electron.app/Contents/MacOS/Electron",
+    join("/r", "Electron.app", "Contents", "MacOS", "Electron"),
   );
 });
 
@@ -205,7 +216,10 @@ Deno.test("localElectronDistFor: a stale node_modules runtime is NOT used for an
       join(tmp, "node_modules", "electron", "package.json"),
       '{"version":"42.0.0"}',
     );
-    assertEquals(await localElectronDistFor("42.0.0", tmp), dist);
+    assertEquals(
+      resolve(await localElectronDistFor("42.0.0", tmp) ?? ""),
+      dist,
+    );
     assertEquals(
       await localElectronDistFor("44.4.1", tmp),
       null,
@@ -232,34 +246,30 @@ async function tinyElectronZip(
   const src = join(dir, "payload");
   await Deno.writeTextFile(src, "#!/bin/sh\necho fake electron\n");
   await Deno.chmod(src, 0o755);
-  const py = await new Deno.Command("python3", {
-    args: [
-      "-c",
-      `import zipfile,sys; z=zipfile.ZipFile(sys.argv[1],'w'); z.write(sys.argv[2],sys.argv[3]); z.close()`,
-      zip,
-      src,
-      entryName,
-    ],
-    stderr: "piped",
-  }).output();
-  if (!py.success) {
-    // python3 missing on this box: `zip` builds the same archive, via a tree
-    // whose layout already carries the entry name.
+  // python3 writes exactly one entry under the given name. Where there is
+  // none (every Windows), the host's archiver packs a tree whose layout
+  // already carries the entry name.
+  let py = false;
+  try {
+    py = (await new Deno.Command("python3", {
+      args: [
+        "-c",
+        `import zipfile,sys; z=zipfile.ZipFile(sys.argv[1],'w'); z.write(sys.argv[2],sys.argv[3]); z.close()`,
+        zip,
+        src,
+        entryName,
+      ],
+      stderr: "piped",
+    }).output()).success;
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  }
+  if (!py) {
     const stage = join(dir, `stage-${entryName.replace(/[^A-Za-z0-9]/g, "_")}`);
     const target = join(stage, entryName);
     await Deno.mkdir(join(target, ".."), { recursive: true });
     await Deno.copyFile(src, target);
-    const p = await new Deno.Command("zip", {
-      args: ["-q", "-r", zip, "."],
-      cwd: stage,
-      stdout: "null",
-      stderr: "piped",
-    }).output();
-    if (!p.success) {
-      throw new Error(
-        "neither python3 nor zip available to build a test archive",
-      );
-    }
+    await zipTree(stage, zip);
   }
   return await Deno.readFile(zip);
 }
@@ -385,45 +395,52 @@ Deno.test("ensureElectronRuntime: a killed unpack's stage is removed; a LIVE one
     const bytes = await tinyElectronZip(tmp);
     const rel = await fakeRelease(bytes, "9.9.8", "linux-x64");
     const dir = electronRuntimeDir("9.9.8", "linux-x64");
-    // A pid no process has (the max pid on Linux is < 2^22) and pid 1 (alive),
-    // both in OUR pid namespace (no start stamp: pid 1's is not ours).
-    const ns = ownPidNs();
-    const hex = (n: number) => n.toString(16).padStart(8, "0");
-    const here = ns === undefined ? "" : `d${hex(ns)}`;
-    const dead = `${dir}.incoming.4194303-0badf00d${here}`;
-    const live = `${dir}.incoming.1-0badf00d${here}`;
-    // Where pid namespaces exist, a name without one (an older aio's) or
-    // with another (a container's pid 7 under tini, heartbeating its stage)
-    // proves nothing by its pid: fresh, it is kept.
-    const unknownNs = `${dir}.incoming.4194303-cafe0123`;
-    const otherNs = `${dir}.incoming.4194303-cafe0123d${hex((ns ?? 0) + 1)}`;
-    for (const d of [dead, live, unknownNs, otherNs]) {
-      await Deno.mkdir(d, { recursive: true });
-      await Deno.writeTextFile(join(d, "partial"), "x");
+    // A pid no process has (the max pid on Linux is < 2^22; a Windows pid is
+    // a multiple of 4) and a live one, both in OUR pid namespace (no start
+    // stamp). Not pid 1: Windows has none.
+    const alive = sleeper({ stdout: "null", stderr: "null" });
+    try {
+      const ns = ownPidNs();
+      const hex = (n: number) => n.toString(16).padStart(8, "0");
+      const here = ns === undefined ? "" : `d${hex(ns)}`;
+      const dead = `${dir}.incoming.4194303-0badf00d${here}`;
+      const live = `${dir}.incoming.${alive.pid}-0badf00d${here}`;
+      // Where pid namespaces exist, a name without one (an older aio's) or
+      // with another (a container's pid 7 under tini, heartbeating its stage)
+      // proves nothing by its pid: fresh, it is kept.
+      const unknownNs = `${dir}.incoming.4194303-cafe0123`;
+      const otherNs = `${dir}.incoming.4194303-cafe0123d${hex((ns ?? 0) + 1)}`;
+      for (const d of [dead, live, unknownNs, otherNs]) {
+        await Deno.mkdir(d, { recursive: true });
+        await Deno.writeTextFile(join(d, "partial"), "x");
+      }
+      await ensureElectronRuntime("9.9.8", "linux-x64", {
+        fetch: rel.fetch,
+        log: () => {},
+      });
+      assertEquals(
+        await Deno.stat(dead).then(() => "kept", () => "removed"),
+        "removed",
+        "a dead launch's ~250 MB stage must not live forever",
+      );
+      assertEquals(
+        await Deno.stat(live).then(() => "kept", () => "removed"),
+        "kept",
+        "a stage whose process is alive is never touched",
+      );
+      assertEquals(
+        await Deno.stat(otherNs).then(() => "kept", () => "removed"),
+        "kept",
+        "another pid namespace's live unpack lost its stage",
+      );
+      assertEquals(
+        await Deno.stat(unknownNs).then(() => "kept", () => "removed"),
+        ns === undefined ? "removed" : "kept",
+      );
+    } finally {
+      alive.kill("SIGKILL");
+      await alive.status;
     }
-    await ensureElectronRuntime("9.9.8", "linux-x64", {
-      fetch: rel.fetch,
-      log: () => {},
-    });
-    assertEquals(
-      await Deno.stat(dead).then(() => "kept", () => "removed"),
-      "removed",
-      "a dead launch's ~250 MB stage must not live forever",
-    );
-    assertEquals(
-      await Deno.stat(live).then(() => "kept", () => "removed"),
-      "kept",
-      "a stage whose process is alive is never touched",
-    );
-    assertEquals(
-      await Deno.stat(otherNs).then(() => "kept", () => "removed"),
-      "kept",
-      "another pid namespace's live unpack lost its stage",
-    );
-    assertEquals(
-      await Deno.stat(unknownNs).then(() => "kept", () => "removed"),
-      ns === undefined ? "removed" : "kept",
-    );
   });
 });
 
@@ -582,8 +599,7 @@ Deno.test("findElectronBin (compiled): never runs deno install; fetches the BAKE
       '{"version":"41.2.3"}\n',
     );
     const runtime = join(tmp, "runtime");
-    await Deno.mkdir(runtime);
-    await Deno.writeTextFile(electronBinIn(runtime), "");
+    await touchElectronBin(runtime);
     let denoInstalls = 0;
     const fetched: [string, string][] = [];
     const bin = await findElectronBin(silent, {
@@ -634,8 +650,7 @@ Deno.test("findElectronBin (compiled): no baked version → the framework defaul
 Deno.test("findElectronBin (dev): deno install first, the fetched runtime as the last resort", async () => {
   await isolated(async (tmp) => {
     const runtime = join(tmp, "runtime");
-    await Deno.mkdir(runtime);
-    await Deno.writeTextFile(electronBinIn(runtime), "");
+    await touchElectronBin(runtime);
     await Deno.writeTextFile(join(tmp, "deno.json"), "{}");
     const order: string[] = [];
     const bin = await findElectronBin(silent, {
@@ -684,8 +699,8 @@ Deno.test("findElectronBin: a shipped package finds the Electron it ALREADY carr
   await isolated(async (tmp) => {
     // A packaged layout: the executable, and the runtime beside it.
     const shipped = join(tmp, "electron");
-    await Deno.mkdir(shipped, { recursive: true });
     const bin = electronBinIn(shipped, Deno.build.os);
+    await Deno.mkdir(join(bin, ".."), { recursive: true });
     await Deno.writeTextFile(bin, "#!/bin/sh\nexit 0\n");
     if (Deno.build.os !== "windows") await Deno.chmod(bin, 0o755);
     // A fetch here would be the bug: it must never be reached.
@@ -1242,25 +1257,32 @@ Deno.test("ensureElectronRuntime: an old stage whose pid proves nothing is remov
     const bytes = await tinyElectronZip(tmp);
     const rel = await fakeRelease(bytes, "9.9.7", "linux-x64");
     const dir = electronRuntimeDir("9.9.7", "linux-x64");
-    const oldForeign = `${dir}.incoming.1-0badf00d`;
-    const oldOwnPid = `${dir}.incoming.${Deno.pid}-0badf00d`;
-    const fresh = `${dir}.incoming.1-cafe0123`;
-    const old = new Date(Date.now() - STAGE_STALE_MS - 60_000);
-    for (const d of [oldForeign, oldOwnPid, fresh]) {
-      await Deno.mkdir(d, { recursive: true });
-      await Deno.writeTextFile(join(d, "partial"), "x");
+    // A live process that is not this one (not pid 1: Windows has none).
+    const alive = sleeper({ stdout: "null", stderr: "null" });
+    try {
+      const oldForeign = `${dir}.incoming.${alive.pid}-0badf00d`;
+      const oldOwnPid = `${dir}.incoming.${Deno.pid}-0badf00d`;
+      const fresh = `${dir}.incoming.${alive.pid}-cafe0123`;
+      const old = new Date(Date.now() - STAGE_STALE_MS - 60_000);
+      for (const d of [oldForeign, oldOwnPid, fresh]) {
+        await Deno.mkdir(d, { recursive: true });
+        await Deno.writeTextFile(join(d, "partial"), "x");
+      }
+      await Deno.utime(oldForeign, old, old);
+      await Deno.utime(oldOwnPid, old, old);
+      await ensureElectronRuntime("9.9.7", "linux-x64", {
+        fetch: rel.fetch,
+        log: () => {},
+      });
+      const there = (p: string) =>
+        Deno.stat(p).then(() => "kept", () => "removed");
+      assertEquals(await there(oldForeign), "removed");
+      assertEquals(await there(oldOwnPid), "removed");
+      assertEquals(await there(fresh), "kept", "a live unpack's stage");
+    } finally {
+      alive.kill("SIGKILL");
+      await alive.status;
     }
-    await Deno.utime(oldForeign, old, old);
-    await Deno.utime(oldOwnPid, old, old);
-    await ensureElectronRuntime("9.9.7", "linux-x64", {
-      fetch: rel.fetch,
-      log: () => {},
-    });
-    const there = (p: string) =>
-      Deno.stat(p).then(() => "kept", () => "removed");
-    assertEquals(await there(oldForeign), "removed");
-    assertEquals(await there(oldOwnPid), "removed");
-    assertEquals(await there(fresh), "kept", "a live unpack's stage");
   });
 });
 
@@ -1323,8 +1345,7 @@ Deno.test("findElectronBin (dev): a directory that is not a project is never ins
   for (const config of ["deno.json", "deno.jsonc", "package.json", null]) {
     await isolated(async (tmp) => {
       const runtime = join(tmp, "runtime");
-      await Deno.mkdir(runtime);
-      await Deno.writeTextFile(electronBinIn(runtime), "");
+      await touchElectronBin(runtime);
       if (config) await Deno.writeTextFile(join(tmp, config), "{}");
       const order: string[] = [];
       const said: string[] = [];
@@ -1419,7 +1440,7 @@ Deno.test("installRefusal: an app project installs; a non-project and the framew
     );
     // …and the real thing: this very checkout is refused.
     assertEquals(
-      await installRefusal(new URL("../", import.meta.url).pathname),
+      await installRefusal(fromFileUrl(new URL("../", import.meta.url))),
       FRAMEWORK_CHECKOUT,
     );
     // A BUILD asks about the root it builds, whatever the cwd is (this test
@@ -1458,8 +1479,7 @@ Deno.test("findElectronBin (dev): from the framework's own checkout nothing is i
         );
       }
       const runtime = join(tmp, "runtime");
-      await Deno.mkdir(runtime);
-      await Deno.writeTextFile(electronBinIn(runtime), "");
+      await touchElectronBin(runtime);
       const order: string[] = [];
       const said: string[] = [];
       const bin = await findElectronBin(

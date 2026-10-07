@@ -830,9 +830,36 @@ export type Verdict = {
 };
 
 /** Judge the facts. Every message names the CAUSE and the exact FIX. Pure. */
-export function preflight(spec: LabSpec, f: LabFacts): Verdict {
+export function preflight(
+  spec: LabSpec,
+  f: LabFacts,
+  host: typeof Deno.build.os = Deno.build.os,
+): Verdict {
   const errors: string[] = [];
   const warnings: string[] = [];
+
+  // The host first, and alone: on one that can never run this lab, every
+  // other fact is noise and every other fix (`apt`, `modprobe`, `usermod`) is
+  // for a machine the reader is not on. On Windows this used to die before
+  // the first check, as `Failed to spawn 'df'`. A KVM lab is Linux-only
+  // (`/dev/kvm`); the container lab is left to Docker wherever `am` itself
+  // can drive it, which is not Windows.
+  if (host === "windows" || (host !== "linux" && spec.needsKvm)) {
+    return {
+      errors: [
+        `the ${spec.os} lab needs a Linux host, and this is ` +
+        `${
+          host === "windows" ? "Windows" : host === "darwin" ? "macOS" : host
+        } — a lab is a Docker container driven through Linux's ` +
+        `own devices (/dev/kvm for the VM and the emulator, /dev/net/tun for ` +
+        `their network). Fix: run \`am lab ${spec.os}\` on a Linux machine ` +
+        `(bare metal, or a VM with nested virtualisation); the viewer it ` +
+        `prints is on that machine's 127.0.0.1 — forward the port here with ` +
+        `\`ssh -L\`.`,
+      ],
+      warnings,
+    };
+  }
 
   if (f.docker === "missing") {
     errors.push(
@@ -1024,11 +1051,17 @@ async function probe(spec: LabSpec, labDir: string): Promise<LabFacts> {
       probeDir = resolve(probeDir, "..");
     }
   }
-  const df = await new Deno.Command("df", {
-    args: ["-Pk", probeDir],
-    stdout: "piped",
-    stderr: "null",
-  }).output().catch(() => null);
+  // `output()` throws where it stands when there is no `df` to spawn — a
+  // promise's `.catch` never saw it. No answer is `freeGb: null`, which the
+  // preflight reads as "unknown", not as a refusal.
+  let df: Deno.CommandOutput | null = null;
+  try {
+    df = await new Deno.Command("df", {
+      args: ["-Pk", probeDir],
+      stdout: "piped",
+      stderr: "null",
+    }).output();
+  } catch { /* aio-ok(silent-catch): no `df` — free space is unknown */ }
   const availKb = df
     ? parseDfAvailKb(new TextDecoder().decode(df.stdout))
     : null;

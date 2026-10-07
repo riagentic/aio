@@ -27,6 +27,7 @@ import type { DB, QueryResult, Tx } from "../src/db/types.ts";
 import { initSchema } from "../src/db/state-sync.ts";
 import { integer, pk, table } from "../src/server/sql.ts";
 import { freePort } from "../src/testing/server-test.ts";
+import { fromFileUrl } from "@std/path";
 
 // deno-lint-ignore no-explicit-any
 const _p = (v: unknown[]): any[] => v;
@@ -240,7 +241,7 @@ Deno.test("persist: SIGKILL never leaves the db: table and the snapshot disagree
         "run",
         "-A",
         "--config",
-        new URL("../deno.json", import.meta.url).pathname,
+        fromFileUrl(new URL("../deno.json", import.meta.url)),
         `${dir}/app.ts`,
       ],
       env: { DIR: dir, PORT: String(freePort()), AIO_APPS_DIR: dir },

@@ -20,6 +20,7 @@ import { assert, assertEquals } from "@std/assert";
 import { freePort } from "../src/testing/server-test.ts";
 // @ts-ignore node:sqlite types unavailable when an old @types/node shadows them
 import { DatabaseSync } from "node:sqlite";
+import { fromFileUrl } from "@std/path";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
@@ -80,17 +81,18 @@ Deno.test("SIGTERM stops EVERY app in the process, not just the quickest", async
   await Deno.mkdir(`${dir}/b`, { recursive: true });
   await Deno.writeTextFile(`${dir}/app.ts`, APP);
 
+  const portA = freePort();
   const proc = new Deno.Command(Deno.execPath(), {
     args: [
       "run",
       "-A",
       "--config",
-      new URL("../deno.json", import.meta.url).pathname,
+      fromFileUrl(new URL("../deno.json", import.meta.url)),
       `${dir}/app.ts`,
     ],
     env: {
       D: dir,
-      PORT_A: String(freePort()),
+      PORT_A: String(portA),
       PORT_B: String(freePort()),
       AIO_APPS_DIR: dir,
     },
@@ -107,7 +109,21 @@ Deno.test("SIGTERM stops EVERY app in the process, not just the quickest", async
       } catch { /* still booting */ }
       await new Promise((r) => setTimeout(r, 20));
     }
-    proc.kill("SIGTERM");
+    if (Deno.build.os !== "windows") proc.kill("SIGTERM");
+    else {
+      // Windows has no signal to deliver (`kill` there ends the process
+      // outright, no handler runs): the PROCESS is told to end the way
+      // `am stop` tells it — one app's stop door, both apps must stop.
+      const r = await fetch(`http://127.0.0.1:${portA}/__aio/trojan/shutdown`, {
+        method: "POST",
+        headers: {
+          "X-AIO": "1",
+          "X-Aio-Control":
+            (await Deno.readTextFile(`${dir}/a/data/control.key`)).trim(),
+        },
+      });
+      assertEquals(r.status, 200, await r.text());
+    }
     const out = await proc.output();
     const said = new TextDecoder().decode(out.stderr) +
       new TextDecoder().decode(out.stdout);

@@ -45,6 +45,7 @@ export function afterRender(fn: () => void): void {
     // is knowable.
     _activeRoot.afterRenderQueue.push({
       fn,
+      owner: _currentCollector,
       component: _currentCollector?._component,
       renderDeps: _currentCollector?._renderDeps ?? null,
     });
@@ -157,6 +158,12 @@ export function _flushAfterRender(root: RootState): void {
   if (cbs.length > 0) {
     root.afterRenderQueue = [];
     for (const entry of cbs) {
+      // Discarded before this commit — a boundary caught, a hydration fell
+      // back, the body threw, a diff removed it: there is no render of its to
+      // run after. It ran anyway, AFTER the instance's own `onUnmount`.
+      // `onMount` has always had this rule (`_flushMounts`).
+      const owner = entry.owner;
+      if (owner && (owner.disposed || owner._inst?.disposed)) continue;
       try {
         runTrackedLifecycle(
           "afterRender",

@@ -18,7 +18,14 @@
  * the one reader of "which Electron is installed" lives there.
  */
 import { fromFileUrl, join } from "@std/path";
-import { DEFAULT_ELECTRON_VERSION } from "../build/electron-runtime.ts";
+import {
+  DEFAULT_ELECTRON_VERSION,
+  electronDrift,
+} from "../build/electron-runtime.ts";
+import {
+  compareVersions,
+  isComparableVersion,
+} from "../server/updates-core.ts";
 
 /** The Electron `frameworkRoot`'s aio is tested with, or null when that tree
  *  does not say (an aio from before the constant existed). */
@@ -157,4 +164,39 @@ export function electronLine(a: ElectronAlign): string {
       return `${what}: install FAILED (${a.error}) — run \`am fix\` to retry; ` +
         `a build ships ${a.to} regardless`;
   }
+}
+
+/** `am doctor`'s hint for an app whose Electron copies — the `deno.json`
+ *  line, the runtime in node_modules — are OLDER than the one its aio is
+ *  tested with, or null. A field report: after an aio upgrade the build
+ *  shipped the new Electron and said so, the dev launcher moved the runtime on
+ *  its next start, and the one command a person runs to ask "is this app
+ *  healthy?" said nothing. A copy that is merely DIFFERENT (newer, a range)
+ *  is the build's drift note's business; older is the one that leaves known
+ *  Chromium fixes out of every dev run. Pure. */
+export function electronBehindHint(
+  d: { tested: string; declared: string | null; installed: string | null },
+): string | null {
+  const older = (v: string | null | undefined): v is string =>
+    !!v && isComparableVersion(v) && compareVersions(v, d.tested) < 0;
+  const declared = /^npm:\/?electron@(\d+\.\d+\.\d+)$/.exec(d.declared ?? "")
+    ?.[1];
+  const off = [
+    older(declared) ? `deno.json says "${d.declared}"` : null,
+    older(d.installed) ? `node_modules has ${d.installed}` : null,
+  ].filter((x): x is string => x !== null);
+  return off.length === 0
+    ? null
+    : `Electron: ${off.join(" and ")} — older than ${d.tested}, the version ` +
+      `this aio is tested with and a build ships. \`am fix\` aligns them`;
+}
+
+/** {@link electronBehindHint} for the app at `appDir`, read from disk. */
+export async function electronBehindHintFor(
+  appDir: string,
+): Promise<string | null> {
+  return electronBehindHint({
+    ...await electronDrift(appDir),
+    tested: await testedElectronFor(appDir),
+  });
 }

@@ -87,7 +87,13 @@ export type CellStateSize = {
 export type MemoryConfig = {
   enabled?: boolean;
   interval?: number;
+  /** Report `pressure` when the heap passes this fraction of its ceiling.
+   *  `onMemoryPressure` gets every sample over it; the log (and `onError`)
+   *  says it once, then again only when the heap has climbed by a further
+   *  tenth of the ceiling — or reached `criticalThreshold`. */
   warnThreshold?: number;
+  /** At or above this fraction a `pressure` report is `critical`, and is
+   *  said every interval. */
   criticalThreshold?: number;
   trendWindow?: number; // number of samples for trend detection (default: 10)
   /** Report when the process (its RSS) passes this fraction of PHYSICAL RAM,
@@ -164,7 +170,9 @@ type MonitorDeps = {
   trendWindow?: number;
   machineWarnFraction?: number;
   growthReportRatio?: number;
-  onReport: (report: MemoryReport) => void;
+  /** `said`: false for a `pressure` report that repeats one already said —
+   *  the app's hook still gets it, the log does not (PRESSURE_REPEAT_STEP). */
+  onReport: (report: MemoryReport, said: boolean) => void;
   getMemoryUsage: () => MemoryUsage;
   getHeapLimit: () => number; // V8 heap_size_limit — the actual max, not lazily-allocated heapTotal
   /** Physical RAM in bytes, or 0 when unmeasurable. Ceiling-relative thresholds
@@ -270,6 +278,13 @@ export function createMemoryMonitor(deps: MonitorDeps): { stop: () => void } {
   // it is WORSE (see MACHINE_REPEAT_STEP), the way a growth report has to
   // climb again to earn a second one.
   let machineSaidAt = -Infinity;
+  // RSS when a machine condition was last put into words INSIDE a pressure
+  // report (whose `reason` stays "pressure"): its own once-only rule, so the
+  // `machine` report after the pressure ends is still made.
+  let machineNotedAt = -Infinity;
+  // The heap's share of its ceiling at the last `pressure` report: the same
+  // rule (see PRESSURE_REPEAT_STEP).
+  let pressureSaidAt = -Infinity;
   // Consecutive full windows that looked like a native leak. One is a
   // warm-up; two is a leak.
   let nativeWindows = 0;
@@ -333,6 +348,20 @@ export function createMemoryMonitor(deps: MonitorDeps): { stop: () => void } {
 
     // FOUR reasons to speak, and they are genuinely different problems.
     const pressure = heapPct >= deps.warnThreshold;
+    // An UNCHANGED pressure below `critical` is SAID once, as the machine
+    // condition below is: an app that sits at 80% of its ceiling logged the
+    // same error every interval for as long as it ran. It speaks again after
+    // another tenth of the ceiling, and is re-armed once the heap has fallen
+    // a tenth below the threshold. Only what is said: the report itself is
+    // still made every interval (`onReport`'s `said`), because the app's
+    // `onMemoryPressure` is how memory gets shed, and each report is a turn
+    // for it. `critical` is said every time too — the app is about to OOM.
+    if (heapPct < deps.warnThreshold - PRESSURE_REPEAT_STEP) {
+      pressureSaidAt = -Infinity;
+    }
+    const pressureSpeaks = pressure &&
+      (heapPct >= deps.criticalThreshold ||
+        heapPct >= pressureSaidAt + PRESSURE_REPEAT_STEP);
     // …a large share of the whole machine, whatever the ceiling allows. On a
     // 47 GB ceiling the pressure threshold is 35 GB, by which point a 64 GB
     // desktop is already swapping — this is the check that sees it first.
@@ -346,8 +375,11 @@ export function createMemoryMonitor(deps: MonitorDeps): { stop: () => void } {
     const step = total * MACHINE_REPEAT_STEP;
     if (machinePct < machineFraction - MACHINE_REPEAT_STEP) {
       machineSaidAt = -Infinity;
+      machineNotedAt = -Infinity;
     }
     const machineSpeaks = machine && mem.rss >= machineSaidAt + step;
+    const machineNews = pressure && machine &&
+      mem.rss >= machineNotedAt + step;
     const heapRising = detectTrend(usedSamples) === "rising";
     const rssGrowth = rssSamples.length >= 3
       ? rssSamples[rssSamples.length - 1]! - rssSamples[0]!
@@ -427,7 +459,9 @@ export function createMemoryMonitor(deps: MonitorDeps): { stop: () => void } {
       rssSamples.length = 0;
     }
     if (!pressure && !machineSpeaks && !growth && !native) return;
+    if (pressureSpeaks) pressureSaidAt = heapPct;
     if (!pressure && machineSpeaks) machineSaidAt = mem.rss;
+    if (machineNews) machineNotedAt = mem.rss;
 
     // Measure cell states
     const entries = deps.getCellStates();
@@ -466,7 +500,9 @@ export function createMemoryMonitor(deps: MonitorDeps): { stop: () => void } {
       ...(native ? { nativeLeak: true } : {}),
       gauges,
       ...(grower ? { topGrower: grower } : {}),
-    });
+      // Quiet pressure silences its own repeat only: a machine share, a
+      // climb or a native leak that starts meanwhile is news, and is said.
+    }, !pressure || pressureSpeaks || machineNews || !!growth || !!native);
   }, period);
 
   return {
@@ -490,6 +526,10 @@ const NATIVE_HEAP_SHARE = 0.05;
 /** A `machine` report repeats only after RSS has grown by this further share
  *  of physical RAM, and re-arms once RSS is this far below the threshold. */
 const MACHINE_REPEAT_STEP = 0.1;
+/** A `pressure` report below `critical` is SAID again only after the heap has
+ *  grown by this further share of its ceiling, and re-arms once the heap is
+ *  this far below the warn threshold. */
+const PRESSURE_REPEAT_STEP = 0.1;
 
 /** The one line a memory report is logged as — pure, so the words can be
  *  pinned. Each reason names the number that fired it: a `machine` report is

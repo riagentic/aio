@@ -4,14 +4,21 @@
 // Skips changelog.md (historical) and upgrade.md (migration references)
 
 import { walk } from "@std/fs/walk";
+import { fromFileUrl } from "@std/path";
 
-const DOCS_DIR = new URL("../docs/", import.meta.url).pathname;
+const DOCS_DIR = fromFileUrl(new URL("../docs/", import.meta.url));
 // The PRERELEASE SUFFIX is part of the version, and leaving it out meant this
 // scan could not tell one release from another: through the whole alpha line
 // `v1.0.0-alpha38` matched as `v1.0.0` and was counted as agreeing with
 // `v1.0.0-alpha77`, so the summary printed "✓ v1.0.0 (66 occurrences)" while
 // verifying nothing. The scan is advisory (docs legitimately name historical
 // versions), but an advisory line that cannot be wrong is not advice.
+/** `path` below `base`, `/`-separated on every OS: every rule here names a
+ *  doc as `basics/x.md`, and on Windows the walk answers `basics\\x.md` — no
+ *  skip-list or history filter matched, and 71 commands "did not resolve". */
+const relTo = (base: string, path: string): string =>
+  path.replace(base, "").replaceAll("\\", "/");
+
 const VERSION_RE = /v(\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?)/g;
 const SKIP_FILES = new Set(["changelog.md", "upgrade.md"]);
 
@@ -54,9 +61,9 @@ async function main(): Promise<void> {
       includeDirs: false,
     })
   ) {
-    const basename = entry.path.split("/").pop() ?? "";
+    const basename = entry.path.split(/[\\/]/).pop() ?? "";
     if (SKIP_FILES.has(basename)) continue;
-    await checkFile(entry.path, entry.path.replace(DOCS_DIR, ""));
+    await checkFile(entry.path, relTo(DOCS_DIR, entry.path));
   }
 
   // Also check README.md at repo root.
@@ -68,7 +75,7 @@ async function main(): Promise<void> {
   // README came to advertise `deno task dev:electron` and friends five alphas
   // after that task matrix was retired. A gate that cannot fail is not a gate:
   // the path is right now, and a missing README is a LOUD failure.
-  const readmePath = new URL("../README.md", import.meta.url).pathname;
+  const readmePath = fromFileUrl(new URL("../README.md", import.meta.url));
   try {
     await Deno.stat(readmePath);
   } catch {
@@ -370,10 +377,10 @@ async function checkRetiredSpellings(): Promise<string[]> {
     const entry of walk(DOCS_DIR, {
       exts: [".md"],
       includeDirs: false,
-      skip: [/\/upgrade\//, /\/specs\//, /\/release-notes\//],
+      skip: [/[\\/]upgrade[\\/]/, /[\\/]specs[\\/]/, /[\\/]release-notes[\\/]/],
     })
   ) {
-    const rel = entry.path.replace(DOCS_DIR, "");
+    const rel = relTo(DOCS_DIR, entry.path);
     if (rel === "content.md") continue; // generated index — mirrors sources
     const lines = (await Deno.readTextFile(entry.path)).split("\n");
     for (let i = 0; i < lines.length; i++) {
@@ -426,7 +433,7 @@ async function checkRetireSections(): Promise<string[]> {
 
 /** Every `docs/….md` path mentioned in src/ code must exist on disk. */
 async function checkSrcDocRefs(): Promise<string[]> {
-  const root = new URL("..", import.meta.url).pathname;
+  const root = fromFileUrl(new URL("..", import.meta.url));
   const issues: string[] = [];
   const seen = new Map<string, string>(); // path → first citing file
   async function walk(dir: string): Promise<void> {
@@ -468,7 +475,7 @@ async function checkSrcDocRefs(): Promise<string[]> {
  *  is about the PAIR: anything interpolating `collectCss()` into HTML has to
  *  put a `<style>` around it. */
 async function checkCollectCss(docs: DocFile[]): Promise<string[]> {
-  const root = new URL("..", import.meta.url).pathname;
+  const root = fromFileUrl(new URL("..", import.meta.url));
   const issues: string[] = [];
   const scan = (where: string, text: string) => {
     for (const m of text.matchAll(/\$\{\s*collectCss\(\)\s*\}/g)) {
@@ -496,13 +503,13 @@ async function checkCollectCss(docs: DocFile[]): Promise<string[]> {
 
 async function checkErrorCodes(): Promise<string[]> {
   const errorTs = await Deno.readTextFile(
-    new URL("../src/diagnostics/error.ts", import.meta.url).pathname,
+    fromFileUrl(new URL("../src/diagnostics/error.ts", import.meta.url)),
   );
   const union = errorTs.match(/export type AioErrorCode =([\s\S]*?);/);
   if (!union) return ["  could not parse AioErrorCode union from src/error.ts"];
   const codes = [...union[1]!.matchAll(/"([A-Z_]+)"/g)].map((m) => m[1]!);
   const errorsMd = await Deno.readTextFile(
-    new URL("../docs/debugging/errors.md", import.meta.url).pathname,
+    fromFileUrl(new URL("../docs/debugging/errors.md", import.meta.url)),
   );
   return codes
     .filter((code) => !errorsMd.includes(code))
@@ -514,7 +521,7 @@ async function detectVersion(): Promise<string | undefined> {
     // Root CHANGELOG.md is the canonical changelog (see .katana/docs.md); its
     // top heading names the current release, e.g. "## 1.0.0-alpha15 — …".
     const changelog = await Deno.readTextFile(
-      new URL("../CHANGELOG.md", import.meta.url).pathname,
+      fromFileUrl(new URL("../CHANGELOG.md", import.meta.url)),
     );
     const match = changelog.match(
       /^## v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?)/m,
@@ -561,10 +568,10 @@ async function checkHarnessMembers(): Promise<string[]> {
     const entry of walk(DOCS_DIR, {
       exts: [".md"],
       includeDirs: false,
-      skip: [/\/upgrade\//, /\/specs\//, /\/release-notes\//],
+      skip: [/[\\/]upgrade[\\/]/, /[\\/]specs[\\/]/, /[\\/]release-notes[\\/]/],
     })
   ) {
-    const rel = entry.path.replace(DOCS_DIR, "");
+    const rel = relTo(DOCS_DIR, entry.path);
     if (rel === "content.md") continue; // generated index — mirrors sources
     const lines = (await Deno.readTextFile(entry.path)).split("\n");
     for (let i = 0; i < lines.length; i++) {
@@ -600,7 +607,11 @@ async function checkHarnessMembers(): Promise<string[]> {
 /** Live docs = everything except the dirs that are deliberately historical.
  *  An upgrade guide naming `aio/react` is CORRECT: it is telling you the
  *  spelling you are migrating off. Same skip list the other checks use. */
-const HISTORICAL_DIRS = [/\/upgrade\//, /\/specs\//, /\/release-notes\//];
+const HISTORICAL_DIRS = [
+  /[\\/]upgrade[\\/]/,
+  /[\\/]specs[\\/]/,
+  /[\\/]release-notes[\\/]/,
+];
 
 export type DocFile = { rel: string; lines: string[] };
 
@@ -715,7 +726,7 @@ async function checkGateClaims(docs: DocFile[]): Promise<string[]> {
     })
   ) {
     await scan(
-      entry.path.replace(SRC(""), ""),
+      relTo(SRC(""), entry.path),
       await Deno.readTextFile(entry.path),
     );
   }
@@ -731,7 +742,7 @@ async function readLiveDocs(): Promise<DocFile[]> {
       skip: HISTORICAL_DIRS,
     })
   ) {
-    const rel = entry.path.replace(DOCS_DIR, "");
+    const rel = relTo(DOCS_DIR, entry.path);
     if (rel === "content.md") continue; // generated index — mirrors sources
     out.push({ rel, lines: (await Deno.readTextFile(entry.path)).split("\n") });
   }
@@ -739,13 +750,13 @@ async function readLiveDocs(): Promise<DocFile[]> {
   out.push({
     rel: "README.md",
     lines: (await Deno.readTextFile(
-      new URL("../README.md", import.meta.url).pathname,
+      fromFileUrl(new URL("../README.md", import.meta.url)),
     )).split("\n"),
   });
   return out.sort((a, b) => a.rel.localeCompare(b.rel));
 }
 
-const SRC = (p: string) => new URL(`../${p}`, import.meta.url).pathname;
+const SRC = (p: string) => fromFileUrl(new URL(`../${p}`, import.meta.url));
 
 // ── The three sources of truth ────────────────────────────────────────
 
@@ -1212,7 +1223,7 @@ export async function readAllDocs(): Promise<DocFile[]> {
   for await (
     const entry of walk(DOCS_DIR, { exts: [".md"], includeDirs: false })
   ) {
-    const rel = entry.path.replace(DOCS_DIR, "");
+    const rel = relTo(DOCS_DIR, entry.path);
     if (rel === "content.md") continue; // generated index — mirrors sources
     out.push({
       rel: `docs/${rel}`,

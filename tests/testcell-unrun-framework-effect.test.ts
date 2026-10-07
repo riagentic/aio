@@ -13,8 +13,10 @@ import {
   tempDir,
 } from "../src/testing/temp-dir.ts";
 import { schedule } from "../src/state/schedule.ts";
+import { fromFileUrl } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 const _childCovDir = childCoverageDir();
 
 /** Run one throwaway test file in a child `deno test` and report its outcome. */
@@ -24,7 +26,7 @@ async function runChildTest(
   const dir = await tempDir("testcell-unrun-effect-");
   try {
     const file = `${dir}/child.test.ts`;
-    await Deno.writeTextFile(file, body.replaceAll("__ROOT__", ROOT));
+    await Deno.writeTextFile(file, body.replaceAll("__ROOT__", spec(ROOT)));
     const out = await new Deno.Command(Deno.execPath(), {
       args: ["test", "-A", "--no-check", file],
       env: { ...Deno.env.toObject(), DENO_COVERAGE_DIR: _childCovDir },

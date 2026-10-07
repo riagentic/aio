@@ -30,8 +30,9 @@
 import { assert, assertEquals } from "@std/assert";
 import { VALID_AIO_CONFIG_KEYS } from "../src/server/config.ts";
 import { childCoverageDir } from "../src/testing/temp-dir.ts";
+import { fromFileUrl } from "@std/path";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("..", import.meta.url));
 const _childCovDir = childCoverageDir();
 
 /** Property names of an exported interface/type alias, via `deno doc --json`

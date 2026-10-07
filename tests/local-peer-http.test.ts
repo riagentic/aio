@@ -532,7 +532,7 @@ for (const peer of [false, true]) {
     name: `local connection (${
       peer ? "peer-credential" : "plain"
     } listener), read raw: never more than the buffer holds, nothing lost or reordered, null at the end`,
-    ignore: Deno.build.os === "windows",
+    ignore: Deno.build.os === "windows", // the raw `read(into)`: a Windows pipe connection has only its streams
     async fn() {
       const dir = await tempDir("peer-http-");
       const sock = `${dir}/raw.sock`;
@@ -578,7 +578,7 @@ for (const peer of [false, true]) {
       peer ? "peer-credential" : "plain"
     }): a process this one spawns inherits neither the listening socket nor an accepted connection`,
     // Read from `/proc`: Linux. (macOS has the same fix and no `/proc`.)
-    ignore: Deno.build.os !== "linux",
+    ignore: Deno.build.os !== "linux", // a child's descriptors, read from /proc
     async fn() {
       /** The sockets a process holds, by inode. */
       const sockets = (pid: number | "self"): string[] => {
@@ -636,7 +636,7 @@ for (const peer of [false, true]) {
 Deno.test({
   name:
     "local listener (peer-credential): bound, but with no descriptor to keep from child processes — it is not handed out",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // the node:net listener's descriptor: the unix peer-credential backend
   async fn() {
     // The descriptor is read from the runtime's own `_handle.fd`. A runtime
     // that moved it would bring the inherited listener back with nothing

@@ -22,7 +22,7 @@ function hasDoc(decl: DocDeclaration): boolean {
 async function docEntry(path: string): Promise<DocSymbol[]> {
   const cmd = new Deno.Command(Deno.execPath(), {
     args: ["doc", "--json", path],
-    cwd: ROOT.pathname,
+    cwd: ROOT, // the URL: its `.pathname` is not a path on Windows
     stdout: "piped",
     stderr: "piped",
   });

@@ -21,18 +21,19 @@
 // And a green summary is not "every file ran": a file that calls
 // `Deno.exit(0)` at top level, or registers no test, passed with 0 tests.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { basename, fromFileUrl, join } from "@std/path";
 import {
   heldLockEntries,
   leftoverFailure,
   lockDirsOf,
   settleHomeLockDirs,
   settleShardRuntime,
+  shardLockBase,
   shardPassed,
 } from "../scripts/test-shards.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const ROOT = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 const LOCK = new URL("../src/server/single-instance-lock.ts", import.meta.url)
   .href;
 
@@ -43,6 +44,9 @@ async function holder(
   ms?: number,
   apps = join(runtime, "apps"),
   appId = "myapp",
+  // The session's temp dir — where Windows keeps lock dirs whatever
+  // `XDG_RUNTIME_DIR` says.
+  session = runtime,
 ): Promise<Deno.ChildProcess> {
   const code = `import { writeLock } from ${JSON.stringify(LOCK)};
 writeLock({ appId: ${JSON.stringify(appId)}, pid: Deno.pid, port: 1,
@@ -51,7 +55,12 @@ console.log("ready");
 setTimeout(() => Deno.exit(0), ${ms ?? 600_000});`;
   const child = new Deno.Command(Deno.execPath(), {
     args: ["eval", code],
-    env: { XDG_RUNTIME_DIR: runtime, ...(apps ? { AIO_APPS_DIR: apps } : {}) },
+    // The base `lockDir()` reads: `$XDG_RUNTIME_DIR`, `%TEMP%` on Windows.
+    env: {
+      XDG_RUNTIME_DIR: runtime,
+      ...(Deno.build.os === "windows" ? { TEMP: session, TMP: session } : {}),
+      ...(apps ? { AIO_APPS_DIR: apps } : {}),
+    },
     stdin: "null",
     stdout: "piped",
     stderr: "null",
@@ -69,7 +78,10 @@ setTimeout(() => Deno.exit(0), ${ms ?? 600_000});`;
 
 const runtimeDir = () =>
   // aio-ok: a runtime dir, short like the runner's own `/tmp/xdg-shard-*`
-  Deno.makeTempDir({ dir: "/tmp", prefix: "xdg-left-" });
+  Deno.makeTempDir({
+    dir: Deno.build.os === "windows" ? undefined : "/tmp",
+    prefix: "xdg-left-",
+  });
 
 const exists = (p: string) => Deno.lstat(p).then(() => true, () => false);
 
@@ -80,7 +92,7 @@ Deno.test("settleShardRuntime: a lock a LIVE process holds is still there after 
     const s = await settleShardRuntime(runtime, 3, 20);
     assertEquals(s.left.length, 1, JSON.stringify(s));
     // The dir AND what is in it: the lock's name is the appId.
-    assertStringIncludes(s.left[0]!, `${runtime}/aio-`);
+    assertStringIncludes(s.left[0]!, join(runtime, "aio-"));
     assertStringIncludes(s.left[0]!, "myapp.lock");
     assertEquals(s.first, s.left);
     assert(await exists(runtime), "a held runtime dir must be left to find");
@@ -169,7 +181,7 @@ Deno.test("settleHomeLockDirs: only what holds a lock under the shard's OWN home
 
     // Held when the shard STARTED: an earlier run's, not this shard's…
     const before = await heldLockEntries(runtime, home);
-    assertEquals([...before.keys()].map((p) => p.split("/").pop()), [
+    assertEquals([...before.keys()].map((p) => basename(p)), [
       "leaked.lock",
     ]);
     assertEquals(
@@ -217,6 +229,11 @@ async function plantedRoot(tests: Record<string, string>): Promise<string> {
   // A COPY: a lock file the nested deno may rewrite must not be the real one.
   await Deno.copyFile(join(ROOT, "deno.lock"), join(root, "deno.lock"));
   await Deno.mkdir(join(root, "tests"));
+  // The module the runner preloads into every shard (`--preload`).
+  await Deno.copyFile(
+    join(ROOT, "tests", "preload-ffi.ts"),
+    join(root, "tests", "preload-ffi.ts"),
+  );
   for (const [name, src] of Object.entries(tests)) {
     await Deno.writeTextFile(join(root, "tests", name), src);
   }
@@ -759,4 +776,57 @@ Deno.test({
       }
     }
   },
+});
+
+// A shard is judged where its locks ARE. Windows keeps lock dirs in `%TEMP%`
+// and never reads `XDG_RUNTIME_DIR`, so a Windows shard's private runtime dir
+// stayed empty and was "settled" empty, while the lock dir of its home was
+// never pruned: the full suite there ended 6 green shards and a red
+// `check:orphans`, on the lock of whichever app a test had stopped hard last
+// (`dev-restart-typo-e2e.lock`, `zero-test.lock` + its `watch-<pid>.tmp`,
+// `ex-counter.lock`) — the debris a POSIX shard's runtime sweep takes.
+Deno.test("shardLockBase: a shard's lock dirs are settled where the lock module puts them — the session's temp dir on Windows, private runtime dir or not", async () => {
+  const s = () => "/session";
+  assertEquals(shardLockBase("/private", "linux", s), "/private");
+  assertEquals(shardLockBase("/private", "darwin", s), "/private");
+  assertEquals(shardLockBase("/private", "windows", s), "/session");
+  assertEquals(shardLockBase(null, "linux", s), "/session");
+  assertEquals(shardLockBase(null, "windows", s), "/session");
+
+  // …and that IS where a child given both lands, on the OS running this.
+  const runtime = await runtimeDir();
+  const session = await runtimeDir();
+  const home = await tempDir("shard-base-home-");
+  try {
+    const base = shardLockBase(runtime, Deno.build.os, () => session);
+    const child = await holder(
+      runtime,
+      undefined,
+      home,
+      "hard-stopped",
+      session,
+    );
+    try {
+      assertEquals(
+        lockDirsOf(base, home).length,
+        1,
+        "the lock dir is not there",
+      );
+    } finally {
+      child.kill("SIGKILL"); // a hard stop: its lock stays behind
+      await child.status;
+    }
+    // The owner is dead: its lock dir is debris, pruned, and nothing is left.
+    const none = new Map<string, string>();
+    assertEquals((await settleHomeLockDirs(base, home, none, 3, 20)).left, []);
+    assertEquals(lockDirsOf(base, home), []);
+    assertEquals(
+      [...Deno.readDirSync(base)].filter((e) => e.name.startsWith("aio")),
+      [],
+    );
+  } finally {
+    await Deno.remove(runtime, { recursive: true });
+    await Deno.remove(session, { recursive: true });
+    await dropTempDir(home);
+  }
 });

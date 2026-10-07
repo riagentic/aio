@@ -572,6 +572,7 @@ where no exec bit exists, "executable" is what Windows runs by its name: `.exe`,
 | `--name=X`                                | Override binary name (default: from deno.json `"title"`)                                                                                             |
 | `--force`                                 | Skip bundle cache — always rebuild `dist/app.js`                                                                                                     |
 | `--analyze`                               | Print where the bundle's bytes went (per dependency, per framework area) — same artifact, one extra report                                           |
+| `--smoke` / `--smoke=strict`              | After building, start each artifact and fail the build when it does not come up clean — see [Start what you built](#start-what-you-built---smoke)    |
 | `--release`                               | Android release build (default: debug) — emits `myapp-unsigned.apk`; sign it yourself                                                                |
 | `--display-name=X`                        | Display name for this build (a target's `"title"`; default: deno.json `"title"`)                                                                     |
 | `--entry=PATH`                            | Entry point for this build (default: `deno.json` `entry` › `src/app.ts`)                                                                             |
@@ -647,6 +648,50 @@ Same artifact, one extra report. Three things it deliberately does:
 - **Summarises the tail rather than dropping it**, so the rows plus "everything
   else" always add up to the bundle.
 
+### Start what you built (`--smoke`)
+
+```
+$ deno task build --smoke
+
+smoke
+  ✓ browser   passed            myapp-0.3.1
+  ✗ electron  FAILED            myapp-0.3.1-x86_64.AppImage
+      guest preload REFUSED in the package: src/guest/preload.cjs is declared in deno.json build.guestPreloads and the packaged shell cannot attach it (it has: none)
+  – server    not smoke-tested  myapp-server-0.3.1-windows-x64.exe
+      not smoke-tested here: built for windows-x64
+```
+
+A green build says the artifact exists. `--smoke` runs it: after every target is
+built and placed, each artifact that can run on this machine is started from a
+foreign working directory with a throwaway home (its own data, config and temp
+dir — never yours) on a free port, checked, stopped, and the build exits
+non-zero when any of them did not come up clean. In deno.json:
+`"build": { "smoke": true }` (or `"strict"`); the flag wins.
+
+| Target                      | What is checked                                                                                                                                                                                                             |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `browser`, `server-app`     | answers `/__aio/health`; `/`, the bundle, the stylesheet and icon the page names, and every asset URL the bundle names all answer 200                                                                                       |
+| `server`                    | answers `/__aio/health` (it is headless — no page)                                                                                                                                                                          |
+| `cli`                       | `--help` exits 0                                                                                                                                                                                                            |
+| `electron` (Linux AppImage) | the window opens and its page finishes loading; every file the page names answers 200; every `build.guestPreloads` file is one the packaged shell says it can attach                                                        |
+| all of the above            | nothing at ERROR level, no uncaught error and no `REFUSED` line in its console output or `logs/app.log`; it stops when asked (the request `am stop` sends; a desktop app by closing its window); no process is left running |
+
+Everything else is listed with its reason and never skipped in silence: an
+artifact built for another OS or architecture
+(`not smoke-tested here: built
+for windows-x64`), a client that needs its
+server, an APK, a web directory, a desktop package on a Windows or macOS build
+host. `--smoke=strict` turns a "not smoke-tested" row into a failure — use it on
+the machine whose job is to prove the release.
+
+The desktop window opens on a nested X display (Xephyr, the one `am start` uses
+for agents), never on your desktop. With no Xephyr installed the row reads
+`not smoke-tested: no display` and names the package to install.
+
+An asset URL that 404s from the artifact and has no file in the source tree
+either is reported and not counted — it is a 404 in `deno task dev` too, and a
+string that looks like a path may be one of your routes.
+
 ## browser (standalone binary)
 
 ```sh
@@ -699,6 +744,11 @@ aio handles this for you:
   "compile": { "include": ["assets/model.bin", "data/"] }
   ```
 
+  A module under an included **directory** (`"plugins/"` holding `.ts` / `.js`
+  files loaded by a computed path) is a root of the binary's module graph, like
+  the entry: the npm packages it imports are embedded. (They used to be left out
+  as "unreachable", and the module failed when the binary loaded it.)
+
 - **`*.server.ts` modules the entry can load are embedded automatically** — even
   one reached through an opaque `import(url)` the module graph cannot see. "Can
   load" is: in the entry's module graph, under the entry's own directory, or in
@@ -709,6 +759,36 @@ aio handles this for you:
   that is ANOTHER target's entry folder (`src/agent/` under a web entry in
   `src/`) belongs to that target: its `*.server.ts` ship elsewhere only when
   this entry's graph reaches them.
+
+- **A file a server module reads from beside itself must be embedded — the build
+  checks.** `Deno.readTextFile(new URL("../style.css", import.meta.url))` finds
+  the file on disk in `deno task dev`; in a compiled binary `import.meta.url`
+  points into the binary, which holds the module graph and the embedded paths
+  and nothing else, so the read throws `NotFound`. The compile reads the app's
+  own modules in the binary's graph and stops when such a read's target exists
+  on disk and nothing embeds it:
+
+  ```
+  ✗ src/rud/serve.server.ts:12 reads "../../style.css" at run time → style.css,
+    a file that is on disk in `deno task dev` and that this binary will NOT
+    contain — the read fails in every shipped artifact. Embed it: add
+    "compile": { "include": ["style.css"] } to deno.json.
+  ```
+
+  | Form                                                                                                                                                                                       | Verdict                   |
+  | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------- |
+  | `new URL("lit", import.meta.url)` or `import.meta.resolve("lit")` written inside `Deno.readTextFile` / `readFile` / `open` / `readDir` (and `…Sync`) — `fromFileUrl(…)` around it included | build fails               |
+  | the same bound to a name that a read call later mentions; `join(import.meta.dirname, "lit")`; a bare `Deno.stat` of it                                                                     | warning                   |
+  | a read whose absence the code handles: `.catch(…)` on it, a `try`/`catch` around it that does not rethrow, an `if (!Deno.build.standalone)` (or `isCompiled()`) test                       | warning, naming the guard |
+  | `fetch(new URL("lit", import.meta.url))` in a `*.server.ts` module                                                                                                                         | warning                   |
+  | the same `fetch` in any other module — it runs in the browser, where the bundler resolved the URL                                                                                          | not judged                |
+  | a target that does not exist at all (a typo — broken in dev too)                                                                                                                           | warning                   |
+
+  Covered means: a module in the binary's graph, a `compile.include` file or a
+  directory holding it, an `assets` directory, the staged `dist/`. A read that
+  is never meant to run in a binary is acknowledged on its line:
+  `// aio-ok(read): only under deno task dev`. Applies to every compiled target
+  (`browser`, `server`, `server-app`, `electron`, `cli`, `cli-client`).
 
 The compile log prints what it embedded (`[compile] embedding N data asset(s)`).
 Compiled binaries are **fully portable** — they serve the embedded `dist/` and
@@ -848,21 +928,32 @@ narrow:
 - `test` / `tests` only **directly under a package's root** — a library's
   `_esm/actions/test/` is runtime code and stays;
 - never a package's own directory (a package _named_ `test`, `@scope/test`);
-- never a non-npm module the binary's graph loads from there. (The graph does
-  not list the files INSIDE an npm package, so for those the name rules above
-  are the whole protection, and `build.keepPackages` the way out.)
+- never a module the binary's graph loads from there — a file your code imports
+  from inside a package (`import "pkg/test/helpers.js"`) included;
+- never a test directory its **own package names**: a literal relative specifier
+  in the package's `.js` / `.cjs` / `.mjs` (`require("./test/x")`,
+  `import … from "../tests/y.js"`, `import("./__tests__/z")`), or a path its
+  `package.json` `main` / `exports` / `imports` hand out. The module graph has
+  one entry per npm package and none of its files, so this is read from the
+  package itself;
 - nothing inside a package named in
-  [`build.keepPackages`](#keep-a-build-only-package-buildkeeppackages) — a
-  package that really does load code from its own `test/` directory at runtime
-  is kept whole by naming it there.
+  [`build.keepPackages`](#keep-a-build-only-package-buildkeeppackages).
+
+What a build cannot read is a path a package **computes** at run time
+(`require(dir + name)`, `fs.readFileSync(join(__dirname, "test", …))`) or a test
+file named from another package. Held aside, that load fails in the binary with
+`Cannot find module './test/…'` at the call — or not at all, where the package
+catches it and falls back. Name the package in `build.keepPackages`: it is kept
+whole.
 
 They are **held aside for the compile and put back afterwards**, so your
 `node_modules` is unchanged. A build that is interrupted (Ctrl-C, `SIGTERM`)
 puts them back before it exits; one that is killed outright is repaired by the
-next `deno task build`, even after a reinstall of `node_modules` in between.
-While a build is running they sit under `.aio/trim.<build>/` beside the project.
-`.d.ts` files are deliberately kept — the compile type-checks with them.
-`AIO_SKIP_TRIM=1` disables this for a build you are debugging.
+next `deno task build` — or the next start from source (`deno task dev`), which
+checks before it resolves a package — even after a reinstall of `node_modules`
+in between. While a build is running they sit under `.aio/trim.<build>/` beside
+the project. `.d.ts` files are deliberately kept — the compile type-checks with
+them. `AIO_SKIP_TRIM=1` disables this for a build you are debugging.
 
 aio's own tool cache (`node_modules/.cache`, where an older aio left a bare
 `appimagetool`) is excluded from the binary and the legacy copy is removed. So
@@ -952,6 +1043,26 @@ Two builds do not depend on it and go on with a warning that says which setting
 wins: a macOS build (the files are Windows and Linux ones; a macOS bundle keeps
 its runtime whole, and the build says so) and a build run with
 `AIO_STRIP_CHROMIUM=1` (the env form decides: the extras are stripped).
+
+### `<webview>` guest preloads: `build.guestPreloads`
+
+A `<webview>` guest's preload is a file Electron opens from disk, so an Electron
+package has to carry it:
+
+```jsonc
+// deno.json — paths are relative to this file
+"build": { "guestPreloads": ["src/guest/preload.cjs"] }
+```
+
+Every Electron package (AppImage, Windows exe and zip, macOS app) then ships the
+listed files, and the page names one with
+`guestPreload("src/guest/preload.cjs")` from `aio/ui` — the same name in
+`deno task dev`. A declared file that does not exist stops the build by name, on
+every target; so does a literal `guestPreload("…")` that is not declared. The
+window prints the files it can attach when it starts
+(`guest preloads present in …`), and `build --smoke` fails a package whose list
+lacks a declared one. See
+[Embedding a web page](../clients/webview.md#a-preload-for-the-guest).
 
 ### Hide the server source: `build.minify` (on by default)
 
@@ -1063,10 +1174,17 @@ What the `.exe` does when it is opened:
 - **It installed the app**: it adds a Start-menu shortcut named after the app
   (`title`), pointing at the installed `<name>.exe` — so the download can be
   deleted. Opening the `.exe` again without installing anything does not put
-  back a shortcut the user removed.
+  back a shortcut the user removed. An install made by an older `.exe` (aio
+  1.0.17-beta or older, which added none) gets the same shortcut from the app
+  itself, once, at its first start on a version that has this — so an app that
+  updated itself needs no new download — and the log says the old `.exe` can be
+  deleted. What was decided is kept beside the install
+  (`…\aio-sfx\<name>\win-x64.shortcut`), so a shortcut removed after that is not
+  put back by a later start or update. (One exception: an install made by a
+  1.0.18-beta `.exe` whose shortcut was removed gets it back once.)
   `"build": { "windows": { "shortcut": false } }` in `deno.json` builds an
-  `.exe` that adds none. Nothing removes the shortcut when the app's folder is
-  deleted by hand: aio has no uninstaller.
+  `.exe` that adds none, and an app that adds none either. Nothing removes the
+  shortcut when the app's folder is deleted by hand: aio has no uninstaller.
 
 **Signing the `.exe` (Authenticode).** Sign the finished `<name>-win-x64.exe`
 with your own tool —
@@ -1350,7 +1468,8 @@ runtime. Dispatch loop, reducer, and effects all run client-side, over a durable
 native store ([below](#state-survives-a-kill)).
 
 **Prerequisites:** Android SDK (`$ANDROID_HOME`), Java 17+ (`$JAVA_HOME`),
-Gradle on `PATH`.
+Gradle on `PATH`. On a Windows host the build runs the wrapper it generates as
+`gradlew.bat`.
 
 ### The APK's version
 

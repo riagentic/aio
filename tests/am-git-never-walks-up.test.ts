@@ -13,6 +13,7 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join, relative } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { copy as copy_ } from "@std/fs";
 
 const REPO = dirname(dirname(fromFileUrl(import.meta.url)));
 const dec = new TextDecoder();
@@ -113,7 +114,6 @@ async function enclosing(base: string): Promise<string> {
 Deno.test({
   name:
     "am upgrade: an install that is a plain copy inside an enclosing repo is refused, exit 1, and that repo's .git is byte-identical",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const base = await tempDir("am-upgrade-no-walk-");
     try {
@@ -121,17 +121,9 @@ Deno.test({
       // The "install": a plain copy of aio (no .git), am run from it.
       const copy = join(outer, "vendor", "aio");
       await Deno.mkdir(copy, { recursive: true });
-      const cp = await new Deno.Command("cp", {
-        args: [
-          "-r",
-          join(REPO, "src"),
-          join(REPO, "mod.ts"),
-          join(REPO, "deno.json"),
-          join(REPO, "deno.lock"),
-          copy,
-        ],
-      }).output();
-      assertEquals(cp.code, 0, "copy the framework");
+      for (const name of ["src", "mod.ts", "deno.json", "deno.lock"]) {
+        await copy_(join(REPO, name), join(copy, name));
+      }
       const install = await Deno.realPath(copy);
       const before = await snapshot(join(outer, ".git"));
       const head = await git(outer, "rev-parse", "HEAD");
@@ -146,8 +138,18 @@ Deno.test({
       }).output();
       const said = dec.decode(r.stdout) + dec.decode(r.stderr);
       assertEquals(r.code, 1, said);
-      assertStringIncludes(said, `AIO at ${install} is not a git clone of aio`);
-      assertStringIncludes(said, "install.sh");
+      // (`--json`: the path arrives JSON-escaped, which matters for `\`.)
+      assertStringIncludes(
+        said,
+        `AIO at ${
+          JSON.stringify(install).slice(1, -1)
+        } is not a git clone of aio`,
+      );
+      // The reinstall line is this OS's installer.
+      assertStringIncludes(
+        said,
+        Deno.build.os === "windows" ? "install.ps1" : "install.sh",
+      );
       assertEquals(await git(outer, "rev-parse", "HEAD"), head);
       assertEquals(changed(before, await snapshot(join(outer, ".git"))), []);
     } finally {
@@ -159,7 +161,6 @@ Deno.test({
 Deno.test({
   name:
     "am fix: a .gitmodules in an app folder that is not its own repo never initializes the enclosing repo's submodules",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const base = await tempDir("am-fix-submod-no-walk-");
     try {

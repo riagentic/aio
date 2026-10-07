@@ -11,10 +11,11 @@
 // in THIS process, which is exactly why an in-process test could never see it
 // missing.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 async function project(appTs: string): Promise<string> {
   const dir = await tempDir("aio-devflag-");
@@ -25,7 +26,7 @@ async function project(appTs: string): Promise<string> {
       title: "devflag",
       version: "0.1",
       imports: {
-        "aio": `${ROOT}mod.ts`,
+        "aio": `${spec(ROOT)}mod.ts`,
         "immer": "npm:immer@10.2.0",
         "@std/path": "jsr:@std/path@^1",
       },
@@ -81,7 +82,6 @@ Deno.exit(0);
 Deno.test({
   name:
     "dev server: a method sees __aioDev === true under `deno run`, and nothing under --prod",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await project(PROBE_APP);
     try {
@@ -126,7 +126,6 @@ for (const [spelling, src, line] of RETIRED) {
   Deno.test({
     name:
       `dev server: retired ${spelling} REFUSES under \`deno run\`; --prod logs it and boots`,
-    ignore: Deno.build.os === "windows",
     async fn() {
       const dir = await project(src);
       try {

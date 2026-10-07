@@ -13,7 +13,7 @@
 //     the exact opposite of what `am fix` enforces (`"aio"`), which repoints
 //     every JSX element in the app at React's runtime.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { basename, join } from "@std/path";
 import { lintProject } from "../aiol/mod.ts";
 
 const IMPORTS = { "aio": "jsr:@riagentic/aio@1.0.0" };
@@ -314,7 +314,7 @@ Deno.test("safe-fix: `aiol .` does not brand the app `my-app`", async () => {
     );
     assertStringIncludes(
       app,
-      `appId: "${dir.split("/").pop()!.toLowerCase()}"`,
+      `appId: "${basename(dir).toLowerCase()}"`,
       "the app is named after its own directory",
     );
   } finally {

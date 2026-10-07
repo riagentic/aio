@@ -362,7 +362,9 @@ export async function testServer<S = unknown>(
   // read, any method call) — see boot-refusals.ts. Real workers need nothing.
   const unisolate = workerEntryUrl
     ? () => {}
-    : _isolateWorkerCellsInProcess(config.cells ?? []);
+    // (`false`: this harness calls them through the app's own dispatch, so
+    // `crashWorker` has no door here — it says so.)
+    : _isolateWorkerCellsInProcess(config.cells ?? [], false);
   const url = `http://127.0.0.1:${port}`;
   const close = async () => {
     // A throw from `app.close()` must not skip the temp-dir/logger cleanup

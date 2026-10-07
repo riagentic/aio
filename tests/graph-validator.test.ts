@@ -6,6 +6,7 @@ import {
   resolveSpecifier,
   validateGraph,
 } from "../src/server/graph-validator.ts";
+import { basename, join, resolve, SEPARATOR } from "@std/path";
 import * as win from "@std/path/windows";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
@@ -35,11 +36,18 @@ Deno.test("extractImports ignores comments", () => {
   assertEquals(extractImports(code), ["real"]);
 });
 
+// A resolved module is the HOST's absolute path — on Windows the POSIX-spelled
+// importer `/project/src/App.tsx` resolves under the current drive.
+const FOO = resolve("/project/src/foo.ts");
+const LIB_UTILS = resolve("/project/src/lib/utils.ts");
+const UTILS = resolve("/project/src/utils.ts");
+const COMPONENTS_INDEX = resolve("/project/src/components/index.ts");
+
 Deno.test("resolveSpecifier resolves relative with extension try", () => {
   // Use a mock fileExists that says ./foo.ts exists
-  const exists = (p: string) => p.endsWith("/foo.ts");
+  const exists = (p: string) => basename(p) === "foo.ts";
   const result = resolveSpecifier("./foo", "/project/src/App.tsx", {}, exists);
-  assertEquals(result, { kind: "local", path: "/project/src/foo.ts" });
+  assertEquals(result, { kind: "local", path: FOO });
 });
 
 Deno.test("resolveSpecifier resolves bare via import map", () => {
@@ -69,7 +77,7 @@ Deno.test("resolveSpecifier resolves jsr: import map entry as external", () => {
 
 Deno.test("resolveSpecifier resolves local import map alias", () => {
   // "./lib/utils.ts" resolved relative to importer's dir (/project/src/) = /project/src/lib/utils.ts
-  const exists = (p: string) => p === "/project/src/lib/utils.ts";
+  const exists = (p: string) => p === LIB_UTILS;
   const importMap = { "my-utils": "./lib/utils.ts" };
   const result = resolveSpecifier(
     "my-utils",
@@ -77,7 +85,7 @@ Deno.test("resolveSpecifier resolves local import map alias", () => {
     importMap,
     exists,
   );
-  assertEquals(result, { kind: "local", path: "/project/src/lib/utils.ts" });
+  assertEquals(result, { kind: "local", path: LIB_UTILS });
 });
 
 Deno.test("resolveSpecifier errors on missing bare specifier", () => {
@@ -89,18 +97,18 @@ Deno.test("resolveSpecifier errors on missing bare specifier", () => {
 });
 
 Deno.test("resolveSpecifier resolves exact relative path", () => {
-  const exists = (p: string) => p === "/project/src/utils.ts";
+  const exists = (p: string) => p === UTILS;
   const result = resolveSpecifier(
     "./utils.ts",
     "/project/src/App.tsx",
     {},
     exists,
   );
-  assertEquals(result, { kind: "local", path: "/project/src/utils.ts" });
+  assertEquals(result, { kind: "local", path: UTILS });
 });
 
 Deno.test("resolveSpecifier resolves index file", () => {
-  const exists = (p: string) => p === "/project/src/components/index.ts";
+  const exists = (p: string) => p === COMPONENTS_INDEX;
   const result = resolveSpecifier(
     "./components",
     "/project/src/App.tsx",
@@ -109,7 +117,7 @@ Deno.test("resolveSpecifier resolves index file", () => {
   );
   assertEquals(result, {
     kind: "local",
-    path: "/project/src/components/index.ts",
+    path: COMPONENTS_INDEX,
   });
 });
 
@@ -258,11 +266,11 @@ Deno.test("validateGraph walks import tree — happy path", async () => {
   const dir = await tempDir("aio-graph-validator-");
   try {
     await Deno.writeTextFile(
-      dir + "/App.tsx",
+      join(dir, "App.tsx"),
       `import { foo } from "./foo.ts";\nexport default function App() { return null; }`,
     );
-    await Deno.writeTextFile(dir + "/foo.ts", `export const foo = 42;`);
-    const result = await validateGraph(dir + "/App.tsx", {}, mockTranspile);
+    await Deno.writeTextFile(join(dir, "foo.ts"), `export const foo = 42;`);
+    const result = await validateGraph(join(dir, "App.tsx"), {}, mockTranspile);
     assertEquals(result.valid, true);
     assertEquals(result.errors.length, 0);
     assert(result.modules.size >= 2); // App.tsx and foo.ts
@@ -277,21 +285,21 @@ Deno.test("validateGraph: Deno.* in a dynamic-only module is deferred (quiet)", 
   try {
     // App → cell (static); cell → server (dynamic import — the escape hatch).
     await Deno.writeTextFile(
-      dir + "/App.tsx",
+      join(dir, "App.tsx"),
       `import { cell } from "./cell.ts";\nexport default function App() { return null; }`,
     );
     await Deno.writeTextFile(
-      dir + "/cell.ts",
+      join(dir, "cell.ts"),
       `export const cell = { run: async () => (await import("./server.ts")).read() };`,
     );
     await Deno.writeTextFile(
-      dir + "/server.ts",
+      join(dir, "server.ts"),
       `export async function read() { return await Deno.readTextFile("x"); }`,
     );
-    const result = await validateGraph(dir + "/App.tsx", {}, mockTranspile);
+    const result = await validateGraph(join(dir, "App.tsx"), {}, mockTranspile);
     assertEquals(result.valid, true); // never blocks
     const e = result.errors.find((e) =>
-      e.file.endsWith("/server.ts") && e.category === "server-only-api"
+      basename(e.file) === "server.ts" && e.category === "server-only-api"
     );
     assert(e, "server.ts Deno usage detected");
     assertEquals(e!.deferred, true, "dynamic-only Deno usage is deferred");
@@ -304,16 +312,16 @@ Deno.test("validateGraph: Deno.* in a statically-reachable module stays loud", a
   const dir = await tempDir("aio-graph-validator-");
   try {
     await Deno.writeTextFile(
-      dir + "/App.tsx",
+      join(dir, "App.tsx"),
       `import { read } from "./server.ts";\nexport default function App() { return null; }`,
     );
     await Deno.writeTextFile(
-      dir + "/server.ts",
+      join(dir, "server.ts"),
       `export async function read() { return await Deno.readTextFile("x"); }`,
     );
-    const result = await validateGraph(dir + "/App.tsx", {}, mockTranspile);
+    const result = await validateGraph(join(dir, "App.tsx"), {}, mockTranspile);
     const e = result.errors.find((e) =>
-      e.file.endsWith("/server.ts") && e.category === "server-only-api"
+      basename(e.file) === "server.ts" && e.category === "server-only-api"
     );
     assert(e, "server.ts Deno usage detected");
     assert(!e!.deferred, "eager Deno usage is NOT deferred (stays loud)");
@@ -326,10 +334,10 @@ Deno.test("validateGraph detects missing import", async () => {
   const dir = await tempDir("aio-graph-validator-");
   try {
     await Deno.writeTextFile(
-      dir + "/App.tsx",
+      join(dir, "App.tsx"),
       `import { bar } from "./bar.ts";\nexport default function App() { return null; }`,
     );
-    const result = await validateGraph(dir + "/App.tsx", {}, mockTranspile);
+    const result = await validateGraph(join(dir, "App.tsx"), {}, mockTranspile);
     assertEquals(result.valid, false);
     assert(result.errors.some((e) => e.category === "file-not-found"));
   } finally {
@@ -341,12 +349,12 @@ Deno.test("validateGraph detects transpile error", async () => {
   const dir = await tempDir("aio-graph-validator-");
   try {
     await Deno.writeTextFile(
-      dir + "/App.tsx",
+      join(dir, "App.tsx"),
       `export default function App() { return null; }`,
     );
     const badTranspile = (_s: string, _f: string): Promise<string> =>
       Promise.reject(new Error("syntax error"));
-    const result = await validateGraph(dir + "/App.tsx", {}, badTranspile);
+    const result = await validateGraph(join(dir, "App.tsx"), {}, badTranspile);
     assertEquals(result.valid, false);
     assert(result.errors.some((e) => e.category === "transpile-error"));
   } finally {
@@ -358,10 +366,10 @@ Deno.test("validateGraph detects missing bare specifier", async () => {
   const dir = await tempDir("aio-graph-validator-");
   try {
     await Deno.writeTextFile(
-      dir + "/App.tsx",
+      join(dir, "App.tsx"),
       `import _ from "lodash";\nexport default function App() { return null; }`,
     );
-    const result = await validateGraph(dir + "/App.tsx", {}, mockTranspile);
+    const result = await validateGraph(join(dir, "App.tsx"), {}, mockTranspile);
     assertEquals(result.valid, false);
     assert(result.errors.some((e) => e.category === "missing-import-map"));
   } finally {
@@ -373,12 +381,12 @@ Deno.test("validateGraph skips external CDN imports", async () => {
   const dir = await tempDir("aio-graph-validator-");
   try {
     await Deno.writeTextFile(
-      dir + "/App.tsx",
+      join(dir, "App.tsx"),
       `import { useState } from "react";\nexport default function App() { return null; }`,
     );
     const importMap = { "react": "https://esm.sh/react@18.3.1" };
     const result = await validateGraph(
-      dir + "/App.tsx",
+      join(dir, "App.tsx"),
       importMap,
       mockTranspile,
     );
@@ -392,14 +400,14 @@ Deno.test("validateGraph detects circular imports", async () => {
   const dir = await tempDir("aio-graph-validator-");
   try {
     await Deno.writeTextFile(
-      dir + "/a.ts",
+      join(dir, "a.ts"),
       `import { b } from "./b.ts";\nexport const a = 1;`,
     );
     await Deno.writeTextFile(
-      dir + "/b.ts",
+      join(dir, "b.ts"),
       `import { a } from "./a.ts";\nexport const b = 2;`,
     );
-    const result = await validateGraph(dir + "/a.ts", {}, mockTranspile);
+    const result = await validateGraph(join(dir, "a.ts"), {}, mockTranspile);
     // Circular imports are warnings — graph is still valid but cycle must be detected
     assert(result.valid, "circular imports should not block validation");
     assert(
@@ -416,12 +424,12 @@ async function cyclesOf(files: Record<string, string>): Promise<string[]> {
   const dir = await tempDir("aio-graph-cycle-");
   try {
     for (const [name, src] of Object.entries(files)) {
-      await Deno.writeTextFile(`${dir}/${name}`, src);
+      await Deno.writeTextFile(join(dir, name), src);
     }
-    const result = await validateGraph(`${dir}/a.ts`, {}, mockTranspile);
+    const result = await validateGraph(join(dir, "a.ts"), {}, mockTranspile);
     return result.errors
       .filter((e) => e.category === "circular-dependency")
-      .map((e) => e.message.replaceAll(`${dir}/`, ""));
+      .map((e) => e.message.replaceAll(dir + SEPARATOR, ""));
   } finally {
     await dropTempDir(dir);
   }
@@ -469,10 +477,10 @@ Deno.test("validateGraph detects server-only API as warning (non-blocking)", asy
   const dir = await tempDir("aio-graph-validator-");
   try {
     await Deno.writeTextFile(
-      dir + "/App.tsx",
+      join(dir, "App.tsx"),
       `const x = Deno.readTextFile("y");\nexport default function App() { return null; }`,
     );
-    const result = await validateGraph(dir + "/App.tsx", {}, mockTranspile);
+    const result = await validateGraph(join(dir, "App.tsx"), {}, mockTranspile);
     // Server-only APIs are warnings, not blocking errors — app still loads
     assertEquals(result.valid, true);
     assert(result.errors.some((e) => e.category === "server-only-api"));
@@ -485,10 +493,10 @@ Deno.test("validateGraph: a node: import in the client graph BLOCKS (sandboxed r
   const dir = await tempDir("aio-graph-validator-");
   try {
     await Deno.writeTextFile(
-      dir + "/App.tsx",
+      join(dir, "App.tsx"),
       `import { readFile } from "node:fs";\nexport default function App() { return null; }`,
     );
-    const result = await validateGraph(dir + "/App.tsx", {}, mockTranspile);
+    const result = await validateGraph(join(dir, "App.tsx"), {}, mockTranspile);
     // Guaranteed break → not valid → server renders the diagnostic page, not a
     // silent blank screen.
     assertEquals(result.valid, false);
@@ -504,11 +512,11 @@ Deno.test("validateGraph: a static createDB-from-aio import BLOCKS (the original
   const dir = await tempDir("aio-graph-validator-");
   try {
     await Deno.writeTextFile(
-      dir + "/App.tsx",
+      join(dir, "App.tsx"),
       `import { cell, createDB } from "aio";\nexport default function App() { return null; }`,
     );
     const result = await validateGraph(
-      dir + "/App.tsx",
+      join(dir, "App.tsx"),
       { aio: "jsr:@example/aio" },
       mockTranspile,
     );
@@ -527,18 +535,18 @@ Deno.test("validateGraph: a server-only module reached ONLY via dynamic import d
     // App statically imports a cell; the cell lazily imports the server-only
     // module (the documented fix). That must NOT block — it's deferred.
     await Deno.writeTextFile(
-      dir + "/App.tsx",
+      join(dir, "App.tsx"),
       `import { cell } from "./cell.ts";\nexport default function App() { return null; }`,
     );
     await Deno.writeTextFile(
-      dir + "/cell.ts",
+      join(dir, "cell.ts"),
       `export const cell = {};\nexport async function load() { const { DatabaseSync } = await import("./db.ts"); return DatabaseSync; }`,
     );
     await Deno.writeTextFile(
-      dir + "/db.ts",
+      join(dir, "db.ts"),
       `import { DatabaseSync } from "node:sqlite";\nexport { DatabaseSync };`,
     );
-    const result = await validateGraph(dir + "/App.tsx", {}, mockTranspile);
+    const result = await validateGraph(join(dir, "App.tsx"), {}, mockTranspile);
     // db.ts is reached only via dynamic import → deferred → boot is NOT blocked.
     assertEquals(
       result.valid,
@@ -557,15 +565,15 @@ Deno.test("validateGraph: a STATIC server-only import still BLOCKS (eagerly link
   const dir = await tempDir("aio-graph-validator-");
   try {
     await Deno.writeTextFile(
-      dir + "/App.tsx",
+      join(dir, "App.tsx"),
       `import { cell } from "./cell.ts";\nexport default function App() { return null; }`,
     );
     // cell STATICALLY imports the server-only module → eager → blocks.
     await Deno.writeTextFile(
-      dir + "/cell.ts",
+      join(dir, "cell.ts"),
       `import { DatabaseSync } from "node:sqlite";\nexport const cell = DatabaseSync;`,
     );
-    const result = await validateGraph(dir + "/App.tsx", {}, mockTranspile);
+    const result = await validateGraph(join(dir, "App.tsx"), {}, mockTranspile);
     assertEquals(result.valid, false);
     assert(result.errors.some((e) => e.category === "server-only-import"));
   } finally {
@@ -578,17 +586,17 @@ Deno.test("validateGraph per-module valid computed after full walk", async () =>
   try {
     // App imports foo which imports missing bar — App is the importer for bar's error
     await Deno.writeTextFile(
-      dir + "/App.tsx",
+      join(dir, "App.tsx"),
       `import { foo } from "./foo.ts";\nexport default function App() { return null; }`,
     );
     await Deno.writeTextFile(
-      dir + "/foo.ts",
+      join(dir, "foo.ts"),
       `import { bar } from "./bar.ts";\nexport const foo = 1;`,
     );
-    const result = await validateGraph(dir + "/App.tsx", {}, mockTranspile);
+    const result = await validateGraph(join(dir, "App.tsx"), {}, mockTranspile);
     assertEquals(result.valid, false);
     // foo.ts should have valid=false because it imports missing bar.ts
-    const fooNode = result.modules.get(dir + "/foo.ts");
+    const fooNode = result.modules.get(join(dir, "foo.ts"));
     assert(fooNode, "foo.ts should be in modules");
     assertEquals(
       fooNode!.valid,
@@ -826,18 +834,18 @@ Deno.test("validateGraph: a missing mapping in a module reached ONLY via dynamic
   const dir = await tempDir("aio-graph-validator-");
   try {
     await Deno.writeTextFile(
-      dir + "/App.tsx",
+      join(dir, "App.tsx"),
       `import { m } from "./cell.ts";\nexport default function App() { return m; }`,
     );
     await Deno.writeTextFile(
-      dir + "/cell.ts",
+      join(dir, "cell.ts"),
       `export const m = 1;\nexport async function load() { const { x } = await import("./x.server.ts"); return x; }`,
     );
     await Deno.writeTextFile(
-      dir + "/x.server.ts",
+      join(dir, "x.server.ts"),
       `import { y } from "some-server-package";\nexport const x = y;`,
     );
-    const result = await validateGraph(dir + "/App.tsx", {}, mockTranspile);
+    const result = await validateGraph(join(dir, "App.tsx"), {}, mockTranspile);
     assertEquals(result.valid, true, JSON.stringify(result.errors));
     // Not reported at all now: a dynamically imported `*.server.ts` is where
     // the client graph ends (the builder marks it external), so nothing in it
@@ -855,10 +863,10 @@ Deno.test("validateGraph: a missing mapping in an EAGER module still blocks", as
   const dir = await tempDir("aio-graph-validator-");
   try {
     await Deno.writeTextFile(
-      dir + "/App.tsx",
+      join(dir, "App.tsx"),
       `import { y } from "some-missing-package";\nexport default function App() { return y; }`,
     );
-    const result = await validateGraph(dir + "/App.tsx", {}, mockTranspile);
+    const result = await validateGraph(join(dir, "App.tsx"), {}, mockTranspile);
     assertEquals(result.valid, false);
     const e = result.errors.find((e) => e.category === "missing-import-map");
     assert(e);
@@ -881,12 +889,12 @@ Deno.test("validateGraph: a client-reachable Worker is named, and never blocks",
   const dir = await tempDir("aio-graph-worker-");
   try {
     await Deno.writeTextFile(
-      dir + "/App.tsx",
+      join(dir, "App.tsx"),
       `const w = new Worker(new URL("./transcribe.ts", import.meta.url), { type: "module" });\n` +
         `export default function App() { return null; }`,
     );
-    await Deno.writeTextFile(dir + "/transcribe.ts", `export const x = 1;`);
-    const result = await validateGraph(dir + "/App.tsx", {}, mockTranspile);
+    await Deno.writeTextFile(join(dir, "transcribe.ts"), `export const x = 1;`);
+    const result = await validateGraph(join(dir, "App.tsx"), {}, mockTranspile);
     assertEquals(
       result.valid,
       true,
@@ -910,12 +918,12 @@ Deno.test("validateGraph: a remote Worker URL is not a stale build product", asy
     // Nothing local goes stale here, so a warning would be noise — and a
     // warning nobody can act on is how a real one gets ignored.
     await Deno.writeTextFile(
-      dir + "/App.tsx",
+      join(dir, "App.tsx"),
       `const a = new Worker("https://cdn.example.com/w.js", { type: "module" });\n` +
         `const b = new Worker(new URL("blob:x"));\n` +
         `export default function App() { return null; }`,
     );
-    const result = await validateGraph(dir + "/App.tsx", {}, mockTranspile);
+    const result = await validateGraph(join(dir, "App.tsx"), {}, mockTranspile);
     assertEquals(
       result.errors.filter((e) => e.category === "unmanaged-worker").length,
       0,
@@ -936,17 +944,17 @@ Deno.test("validateGraph: an aio entry missing from the APP's deno.json blocks",
   const dir = await tempDir("aio-graph-appmap-");
   try {
     await Deno.writeTextFile(
-      dir + "/App.tsx",
+      join(dir, "App.tsx"),
       `import { cell } from "aio";\nimport { x } from "./b.ts";\nexport default () => null;`,
     );
     // A SECOND file naming the same specifier: one missing key is one edit.
     await Deno.writeTextFile(
-      dir + "/b.ts",
+      join(dir, "b.ts"),
       `import { cell } from "aio";\nexport const x = cell;`,
     );
     const map = { "aio": "/__aio/ui.js" }; // the browser map — always has it
     const result = await validateGraph(
-      dir + "/App.tsx",
+      join(dir, "App.tsx"),
       map,
       mockTranspile,
       undefined,
@@ -978,15 +986,15 @@ Deno.test("validateGraph: a DYNAMIC aio import needs the app mapping too", async
   const dir = await tempDir("aio-graph-appmap-dyn-");
   try {
     await Deno.writeTextFile(
-      dir + "/App.tsx",
+      join(dir, "App.tsx"),
       `import { c } from "./cell.ts";\nexport default () => c;`,
     );
     await Deno.writeTextFile(
-      dir + "/cell.ts",
+      join(dir, "cell.ts"),
       `export const c = { m: async () => (await import("aio/db")).createDB() };`,
     );
     const result = await validateGraph(
-      dir + "/App.tsx",
+      join(dir, "App.tsx"),
       {},
       mockTranspile,
       undefined,
@@ -1013,12 +1021,12 @@ Deno.test("validateGraph: a complete app map is silent, and no map means no chec
   const dir = await tempDir("aio-graph-appmap-ok-");
   try {
     await Deno.writeTextFile(
-      dir + "/App.tsx",
+      join(dir, "App.tsx"),
       `import { cell } from "aio";\nexport default () => cell;`,
     );
     const map = { "aio": "/__aio/ui.js" };
     const ok = await validateGraph(
-      dir + "/App.tsx",
+      join(dir, "App.tsx"),
       map,
       mockTranspile,
       undefined,
@@ -1031,7 +1039,7 @@ Deno.test("validateGraph: a complete app map is silent, and no map means no chec
     );
     // Omitted ⇒ nothing to say. A caller that cannot know must not be made to
     // guess, and must not be made loud about a guess.
-    const quiet = await validateGraph(dir + "/App.tsx", map, mockTranspile);
+    const quiet = await validateGraph(join(dir, "App.tsx"), map, mockTranspile);
     assertEquals(quiet.valid, true);
     assertEquals(quiet.errors.length, 0);
   } finally {

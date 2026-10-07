@@ -5,7 +5,7 @@
 // names its folder (`appDir`) booted from two AIO_APPS_DIR scopes
 // (`--instance`) no longer opens one database twice.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import {
   _resetParsedCli,
@@ -14,8 +14,9 @@ import {
   parseCli,
 } from "../src/server/aio-cli.ts";
 import { args as cliArgs } from "../src/cli/args.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const REPO = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 
 /** A minimal non-library app: server-only, no persistence. */
 async function writeApp(
@@ -26,7 +27,7 @@ async function writeApp(
   const f = join(dir, `${appId}.ts`);
   await Deno.writeTextFile(
     f,
-    `import { aio, cell } from "${REPO}/mod.ts";
+    `import { aio, cell } from "${spec(REPO)}/mod.ts";
 const c = cell("c", { state: { n: 1 }, methods: {} });
 await aio.run({ cells: [c], appId: ${JSON.stringify(appId)}, persist: false,
   client: "server-only", port: 0 ${extra} });
@@ -87,12 +88,17 @@ const exists = (p: string) => {
 Deno.test({
   name:
     "runtime: --profile=dev / AIO_PROFILE=dev boot in <base>-dev, stamped, keyed <appId>@dev",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("prof-rt-");
     const apps = join(dir, "apps");
-    const env = { AIO_APPS_DIR: apps, XDG_RUNTIME_DIR: join(dir, "rt") };
-    await Deno.mkdir(env.XDG_RUNTIME_DIR, { mode: 0o700 });
+    const rt = join(dir, "rt");
+    // The runtime base the lock dir goes under: %TEMP% on Windows.
+    const env = {
+      AIO_APPS_DIR: apps,
+      XDG_RUNTIME_DIR: rt,
+      ...(Deno.build.os === "windows" ? { TEMP: rt, TMP: rt } : {}),
+    };
+    await Deno.mkdir(rt, { mode: 0o700 });
     try {
       const file = await writeApp(dir, "pa");
       for (
@@ -136,7 +142,6 @@ Deno.test({
 Deno.test({
   name:
     "runtime: profiles:false refuses --profile, AIO_PROFILE and --home (exit 1)",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("prof-off-");
     const env = {
@@ -167,7 +172,6 @@ Deno.test({
 Deno.test({
   name:
     "bug: an appDir app from two AIO_APPS_DIR scopes never opens one database twice",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("prof-scope-");
     const rt = join(dir, "rt");

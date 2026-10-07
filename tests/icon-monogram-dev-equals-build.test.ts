@@ -6,7 +6,7 @@
 // an "M" in every built target. The shipped artifact is what users see —
 // dev now follows it (appIconLabel).
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { aio, cell } from "../mod.ts";
 import { appIconSvg } from "../src/build/app-icon.ts";
 import { freePort } from "../src/testing/server-test.ts";
@@ -15,8 +15,10 @@ import {
   dropTempDir,
   tempDir,
 } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
+import { fixtureNodeModules } from "./symlink-helper.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 Deno.test({
   name: "monogram: dev and build draw the same icon for notes-app / My Notes",
@@ -39,7 +41,7 @@ Deno.test({
             lib: ["deno.ns", "deno.unstable", "dom", "dom.iterable"],
           },
           imports: {
-            "aio": `${ROOT}mod.ts`,
+            "aio": `${spec(ROOT)}mod.ts`,
             "aio/jsx-runtime": `${ROOT}src/jsx-runtime.ts`,
             "aio/server": `${ROOT}src/server.ts`,
             "immer": "npm:immer@10.2.0",
@@ -47,7 +49,7 @@ Deno.test({
           },
         }),
       );
-      await Deno.symlink(`${ROOT}node_modules`, join(dir, "node_modules"));
+      await fixtureNodeModules(dir);
       await Deno.writeTextFile(
         join(dir, "src", "App.tsx"),
         `export default function App() { return <p>hi</p>; }`,
@@ -57,8 +59,8 @@ Deno.test({
       const runner = join(dir, "runner.ts");
       await Deno.writeTextFile(
         runner,
-        `import { runBundle } from "${ROOT}src/build/build-bundle.ts";
-import { loadBuildConfig } from "${ROOT}src/build/build-config.ts";
+        `import { runBundle } from "${spec(ROOT)}src/build/build-bundle.ts";
+import { loadBuildConfig } from "${spec(ROOT)}src/build/build-config.ts";
 const cfg = await loadBuildConfig();
 await runBundle(cfg, JSON.parse(await Deno.readTextFile("deno.json")));
 `,

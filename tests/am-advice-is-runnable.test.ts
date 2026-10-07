@@ -12,8 +12,11 @@
 // what `am` actually accepts.
 import { assert } from "@std/assert";
 import { REMOVALS } from "../src/state/removals.ts";
+import { fromFileUrl } from "@std/path";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+// `/`-separated on every OS: the walk below tells its exemptions by path
+// (`/docs/specs/`), and Windows opens a `/` path just as well.
+const ROOT = fromFileUrl(new URL("..", import.meta.url)).replaceAll("\\", "/");
 
 async function liveCommands(): Promise<Set<string>> {
   const out = await new Deno.Command(Deno.execPath(), {

@@ -16,15 +16,16 @@
 // reads (a real process, runs everywhere), and the whole flow with a real
 // Electron on the nested display (opt-in, like the other Electron e2e tests).
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { dirname, join } from "@std/path";
+import { dirname, fromFileUrl, join } from "@std/path";
 import { electronClosedPlan } from "../src/server/aio-lifecycle.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { testDisplayEnv } from "../src/testing/test-display.ts";
 import { descendantPids } from "../src/server/single-instance-lock.ts";
 import { stopChild } from "./stop-child.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const REPO = new URL("../", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("../", import.meta.url));
 
 Deno.test("electron closed: a restart's own teardown stops nothing", () => {
   const ctx = { keepServer: false, restarting: true, url: "http://x/" };
@@ -84,7 +85,7 @@ Deno.test("dev-restart: isRestarting() is already true while shutdown() runs", a
   // itself, so no supervisor is ever started here.
   const probe = `
 import { isRestarting, restartForCellChange } from ${
-    JSON.stringify(`${REPO}src/server/dev-restart.ts`)
+    JSON.stringify(`${spec(REPO)}src/server/dev-restart.ts`)
   };
 if (isRestarting()) { console.log("EARLY"); Deno.exit(2); }
 await restartForCellChange("/tmp/cell.ts", () => {
@@ -202,8 +203,8 @@ Deno.test({
           lib: ["deno.ns", "dom", "dom.iterable"],
         },
         imports: {
-          "aio": `${REPO}mod.ts`,
-          "aio/jsx-runtime": `${REPO}src/jsx-runtime.ts`,
+          "aio": `${spec(REPO)}mod.ts`,
+          "aio/jsx-runtime": `${spec(REPO)}src/jsx-runtime.ts`,
           "immer": "npm:immer@10.2.0",
           "@std/path": "jsr:@std/path@1.1.2",
         },

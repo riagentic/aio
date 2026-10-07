@@ -16,12 +16,13 @@ import { filterPatchesByStrategy } from "../src/state/state-filter.ts";
 import { REPORT_LIMITS } from "../src/server/report.ts";
 import type { Patch } from "immer";
 import { permissiveUmask } from "./permissive-umask.ts";
+import { fromFileUrl } from "@std/path";
 
 const BASE_CFG = {
   title: "sec",
   getUIState: () => ({}),
   dispatch: () => {},
-  baseDir: new URL("../examples", import.meta.url).pathname,
+  baseDir: fromFileUrl(new URL("../examples", import.meta.url)),
   debug: () => {},
 };
 

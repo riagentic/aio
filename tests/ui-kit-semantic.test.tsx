@@ -407,7 +407,9 @@ Deno.test("kit: a toast auto-dismisses on its own duration", async () => {
       "advance() does not drive toast timers",
     );
     // What DOES work: the toast's own duration, on real time.
-    toast("saved", { variant: "success", duration: 20 });
+    // Long enough to be SEEN first: a `waitFor` round is a timer tick (~16 ms
+    // on Windows), and a 20 ms toast was gone before the first look.
+    toast("saved", { variant: "success", duration: 300 });
     await ui.waitFor(() => ui.html().includes("saved"), "second toast shows");
     await ui.waitFor(
       () => !ui.html().includes("saved"),

@@ -10,8 +10,9 @@
 import { assert, assertEquals, assertMatch } from "@std/assert";
 import { scaffold } from "../src/am/am-cmd-create.ts";
 import { FRAMEWORK_DEPS } from "../src/am/am-versions.ts";
+import { fromFileUrl } from "@std/path";
 
-const ROOT = new URL("../", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("../", import.meta.url));
 const read = (rel: string) => Deno.readTextFile(ROOT + rel);
 
 /** The first fenced block of `lang` after `heading`. */

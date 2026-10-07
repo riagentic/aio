@@ -23,6 +23,7 @@ import { _pendingCallPromises } from "../src/state/method-cancel.ts";
 import { schedule } from "../src/state/schedule.ts";
 import type { CellDef } from "../src/state/cell-types.ts";
 import { h } from "../src/air/vdom.ts";
+import { fromFileUrl } from "@std/path";
 
 /** Build a cell, use it, and take it back OUT of the process-wide registry.
  *
@@ -445,7 +446,7 @@ const VALUE_IMPORT_RE =
   /(?:^|\n)\s*(?:import|export)\s+(?!type\s)[^"'\n]*?from\s*["'](\.\.?\/[^"']+?\.tsx?)["']|(?:^|\n)\s*import\s*["'](\.\.?\/[^"']+?\.tsx?)["']|import\s*\(\s*["'](\.\.?\/[^"']+?\.tsx?)["']\s*\)/g;
 
 Deno.test("no browser entry statically reaches src/server/", async () => {
-  const src = new URL("../src/", import.meta.url).pathname;
+  const src = fromFileUrl(new URL("../src/", import.meta.url));
   const problems: string[] = [];
   for (const entry of BROWSER_ENTRIES) {
     const importer = new Map<string, string>();

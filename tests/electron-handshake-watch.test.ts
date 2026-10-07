@@ -27,6 +27,8 @@ import {
 import { join } from "@std/path";
 import { electronMainScriptUDS } from "../src/electron/electron.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { listenLocal, type LocalConn } from "../src/server/local-listen.ts";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
 
 /** The least `electron` the generated main process boots against. The window
  *  reports every title it is given on stdout. */
@@ -60,15 +62,18 @@ module.exports = {
     on: (e, fn) => { if (e === 'ready') setTimeout(fn, 0); },
     getPath: () => process.env.AIO_STUB_DIR, commandLine: { appendSwitch() {} },
     quit() {}, name: 'stub',
+    whenReady: () => new Promise((r) => setTimeout(r, 0)),
   },
   BrowserWindow,
-  Menu: { setApplicationMenu() {} },
+  // macOS: the generated main builds its menu after whenReady (tmplAppMenu;
+  // the menu itself is pinned by electron-window-close-and-menu.test.ts).
+  Menu: { setApplicationMenu() {}, buildFromTemplate: (t) => t },
   ipcMain: { on() {}, handle() {} },
   protocol: { registerSchemesAsPrivileged() {}, handle() {} },
   shell: { openExternal() {} },
   dialog: {},
   nativeImage: { createFromDataURL: () => ({}) },
-  session: { defaultSession: { setPermissionRequestHandler() {}, setPermissionCheckHandler() {}, on() {}, webRequest: { onHeadersReceived() {} } } },
+  session: { defaultSession: { setPermissionRequestHandler() {}, setPermissionCheckHandler() {}, setDevicePermissionHandler() {}, on() {}, webRequest: { onHeadersReceived() {} } } },
 };
 `;
 
@@ -85,11 +90,12 @@ async function withSilentServer(
   }) => Promise<void>,
 ): Promise<void> {
   const dir = await tempDir("el-handshake-");
-  const sockPath = join(dir, "app.sock");
-  const listener = Deno.listen({ transport: "unix", path: sockPath });
-  const conns: Deno.Conn[] = [];
+  // The app's local transport: a unix socket, a named pipe on Windows.
+  const sockPath = localEndpoint(join(dir, "app.sock"));
+  const listener = listenLocal(sockPath);
+  const conns: LocalConn[] = [];
   const accepted: number[] = [];
-  (async () => {
+  const accepting = (async () => {
     for await (const c of listener) {
       conns.push(c);
       accepted.push(performance.now());
@@ -173,6 +179,8 @@ async function withSilentServer(
       } catch { /* already closed */ }
     }
     listener.close();
+    await accepting;
+    await localIdle();
     await dropTempDir(dir);
   }
 }
@@ -182,7 +190,6 @@ const count = (s: string, re: RegExp) => (s.match(re) ?? []).length;
 Deno.test({
   name:
     "electron main: a server that does not answer is reported once, neutrally, and retried on the normal backoff",
-  ignore: Deno.build.os === "windows", // a unix socket + Deno's node-compat
   async fn() {
     // Three connections are accepted and told nothing; the fourth is greeted.
     await withSilentServer(3, {}, async ({ out, accepted, until }) => {
@@ -245,7 +252,6 @@ Deno.test({
 Deno.test({
   name:
     "electron main: a title the page set while the notice was up is not overwritten when the server answers",
-  ignore: Deno.build.os === "windows",
   async fn() {
     await withSilentServer(
       1,

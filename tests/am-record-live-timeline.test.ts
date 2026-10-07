@@ -10,6 +10,7 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const REPO = dirname(dirname(fromFileUrl(import.meta.url)));
 const DENO_JSON = join(REPO, "deno.json");
@@ -24,7 +25,7 @@ Deno.test({
     await Deno.mkdir(apps);
     await Deno.writeTextFile(
       join(dir, "app.ts"),
-      `import { aio, cell } from "${REPO}/mod.ts";
+      `import { aio, cell } from "${spec(REPO)}/mod.ts";
 const c = cell("c", { state: { n: 0, k: "" }, visible: "all", methods: {
   add(s: { n: number }, by: number) { s.n += by; },
   unlock(s: { k: string }, key: string) { s.k = key.slice(0, 1); },

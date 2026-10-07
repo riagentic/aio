@@ -15,10 +15,10 @@
 //   • an old lock-shaped directory with no live lock is still swept — the job
 //     the sweep exists for.
 import { assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 const OLD = new Date(Date.now() - 60 * 60_000); // an hour ago
 
 /** The fake lock root this file's scans are pinned to. */
@@ -60,7 +60,6 @@ async function cleanStale(): Promise<string> {
 Deno.test({
   name:
     "clean-stale: an aio-* dir that is not a lock dir survives; a stale lock dir does not",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     ROOTDIR = await tempDir("orphans-root-");
     const tag = crypto.randomUUID().slice(0, 8);
@@ -125,7 +124,6 @@ Deno.test({
 // lock dir(s) removed". The mtime is read before the pass touches anything.
 Deno.test({
   name: "clean: a stale lock dir is removed, not merely emptied",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     ROOTDIR = await tempDir("orphans-root-");
     const tag = crypto.randomUUID().slice(0, 8);

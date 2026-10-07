@@ -25,7 +25,7 @@ import {
   assertRejects,
   assertStringIncludes,
 } from "@std/assert";
-import { dirname, join } from "@std/path";
+import { dirname, fromFileUrl, join } from "@std/path";
 import { realElectronBin } from "../src/electron/electron-spawn.ts";
 import { localPeerLockdownPlan } from "../src/server/aio-server.ts";
 import { freePort } from "../src/testing/server-test.ts";
@@ -33,7 +33,7 @@ import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { childEnv } from "./e2e-app-harness.ts";
 import { permissiveUmask } from "./permissive-umask.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const ROOT = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 const NOTE = "hkept-e2e-note";
 const ROUTE_BODY = "route-body-e2e";
 const enc = new TextEncoder();

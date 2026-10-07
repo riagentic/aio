@@ -21,6 +21,7 @@ import {
   writeRecordAtomic,
 } from "../src/server/updates-apply.ts";
 import {
+  _confirm,
   beginUpdates,
   confirmPendingUpdate,
   MAX_FAILED_SWAPS,
@@ -280,7 +281,7 @@ Deno.test("failed swap: only a swap that moved NOTHING is offered again", async 
 Deno.test({
   name:
     "failed swap: a count that cannot be kept dismisses — a retry nothing counts never ends",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // a folder nothing can be written in, by mode bits: a Windows directory has none
   fn: async () => {
     const data = await tempDir("aio-swap-retry-");
     try {
@@ -345,6 +346,7 @@ Deno.test("failed swap: a confirmed update ends the count", async () => {
       data,
       { info() {}, debug() {}, warn() {}, error() {} } as unknown as Log,
     );
+    await _confirm.pruned; // its background prune, read to the end
     assertEquals(readTrust(data).failedSwaps, undefined);
   } finally {
     await dropTempDir(data);

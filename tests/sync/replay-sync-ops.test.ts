@@ -9,7 +9,7 @@ import { assertEquals } from "@std/assert";
 import { DatabaseSync } from "node:sqlite";
 import type { DB, QueryResult } from "../../src/db/types.ts";
 import { compactSyncOps, SYNC_SCHEMA } from "../../src/sync/compact.ts";
-import { persistOp } from "../../src/sync/server-store.ts";
+import { persistOp, settleOp } from "../../src/sync/server-store.ts";
 import type { HLC } from "../../src/sync/types.ts";
 import { replaySyncOps } from "../../src/server/aio-boot.ts";
 
@@ -251,4 +251,93 @@ Deno.test("replaySyncOps: folds post-compaction ops on top of the snapshot", asy
     [{ id: 1 }, { id: 2 }],
     "snapshot + surviving ops, each exactly once",
   );
+});
+
+// A deferred op (the caller reduces and marks it) is not always the last
+// row the fold meets: the last row this fold DID take is marked settled.
+Deno.test("replaySyncOps: a deferred op that is not the last row does not leave the last row unsettled", async () => {
+  const db = createTestDb();
+  try {
+    const first = await persistOp(db, {
+      id: "d1",
+      hlc: hlc(1, 0),
+      cell: "members",
+      action: "add",
+      payload: { id: 1, pin: "a" },
+    });
+    await persistOp(db, {
+      id: "d2",
+      hlc: hlc(2, 0),
+      cell: "members",
+      action: "add",
+      payload: { id: 2, pin: "b" },
+    });
+    const state = await replaySyncOps(
+      db,
+      ["members"],
+      reduce,
+      structuredClone(initial),
+      silentLog,
+      { dev: true },
+      { defer: new Map([["members", first!]]) },
+    );
+    assertEquals(state.members.roster, [{ id: 2 }]);
+    const { rows } = await db.query<{ id: string; settled: number }>(
+      "SELECT id, settled FROM sync_ops ORDER BY server_ts",
+    );
+    assertEquals(rows.map((r) => [r.id, r.settled]), [["d1", 0], ["d2", 1]]);
+  } finally {
+    await db.close();
+  }
+});
+
+// `persistOp` is exported: a consumer that ran `SYNC_SCHEMA` alone over a
+// file an older aio made has a `sync_ops` with no `settled` column.
+Deno.test("persistOp: a sync_ops table an older aio created gets its settled column on the first insert", async () => {
+  const sqlite = new DatabaseSync(":memory:");
+  sqlite.exec(
+    `CREATE TABLE sync_ops (
+      id TEXT PRIMARY KEY, cell TEXT NOT NULL, action TEXT NOT NULL,
+      payload TEXT NOT NULL, hlc_phys INTEGER NOT NULL, hlc_cnt INTEGER NOT NULL,
+      hlc_node TEXT NOT NULL, server_ts INTEGER NOT NULL,
+      version INTEGER NOT NULL DEFAULT -1)`,
+  );
+  sqlite.exec(
+    "INSERT INTO sync_ops VALUES ('old', 'members', 'add', '{}', 1, 0, 'n', 5, -1)",
+  );
+  for (const stmt of SYNC_SCHEMA) sqlite.exec(stmt);
+  const db = {
+    query: (sql: string, params?: unknown[]) =>
+      Promise.resolve({
+        rows: sqlite.prepare(sql).all(..._p(params ?? [])),
+        changes: 0,
+        lastInsertRowId: 0n,
+      }),
+    execute: (sql: string, params?: unknown[]) => {
+      const r = sqlite.prepare(sql).run(..._p(params ?? []));
+      return Promise.resolve({
+        rows: [],
+        changes: Number(r.changes),
+        lastInsertRowId: BigInt(r.lastInsertRowid),
+      });
+    },
+  } as unknown as DB;
+  try {
+    const ts = await persistOp(db, {
+      id: "new",
+      hlc: hlc(9, 0),
+      cell: "members",
+      action: "add",
+      payload: { id: 9, pin: "z" },
+    });
+    assertEquals(typeof ts, "number");
+    await settleOp(db, "new");
+    assertEquals(
+      sqlite.prepare("SELECT id, settled FROM sync_ops ORDER BY server_ts")
+        .all().map((r) => [r.id, r.settled]),
+      [["old", null], ["new", 1]],
+    );
+  } finally {
+    sqlite.close();
+  }
 });

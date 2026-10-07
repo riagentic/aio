@@ -12,14 +12,14 @@
 // only one it started), and takes a few minutes. On success it records
 // `android (emulator)` in the physical proof matrix.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { cdpConnect, cdpTargets } from "../src/am/am-cdp.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { ANDROID_TEMPLATE } from "../src/build/android-template.ts";
 
 const GATED = Deno.env.get("AIO_ANDROID_E2E") === "1";
-const REPO = new URL("../", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("../", import.meta.url));
 const SDK = Deno.env.get("ANDROID_HOME") ?? Deno.env.get("ANDROID_SDK_ROOT") ??
   join(Deno.env.get("HOME") ?? "", "Android", "Sdk");
 const ADB = join(SDK, "platform-tools", "adb");

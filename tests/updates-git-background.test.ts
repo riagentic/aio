@@ -9,6 +9,7 @@ import { gitLsRemote, gitSshEnv } from "../src/server/updates-check.ts";
 import { rebuildFromGit } from "../src/server/updates-rebuild.ts";
 import type { Log } from "../src/diagnostics/logger.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { EXE, writeProgram } from "./fake-program-helper.ts";
 
 const silentLog = {
   info: () => {},
@@ -94,7 +95,7 @@ async function withEnv<T>(
 Deno.test({
   name:
     "git rebuild: a clone from a stalled remote hits its deadline and leaves no process",
-  ignore: Deno.build.os !== "linux",
+  ignore: Deno.build.os !== "linux", // descendants are read from /proc
   async fn() {
     await using host = silentHost();
     const work = await tempDir("aio-rebuild-stall-");
@@ -130,7 +131,6 @@ Deno.test({
 Deno.test({
   name:
     "git rebuild: an auth challenge on the clone never runs an askpass program",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("aio-rebuild-askpass-");
     const marker = join(dir, "asked");
@@ -193,18 +193,17 @@ Deno.test("gitSshEnv: BatchMode + keepalives unless the user chose their own ssh
 Deno.test({
   name:
     "git over ssh: the poll and the clone both hand ssh BatchMode + keepalives",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // OPEN(windows): git there never ran the stand-in `ssh` put first on PATH, so what it is handed went unseen
   async fn() {
     const dir = await tempDir("aio-git-ssh-env-");
     const argv = join(dir, "argv");
     const bin = join(dir, "bin");
     await Deno.mkdir(bin);
     // A fake `ssh` first on PATH: records its arguments, then fails.
-    await Deno.writeTextFile(
-      join(bin, "ssh"),
+    await writeProgram(
+      join(bin, "ssh" + EXE),
       `#!/bin/sh\necho "$@" >> "${argv}"\nexit 255\n`,
     );
-    await Deno.chmod(join(bin, "ssh"), 0o755);
     const path = `${bin}${DELIMITER}${Deno.env.get("PATH") ?? ""}`;
     const source = "ssh://nobody@127.0.0.1/repo.git";
     try {

@@ -29,12 +29,14 @@
 // lock, or a real desktop. `uninstall` runs against a fake `deno` on PATH that
 // fails, so the real `deno uninstall -g am` never runs from a test.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { DELIMITER, fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { EXE, writeProgram } from "./fake-program-helper.ts";
+import { sleeper as liveChild } from "./proc-helper.ts";
 
-const AM = new URL("../src/am.ts", import.meta.url).pathname;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const AM = fromFileUrl(new URL("../src/am.ts", import.meta.url));
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 const LOCK_MOD = new URL(
   "../src/server/single-instance-lock.ts",
   import.meta.url,
@@ -270,12 +272,11 @@ const SCENARIOS: Record<string, Scenario> = {
       );
       const apps = join(w.base, "apps-doctor");
       // A process that is alive for the whole run, standing in for the app.
-      const sleeper = new Deno.Command("sleep", {
-        args: ["300"],
+      const sleeper = liveChild({
         stdin: "null",
         stdout: "null",
         stderr: "null",
-      }).spawn();
+      });
       const lock = {
         appId: "amsweepdoctor",
         pid: sleeper.pid,
@@ -334,7 +335,7 @@ const SCENARIOS: Record<string, Scenario> = {
       "--force",
       `--mirror=${join(w.base, "throwaway-aio")}`,
     ],
-    names: /myapp\/src/,
+    names: /myapp[\\/]src/,
     why: "FAILED SIDE EFFECT: ./myapp/src is a FILE, so the scaffold's write " +
       "fails mid-way. `--mirror` at a throwaway checkout: the default path " +
       "provisions a `git worktree` of THIS repo into the temp HOME, which " +
@@ -431,12 +432,13 @@ const SCENARIOS: Record<string, Scenario> = {
     prepare: async (w) => {
       const bin = join(w.base, "failbin");
       await Deno.mkdir(bin, { recursive: true });
-      await Deno.writeTextFile(
-        join(bin, "deno"),
+      await writeProgram(
+        join(bin, `deno${EXE}`),
         "#!/bin/sh\necho 'error: fake deno refuses (am sweep)' >&2\nexit 3\n",
-        { mode: 0o755 },
       );
-      return { env: { PATH: `${bin}:${Deno.env.get("PATH") ?? ""}` } };
+      return {
+        env: { PATH: `${bin}${DELIMITER}${Deno.env.get("PATH") ?? ""}` },
+      };
     },
   },
   remove: {
@@ -507,6 +509,8 @@ function sandboxEnv(
 ): Record<string, string> {
   return {
     PATH: Deno.env.get("PATH") ?? "/usr/bin:/bin",
+    // Windows finds `deno` on PATH only through PATHEXT (`.EXE`).
+    ...(Deno.env.has("PATHEXT") ? { PATHEXT: Deno.env.get("PATHEXT")! } : {}),
     DENO_DIR: w.denoDir,
     HOME: w.home,
     AIO_APPS_DIR: join(w.base, "apps"),
@@ -627,7 +631,7 @@ async function denoDirOf(): Promise<string> {
 async function worktrees(): Promise<string[]> {
   const o = await new Deno.Command("git", {
     args: ["worktree", "list", "--porcelain"],
-    cwd: new URL("..", import.meta.url).pathname,
+    cwd: fromFileUrl(new URL("..", import.meta.url)),
     stdout: "piped",
     stderr: "null",
   }).output();
@@ -675,9 +679,6 @@ Deno.test("am exit-code sweep: every registered verb has a failure scenario", as
 Deno.test({
   name:
     "am exit-code sweep: every verb fails with its exit code, no success doc, and names what failed",
-  // POSIX fixtures: a `sleep` stands in for a live app, and the fake `deno`
-  // that `uninstall` runs is a shell script.
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     const w = await makeWorld();
     try {
@@ -766,7 +767,12 @@ async function runAmPty(
     stdout: "piped",
     stderr: "piped",
   }).output();
-  return { code: o.code, text: new TextDecoder().decode(o.stdout) };
+  // BSD `script` forwards stdin's EOF to the pty, which echoes it as `^D`
+  // and two backspaces ahead of the child's first byte: not am's output.
+  return {
+    code: o.code,
+    text: new TextDecoder().decode(o.stdout).replace(/^\^D\x08\x08/, ""),
+  };
 }
 
 /** Why a TEXT-mode failure reads as anything but a failure, or null. Pure.
@@ -853,7 +859,6 @@ Deno.test("am exit-code sweep: the success path still says success (spot check)"
 Deno.test({
   name: "am create: a file at the target is refused BEFORE a framework " +
     "worktree is provisioned",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     const w = await makeWorld();
     try {
@@ -882,7 +887,6 @@ Deno.test({
 Deno.test({
   name: "am create --force: a failed scaffold leaves the user's directory " +
     "exactly as it was",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     const w = await makeWorld();
     try {
@@ -924,7 +928,7 @@ Deno.test({
 Deno.test({
   name:
     "am create: an unreadable target is said to be unreadable, not 'not a directory'",
-  ignore: Deno.build.os === "windows" || Deno.uid() === 0,
+  ignore: Deno.build.os === "windows" || Deno.uid() === 0, // chmod 000 is a POSIX mode
   fn: async () => {
     const w = await makeWorld();
     const target = join(w.base, "create-eacces", "myapp");

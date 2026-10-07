@@ -14,6 +14,7 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import { freePort } from "./e2e-app-harness.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { localEndpoint } from "./local-endpoint-helper.ts";
 import { lockPath } from "../src/server/single-instance-lock.ts";
 
 const REPO = dirname(dirname(fromFileUrl(import.meta.url)));
@@ -46,10 +47,19 @@ if (!o.alive) {
   await sleep(300);
   Deno.exit(3);
 }
-const l = Deno.listen({ transport: "unix", path: o.sock });
-write({ port: 0, status: "started", socketPath: o.sock });
 setTimeout(() => Deno.exit(0), 60_000); // never outlive a hung test
-for await (const c of l) c.close();
+if (Deno.build.os === "windows") {
+  // The local transport there is a named pipe, which node:net can serve
+  // without the framework's import map.
+  const net = await import("node:net");
+  const srv = net.createServer((c) => c.destroy());
+  await new Promise((r) => srv.listen(o.sock, r));
+  write({ port: 0, status: "started", socketPath: o.sock });
+} else {
+  const l = Deno.listen({ transport: "unix", path: o.sock });
+  write({ port: 0, status: "started", socketPath: o.sock });
+  for await (const c of l) c.close();
+}
 `;
 }
 
@@ -81,7 +91,7 @@ async function run(alive: boolean): Promise<{
         appId,
         home: join(apps, appId),
         port: freePort(), // declared in the lock, never bound
-        sock: join(sockDir, "a.sock"),
+        sock: localEndpoint(join(sockDir, "a.sock")),
         alive,
       }),
     );
@@ -127,7 +137,6 @@ async function run(alive: boolean): Promise<{
 Deno.test({
   name:
     "am start: a child that re-locks {port:N,starting} → {port:0,socketPath} is reported started, exit 0",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const r = await run(true);
     assertEquals(r.code, 0, `${r.out}\n${r.err}`);
@@ -139,7 +148,6 @@ Deno.test({
 Deno.test({
   name:
     "am start: a socket-only child that dies before listening still fails, exit 1",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const r = await run(false);
     assertEquals(r.code, 1, `${r.out}\n${r.err}`);

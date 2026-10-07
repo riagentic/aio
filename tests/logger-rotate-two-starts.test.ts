@@ -100,8 +100,12 @@ Deno.test("on-start pass: who repeats it and who does not", async () => {
     assertEquals(await pass(202, START_ONCE_MS), true, "past it: a new run");
     // …and that pass is now the recent one.
     assertEquals(await pass(303, 5), false);
-    // A claim stamped in the future (the clock stepped back) is not recent.
-    assertEquals(await pass(404, -1), true);
+    // A claim a moment AHEAD is the one just made: the file system's clock
+    // and `Date.now()` are two clocks (Windows: up to 2 ms apart, measured).
+    assertEquals(await pass(404, -1), false, "a moment ahead is recent");
+    // One stamped beyond the window in the future (the clock stepped back)
+    // is not recent.
+    assertEquals(await pass(404, -START_ONCE_MS), true);
   } finally {
     await dropTempDir(dir);
   }

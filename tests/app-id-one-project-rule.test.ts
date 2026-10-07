@@ -22,20 +22,22 @@
 // booting under the OLD id, with a warning naming both paths and both fixes —
 // never a refused boot, never a silent fresh start.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { basename, join } from "@std/path";
+import { basename, fromFileUrl, join } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
+import { linkDir } from "./symlink-helper.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { freePort } from "../src/testing/server-test.ts";
 
-const AIO_ROOT = new URL("..", import.meta.url).pathname;
+const AIO_ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 const PROBE = `import { resolveAppId } from "${
-  join(AIO_ROOT, "src/server/single-instance-lock.ts")
+  spec(join(AIO_ROOT, "src/server/single-instance-lock.ts"))
 }";
 console.log("IDPROBE " + resolveAppId());
 `;
 
 const AM_PROBE = `import { resolveAmAppId } from "${
-  join(AIO_ROOT, "src/am/am-utils.ts")
+  spec(join(AIO_ROOT, "src/am/am-utils.ts"))
 }";
 console.log("IDPROBE " + resolveAmAppId());
 `;
@@ -193,7 +195,7 @@ Deno.test("appId: an entry reached through a symlink is still inside the cwd pro
       PROBE,
     );
     const link = join(root, "link");
-    await Deno.symlink(real, link);
+    await linkDir(real, link);
     assertEquals(
       await probe(join(real, "tools", "app.ts"), real, apps),
       "myid",
@@ -247,7 +249,7 @@ Deno.test("appId: a %-encoded folder name keeps its old id while the data is the
   }
 });
 
-const APP = `import { aio, cell } from "${join(AIO_ROOT, "mod.ts")}";
+const APP = `import { aio, cell } from "${spec(join(AIO_ROOT, "mod.ts"))}";
 export const c = cell("c", { state: { n: 0 }, methods: {} });
 await aio.run({ cells: [c] });
 console.log("BOOTED");

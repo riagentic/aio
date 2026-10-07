@@ -16,6 +16,8 @@
 // and the server's memo of what it holds is exactly what is in question.
 import { assertEquals } from "@std/assert";
 import { join } from "@std/path";
+import { connectLocal } from "../src/server/local-listen.ts";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
 import { dec, enc } from "../src/protocol/envelope.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { createWsManager } from "../src/server/server-ws.ts";
@@ -108,7 +110,7 @@ Deno.test("ws: a subs that narrows the view, and a resync, still get their state
 // ── UDS ───────────────────────────────────────────────────────────────────
 
 async function udsPeer(socketPath: string) {
-  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  const conn = await connectLocal(socketPath);
   const frames: Frame[] = [];
   const decoder = new TextDecoder();
   let buf = "";
@@ -137,10 +139,10 @@ async function udsPeer(socketPath: string) {
 }
 
 Deno.test("uds: the accept-time state is not re-sent by a subs reply that changes nothing", async () => {
-  const socketPath = join(
+  const socketPath = localEndpoint(join(
     await tempDir("aio-initial-state-sent-once-"),
     "once.sock",
-  );
+  ));
   const uds = createUDSListener(
     socketPath,
     () => ({ a: { n: 1 }, b: { n: 2 } }),
@@ -167,14 +169,15 @@ Deno.test("uds: the accept-time state is not re-sent by a subs reply that change
     }
   } finally {
     uds.shutdown();
+    await localIdle();
   }
 });
 
 Deno.test("uds: a subs that narrows the view, and a resync, still get their state", async () => {
-  const socketPath = join(
+  const socketPath = localEndpoint(join(
     await tempDir("aio-initial-state-sent-once-"),
     "narrow.sock",
-  );
+  ));
   const uds = createUDSListener(
     socketPath,
     () => ({ a: { n: 1 }, b: { n: 2 } }),
@@ -196,5 +199,6 @@ Deno.test("uds: a subs that narrows the view, and a resync, still get their stat
     p.conn.close();
     await wait(20);
     uds.shutdown();
+    await localIdle();
   }
 });

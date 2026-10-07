@@ -16,6 +16,7 @@ import { assert } from "@std/assert";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { dirname, fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const REPO = dirname(dirname(fromFileUrl(import.meta.url)));
 const DENO_JSON = join(REPO, "deno.json");
@@ -35,7 +36,7 @@ async function bootAndCollect(
     );
     await Deno.writeTextFile(
       join(dir, "app.ts"),
-      `import { aio, cell } from "${REPO}/mod.ts";
+      `import { aio, cell } from "${spec(REPO)}/mod.ts";
 const c = cell("c", { state: { n: 1 }, methods: {} });
 await aio.run({
   cells: [c], persist: false, client: "server-only",

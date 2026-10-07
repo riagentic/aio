@@ -42,7 +42,19 @@ export type HeadlessSurfaceResult =
  *  refused (the graph grows per edit, and a busted child module can load fresh
  *  copies of cells instead of the live ones), so the render keeps its import
  *  and says when a source file is newer than it. */
-const _importedAt = new Map<string, number>();
+const _importedAt = new Map<
+  string,
+  {
+    at: number;
+    /** Each UI source file's mtime as of the import. A file is compared with
+     *  ITS OWN earlier mtime — the file system's clock against itself — and
+     *  never with `Date.now()`: the two clocks do not agree (measured on a
+     *  Windows laptop, a file written just before the import was dated 8 ms
+     *  after it; a network share's clock is another machine's), so a file
+     *  written before the import read as changed after it — "STALE". */
+    seen: Promise<Map<string, number>>;
+  }
+>();
 
 /** What a stale headless render carries on each root (`am surface --json`). */
 export type StaleSurface = {
@@ -61,16 +73,9 @@ const TEST_FILE = /\.(test|spec)\.[cm]?[jt]sx?$/;
 /** A bound on the walk: an inspection command must not stat a monorepo. */
 const MAX_FILES = 5000;
 
-/** The newest UI source file under the entry's directory changed after
- *  `importedAt`, or null. The directory, not the entry alone: an edit to a
- *  component App.tsx imports is the common case, and it leaves App.tsx's own
- *  mtime untouched. */
-async function staleSince(
-  entryPath: string,
-  importedAt: number,
-): Promise<StaleSurface | null> {
-  const root = dirname(entryPath);
-  let newest: { path: string; at: number } | null = null;
+/** Every UI source file under `root`, with its mtime. */
+async function sourceMtimes(root: string): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
   let seen = 0;
   const walk = async (dir: string): Promise<void> => {
     try {
@@ -84,9 +89,7 @@ async function staleSince(
         }
         if (!UI_SOURCE.test(e.name) || TEST_FILE.test(e.name)) continue;
         const at = (await Deno.stat(path).catch(() => null))?.mtime?.getTime();
-        if (at !== undefined && at > importedAt && at > (newest?.at ?? 0)) {
-          newest = { path, at };
-        }
+        if (at !== undefined) out.set(path, at);
       }
     } catch {
       // aio-ok: a directory that vanished or denies reading mid-walk has no
@@ -94,6 +97,30 @@ async function staleSince(
     }
   };
   await walk(root);
+  return out;
+}
+
+/** The newest UI source file under the entry's directory changed since the
+ *  import, or null. The directory, not the entry alone: an edit to a
+ *  component App.tsx imports is the common case, and it leaves App.tsx's own
+ *  mtime untouched. A file the import's walk did not see (new, or past the
+ *  walk's bound) has only the import's own stamp to be compared with. */
+async function staleSince(
+  entryPath: string,
+  imported: { at: number; seen: Promise<Map<string, number>> },
+): Promise<StaleSurface | null> {
+  const root = dirname(entryPath);
+  const importedAt = imported.at;
+  const seen = await imported.seen;
+  let newest: { path: string; at: number } | null = null;
+  for (const [path, at] of await sourceMtimes(root)) {
+    // Its own mtime as of the import, DIFFERENT — a file put back with an
+    // older date (a rename, `cp -p`, `rsync -t`) is an edit too.
+    const changed = seen.has(path) ? at !== seen.get(path) : at > importedAt;
+    if (changed && at > (newest?.at ?? 0)) {
+      newest = { path, at };
+    }
+  }
   if (!newest) return null;
   const { path, at } = newest as { path: string; at: number };
   const file = relative(root, path);
@@ -135,7 +162,14 @@ export async function renderHeadlessSurface(
   const href = toFileUrl(entryPath).href;
   // Recorded BEFORE the first import resolves, so an edit landing during the
   // import reads as newer than it (stale), never the other way round.
-  if (!_importedAt.has(href)) _importedAt.set(href, Date.now());
+  if (!_importedAt.has(href)) {
+    _importedAt.set(href, {
+      at: Date.now(),
+      seen: sourceMtimes(dirname(entryPath)),
+    });
+  }
+  // The walk is done before the import reads a file, for the same reason.
+  await _importedAt.get(href)!.seen;
   try {
     const mod = await import(href) as Record<
       string,
@@ -182,7 +216,7 @@ export async function renderHeadlessSurface(
     return {
       ok: false,
       error:
-        'surface: happy-dom unavailable — add "happy-dom": "npm:happy-dom@^17" to deno.json imports for headless `am surface`',
+        'surface: happy-dom unavailable — add "happy-dom": "npm:happy-dom@^20" to deno.json imports for headless `am surface`',
     };
   }
 

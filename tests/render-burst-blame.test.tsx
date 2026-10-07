@@ -23,6 +23,13 @@ import { assert, assertEquals } from "@std/assert";
 import { testUI } from "../src/testing/ui-test.ts";
 import { signal } from "../src/state/signal.ts";
 import { afterRender, useSignal } from "../src/air.ts";
+import { setImmediate } from "node:timers";
+
+/** One event-loop turn between two writes — a render is flushed on a
+ *  microtask, so each write is a render of its own. Not `ui.settle()` per
+ *  write: that is two timer ticks, ~31 ms on Windows, and 60 of them no longer
+ *  fit the tripwire's one-second window (the burst is settled once, after). */
+const turn = () => new Promise<void>((r) => setImmediate(() => r()));
 
 const WARNS: string[] = [];
 // Forwarded, never restored: a real warning from anywhere else in this file
@@ -80,8 +87,9 @@ testUI(
   async (ui) => {
     for (let i = 0; i < 60; i++) {
       stream.set(`chunk ${i}`);
-      await ui.settle();
+      await turn();
     }
+    await ui.settle();
     const hit = burstFor("Reader");
     assert(hit, `no tripwire fired:\n${WARNS.join("\n")}`);
     assert(
@@ -120,8 +128,9 @@ testUI(
   async (ui) => {
     for (let i = 1; i <= 60; i++) {
       tick.set(i);
-      await ui.settle();
+      await turn();
     }
+    await ui.settle();
     const hit = burstFor("Mirror");
     assert(hit, `no tripwire fired:\n${WARNS.join("\n")}`);
     assert(
@@ -167,8 +176,9 @@ testUI(
     await new Promise((r) => setTimeout(r, 1300));
     for (let i = 0; i < 60; i++) {
       fastStream.set(i + 1);
-      await ui.settle();
+      await turn();
     }
+    await ui.settle();
     const hit = burstFor("Mixed");
     assert(hit, `no tripwire fired:\n${WARNS.join("\n")}`);
     assert(hit.includes("fastStream"), `must name the real driver: ${hit}`);

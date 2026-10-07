@@ -17,7 +17,7 @@
 //    reduced anyway: an idempotency guard threw and boot said the call
 //    "COULD NOT be replayed" for a write it had restored.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 // @ts-ignore node:sqlite types unavailable when an old @types/node shadows them
 import { DatabaseSync } from "node:sqlite";
 import { freePort } from "../src/testing/server-test.ts";
@@ -32,10 +32,10 @@ import {
 } from "../src/server/journal.ts";
 
 const MOD = new URL("../mod.ts", import.meta.url).href;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
-const FIXTURE =
-  new URL("./fixtures/v1.0.9-crashed-sync-listeners/", import.meta.url)
-    .pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
+const FIXTURE = fromFileUrl(
+  new URL("./fixtures/v1.0.9-crashed-sync-listeners/", import.meta.url),
+);
 
 async function run(dir: string, phase: string): Promise<string> {
   const out = await new Deno.Command(Deno.execPath(), {
@@ -75,13 +75,14 @@ async function copyFixture(
 }
 const readJson = async (f: string) => JSON.parse(await Deno.readTextFile(f));
 
-const STREAMING =
-  new URL("./fixtures/v1.0.9-crashed-streaming/", import.meta.url).pathname;
+const STREAMING = fromFileUrl(
+  new URL("./fixtures/v1.0.9-crashed-streaming/", import.meta.url),
+);
 
 // The store saved while the journal held no line: no app-wide watermark key.
-const SYNC_ONLY_SAVE =
-  new URL("./fixtures/v1.0.9-crashed-sync-only-save/", import.meta.url)
-    .pathname;
+const SYNC_ONLY_SAVE = fromFileUrl(
+  new URL("./fixtures/v1.0.9-crashed-sync-only-save/", import.meta.url),
+);
 const FIXTURES: [string, string][] = [
   ["before-fold", FIXTURE],
   ["streaming", STREAMING],
@@ -89,14 +90,15 @@ const FIXTURES: [string, string][] = [
   // Server-side calls to sync cells journalled as plain call lines.
   [
     "server-writes",
-    new URL("./fixtures/v1.0.9-crashed-server-writes/", import.meta.url)
-      .pathname,
+    fromFileUrl(
+      new URL("./fixtures/v1.0.9-crashed-server-writes/", import.meta.url),
+    ),
   ],
   // A clean stop: an EMPTY journal — the older build is known by the store's
   // missing stamp alone.
   [
     "clean-stop",
-    new URL("./fixtures/v1.0.9-clean-stop/", import.meta.url).pathname,
+    fromFileUrl(new URL("./fixtures/v1.0.9-clean-stop/", import.meta.url)),
   ],
 ];
 /** `got` holds nothing `live` does not, as often as it does. Returns how
@@ -399,8 +401,9 @@ Deno.test("isLegacyTail: unstamped lines without the marker only", () => {
 });
 
 Deno.test("journal upgrade: a journal.base's mtime proves nothing — a stale one (a base write that failed, or a kill before it) must not make a saved reaction apply again", async () => {
-  const CLEAN_STOP =
-    new URL("./fixtures/v1.0.9-clean-stop/", import.meta.url).pathname;
+  const CLEAN_STOP = fromFileUrl(
+    new URL("./fixtures/v1.0.9-clean-stop/", import.meta.url),
+  );
   const want = await readJson(join(CLEAN_STOP, "upgrade-recovered.json"));
   for (const mtime of [1_000, 4e12]) {
     const dir = await tempDir("aio-upgrade-base-mtime-");
@@ -422,8 +425,9 @@ Deno.test("journal upgrade: a journal.base's mtime proves nothing — a stale on
 });
 
 Deno.test("journal upgrade: the store's stamp outlives the journal — once its stamped lines are compacted away, the next boot is not an upgrade again", async () => {
-  const CLEAN_STOP =
-    new URL("./fixtures/v1.0.9-clean-stop/", import.meta.url).pathname;
+  const CLEAN_STOP = fromFileUrl(
+    new URL("./fixtures/v1.0.9-clean-stop/", import.meta.url),
+  );
   const dir = await tempDir("aio-upgrade-stamp-");
   try {
     await copyFixture(dir, CLEAN_STOP);
@@ -441,8 +445,9 @@ Deno.test("journal upgrade: the store's stamp outlives the journal — once its 
 });
 
 Deno.test("journal upgrade: placements that could not be written down are named again — the same state, nothing counted twice", async () => {
-  const CLEAN_STOP =
-    new URL("./fixtures/v1.0.9-clean-stop/", import.meta.url).pathname;
+  const CLEAN_STOP = fromFileUrl(
+    new URL("./fixtures/v1.0.9-clean-stop/", import.meta.url),
+  );
   const want = await readJson(join(CLEAN_STOP, "upgrade-recovered.json"));
   const dir = await tempDir("aio-upgrade-unsaved-");
   try {

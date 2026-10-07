@@ -14,12 +14,13 @@
 // three rounds over, and requires ZERO warnings and errors. A new warning
 // that fires on the code aio itself teaches turns this red with its text.
 import { assertEquals } from "@std/assert";
-import { dirname, join } from "@std/path";
+import { dirname, fromFileUrl, join } from "@std/path";
 import { testUI } from "../src/cell-test.ts";
 import { scaffold, TEMPLATES } from "../src/am/am-cmd-create.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const REPO = new URL("../", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("../", import.meta.url));
 
 const EXAMPLES = [
   "counter",
@@ -101,7 +102,7 @@ async function silentRun(
   label: string,
   appTsx: string,
 ): Promise<void> {
-  const { default: App } = await import(appTsx);
+  const { default: App } = await import(spec(appTsx));
   let acted = 0;
   const lines = await said(async () => {
     await using ui = await testUI(App);

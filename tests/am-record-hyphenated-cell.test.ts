@@ -8,11 +8,11 @@
 // `bootCells([flc-counter])`, `await flc-counter.inc(2)` — a syntax error, so
 // the generated file cannot run at all.
 import { assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { generateReplayTest } from "../src/am/record.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 Deno.test("am record: a hyphenated cell name yields a replay test that passes deno check", async () => {
   const dir = await tempDir("hunt-r4-record-hyphen-");

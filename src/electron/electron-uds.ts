@@ -10,6 +10,7 @@ import {
 } from "../protocol/transport-shared.ts";
 import { createLineReader } from "../protocol/line-reader.ts";
 import { redactUrlToken, redactUrlTokenSource } from "../diagnostics/redact.ts";
+import { GUEST_PRELOAD_REFUSED_EVENT } from "../protocol/guest-preload.ts";
 import {
   type AioMeta,
   type ShellConfig,
@@ -18,6 +19,7 @@ import {
   tmplBounds,
   tmplBoundsTracking,
   tmplCrashGuard,
+  tmplGuestPreloads,
   tmplIpcGuard,
   tmplKeyboardShortcuts,
   tmplParentWatch,
@@ -27,6 +29,7 @@ import {
   tmplRendererDiagnostics,
   tmplSocketFetch,
   tmplTray,
+  tmplWebGuard,
   tmplWillNavigate,
   tmplWindowShape,
   udsPreloadScript,
@@ -98,7 +101,9 @@ ${tmplAppMenu(opts.meta?.title ?? opts.title)}
 app.name = ${JSON.stringify(slug)};
 ${tmplCrashGuard()}
 ${tmplPermissionGuard(opts.meta?.permissions)}
+${tmplWebGuard(opts.meta)}
 ${tmplIpcGuard()}
+${tmplGuestPreloads(opts.meta?.guestPreloads)}
 ${tmplParentWatch()}
 
 // ── Where the page comes from: disk (prod), the app's socket (dev, zero
@@ -761,6 +766,24 @@ ${tmplRendererDiagnostics(true)}
     console.warn('[aio:electron] ' + reason);
     return { ok: false, reason };
   };
+  // A refused PRELOAD: the same line, with the fix, and the same page event
+  // a refused <webview> preload sends (tmplWillNavigate) — an app that sends
+  // without awaiting the answer still hears of it.
+  const refusePreload = (preload, why) => {
+    const fix = __aioGuestPreloadFix(preload);
+    const r = refuseWindow(why + '. Fix: declare the file in deno.json "build": { "guestPreloads": ' +
+      fix.list + ' } and pass { preload: guestPreload(' + fix.rel + ') } ' +
+      '(from aio/ui) — the one form that loads in dev AND in a packaged build.');
+    try {
+      win.webContents.executeJavaScript(
+        'window.dispatchEvent(new CustomEvent(${
+    JSON.stringify(GUEST_PRELOAD_REFUSED_EVENT)
+  }, { detail: ' +
+          JSON.stringify({ preload: String(preload), reason: r.reason }) + ' }))',
+      ).catch(() => {}); // aio-ok: the page is gone or mid-navigation; the line above and the returned reason already say it
+    } catch {} // aio-ok: same — telling the page is the third channel, never the only one
+    return r;
+  };
   const _openWindow = (payload) => {
     try {
       if (!CHILD_WINDOWS) {
@@ -777,19 +800,30 @@ ${tmplRendererDiagnostics(true)}
       const root = fs.realpathSync(BASE_DIR || (process.env.AIO_APP_CWD || process.cwd()));
       const pfx = root.endsWith(path.sep) ? root: root + path.sep;
       if (typeof preload !== 'string' || !preload) {
-        return refuseWindow('no preload given — pass { preload: <a file inside the app directory ' + root + '> }');
+        return refuseWindow('no preload given — pass { preload: guestPreload("src/guest/preload.cjs") }, a file declared in deno.json build.guestPreloads (or a file inside the app directory ' + root + ')');
       }
-      // Relative to the APP directory, never the process cwd: a packaged app's
-      // cwd is whatever launched it, so a cwd-relative answer differs between
-      // dev and prod. An absolute path is unaffected.
-      const p = path.resolve(root, preload);
-      if (!p.startsWith(pfx)) {
-        return refuseWindow('preload ' + p + ' is outside the app directory ' + root);
-      }
-      if (!fs.existsSync(p)) return refuseWindow('preload ' + p + ' does not exist');
-      // Symlink escape: judge the REAL file, not the link's address.
-      if (!fs.realpathSync(p).startsWith(pfx)) {
-        return refuseWindow('preload ' + p + ' is a link that resolves outside the app directory');
+      // A DECLARED preload, asked for by name — guestPreload(), the same name
+      // a <webview> uses (tmplGuestPreloads) — resolves where this run keeps
+      // the file. The path rule below cannot be met in a package: its app
+      // directory is dist/, which holds only aio's own bundle.
+      const named = __aioGuestPreload(preload);
+      let p;
+      if (named) {
+        if (!named.ok) return refusePreload(preload, named.why);
+        p = named.real;
+      } else {
+        // Relative to the APP directory, never the process cwd: a packaged
+        // app's cwd is whatever launched it, so a cwd-relative answer differs
+        // between dev and prod. An absolute path is unaffected.
+        p = path.resolve(root, preload);
+        if (!p.startsWith(pfx)) {
+          return refusePreload(preload, 'preload ' + p + ' is outside the app directory ' + root);
+        }
+        if (!fs.existsSync(p)) return refusePreload(preload, 'preload ' + p + ' does not exist');
+        // Symlink escape: judge the REAL file, not the link's address.
+        if (!fs.realpathSync(p).startsWith(pfx)) {
+          return refusePreload(preload, 'preload ' + p + ' is a link that resolves outside the app directory');
+        }
       }
       // REFUSED, not quietly upgraded: the page asked for something it is not
       // getting, and a window that silently differs from the one requested is
@@ -798,7 +832,30 @@ ${tmplRendererDiagnostics(true)}
         return refuseWindow('sandbox: false — this app has not opted in. The APP decides the Chromium sandbox of a window it opens, not the page: add aio.run({ electron: { unsandboxedChildWindows: true } }) if this page really must run unsandboxed.');
       }
       const sandbox = payload.sandbox === false ? false: true;
-      console.warn('[aio:electron] openWindow → ' + _shownUrl(u.href) + (sandbox ? '': ' (sandbox DISABLED by app request)'));
+      // Never the app's own session (the one that serves aio://app): child
+      // windows share ONE persistent session of their own, 'persist:aio-child'
+      // — kept across launches, as a child window's logins always were (in
+      // memory, they would be gone at every start). The app names
+      // another with { partition }: 'persist:x' is kept, a name without
+      // 'persist:' is in memory (a throw-away window).
+      if (payload.partition !== undefined && (typeof payload.partition !== 'string' || !payload.partition)) {
+        return refuseWindow('partition must be a non-empty string, like "persist:name"');
+      }
+      // …and never the app's own by another spelling: Electron resolves
+      // 'persist:' to the default session (measured, 44). By identity.
+      if (payload.partition !== undefined && __aioAppSessionName(payload.partition)) {
+        return refuseWindow('partition ' + JSON.stringify(payload.partition) + " resolves to the app's own session — a child window never shares it. Name one, like \\"persist:name\\"");
+      }
+      // origins: the app turns a navigation restriction ON (tmplWebGuard's
+      // __aioGuardChild); without it the window navigates as it did in 1.0.18.
+      if (payload.origins !== undefined && payload.origins !== '*' && !Array.isArray(payload.origins)) {
+        return refuseWindow('origins must be a list of origins, like ["https://id.example"], or "*"');
+      }
+      const partition = payload.partition || 'persist:aio-child';
+      console.warn('[aio:electron] openWindow → ' + _shownUrl(u.href) + (sandbox ? '': ' (sandbox DISABLED by app request)') +
+        (payload.partition
+          ? ' — session ' + JSON.stringify(partition)
+          : ' — session "persist:aio-child": the one child windows share, kept across launches, apart from the app session. Pass { partition: "name" } (no "persist:") for a throw-away window'));
       const child = new BrowserWindow({
         width: 1100,
         height: 800,
@@ -807,10 +864,12 @@ ${tmplRendererDiagnostics(true)}
           contextIsolation: true,
           sandbox,
           preload: p,
+          partition,
         },
       });
       dappWindows.add(child);
-      __aioChildWindows.add(child.webContents); // never "app" (tmplPermissionGuard)
+      // never "app"; pop-ups, navigation, downloads (tmplWebGuard)
+      __aioGuardChild(child, u.href, payload.origins);
       child.on('closed', () => dappWindows.delete(child));
       child.setMenuBarVisibility(false);
       child.loadURL(u.href);

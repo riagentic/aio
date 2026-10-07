@@ -14,15 +14,16 @@
 import { assert, assertEquals } from "@std/assert";
 // @ts-ignore node:sqlite types unavailable when an old @types/node shadows them
 import { DatabaseSync } from "node:sqlite";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { fuzzEnvInt } from "./fuzz-seed.ts";
 import { rngOf } from "./sync/properties/_prop.ts";
 
-const APP = new URL("./fixtures/v1.0.9-sweep/app.js", import.meta.url)
-  .pathname;
-const TREE = new URL("..", import.meta.url).pathname;
+const APP = fromFileUrl(
+  new URL("./fixtures/v1.0.9-sweep/app.js", import.meta.url),
+);
+const TREE = fromFileUrl(new URL("..", import.meta.url));
 
 type Snap = {
   notes: string[];
@@ -31,6 +32,8 @@ type Snap = {
   inbox: string[];
   feed: string[];
   shaped: number;
+  /** Ops the server acknowledged before the kill (expected.json only). */
+  acked?: string[];
 };
 
 async function exportTag(tag: string): Promise<string> {
@@ -186,7 +189,32 @@ Deno.test("journal upgrade sweep: v1.0.9 killed at random points — this build 
           throw new Error(`${what}: v1.0.9 never reached its kill\n${crash}`);
         });
         const recorded = mirrorRecords(join(dir, "data", "state.db"));
-        const log1 = await run(dir, TREE, "read", env);
+        let log1 = await run(dir, TREE, "read", env);
+        // The kill fell between v1.0.9 storing a refused duplicate and
+        // deleting its row. v1.0.9 marked nothing that tells that row from
+        // an accepted op, so this build removes nothing: it refuses, names
+        // the row and the statement that removes it
+        // (tests/sync-op-killed-before-settle.test.ts makes that kill
+        // deterministic). Taken as told; every property below still holds.
+        const stuck =
+          /run `(DELETE FROM sync_ops WHERE id = '[^']+')` on its state\.db/
+            .exec(log1)?.[1];
+        if (
+          phase === "rejdrift" && stuck &&
+          /refusing to boot[^\n]*\(notes:add\) threw: Error: dup n1/.test(log1)
+        ) {
+          // Only ever an op nobody was told landed.
+          const id = /id = '([^']+)'/.exec(stuck)![1]!;
+          assert(live.acked, "expected.json names the acked ops");
+          assert(!live.acked.includes(id), `${id} was acknowledged: ${what}`);
+          const d = new DatabaseSync(join(dir, "data", "state.db"));
+          try {
+            d.exec(stuck);
+          } finally {
+            d.close();
+          }
+          log1 = await run(dir, TREE, "read", env);
+        }
         const got = await readSnap(join(dir, "recovered.json")).catch(() => {
           throw new Error(`${what}: this build did not boot\n${log1}`);
         });

@@ -16,7 +16,7 @@
 // So this one spawns a real app with a real entry module, kills it mid-write,
 // and reads the DISK.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
 // @ts-ignore node:sqlite types unavailable when an old @types/node shadows them
 import { DatabaseSync } from "node:sqlite";
@@ -24,12 +24,13 @@ import {
   WORKER_CLOSE_DEADLINE_MS,
   WORKER_CLOSE_DRAIN_MS,
 } from "../src/server/cell-worker-protocol.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const REPO = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
+const REPO = fromFileUrl(new URL("../", import.meta.url)).replace(/[\\/]$/, "");
 
 /** An app whose worker cell streams, and only its abort signal ends it. */
 function appSource(port: number): string {
-  return `import { aio, cell } from "${REPO}/mod.ts";
+  return `import { aio, cell } from "${spec(REPO)}/mod.ts";
 
 export const stream = cell("stream", {
   worker: true,

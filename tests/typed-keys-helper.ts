@@ -10,6 +10,7 @@
 // question is asked once, in one place.
 import { assert } from "@std/assert";
 import { childCoverageDir } from "../src/testing/temp-dir.ts";
+import { fromFileUrl } from "@std/path";
 const _childCovDir = childCoverageDir();
 
 export type TypedProp = { name: string; optional: boolean; isFn: boolean };
@@ -22,7 +23,7 @@ export async function typedProps(
   const out = await new Deno.Command(Deno.execPath(), {
     env: { DENO_COVERAGE_DIR: _childCovDir },
     args: ["doc", "--json", file],
-    cwd: new URL("..", import.meta.url).pathname,
+    cwd: fromFileUrl(new URL("..", import.meta.url)),
     stdout: "piped",
     stderr: "null",
   }).output();

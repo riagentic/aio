@@ -14,7 +14,7 @@
 // `deno check` and `deno test` on it, and require the state it ends in to be
 // the state the live app ended in.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { aio } from "../src/server/aio.ts";
 import { _resetAioRuntime } from "../src/state/runtime-reset.ts";
 import { freePort } from "../src/testing/server-test.ts";
@@ -22,7 +22,7 @@ import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { generateReplayTest, timelineActions } from "../src/am/record.ts";
 import type { TimelineEntry } from "../src/server/timeline.ts";
 
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 const CELL = `import { cell, schedule, self } from "aio";
 export const counter = cell("counter", {

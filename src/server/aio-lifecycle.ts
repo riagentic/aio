@@ -8,7 +8,11 @@ import {
   frameAncestors,
 } from "./security-headers.ts";
 import type { UiConfig } from "./aio-types.ts";
-import { join } from "@std/path";
+import { dirname, join, resolve } from "@std/path";
+import {
+  resolveGuestPreloads,
+  stagedGuestPreloadDirs,
+} from "./guest-preloads.ts";
 import { isPipePath } from "./local-listen.ts";
 import { hasDesktopSession, openExternalBestEffort } from "./open-external.ts";
 import {
@@ -743,7 +747,17 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     say("ws", `${wsProto}://${advertiseHost}:${port}/ws`);
   }
   if (udsHandle) say(localKind, udsHandle.socketPath);
-  if (server.trojanPort) say("trojan", `http://localhost:${server.trojanPort}`);
+  // Named for what it is to the person reading the report: the plain-HTTP
+  // listener `am` talks to while the app serves TLS. ("trojan" is the
+  // internal name of the control API, and read as a dev-only door on a
+  // production boot.) The lock file's `trojanPort` and the `/__aio/trojan/*`
+  // routes are surface, and keep their names.
+  if (server.trojanPort) {
+    say(
+      "control",
+      `http://localhost:${server.trojanPort} (am, loopback only)`,
+    );
+  }
   // Printed ONLY when asked for: a debugging port is a port, and the
   // "no TCP port" line above must stay literally true by default.
   const cdp = cdpPort();
@@ -1090,8 +1104,31 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     // draw it must never stop the app from starting — it is an icon.
     devWindowIcon(appIconLabel(appConfigTitle(deps.baseDir), appId), appId)
       .catch(() => "")
-      .then((defaultIcon) =>
-        launchElectron(
+      .then(async (defaultIcon) => {
+        // The guest preloads this window may load by name: the package's
+        // staged files, else the project's declaration. A declaration that
+        // cannot be read is SAID and leaves none — every guestPreload() is
+        // then refused by name when its guest attaches.
+        meta.guestPreloads = await resolveGuestPreloads({
+          baseDir: resolve(deps.baseDir),
+          packaged: isCompiled(),
+          staged: prod
+            ? stagedGuestPreloadDirs({
+              distDir: electronDistDir,
+              execDir: dirname(Deno.execPath()),
+              os: Deno.build.os,
+            })
+            : [],
+        }).catch((e) => {
+          log.error(
+            "electron",
+            `guest preloads unavailable — ${
+              e instanceof Error ? e.message : e
+            }`,
+          );
+          return undefined;
+        });
+        return launchElectron(
           electronUrl,
           log,
           meta,
@@ -1099,8 +1136,8 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
           distDir,
           cdpPort(),
           stopSignal,
-        )
-      )
+        );
+      })
       .then((proc) => {
         // Shutdown began while the launch was in flight: refuse. A proc that
         // was spawned in the last instant is killed here — the orchestrator's

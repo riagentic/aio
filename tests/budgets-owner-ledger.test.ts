@@ -13,8 +13,9 @@
 import { assert, assertEquals } from "@std/assert";
 import { resetBudgets, setBudgets } from "../src/state/budgets.ts";
 import { createVitalsSystem } from "../src/vitals/mod.ts";
+import { fromFileUrl } from "@std/path";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 Deno.test("budgets owner: the vitals pressure monitor records into the ledger it is handed, not the latest boot's", () => {
   // App A booted first (payload budget 1 KB); app B booted after it (10 MB),

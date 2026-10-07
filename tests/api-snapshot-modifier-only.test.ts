@@ -21,6 +21,7 @@ import {
   sigOf,
   type Snapshot,
 } from "../scripts/api-snapshot.ts";
+import { fromFileUrl } from "@std/path";
 
 const param = (name: string, repr: string) => ({
   kind: "identifier",
@@ -177,7 +178,7 @@ Deno.test("no reviewed entry helps without a declared return type, or with a cha
 // ever matches its exact two digests.
 const TAGGED_1_0_10 = await new Deno.Command("git", {
   args: ["rev-parse", "-q", "--verify", "refs/tags/v1.0.10-beta"],
-  cwd: new URL("..", import.meta.url).pathname,
+  cwd: fromFileUrl(new URL("..", import.meta.url)),
   stdout: "null",
   stderr: "null",
 }).output().then((o) => o.success, () => false);
@@ -193,7 +194,7 @@ Deno.test({
     assert(entry.reason.length > 40);
     const o = await new Deno.Command("git", {
       args: ["show", "v1.0.10-beta:docs/api-snapshot.json"],
-      cwd: new URL("..", import.meta.url).pathname,
+      cwd: fromFileUrl(new URL("..", import.meta.url)),
       stdout: "piped",
       stderr: "piped",
     }).output();

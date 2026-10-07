@@ -8,16 +8,17 @@ import { assert, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { udsRequest } from "../src/am/am-uds.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { listenLocal, type LocalConn } from "../src/server/local-listen.ts";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
 
 Deno.test({
   name: "udsRequest: timeout is honoured against a peer that never answers",
-  ignore: Deno.build.os === "windows",
 }, async () => {
   const dir = await tempDir("uds-timeout-");
-  const socketPath = join(dir, "s.sock");
-  const listener = Deno.listen({ transport: "unix", path: socketPath });
-  const held: Deno.Conn[] = [];
-  (async () => {
+  const socketPath = localEndpoint(join(dir, "s.sock"));
+  const listener = listenLocal(socketPath);
+  const held: LocalConn[] = [];
+  const accepting = (async () => {
     for await (const c of listener) held.push(c); // accept, never write
   })().catch(() => {});
   try {
@@ -46,6 +47,8 @@ Deno.test({
       } catch { /* gone */ }
     }
     listener.close();
+    await accepting;
+    await localIdle();
     await dropTempDir(dir);
   }
 });

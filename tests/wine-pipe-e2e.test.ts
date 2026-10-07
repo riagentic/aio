@@ -5,9 +5,10 @@
 // runner's own summary line — `WINE PIPE: N passed, M failed` with M = 0 — and
 // a floor on N, so a runner that quietly ran nothing cannot pass.
 import { assert, assertEquals, assertMatch } from "jsr:@std/assert@^1";
+import { fromFileUrl } from "@std/path";
 
 const GATED = Deno.env.get("AIO_WINE_E2E") === "1";
-const HERE = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const HERE = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 
 /** host READY + deno.exe/node.exe boot + 8 node cases + 3 deno cases. */
 const EXPECTED_CASES = 14;

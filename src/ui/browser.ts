@@ -77,6 +77,11 @@ export interface BrowserProps {
   /** `partition` on the underlying tag: which session (cookies, storage) the
    *  guest uses. Two `<Browser>`s with the same partition share a login. */
   partition?: string;
+  /** `preload` on the underlying tag: a script that runs in the guest before
+   *  its page does. Pass `guestPreload("src/guest/preload.cjs")` — a file
+   *  declared in deno.json `build.guestPreloads` — the one form that loads in
+   *  dev and in a packaged build. Read once, when the guest attaches. */
+  preload?: string;
   /** Called after the guest navigates, with the URL it landed on. Write this
    *  to state if you want an address bar — and note that doing so is safe
    *  precisely because `src` is only applied when it differs. */
@@ -134,15 +139,17 @@ function hostKeysAttr(keys: readonly string[] | undefined): string | undefined {
  * />
  * ```
  *
- * Requires `childWindows: true` — a `<webview>` without that gate does not
+ * Requires `electron: { webviewTag: true }` (or `childWindows: true`, which
+ * also enables `openWindow`) — a `<webview>` without that gate does not
  * render at all, and the gate exists because embedding remote content is a
  * decision an app should make on purpose.
  */
 export function Browser(props: BrowserProps): VNode {
-  const { partition } = props;
+  const { partition, preload } = props;
   const hostKeys = hostKeysAttr(props.hostKeys);
   return h("webview", {
     ...(partition ? { partition } : {}),
+    ...(preload ? { preload } : {}),
     // An attribute, set at creation: the main process reads it when the guest
     // attaches, which is after this element exists and before it loads.
     ...(hostKeys ? { [HOST_KEYS_ATTR]: hostKeys } : {}),

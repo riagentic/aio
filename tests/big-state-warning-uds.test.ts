@@ -11,6 +11,8 @@
 // broadcasts/sec alarm and `aio_clients_connected`.
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
+import { connectLocal, type LocalConn } from "../src/server/local-listen.ts";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
 import { createUDSListener } from "../src/server/aio.ts";
 import {
   _resetBigStateWarnings,
@@ -55,7 +57,7 @@ Deno.test({
   async fn() {
     _resetBigStateWarnings();
     const dir = await Deno.makeTempDir({ prefix: "aio-bigstate-" });
-    const socketPath = join(dir, "big.sock");
+    const socketPath = localEndpoint(join(dir, "big.sock"));
     // One cell well past the budget, one small — the message must pick the
     // right one, which is the half that makes it actionable.
     const rows = "x".repeat(BROADCAST_FULL_WARN_BYTES + 1024);
@@ -65,11 +67,11 @@ Deno.test({
       () => {},
       () => {},
     );
-    let conn: Deno.Conn | undefined;
+    let conn: LocalConn | undefined;
     const warns = await warningsDuring(async () => {
       // Connecting is enough: the accept-time snapshot goes through the same
       // builder every broadcast uses.
-      conn = await Deno.connect({ path: socketPath, transport: "unix" });
+      conn = await connectLocal(socketPath);
       await new Promise((r) => setTimeout(r, 80));
     });
     try {
@@ -87,6 +89,7 @@ Deno.test({
         conn?.close();
       } catch { /* already gone */ }
       uds.shutdown();
+      await localIdle();
       // See check:orphans — a temp home a test does not remove is 4 GB in
       // aggregate and invisible one at a time.
       await Deno.remove(dir, { recursive: true }).catch(() => {});
@@ -102,16 +105,16 @@ Deno.test({
   async fn() {
     _resetBigStateWarnings();
     const dir = await Deno.makeTempDir({ prefix: "aio-smallstate-" });
-    const socketPath = join(dir, "small.sock");
+    const socketPath = localEndpoint(join(dir, "small.sock"));
     const uds = createUDSListener(
       socketPath,
       () => ({ nav: { tab: "desk" } }),
       () => {},
       () => {},
     );
-    let conn: Deno.Conn | undefined;
+    let conn: LocalConn | undefined;
     const warns = await warningsDuring(async () => {
-      conn = await Deno.connect({ path: socketPath, transport: "unix" });
+      conn = await connectLocal(socketPath);
       await new Promise((r) => setTimeout(r, 80));
     });
     try {
@@ -125,6 +128,7 @@ Deno.test({
         conn?.close();
       } catch { /* already gone */ }
       uds.shutdown();
+      await localIdle();
       await Deno.remove(dir, { recursive: true }).catch(() => {});
       _resetBigStateWarnings();
     }

@@ -283,6 +283,7 @@ export function createCellWorkerPool(opts: {
         ...(appId ? { appId } : {}),
         ...(opts.reportError ? { reportError: opts.reportError } : {}),
         countError: () => opts.breaker?.count(name),
+        respawn: f.__aio.workerRespawn === true,
         initialState: () => getSlice(name),
         applyPatches: (cell: string, ops: Patch[]) => {
           // In-flight (dispatch.ts INFLIGHT): these ARE a method's writes

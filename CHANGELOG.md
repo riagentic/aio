@@ -1,5 +1,187 @@
 # Changelog
 
+## v1.0.19-beta — tested on Windows and macOS as on Linux; what only dev said is said in a package (2026-10-07)
+
+> **Nothing is removed or renamed. Added: `build.guestPreloads` and
+> `guestPreload()`, `electron.webviewTag`, `electron.guestDownloads`,
+> `openWindow`'s `partition` and `origins`, `clearPartition`, `workerRespawn`
+> and `crashWorker`, `build --smoke`, and an aiol hook-order rule.** Three
+> things an existing app can notice: a `<webview>` or child window that shows
+> another site gets its own session (its cookies start empty once); a `testUI`
+> call that passes a `Date` or a `Map` to a method now fails; a compiled build
+> stops on a server file read the binary will not hold. See
+> [the upgrade guide](docs/upgrade/from-1.0.18-beta-to-1.0.19-beta.md).
+
+### Desktop builds (a field report)
+
+- **A `<webview>` guest preload ships in a packaged app.** It worked in
+  `deno task dev` and was dropped in every package: the window accepts a preload
+  only inside its base directory, a package's base directory is its `dist/`, and
+  an app could put nothing there. `build.guestPreloads` declares the files,
+  every Electron package carries them (a macOS bundle in `Contents/Resources/`,
+  inside the seal), and `guestPreload(path)` from `aio/ui` names one the same
+  way in dev and in the package. `openWindow(url, { preload })` takes the same
+  name. A declared file that is missing and a `guestPreload()` that is not
+  declared fail the build; a `preload` written as a path is warned about; a
+  refused preload is logged with the fix and told to the page
+  (`aio:guest-preload-refused`). Run in a real packaged window on Linux, Windows
+  11 and macOS 26. `tests/guest-preloads.test.ts`,
+  `tests/electron-guest-preload-artifact-e2e.test.ts`.
+- **Embedded and child pages are outsiders.** A child window and a partitionless
+  `<webview>` on another site shared the app's session, where a page can read
+  and post to the app's own `aio://` pages; they now live in `persist:aio-child`
+  and `persist:aio-webview`. A partitionless guest on the app's own pages cannot
+  leave for another site. Only the app's own window holds the app's permissions;
+  a child window's `window.open` opens no window; a link to the system browser
+  needs a real click and is rate-limited; downloads from guests and child
+  windows are cancelled (`electron.guestDownloads`); device pickers are refused
+  for them. Added: `electron.webviewTag` (the tag without `openWindow`),
+  `openWindow(url, { partition, origins })`, `__aioShell.clearPartition`. The
+  connect-mode window has the same guards. Measured in real windows on Electron
+  44.5.1. `tests/electron-web-isolation.test.ts`.
+- **`deno task build --smoke`** (`build.smoke`) starts every artifact that can
+  run on this machine from another folder with a throwaway home, and fails the
+  build on a page file or asset that does not load, a declared guest preload the
+  package cannot attach, an error or `REFUSED` line at boot, or a process left
+  behind. An artifact it cannot run is listed as not smoke-tested;
+  `--smoke=strict` makes that a failure. `tests/build-smoke.test.ts`.
+- **A compiled build stops on a file read the binary will not hold.**
+  `Deno.readTextFile(new URL("../style.css", import.meta.url))` in a server
+  module read a file that exists in dev and not in the binary; the app fell back
+  in silence. The build names the line and the `compile.include` entry to add.
+  Less certain forms — and a read whose absence the code handles (`.catch`,
+  `try`/`catch`, a `Deno.build.standalone` test) — are warned about; a `fetch`
+  outside a `*.server.ts` module is the browser's and is not judged.
+  `// aio-ok(read): <why>` marks a read the check should not judge.
+  `tests/build-unembedded-reads.test.ts`.
+- **Windows: an app installed by an older one-click `.exe` gets its Start-menu
+  shortcut** at its next start, once. `tests/sfx-shortcut.test.ts`.
+- **A module under a `compile.include` directory is a graph root**; the trim
+  keeps a test file its own package names; an interrupted trim is repaired at
+  the next start from source; an Android build on a Windows host starts
+  `gradlew.bat`; minify keeps a function declaration's name wherever it is read.
+- **macOS: the "Move to Applications?" question closes when the app stops.** It
+  stayed on screen for up to ten minutes after the app was gone.
+
+### Said in a release build too
+
+- **A changed hook count.** A hook after an early `return` made a component read
+  another hook's state — a line in the dev console, nothing in a package. A
+  production page logs one error per component. So do `onMount`, `onCleanup`,
+  `onUnmount` and `useHead` called outside a render, which were dropped.
+  `tests/renderer-hook-order-prod.test.ts`.
+- **aiol: hook order.** A state hook after a conditional `return`, behind a
+  condition, or in a loop is flagged. The hook list is the renderer's own,
+  pinned by a test. `tests/aiol-hook-order.test.ts`.
+- **Arguments JSON cannot carry intact** are logged by a production client, once
+  per method; the frame is unchanged. `testUI` puts a call from a component, a
+  handler or the test body through the production encode and decode, and fails
+  on a changed argument by path; an optional field left `undefined` is not one.
+  `tests/wire-harness-differential.test.tsx` compares its verdict with a real
+  WebSocket.
+
+### Windows and macOS
+
+aio's suite runs natively on Windows 11 and on an Apple-silicon Mac. About 290
+test files were ported off Linux-only props to run there, about 170 tests that
+still skipped Windows now run, and every remaining skip states why. What running
+there found:
+
+- **A recycled process number read as the running app.** A lock now records when
+  its process started — on Windows from the process's creation time, and for
+  local connections on macOS from `proc_pidinfo` — as it did on Linux.
+- **Windows: `am kill --stale` could end any process** a stale answer named; it
+  checks what the process is. A launch that never started writes why.
+- **Windows: a refused large upload lost its answer** on the local pipe; a file
+  that failed to open as a database stayed locked; a zip packed there had
+  backslash names; minify did nothing; aiol and several `am` verbs mishandled
+  paths; amui could not start an app.
+- **macOS: a snapshot through a symlinked folder failed; a root certificate made
+  by LibreSSL could not sign and is now replaced, loudly; a busy peer closed for
+  flooding or for an old protocol never got the reason; a discovery probe that
+  could not be sent read as "no apps found"** (`am discover` now exits 1 and
+  names the Local Network permission).
+- **Windows: the once-per-start log pass could run twice.** A file just written
+  can read up to 2 ms ahead of the clock there, and the claim was read as stale.
+  **A rebuild over a program that is still running** said only "Access is
+  denied"; it names the file and says to stop it.
+  `tests/logger-rotate-two-starts.test.ts`, `tests/build-output-held.test.ts`.
+- **Any OS: `am restart` reported "started" for a launch that had lost to
+  another one.** It reads the lock again after the door answers.
+  `tests/am-restart-lost-race.test.ts`.
+- **Any OS: a sync app killed while it refused a change could refuse to boot.**
+  The change's row is stored before the method runs and removed when the method
+  refuses it; a kill in between left the row, and the next start replayed it,
+  met the same refusal, and stopped (dev) or set the cell aside (prod). A stored
+  change now carries a mark that is set once it is accepted. At start, a cell's
+  last change that has no mark and is refused is removed with one warning; a
+  marked change that fails still stops the start. A row left this way by an
+  older aio still stops it, and the message gives the one-line repair. Cost: one
+  more small write per accepted change — none measured under the default
+  `synchronous = NORMAL`, a second sync per change under `FULL` (about 5 ms → 10
+  ms on NVMe). Found by the upgrade sweep on a real Windows laptop.
+  `tests/sync-op-killed-before-settle.test.ts`.
+- **Any OS: the record of the installed version could be read empty.** It was
+  written in place; it is written whole and swapped in.
+  `tests/install-record-written-whole.test.ts`.
+- **The lock folder under several starts at once.** On macOS, making a file or a
+  socket in a folder that a sibling had just removed answers "invalid argument",
+  and a start failed. On any OS the folder could be judged in the instant
+  between being made and being made private, and the app then kept its lock in a
+  fallback folder where `am` does not look. The folder is made private in one
+  step, and every create in it goes through one helper that remakes the folder
+  and retries for up to 2 s, then fails by name. Six processes, 3 000 rounds
+  each: about 19 % of rounds failed before, none of 36 000 after.
+  `tests/lock-dir-removed-under-create.test.ts`.
+- **Windows: two processes could be inside the lock mutex at once.** "Is the
+  file I locked still the one at the path" compared file ids, which are 64 bits
+  there and lose their low bits as a number, so a mutex file that had just been
+  removed could read as its successor. The handle is asked first whether its
+  file still has a name. Under three suites at once: 5 clashes in 21 rounds
+  before, none in 30 runs after. A create inside a folder that Windows is still
+  removing is waited out, bounded.
+- **Watcher marker files and record temp files of a killed process** are swept
+  by the next start; the watcher removes its own at exit, and says once when it
+  could not make one. `tests/watcher-sentinel-gone-at-exit.test.ts`.
+- **The "source changed" note of `am surface`** compared file times with the
+  clock, which can disagree by milliseconds (or more on a network share); it
+  compares a file with its own earlier time.
+- **A build with a package missing from `node_modules`** names the package and
+  the command to run. A refused guest preload's fix line names the refused file.
+
+### Renderer and tests
+
+- **`afterRender` never runs for a discarded component** — by an error boundary,
+  a failed hydration, or a removal in the same pass. A `<Portal>` under a
+  boundary that caught kept a subscription on every catch; it is released. Found
+  by a new step in the lifecycle fuzzer.
+  `tests/air-after-render-discarded.test.ts`.
+- **`testUI`: contrast and selector audits, and once-only warnings, reset on
+  every mount**; the history stand-in records `#hash` navigations.
+- **A crashed `worker: true` cell** can be started again
+  (`workerRespawn: true`); `crashWorker(cell)` in `aio/testing` proves it.
+  `tests/worker-respawn.test.ts`.
+
+### Running an app
+
+- Steady memory pressure is logged once, and again as it worsens; the hook's
+  cadence is unchanged. A machine-memory, growth or native-leak condition that
+  starts meanwhile is still said.
+- A journal tail replayed by start after start with no save in between is
+  charged against the replay ceiling; at the ceiling one start is refused, and
+  the next replays.
+- The boot report labels the `am` port `control`.
+- A git that could not be started is said as that, not as "not a git clone".
+
+### Packages
+
+- esbuild 0.24.2 → 0.25.12, Electron 44.4.1 → 44.5.1, happy-dom 17.6.3 → 20.14.5
+  — the versions a field report's dependency audit flagged. An app that keeps
+  its old pins builds and tests; `am fix` aligns Electron, and `am doctor` names
+  an Electron older than the tested one.
+- The page bundle is 84 KB gzipped (was 83): +0.2 KB, itemised in
+  `tests/bundle-size.test.ts`.
+
 ## v1.0.18-beta — the Windows stub is Rust: Go leaves aio (2026-10-04)
 
 > **One flag (`am publish --no-zip`), one build key (`build.windows.shortcut`)

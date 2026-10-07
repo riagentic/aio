@@ -16,8 +16,9 @@
 // several deliberately name a retired spelling to explain why it is gone.
 import { assert, assertEquals } from "@std/assert";
 import { standardTasks } from "../src/am/am-cmd-create.ts";
+import { fromFileUrl } from "@std/path";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 async function* walk(dir: string): AsyncGenerator<string> {
   for await (const e of Deno.readDir(dir)) {

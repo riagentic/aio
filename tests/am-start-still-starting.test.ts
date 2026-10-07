@@ -127,10 +127,16 @@ async function reap(pids: Iterable<number>): Promise<void> {
 const pidsIn = (text: string): number[] =>
   [...text.matchAll(/"(?:pid|killing|waiting)":(\d+)/g)].map((m) => +m[1]!);
 
+/** How long the fixture app takes to boot: past the first `am start`'s 10 s
+ *  wait AND the `am status` after it, and inside the second `am start`'s own
+ *  10 s. Each `am` is a process start, which takes seconds on Windows —
+ *  measured there: at 15 s the app was up before the second `am start` ran
+ *  ("already running", 3 runs of 3), at 30 s the second gave up first. */
+const BOOT_MS = Deno.build.os === "windows" ? 25_000 : 15_000;
+
 Deno.test({
   name:
     "am start ×2 on a 15 s boot: the second WAITS for the first, never kills it",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await makeApp("counter", "am-still-starting-");
     const apps = await tempDir("am-still-starting-apps-");
@@ -139,7 +145,7 @@ Deno.test({
       const cell = join(dir, "src", "cell.ts");
       await Deno.writeTextFile(
         cell,
-        `await new Promise((r) => setTimeout(r, 15_000));\n` +
+        `await new Promise((r) => setTimeout(r, ${BOOT_MS}));\n` +
           await Deno.readTextFile(cell),
       );
       const port = freePort();
@@ -198,7 +204,6 @@ Deno.test({
 
 Deno.test({
   name: "am start: a boot that throws a teachable error shows its → fix:",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await makeApp("counter", "am-crash-tail-");
     const apps = await tempDir("am-crash-tail-apps-");

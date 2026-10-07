@@ -67,7 +67,7 @@ import {
   type SfxFormat,
   type SfxHeader,
 } from "./sfx-trailer.ts";
-import { electronStagingDir } from "./build-electron.ts";
+import { _zipFallbackSpec, electronStagingDir } from "./build-electron.ts";
 import { runDenoCompile } from "./build-compile.ts";
 import { ensureHeadroom } from "./freeze-guard.ts";
 import { artifactMode, formatMb } from "./build-helpers.ts";
@@ -94,7 +94,7 @@ export {
  *  built from `windows-sfx-stub/` by the command in its README — update this
  *  line with every rebuild. */
 export const SFX_STUB_SHA256 =
-  "2fd8497fbb7c00cf1cecee664b4e8b1b2bd8c01e0a5c0196f010bf8704d41871";
+  "f685aac7226c59da6500f184899fcdcc95c5399745f28ebe41a62792a31c9d65";
 
 /** SHA-256 over the stub's SOURCES (`src/*.rs`, `Cargo.toml`, `Cargo.lock`) as
  *  they were when {@link SFX_STUB_SHA256} was built. Rebuilding needs Rust,
@@ -103,7 +103,7 @@ export const SFX_STUB_SHA256 =
  *  (`tests/build-windows-sfx-stub.test.ts` prints the value to put here). */
 // aio-ok: a test-only seam — the pin a gate without Rust compares the sources with.
 export const SFX_STUB_SOURCE_SHA256 =
-  "7aa3ce923acd381e4dae5a0c8a8b51e4177b64cf6adaefd4e62f70a2f7c5b3fd";
+  "2928a44f50f85ba9fde382595e415ca34b3f15a2a4b83efb476fc5f8b90862b9";
 
 /** The self-contained exe's file name — the zip's name with `.exe`, so the
  *  two Windows desktop artifacts sort together and neither is mistaken for
@@ -513,24 +513,39 @@ async function removeQuietly(path: string): Promise<void> {
 async function zipFollowingLinks(dir: string, out: string): Promise<void> {
   // `zip -r` updates an existing archive; only a fresh one holds just this tree.
   await removeQuietly(out);
-  let r: Deno.CommandOutput;
-  try {
-    r = await new Deno.Command("zip", {
-      args: ["-r", "-q", out, "."],
-      cwd: dir,
-      stdout: "null",
-      stderr: "piped",
-    }).output();
-  } catch (e) {
+  // `zip` first, PowerShell second — the order and the fallback `zipDir`
+  // packs the `.zip` artifact with: a Windows host has no `zip`, and .NET
+  // packs a link as its target, which is what is wanted here.
+  const ps = _zipFallbackSpec(dir, out);
+  const attempts: [string, string[], Record<string, string>?][] = [
+    ["zip", ["-r", "-q", out, "."]],
+    [ps.cmd, ps.args, ps.env],
+  ];
+  let noZip: unknown;
+  for (const [cmd, args, env] of attempts) {
+    let r: Deno.CommandOutput;
+    try {
+      r = await new Deno.Command(cmd, {
+        args,
+        env,
+        cwd: cmd === "zip" ? dir : undefined,
+        stdout: "null",
+        stderr: "piped",
+      }).output();
+    } catch (e) {
+      noZip ??= e; // not installed — try the next
+      continue;
+    }
+    if (r.success) return;
     throw new Error(
-      `zip could not be run (${e instanceof Error ? e.message : e})`,
+      `${cmd}: ${
+        new TextDecoder().decode(r.stderr).trim().split("\n")[0] ?? ""
+      }`,
     );
   }
-  if (!r.success) {
-    throw new Error(
-      `zip: ${new TextDecoder().decode(r.stderr).trim().split("\n")[0] ?? ""}`,
-    );
-  }
+  throw new Error(
+    `zip could not be run (${noZip instanceof Error ? noZip.message : noZip})`,
+  );
 }
 
 /** Pack stub + payload → SFX exe on disk. The payload is STREAMED through the

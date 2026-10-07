@@ -11,12 +11,12 @@
 // Driven through a REAL `am` process from a subdirectory: the record and the
 // child's `Deno.cwd()` are two facts that only a spawn can put side by side.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { lockDir } from "../src/server/single-instance-lock.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const AM = new URL("../src/am.ts", import.meta.url).pathname;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const AM = fromFileUrl(new URL("../src/am.ts", import.meta.url));
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 const APP = "cwdprobe";
 
 /** The scoped lock dir `am` will use under `apps` — asked of THE decider
@@ -35,7 +35,6 @@ function scopedLockDir(apps: string): string {
 
 Deno.test({
   name: "am start: the child's cwd is the cwd the launch record claims",
-  ignore: Deno.build.os === "windows", // the detached spawn is sh/nohup here
   fn: async () => {
     const root = await tempDir("aio-am-cwd-");
     const apps = await tempDir("aio-am-cwd-apps-");

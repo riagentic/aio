@@ -27,6 +27,7 @@ import {
 } from "../src/air/contrast-cascade.ts";
 import { setDevModeOverride } from "../src/state/dev-flag.ts";
 import { closeWindow } from "../src/testing/close-window.ts";
+import { breakRootCascade } from "./root-cascade-defect-helper.ts";
 
 /** A DOM whose `getComputedStyle` answers from an inline map — the shape a real
  *  engine reports (always resolved `rgb()`, never a keyword or a var()). */
@@ -315,9 +316,12 @@ Deno.test("contrast audit: the element is named the way HTML spells it", async (
 async function inHappyDom(
   css: string,
   html: string,
+  /** Give the window happy-dom 17's root cascade (see the helper). */
+  brokenCascade = false,
 ): Promise<{ findings: number; warns: string[] }> {
   const { Window } = await import("happy-dom");
   const win = new Window({ url: "https://x.test" });
+  if (brokenCascade) breakRootCascade(win);
   const doc = win.document;
   doc.body.innerHTML = `<style>${css}</style>${html}`;
   const warns: string[] = [];
@@ -527,7 +531,7 @@ Deno.test("contrast cascade: every legitimate coincidence stays 'trustworthy'", 
   );
 });
 
-Deno.test("contrast cascade: in a real happy-dom window the walk stands down once, loudly", async () => {
+Deno.test("contrast cascade: in a happy-dom window with 17.x's cascade the walk stands down once, loudly", async () => {
   // What `testUI`/`testComponent` install on every mount.
   _setContrastCascadeProbe(contrastCascadeNotice);
   _resetContrastAudit({ cascadeNotice: true });
@@ -535,7 +539,16 @@ Deno.test("contrast cascade: in a real happy-dom window the walk stands down onc
     ':root[data-palette="light"]{--ink:#111111;--bg:#ffffff}' +
     ':root[data-palette="print"]{--ink:#ffffff;--bg:#ffffff}' +
     ".root{background-color:var(--bg);color:var(--ink)}";
-  const first = await inHappyDom(css, `<div class="root"><span>x</span></div>`);
+  const body = `<div class="root"><span>x</span></div>`;
+  // The engine this repo runs (happy-dom 20.14.5) cascades as a browser does:
+  // nothing to stand down from, and the palette the root really has —
+  // #eeeeee on #111111 — is measured and fine. Fails the day that regresses.
+  const real = await inHappyDom(css, body);
+  assertEquals(real.warns, [], "a correct cascade is measured, silently");
+  assertEquals(real.findings, 0);
+  // happy-dom 17.x's (a caller's own document may still be one): the
+  // `print` palette, declared last, leaks onto a root it does not match.
+  const first = await inHappyDom(css, body, true);
   assertEquals(first.findings, 0, first.warns.join("\n"));
   assertEquals(first.warns.length, 1, first.warns.join("\n"));
   assert(
@@ -543,7 +556,7 @@ Deno.test("contrast cascade: in a real happy-dom window the walk stands down onc
     first.warns[0],
   );
   // Said once: the same engine answers the same way on the next pass.
-  const again = await inHappyDom(css, `<div class="root"><span>x</span></div>`);
+  const again = await inHappyDom(css, body, true);
   assertEquals(again.warns, []);
   // A single palette leaves nothing to disprove, and the walk still measures.
   const single = await inHappyDom(

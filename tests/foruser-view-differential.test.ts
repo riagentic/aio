@@ -25,11 +25,13 @@ import { _resetAioRuntime } from "../src/state/runtime-reset.ts";
 import { getLogger, setLogger } from "../src/diagnostics/logger.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import type { AccessUser, CellFieldFilter } from "../src/state/cell-types.ts";
+import { fromFileUrl } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 
 type Slice = Record<string, unknown>;
 type Row = { owner: string; v: string };
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("..", import.meta.url));
 
 const DECLARED = {
   theme: "light",
@@ -243,7 +245,7 @@ Deno.test("forUser: the headless render (am surface) agrees with the broadcast f
     // component just reports what each declared key answers.
     await Deno.writeTextFile(
       `${dir}/App.ts`,
-      `import { h } from "${REPO}src/air/vdom.ts";
+      `import { h } from "${spec(REPO)}src/air/vdom.ts";
 export default function App() {
   const g = globalThis as any;
   const def = g.__fudiffDef;

@@ -18,8 +18,9 @@
 // stripped of SGR escapes before it reaches a digest.
 import { assert, assertEquals } from "@std/assert";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { fromFileUrl } from "@std/path";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("..", import.meta.url));
 const ESC = "\u001b";
 
 /** A template-literal type over two type parameters — the shape `deno doc`

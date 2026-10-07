@@ -10,6 +10,8 @@ import { join } from "@std/path";
 import { createUDSListener } from "../src/server/aio.ts";
 import { decidePatchOrFull } from "../src/server/patch-or-full.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
+import { connectLocal, type LocalConn } from "../src/server/local-listen.ts";
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -45,7 +47,7 @@ Deno.test("patch-or-full: the estimate answers a clearly-small patch without ser
 });
 
 async function connectAndRead(socketPath: string) {
-  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  const conn = await connectLocal(socketPath);
   const lines: string[] = [];
   const decoder = new TextDecoder();
   let buf = "";
@@ -65,7 +67,7 @@ async function connectAndRead(socketPath: string) {
   return { conn, lines };
 }
 
-function send(conn: Deno.Conn, msg: string): void {
+function send(conn: LocalConn, msg: string): void {
   const w = conn.writable.getWriter();
   w.write(new TextEncoder().encode(msg + "\n")).catch(() => {});
   w.releaseLock();
@@ -81,7 +83,9 @@ async function until(pred: () => boolean, ms = 3000): Promise<void> {
 }
 
 Deno.test("uds: a small patch round on a big state does not serialize the view", async () => {
-  const socketPath = join(await tempDir("aio-uds-dec-"), "uds-decider.sock");
+  const socketPath = localEndpoint(
+    join(await tempDir("aio-uds-dec-"), "uds-decider.sock"),
+  );
   const state = {
     c: {
       v: 0,
@@ -127,6 +131,7 @@ Deno.test("uds: a small patch round on a big state does not serialize the view",
   } finally {
     await wait(20);
     uds.shutdown();
+    await localIdle();
   }
 });
 
@@ -135,10 +140,10 @@ Deno.test("uds: after an unmeasured patch, a state that reverts to the last FULL
   // not serialize leaves the last full text describing an OLDER state. A later
   // fallback round whose view serializes back to that older text must not be
   // read as "already delivered" — the peer holds the patched state.
-  const socketPath = join(
+  const socketPath = localEndpoint(join(
     await tempDir("aio-uds-memo-"),
     "uds-decider-memo.sock",
-  );
+  ));
   const state: Record<string, { v: number; pad?: string }> = {
     c: { v: 1, pad: "p".repeat(2000) },
     d: { v: 0 },
@@ -181,5 +186,6 @@ Deno.test("uds: after an unmeasured patch, a state that reverts to the last FULL
   } finally {
     await wait(20);
     uds.shutdown();
+    await localIdle();
   }
 });

@@ -68,6 +68,7 @@ import {
   check as persistCheck,
   report as persistReport,
 } from "./check-persist-decider.ts";
+import { fromFileUrl } from "@std/path";
 
 export type Offender = {
   file: string;
@@ -798,7 +799,7 @@ export async function checkDeciders(root: string): Promise<Offender[]> {
 }
 
 if (import.meta.main) {
-  const root = new URL("../", import.meta.url).pathname;
+  const root = fromFileUrl(new URL("../", import.meta.url));
   const all = await scan(root);
   const v = verdict(all, LEDGER);
   if (Deno.args.includes("--print-ledger")) {

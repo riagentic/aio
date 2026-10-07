@@ -17,6 +17,7 @@ import {
 import { STARTUP_GRACE_MS } from "../src/server/single-instance-lock.ts";
 import { childEnv } from "./e2e-app-harness.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const REPO = join(import.meta.dirname!, "..");
 const NOW = 1_000_000;
@@ -145,7 +146,7 @@ Deno.test("askRunningToShow: a holder that goes away ends the wait at once", asy
 
 // ── real processes: the launch that meets a STARTING desktop holder ──
 //
-// The entry plants the holder's lock (a live `sleep`, status "starting", the
+// The entry plants the holder's lock (a live idle child, status "starting", the
 // configured port) and stands in for its window: once the show request
 // appears it takes it (the window opened), ends the holder (the first launch
 // died while starting), does nothing (a holder stuck starting), or comes up
@@ -160,7 +161,8 @@ import { lockDir, writeLock } from "aio/server/single-instance-lock.ts";
 import { acquireSingletonLock } from "aio/server/aio-run-helpers.ts";
 const appId = Deno.env.get("APP_ID")!;
 const how = Deno.env.get("HOLDER")!;
-const holder = new Deno.Command("sleep", { args: ["120"], stdin: "null",
+const holder = new Deno.Command(Deno.execPath(), {
+  args: ["eval", "setTimeout(() => {}, 600000)"], stdin: "null",
   stdout: "null", stderr: "null" }).spawn();
 const lock = (o: Record<string, unknown>) =>
   writeLock({ appId, pid: holder.pid, port: 54879, startedAt: Date.now(),
@@ -174,7 +176,10 @@ lock(how === "stuck" || how === "late"
   : how === "up-dies" ? { status: "started" } : {});
 if (how === "up-dies") setTimeout(() => holder.kill("SIGKILL"), 800);
 let listener: Deno.Listener | undefined;
-let upAt = 0;
+// The request it came up on, by the file's own mtime — never \`Date.now()\`:
+// the file system's clock runs ahead of it by milliseconds on Windows, and
+// a request written BEFORE it came up then read as written after.
+let firstAt = 0;
 // Every request this launch made, by the time it was written.
 const requests = new Set<number>();
 const window = setInterval(() => {
@@ -194,11 +199,11 @@ const window = setInterval(() => {
         listener = Deno.listen({ hostname: "127.0.0.1", port: 0 });
         lock({ status: "started",
           port: (listener.addr as Deno.NetAddr).port });
-        upAt = Date.now();
+        firstAt = Deno.statSync(join(lockDir(), e.name)).mtime!.getTime();
       } else {
         // Only a request written AFTER it came up: the first one stays.
         const at = Deno.statSync(join(lockDir(), e.name)).mtime!.getTime();
-        if (at > upAt) Deno.removeSync(join(lockDir(), e.name));
+        if (at > firstAt) Deno.removeSync(join(lockDir(), e.name));
       }
     }
     if (how === "opens" || how === "dies" || how === "takes-dies") {
@@ -235,8 +240,8 @@ async function secondLaunch(
       join(dir, "deno.json"),
       JSON.stringify({
         imports: {
-          "aio": `${REPO}/mod.ts`,
-          "aio/": `${REPO}/src/`,
+          "aio": `${spec(REPO)}/mod.ts`,
+          "aio/": `${spec(REPO)}/src/`,
           "immer": "npm:immer@10.2.0",
           "@std/path": "jsr:@std/path@1.1.2",
         },
@@ -292,7 +297,6 @@ const lineOf = (out: string, re: RegExp | string) =>
 Deno.test({
   name:
     "second launch, holder still starting: says it is waiting, its window takes the request — exit 0",
-  ignore: Deno.build.os === "windows", // `sleep` stands in for the holder
   async fn() {
     const r = await secondLaunch("opens");
     assertEquals(r.code, 0, r.out);
@@ -311,7 +315,6 @@ Deno.test({
 Deno.test({
   name:
     "second launch, holder dies while starting: its lock is reclaimed and this launch starts",
-  ignore: Deno.build.os === "windows", // `sleep` stands in for the holder
   async fn() {
     const r = await secondLaunch("dies");
     assertEquals(r.code, 0, r.out);
@@ -325,7 +328,6 @@ Deno.test({
 Deno.test({
   name:
     "second launch, holder alive and stuck starting: one wait, said once, then the refusal a fresh launch gets — exit 1",
-  ignore: Deno.build.os === "windows", // `sleep` stands in for the holder
   async fn() {
     const r = await secondLaunch("stuck");
     assertEquals(r.code, 1, r.out);
@@ -345,7 +347,6 @@ Deno.test({
 Deno.test({
   name:
     "second launch, holder came up during the wait without taking the request: asked again as a running app — exit 0",
-  ignore: Deno.build.os === "windows", // `sleep` stands in for the holder
   async fn() {
     const r = await secondLaunch("late");
     assertEquals(r.code, 0, r.out);
@@ -363,7 +364,6 @@ Deno.test({
 Deno.test({
   name:
     "second launch, holder takes the request while starting and then dies: this launch does not end on it — it starts",
-  ignore: Deno.build.os === "windows", // `sleep` stands in for the holder
   async fn() {
     const r = await secondLaunch("takes-dies");
     assertEquals(r.code, 0, r.out);
@@ -379,7 +379,6 @@ Deno.test({
 Deno.test({
   name:
     "second launch, holder's server is up but its window never takes the request, and it dies: this launch starts",
-  ignore: Deno.build.os === "windows", // `sleep` stands in for the holder
   async fn() {
     const r = await secondLaunch("up-dies");
     assertEquals(r.code, 0, r.out);

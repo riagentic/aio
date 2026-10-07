@@ -9,10 +9,10 @@
 //
 //   deno task update:examples
 
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { count, mark, style } from "../src/diagnostics/fmt.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 const CASES = [
   { dir: "counter", template: "counter" },
   { dir: "todo", template: "todo" },

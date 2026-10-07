@@ -7,8 +7,9 @@
 // first thing a reader copied was the one form that fails.
 import { assert, assertEquals } from "@std/assert";
 import { walk } from "@std/fs/walk";
+import { fromFileUrl } from "@std/path";
 
-const ROOT = new URL("../", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("../", import.meta.url));
 const BAD = /\bam (surface|trigger) 0\b/;
 
 async function offenders(): Promise<string[]> {

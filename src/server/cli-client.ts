@@ -636,6 +636,9 @@ export function connectCli<S>(
   ready.catch(() => {});
 
   let connecting = false;
+  /** Cancels a `/__aio/health` identity request still in flight at `close()`:
+   *  a closed client holds no handle open, and the answer has no reader. */
+  const peerAbort = new AbortController();
   /** The appId this URL currently answers with, or undefined if it cannot be
    *  learned. `/__aio/health` is a public route and already carries `appId`,
    *  so this needs no protocol change and no new option. EVERY failure — an
@@ -653,7 +656,10 @@ export function connectCli<S>(
       const t = token ?? parsed.searchParams.get("token") ?? undefined;
       const res = await fetch(
         `${scheme}//${parsed.host}/__aio/health`,
-        t ? { headers: { authorization: `Bearer ${t}` } } : undefined,
+        {
+          signal: peerAbort.signal,
+          ...(t ? { headers: { authorization: `Bearer ${t}` } } : {}),
+        },
       );
       if (!res.ok) {
         await res.body?.cancel();
@@ -1268,6 +1274,7 @@ export function connectCli<S>(
       }
       ws?.close();
       ws = null;
+      peerAbort.abort();
       listeners.clear();
       // close() DISCARDS the queue — nothing will ever drain it — so here the
       // queued calls really are dead and rejectAll (not rejectInFlight) is the

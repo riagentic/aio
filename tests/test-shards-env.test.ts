@@ -14,8 +14,9 @@ import {
   SWALLOWED_PRESS,
   swallowedPresses,
 } from "../scripts/test-shards.ts";
+import { fromFileUrl } from "@std/path";
 
-const ROOT = new URL("../", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("../", import.meta.url));
 
 Deno.test("shardEnv: every non-window shard gets its own XDG_RUNTIME_DIR and portSliceFor's slice", async () => {
   const n = 6;

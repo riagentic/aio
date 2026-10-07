@@ -5,15 +5,16 @@
 // emulator lane (`test:android`) proves the APK; this pins the cause in the
 // ordinary suite, with no SDK: bundle the Android way, run its module scope.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import * as esbuild from "esbuild";
 import { bundleClient } from "../src/build/client-bundle.ts";
 import { stopEsbuildService } from "../src/build/esbuild-shared.ts";
 import { evaluateBundle } from "../src/build/graph-eval.ts";
 import { isRunningFromSource } from "../src/diagnostics/logger-types.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { fixtureNodeModules } from "./symlink-helper.ts";
 
-const REPO = new URL("../", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("../", import.meta.url));
 
 Deno.test("android bundle: import.meta.url is a string and import.meta.main is false", async () => {
   const root = await tempDir("aio-android-meta-");
@@ -26,6 +27,8 @@ if (import.meta.main !== false) throw new Error("import.meta.main is " + import.
 export default function App() { return null; }
 `,
     );
+    // The framework's own npm dep, where the build looks for it.
+    await fixtureNodeModules(root, "npm:immer@10.2.0");
     const b = await bundleClient({
       esbuild,
       root,

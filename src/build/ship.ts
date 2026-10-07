@@ -29,7 +29,7 @@ import {
 import {
   type Capabilities,
   permissionFlags,
-  scanCapabilities,
+  scanCapabilitiesFor,
 } from "./capabilities.ts";
 import { HEY, NO } from "../diagnostics/fmt.ts";
 import { count } from "../diagnostics/fmt.ts";
@@ -409,7 +409,10 @@ export async function buildReleaseManifest(
   },
 ): Promise<ShipManifest> {
   const sha256 = await sha256Hex(opts.binary);
-  const scanned = scanCapabilities(opts.sources);
+  const scanned = scanCapabilitiesFor(
+    opts.sources,
+    opts.platform?.os ?? Deno.build.os,
+  );
   const capabilities = opts.updates ? { ...scanned, net: true } : scanned;
   const manifest: ShipManifest = {
     manifestVersion: 3,

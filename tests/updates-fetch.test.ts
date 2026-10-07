@@ -69,7 +69,7 @@ Deno.test("updates: a CORRUPT trust file throws — it never fails open", async 
   await Deno.writeTextFile(trustPath(dir), `{"key":{"kty":"OKP","x":"ab`);
   const e = assertThrows(() => readTrust(dir), Error);
   assertMatch(e.message, /update trust file/);
-  assertMatch(e.message, new RegExp(trustPath(dir).replace(/[.*+?]/g, "\\$&")));
+  assert(e.message.includes(trustPath(dir)), e.message);
   assertMatch(e.message, /delete it/, "the fix is named");
 });
 

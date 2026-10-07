@@ -5,6 +5,7 @@
 // timestamped archive beside it at handover, an empty profile takes its place,
 // and a failure at any step names the step and leaves the previous data where
 // it was.
+import { programBytes, writeProgram } from "./fake-program-helper.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { buildShipManifest, generateSigningKey } from "../src/build/ship.ts";
@@ -53,8 +54,7 @@ async function rig(): Promise<Rig> {
   const dataDir = join(home, "data");
   await Deno.mkdir(dataDir);
   const artifact = join(home, "app");
-  await Deno.writeTextFile(artifact, appBody("1.0.0"));
-  await Deno.chmod(artifact, 0o755);
+  await writeProgram(artifact, appBody("1.0.0"));
   return {
     home,
     dataDir,
@@ -68,7 +68,7 @@ async function rig(): Promise<Rig> {
 async function publishBlocked(r: Rig, version: string): Promise<void> {
   const dir = join(r.releases, "prod");
   await Deno.mkdir(dir, { recursive: true });
-  const bytes = new TextEncoder().encode(appBody(version));
+  const bytes = await programBytes(appBody(version));
   const manifest = await buildShipManifest({
     name: "app",
     version,
@@ -125,7 +125,10 @@ Deno.test("retireData: the archive name says which app, which version, when", ()
     "my_app_v-2.0-2026-08-28T10-22-33Z",
   );
   assertEquals(archiveName(undefined, "1", at), "app-1-2026-08-28T10-22-33Z");
-  assertEquals(archiveRoot("/home/u/.wallet/data"), "/home/u/.wallet/archive");
+  assertEquals(
+    archiveRoot(join("/home/u/.wallet", "data")),
+    join("/home/u/.wallet", "archive"),
+  );
 });
 
 Deno.test("retireData: a blocked release installs, and the profile is retired at handover — moved whole, never deleted", async () => {
@@ -150,7 +153,10 @@ Deno.test("retireData: a blocked release installs, and the profile is retired at
     let refused = "";
     await rt.apply().catch((e) => (refused = String(e)));
     assertStringIncludes(refused, "no verified update is staged");
-    assertEquals(await Deno.readTextFile(r.artifact), appBody("1.0.0"));
+    assertEquals(
+      await Deno.readFile(r.artifact),
+      await programBytes(appBody("1.0.0")),
+    );
 
     // The door.
     await rt.apply(DOOR);
@@ -167,7 +173,10 @@ Deno.test("retireData: a blocked release installs, and the profile is retired at
     assertEquals(hooks.shutdowns.length, 1);
     assertEquals(hooks.relaunched, [r.artifact]);
     assertEquals(hooks.exits, [0]);
-    assertEquals(await Deno.readTextFile(r.artifact), appBody("2.0.0"));
+    assertEquals(
+      await Deno.readFile(r.artifact),
+      await programBytes(appBody("2.0.0")),
+    );
 
     // The previous profile is in the archive, whole.
     const archives = [...Deno.readDirSync(archiveRoot(r.dataDir))].map((e) =>

@@ -14,8 +14,9 @@ import {
   generateTip,
   PERSIST_WRITTEN_ANYWAY,
 } from "../src/diagnostics/error.ts";
+import { fromFileUrl } from "@std/path";
 
-const REPO = new URL("../", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("../", import.meta.url));
 const DOOR = /`[^`]+`|docs\/[\w./-]+\.md|(^|\s)--[a-z]/;
 
 const src = Deno.readTextFileSync(`${REPO}src/diagnostics/error.ts`);

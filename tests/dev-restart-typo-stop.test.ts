@@ -5,9 +5,10 @@
 // running" (exit 1) and could not reach it, and the next save brought the app
 // back up after the operator had stopped it.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { childEnv, freePort, kill } from "./e2e-app-harness.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const appSource = (port: number) =>
   `import { aio } from "aio";
@@ -65,20 +66,19 @@ const alive = (pid: number) => {
 Deno.test({
   name:
     "dev-restart e2e: am stop ends a dev session that waits on a typo, and a later save does not revive it",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("aio-dev-typo-stop-");
     const appsDir = join(dir, ".apps");
     const env = childEnv({ AIO_APPS_DIR: appsDir });
     const port = freePort();
     const url = `http://127.0.0.1:${port}`;
-    const repo = new URL("../", import.meta.url).pathname;
+    const repo = fromFileUrl(new URL("../", import.meta.url));
     await Deno.writeTextFile(
       join(dir, "deno.json"),
       JSON.stringify({
         imports: {
-          "aio": `${repo}mod.ts`,
-          "aio/": `${repo}src/`,
+          "aio": `${spec(repo)}mod.ts`,
+          "aio/": `${spec(repo)}src/`,
           "immer": "npm:immer@10.2.0",
           "@std/path": "jsr:@std/path@1.1.2",
         },

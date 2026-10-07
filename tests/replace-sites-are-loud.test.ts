@@ -54,7 +54,14 @@ Deno.test("meta.json: a write that cannot land is a warning — never a throw, n
       _renameDeps.rename = (from, to) => Deno.renameSync(from, to);
       writeAppMeta(dirs, info);
     });
-    assertEquals(ok.said, []);
+    // Windows waited the refusal out as a held-open file and remembers it, so
+    // there the recovery is said once (rename-over.ts `sayDone`).
+    assertEquals(
+      ok.said,
+      Deno.build.os === "windows"
+        ? [`info fs ${dirs.meta}: replaced again after 1 failed attempts`]
+        : [],
+    );
     assertEquals(
       JSON.parse(Deno.readTextFileSync(dirs.meta)).appId,
       "meta-loud",

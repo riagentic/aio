@@ -12,15 +12,33 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join, resolve } from "@std/path";
 import { depAioProvider, isOwnDepAio } from "../src/am/am-cmd-fix.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec as fileSpec } from "./module-spec-helper.ts";
+import { linkDir } from "./symlink-helper.ts";
+
+/** An ABSOLUTE path as an import map spells it on this OS: the path itself on
+ *  POSIX; on Windows a `file:` URL, the only absolute spelling there is. */
+const absSpec = (path: string) =>
+  Deno.build.os === "windows" ? fileSpec(path) : path;
 
 const REPO = dirname(dirname(fromFileUrl(import.meta.url)));
 
 Deno.test("depAioProvider: own ./dep/aio, a parent's ../dep/aio, no dep/aio", () => {
-  const d = "/r/client";
+  // The answer is a path of THIS host (`C:\\r\\dep\\aio` on Windows).
+  const d = resolve("/r/client");
   assertEquals(depAioProvider(d, "./dep/aio/mod.ts"), resolve(d, "dep/aio"));
-  assertEquals(depAioProvider(d, "../dep/aio/mod.ts"), "/r/dep/aio");
-  assertEquals(depAioProvider(d, "../dep/aio/"), "/r/dep/aio");
-  assertEquals(depAioProvider(d, "/x/dep/aio/mod.ts"), "/x/dep/aio");
+  assertEquals(depAioProvider(d, "../dep/aio/mod.ts"), resolve("/r/dep/aio"));
+  assertEquals(depAioProvider(d, "../dep/aio/"), resolve("/r/dep/aio"));
+  assertEquals(
+    depAioProvider(d, "/x/dep/aio/mod.ts"),
+    resolve("/x/dep/aio"),
+  );
+  // …and a `file:` URL names a path too — the one absolute spelling Windows
+  // has.
+  assertEquals(
+    depAioProvider(d, fileSpec(resolve("/x/dep/aio/mod.ts"))),
+    resolve("/x/dep/aio"),
+  );
+  assertEquals(depAioProvider(d, "file:///x/vendor-dep/aio-core/mod.ts"), null);
   assertEquals(depAioProvider(d, "../vendor-dep/aio-core/mod.ts"), null);
   assertEquals(depAioProvider(d, "jsr:@x/aio"), null);
 });
@@ -36,7 +54,7 @@ Deno.test({
       await Deno.mkdir(fw, { recursive: true });
       await Deno.writeTextFile(join(fw, "mod.ts"), "export {};\n");
       await Deno.mkdir(join(root, "dep"));
-      await Deno.symlink(fw, join(root, "dep", "aio"));
+      await linkDir(fw, join(root, "dep", "aio"));
       await Deno.writeTextFile(
         join(root, "deno.json"),
         JSON.stringify({
@@ -129,22 +147,34 @@ Deno.test("isOwnDepAio: the app's own dep/aio through a symlinked absolute path 
     const app = join(root, "real", "app");
     await Deno.mkdir(join(app, "dep"), { recursive: true });
     await Deno.mkdir(join(root, "real", "dep"));
-    await Deno.symlink(join(root, "real"), join(root, "link"));
+    await linkDir(join(root, "real"), join(root, "link"));
     const own = (spec: string) => {
       const p = depAioProvider(app, spec);
       assert(p !== null, spec);
       return isOwnDepAio(app, p);
     };
-    assertEquals(own(join(root, "link", "app", "dep", "aio", "mod.ts")), true);
+    assertEquals(
+      own(absSpec(join(root, "link", "app", "dep", "aio", "mod.ts"))),
+      true,
+    );
     assertEquals(own("./dep/aio/mod.ts"), true);
     assertEquals(own("../app/dep/aio/mod.ts"), true);
-    assertEquals(own(join(app, "dep", "aio", "mod.ts")), true);
+    assertEquals(own(absSpec(join(app, "dep", "aio", "mod.ts"))), true);
     // A parent's — real or through the link — stays the parent's.
     assertEquals(own("../dep/aio/mod.ts"), false);
-    assertEquals(own(join(root, "link", "dep", "aio", "mod.ts")), false);
+    assertEquals(
+      own(absSpec(join(root, "link", "dep", "aio", "mod.ts"))),
+      false,
+    );
     // Not on disk: the lexical answer.
-    assertEquals(isOwnDepAio("/nope/app", "/nope/app/dep/aio"), true);
-    assertEquals(isOwnDepAio("/nope/app", "/nope/dep/aio"), false);
+    assertEquals(
+      isOwnDepAio(resolve("/nope/app"), resolve("/nope/app/dep/aio")),
+      true,
+    );
+    assertEquals(
+      isOwnDepAio(resolve("/nope/app"), resolve("/nope/dep/aio")),
+      false,
+    );
   } finally {
     await dropTempDir(root);
   }
@@ -162,9 +192,9 @@ Deno.test({
       const app = join(root, "real", "app");
       await Deno.mkdir(join(app, "src"), { recursive: true });
       await Deno.mkdir(join(app, "dep"));
-      await Deno.symlink(fw, join(app, "dep", "aio"));
-      await Deno.symlink(join(root, "real"), join(root, "link"));
-      const spec = join(root, "link", "app", "dep", "aio", "mod.ts");
+      await linkDir(fw, join(app, "dep", "aio"));
+      await linkDir(join(root, "real"), join(root, "link"));
+      const spec = absSpec(join(root, "link", "app", "dep", "aio", "mod.ts"));
       await Deno.writeTextFile(
         join(app, "deno.json"),
         JSON.stringify({ name: "own", imports: { aio: spec } }),

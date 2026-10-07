@@ -18,6 +18,7 @@ import {
   resolveMaxHeapMB,
 } from "../src/server/heap-policy.ts";
 import { getLogger, setLogger } from "../src/diagnostics/logger-api.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const GB = 1024 * 1024 * 1024;
 
@@ -164,7 +165,9 @@ Deno.test("envHeapCapMB: an unreadable environment (no --allow-env) is 'no cap',
   const script = await Deno.makeTempFile({ suffix: ".ts" });
   await Deno.writeTextFile(
     script,
-    `import { envHeapCapMB } from "${mod}"; console.log("cap:" + envHeapCapMB());`,
+    `import { envHeapCapMB } from "${
+      spec(mod)
+    }"; console.log("cap:" + envHeapCapMB());`,
   );
   const out = await new Deno.Command(Deno.execPath(), {
     args: ["run", "--no-prompt", "--no-check", script],

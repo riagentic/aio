@@ -38,6 +38,7 @@ import {
 } from "./am-cmd-process.ts";
 import { appHome, profileOfHome } from "../server/app-dirs.ts";
 import type { InstanceInfo } from "../server/single-instance-lock.ts";
+import { electronBehindHintFor } from "./am-electron.ts";
 
 /** The newest file under a tree, by mtime. `null` for an empty/missing tree.
  *  Skips `node_modules` and `.git` — vendored and history, not the code the
@@ -220,11 +221,18 @@ export async function cmdDoctor(
   const mode = detectMode(flags);
   const root = resolve(projectRoot());
   const running = instancesInProject(root).filter((i) => i.alive);
+  // Advisory, and about the TREE rather than a process, so it is said whether
+  // or not anything runs — and never changes the exit code: a build ships the
+  // tested Electron regardless.
+  const electron = await electronBehindHintFor(root);
+  const hints = electron ? [electron] : [];
+  const hintBlocks = hints.map((h) => block("warn", h, undefined, "am fix"));
   if (running.length === 0) {
     out(
       {
         ok: true,
         findings: [],
+        hints,
         message: "no running instance of this project — nothing to compare",
       },
       mode,
@@ -240,6 +248,7 @@ export async function cmdDoctor(
             undefined,
             "am start",
           ),
+          ...hintBlocks,
         ),
     );
     return;
@@ -251,7 +260,7 @@ export async function cmdDoctor(
     })),
   );
   const bad = findings.filter((f) => !f.ok);
-  const payload = { ok: bad.length === 0, findings };
+  const payload = { ok: bad.length === 0, findings, hints };
   const pretty = () =>
     stack(
       heading("doctor", count(findings.length, "instance")),
@@ -268,6 +277,7 @@ export async function cmdDoctor(
         [bad.length, "failed", "bad"],
       ])),
       ...findings.map((f) => indent(settingsBlock(doctorLabel(f), f.settings))),
+      ...hintBlocks,
     );
   if (bad.length > 0) {
     // ONE act: findings + refusal. A preceding `out` then `outError` in

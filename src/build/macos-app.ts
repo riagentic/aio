@@ -56,6 +56,7 @@
 import { join } from "@std/path";
 import { appIconPng, pngSize } from "./app-icon.ts";
 import { copyDir, normalizeArtifactModes } from "./build-helpers.ts";
+import { GUEST_PRELOADS_DIR } from "../server/guest-preloads.ts";
 import { DEFAULT_KEPT_LOCALES, trimLprojLocales } from "./electron-locales.ts";
 import {
   MAC_WINDOW_LINK,
@@ -550,6 +551,20 @@ export async function assembleMacApp(opts: {
     });
   }
 
+  // The declared <webview> guest preloads, into `Contents/Resources/` too:
+  // the bundle has no `dist/` on disk (fact 2 above), and a guest preload is
+  // a file ELECTRON opens — the binary's VFS cannot serve it. Placed here,
+  // before the bundle is sealed, and found there at run time by
+  // `stagedGuestPreloadDirs` (server/guest-preloads.ts).
+  await copyDir(
+    join(stagedDir, "dist", GUEST_PRELOADS_DIR),
+    join(resources, GUEST_PRELOADS_DIR),
+  ).catch(async (e) => {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+    // None declared: copyDir made the directory before it found no source.
+    await Deno.remove(join(resources, GUEST_PRELOADS_DIR));
+  });
+
   // 3. Identity + icon on the nested runtime — the difference between a Dock
   //    entry called "Counter" and one called "Electron".
   const iconName = "AppIcon";
@@ -587,7 +602,11 @@ export async function assembleMacApp(opts: {
   // MAC_WINDOW_LINK — without it, "quit" after the app was opened twice
   // reached nothing). Relative, so the bundle can be moved; `codesign` seals
   // it as a link.
-  await Deno.symlink(MAC_WINDOW_LINK_TARGET, join(macos, MAC_WINDOW_LINK));
+  // `type`: a Windows host cannot infer it for a relative target (it looks
+  // from the cwd and throws); the target is the runtime's executable.
+  await Deno.symlink(MAC_WINDOW_LINK_TARGET, join(macos, MAC_WINDOW_LINK), {
+    type: "file",
+  });
   // The window's main bundle is now THIS bundle, and macOS picks the app's
   // language from the `.lproj` directories of the main bundle: without them
   // the page falls back to English whatever the user chose (measured: an

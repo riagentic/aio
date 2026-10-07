@@ -15,6 +15,7 @@ import {
   BUILD_VALUE_FLAGS,
   unknownBuildFlags,
 } from "../src/build/build-flags.ts";
+import { fromFileUrl } from "@std/path";
 
 Deno.test("appImportSpecifier: the UI entry is threaded through, not hardcoded", () => {
   // root-level app dir
@@ -91,7 +92,7 @@ Deno.exit(0);
         "run",
         "-A",
         "--config",
-        new URL("../deno.json", import.meta.url).pathname,
+        fromFileUrl(new URL("../deno.json", import.meta.url)),
         `${dir}/src/app.ts`,
       ],
       env: { AIO_APPS_DIR: `${dir}/home`, NO_COLOR: "1" },

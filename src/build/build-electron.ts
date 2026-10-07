@@ -19,6 +19,8 @@ import {
   writeDefaultIcon,
 } from "./build-helpers.ts";
 import type { BuildConfig } from "./build-config.ts";
+import { checkedGuestPreloads, stageGuestPreloads } from "./guest-preloads.ts";
+import { readDenoJson } from "../server/deno-json.ts";
 import { isHostPlatform } from "./platforms.ts";
 import { appIconLabel } from "./app-icon.ts";
 import { assembleMacApp, icnsFromName, icnsFromPng } from "./macos-app.ts";
@@ -109,7 +111,10 @@ export async function zipDir(dir: string, out: string): Promise<boolean> {
  *  into the script inside double quotes, a path with `$` or a backtick was
  *  expanded and one with `"` ended the string; and `Compress-Archive` reads
  *  `-Path` — and the folder of its destination — as a wildcard pattern, so a
- *  project under `C:\\work [old]\\app` packed nothing. @internal */
+ *  project under `C:\\work [old]\\app` packed nothing.
+ *
+ *  .NET opens what a link points at, so a symlink is packed as a COPY of its
+ *  target — unlike `zip -y`. @internal */
 export function _zipFallbackSpec(
   dir: string,
   out: string,
@@ -120,7 +125,13 @@ export function _zipFallbackSpec(
       "-NoProfile",
       "-NonInteractive",
       "-Command",
-      "try { Add-Type -AssemblyName System.IO.Compression.FileSystem; " +
+      // A zip entry is named with `/` (APPNOTE 4.4.17). Windows PowerShell's
+      // .NET Framework writes `\` unless told otherwise — `sub\big.txt`, and
+      // an empty folder as `empty\`, which a reader takes for a FILE. The
+      // switch is read once, on the first use of the type: set before it.
+      "try { [AppContext]::SetSwitch(" +
+      "'Switch.System.IO.Compression.ZipFile.UseBackslash', $false); " +
+      "Add-Type -AssemblyName System.IO.Compression.FileSystem; " +
       "[IO.Compression.ZipFile]::CreateFromDirectory($env:AIO_ZIP_DIR, " +
       "$env:AIO_ZIP_OUT) } catch { " +
       "[Console]::Error.WriteLine($_.Exception.Message); exit 1 }",
@@ -231,7 +242,23 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
     }
     if (exists) await Deno.copyFile(join(dist, name), join(appDirDist, name));
   }
+  // The declared <webview> guest preloads (deno.json build.guestPreloads):
+  // the only app files besides the bundle a window can load from the package.
+  // Staged for every OS here; a macOS bundle moves them to its Resources/
+  // (assembleMacApp), since it carries no dist/ on disk.
+  const guestPreloads = await checkedGuestPreloads(
+    root,
+    (await readDenoJson(root))?.config,
+  );
+  await stageGuestPreloads(root, guestPreloads, appDirDist);
   console.log(`${OK} dist/ assets copied to AppDir/dist/`);
+  if (guestPreloads.length) {
+    console.log(
+      `${OK} ${guestPreloads.length} guest preload(s) staged: ${
+        guestPreloads.join(", ")
+      }`,
+    );
+  }
 
   // Copy Electron runtime — auto-install on first build so `--electron` works
   // OUT OF THE BOX; loud manual fallback if it fails.

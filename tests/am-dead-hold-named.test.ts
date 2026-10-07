@@ -12,6 +12,8 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
+import { exits0, sleeper as sleeperChild } from "./proc-helper.ts";
 
 const REPO = join(import.meta.dirname!, "..");
 const CONFIG = join(REPO, "deno.json");
@@ -35,8 +37,8 @@ async function killedHold(
   verb: "backup" | "restore",
   dest = "bk",
 ): Promise<void> {
-  const data = join(REPO, "src/am/am-cmd-data.ts");
-  const dirs = join(REPO, "src/server/app-dirs.ts");
+  const data = spec(join(REPO, "src/am/am-cmd-data.ts"));
+  const dirs = spec(join(REPO, "src/server/app-dirs.ts"));
   const arg = verb === "backup" ? join(base, dest) : join(base, "archive");
   const code = `
     import { cmdBackup, cmdRestore } from ${JSON.stringify(data)};
@@ -87,7 +89,6 @@ async function killedHold(
 
 Deno.test({
   name: "am: a killed backup/restore is named by status, instances and start",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     const base = await tempDir("am-dead-hold-");
     try {
@@ -148,7 +149,7 @@ async function plant(
   env: Record<string, string>,
   rec: Record<string, unknown>,
 ) {
-  const mod = join(REPO, "src/server/single-instance-lock.ts");
+  const mod = spec(join(REPO, "src/server/single-instance-lock.ts"));
   const o = await new Deno.Command(Deno.execPath(), {
     args: [
       "eval",
@@ -168,15 +169,13 @@ async function plant(
 Deno.test({
   name: "am: stop --home names a dead hold ONCE; restart refuses a live hold " +
     "before announcing a relaunch; a recycled pid is not a live hold",
-  ignore: Deno.build.os !== "linux", // the start-token check is /proc-based
   fn: async () => {
     const base = await tempDir("am-dead-hold-2-");
-    const sleeper = new Deno.Command("sleep", {
-      args: ["60"],
+    const sleeper = sleeperChild({
       stdin: "null",
       stdout: "null",
       stderr: "null",
-    }).spawn();
+    });
     try {
       const cwd = join(base, "cwd");
       const home = join(base, "elsewhere");
@@ -209,7 +208,7 @@ Deno.test({
             new TextDecoder().decode(o.stderr),
         };
       };
-      const gone = new Deno.Command("true").spawn();
+      const gone = exits0();
       await gone.status;
       const hold = (pid: number, extra: Record<string, unknown> = {}) => ({
         appId: APP,
@@ -237,14 +236,17 @@ Deno.test({
       assert(!rs.all.includes("restart:"), `announced first:\n${rs.all}`);
 
       // A live pid whose START TOKEN differs is a recycled pid: the hold is
-      // dead, and status says stopped — never "maintenance".
-      await plant(
-        env,
-        hold(sleeper.pid, { home, startToken: "not-this-process" }),
-      );
-      const st = await am("status", `--home=${home}`, "--json");
-      assertEquals(st.code, 1, st.all);
-      assert(!st.all.includes('"maintenance"'), st.all);
+      // dead, and status says stopped — never "maintenance". Linux only: the
+      // token is a /proc field, and no other OS has one to disagree with.
+      if (Deno.build.os === "linux") {
+        await plant(
+          env,
+          hold(sleeper.pid, { home, startToken: "not-this-process" }),
+        );
+        const st = await am("status", `--home=${home}`, "--json");
+        assertEquals(st.code, 1, st.all);
+        assert(!st.all.includes('"maintenance"'), st.all);
+      }
     } finally {
       try {
         sleeper.kill("SIGKILL");

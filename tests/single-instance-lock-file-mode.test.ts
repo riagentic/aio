@@ -86,7 +86,7 @@ async function modesUnder022(
 
 Deno.test({
   name: "lock file mode: 0600 on the hard-link path",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // POSIX mode bits under a umask: Windows has neither
   async fn() {
     assertEquals(await modes("mode-link", false), [0o600, 0o600]);
   },
@@ -94,7 +94,7 @@ Deno.test({
 
 Deno.test({
   name: "lock file mode: 0600 on the no-hard-link fallback",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // POSIX mode bits under a umask: Windows has neither
   async fn() {
     assertEquals(await modes("mode-nolink", true), [0o600, 0o600]);
   },

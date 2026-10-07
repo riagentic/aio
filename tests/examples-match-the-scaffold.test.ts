@@ -11,9 +11,9 @@
 // One source, checked. `deno task update:examples` regenerates them.
 
 import { assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 const CASES = [
   { dir: "counter", template: "counter" },

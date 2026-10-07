@@ -717,6 +717,11 @@ Deno.test({
     }
 
     const handle = m(App);
+    // The WINDOW's Event, as on a page — the global one here is Deno's, and
+    // happy-dom 20 refuses an event that is not its own (17 took anything).
+    const Event =
+      (doc.defaultView as unknown as { Event: typeof globalThis.Event })
+        .Event;
 
     // Simulate click
     doc.dispatchEvent(new Event("click"));

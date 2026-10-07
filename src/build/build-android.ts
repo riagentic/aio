@@ -15,6 +15,7 @@ import {
   findGradle,
   findJdk,
   GRADLE_MAX_JDK,
+  gradlewPath,
   type JdkResult,
   misplacedIconHint,
   resolveAppIcon,
@@ -1037,13 +1038,13 @@ async function _runGradle(
     Deno.exit(1);
   }
 
-  const gradlew = join(androidDir, "gradlew");
-  await chmodIfSupported(gradlew, 0o755);
+  await chmodIfSupported(join(androidDir, "gradlew"), 0o755);
   console.log(`${OK} gradle wrapper (pinned 8.14.3)`);
 
   // Build APK using wrapper
   const gradleTask = doRelease ? "assembleRelease" : "assembleDebug";
   console.log(`./gradlew ${gradleTask}...`);
+  const gradlew = gradlewPath(Deno.build.os, androidDir);
   const gradleResult = await new Deno.Command(gradlew, {
     args: [gradleTask],
     cwd: androidDir,

@@ -13,13 +13,15 @@
 // whole project is type-checked ONCE — the compiler, not the fix's own
 // reading, says whether a name went missing.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { join, toFileUrl } from "@std/path";
 import { codeMaskDeep } from "../aiol/fixes.ts";
 import { lintProject } from "../aiol/mod.ts";
 import type { Issue } from "../aiol/types.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const REPO = new URL("../", import.meta.url).pathname;
+// An import map names a module by specifier, never by path: `C:\\x\\mod.ts`
+// is the URL scheme `c:` to Deno.
+const REPO = new URL("../", import.meta.url).href;
 const IMPORT = `import { useCell } from "aio";\n`;
 const CELL = `import { counter } from "./cell.ts";\n`;
 const USE = "useCell(counter).state.count";
@@ -181,6 +183,71 @@ const OWN: readonly string[] = [
 OWN.forEach((own, i) => {
   const src = CALL + own + "\n" + TAIL;
   CASES[`src/own${i}.ts`] = { src, fixed: src };
+});
+
+// ── A `call` an inner scope binds, beside aio's ──────────────────────
+// The files above also write `[call, rpc]`, which alone stops the fix. Here
+// NOTHING else does: aio's own use stands in the file, and a scope below it
+// binds a `call` of its own — a parameter, a local, a nested function —
+// which that scope then calls. How the name is bound × where the scope is:
+// the file is left whole, and aio's use is named, `[manual]`.
+/** How a scope binds its own `call`: in its parameters, or in its body. */
+const BINDS: readonly (readonly [params: string, body: string])[] = [
+  ["call: Fn", ""],
+  ["a: number, call: Fn", ""],
+  ["call: Fn = rpc", ""],
+  ["call = rpc", ""],
+  ["{ call }: { call: Fn }", ""],
+  ["{ rpc: call }: { rpc: Fn }", ""],
+  ["{ call = rpc }: { call?: Fn }", ""],
+  ["", "const call = rpc;"],
+  ["", "const call: Fn = rpc;"],
+  ["", "let call: Fn; call = rpc;"],
+  ["", "var call = rpc;"],
+  ["", "const a = 1, call = a ? rpc : rpc;"],
+  ["", "const { call } = { call: rpc };"],
+  ["", "const { rpc: call } = { rpc };"],
+  ["", "const [call] = [rpc] as const;"],
+  ["", "function call(o: { timeout: number }) { return o.timeout; }"],
+  ["", "function\n  call(o: { timeout: number }) { return o.timeout; }"],
+  ["", "function /* own */ call(o: { timeout: number }) { return o.timeout; }"],
+  ["", "async function call(o: { timeout: number }) { return o.timeout; }"],
+  ["", "function* call(o: { timeout: number }) { yield o.timeout; }"],
+  [
+    "",
+    "function call<T extends { timeout: number }>(o: T) { return o.timeout; }",
+  ],
+  ["", "function call({ timeout }: { timeout: number }) { return timeout; }"],
+  ["", "function call(...a: { timeout: number }[]) { return a.length; }"],
+];
+/** Where that scope is: `@P` its parameters, `@B` its body, `@U` the use.
+ *  The last declares AFTER the `return` — a hoisted `function` only. */
+const SCOPES: readonly string[] = [
+  `export function run(@P) { @B return @U; }`,
+  `export const run = (@P) => { @B return @U; };`,
+  `export const run = async function (@P) { @B return @U; };`,
+  `export const run = { go(@P) { @B return @U; } };`,
+  `export class A { go(@P) { @B return @U; } }`,
+  `export const run = () => [1].map(() => (@P) => { @B return @U; });`,
+  `export function run(@P) { return @U; @B }`,
+];
+const TOP =
+  `export const top = () => call({ timeout: 1 }, () => Promise.resolve(1));\n`;
+BINDS.forEach(([params, body], b) => {
+  SCOPES.forEach((scope, s) => {
+    if (s === SCOPES.length - 1 && !body.startsWith("function")) return;
+    const inner = scope.replace("@P", params).replace("@B", body)
+      .replace("@U", "call({ timeout: 5 })") + "\n";
+    // aio's use before the scope, and after it.
+    const src = (b + s) % 2 ? CALL + TOP + inner : CALL + inner + TOP;
+    // aio's `timeout`, left for a person, is the type error it was.
+    CASES[`src/inner${b}-${s}.ts`] = {
+      src,
+      fixed: src,
+      manual: true,
+      error: "TS2561",
+    };
+  });
 });
 
 /** aio's `call`: the one key renamed. */
@@ -1964,9 +2031,9 @@ async function typeErrors(dir: string, files: string[]): Promise<string[]> {
   if (!/^Check /m.test(stderr) && check.code !== 0) throw new Error(stderr);
   // Of the project's own files: aio's sources are read through the import
   // map, and what the compiler says about THEM is not this test's subject.
-  const own = `${await Deno.realPath(dir)}/`;
+  const own = `${toFileUrl(await Deno.realPath(dir)).href}/`;
   return [...stderr.matchAll(
-    /^(TS\d+) [^\n]*\n(?:[^\n]*\n)*?\s+at file:\/\/([^:\n]+):/gm,
+    /^(TS\d+) [^\n]*\n(?:[^\n]*\n)*?\s+at (file:\/\/\S+?):\d+:\d+$/gm,
   )].filter((m) => m[2]!.startsWith(own))
     .map((m) => `${m[1]} ${m[2]!.slice(own.length)}`).sort();
 }
@@ -2258,6 +2325,10 @@ Deno.test("aiol --safe-fix: over every generated shape, each file is what it mus
 const ALIASED =
   `import { schedule } from "fw";\nexport const e = schedule.blocking("id", () => 1, 0);\n`;
 const AIO = `${REPO}mod.ts`;
+// The same module with no `//` in its spelling (`file:/x/mod.ts`): this
+// reader takes a `//` inside a string for a comment — the case
+// "a jsonc the reader cannot parse" below is that limit, pinned.
+const AIO_1 = AIO.replace("file:///", "file:/");
 type Variant = {
   says: "fixable" | "manual" | "silent";
   files: Record<string, string>;
@@ -2301,7 +2372,7 @@ const CONFIGS: Record<string, Variant> = {
     says: "fixable",
     files: {
       "deno.jsonc":
-        `{\n  // the framework\n  "imports": { "aio": "${AIO}", "fw": "${AIO}" } /* c */\n}`,
+        `{\n  // the framework\n  "imports": { "aio": "${AIO_1}", "fw": "${AIO_1}" } /* c */\n}`,
     },
   },
   "a key that is no prefix": {

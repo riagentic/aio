@@ -24,6 +24,7 @@ import {
   type LocalListener,
 } from "../src/server/local-listen.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -127,12 +128,13 @@ async function withServer(
   f: (path: string) => Promise<void>,
 ): Promise<void> {
   const dir = await tempDir("aio-hoc-");
-  const path = join(dir, "h.sock");
+  const path = localEndpoint(join(dir, "h.sock"));
   const srv = serveHttpOverLocal(streamsOnly(listenLocal(path)), handler);
   try {
     await f(path);
   } finally {
     await srv.close();
+    await localIdle();
     await dropTempDir(dir);
   }
 }
@@ -595,7 +597,7 @@ Deno.test("concurrent requests are served independently", async () => {
 
 Deno.test("close(): stops accepting and settles", async () => {
   const dir = await tempDir("aio-hoc-");
-  const path = join(dir, "h.sock");
+  const path = localEndpoint(join(dir, "h.sock"));
   const srv = serveHttpOverLocal(listenLocal(path), () => new Response("x"));
   await srv.close();
   await srv.close(); // idempotent
@@ -606,6 +608,7 @@ Deno.test("close(): stops accepting and settles", async () => {
     refused = true;
   }
   assert(refused);
+  await localIdle();
   await dropTempDir(dir);
 });
 
@@ -773,7 +776,7 @@ for (const how of ["close", "dropConnections"] as const) {
     // already in the buffer, and the connection is ended before it is taken.
     // `completed` settles exactly there.
     const dir = await tempDir("aio-hoc-");
-    const path = `${dir}/h.sock`;
+    const path = localEndpoint(`${dir}/h.sock`);
     const seen: string[] = [];
     const srv = serveHttpOverLocal(listenLocal(path), (req, info) => {
       seen.push(new URL(req.url).pathname);
@@ -796,6 +799,7 @@ for (const how of ["close", "dropConnections"] as const) {
       );
     } finally {
       await srv.close();
+      await localIdle();
       await dropTempDir(dir);
     }
   });

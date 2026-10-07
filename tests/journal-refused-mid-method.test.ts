@@ -154,8 +154,12 @@ Deno.test("journal refused mid-method: every ack resolves, health says degraded,
       `health must carry the journal: ${JSON.stringify(sick.degraded)}`,
     );
     assert(entry!.failures >= 1);
+    // Windows words a write to a directory "Incorrect function. (os error 1)"
+    // (measured on Windows 11).
     assert(
-      /EISDIR|directory|Is a directory/i.test(entry!.lastError),
+      (Deno.build.os === "windows"
+        ? /Incorrect function/
+        : /EISDIR|directory|Is a directory/i).test(entry!.lastError),
       entry!.lastError,
     );
     // …while the STATE verdict is true: it landed (the refusal flushed it).

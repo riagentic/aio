@@ -20,6 +20,7 @@ import { cliCompileArgs } from "../src/build/build-cli.ts";
 import { smokeRunArtifact } from "../src/build/build-compile.ts";
 import { BUILD_STAMP_FILE } from "../src/build/build-version.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { EXE, writeProgram } from "./fake-program-helper.ts";
 
 function includes(args: string[]): string[] {
   return args.flatMap((a, i) => args[i - 1] === "--include" ? [a] : []);
@@ -110,18 +111,16 @@ Deno.test("cli target: v8 flags, the cross-compile triple and the excludes reach
 Deno.test({
   name:
     "cli target: the smoke run asks the flag it was given and judges by exit code",
-  ignore: Deno.build.os === "windows", // the stand-in artifact is a shell script
   fn: async () => {
     const dir = await tempDir("aio-cli-smoke-");
     try {
       // A stand-in binary: exits 0 ONLY for `--help`, and says what it got.
-      const bin = join(dir, "tool");
-      await Deno.writeTextFile(
+      const bin = join(dir, `tool${EXE}`);
+      await writeProgram(
         bin,
         `#!/bin/sh\nif [ "$1" = "--help" ]; then echo "Usage: tool"; exit 0; fi\n` +
-          `echo "unknown flag: $1" >&2; exit 2\n`,
+          `echo "unknown flag: $1" >&2\nexit 2\n`,
       );
-      await Deno.chmod(bin, 0o755);
 
       assertEquals(
         await smokeRunArtifact(bin, undefined, ["--help"]),

@@ -15,6 +15,44 @@ import { Buffer } from "node:buffer";
 
 const UDP = discoverySupported();
 
+/** A sweep for the LAN tests below: one whose probe could not be SENT fails
+ *  here, with the machine's own reason, instead of as "our apps were not
+ *  found" fifteen seconds later. That was every full run on the Mac: started
+ *  detached from its ssh session, the process had no Local Network permission
+ *  and macOS refused each broadcast ("No route to host") — which
+ *  `discoverAioApps` swallowed until it grew `onNote`. */
+const sweep = async (opts: { timeoutMs: number; nonce?: string }) => {
+  const unsent: string[] = [];
+  const apps = await discoverAioApps({
+    ...opts,
+    onNote: (m) => unsent.push(m),
+  });
+  assertEquals(unsent, [], "this machine did not let the probe out");
+  return apps;
+};
+
+Deno.test({
+  name: "discovery: a probe that could not be sent is SAID, not an empty list",
+  ignore: !UDP,
+  async fn() {
+    // Port 0 is not a destination on any OS — the one send failure every
+    // machine reproduces.
+    const notes: string[] = [];
+    const apps = await discoverAioApps({
+      timeoutMs: 300,
+      port: 0,
+      onNote: (m) => notes.push(m),
+    });
+    assertEquals(apps, []);
+    assertEquals(notes.length, 1, notes.join("\n"));
+    assert(
+      notes[0]!.includes("could not be sent to 255.255.255.255:0") &&
+        notes[0]!.includes("Nothing was asked"),
+      notes[0],
+    );
+  },
+});
+
 Deno.test({
   name: "discovery: multi-app-per-host — ONE responder reports EVERY app",
   ignore: !UDP,
@@ -66,7 +104,7 @@ Deno.test({
       const mine = () => apps.filter((a) => a.name.startsWith(tag));
       const deadline = Date.now() + 15_000;
       while (Date.now() < deadline) {
-        apps = await discoverAioApps({ timeoutMs: 800, nonce });
+        apps = await sweep({ timeoutMs: 800, nonce });
         // OURS, not "three answers". `apps.length >= 3` broke the retry the
         // instant three STRANGERS answered — and on a machine with several aio
         // apps running that is the first sweep, every time, whether or not our
@@ -203,8 +241,8 @@ Deno.test({
       let plain: string[] = [], filtered: string[] = [];
       const deadline = Date.now() + 15_000;
       while (Date.now() < deadline) {
-        plain = names(await discoverAioApps({ timeoutMs: 600 }));
-        filtered = names(await discoverAioApps({ timeoutMs: 600, nonce: tag }));
+        plain = names(await sweep({ timeoutMs: 600 }));
+        filtered = names(await sweep({ timeoutMs: 600, nonce: tag }));
         if (plain.length === 2 && filtered.length === 1) break;
       }
       assertEquals(

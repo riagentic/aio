@@ -14,7 +14,6 @@ const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 Deno.test({
   name:
     "amui psStats: a later sample is the cpu used since the previous one, not the lifetime average",
-  ignore: Deno.build.os === "windows",
   async fn() {
     // Busy for the first IDLE_MS, then idle for good.
     const child = new Deno.Command(Deno.execPath(), {
@@ -43,28 +42,38 @@ Deno.test({
 
 Deno.test({
   name: "amui psStats: a process that turns busy after idling reads busy",
-  ignore: Deno.build.os === "windows",
   async fn() {
-    const child = new Deno.Command(Deno.execPath(), {
-      args: [
-        "eval",
-        `setTimeout(() => { for (;;) {} }, ${IDLE_MS});`,
-      ],
-      stdout: "null",
-      stderr: "null",
-    }).spawn();
+    const spawn = (code: string) =>
+      new Deno.Command(Deno.execPath(), {
+        args: ["eval", code],
+        stdout: "null",
+        stderr: "null",
+      }).spawn();
+    const child = spawn(`setTimeout(() => { for (;;) {} }, ${IDLE_MS});`);
+    // What a spinning process gets on THIS machine right now: a whole core
+    // when it is idle, a share of one under load (52% in a parallel suite on
+    // Windows) — so "busy" is measured against a process that only spins,
+    // sampled over the same second, not against a fixed 60%.
+    const spinner = spawn("for (;;) {}");
     try {
       await wait(IDLE_MS + 500);
-      await cpuOf(child.pid);
+      await Promise.all([cpuOf(child.pid), cpuOf(spinner.pid)]);
       await wait(1000);
-      const busy = await cpuOf(child.pid);
+      const [busy, full] = await Promise.all([
+        cpuOf(child.pid),
+        cpuOf(spinner.pid),
+      ]);
+      assert(full > 5, `the reference spinner read ${full}%`);
+      // The lifetime average would be about a quarter of it: 1.5 s of
+      // spinning in the 5.5 s the process has lived.
       assert(
-        busy > 60,
-        `a spinning process read ${busy}% — the lifetime average, not the last second`,
+        busy > full * 0.6,
+        `a spinning process read ${busy}% where one that only spins read ${full}% — the lifetime average, not the last second`,
       );
     } finally {
       child.kill("SIGKILL");
-      await child.status;
+      spinner.kill("SIGKILL");
+      await Promise.all([child.status, spinner.status]);
     }
   },
 });

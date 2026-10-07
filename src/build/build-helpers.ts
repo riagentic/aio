@@ -124,7 +124,18 @@ export async function copyDir(src: string, dst: string): Promise<void> {
         // failure that matters here is one that makes the symlink below fail,
         // and that one is not swallowed: it throws with the path.
       });
-      await Deno.symlink(target, dstPath);
+      // Windows must be TOLD what a link points at: with no `type` it stats
+      // the target from the cwd, so every relative link — all of a macOS
+      // bundle's are (`Versions/Current -> A`) — threw "an `options` argument
+      // is required if the target does not exist" and a .app could not be
+      // assembled on a Windows host. A real symlink, never a junction: the
+      // copy keeps the link's text, and a junction cannot be relative.
+      // Ignored elsewhere.
+      const type = await Deno.stat(srcPath).then(
+        (i) => i.isDirectory ? "dir" as const : "file" as const,
+        () => "file" as const, // dangling: nothing to ask
+      );
+      await Deno.symlink(target, dstPath, { type });
     } else {
       await Deno.copyFile(srcPath, dstPath);
       // Preserve executable bit
@@ -144,7 +155,7 @@ export async function copyDir(src: string, dst: string): Promise<void> {
  *  `~/Android/Sdk`), and falls back to the platform's default install locations.
  *  Returns null when no SDK is found. */
 export function resolveSdk(): string | null {
-  const home = Deno.env.get("HOME") ?? "";
+  const home = userHome() ?? "";
   const exe = Deno.build.os === "windows" ? ".exe" : "";
   const candidates: string[] = [];
   const add = (d?: string | null) => {
@@ -169,9 +180,29 @@ export function resolveSdk(): string | null {
   return null;
 }
 
+/** The user's home directory: `HOME`, or `USERPROFILE` on a Windows host,
+ *  where `HOME` is not set — the default SDK and JDK locations hang off it. */
+function userHome(): string | undefined {
+  return Deno.env.get("HOME") || Deno.env.get("USERPROFILE");
+}
+
+/** The Gradle wrapper `gradle wrapper` wrote into `androidDir`, as a host
+ *  running `os` can start it. It writes two: `gradlew`, a shell script, and
+ *  `gradlew.bat`. Windows runs only the second — spawning the first there is
+ *  `NotFound` (measured), so an Android build on a Windows host generated its
+ *  wrapper and died starting it. Deno starts a `.bat` given by its own name
+ *  (a project path with a space included; the exit code is the script's).
+ *  Pure. */
+export function gradlewPath(
+  os: typeof Deno.build.os,
+  androidDir: string,
+): string {
+  return join(androidDir, os === "windows" ? "gradlew.bat" : "gradlew");
+}
+
 /** Find gradle binary — checks PATH then common install locations */
 export function findGradle(): string | null {
-  const home = Deno.env.get("HOME") ?? "/tmp";
+  const home = userHome() ?? "/tmp";
   const candidates = [
     "gradle",
     "/usr/bin/gradle",
@@ -227,7 +258,7 @@ export interface JdkResult {
  *  Scans JAVA_HOME, system JVM dirs, Android Studio's JBR, Homebrew, SDKMAN and
  *  PATH. An explicit, usable JAVA_HOME is honoured as the primary pick. */
 export function findJdk(): JdkResult {
-  const home = Deno.env.get("HOME") ?? "/tmp";
+  const home = userHome() ?? "/tmp";
   const exe = Deno.build.os === "windows" ? "javac.exe" : "javac";
 
   // Gather candidate javac paths from everywhere a JDK tends to live.

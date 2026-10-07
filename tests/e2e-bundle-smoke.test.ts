@@ -13,9 +13,12 @@ import {
   assertStringIncludes,
 } from "@std/assert";
 import { childCoverageDir } from "../src/testing/temp-dir.ts";
+import { fromFileUrl } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
+import { fixtureNodeModules } from "./symlink-helper.ts";
 const _childCovDir = childCoverageDir();
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 /** `flat: true` builds the OTHER sanctioned layout — entry, App.tsx and a
  *  nested component at the project root (`examples/counter`) instead of under
@@ -37,7 +40,7 @@ async function makeApp(opts: { flat?: boolean } = {}): Promise<string> {
         lib: ["deno.ns", "deno.unstable", "dom", "dom.iterable"],
       },
       imports: {
-        "aio": `${ROOT}mod.ts`,
+        "aio": `${spec(ROOT)}mod.ts`,
         "aio/jsx-runtime": `${ROOT}src/jsx-runtime.ts`,
         "immer": "npm:immer@10.2.0",
         "@std/path": "jsr:@std/path@^1",
@@ -45,7 +48,7 @@ async function makeApp(opts: { flat?: boolean } = {}): Promise<string> {
     }),
   );
   // reuse the framework repo's node_modules for npm resolution (immer)
-  await Deno.symlink(`${ROOT}node_modules`, `${dir}/node_modules`);
+  await fixtureNodeModules(dir);
   await Deno.writeTextFile(
     `${dir}${appSub}/cell.ts`,
     `import { cell } from "aio";
@@ -97,8 +100,8 @@ async function runBundleProc(
   await Deno.mkdir(`${dir}/.aio-build`, { recursive: true });
   await Deno.writeTextFile(
     runner,
-    `import { runBundle } from "${ROOT}src/build/build-bundle.ts";
-import { resolveAppDir } from "${ROOT}src/build/build-config.ts";
+    `import { runBundle } from "${spec(ROOT)}src/build/build-bundle.ts";
+import { resolveAppDir } from "${spec(ROOT)}src/build/build-config.ts";
 const root = ${JSON.stringify(dir)};
 const mainConfig = JSON.parse(await Deno.readTextFile(root + "/deno.json"));
 // The app dir comes from THE decider, never a literal — a hand-rolled path

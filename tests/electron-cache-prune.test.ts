@@ -14,6 +14,7 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { sleeper } from "./proc-helper.ts";
 import {
   applyElectronPrune,
   type CacheEntry,
@@ -367,7 +368,11 @@ Deno.test({
         );
       }
       // Parent without write: Deno.remove(child) fails; listing still works.
-      await Deno.chmod(root, 0o555);
+      // Windows has no such mode; what fails a removal there is a process
+      // living in the directory (as a running Electron does).
+      const WIN = Deno.build.os === "windows";
+      const holder = WIN ? sleeper({ cwd: stale }) : null;
+      if (!WIN) await Deno.chmod(root, 0o555);
       let out: Deno.CommandOutput;
       try {
         out = await new Deno.Command(Deno.execPath(), {
@@ -377,7 +382,12 @@ Deno.test({
           stderr: "piped",
         }).output();
       } finally {
-        await Deno.chmod(root, 0o755);
+        if (!WIN) await Deno.chmod(root, 0o755);
+      }
+      const stillThere = (await Deno.stat(stale)).isDirectory;
+      if (holder) {
+        holder.kill();
+        await holder.status;
       }
       assertEquals(
         out.code,
@@ -400,7 +410,7 @@ Deno.test({
       assertEquals(doc.failed[0].path, stale);
       assert(typeof doc.error === "string" && doc.error.length > 0);
       assertEquals(
-        (await Deno.stat(stale)).isDirectory,
+        stillThere,
         true,
         "the entry that could not be removed is still there",
       );

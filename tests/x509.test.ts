@@ -43,19 +43,22 @@ import {
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-async function haveOpenssl(): Promise<boolean> {
+/** `openssl version`'s first line, or null when there is no openssl. */
+async function opensslVersion(): Promise<string | null> {
   try {
     const r = await new Deno.Command("openssl", {
       args: ["version"],
-      stdout: "null",
+      stdout: "piped",
       stderr: "null",
     }).output();
-    return r.success;
+    return r.success ? new TextDecoder().decode(r.stdout) : null;
   } catch {
-    return false;
+    return null;
   }
 }
-const OPENSSL = await haveOpenssl();
+const OPENSSL_VERSION = await opensslVersion();
+const OPENSSL = OPENSSL_VERSION !== null;
+const LIBRESSL = OPENSSL_VERSION?.startsWith("LibreSSL") ?? false;
 
 async function openssl(args: string[]): Promise<{ ok: boolean; out: string }> {
   const r = await new Deno.Command("openssl", {
@@ -352,6 +355,13 @@ Deno.test({
         "ec",
         "-pkeyopt",
         "ec_paramgen_curve:P-256",
+        // The NAMED curve, said outright: it is what OpenSSL wrote on the
+        // machines this pins. LibreSSL (macOS's `openssl`) defaults to
+        // explicit parameters — a root no client accepts, which
+        // `loadOrCreateAioRoot` replaces instead
+        // (tests/tls-root-unusable-key-is-replaced.test.ts).
+        "-pkeyopt",
+        "ec_param_enc:named_curve",
         "-keyout",
         `${dir}/legacy-key.pem`,
         "-out",
@@ -744,7 +754,15 @@ Deno.test({
           !v.ok,
           `the local root vouched for a ${purpose} certificate:\n${v.out}`,
         );
-        assertStringIncludes(v.out, "unsuitable certificate purpose");
+        // LibreSSL (macOS's openssl) checks names before purpose and reads
+        // the CN as a DNS name, so the root's name constraints refuse the
+        // thief first; OpenSSL gets as far as the EKU nesting.
+        assertStringIncludes(
+          v.out,
+          LIBRESSL
+            ? "permitted subtree violation"
+            : "unsuitable certificate purpose",
+        );
       }
       // …and the one purpose aio needs is untouched.
       const ok = await openssl([
@@ -796,6 +814,11 @@ Deno.test({
         "ec",
         "-pkeyopt",
         "ec_paramgen_curve:P-256",
+        // macOS's openssl is LibreSSL, which otherwise spells the curve out
+        // as explicit parameters — a key no WebCrypto or rustls reads. This
+        // test's subject is the DN, so the key is pinned to the named form.
+        "-pkeyopt",
+        "ec_param_enc:named_curve",
         "-keyout",
         `${dir}/pk-key.pem`,
         "-out",

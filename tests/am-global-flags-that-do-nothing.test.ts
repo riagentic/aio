@@ -20,6 +20,7 @@ import {
   VERB_FLAGS,
 } from "../src/am/am-flags.ts";
 import { lastHistoryEntries } from "../src/am/am-cmd-state.ts";
+import { fromFileUrl } from "@std/path";
 
 Deno.test("am: the measured no-op flags are warned about, naming who reads them", () => {
   for (
@@ -95,8 +96,8 @@ Deno.test("am timeline --follow, end to end: warned on stderr, the verb still ru
         "run",
         "-A",
         "--config",
-        new URL("../deno.json", import.meta.url).pathname,
-        new URL("../src/am.ts", import.meta.url).pathname,
+        fromFileUrl(new URL("../deno.json", import.meta.url)),
+        fromFileUrl(new URL("../src/am.ts", import.meta.url)),
         "timeline",
         "--follow",
         "--json",

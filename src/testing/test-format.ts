@@ -3,6 +3,7 @@
 // Deliberately NOT re-exported from `src/cell-test.ts`: these are the shape of
 // a message, not API anyone calls. `aio/testing` is `export *` over
 // cell-test.ts, so a helper defined there is a public name forever.
+import { toFileUrl } from "@std/path";
 
 /** THE state dump both assertion APIs print on failure (`t.expect.state` and
  *  `testUI`'s `ui.expectCell`). One formatter, so the two cannot drift into
@@ -63,7 +64,9 @@ export function callerLocation(skipFiles: string[]): string | undefined {
     // as a place; a 90-character file:// URL reads as noise.
     let where = m[1]!;
     try {
-      const cwd = new URL(`${Deno.cwd()}/`, "file:///").href;
+      // `toFileUrl`, not `new URL(cwd, "file:///")`: a Windows cwd (`C:\\x`)
+      // parses as a URL with the scheme `c:` and nothing was ever shortened.
+      const cwd = toFileUrl(Deno.cwd()).href.replace(/\/?$/, "/");
       if (where.startsWith("file://") && where.startsWith(cwd)) {
         where = where.slice(cwd.length);
       }

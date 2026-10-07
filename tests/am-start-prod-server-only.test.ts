@@ -10,19 +10,19 @@
 // "zombie — kill it". The app's door answers on `/__aio/health`, which every
 // aio server serves in every mode; a refused page is not a dead server.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import {
   isProcessAlive,
   lockPath,
 } from "../src/server/single-instance-lock.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const REPO = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 
 Deno.test({
   name:
     "am start --prod: a server-only app (503 at /) is reported started, and a second start refuses instead of killing it",
-  ignore: Deno.build.os === "windows",
   sanitizeOps: false, // aio-ok: the app am starts is stopped below, by am
   sanitizeResources: false, // aio-ok: same
   async fn() {
@@ -48,7 +48,7 @@ Deno.test({
     );
     await Deno.writeTextFile(
       join(proj, "src", "app.ts"),
-      `import { aio, cell } from "${REPO}/mod.ts";
+      `import { aio, cell } from "${spec(REPO)}/mod.ts";
 const c = cell("c", { state: { n: 1 }, methods: {} });
 await aio.run({ cells: [c], appId: "pso", persist: false, client: "server-only" });
 `,

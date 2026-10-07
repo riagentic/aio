@@ -18,12 +18,14 @@ import { within } from "./within.ts";
 import { assert, assertEquals } from "@std/assert";
 import { createUDSListener } from "../src/server/aio.ts";
 import { join } from "@std/path";
+import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
+import { connectLocal, type LocalConn } from "../src/server/local-listen.ts";
 
 const encoder = new TextEncoder();
 
 /** Read whole NDJSON lines from a conn until `pred` is satisfied or time runs out. */
 async function readLines(
-  conn: Deno.Conn,
+  conn: LocalConn,
   pred: (lines: string[]) => boolean,
   ms = 2000,
 ): Promise<string[]> {
@@ -50,7 +52,7 @@ async function readLines(
 
 Deno.test("uds: an unserializable snapshot fails ONE connection, not the listener", async () => {
   const dir = await Deno.makeTempDir({ prefix: "aio-uds-accept-" });
-  const socketPath = join(dir, "s.sock");
+  const socketPath = localEndpoint(join(dir, "s.sock"));
   // First connect gets a state that cannot be serialized; later ones are fine.
   let n = 0;
   const uds = createUDSListener(
@@ -62,7 +64,7 @@ Deno.test("uds: an unserializable snapshot fails ONE connection, not the listene
   try {
     await new Promise((r) => setTimeout(r, 50));
 
-    const first = await Deno.connect({ transport: "unix", path: socketPath });
+    const first = await connectLocal(socketPath);
     await readLines(first, (l) => l.length >= 3, 400);
     try {
       first.close();
@@ -70,7 +72,7 @@ Deno.test("uds: an unserializable snapshot fails ONE connection, not the listene
     await new Promise((r) => setTimeout(r, 100));
 
     // The app recovered (the offending value is gone). The transport must too.
-    const second = await Deno.connect({ transport: "unix", path: socketPath });
+    const second = await connectLocal(socketPath);
     const lines = await readLines(
       second,
       (l) => l.some((x) => x.includes('"t":"state"')),
@@ -88,13 +90,14 @@ Deno.test("uds: an unserializable snapshot fails ONE connection, not the listene
     );
   } finally {
     uds.shutdown();
+    await localIdle();
     await Deno.remove(dir, { recursive: true }).catch(() => {});
   }
 });
 
 Deno.test("uds: a client that dies mid-handshake does not take the listener with it", async () => {
   const dir = await Deno.makeTempDir({ prefix: "aio-uds-accept-" });
-  const socketPath = join(dir, "s.sock");
+  const socketPath = localEndpoint(join(dir, "s.sock"));
   const uds = createUDSListener(
     socketPath,
     () => ({ ok: true }),
@@ -105,12 +108,12 @@ Deno.test("uds: a client that dies mid-handshake does not take the listener with
     await new Promise((r) => setTimeout(r, 50));
     // Connect and vanish before reading a single byte of the handshake.
     for (let i = 0; i < 5; i++) {
-      const c = await Deno.connect({ transport: "unix", path: socketPath });
+      const c = await connectLocal(socketPath);
       c.close();
     }
     await new Promise((r) => setTimeout(r, 150));
 
-    const good = await Deno.connect({ transport: "unix", path: socketPath });
+    const good = await connectLocal(socketPath);
     const lines = await readLines(
       good,
       (l) => l.some((x) => x.includes('"t":"state"')),
@@ -125,6 +128,7 @@ Deno.test("uds: a client that dies mid-handshake does not take the listener with
     );
   } finally {
     uds.shutdown();
+    await localIdle();
     await Deno.remove(dir, { recursive: true }).catch(() => {});
   }
 });
@@ -134,12 +138,12 @@ Deno.test("uds: the accept-time snapshot is filtered by the SAME rule as every l
   // getUIState())`, while every later frame goes through the subscription
   // filter. One decider or the two drift.
   const dir = await Deno.makeTempDir({ prefix: "aio-uds-accept-" });
-  const socketPath = join(dir, "s.sock");
+  const socketPath = localEndpoint(join(dir, "s.sock"));
   const state = { a: { n: 1 }, b: { n: 2 } };
   const uds = createUDSListener(socketPath, () => state, () => {}, () => {});
   try {
     await new Promise((r) => setTimeout(r, 50));
-    const conn = await Deno.connect({ transport: "unix", path: socketPath });
+    const conn = await connectLocal(socketPath);
     const first = await readLines(
       conn,
       (l) => l.some((x) => x.includes('"t":"state"')),
@@ -170,6 +174,7 @@ Deno.test("uds: the accept-time snapshot is filtered by the SAME rule as every l
     } catch { /* already closed */ }
   } finally {
     uds.shutdown();
+    await localIdle();
     await Deno.remove(dir, { recursive: true }).catch(() => {});
   }
 });
@@ -180,12 +185,12 @@ Deno.test("uds: an unchanged state is not re-sent after the accept-time snapshot
   // so the client's very first broadcast was always a byte-identical duplicate
   // of the state it had just been handed.
   const dir = await Deno.makeTempDir({ prefix: "aio-uds-accept-" });
-  const socketPath = join(dir, "s.sock");
+  const socketPath = localEndpoint(join(dir, "s.sock"));
   const state = { a: { n: 1 } };
   const uds = createUDSListener(socketPath, () => state, () => {}, () => {});
   try {
     await new Promise((r) => setTimeout(r, 50));
-    const conn = await Deno.connect({ transport: "unix", path: socketPath });
+    const conn = await connectLocal(socketPath);
     await readLines(
       conn,
       (l) => l.some((x) => x.includes('"t":"state"')),
@@ -207,6 +212,7 @@ Deno.test("uds: an unchanged state is not re-sent after the accept-time snapshot
     );
   } finally {
     uds.shutdown();
+    await localIdle();
     await Deno.remove(dir, { recursive: true }).catch(() => {});
   }
 });
@@ -216,7 +222,7 @@ Deno.test("uds: an unserializable state does not throw out of broadcastState", a
   // follows it — and stringify is where an unserializable value actually
   // throws. The exception escaped into whoever drove the broadcast.
   const dir = await Deno.makeTempDir({ prefix: "aio-uds-accept-" });
-  const socketPath = join(dir, "s.sock");
+  const socketPath = localEndpoint(join(dir, "s.sock"));
   // Serializable while the client connects; a BigInt lands in state later —
   // the way an app actually gets here.
   let poisoned = false;
@@ -228,7 +234,7 @@ Deno.test("uds: an unserializable state does not throw out of broadcastState", a
   );
   try {
     await new Promise((r) => setTimeout(r, 50));
-    const conn = await Deno.connect({ transport: "unix", path: socketPath });
+    const conn = await connectLocal(socketPath);
     await readLines(
       conn,
       (l) => l.some((x) => x.includes('"t":"state"')),
@@ -243,6 +249,7 @@ Deno.test("uds: an unserializable state does not throw out of broadcastState", a
     } catch { /* already closed */ }
   } finally {
     uds.shutdown();
+    await localIdle();
     await Deno.remove(dir, { recursive: true }).catch(() => {});
   }
 });

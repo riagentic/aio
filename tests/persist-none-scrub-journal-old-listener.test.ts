@@ -15,15 +15,15 @@
 // Built from a data directory v1.0.11-beta really wrote and crashed on
 // (tests/fixtures/v1.0.11-crashed-none-listener).
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const MOD = new URL("../mod.ts", import.meta.url).href;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
-const FIXTURE =
-  new URL("./fixtures/v1.0.11-crashed-none-listener/", import.meta.url)
-    .pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
+const FIXTURE = fromFileUrl(
+  new URL("./fixtures/v1.0.11-crashed-none-listener/", import.meta.url),
+);
 
 async function boot(dir: string): Promise<string> {
   const out = await new Deno.Command(Deno.execPath(), {

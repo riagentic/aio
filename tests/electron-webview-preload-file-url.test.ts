@@ -29,6 +29,7 @@ Deno.test("electron: a webview preload given as an encoded file: URL inside the 
     "BASE_DIR",
     "_appOrigin",
     "require",
+    "__aioAppSessionName", // tmplWebGuard's; "persist:t" is not the app's
     tmplWillNavigate("_appOrigin"),
   )(
     {
@@ -45,10 +46,11 @@ Deno.test("electron: a webview preload given as an encoded file: URL inside the 
     base,
     "aio://app",
     (m: string) => m === "url" ? nodeUrl : { shell: { openExternal() {} } },
+    () => false,
   );
   const url = nodeUrl.pathToFileURL(preload).href;
   const wp: Record<string, unknown> = { preload: url };
-  handlers["will-attach-webview"]!(null, wp, {});
+  handlers["will-attach-webview"]!(null, wp, { partition: "persist:t" });
   assertEquals(warnings, [], "an in-app preload must not be refused");
   assertEquals(wp.preload, nodeFs.realpathSync(preload));
 });

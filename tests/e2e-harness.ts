@@ -12,6 +12,8 @@ import { childCoverageDir, tempDir } from "../src/testing/temp-dir.ts";
 import { dropBrowserProfile } from "../src/testing/chromium.ts";
 import { stopChild } from "./stop-child.ts";
 import { freePort } from "../src/testing/server-test.ts";
+import { fromFileUrl } from "@std/path";
+import { spec as toSpec } from "./module-spec-helper.ts";
 
 // Route the spawned server's coverage into the parent's coverage dir when the
 // suite runs under `--coverage` (DENO_COVERAGE_DIR is set by `deno test
@@ -21,7 +23,7 @@ import { freePort } from "../src/testing/server-test.ts";
 // coverage run the var is unset, so we use a throwaway.
 const _childCovDir = childCoverageDir();
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 export function findBrowser(): string | null {
   if (Deno.env.get("AIO_E2E") === "0") return null;
@@ -145,7 +147,7 @@ async function writeApp(spec: E2eApp): Promise<string> {
         lib: ["deno.ns", "deno.unstable", "dom", "dom.iterable"],
       },
       imports: {
-        "aio": `${ROOT}mod.ts`,
+        "aio": `${toSpec(ROOT)}mod.ts`,
         "aio/air": `${ROOT}src/air.ts`,
         "aio/jsx-runtime": `${ROOT}src/jsx-runtime.ts`,
         "immer": "npm:immer@10.2.0",

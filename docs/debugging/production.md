@@ -108,6 +108,14 @@ change how a symptom is read.
 A line is omitted only when the thing does not exist — never when it is merely
 inconvenient, since "absent" and "unknown" read identically in a log.
 
+An app serving TLS (`--expose`) has one more row,
+`control
+http://localhost:<port> (am, loopback only)`: the plain-HTTP listener
+on 127.0.0.1 that `am` talks to, which asks for the app key like every other
+door. (Its routes are `/__aio/trojan/*` and the lock file calls the port
+`trojanPort` — the control API's internal name, which this row carried until
+1.0.18.)
+
 ## Memory pressure monitor
 
 AIO monitors heap usage and alerts before OOM. Critical for long-running apps.
@@ -164,6 +172,20 @@ it saw (`report.reason`):
 - **`growth`** — climbing steadily with nothing near a threshold. A leak shows
   up here hours before it shows up anywhere else; reporting it only at 75% turns
   a slow diagnosis into an emergency. Tune with `memory.growthReportRatio`.
+
+**A condition is said once, and again only when it changes.** The monitor
+samples every interval; it does not log every interval. A `pressure` report
+below `criticalThreshold` is logged (and sent to `onError`) again only after the
+heap has climbed a further tenth of its ceiling, a `machine` report after RSS
+has climbed a further tenth of RAM, and a `growth` report after the heap (or
+RSS, for a native leak) has climbed by the same amount again. `pressure` and
+`machine` are re-armed once the number has fallen a tenth below its threshold,
+so a condition that went away and came back is said again. An app that simply
+sits at 80% of its ceiling is one `MEMORY_PRESSURE` line, not one every ten
+seconds. Two things do repeat while they last: `MEMORY_CRITICAL`, on every
+sample, and the calls of `onMemoryPressure` for a `pressure` report at either
+level — the handler is how an app sheds memory, and each sample is another turn
+for it.
 
 - Samples `Deno.memoryUsage()` every `interval` ms (near-zero cost)
 - At/above threshold: measures per-cell state sizes, reports largest cell and

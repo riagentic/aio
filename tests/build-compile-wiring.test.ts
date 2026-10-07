@@ -24,6 +24,8 @@ import {
   PLATFORMS,
 } from "../src/build/platforms.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { EXE, writeProgram } from "./fake-program-helper.ts";
+import { linkDir } from "./symlink-helper.ts";
 import { artifact } from "./vfs-fixture.ts";
 
 // A cross target: the artifact is not run here (the stand-in is not a binary).
@@ -55,13 +57,13 @@ async function project(
       join(dir, "package.json"),
       JSON.stringify({ name, ...json }),
     );
-    await Deno.symlink(`.deno/${entry}/node_modules/${name}`, join(nm, name));
+    await linkDir(`.deno/${entry}/node_modules/${name}`, join(nm, name));
   };
   await pkg("lib@1.0.0", "lib");
   await pkg("three@0.170.0", "three");
   await pkg("esbuild@0.24.2", "esbuild");
   await pkg("tsx@4.0.0", "tsx", { dependencies: { esbuild: "~0.24.0" } });
-  await Deno.symlink(
+  await linkDir(
     "../../esbuild@0.24.2/node_modules/esbuild",
     join(nm, ".deno", "tsx@4.0.0", "node_modules", "esbuild"),
   );
@@ -103,6 +105,90 @@ function graph(
   });
 }
 
+/** What the stand-in `deno` does with its arguments (`F`: the files the test
+ *  reads back, prepended by {@linkcode compiledWith}). */
+const STAND_IN = String.raw`
+const exists = (p) => {
+  try {
+    Deno.lstatSync(p);
+    return true;
+  } catch {
+    return false;
+  }
+};
+const SEP = Deno.build.os === "windows" ? "\\" : "/";
+const base = (p) => p.split(/[\\/]/).pop();
+const log = (line) =>
+  Deno.writeTextFileSync(F.callsFile, line + "\n", { append: true });
+function copyTree(from, to) {
+  const st = Deno.lstatSync(from);
+  if (st.isSymlink) {
+    if (exists(to)) return;
+    Deno.symlinkSync(Deno.readLinkSync(from), to, {
+      type: Deno.build.os === "windows" ? "junction" : "dir",
+    });
+  } else if (st.isDirectory) {
+    Deno.mkdirSync(to, { recursive: true });
+    for (const e of Deno.readDirSync(from)) {
+      copyTree(from + SEP + e.name, to + SEP + e.name);
+    }
+  } else Deno.copyFileSync(from, to);
+}
+const args = Deno.args;
+switch (args[0]) {
+  case "info": {
+    // One graph per root when the test wrote graph.json.<root's name>.
+    const own = F.graphFile + "." + base(args[2] ?? "");
+    console.log(Deno.readTextFileSync(exists(own) ? own : F.graphFile));
+    break;
+  }
+  case "install": {
+    // The lock it was handed: logged by where it is, kept as it was read,
+    // then written to — the way deno records what it resolved.
+    let lock = "", line = "install";
+    for (const a of args) {
+      if (a === "install") continue;
+      if (a.startsWith("--lock=")) {
+        lock = a.slice(7);
+        line += lock.startsWith(Deno.cwd() + SEP)
+          ? " --lock=IN-PROJECT"
+          : " --lock=COPY";
+      } else line += " " + a;
+    }
+    log(line);
+    if (lock) {
+      // (A project with no lock yet hands over a path with nothing at it.)
+      if (exists(lock)) Deno.copyFileSync(lock, F.seenLock);
+      Deno.writeTextFileSync(lock, "resolved\n", { append: true });
+    }
+    if (exists(F.failFile)) {
+      console.error("Download https://registry.example/x.tgz");
+      console.error("error: no network");
+      console.error("    0: dns error");
+      Deno.exit(1);
+    }
+    // What installing for another system brings: packages the tree lacked.
+    if (exists(F.lateDir)) {
+      copyTree(F.lateDir, [Deno.cwd(), "node_modules", ".deno"].join(SEP));
+    }
+    break;
+  }
+  case "compile": {
+    log("compile");
+    Deno.writeTextFileSync(F.argvFile, args.join("\n") + "\n");
+    args.forEach((a, i) => {
+      if (args[i - 1] !== "-o") return;
+      if (exists(F.binFile)) Deno.copyFileSync(F.binFile, a);
+      else Deno.writeTextFileSync(a, "not a deno binary");
+    });
+    break;
+  }
+  default:
+    console.error("unexpected: deno " + args.join(" "));
+    Deno.exit(1);
+}
+`;
+
 /** Run `build` with the stand-in `deno` first on PATH. Returns the `.deno`
  *  paths the compile was told to exclude, and what the build warned. */
 async function compiledWith(
@@ -124,43 +210,36 @@ async function compiledWith(
   const graphFile = join(tmp, "graph.json");
   await Deno.mkdir(bin, { recursive: true });
   await Deno.writeTextFile(graphFile, graphJson);
+  // The stand-in `deno`: a program on PATH that hands its arguments to
+  // `STAND_IN` below, run by the real deno. (It was a shell script — `case`,
+  // `cp -R`, `basename` — which Windows cannot run.)
+  const standIn = join(tmp, "stand-in-deno.ts");
   await Deno.writeTextFile(
-    join(bin, "deno"),
-    `#!/bin/sh
-case "$1" in
-  info) cat '${graphFile}' ;;
-  install)
-    # The lock it was handed: logged by where it is, kept as it was read,
-    # then written to — the way deno records what it resolved.
-    lock=; line=install
-    for a in "$@"; do
-      case "$a" in
-        install) ;;
-        --lock=*) lock=\${a#--lock=}
-          case "$lock" in "$PWD"/*) line="$line --lock=IN-PROJECT" ;; *) line="$line --lock=COPY" ;; esac ;;
-        *) line="$line $a" ;;
-      esac
-    done
-    echo "$line" >> '${callsFile}'
-    if [ -n "$lock" ]; then cp "$lock" '${seenLock}'; echo resolved >> "$lock"; fi
-    if [ -e '${failFile}' ]; then echo "Download https://registry.example/x.tgz" >&2; echo "error: no network" >&2; echo "    0: dns error" >&2; exit 1; fi
-    # What installing for another system brings: packages the tree lacked.
-    if [ -d '${lateDir}' ]; then cp -R '${lateDir}'/. "$PWD/node_modules/.deno/"; fi ;;
-  compile)
-    echo compile >> '${callsFile}'
-    printf '%s\\n' "$@" > '${argvFile}'
-    prev=
-    for a in "$@"; do
-      if [ "$prev" = "-o" ]; then
-        if [ -e '${binFile}' ]; then cp '${binFile}' "$a"; else printf 'not a deno binary' > "$a"; fi
-      fi
-      prev=$a
-    done ;;
-  *) echo "unexpected: deno $*" >&2; exit 1 ;;
-esac
-`,
-    { mode: 0o755 },
+    standIn,
+    `const F = ${
+      JSON.stringify({
+        graphFile,
+        callsFile,
+        argvFile,
+        failFile,
+        seenLock,
+        lateDir,
+        binFile,
+      })
+    };\n${STAND_IN}`,
   );
+  // Once per `tmp` — a second build in it runs the same program. Written
+  // again, the write itself failed on Windows now and then (os error 1224, a
+  // "user-mapped section": 1 in 1800 on a loaded machine, clearing by itself
+  // within a second): a program that has just run cannot be overwritten the
+  // moment its exit is reported.
+  const fake = join(bin, `deno${EXE}`);
+  if (!await Deno.stat(fake).then(() => true, () => false)) {
+    await writeProgram(
+      fake,
+      `#!/bin/sh\nexec "${Deno.execPath()}" run -A --no-config "${standIn}" "$@"\n`,
+    );
+  }
   const path = Deno.env.get("PATH") ?? "";
   const warn = console.warn, log = console.log, exit = Deno.exit;
   const warns: string[] = [];
@@ -186,7 +265,10 @@ esac
   const argv = (await Deno.readTextFile(argvFile).catch(() => "")).trim()
     .split("\n");
   const paths = argv.filter((_, i) => argv[i - 1] === "--exclude");
-  const excluded = paths.flatMap((a) => a.split("/.deno/")[1] ?? []);
+  // (`/`-spelled on every OS: what the tests below compare against.)
+  const excluded = paths.flatMap((a) =>
+    a.replaceAll("\\", "/").split("/.deno/")[1] ?? []
+  );
   const calls = (await Deno.readTextFile(callsFile)).trim().split("\n");
   return { excluded: excluded.sort(), paths, warns, calls };
 }
@@ -212,7 +294,6 @@ const audited = (warns: string[]) =>
 Deno.test({
   name:
     "compile wiring: the app build excludes by graph, excludes the mid-compile link, and audits the artifact",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const tmp = await tempDir("compile-wiring-app-");
     try {
@@ -250,7 +331,7 @@ Deno.test({
       await Deno.mkdir(join(nm, ".deno", "node_modules", "@esbuild"), {
         recursive: true,
       });
-      await Deno.symlink(
+      await linkDir(
         `../../${WIN}/node_modules/@esbuild/win32-x64`,
         join(nm, ".deno", "node_modules", "@esbuild", "win32-x64"),
       );
@@ -274,7 +355,6 @@ Deno.test({
 Deno.test({
   name:
     "compile wiring: the cli build reads the graph but keeps unreached packages, and audits the artifact",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const tmp = await tempDir("compile-wiring-cli-");
     try {
@@ -317,13 +397,52 @@ Deno.test({
   },
 });
 
+Deno.test({
+  name:
+    "compile wiring: a module under a compile.include DIRECTORY is a graph root — the package only it imports stays in the binary",
+  async fn() {
+    const tmp = await tempDir("compile-wiring-include-dir-");
+    try {
+      const { root, nm } = await project(tmp);
+      await Deno.writeTextFile(
+        join(root, "deno.json"),
+        JSON.stringify({
+          build: { minify: false },
+          compile: { include: ["plugins"] },
+        }),
+      );
+      await Deno.mkdir(join(root, "plugins", "deep"), { recursive: true });
+      await Deno.writeTextFile(
+        join(root, "plugins", "deep", "a.ts"),
+        `import "three";\n`,
+      );
+      // The entry reaches `lib` alone; the plugin — loaded by a path the
+      // entry's graph cannot see, which is why it is included — needs `three`.
+      await Deno.writeTextFile(
+        join(tmp, "graph.json.a.ts"),
+        graph(root, nm, ["three@0.170.0"]),
+      );
+      const { excluded } = await compiledWith(
+        tmp,
+        graph(root, nm, ["lib@1.0.0"]),
+        async () => assert(await runDenoCompile(cfg(root, tmp))),
+      );
+      assert(!excluded.includes("three@0.170.0"), excluded.join("\n"));
+      assert(!excluded.includes("node_modules/three"), excluded.join("\n"));
+      // …and what neither root reaches is still left out.
+      assert(excluded.includes("tsx@4.0.0"), excluded.join("\n"));
+    } finally {
+      await dropTempDir(tmp);
+    }
+  },
+});
+
 const needsEsbuild = (warns: string[], by = "tsx depends") =>
   warns.filter((w) => w.includes(`${by} on esbuild`));
 
 Deno.test({
   name:
     "compile wiring: a package kept by name is asked what it needs though the graph never reaches it — app and cli",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const tmp = await tempDir("compile-wiring-kept-");
     try {
@@ -339,11 +458,11 @@ Deno.test({
         join(need, "package.json"),
         JSON.stringify({ dependencies: { esbuild: "~0.24.0" } }),
       );
-      await Deno.symlink(
+      await linkDir(
         "../../esbuild@0.24.2/node_modules/esbuild",
         join(nm, ".deno", NEED, "node_modules", "esbuild"),
       );
-      await Deno.symlink(
+      await linkDir(
         `../../${NEED}/node_modules/get-tsconfig`,
         join(nm, ".deno", "tsx@4.0.0", "node_modules", "get-tsconfig"),
       );
@@ -390,7 +509,6 @@ Deno.test({
 Deno.test({
   name:
     "compile wiring: a graph that cannot be mapped narrows nothing — every embedded dependent is asked",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const tmp = await tempDir("compile-wiring-unmapped-");
     try {
@@ -423,7 +541,6 @@ const sysOf = (platform: string) => npmSystemOf(PLATFORMS[platform]!);
 Deno.test({
   name:
     "compile wiring: a cross build installs the target's packages first — for the entry's graph, against a COPY of the lock — and leaves the host's native out",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const tmp = await tempDir("compile-wiring-native-");
     try {
@@ -436,7 +553,7 @@ Deno.test({
           JSON.stringify({ name, ...sys as Record<string, unknown> }),
         );
         // `lib` is what loads it: linked beside it, the way deno installs.
-        await Deno.symlink(
+        await linkDir(
           `../../${entry}/node_modules/${name}`,
           join(nm, ".deno", "lib@1.0.0", "node_modules", name),
         );
@@ -456,7 +573,7 @@ Deno.test({
         cpu: [target.cpu],
       });
       // Left behind by an earlier build for a third system: the link only.
-      await Deno.symlink(
+      await linkDir(
         "../../nat-gone@1.0.0/node_modules/nat-gone",
         join(nm, ".deno", "lib@1.0.0", "node_modules", "nat-gone"),
       );
@@ -634,7 +751,6 @@ Deno.test({
 Deno.test({
   name:
     "compile wiring: a host build installs nothing, and still leaves another system's native out",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const tmp = await tempDir("compile-wiring-native-host-");
     try {
@@ -651,7 +767,7 @@ Deno.test({
         join(dir, "package.json"),
         JSON.stringify({ os: ["aix"], cpu: ["ppc64"] }),
       );
-      await Deno.symlink(
+      await linkDir(
         "../../nat-other@1.0.0/node_modules/nat-other",
         join(nm, ".deno", "lib@1.0.0", "node_modules", "nat-other"),
       );

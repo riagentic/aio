@@ -21,6 +21,11 @@ import {
   clientDegradedReport,
 } from "../src/diagnostics/degraded.ts";
 import { tempDir } from "../src/testing/temp-dir.ts";
+import {
+  connectRW,
+  localEndpoint,
+  localIdle,
+} from "./local-endpoint-helper.ts";
 
 /** Every `case "<kind>":` label in `text` that names a known frame kind (or a
  *  reserved-ignorable one) — the same tokens the routers switch on. */
@@ -163,17 +168,17 @@ Deno.test("ignorable kinds never appear in SERVES (skipped, not routed)", () => 
 //    escalation must reach /__aio/health, not the default-arm warn) ─────────
 
 Deno.test("uds: cdiag frame records a client degradation", async () => {
-  const socketPath = join(
+  const socketPath = localEndpoint(join(
     await tempDir("aio-uds-cdiag-"),
     "s.sock",
-  );
+  ));
   const uds = createUDSListener(
     socketPath,
     () => ({}),
     () => {},
     () => {},
   );
-  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  const conn = await connectRW(socketPath);
   const name = `uds-cdiag-${crypto.randomUUID().slice(0, 8)}`;
   try {
     // Drain server frames so the write queue keeps moving.
@@ -206,14 +211,15 @@ Deno.test("uds: cdiag frame records a client degradation", async () => {
       conn.close();
     } catch { /* already closed */ }
     uds.shutdown();
+    await localIdle();
   }
 });
 
 Deno.test("uds: an ignorable extension frame is skipped without killing the connection", async () => {
-  const socketPath = join(
+  const socketPath = localEndpoint(join(
     await tempDir("aio-uds-x-"),
     "s.sock",
-  );
+  ));
   let dispatched: unknown = null;
   const uds = createUDSListener(
     socketPath,
@@ -223,7 +229,7 @@ Deno.test("uds: an ignorable extension frame is skipped without killing the conn
     },
     () => {},
   );
-  const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+  const conn = await connectRW(socketPath);
   try {
     (async () => {
       const buf = new Uint8Array(65536);
@@ -251,5 +257,6 @@ Deno.test("uds: an ignorable extension frame is skipped without killing the conn
       conn.close();
     } catch { /* already closed */ }
     uds.shutdown();
+    await localIdle();
   }
 });

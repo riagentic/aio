@@ -5,6 +5,7 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
+import { spec } from "./module-spec-helper.ts";
 
 Deno.test("cdp: a connect timeout closes the socket, so the process can exit", async () => {
   const port = freePort();
@@ -26,7 +27,7 @@ Deno.test("cdp: a connect timeout closes the socket, so the process can exit", a
   })();
   const cdp = fromFileUrl(new URL("../src/media/cdp.ts", import.meta.url));
   const script = `
-    import { cdpConnect } from ${JSON.stringify(cdp)};
+    import { cdpConnect } from ${JSON.stringify(spec(cdp))};
     try {
       await cdpConnect("ws://127.0.0.1:${port}/devtools/page/x", 300);
       console.log("connected?!");

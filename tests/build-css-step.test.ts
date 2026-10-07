@@ -15,6 +15,7 @@ import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { join } from "@std/path";
 import { cssBuildStep, runCssBuild } from "../src/build/build-css.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { SLEEP_ARGS } from "./proc-helper.ts";
 
 Deno.test("build.css: absent means absent — nothing runs, nothing changes", () => {
   assertEquals(cssBuildStep(undefined), null);
@@ -57,6 +58,10 @@ Deno.test("build.css: a malformed value is refused, not ignored", () => {
   }
 });
 
+/** A build step every OS can run: this deno, evaluating `js` in the app dir —
+ *  the portable `sh -c`. */
+const step = (js: string) => [Deno.execPath(), "eval", js];
+
 async function appWith(css: unknown): Promise<string> {
   const dir = await tempDir("aio-cssstep-");
   await Deno.writeTextFile(
@@ -67,11 +72,9 @@ async function appWith(css: unknown): Promise<string> {
 }
 
 Deno.test("build.css: a successful step runs and reports what it did", async () => {
-  const dir = await appWith([
-    "sh",
-    "-c",
-    "printf 'body{color:red}' > style.css",
-  ]);
+  const dir = await appWith(
+    step(`Deno.writeTextFileSync("style.css", "body{color:red}")`),
+  );
   try {
     const res = await runCssBuild(dir, { throwOnFail: true });
     assert(res.ran && res.ok, JSON.stringify(res));
@@ -86,7 +89,11 @@ Deno.test("build.css: a successful step runs and reports what it did", async () 
 });
 
 Deno.test("build.css: a FAILING step fails the build", async () => {
-  const dir = await appWith(["sh", "-c", "echo 'unknown class' >&2; exit 3"]);
+  // `"unknown" + " class"`: the message quotes the command, so the tool's
+  // OUTPUT must be told apart from its command line.
+  const dir = await appWith(
+    step(`console.error("unknown" + " class"); Deno.exit(3)`),
+  );
   try {
     const e = await assertRejects(
       () => runCssBuild(dir, { throwOnFail: true }),
@@ -124,7 +131,7 @@ Deno.test("build.css: dev REPORTS a failure and keeps serving", async () => {
   // class must not kill the dev server you are using to fix it — but the same
   // failure still refuses a BUILD, so dev is not more permissive about what
   // ships.
-  const dir = await appWith(["sh", "-c", "exit 1"]);
+  const dir = await appWith(step(`Deno.exit(1)`));
   try {
     const said: string[] = [];
     const res = await runCssBuild(dir, {
@@ -151,7 +158,7 @@ Deno.test({
     try {
       await Deno.writeTextFile(
         join(dir, "deno.json"),
-        JSON.stringify({ build: { css: ["sleep", "30"] } }),
+        JSON.stringify({ build: { css: [Deno.execPath(), ...SLEEP_ARGS] } }),
       );
       const said: string[] = [];
       const stop = new AbortController();
@@ -185,7 +192,9 @@ Deno.test({
     try {
       await Deno.writeTextFile(
         join(dir, "deno.json"),
-        JSON.stringify({ build: { css: ["sh", "-c", "echo x > ran"] } }),
+        JSON.stringify({
+          build: { css: step(`Deno.writeTextFileSync("ran", "x")`) },
+        }),
       );
       const said: string[] = [];
       const res = await runCssBuild(dir, {

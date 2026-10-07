@@ -46,10 +46,25 @@ export const AIO_BASELINE: Readonly<Capabilities> = Object.freeze({
   write: true, // state.db, logs, the lock, the socket
   env: true, // AIO_PORT / HOME / XDG_* — and immer's NODE_ENV
   // Not baseline: aio degrades without them, and they are real escalations.
-  ffi: false, // windows named pipes only
+  ffi: false, // not here: Windows only — see `aioBaseline`
   run: false, // spawning electron / a subprocess
   sys: false, // heap policy reads system memory, and does without
 });
+
+/** {@linkcode AIO_BASELINE} for a target OS.
+ *
+ *  Windows adds `ffi`, because there aio "degrades without it" into an app
+ *  that boots with no local control credential (`control.key` is written
+ *  owner-only through advapi32), no pipe for `am` or the desktop window
+ *  (named pipes are kernel32), and a console window flashing behind it — the
+ *  three things the baseline says a binary must not be left without. Measured
+ *  on a real Windows 11: started with exactly the advertised flags, a
+ *  scaffolded app logged `control plane: no local control credential …
+ *  Requires ffi access to "advapi32.dll"`. Elsewhere the local transport is a
+ *  unix socket and nothing in the baseline needs FFI. Pure. */
+export function aioBaseline(os: string = Deno.build.os): Capabilities {
+  return { ...AIO_BASELINE, ffi: AIO_BASELINE.ffi || os === "windows" };
+}
 
 // Signal → capability. Matched against comment-stripped source.
 const SIGNALS: [keyof Capabilities, RegExp][] = [
@@ -114,7 +129,18 @@ export const _SCANNED_FS_APIS: readonly string[] = [
 /** The capabilities an app's binary requires: {@linkcode AIO_BASELINE} — what
  *  aio itself needs — plus whatever the app's own sources ask for on top. */
 export function scanCapabilities(sources: { content: string }[]): Capabilities {
-  const caps: Capabilities = { ...AIO_BASELINE };
+  return scanCapabilitiesFor(sources, Deno.build.os);
+}
+
+/** {@linkcode scanCapabilities} for a named target OS — a cross-build scans
+ *  for the OS the binary is FOR, not the one building it (see
+ *  {@linkcode aioBaseline}). Its own function because `scanCapabilities`'s
+ *  signature is frozen surface. */
+export function scanCapabilitiesFor(
+  sources: { content: string }[],
+  os: string,
+): Capabilities {
+  const caps: Capabilities = aioBaseline(os);
   for (const { content } of sources) {
     // Strip comments so a mention in a comment doesn't grant a permission.
     const code = content
@@ -145,7 +171,12 @@ export function permissionFlags(caps: Capabilities): string[] {
 
 /** A human-readable manifest: the flags + why each was included.
  *  @internal alpha70 — test seam via src/testing/internal.ts */
-export function manifestReport(caps: Capabilities): string {
+export function manifestReport(
+  caps: Capabilities,
+  /** The OS the flags are for; decides which of them are aio's own. */
+  os: string = Deno.build.os,
+): string {
+  const base = aioBaseline(os);
   const flags = permissionFlags(caps);
   const why: Record<keyof Capabilities, string> = {
     net: "network (fetch / sockets / RPC)",
@@ -178,7 +209,11 @@ export function manifestReport(caps: Capabilities): string {
     if (on) {
       lines.push(
         `  • --allow-${cap} — ${why[cap]}${
-          AIO_BASELINE[cap] ? " (aio itself)" : ""
+          base[cap]
+            ? cap === "ffi"
+              ? " (aio itself, on Windows: named pipes and owner-only key files)"
+              : " (aio itself)"
+            : ""
         }`,
       );
     }

@@ -7,7 +7,8 @@
 //   • `am add cell` generates code in the scaffold's current style, and it
 //     compiles.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { legacyStandardTasks, standardTasks } from "../src/am/am-cmd-create.ts";
 import {
@@ -17,7 +18,7 @@ import {
 } from "../src/am/am-cmd-fix.ts";
 import { VERSION } from "../src/server/aio-cli.ts";
 
-const AIO_ROOT = new URL("..", import.meta.url).pathname;
+const AIO_ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 // ── migrateTasks (pure) ─────────────────────────────────────────────────────
 
@@ -221,12 +222,17 @@ async function probeClientKey(
     await Deno.mkdir(join(proj, "src"), { recursive: true });
     await Deno.writeTextFile(
       join(proj, "deno.json"),
-      JSON.stringify({ ...keys, imports: { aio: join(AIO_ROOT, "mod.ts") } }),
+      JSON.stringify({
+        ...keys,
+        imports: { aio: spec(join(AIO_ROOT, "mod.ts")) },
+      }),
     );
     await Deno.writeTextFile(
       join(proj, "src", "probe.ts"),
       `if (Deno.env.get("AIO_PROBE_DEV") === "1") globalThis.__aioDev = true;
-import { _denoJsonTargetClient } from "${join(AIO_ROOT, "src/server/aio.ts")}";
+import { _denoJsonTargetClient } from "${
+        spec(join(AIO_ROOT, "src/server/aio.ts"))
+      }";
 console.log(JSON.stringify({ client: _denoJsonTargetClient() ?? null }));
 `,
     );
@@ -295,7 +301,7 @@ Deno.test("am add cell: generates src/cell/<name>.ts in scaffold style, and it t
     await Deno.writeTextFile(
       join(dir, "deno.json"),
       JSON.stringify({
-        imports: { aio: join(AIO_ROOT, "mod.ts") },
+        imports: { aio: spec(join(AIO_ROOT, "mod.ts")) },
         // The scaffold's lib set — `am add` runs inside a scaffolded app.
         compilerOptions: {
           lib: ["deno.ns", "deno.unstable", "dom", "dom.iterable"],

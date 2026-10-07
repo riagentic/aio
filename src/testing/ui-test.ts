@@ -21,7 +21,7 @@ import {
   type CallFailureLedger,
 } from "./test-strict.ts";
 import { closeWindow } from "./close-window.ts";
-import { repairProxiedSiblings } from "./happy-dom-repair.ts";
+import { acceptHostEvents, repairProxiedSiblings } from "./happy-dom-repair.ts";
 // Server-touching, so NOT in test-strict.ts — see boot-refusals.ts.
 import {
   _armBootScope,
@@ -65,7 +65,7 @@ import { contrastCascadeNotice } from "../air/contrast-cascade.ts";
 import { _resetSelectorAudit } from "../air/selector-audit.ts";
 import { _resetUntrackedReadWarnings } from "../air/untracked-read.ts";
 import { _readAsClient, getRegisteredCells } from "../state/cell-reactive.ts";
-import type { ComponentFn } from "../air/vdom-types.ts";
+import { _resetDevWarnings, type ComponentFn } from "../air/vdom-types.ts";
 import type { MountHandle, RootState } from "../air/renderer-types.ts";
 import { _activeRoot, _rootStateMap } from "../air/renderer-state.ts";
 import { _setRenderErrorSink } from "../air/renderer-rerender.ts";
@@ -92,6 +92,11 @@ import {
 } from "../state/call-origin.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createAioError } from "../diagnostics/error.ts";
+import { actionWireTrip, wireLossCounts } from "../state/action-encode.ts";
+import { serializeReturn } from "../protocol/return-value.ts";
+import type { LossyConversion } from "../protocol/wire-value.ts";
+import { isDomEvent } from "../state/event-arg.ts";
+import { _eventArgHint } from "../state/cell-methods-internals.ts";
 import {
   assertOperable,
   hiddenReason as _hiddenReason,
@@ -1024,6 +1029,165 @@ function _enforceCellAccess(
   };
 }
 
+/** What to send instead, by what was passed. */
+const _WIRE_FIX: Record<string, string> = {
+  Date: "send date.toISOString() (or .getTime()) and rebuild it in the method",
+  Map: "send [...map] (entries) or Object.fromEntries(map)",
+  Set: "send [...set]",
+  undefined: "send null, or leave the argument out — it arrives as null, " +
+    "and a default parameter does not apply to null",
+  NaN: "send null or a string — JSON has no NaN",
+  Infinity: "send null or a string — JSON has no Infinity",
+  "-Infinity": "send null or a string — JSON has no Infinity",
+  "-0": "send 0",
+  function: "send data, not a function",
+  symbol: "send a string",
+};
+
+/** A client call's arguments as the server decodes them — or the test's
+ *  failure, when they do not arrive intact. `actionWireTrip` is the decider:
+ *  production's encode, production's decode, and the walk behind the
+ *  "JSON cannot carry intact" console warning. */
+function _argsOverWire(
+  cellId: string,
+  key: string,
+  args: unknown[],
+): unknown[] {
+  const type = `${cellId}:${key}`;
+  const lost: LossyConversion[] = [];
+  // A DOM Event: `onClick={counter.inc}` passes one to a method that declares
+  // no parameter for it. A browser sends `{"isTrusted":true}` and nothing
+  // reads it, so that is what crosses here. One landing in a DECLARED
+  // parameter is a method that gets `{"isTrusted":true}` in the app.
+  const hint = _eventArgHint(cellId, key, args);
+  if (hint) {
+    const at = args.findIndex(isDomEvent);
+    lost.push({
+      path: `args[${at}]`,
+      from: (args[at] as object).constructor?.name || "Event",
+      to: "object",
+    });
+  }
+  const trip = actionWireTrip({
+    type,
+    payload: { args: args.map((a) => isDomEvent(a) ? { isTrusted: true } : a) },
+  });
+  for (const l of trip.lossy) {
+    // `{ text, due: undefined }` → `{ text }` is not a failure: the table in
+    // action-encode.ts decides, for this and for both console warnings.
+    if (!wireLossCounts(l, "harness")) continue;
+    lost.push({ ...l, path: l.path.slice(type.length + 1) });
+  }
+  if (lost.length === 0) return (trip.payload as { args: unknown[] }).args;
+  throw new Error(
+    `testUI: ${cellId}.${key}() was called from the UI with arguments JSON ` +
+      `cannot carry intact — over the real socket the server receives ` +
+      `DIFFERENT values than the caller passed:\n` +
+      lost.map((l) =>
+        `  ${l.path}: ${l.from} → ${l.to} — ${
+          _WIRE_FIX[l.from] ??
+            "send a plain object / array of JSON values"
+        }`
+      ).join("\n") +
+      (hint ? `\n  ${hint}` : "") +
+      `\n  cause: a client's call is JSON on the wire. In the app this call ` +
+      `IS sent, changed, and a console warning is all that says so; passing ` +
+      `the original here would be a green test over that, so the call was ` +
+      `not dispatched.\n` +
+      `  fix: change the CALLER (the component or handler) to pass JSON-safe ` +
+      `data. Server code calling the method (another cell, an effect, ` +
+      `onInit) crosses no wire and is not checked — to test the method with ` +
+      `a rich value, call it with testCell / bootCells ` +
+      `(docs/testing/ui-testing.md, "Calls cross the wire").`,
+  );
+}
+
+/** One call across the wire a real client's call crosses: arguments are
+ *  encoded and decoded as an action frame, and the return value is vetted as
+ *  the ack carries it (`serializeReturn`, which also says what changed).
+ *
+ *  Without it the component's `cell.open(new Date())` handed the method the
+ *  Date itself, while a browser hands the server a string — a green test over
+ *  a call the app gets wrong, and the only other witness was a console line.
+ *
+ *  CLIENT calls only, decided as `access` decides it (`isServerOrigin`): a
+ *  method body, an effect or an `onInit` calling another cell crosses no wire
+ *  in the app and none here. */
+function _overClientWire(
+  cellId: string,
+  key: string,
+  args: unknown[],
+  run: (args: unknown[]) => unknown,
+): unknown {
+  if (isServerOrigin()) return run(args);
+  let sent: unknown[];
+  try {
+    sent = _argsOverWire(cellId, key, args);
+  } catch (e) {
+    const refused = Promise.reject(e);
+    // Pre-caught, as the access gate's denial is: a fire-and-forget `onClick`
+    // must reach the ledger, not kill the test module.
+    refused.catch(() => {
+      // aio-ok: a caller that awaits still gets it; the ledger wrapped around
+      // this reports the one nobody awaited.
+    });
+    return refused;
+  }
+  const out = run(sent);
+  return out !== null && typeof (out as { then?: unknown })?.then === "function"
+    ? (out as Promise<unknown>).then((v) =>
+      serializeReturn(v, `${cellId}:${key}`).value
+    )
+    : out;
+}
+
+/** Put every client call to these cells across the wire (see
+ *  `_overClientWire`). Returns a restore function.
+ *
+ *  Not a `scope: "client"` cell — it runs in the browser and has no wire —
+ *  and not a `worker: true` one here: its wire is OUTSIDE its thread boundary
+ *  (a frame is decoded, then posted to the worker; the result is cloned back,
+ *  then acked), so the ledger's worker door carries it (`_workerCallOverWire`). */
+function _crossClientWire(cells: CellDef[]): () => void {
+  const undo: (() => void)[] = [_useServerOriginScope()];
+  for (const def of cells) {
+    if (def.__aio?.scope === "client" || def.__aio?.worker === true) continue;
+    const cellId = def.__aio.id;
+    const target = def as unknown as Record<string, unknown>;
+    for (const key of def.__aio.actionKeys ?? []) {
+      if (key.startsWith("__")) continue;
+      const bound = target[key];
+      if (typeof bound !== "function") continue;
+      const original = bound as (...a: unknown[]) => unknown;
+      target[key] = (...args: unknown[]) =>
+        _overClientWire(cellId, key, args, (sent) => original(...sent));
+      undo.push(() => {
+        target[key] = original;
+      });
+    }
+  }
+  return () => {
+    for (const f of undo) f();
+  };
+}
+
+/** A `worker: true` cell's method, called the way the app reaches it: the
+ *  client's wire first, the worker's boundary inside it. */
+const _workerCallOverWire: typeof _callAcrossWorkerBoundary = (
+  cellId,
+  args,
+  run,
+  key,
+) =>
+  key === undefined || key.startsWith("__")
+    ? _callAcrossWorkerBoundary(cellId, args, run, key)
+    : _overClientWire(
+      cellId,
+      key,
+      args,
+      (sent) => _callAcrossWorkerBoundary(cellId, sent, run, key),
+    );
+
 /** The `{ persist: true }` store key: one per PROCESS, so a persistence-flow
  *  test sees continuity between its own mounts while the host's localStorage
  *  (Deno's is on disk and outlives the run) can never hand it a previous
@@ -1453,6 +1617,33 @@ function _installViewport(win: AnyDoc, width: number, height: number): void {
   }
 }
 
+/** Does this happy-dom fire `hashchange` for `pushState`/`replaceState`?
+ *
+ *  MEASURED (happy-dom 20.14.5; 17.6.3 does not): its `Location` queues a
+ *  `hashchange` for EVERY URL write whose fragment differs — the two History
+ *  calls included, for which a browser fires nothing (HTML, "URL and history
+ *  update steps"). A router that `pushState`s to `/list#top` then hears its
+ *  own navigation back as a `hashchange`, under testUI and nowhere else.
+ *
+ *  Proven once per process, on a throwaway window: an engine that behaves
+ *  gets no filter at all (see `_installSameDocumentHistory`). */
+let _historyHashchangeProof: Promise<boolean> | null = null;
+function _historyFiresHashchange(hd: AnyDoc): Promise<boolean> {
+  return _historyHashchangeProof ??= (async () => {
+    const w = new hd.Window({ url: "http://localhost/" });
+    try {
+      let fired = false;
+      w.addEventListener("hashchange", () => fired = true);
+      w.history.replaceState(null, "", "#aio-probe");
+      // Queued BEHIND the timer the defect arms (same delay, so FIFO).
+      await new Promise<void>((r) => w.setTimeout(r, 0));
+      return fired;
+    } finally {
+      await closeWindow(w);
+    }
+  })();
+}
+
 /** Make Back/Forward a SAME-DOCUMENT traversal, as it is in a browser.
  *
  *  MEASURED (happy-dom 17.6.3): `history.back()` between two `pushState`
@@ -1465,6 +1656,18 @@ function _installViewport(win: AnyDoc, width: number, height: number): void {
  *  browser re-rendered. A test of "Back returns to the list" could not pass
  *  against a correct app.
  *
+ *  RE-MEASURED (happy-dom 20.14.5): the traversal is same-document now and
+ *  `popstate` carries the right state — but it all happens INSIDE `back()`,
+ *  where a browser queues a task (code right after `back()` reads the old
+ *  URL). Still replaced, for that; `tests/testui-history-traversal.test.tsx`
+ *  goes red without it on both versions.
+ *
+ *  `quietHash` (the engine failed `_historyFiresHashchange`): the
+ *  `hashchange` it owes for each `pushState`/`replaceState` made here is
+ *  dropped as it is dispatched — matched oldest-first by its exact
+ *  `oldURL → newURL`, the order the engine queues them in — so one caused by
+ *  `location.hash = …` or a fragment link still arrives.
+ *
  *  So the harness keeps the session history itself, for this window only:
  *  `pushState`/`replaceState` still go through happy-dom (it validates the
  *  origin and moves `location`), and each is recorded here. A traversal is
@@ -1475,18 +1678,64 @@ function _installViewport(win: AnyDoc, width: number, height: number): void {
  *  navigation the app can make stays a real happy-dom call; only the part
  *  happy-dom gets wrong is replaced, so this is never more permissive than a
  *  browser. `go(0)` (a reload) is left to happy-dom. */
-function _installSameDocumentHistory(win: AnyDoc): void {
+function _installSameDocumentHistory(win: AnyDoc, quietHash: boolean): void {
   const h = win?.history;
   if (!h || typeof h.pushState !== "function") return;
-  const push = h.pushState.bind(h);
-  const replace = h.replaceState.bind(h);
+  /** `oldURL newURL` of each `hashchange` the engine owes for a History call. */
+  const owed: string[] = [];
+  /** The traversal's own `hashchange` — never one of the engine's. */
+  const own = new WeakSet<object>();
+  const viaHistory = (
+    call: (state: unknown, title: string, url?: string | URL | null) => void,
+  ): typeof call =>
+  (state, title, url) => {
+    const was = win.location.href, wasHash = win.location.hash;
+    call(state, title, url);
+    if (quietHash && win.location.hash !== wasHash) {
+      owed.push(`${was} ${win.location.href}`);
+    }
+  };
+  const push = viaHistory(h.pushState.bind(h));
+  const replace = viaHistory(h.replaceState.bind(h));
   const reload = h.go.bind(h);
+  if (quietHash) {
+    const dispatch = win.dispatchEvent;
+    win.dispatchEvent = function (this: unknown, ev: AnyDoc) {
+      if (
+        ev?.type === "hashchange" && !own.has(ev) &&
+        owed[0] === `${ev.oldURL} ${ev.newURL}`
+      ) {
+        owed.shift();
+        return true;
+      }
+      return dispatch.call(this, ev);
+    };
+  }
   const entries: { href: string; state: unknown }[] = [
     { href: win.location.href, state: h.state },
   ];
   let index = 0;
-  const current = () => ({ href: win.location.href, state: h.state });
+  const engineState = () =>
+    Reflect.get(Object.getPrototypeOf(h), "state", h) as unknown;
+  const current = () => ({ href: win.location.href, state: engineState() });
+  const base = (href: string) => href.split("#")[0];
+  /** A fragment navigation made OUTSIDE the History API (`location.hash = …`,
+   *  a `#` link — which `<Link>` leaves to the browser) is a new entry with
+   *  no state, as in a browser. This list never heard of it, so `back()`
+   *  went one entry too far. Noticed on the next look at the history rather
+   *  than at every door the address can change through. MEASURED (happy-dom
+   *  20.14.5): `location.hash = …` also keeps the old entry's `state`. */
+  const sync = () => {
+    const href = win.location.href;
+    if (href === entries[index]!.href) return;
+    if (base(href) !== base(entries[index]!.href)) return;
+    replace(null, "", href);
+    entries.length = index + 1;
+    entries.push({ href, state: null });
+    index++;
+  };
   const traverse = (delta: number) => {
+    sync();
     win.setTimeout(() => {
       if (win.closed) return;
       const target = entries[index + delta];
@@ -1500,12 +1749,12 @@ function _installSameDocumentHistory(win: AnyDoc): void {
       const [oldBase, oldHash = ""] = oldURL.split("#");
       const [newBase, newHash = ""] = target.href.split("#");
       if (oldBase === newBase && oldHash !== newHash) {
-        win.dispatchEvent(
-          new win.HashChangeEvent("hashchange", {
-            oldURL,
-            newURL: target.href,
-          }),
-        );
+        const hc = new win.HashChangeEvent("hashchange", {
+          oldURL,
+          newURL: target.href,
+        });
+        own.add(hc);
+        win.dispatchEvent(hc);
       }
     }, 0);
   };
@@ -1513,6 +1762,7 @@ function _installSameDocumentHistory(win: AnyDoc): void {
     pushState: {
       configurable: true,
       value(state: unknown, title: string, url?: string | URL | null) {
+        sync();
         push(state, title, url);
         entries.length = index + 1;
         entries.push(current());
@@ -1522,6 +1772,7 @@ function _installSameDocumentHistory(win: AnyDoc): void {
     replaceState: {
       configurable: true,
       value(state: unknown, title: string, url?: string | URL | null) {
+        sync();
         replace(state, title, url);
         entries[index] = current();
       },
@@ -1536,7 +1787,8 @@ function _installSameDocumentHistory(win: AnyDoc): void {
     },
     back: { configurable: true, value: () => traverse(-1) },
     forward: { configurable: true, value: () => traverse(1) },
-    length: { configurable: true, get: () => entries.length },
+    length: { configurable: true, get: () => (sync(), entries.length) },
+    state: { configurable: true, get: () => (sync(), engineState()) },
   });
 }
 
@@ -1638,6 +1890,28 @@ type PartialMount = {
  *  happy-dom window fire-and-forget, and happy-dom's abort-all-tasks arms a
  *  timer the test then ended on top of — so every test that asserts a
  *  refusal was a test that leaked, and the harness itself was what leaked. */
+/** How many mounts are using each window testUI made.
+ *
+ *  A `testUI` started while another is mounted renders into the FIRST one's
+ *  document — it is `globalThis.document` by then — so that window has to
+ *  outlive whichever of them is disposed first. MEASURED (happy-dom 20.14.5):
+ *  a closed window is destroyed, and its nodes dispatch to no listener;
+ *  17.6.3's went on working after `close()`, which is all the overlapping
+ *  case ever stood on. The last mount out closes it. */
+const _windowHolds = new WeakMap<object, number>();
+
+/** Drop one mount's hold on `win`; true when it was the last, and the caller
+ *  closes the window. */
+function _dropWindowHold(win: object): boolean {
+  const left = (_windowHolds.get(win) ?? 1) - 1;
+  if (left > 0) {
+    _windowHolds.set(win, left);
+    return false;
+  }
+  _windowHolds.delete(win);
+  return true;
+}
+
 async function _teardownPartialMount(p: PartialMount): Promise<void> {
   const step = async (what: string, fn: () => void | Promise<void>) => {
     try {
@@ -1658,7 +1932,7 @@ async function _teardownPartialMount(p: PartialMount): Promise<void> {
   await step("window close", async () => {
     const win = p.window;
     p.window = null;
-    await closeWindow(win);
+    if (win && _dropWindowHold(win)) await closeWindow(win);
   });
   await step("globals", () => {
     for (const key of p.owned.splice(0)) delete (globalThis as AnyDoc)[key];
@@ -1704,6 +1978,8 @@ async function _buildTestUI(
   // lifecycle (closed on dispose). Lazy import keeps the DOM dep out of
   // production code paths entirely.
   let ownedWindow: AnyDoc = null;
+  /** A window another mount owns and this one renders into. */
+  let sharedWindow: AnyDoc = null;
   // Globals we installed from the owned window (restored on dispose) — held in
   // `partial` so a throw before we return can undo them too.
   const _ownedGlobals: string[] = partial.owned;
@@ -1727,14 +2003,19 @@ async function _buildTestUI(
         height: vh,
       });
       doc = ownedWindow.document;
+      _windowHolds.set(ownedWindow, 1);
       partial.window = ownedWindow; // so a later throw still closes it
       // BEFORE anything renders: happy-dom answers `null` for a `<form>` or
       // `<select>`'s siblings, and the reconciler's positional cursor walks
       // siblings. See happy-dom-repair.ts — it proves the defect first, so a
       // fixed happy-dom is left untouched.
       repairProxiedSiblings(ownedWindow);
+      acceptHostEvents(ownedWindow);
       _installViewport(ownedWindow, vw, vh);
-      _installSameDocumentHistory(ownedWindow);
+      _installSameDocumentHistory(
+        ownedWindow,
+        await _historyFiresHashchange(hd),
+      );
       _warnOnFakeLayout(ownedWindow);
       // `document` and `window` as GLOBALS, from the same owned window.
       //
@@ -1779,7 +2060,7 @@ async function _buildTestUI(
     } catch (e) {
       throw new Error(
         "testUI: no DOM available — add happy-dom to your deno.json imports " +
-          '("happy-dom": "npm:happy-dom@^17"), or pass { document } yourself',
+          '("happy-dom": "npm:happy-dom@^20"), or pass { document } yourself',
         { cause: e },
       );
     }
@@ -1790,6 +2071,14 @@ async function _buildTestUI(
     // printed a false "ran out of DOM nodes" (report 9b §4). It proves the
     // defect first, so a browser-faithful DOM is left untouched.
     repairProxiedSiblings(doc.defaultView);
+    acceptHostEvents(doc.defaultView);
+    // Another mount's window (see `_windowHolds`): held until this one is done.
+    const held = _windowHolds.get(doc.defaultView);
+    if (held) {
+      sharedWindow = doc.defaultView;
+      _windowHolds.set(sharedWindow, held + 1);
+      partial.window = sharedWindow;
+    }
   }
   const maxIter = opts.settleIterations ?? 20;
 
@@ -2045,6 +2334,24 @@ async function _buildTestUI(
   // most of it. Before the cells boot, and independent of whether this app has
   // any: a signals-only UI leaked just as hard.
   if (!opts.persist) _resetRootSignals();
+  // The renderer's own dev-audit memories. They are the same
+  // "have I already said this?" class `_resetAioRuntime` clears for the
+  // state layer — unreset, the SECOND test to trigger the same finding
+  // sees silence, so "it warns about X" passes alone and fails in a suite
+  // (or the reverse). They cannot live in `_resetAioRuntime` itself:
+  // that is `src/state/`, which may not import `src/air/` (the boundary
+  // matrix), and loosening a red gate to save a line is the wrong trade.
+  // The harness is the next-best owner, and it is the one every UI test
+  // goes through.
+  //
+  // EVERY mount: these sat inside `if (cells.length > 0)` below, so a
+  // cell-less App mounted within the contrast walk's throttle of the mount
+  // before it was never walked. Under `persist` too — that keeps the app's
+  // state, and what an audit has already said is not state.
+  _resetContrastAudit();
+  _resetSelectorAudit();
+  _resetUntrackedReadWarnings();
+  _resetDevWarnings();
   // Every boot refusal a real `aio.run()` performs, BEFORE anything boots.
   // testUI composes on the standalone runtime, which is not the server's boot
   // path — so an app whose cell exposes a credential to the UI passed here and
@@ -2079,18 +2386,6 @@ async function _buildTestUI(
       // AFTER `_resetState()`: that call destroys the previous mount's cells,
       // and their onDestroy hooks must still find their methods bound.
       _resetAioRuntime();
-      // The renderer's own dev-audit memories. They are the same
-      // "have I already said this?" class `_resetAioRuntime` clears for the
-      // state layer — unreset, the SECOND test to trigger the same finding
-      // sees silence, so "it warns about X" passes alone and fails in a suite
-      // (or the reverse). They cannot live in `_resetAioRuntime` itself:
-      // that is `src/state/`, which may not import `src/air/` (the boundary
-      // matrix), and loosening a red gate to save a line is the wrong trade.
-      // The harness is the next-best owner, and it is the one every UI test
-      // goes through.
-      _resetContrastAudit();
-      _resetSelectorAudit();
-      _resetUntrackedReadWarnings();
     }
     // BEFORE the boot, because the boot is what runs `onInit` — and `onInit`
     // is one of the four things `access` documents as server origin. The GATE
@@ -2215,9 +2510,14 @@ async function _buildTestUI(
     // ledger, so a denied call is just "an async method that rejected" and is
     // reported the harness's way — through `settle()` — instead of escaping as
     // an unhandled rejection that kills the whole test module.
-    if (opts.enforceAccess !== false) {
-      partial.restore.push(_enforceCellAccess(cells, opts.user ?? undefined));
-    }
+    const ungate = opts.enforceAccess !== false
+      ? _enforceCellAccess(cells, opts.user ?? undefined)
+      : undefined;
+    // The wire, around the gate: the server decodes a frame first and asks
+    // `access` about what it decoded. Undone first (restores run in push
+    // order), so the gate's undo is the one that puts the bound method back.
+    partial.restore.push(_crossClientWire(cells));
+    if (ungate) partial.restore.push(ungate);
     // What this user's SOCKET would carry, not the server's whole state: a
     // real client only ever holds the `visible.forUser` view, so a component
     // under testUI must read that view too — anonymous when no `user` is
@@ -2232,7 +2532,7 @@ async function _buildTestUI(
     // ledger wraps it, and undone AFTER the ledger's restore (restores run in
     // push order), so each identity-checked undo finds its own wrapper.
     const unisolate = _isolateWorkerCellsInProcess(cells);
-    ledger = _watchUnobservedCalls(cells, _callAcrossWorkerBoundary);
+    ledger = _watchUnobservedCalls(cells, _workerCallOverWire);
     inits.pipe(ledger);
     partial.restore.push(() => ledger?.restore());
     partial.restore.push(unisolate);
@@ -3603,11 +3903,14 @@ async function _buildTestUI(
       _resetAioRuntime();
       // Owned window: close in the background (fire-and-forget is safe for
       // happy-dom; use dispose() when you need to await it).
-      ownedWindow?.happyDOM?.close()?.catch?.(() => {
-        // aio-ok: teardown is fire-and-forget by design here — dispose() is
-        // the spelling that awaits it.
-      });
-      ownedWindow = null;
+      const win = ownedWindow ?? sharedWindow;
+      if (win && _dropWindowHold(win)) {
+        win.happyDOM?.close()?.catch?.(() => {
+          // aio-ok: teardown is fire-and-forget by design here — dispose() is
+          // the spelling that awaits it.
+        });
+      }
+      ownedWindow = sharedWindow = null;
       partial.window = null;
       for (const key of _ownedGlobals.splice(0)) {
         delete (globalThis as AnyDoc)[key];
@@ -3641,9 +3944,10 @@ async function _buildTestUI(
       ledger?.restore(); // put the cells' own methods back before the reset
       resetRuntime?.();
       _resetAioRuntime(); // see unmount() — process-global residue
-      if (ownedWindow) {
-        await closeWindow(ownedWindow);
-        ownedWindow = null;
+      const win = ownedWindow ?? sharedWindow;
+      if (win) {
+        if (_dropWindowHold(win)) await closeWindow(win);
+        ownedWindow = sharedWindow = null;
         partial.window = null;
       }
       for (const key of _ownedGlobals.splice(0)) {

@@ -14,9 +14,16 @@
 // is the thing that was actually wrong, is that no branch reports success
 // without the proof.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { dirname, fromFileUrl, join } from "@std/path";
+import { join } from "@std/path";
 
-const REPO_ROOT = dirname(fromFileUrl(import.meta.url)).replace(/\/tests$/, "");
+const REPO_ROOT = join(import.meta.dirname!, "..");
+
+// These tests RUN a POSIX shell script with `sh`. Windows has neither: its
+// installer and runner are install.ps1 / run.ps1 (see the note in
+// tests/run-sh.test.ts).
+const NEEDS_SH = {
+  ignore: Deno.build.os === "windows", // install.sh is a POSIX sh script; Windows has install.ps1
+};
 const INSTALL = join(REPO_ROOT, "install.sh");
 
 /** The body of a shell function, by brace depth from its `name() {` line. */
@@ -37,7 +44,7 @@ function shellFunction(src: string, name: string): string {
   return out.join("\n");
 }
 
-Deno.test("install.sh: valid POSIX syntax (sh -n)", async () => {
+Deno.test("install.sh: valid POSIX syntax (sh -n)", NEEDS_SH, async () => {
   const p = await new Deno.Command("sh", {
     args: ["-n", INSTALL],
     stderr: "piped",

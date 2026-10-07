@@ -16,7 +16,7 @@
 import { declaredArgCount } from "./arg-arity.ts";
 
 /** Is `v` a DOM Event (any realm — happy-dom's is not the global `Event`)? */
-function isDomEvent(
+export function isDomEvent(
   v: unknown,
 ): v is { type: string; constructor?: { name?: string } } {
   if (typeof v !== "object" || v === null) return false;

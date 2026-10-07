@@ -20,7 +20,13 @@ import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const H = { "Content-Type": "application/json", "X-AIO": "1" };
 
-Deno.test("persist: deleting state.db under a running app fails `persist`, health and the dispatch reply", async () => {
+Deno.test({
+  name:
+    "persist: deleting state.db under a running app fails `persist`, health and the dispatch reply",
+  // Windows refuses to delete a file that is open (os error 32, measured on
+  // Windows 11), so a live database cannot go missing there: no subject.
+  ignore: Deno.build.os === "windows", // Windows refuses to delete an open file (os error 32): a live database cannot go missing
+}, async () => {
   const dir = await tempDir("aio-db-deleted-live-");
   const dbPath = join(dir, "state.db");
   const port = freePort();

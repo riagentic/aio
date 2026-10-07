@@ -6,11 +6,13 @@
 // the re-booted instance's LIVE lock, and a second instance acquired it and
 // opened the same state.db. Each case runs in a child with its own
 // XDG_RUNTIME_DIR / AIO_APPS_DIR, so nothing here touches the real runtime dir.
+import { exits0, SLEEP_ARGS, sleeper } from "./proc-helper.ts";
 import { assert, assertEquals } from "@std/assert";
 import { join, toFileUrl } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import {
   boundUnixSockets,
+  createInLockDir,
   instances,
   lockPath,
   ownPidTag,
@@ -72,7 +74,7 @@ async function scratch(prefix: string): Promise<string> {
 const staleThenLive = (act: string) => `
   const m = await import(${LOCK});
   const home = Deno.env.get("AIO_APPS_DIR") + "/b";
-  const gone = new Deno.Command("true").spawn(); await gone.status;
+  const gone = new Deno.Command(Deno.execPath(), { args: ["eval", ""] }).spawn(); await gone.status;
   const pf = { appId: "b", pid: gone.pid, port: 0, startedAt: Date.now(),
     status: "starting", cwd: "/", home };
   const live = new m.AppLock("b", home);
@@ -106,7 +108,6 @@ function assertKept(r: unknown): void {
 
 Deno.test({
   name: "lock CAS: am stop on a stale placeholder keeps a re-booted live lock",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await scratch("lock-cas-stop-");
     try {
@@ -126,7 +127,6 @@ Deno.test({
 
 Deno.test({
   name: "lock CAS: removePid with a stale pf, or none, keeps the live lock",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await scratch("lock-cas-rmpid-");
     try {
@@ -175,7 +175,7 @@ Deno.test({
     const base = await shortRuntime(); // sockets are bound under it
     const dir = join(base, "aio-scope");
     await Deno.mkdir(dir, { mode: 0o700 });
-    const gone = new Deno.Command("true").spawn();
+    const gone = exits0();
     await gone.status;
     const put = (n: string, s: string) => Deno.writeTextFile(join(dir, n), s);
     const lock = (pid: number) =>
@@ -328,7 +328,7 @@ Deno.test("boundUnixSockets: a path keeps its double spaces and tabs", async () 
 // dir: a sibling's exit prune removed it, and the socket bind failed ENOENT.
 Deno.test({
   name: "lock dir: a UDS bind recreates a lock dir pruned under it, 0700",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // a Unix-socket dir and its 0700 mode: Windows has neither
   fn: () =>
     permissiveUmask(async () => {
       const dir = await scratch("lk-");
@@ -392,7 +392,7 @@ Deno.test("removeLockIfOwner: another start identity is another owner", () => {
 // very gap: the log line re-publishes the lock, as a racing boot would.
 Deno.test("instances(): a lock re-published after it was judged dead is kept", async () => {
   const id = `inst-${crypto.randomUUID().slice(0, 8)}`;
-  const gone = new Deno.Command("true").spawn();
+  const gone = exits0();
   await gone.status;
   const base = { appId: id, port: 0, startedAt: 1, status: "started" };
   Deno.writeTextFileSync(
@@ -424,7 +424,7 @@ Deno.test("instances(): a lock re-published after it was judged dead is kept", a
 Deno.test({
   name: "lock dir: a UDS bind re-checks an EXISTING dir — 0700, or refused",
   // aio-ok(umask): the dir is chmod'ed 0755 first and must END 0700 — chmod ignores the umask, so none can fake the re-check.
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // a Unix-socket dir and its 0700 mode: Windows has neither
   async fn() {
     const dir = await scratch("lk2-");
     const rt = await shortRuntime();
@@ -517,7 +517,6 @@ Deno.test("replaceLockIf: writes only over the record read, onto its current byt
 Deno.test({
   name:
     "am stop: a lock another process published after the read is neither marked nor signalled",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await scratch("lock-cas-mark-");
     try {
@@ -528,7 +527,9 @@ Deno.test({
          const home = Deno.env.get("AIO_APPS_DIR") + "/b";
          // What \`am stop\` read: an instance that has since gone away —
          // its pid now a live stranger's (a sleep) with that stranger's start.
-         const old = new Deno.Command("sleep", { args: ["30"] }).spawn();
+         const old = new Deno.Command(Deno.execPath(), { args: ${
+          JSON.stringify(SLEEP_ARGS)
+        } }).spawn();
          const live = new m.AppLock("b", home);
          await live.acquire(0); // …and a NEW instance (this one) holds b now
          const pf = { ...m.readLock(m.lockKey("b", home)), pid: old.pid,
@@ -565,7 +566,7 @@ Deno.test("am start placeholder: never over a live owner, or the child's own", a
     "../src/am/am-cmd-process.ts"
   );
   const id = `ph-${crypto.randomUUID().slice(0, 8)}`;
-  const gone = new Deno.Command("true").spawn();
+  const gone = exits0();
   await gone.status;
   const rec = (pid: number) => ({
     appId: id,
@@ -577,12 +578,18 @@ Deno.test("am start placeholder: never over a live owner, or the child's own", a
   });
   const put = (pid: number) => {
     const t = JSON.stringify(rec(pid));
-    Deno.writeTextFileSync(lockPath(id), t);
+    // By the lock dir's rule: a sibling's exit prunes the scoped dir
+    // whenever it is empty, and a bare write then found none.
+    createInLockDir(
+      lockPath(id),
+      () => Deno.writeTextFileSync(lockPath(id), t),
+    );
     return t;
   };
   const child = rec(gone.pid + 100000); // the spawned child: another pid
+  const other = sleeper(); // alive, another owner
   try {
-    const live = put(1); // pid 1: alive, another owner
+    const live = put(other.pid);
     assertEquals(writeStartPlaceholder(readLock(id), child), false);
     assertEquals(Deno.readTextFileSync(lockPath(id)), live, "live lock kept");
     const own = put(child.pid); // the child already wrote its own
@@ -594,6 +601,8 @@ Deno.test("am start placeholder: never over a live owner, or the child's own", a
     Deno.removeSync(lockPath(id));
     assertEquals(writeStartPlaceholder(null, child), true, "none there");
   } finally {
+    other.kill("SIGKILL");
+    await other.status;
     try {
       Deno.removeSync(lockPath(id));
     } catch { /* already gone */ }
@@ -606,7 +615,7 @@ Deno.test("am start placeholder: never over a live owner, or the child's own", a
 Deno.test({
   name: "UDS bind: a caller-chosen socket dir keeps its mode",
   // aio-ok(umask): the dir is chmod'ed 0755 and must KEEP it — a restrictive umask cannot produce 0755, only break it.
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // a Unix-socket dir and its 0700 mode: Windows has neither
   async fn() {
     const { createUDSListener } = await import("../src/server/uds.ts");
     const dir = await shortRuntime();

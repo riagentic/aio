@@ -196,7 +196,7 @@ test({
 
 test({
   name: "tls: the CA private key is owner-only",
-  ignore: SKIP || Deno.build.os === "windows",
+  ignore: SKIP || Deno.build.os === "windows", // POSIX mode bits: Windows has none
   fn: () =>
     permissiveUmask(async () => {
       const dir = await Deno.makeTempDir({ prefix: "aio-tls-perm-" });
@@ -291,7 +291,10 @@ test({
             "req_extensions = v3",
             "prompt = no",
             "[dn]",
-            "CN = probe",
+            // A CN the root permits: LibreSSL (macOS's openssl) reads the CN
+            // as a DNS name when the SAN carries none, and would refuse an
+            // IP-only probe for its CN. The SAN alone is what is under test.
+            "CN = localhost",
             "[v3]",
             "basicConstraints = critical,CA:FALSE",
             "extendedKeyUsage = serverAuth",
@@ -554,6 +557,13 @@ test({
           "ec",
           "-pkeyopt",
           "ec_paramgen_curve:P-256",
+          // The NAMED curve, said outright (as tests/x509.test.ts does): the
+          // subject is an old root that still LOADS. LibreSSL (macOS's
+          // `openssl`) defaults to explicit parameters — a key this runtime
+          // cannot load, so the root is replaced and that warning is the only
+          // one (tests/tls-root-unusable-key-is-replaced.test.ts).
+          "-pkeyopt",
+          "ec_param_enc:named_curve",
           "-nodes",
           "-keyout",
           join(ca, "aio-root-key.pem"),

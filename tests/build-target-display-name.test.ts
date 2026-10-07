@@ -21,11 +21,11 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { normalizeTargets } from "../src/build-all.ts";
 import { displayNameClashes } from "../src/build/build-config.ts";
 import { unknownBuildKeys } from "../src/server/config.ts";
-import { join, toFileUrl } from "@std/path";
+import { fromFileUrl, join, toFileUrl } from "@std/path";
 
 const CONFIG_URL = new URL("../src/build/build-config.ts", import.meta.url);
 /** The repo's import map, so the probe resolves `@std/*` like the build does. */
-const REPO_CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const REPO_CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 /** Run `loadBuildConfig()` in `dir` with `args`; return the identity fields. */
 async function configIn(
@@ -187,7 +187,7 @@ Deno.test("build display name: two desktop apps showing one name clash; one app,
   );
 });
 
-const BUILD_ALL = new URL("../src/build-all.ts", import.meta.url).pathname;
+const BUILD_ALL = fromFileUrl(new URL("../src/build-all.ts", import.meta.url));
 
 /** Run the fleet in `dir`; the project's entries are missing on purpose, so
  *  it stops at the entry check right after its config warnings. */

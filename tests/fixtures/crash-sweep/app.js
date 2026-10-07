@@ -9,7 +9,7 @@ if (Deno.env.get("CHECKATOMIC") === "1") {
   Deno.writeTextFileSync = (path, data, opts) => {
     const text = String(data);
     if (
-      String(path).endsWith("/journal") &&
+      /[\\/]journal$/.test(String(path)) &&
       /"__aioSyncApplied".*"cell":"notes"/.test(text)
     ) {
       console.log(
@@ -160,6 +160,21 @@ const app = await aio.run({
   appDir: DIR,
 });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// A clean stop. Windows has no SIGTERM to deliver (`kill` there ends the
+// process outright, which is the KILL this sweep compares it with) — the app
+// is asked the way `am stop` asks it.
+const stopClean = () => {
+  if (Deno.build.os !== "windows") return Deno.kill(Deno.pid, "SIGTERM");
+  fetch("http://127.0.0.1:" + PORT + "/__aio/trojan/shutdown", {
+    method: "POST",
+    headers: {
+      "X-AIO": "1",
+      "X-Aio-Control": Deno.readTextFileSync(DIR + "/data/control.key").trim(),
+    },
+  }).then(async (r) => {
+    if (!r.ok) console.log("CLEAN STOP REFUSED", r.status, await r.text());
+  }, (e) => console.log("CLEAN STOP NOT SENT", String(e)));
+};
 const snap = () => {
   const s = app.getState();
   return {
@@ -183,7 +198,7 @@ if (PHASE === "read") {
 if (PHASE === "clean") {
   Deno.writeTextFileSync(DIR + "/recovered.json", JSON.stringify(snap()));
   await sleep(200);
-  Deno.kill(Deno.pid, "SIGTERM");
+  stopClean();
   await sleep(20000);
 }
 let seed = Number(E("SEED", "1"));
@@ -272,7 +287,8 @@ const killAt = realNow() + Number(E("KILLMS", "3000"));
 setTimeout(() => {
   Deno.writeTextFileSync(DIR + "/expected.json", JSON.stringify(snap()));
   stopping = true;
-  Deno.kill(Deno.pid, E("STOPK", "kill") === "term" ? "SIGTERM" : "SIGKILL");
+  if (E("STOPK", "kill") === "term") stopClean();
+  else Deno.kill(Deno.pid, "SIGKILL");
 }, Number(E("KILLMS", "3000")));
 if (E("DUPS", "")) await op("notes", "add", "x-dup");
 for (let st = 0; st < STEPS * 10 && !stopping; st++) {

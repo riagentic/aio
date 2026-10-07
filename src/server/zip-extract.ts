@@ -97,7 +97,11 @@ export function readZipDirectory(zip: Uint8Array): ZipEntry[] {
       size,
       localOffset,
       mode,
-      isDir: name.endsWith("/"),
+      // `/` ends a directory's name. An archive NOT made on Unix may say `\`
+      // (.NET Framework's `ZipFile` on Windows did): no Windows file name can
+      // end in one, so there it is a directory too — it used to be unpacked
+      // as an empty FILE. On Unix `\` is a legal character of a file name.
+      isDir: name.endsWith("/") || (madeBy !== 3 && name.endsWith("\\")),
       isSymlink,
     });
     at += 46 + nameLen + extraLen + commentLen;

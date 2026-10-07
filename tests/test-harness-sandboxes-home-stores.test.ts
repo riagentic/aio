@@ -14,7 +14,7 @@
 // the stores beside it. Now the harness (and every `tempDir`) pins each such
 // store into the test root, and the shard runner pins them per shard.
 import { assert, assertEquals, assertNotEquals } from "@std/assert";
-import { join } from "@std/path";
+import { join, resolve, SEPARATOR } from "@std/path";
 import {
   _armTestStrict,
   aioTestRoot,
@@ -52,7 +52,9 @@ async function withStoresUnset(fn: () => void | Promise<void>): Promise<void> {
 function assertSandboxed(path: string, what: string): void {
   const root = aioTestRoot();
   assert(
-    path.startsWith(root + "/"),
+    // `resolve`: a store path is `<base>/<subdir>` on every OS, and Windows
+    // reads that as it reads `\\` — compared in the host's one spelling.
+    resolve(path).startsWith(resolve(root) + SEPARATOR),
     `${what} resolved to ${path}, outside the test root ${root}`,
   );
 }
@@ -102,13 +104,15 @@ Deno.test("home stores: a test's own value wins, and a restore that DELETES the 
 });
 
 Deno.test("home stores: the shard runner pins every store per shard, beside (not inside) its apps dir", () => {
-  const home = "/r/.aio-test-shards/3/.aio-test-home";
+  const shard = resolve("/r/.aio-test-shards/3");
+  const home = join(shard, ".aio-test-home");
   const env = shardEnv(3, 8, "/tmp/xdg-shard-3", { home, realWindow: false });
   const win = shardEnv(0, 8, null, { home, realWindow: true });
   for (const k of VARS) {
     assert(env[k], `shard env is missing ${k}`);
-    assert(env[k]!.startsWith("/r/.aio-test-shards/3/"), `${k}=${env[k]}`);
-    assert(!env[k]!.startsWith(home + "/"), `${k} inside AIO_APPS_DIR`);
+    const at = resolve(env[k]!);
+    assert(at.startsWith(shard + SEPARATOR), `${k}=${env[k]}`);
+    assert(!at.startsWith(home + SEPARATOR), `${k} inside AIO_APPS_DIR`);
     assertEquals(win[k], env[k], `the real-window shard must pin ${k} too`);
   }
   assertEquals(new Set(VARS.map((k) => env[k])).size, VARS.length);

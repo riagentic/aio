@@ -5,14 +5,16 @@
 // `--jobs=abc` (NaN) did the same. The exit counted failures seen instead of
 // kills made — a gate that passes by not looking.
 import { assert, assertEquals, assertThrows } from "@std/assert";
+import { fromFileUrl } from "@std/path";
 import {
   allKilled,
   mutationExitCode,
   mutationJobs,
 } from "../scripts/check-mutations.ts";
 
-const SCRIPT = new URL("../scripts/check-mutations.ts", import.meta.url)
-  .pathname;
+const SCRIPT = fromFileUrl(
+  new URL("../scripts/check-mutations.ts", import.meta.url),
+);
 
 Deno.test("check:mutations --jobs: a whole number ≥ 1, or a refusal", () => {
   assertEquals(mutationJobs(undefined), 4);

@@ -17,11 +17,11 @@
 // Docker lab (`deno task lab`) proves the whole path on a fresh machine; this
 // proves the decision that path depends on, on every `deno task test` run.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { MIN_DENO } from "../src/server/deno-version.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const REPO = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 
 /** A sandbox with a fake `deno` of the given version first on PATH, a fake
  *  `git` that refuses to reach the network, and a HOME of its own. */
@@ -105,7 +105,7 @@ async function runInstall(
 Deno.test({
   name: "install.sh: an OLD deno is never accepted as 'ok'",
   // The clone step needs git; everything else is fake.
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // install.sh is a POSIX sh script; Windows has install.ps1
   fn: async () => {
     const { dir, env } = await sandbox("2.1.4");
     try {
@@ -130,7 +130,7 @@ Deno.test({
 
 Deno.test({
   name: "install.sh: when it cannot upgrade, it FAILS with the exact commands",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // install.sh is a POSIX sh script; Windows has install.ps1
   fn: async () => {
     const { dir, env } = await sandbox("2.1.4");
     try {
@@ -213,7 +213,7 @@ Deno.test({
 
 Deno.test({
   name: "install.sh: `am` runs even when deno is NOT on PATH",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // install.sh is a POSIX sh script; Windows has install.ps1
   fn: async () => {
     // `deno install` writes a shim whose body is `exec deno run …` — deno BY
     // NAME. So the tool it just installed works only where deno is already on
@@ -252,7 +252,7 @@ Deno.test({
 Deno.test({
   name:
     "install.sh: a NEW shell can find am (PATH is persisted, not suggested)",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // install.sh is a POSIX sh script; Windows has install.ps1
   fn: async () => {
     // The old script printed "add it to PATH: …" and exited 0 — so the
     // one-liner's promise ("run this, then use am") was false for anyone who
@@ -310,7 +310,7 @@ Deno.test({
 
 Deno.test({
   name: "install.sh: a fresh macOS/zsh account gets a file zsh actually READS",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // install.sh is a POSIX sh script; Windows has install.ps1
   fn: async () => {
     // macOS has defaulted to zsh since Catalina and ships NO ~/.zshrc, so the
     // old "only touch it if it exists" rule skipped every zsh file and wrote
@@ -379,7 +379,7 @@ Deno.test({
 Deno.test({
   name:
     "install.sh: a HOME with a space gets its profile written, with no stray files",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // install.sh is a POSIX sh script; Windows has install.ps1
   fn: async () => {
     // The target list was space-separated and iterated unquoted, so
     // `/tmp/x/John Doe/.profile` split into `/tmp/x/John`, `Doe/.profile`: the

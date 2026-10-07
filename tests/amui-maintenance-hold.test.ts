@@ -4,6 +4,7 @@
 // user's backup or restore mid-copy. `am stop` refuses exactly this; so must
 // amui. Sandboxed: AIO_APPS_DIR scopes the lock registry to a temp dir, so no
 // real running app is ever seen or touched.
+import { SLEEP_ARGS } from "./proc-helper.ts";
 import { assert, assertStringIncludes } from "@std/assert";
 import { testCell } from "../src/testing/cell-test.ts";
 import { manager } from "../amui/src/manager.ts";
@@ -28,8 +29,8 @@ async function withHold(
   };
   Deno.env.set("AIO_APPS_DIR", `${sandbox}/apps`);
   Deno.env.set("AMUI_ROOTS", dir);
-  const op = new Deno.Command("sleep", {
-    args: ["120"],
+  const op = new Deno.Command(Deno.execPath(), {
+    args: SLEEP_ARGS,
     stdin: "null",
     stdout: "null",
     stderr: "null",

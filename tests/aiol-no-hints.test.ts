@@ -5,6 +5,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { nearestFlag, printReport } from "../aiol/mod.ts";
 import type { LintReport } from "../aiol/types.ts";
+import { fromFileUrl } from "@std/path";
 
 function capture(fn: () => void): string {
   const orig = console.log;
@@ -89,7 +90,7 @@ Deno.test("aiol: a misspelled flag is refused, with the flag it meant", () => {
 });
 
 Deno.test("aiol: an unknown flag exits non-zero and names the alternatives", async () => {
-  const mod = new URL("../aiol/mod.ts", import.meta.url).pathname;
+  const mod = fromFileUrl(new URL("../aiol/mod.ts", import.meta.url));
   const out = await new Deno.Command(Deno.execPath(), {
     args: ["run", "-A", mod, ".", "--safefix"],
     env: { NO_COLOR: "1" },

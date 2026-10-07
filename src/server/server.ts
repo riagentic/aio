@@ -3,12 +3,12 @@
 import { APP_STYLE, appHasStylesheet, UI_ENTRY } from "./app-files.ts";
 import { declaresOverLimit, readBounded } from "./read-body.ts";
 import {
-  ensureLockDirOf,
   instances,
   isOwnLock,
+  listenInLockDir,
   slugify,
 } from "./single-instance-lock.ts";
-import { isPipePath, listenLocal } from "./local-listen.ts";
+import { isPipePath } from "./local-listen.ts";
 import { serveHttpOverLocal } from "./http-over-conn.ts";
 import { enc } from "../protocol/envelope.ts";
 import { dirname, fromFileUrl, join, resolve, toFileUrl } from "@std/path";
@@ -1871,10 +1871,10 @@ export function createServer(config: ServerConfig): ServerHandle {
       try {
         Deno.removeSync(udsPath);
       } catch { /* aio-ok: no stale socket to remove */ }
-      ensureLockDirOf(udsPath); // pruned since `lockDir()` cached it — see uds.ts
     }
     const over = serveHttpOverLocal(
-      listenLocal(udsPath, peerGate ? { peer: true } : undefined),
+      // Its lock dir pruned since `lockDir()` cached it is made again — uds.ts
+      listenInLockDir(udsPath, !!peerGate),
       handleRequest,
       peerGate && ((conn) => peerGate.refusal(conn, udsPath)),
       // A route on a unix socket sees the URL `Deno.serve` gave it there.

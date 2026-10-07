@@ -24,9 +24,14 @@ import { writePid } from "../src/am/am-utils.ts";
 import { trojanGet } from "../src/am/am-http.ts";
 import { tempDir } from "../src/testing/temp-dir.ts";
 import { dropFixtureLock } from "./fixture-lock-helper.ts";
+import {
+  connectRW,
+  localEndpoint,
+  localIdle,
+} from "./local-endpoint-helper.ts";
 
 async function socketDir(prefix: string): Promise<string> {
-  return join(await tempDir(prefix), "s.sock");
+  return localEndpoint(join(await tempDir(prefix), "s.sock"));
 }
 
 /** A stand-in for the server's `control` — records what it was handed, so the
@@ -90,6 +95,7 @@ Deno.test("uds control: a GET round-trips through the server's own handler", asy
     assertEquals(seen[0]!.method, "GET");
   } finally {
     uds.shutdown();
+    await localIdle();
   }
 });
 
@@ -135,6 +141,7 @@ Deno.test("uds control: a POST carries body and credential headers verbatim", as
     assertEquals(seen[0]!.headers["x-aio-control"], "secret-control-key");
   } finally {
     uds.shutdown();
+    await localIdle();
   }
 });
 
@@ -172,6 +179,7 @@ Deno.test("uds control: the handler's refusal is relayed, not swallowed", async 
     assertEquals(JSON.parse(r.body).error, "access denied");
   } finally {
     uds.shutdown();
+    await localIdle();
   }
 });
 
@@ -201,6 +209,7 @@ Deno.test("uds control: a throwing handler answers 500 instead of hanging the ca
     assert(r.body.includes("handler exploded"));
   } finally {
     uds.shutdown();
+    await localIdle();
   }
 });
 
@@ -224,6 +233,7 @@ Deno.test("uds control: an app with no control plane says so, and does not go qu
     );
   } finally {
     uds.shutdown();
+    await localIdle();
   }
 });
 
@@ -262,6 +272,7 @@ Deno.test("uds control: replies are matched by id, never by arrival order", asyn
     assertEquals(JSON.parse(fast.body).route, "fast");
   } finally {
     uds.shutdown();
+    await localIdle();
   }
 });
 
@@ -289,7 +300,7 @@ Deno.test("uds control: a ctlr for a different id is skipped, not mistaken for o
       ),
   );
   try {
-    const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+    const conn = await connectRW(socketPath);
     const enc2 = new TextEncoder();
     await conn.write(
       enc2.encode(
@@ -318,6 +329,7 @@ Deno.test("uds control: a ctlr for a different id is skipped, not mistaken for o
     assertEquals((mine as { id: string }).id, "MINE");
   } finally {
     uds.shutdown();
+    await localIdle();
   }
 });
 
@@ -331,7 +343,7 @@ Deno.test("uds control: a ctlr for a different id is skipped, not mistaken for o
 // property this design exists to guarantee it cannot.
 Deno.test("uds control: `am` reads real trojan state over the socket", async () => {
   const dir = await tempDir("aio-ctl-e2e-");
-  const socketPath = join(dir, "s.sock");
+  const socketPath = localEndpoint(join(dir, "s.sock"));
   const appState = { count: 7, note: "over the socket" };
   const server = createServer({
     port: await freePort(),
@@ -384,6 +396,7 @@ Deno.test("uds control: `am` reads real trojan state over the socket", async () 
     assertEquals(miss.status, 404);
   } finally {
     uds.shutdown();
+    await localIdle();
     await server.shutdown();
     await Deno.remove(dir, { recursive: true });
   }
@@ -426,7 +439,7 @@ Deno.test("am: a dead socket falls through to the TCP wire, not to an error", as
     startedAt: Date.now(),
     status: "started",
     cwd: dir,
-    socketPath: join(dir, "not-a-real.sock"),
+    socketPath: localEndpoint(join(dir, "not-a-real.sock")),
   });
   try {
     await new Promise((r) => setTimeout(r, 50));
@@ -457,9 +470,17 @@ Deno.test("sockets: the transport and HTTP listeners never share a path", () => 
   const ndjson = resolveSocketPath("some-app");
   const http = resolveSocketPath("some-app", "http");
   assert(ndjson !== http, "two listeners cannot share one socket path");
-  // `-<hash8>` when a long runtime dir pushes it into the `/tmp` fallback.
-  assert(/\/some-app(-[0-9a-f]{8})?\.sock$/.test(ndjson), ndjson);
-  assert(/\/some-app(-[0-9a-f]{8})?\.http\.sock$/.test(http), http);
+  // Windows: pipe NAMES, `…aio-<key>` and `…aio-<key>-http`. Unix: files,
+  // with `-<hash8>` when a long runtime dir pushes it into the `/tmp` fallback.
+  const win = Deno.build.os === "windows";
+  const [reNdjson, reHttp] = win
+    ? [/^\\\\\.\\pipe\\aio-some-app$/, /^\\\\\.\\pipe\\aio-some-app-http$/]
+    : [
+      /\/some-app(-[0-9a-f]{8})?\.sock$/,
+      /\/some-app(-[0-9a-f]{8})?\.http\.sock$/,
+    ];
+  assert(reNdjson.test(ndjson), ndjson);
+  assert(reHttp.test(http), http);
 
   // The >100-char fallback keeps them apart too. A name long enough to trip it
   // is the only way to reach that branch, and it is exactly where a dropped
@@ -468,7 +489,7 @@ Deno.test("sockets: the transport and HTTP listeners never share a path", () => 
   const a = resolveSocketPath(long);
   const b = resolveSocketPath(long, "http");
   assert(a !== b, "the long-path fallback must keep the suffix");
-  assert(b.endsWith(".http.sock"));
+  assert(b.endsWith(win ? "-http" : ".http.sock"));
 });
 
 // `am`'s control client is not a window. It asks a question and leaves, so it
@@ -512,5 +533,6 @@ Deno.test("uds control: a control client is not counted as a UI client", async (
     );
   } finally {
     uds.shutdown();
+    await localIdle();
   }
 });

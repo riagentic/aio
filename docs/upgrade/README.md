@@ -26,6 +26,12 @@ app, that is a bug in aio, not a step you missed.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [1.0.18-beta → **1.0.19-beta**](from-1.0.18-beta-to-1.0.19-beta.md) — nothing
+  is removed or renamed. A `<webview>` preload ships in a package
+  (`build.guestPreloads`, `guestPreload()`); embedded and child pages get their
+  own session; `testUI` calls cross the wire; a compiled build stops on a file
+  read the binary will not hold; `build --smoke`; esbuild, Electron and
+  happy-dom are bumped
 - [1.0.17-beta → **1.0.18-beta**](from-1.0.17-beta-to-1.0.18-beta.md) — nothing
   is removed or renamed; one flag (`am publish --no-zip`) and one build key
   (`build.windows.shortcut`) are added. The Windows one-click `.exe` stub is

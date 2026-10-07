@@ -4,7 +4,7 @@
 // runtime), lockKey (the lock and socket name), electronProfileName (the
 // Chromium profile), and the refusals.
 import { assert, assertEquals, assertThrows } from "@std/assert";
-import { join } from "@std/path";
+import { join, resolve } from "@std/path";
 import {
   _resetAppDirs,
   expandProfilePath,
@@ -20,6 +20,17 @@ import { hash8, lockKey } from "../src/server/single-instance-lock.ts";
 import { electronProfileName } from "../src/electron/electron-shared.ts";
 import { homedir } from "../src/server/paths.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+
+// The fixtures below are spelled as POSIX absolute paths; every function here
+// answers with the HOST's absolute path, and on Windows `/opt/x` is
+// `C:\\opt\\x`. Named once, so no assertion calls the same thing on both sides.
+const ABS_DIR = resolve("/abs/dir");
+const OPT_X = resolve("/opt/x");
+const OPT_OTHER = resolve("/opt/other");
+const ANY_DIR = resolve("/any/dir");
+const SRV_APPS = resolve("/srv/apps");
+const SRV_NONE = resolve("/srv/apps-none");
+const SRV_INST = resolve("/srv/inst");
 
 /** Run `fn` with AIO_APPS_DIR = `root` (or unset), restored after. */
 async function withApps<T>(
@@ -83,20 +94,20 @@ Deno.test("profile paths: ~ expanded, relative resolved against the cwd", () => 
   assertEquals(expandProfilePath("~/x"), join(homedir(), "x"));
   assertEquals(expandProfilePath("~"), homedir());
   assertEquals(expandProfilePath("./rel"), join(Deno.cwd(), "rel"));
-  assertEquals(expandProfilePath("/abs/dir"), "/abs/dir");
+  assertEquals(expandProfilePath("/abs/dir"), ABS_DIR);
 });
 
 Deno.test("profile home: <base>-<name>, for the default, AIO_APPS_DIR and appDir bases", async () => {
   await withApps(undefined, () => {
     assertEquals(profileHome("myapp", "dev"), join(homedir(), ".myapp-dev"));
-    assertEquals(profileHome("myapp", "dev", "/opt/x"), "/opt/x-dev");
+    assertEquals(profileHome("myapp", "dev", "/opt/x"), `${OPT_X}-dev`);
     assertEquals(profileOfHome("myapp", join(homedir(), ".myapp-dev")), "dev");
     assertEquals(profileOfHome("myapp", "/opt/x-dev", "/opt/x"), "dev");
     assertEquals(profileOfHome("myapp", join(homedir(), ".myapp")), undefined);
     assertEquals(profileOfHome("myapp", "/elsewhere"), undefined);
   });
   await withApps("/srv/apps", () => {
-    assertEquals(profileHome("myapp", "dev"), "/srv/apps/myapp-dev");
+    assertEquals(profileHome("myapp", "dev"), join(SRV_APPS, "myapp-dev"));
   });
 });
 
@@ -111,9 +122,9 @@ Deno.test("lockKey: default plain, profile by NAME (default base and appDir), el
     // …a recorded profile the home does not end in is not believed.
     assertEquals(
       lockKey("myapp", "/opt/other", "dev"),
-      `myapp@${hash8("/opt/other")}`,
+      `myapp@${hash8(OPT_OTHER)}`,
     );
-    assertEquals(lockKey("myapp", "/any/dir"), `myapp@${hash8("/any/dir")}`);
+    assertEquals(lockKey("myapp", "/any/dir"), `myapp@${hash8(ANY_DIR)}`);
     // A home that LOOKS like `<base>-<hash>` is not a profile.
     assertEquals(
       lockKey("myapp", `${def}-1a2b3c4d`),
@@ -216,7 +227,7 @@ Deno.test("profiles: false refuses every form — name, path, --home", async () 
     // No request: profiles:false changes nothing.
     assertEquals(
       resolveAppDirs({ appId: "pa", profiles: false }).home,
-      "/srv/apps-none/pa",
+      join(SRV_NONE, "pa"),
     );
   });
 });
@@ -270,7 +281,7 @@ Deno.test("electron profile: default plain, profile by name, --instance never th
   // Under AIO_APPS_DIR the lock key is the plain id — the Chromium profile
   // must NOT be the machine's own (ERR_CACHE_READ_FAILURE).
   await withApps("/srv/inst", () => {
-    const scoped = "/srv/inst/myapp";
+    const scoped = join(SRV_INST, "myapp");
     assertEquals(
       electronProfileName("myapp", "My App", scoped),
       `my-app@${hash8(scoped)}`,

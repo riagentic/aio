@@ -6,10 +6,11 @@
 // The compiled-binary case has been guarded for a while; the source case had
 // only a debug line, invisible at the default log level.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const ROOT = new URL("../", import.meta.url).pathname.replace(/\/$/, "");
+const ROOT = fromFileUrl(new URL("../", import.meta.url)).replace(/[\\/]$/, "");
 
 async function probeApp(client: string): Promise<{
   text: string;
@@ -27,8 +28,8 @@ async function probeApp(client: string): Promise<{
         title: `prodnobundle-${port}`,
         version: "0.1",
         imports: {
-          "aio": `${ROOT}/mod.ts`,
-          "aio/": `${ROOT}/src/`,
+          "aio": `${spec(ROOT)}/mod.ts`,
+          "aio/": `${spec(ROOT)}/src/`,
           "immer": "npm:immer@10.2.0",
           "@std/path": "jsr:@std/path@1.1.2",
         },
@@ -65,6 +66,17 @@ async function probeApp(client: string): Promise<{
         AIO_APPS_DIR: home,
         DENO_DIR: Deno.env.get("DENO_DIR") ??
           join(Deno.env.get("HOME") ?? ".", ".cache", "deno"),
+        // Windows: sockets do not load without SystemRoot ("os error
+        // 10106"), and deno's cache is under LOCALAPPDATA, not HOME.
+        ...(Deno.build.os === "windows"
+          ? {
+            SystemRoot: Deno.env.get("SystemRoot")!,
+            TEMP: Deno.env.get("TEMP")!,
+            USERPROFILE: home,
+            DENO_DIR: Deno.env.get("DENO_DIR") ??
+              join(Deno.env.get("LOCALAPPDATA")!, "deno"),
+          }
+          : {}),
       },
       clearEnv: true,
       stdout: "piped",
@@ -97,20 +109,19 @@ async function probeApp(client: string): Promise<{
 
 Deno.test({
   name: "--prod with no dist/app.js: the terminal says so, beside the URL",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const r = await probeApp("browser");
     assertEquals(r.status, 503, `the page really is unservable:\n${r.text}`);
     assertStringIncludes(r.text, "no");
     assert(
-      /there is no .*dist\/app\.js to serve/.test(r.text),
+      /there is no .*dist[\\/]app\.js to serve/.test(r.text),
       `boot must name the missing bundle, at a level people see:\n${r.text}`,
     );
     assertStringIncludes(r.text, "deno task build");
     assertStringIncludes(r.text, "deno task dev");
     // …and it is a WARN, not a debug line suppressed at the default level.
     assert(
-      /WARN[^\n]*dist\/app\.js/.test(r.text),
+      /WARN[^\n]*dist[\\/]app\.js/.test(r.text),
       `a debug line is invisible — that is how this shipped:\n${r.text}`,
     );
   },
@@ -118,11 +129,10 @@ Deno.test({
 
 Deno.test({
   name: "--prod headless: no page, so no complaint about a page",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const r = await probeApp("server-only");
     assert(
-      !/there is no .*dist\/app\.js to serve/.test(r.text),
+      !/there is no .*dist[\\/]app\.js to serve/.test(r.text),
       `a headless run serves no page and needs no bundle:\n${r.text}`,
     );
   },

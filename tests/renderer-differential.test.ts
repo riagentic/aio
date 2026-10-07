@@ -116,7 +116,12 @@ const PROPS: Record<string, unknown>[] = [
  *  shape a content scan cannot tell apart, and `{" "}` separators, repeated
  *  labels and equal numbers make them ordinary rather than exotic. */
 const TEXTS = ["a", "a", "b", " ", "1", "1", "x"];
-const TAGS = ["div", "p", "i"];
+/** `section`, not `p`: both differentials round-trip a model through
+ *  `innerHTML`, and a `<p>` is CLOSED by a `<div>` or `<p>` inside it when
+ *  that string is parsed (in a browser, and in happy-dom since 20; 17 kept
+ *  the nesting). Such a model is markup no DOM can hold — a hydrate mismatch
+ *  by construction, pinned in tests/hydrate-parser-restructured.test.ts. */
+const TAGS = ["div", "section", "i"];
 
 /** Prop sets for the `<input>` leaf — the props that are DOM PROPERTIES on a
  *  form control (`value`, `checked`, `readOnly`) and the ones SSR writes as

@@ -25,6 +25,7 @@ import {
   loadSnapshot,
   persistOp,
   seedSyncSnapshot,
+  settleOp,
 } from "../../src/sync/server-store.ts";
 import { compactSyncOps, SYNC_MIGRATIONS } from "../../src/sync/compact.ts";
 import type { HLC } from "../../src/sync/types.ts";
@@ -123,6 +124,10 @@ async function writeV1Log(db: ReturnType<typeof createTestDb>["db"]) {
     { id: "o2", hlc: hlc(1001), cell: CELL, action: "add", payload: "b" },
     1,
   );
+  // Accepted, as the v1 server answered them: an op left unsettled is one a
+  // kill caught in flight (tests/sync-op-killed-before-settle.test.ts).
+  await settleOp(db, "o1");
+  await settleOp(db, "o2");
 }
 
 Deno.test("field report §3.1 — dev: a replay the reducer refuses REFUSES to boot, naming the fix", async () => {

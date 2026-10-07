@@ -18,6 +18,7 @@
 // on every OS, not only on the one that has no shell tools.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const TLS = new URL("../src/server/tls.ts", import.meta.url).href;
 
@@ -39,7 +40,9 @@ async function withEmptyPath(
     const p = await new Deno.Command(Deno.execPath(), {
       args: [
         "eval",
-        `import { certSans, loadOrCreateAioRoot, loadOrCreateCert } from "${TLS}";
+        `import { certSans, loadOrCreateAioRoot, loadOrCreateCert } from "${
+          spec(TLS)
+        }";
 ${code}`,
       ],
       env: {

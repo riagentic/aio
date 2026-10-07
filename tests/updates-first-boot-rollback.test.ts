@@ -74,7 +74,13 @@ async function swapWith(
   await Deno.chmod(join(current, "run.sh"), 0o755);
   await Deno.chmod(join(staged, "run.sh"), 0o755);
   // A long-lived program INSIDE the new install, as a real app is.
-  await Deno.copyFile("/bin/sleep", join(staged, "sleeper"));
+  // macOS: a link, not a copy — Apple silicon kills (SIGKILL at exec) a copy
+  // of a system binary run from outside the system volume. Started through
+  // the link, its command line still begins with the install's path, which is
+  // what the helper looks for.
+  if (Deno.build.os === "darwin") {
+    await Deno.symlink("/bin/sleep", join(staged, "sleeper"));
+  } else await Deno.copyFile("/bin/sleep", join(staged, "sleeper"));
 
   let call: { cmd: string; args: string[] } | null = null;
   swapDirectoryDetached({

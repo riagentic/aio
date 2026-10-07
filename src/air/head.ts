@@ -29,6 +29,7 @@
 
 import {
   _inRender,
+  _warnOutsideRender,
   onCleanup,
   onUnmount,
   useRef,
@@ -331,13 +332,7 @@ export function useHead(input: HeadInput): void {
     return;
   }
   if (!_inRender()) {
-    if (isDevMode()) {
-      console.warn(
-        "[aio-dev] useHead() called outside a component render — there is no " +
-          "component to bind the title's lifetime to, so it was DROPPED. Call " +
-          "it in a component body.",
-      );
-    }
+    _warnOutsideRender("useHead");
     return;
   }
   // A stable identity per component INSTANCE, not per call: two `<Post/>`s

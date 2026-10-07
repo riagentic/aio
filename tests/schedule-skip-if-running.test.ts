@@ -11,6 +11,15 @@ import { createScheduleManager, schedule } from "../src/state/schedule.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** Wait for `count()` to reach `min` — the ticks themselves, not a time they
+ *  usually fit in: a 20 ms interval is ~31 ms on Windows' 15.6 ms timer, and
+ *  a loaded machine fires later still (2 ticks in 90 ms, measured). Bounded:
+ *  a schedule that stopped never gets there, and the assert after it says so. */
+async function reaches(count: () => number, min: number): Promise<void> {
+  const end = Date.now() + 5_000;
+  while (count() < min && Date.now() < end) await sleep(5);
+}
+
 const quiet = {
   debug() {},
   info() {},
@@ -36,7 +45,7 @@ Deno.test("every: overlapping ticks stack by default (unchanged behaviour)", asy
     return t;
   });
   m.handle(schedule.every("poll", 20, { type: "x:tick" }));
-  await sleep(110);
+  await reaches(() => started, 3);
   m.cancelAll();
   assert(
     started >= 3,
@@ -80,6 +89,7 @@ Deno.test("every: the next tick runs once the previous settles", async () => {
     schedule.every("poll", 20, { type: "x:tick" }, { skipIfRunning: true }),
   );
   await sleep(150);
+  await reaches(() => started, 2);
   m.cancelAll();
   assert(started >= 2, `polling must continue, not stop (${started})`);
   assert(started <= 5, `and must not stack (${started})`);
@@ -97,7 +107,7 @@ Deno.test("every: a tick that REJECTS still clears the guard", async () => {
   m.handle(
     schedule.every("poll", 20, { type: "x:tick" }, { skipIfRunning: true }),
   );
-  await sleep(90);
+  await reaches(() => started, 3);
   m.cancelAll();
   assert(
     started >= 3,
@@ -113,7 +123,7 @@ Deno.test("every: a SYNC tick is never skipped", async () => {
   m.handle(
     schedule.every("poll", 20, { type: "x:tick" }, { skipIfRunning: true }),
   );
-  await sleep(90);
+  await reaches(() => started, 3);
   m.cancelAll();
   assert(started >= 3, `sync ticks have no overlap to skip (${started})`);
 });
@@ -161,7 +171,7 @@ Deno.test("a repeating schedule keeps ticking after a failure", async () => {
     return Promise.reject(new Error("transient"));
   });
   m.handle(schedule.every("poll", 20, { type: "x:tick" }));
-  await sleep(90);
+  await reaches(() => started, 3);
   m.cancelAll();
   assert(
     started >= 3,

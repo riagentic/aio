@@ -3,6 +3,7 @@
 // stayed green: the validator had no category for the serving convention
 // (field report §5.1). Now: static + eager ⇒ BLOCKING; dynamic ⇒ the escape hatch.
 import { assert, assertEquals } from "@std/assert";
+import { join } from "@std/path";
 import {
   BLOCKING_CATEGORIES,
   validateGraph,
@@ -33,7 +34,7 @@ Deno.test("graph: static *.server.ts import from a client-loaded file BLOCKS", a
       e.message.includes("vault.server.ts")
     );
     assert(hit, `expected a server-only-import: ${JSON.stringify(r.errors)}`);
-    assertEquals(hit.file, `${dir}/lib.ts`, "attributed to the IMPORTER");
+    assertEquals(hit.file, join(dir, "lib.ts"), "attributed to the IMPORTER");
     assertEquals(hit.line, 1);
     assert(hit.fix.includes("await import("), "names the escape hatch");
     assert(BLOCKING_CATEGORIES.has(hit.category), "and it is blocking");

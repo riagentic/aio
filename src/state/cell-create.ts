@@ -57,6 +57,7 @@ const VALID_CELL_KEYS: ReadonlySet<string> = new Set([
   "onRestore",
   "onPersist",
   "worker",
+  "workerRespawn",
 ]);
 
 /** Cell config keys whose value must be a FUNCTION. */
@@ -97,12 +98,22 @@ function refuseUnreadValues(
       } — any other value is read as the default, silently.`,
     );
   };
-  const { scope, worker, diagnostics } = config;
+  const { scope, worker, workerRespawn, diagnostics } = config;
   if (scope !== undefined && scope !== "client" && scope !== "server") {
     refuse("scope", '"client" or "server"');
   }
   if (worker !== undefined && typeof worker !== "boolean") {
     refuse("worker", "a boolean");
+  }
+  if (workerRespawn !== undefined && typeof workerRespawn !== "boolean") {
+    refuse("workerRespawn", "a boolean");
+  }
+  // Refused HERE, not at the first crash — the only moment the flag is read.
+  if (workerRespawn === true && worker !== true) {
+    throw new Error(
+      `[${name}] cell(): workerRespawn: true needs worker: true — it restarts ` +
+        `this cell's crashed worker, and without worker: true there is none.`,
+    );
   }
   if (diagnostics !== undefined && typeof diagnostics !== "boolean") {
     refuse(

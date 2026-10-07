@@ -490,6 +490,23 @@ function _countOverflowRejection(e: unknown): boolean {
 
 const _eventArgWarned = new Set<string>();
 
+/** Method bodies by `cell:key`. Which parameters a method DECLARES is a fact
+ *  about its source, and the bound method a caller holds does not carry it.
+ *  @internal */
+const _bodies = new Map<string, unknown>();
+
+/** The hint for a DOM Event in a parameter `cell.key` declares, else null —
+ *  for `testUI`, which must tell `onClick={counter.inc}` (the Event is
+ *  ignored; the call is fine over the wire) from `onInput={form.setTitle}`
+ *  (the method gets `{"isTrusted":true}` over the wire). @internal */
+export function _eventArgHint(
+  cell: string,
+  key: string,
+  args: readonly unknown[],
+): string | null {
+  return eventArgWarning(cell, key, _bodies.get(`${cell}:${key}`), args);
+}
+
 /** A DOM Event in a declared parameter — the hint, once per method
  *  (src/state/event-arg.ts). Observe-only: the call proceeds unchanged. */
 function _warnEventArg(
@@ -532,6 +549,9 @@ export function buildMethodsReducer(
   // the FOREIGN action, and a dropped `own.set(...)` leaked its factory in
   // pendingFactories for the process lifetime.
   // The dispatching cell's method set — what self("m") resolves against.
+  for (const k of Object.keys(methods)) {
+    _bodies.set(`${prefix}:${k}`, methods[k]);
+  }
   const hasMethod = (m: string) => typeof methods[m] === "function";
   const knownMethods = () => Object.keys(methods);
   const classify = (

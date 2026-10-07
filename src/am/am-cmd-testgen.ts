@@ -17,7 +17,7 @@
  * what a test can address, and a `t=` prop inside a branch that never renders
  * is not a locator anyone can use.
  */
-import { dirname, relative, resolve } from "@std/path";
+import { basename, dirname, relative, resolve } from "@std/path";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, out, outError } from "./am-output.ts";
 import { projectRoot } from "./am-cmd-process.ts";
@@ -110,9 +110,7 @@ export async function cmdTestgen(
     { file: rel, components, bytes: src.length },
     mode,
     `✓ ${rel} — ${components} component${components === 1 ? "" : "s"} typed\n` +
-      `  import type { TypedTestUI } from "./${
-        rel.split("/").pop()
-      }" and cast: ` +
+      `  import type { TypedTestUI } from "./${basename(rel)}" and cast: ` +
       `\`const ui = await testUI(App) as TypedTestUI\`\n` +
       `  re-run after a UI change — the types describe what RENDERS, so a ` +
       `renamed button breaks the test at compile time`,

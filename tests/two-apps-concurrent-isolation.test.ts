@@ -18,10 +18,11 @@
 // A child process, because `startFeedback`/`startUpdates` are off under
 // `libraryMode`, which every in-process harness sets.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 type Json = Record<string, unknown>;
 
@@ -34,7 +35,7 @@ Deno.test({
     await Deno.writeTextFile(
       join(root, "two.ts"),
       `
-import { aio, cell } from "${ROOT}mod.ts";
+import { aio, cell } from "${spec(ROOT)}mod.ts";
 const mk = (id: string, big = 0) => cell("c", {
   state: { n: 0, big: "x".repeat(big) },
   methods: {
@@ -54,11 +55,11 @@ const boot = (id: string, port: number, extra: Record<string, unknown>) =>
 const [a, b] = await Promise.all([
   boot("twoa", ${pa}, {
     feedback: { auto: true },
-    updates: { source: "file://${root}/rel-a", channel: "alpha", check: false },
+    updates: { source: "${spec(root)}/rel-a", channel: "alpha", check: false },
   }),
   boot("twob", ${pb}, {
     feedback: { auto: true },
-    updates: { source: "file://${root}/rel-b", channel: "beta", check: false },
+    updates: { source: "${spec(root)}/rel-b", channel: "beta", check: false },
     budgets: { cellState: "64KB" },
   }),
 ]);

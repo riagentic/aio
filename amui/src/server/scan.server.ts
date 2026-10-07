@@ -3,9 +3,30 @@
 //  2. an on-disk scan of root dirs for folders whose deno.json imports aio
 // Merged by absolute path. Dynamic-imported by the manager cell (keeps
 // node/Deno bits out of the browser bundle).
-import { join } from "@std/path";
+import { basename, fromFileUrl, join } from "@std/path";
+import * as posixPath from "@std/path/posix";
+import * as windowsPath from "@std/path/windows";
+// THE home rule ($HOME, else $USERPROFILE) — the framework's, not a second one.
+import { homedir } from "../../../src/server/paths.ts";
 import { parse as parseJsonc } from "@std/jsonc";
 import type { LockData } from "../../../src/server/single-instance-lock.ts";
+
+type OS = typeof Deno.build.os;
+
+/** The path rules of `os` — so every path decision below is a pure function of
+ *  the OS it is asked about, testable on any host. */
+export const pathOf = (os: OS) => os === "windows" ? windowsPath : posixPath;
+
+/** What two spellings of one directory share: normalized, no trailing
+ *  separator, and caseless on Windows (where `C:\Users` is `c:\users`). */
+export function pathKey(os: OS, p: string): string {
+  const P = pathOf(os);
+  const n = P.normalize(p);
+  const bare = n.length > P.parse(n).root.length
+    ? n.replace(os === "windows" ? /[\\/]+$/ : /\/+$/, "")
+    : n;
+  return os === "windows" ? bare.toLowerCase() : bare;
+}
 
 export interface ProjectMeta {
   name: string;
@@ -65,10 +86,10 @@ export interface DiscoveredProject {
  *  from source; inside a compiled binary this points into the compile VFS, so
  *  it is only ONE of the signals `selfPaths()` uses. */
 export function selfDir(): string {
-  return decodeURIComponent(new URL("../..", import.meta.url).pathname).replace(
-    /\/$/,
-    "",
-  );
+  return decodeURIComponent(fromFileUrl(new URL("../..", import.meta.url)))
+    // The host's separator: on Windows the path ends in `\`, and left on it
+    // matched no lock cwd — amui did not recognise itself.
+    .replace(/[\\/]$/, "");
 }
 
 /** Every path that IS this amui process. The authoritative signal is the lock
@@ -150,6 +171,7 @@ async function scanDisk(
 ): Promise<Map<string, DiscoveredProject>> {
   const out = new Map<string, DiscoveredProject>();
   const seenRoots = new Set<string>();
+  const never = neverWalk(Deno.build.os, homedir(), (k) => Deno.env.get(k));
 
   async function walk(dir: string, left: number): Promise<void> {
     if (left < 0) return;
@@ -159,7 +181,7 @@ async function scanDisk(
       out.set(dir, {
         id: dir,
         path: dir,
-        name: meta.name || dir.split("/").filter(Boolean).pop() || dir,
+        name: meta.name || basename(dir) || dir,
         meta,
         running: null,
         git: await isDir(join(dir, ".git")),
@@ -172,7 +194,7 @@ async function scanDisk(
         if (!e.isDirectory) continue;
         if (e.name === "node_modules" || e.name.startsWith(".")) continue;
         const child = join(dir, e.name);
-        if (NEVER_WALK.has(child)) continue;
+        if (never.has(pathKey(Deno.build.os, child))) continue;
         await walk(child, left - 1);
       }
     } catch { /* unreadable dir */ }
@@ -187,40 +209,82 @@ async function scanDisk(
   return out;
 }
 
-const seg = (p: string) => p.split("/").filter(Boolean).length;
-
 /** Directories a project can never live in, skipped during traversal however we
  *  got there. Pseudo-filesystems (`/proc`, `/sys`, `/dev`) are infinite or
  *  meaningless to walk; `/run`, `/tmp`, `/var` are machine state; `/mnt` and
  *  `/media` can be network mounts whose readDir blocks for seconds.
  *
+ *  Windows and macOS get what those protect THERE. System and machine state:
+ *  `%SystemRoot%`, both `Program Files`, `%ProgramData%`, the volume's own
+ *  bookkeeping; `/System`, `/Library`, `/private` (where `/tmp`, `/var` and
+ *  `/etc` really are), `/Volumes` (the mounts). And the user's app state:
+ *  on Linux that is dot-dirs (`~/.config`, `~/.ssh`), which the walk skips by
+ *  name; `%USERPROFILE%\AppData` and `~/Library` are the same thing without
+ *  the dot — browser profiles, keychains, credential stores, and enormous.
+ *
  *  This is a TRAVERSAL filter, not a veto on configuration: an explicit
- *  `AMUI_ROOTS=/mnt/projects` is honoured exactly as given. */
-const NEVER_WALK = new Set([
-  "/proc",
-  "/sys",
-  "/dev",
-  "/run",
-  "/boot",
-  "/tmp",
-  "/var",
-  "/etc",
-  "/usr",
-  "/lib",
-  "/lib64",
-  "/bin",
-  "/sbin",
-  "/snap",
-  "/mnt",
-  "/media",
-  "/lost+found",
-]);
+ *  `AMUI_ROOTS=/mnt/projects` is honoured exactly as given.
+ *
+ *  Keys are {@linkcode pathKey}s. Pure: the OS, the home and the environment
+ *  are arguments. */
+function neverWalk(
+  os: OS,
+  home: string,
+  env: (k: string) => string | undefined,
+): Set<string> {
+  if (os === "windows") {
+    const drive = env("SystemDrive") ?? "C:";
+    return new Set(
+      [
+        env("SystemRoot") ?? `${drive}\\Windows`,
+        env("ProgramFiles") ?? `${drive}\\Program Files`,
+        env("ProgramFiles(x86)") ?? `${drive}\\Program Files (x86)`,
+        env("ProgramData") ?? `${drive}\\ProgramData`,
+        `${drive}\\$Recycle.Bin`,
+        `${drive}\\System Volume Information`,
+        `${drive}\\Recovery`,
+        `${home}\\AppData`,
+      ].map((p) => pathKey(os, p)),
+    );
+  }
+  return new Set([
+    "/proc",
+    "/sys",
+    "/dev",
+    "/run",
+    "/boot",
+    "/tmp",
+    "/var",
+    "/etc",
+    "/usr",
+    "/lib",
+    "/lib64",
+    "/bin",
+    "/sbin",
+    "/snap",
+    "/mnt",
+    "/media",
+    "/lost+found",
+    ...(os === "darwin"
+      ? [
+        "/System",
+        "/Library",
+        "/private",
+        "/Volumes",
+        "/cores",
+        pathKey(os, `${home}/Library`),
+      ]
+      : []),
+  ]);
+}
 
 /** Default scan roots, most-specific first:
- *  - $AMUI_ROOTS (colon-separated, explicit override — used verbatim)
+ *  - $AMUI_ROOTS (separated like PATH: `:`, `;` on Windows where a path
+ *    holds a colon — explicit override, used verbatim)
  *  - ~/aio-apps (where `am create` scaffolds)
- *  - $HOME itself, so a project is found wherever the developer actually keeps
- *    it (`~/code/gen/wallet`, `~/work/clients/x`) without any configuration.
+ *  - the home directory itself, so a project is found wherever the developer
+ *    actually keeps it (`~/code/gen/wallet`, `~/work/clients/x`) without any
+ *    configuration.
  *    That is affordable because the walk stops at the first `deno.json`, skips
  *    dot-dirs and `node_modules`, is depth-capped, and never enters the
  *    system paths above — not because the tree is small.
@@ -228,31 +292,60 @@ const NEVER_WALK = new Set([
  *
  *  Running apps themselves are never scanned for: their lock files carry pid,
  *  port and cwd, so they are found instantly wherever they live. The scan only
- *  exists to list projects that are NOT currently running. */
-function defaultRoots(runningCwds: string[]): string[] {
-  const home = Deno.env.get("HOME") ?? ".";
+ *  exists to list projects that are NOT currently running.
+ *
+ *  Pure — the OS, the home and `$AMUI_ROOTS` are arguments. */
+function rootsFor(
+  os: OS,
+  home: string,
+  amuiRoots: string,
+  runningCwds: string[],
+): string[] {
+  const P = pathOf(os);
   const roots = new Set<string>();
 
-  for (const r of (Deno.env.get("AMUI_ROOTS") ?? "").split(":")) {
+  for (const r of amuiRoots.split(P.DELIMITER)) {
     if (r.trim()) roots.add(r.trim());
   }
-  roots.add(`${home}/aio-apps`);
+  roots.add(P.join(home, "aio-apps"));
   roots.add(home);
 
+  // Directories below the filesystem root (a drive is not one of them).
+  const depth = (p: string) =>
+    p.slice(P.parse(p).root.length).split(P.SEPARATOR_PATTERN).filter(Boolean)
+      .length;
   for (const cwd of runningCwds) {
-    const parent = cwd.split("/").slice(0, -1).join("/");
-    if (parent && parent.startsWith(home) && seg(parent) >= 3) {
+    const parent = P.dirname(cwd);
+    if (
+      parent !== cwd && pathKey(os, parent).startsWith(pathKey(os, home)) &&
+      depth(parent) >= 3
+    ) {
       roots.add(parent);
     }
   }
   return [...roots];
 }
 
+const defaultRoots = (runningCwds: string[]): string[] =>
+  rootsFor(
+    Deno.build.os,
+    homedir(),
+    Deno.env.get("AMUI_ROOTS") ?? "",
+    runningCwds,
+  );
+
+/** How to name more roots, in the spelling of the OS the SERVER runs on — the
+ *  hint is read in a browser, which cannot know. */
+export const rootsExample = (os: OS): string =>
+  os === "windows"
+    ? "AMUI_ROOTS=C:\\path;D:\\path2"
+    : "AMUI_ROOTS=/path:/path2";
+
 /** Discover every aio project: running instances (with cwd) ∪ on-disk scan.
  *  Returns the projects plus the roots searched (surfaced in the empty state so
  *  "found nothing" is diagnosable, not a mystery). */
 export async function discoverProjects(): Promise<
-  { projects: DiscoveredProject[]; roots: string[] }
+  { projects: DiscoveredProject[]; roots: string[]; rootsExample: string }
 > {
   const { instances } = await import(
     "./control.server.ts"
@@ -271,8 +364,8 @@ export async function discoverProjects(): Promise<
   // not an app. decodeURIComponent so a path with spaces still matches the
   // decoded disk-path keys.
   const dirOf = (rel: string) =>
-    decodeURIComponent(new URL(rel, import.meta.url).pathname).replace(
-      /\/$/,
+    decodeURIComponent(fromFileUrl(new URL(rel, import.meta.url))).replace(
+      /[\\/]$/,
       "",
     );
   const self = await selfPaths();
@@ -289,7 +382,7 @@ export async function discoverProjects(): Promise<
     byPath.set(p, {
       id: p,
       path: p,
-      name: meta.name || p.split("/").filter(Boolean).pop() || p,
+      name: meta.name || basename(p) || p,
       meta,
       running: null,
       git: await isDir(join(p, ".git")),
@@ -347,7 +440,7 @@ export async function discoverProjects(): Promise<
     if (!!a.running !== !!b.running) return a.running ? -1 : 1;
     return a.name.localeCompare(b.name);
   });
-  return { projects, roots };
+  return { projects, roots, rootsExample: rootsExample(Deno.build.os) };
 }
 
 /** A running instance's list identity — see {@linkcode DiscoveredProject.id}. */
@@ -356,4 +449,8 @@ export const instanceId = (cwd: string, appId: string, home?: string): string =>
 
 /** Exported for tests — the root set and the traversal denylist are the two
  *  things that decide whether discovery is both complete and cheap. */
-export const _internals = { defaultRoots, NEVER_WALK } as const;
+export const _internals = {
+  defaultRoots,
+  neverWalk,
+  rootsFor,
+} as const;

@@ -12,6 +12,8 @@ import {
 import { join } from "@std/path";
 import { detachedSpawnSpec, launchDetached } from "../src/am/am-cmd-process.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { isProcessAlive } from "../src/server/single-instance-lock.ts";
+import { SLEEP_ARGS } from "./proc-helper.ts";
 
 Deno.test("windows spec: PowerShell Start-Process, one pre-quoted command line", () => {
   const spec = detachedSpawnSpec(
@@ -50,6 +52,11 @@ Deno.test("windows spec: PowerShell Start-Process, one pre-quoted command line",
     "[IO.File]::WriteAllText('C:\\logs\\out.log.pid', [string]$p.Id)",
   );
   assert(!ps.includes("Write-Output"), ps);
+  // A launch that fails says why where `am start` reads it (`<log>.err`).
+  assertStringIncludes(
+    ps,
+    "catch { [IO.File]::WriteAllText('C:\\logs\\out.log.err', [string]$_); exit 1 }",
+  );
   // Embedded single quotes are doubled (PowerShell escaping), never raw.
   const evil = detachedSpawnSpec("windows", ["--title=o'brien"], "l.log");
   assertStringIncludes(evil.args.join(" "), "'--title=o''brien'");
@@ -188,8 +195,7 @@ Deno.test({
 
 Deno.test({
   name:
-    "posix spec EXECUTES: detached child, real PID in <log>.pid, log written",
-  ignore: Deno.build.os === "windows",
+    "this OS's spec EXECUTES: detached child, real PID in <log>.pid, log written",
   async fn() {
     const dir = await tempDir("am-detached-");
     const log = join(dir, "out.log");
@@ -197,19 +203,17 @@ Deno.test({
     // briefly so we can prove the PID is the CHILD's and it outlives am.
     const spec = detachedSpawnSpec(
       Deno.build.os,
-      ["eval", "console.log('alive'); await new Promise(r=>setTimeout(r,300))"],
+      // (5 s: Windows' launcher is a PowerShell, which takes its time to go.)
+      [
+        "eval",
+        "console.log('alive'); await new Promise(r=>setTimeout(r,5000))",
+      ],
       log,
     );
     const pid = await launchDetached(spec, log); // "am" is done here
     assert(Number.isFinite(pid) && pid > 0, "child PID came back");
     // The child is alive after the spawner exited (detachment contract)…
-    let alive = true;
-    try {
-      Deno.kill(pid, "SIGCONT");
-    } catch {
-      alive = false;
-    }
-    assert(alive, "child survives the spawning shell's exit");
+    assert(isProcessAlive(pid), "child survives the spawning shell's exit");
     // …and its output lands in the log.
     for (let i = 0; i < 50; i++) {
       try {
@@ -233,14 +237,24 @@ Deno.test({
 Deno.test({
   name:
     "launchDetached: a child that would hold the launcher's stdout does not hold am",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("am-detached-");
     const log = join(dir, "out.log");
     // The stand-in: the child keeps every handle the launcher had, for 20 s.
+    // (A deno, not `sh -c "sleep 20 & echo $!"`: Windows has neither.)
     const spec = {
-      cmd: "sh",
-      args: ["-c", `sleep 20 & echo $! >'${log}.pid'`],
+      cmd: Deno.execPath(),
+      args: [
+        "eval",
+        `const c = new Deno.Command(Deno.execPath(), {
+           args: ${JSON.stringify(SLEEP_ARGS)},
+           stdin: "inherit", stdout: "inherit", stderr: "inherit",
+           detached: true, // Windows ends a child with its parent otherwise
+         }).spawn();
+         c.unref();
+         Deno.writeTextFileSync(${JSON.stringify(log + ".pid")}, String(c.pid));
+         Deno.exit(0);`,
+      ],
     };
     const t0 = performance.now();
     const pid = await launchDetached(spec, log, {}, 10_000);
@@ -248,7 +262,7 @@ Deno.test({
     try {
       assert(took < 5_000, `am waited on the child: ${took} ms`);
       assert(pid > 0);
-      Deno.kill(pid, "SIGCONT"); // the child is alive — it was not waited for
+      assert(isProcessAlive(pid), "the child is alive — it was not waited for");
     } finally {
       try {
         Deno.kill(pid, "SIGKILL");
@@ -261,14 +275,13 @@ Deno.test({
 Deno.test({
   name:
     "launchDetached: a launcher that never returns is bounded — killed, and said",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("am-detached-");
     const log = join(dir, "out.log");
     try {
       const t0 = performance.now();
       const e = await assertRejects(() =>
-        launchDetached({ cmd: "sleep", args: ["20"] }, log, {}, 300)
+        launchDetached({ cmd: Deno.execPath(), args: SLEEP_ARGS }, log, {}, 300)
       );
       assert(performance.now() - t0 < 5_000);
       assertStringIncludes(String(e), "did not return within 0.3 s");

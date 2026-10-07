@@ -151,10 +151,12 @@ async function harness(
     shutdownFails?: boolean;
     dittoFails?: boolean;
     noWindow?: boolean;
+    stopSignal?: AbortSignal;
   } = {},
 ) {
   const dir = await tempDir("macos-move-");
-  const apps = join(dir, "Applications");
+  // The product is macOS-only and spells its paths with `/`; so does this.
+  const apps = `${dir}/Applications`;
   await Deno.mkdir(apps);
   const dataDir = join(dir, "data");
   await Deno.mkdir(dataDir);
@@ -162,7 +164,8 @@ async function harness(
   const spawned: string[][] = [];
   const exits: number[] = [];
   let stopped = 0;
-  const dest = join(apps, "Counter.app");
+  let dialogSignal: AbortSignal | undefined;
+  const dest = `${apps}/Counter.app`;
   const result = await offerMoveToApplications({
     title: "Counter",
     dataDir,
@@ -175,16 +178,22 @@ async function harness(
         : Promise.resolve();
     },
     windowUp: () => Promise.resolve(over.noWindow !== true),
+    stopSignal: over.stopSignal,
     os: "darwin",
     execPath: EXE,
     home: dir,
-    env: over.env,
+    // "" and not undefined: unset falls back to this process's own
+    // AIO_MOVE_TO_APPLICATIONS, and a lab that exports `never` decided the test.
+    env: over.env ?? "",
     pid: 42,
     // `/Applications` is not ours to write in a test: the user's own folder.
     canWrite: (d) => d !== "/Applications",
-    run: async (cmd, args) => {
+    run: async (cmd, args, signal) => {
       calls.push(cmd.split("/").at(-1)!);
-      if (cmd.endsWith("osascript")) return answer!;
+      if (cmd.endsWith("osascript")) {
+        dialogSignal = signal;
+        return answer!;
+      }
       if (cmd.endsWith("ditto")) {
         if (over.dittoFails) return { code: 1, stdout: "", stderr: "no space" };
         await Deno.mkdir(args[1]!);
@@ -206,6 +215,7 @@ async function harness(
     dir,
     result,
     calls,
+    dialogSignal,
     spawned,
     exits,
     stopped,
@@ -265,6 +275,26 @@ Deno.test("offer: a dialog nobody answered remembers nothing", async () => {
     assertEquals([h.moved, h.declined, h.stopped], [false, false, 0]);
   } finally {
     await dropTempDir(h.dir);
+  }
+});
+
+// Measured on a real Mac (macOS 26): the app quit and its question stayed on
+// screen, an `osascript` owned by nobody, for up to its ten minutes.
+Deno.test("offer: the dialog is handed the app's stop signal, and an app already stopping asks nothing", async () => {
+  const ctl = new AbortController();
+  // Ended by the signal: osascript dies of SIGTERM — nothing is remembered.
+  const h = await harness({ code: 143, stdout: "", stderr: "" }, {
+    stopSignal: ctl.signal,
+  });
+  ctl.abort();
+  const late = await harness(null, { stopSignal: ctl.signal });
+  try {
+    assertEquals(h.dialogSignal, ctl.signal);
+    assertEquals([h.result, h.moved, h.declined], ["unanswered", false, false]);
+    assertEquals([late.result, late.calls], ["none", []]);
+  } finally {
+    await dropTempDir(h.dir);
+    await dropTempDir(late.dir);
   }
 });
 

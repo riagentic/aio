@@ -16,7 +16,7 @@
  *    no max wait, so an event storm meant no reload ever.
  */
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { join, SEPARATOR } from "@std/path";
 import {
   _immerCandidates,
   _resetVendorCache,
@@ -160,18 +160,21 @@ Deno.test("watcher: the debounce has a ceiling — a storm still reloads", () =>
 });
 
 Deno.test("watcher: config lookup honours BOTH names, and derives the parent properly", () => {
-  const paths = _configPaths("/tmp/proj/src");
+  const paths = _configPaths(join("/tmp", "proj", "src"));
   assertEquals(paths, [
-    "/tmp/proj/src/deno.json",
-    "/tmp/proj/src/deno.jsonc",
-    "/tmp/proj/deno.json",
-    "/tmp/proj/deno.jsonc",
+    join("/tmp", "proj", "src", "deno.json"),
+    join("/tmp", "proj", "src", "deno.jsonc"),
+    join("/tmp", "proj", "deno.json"),
+    join("/tmp", "proj", "deno.jsonc"),
   ]);
   // A trailing separator used to produce an empty parent via
   // `lastIndexOf("/")` — `dirname` is the one that answers correctly.
-  assertEquals(_configPaths("/tmp/proj/src/")[2], "/tmp/proj/deno.json");
+  assertEquals(
+    _configPaths(join("/tmp", "proj", "src") + SEPARATOR)[2],
+    join("/tmp", "proj", "deno.json"),
+  );
   // The filesystem root has no parent to walk to, and must not produce "".
-  for (const p of _configPaths("/")) assert(p.startsWith("/"), p);
+  for (const p of _configPaths(SEPARATOR)) assert(p.startsWith(SEPARATOR), p);
 });
 
 Deno.test("watcher: a graph validation that times out still reloads, and SAYS SO", async () => {

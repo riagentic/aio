@@ -4,12 +4,13 @@
 // reinstall in between, a second build beside it) must leave the tree whole
 // and never lose the only copy of a file.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { fromFileUrl, join } from "@std/path";
+import { fromFileUrl, join, SEPARATOR } from "@std/path";
 import {
   recoverInterruptedLinks,
   withDevExcluded,
 } from "../src/build/build-compile.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { linkDir } from "./symlink-helper.ts";
 
 const exists = (p: string) => Deno.lstat(p).then(() => true).catch(() => false);
 const UNIX = Deno.build.os !== "windows";
@@ -31,7 +32,7 @@ async function denoEntryFile(
 /** Link `node_modules/<name>` at the `.deno` entry, the way deno install does. */
 async function link(nm: string, entry: string, pkg: string): Promise<void> {
   await Deno.mkdir(join(nm, pkg, ".."), { recursive: true });
-  await Deno.symlink(`.deno/${entry}/node_modules/${pkg}`, join(nm, pkg));
+  await linkDir(`.deno/${entry}/node_modules/${pkg}`, join(nm, pkg));
 }
 
 /** A killed build's leftovers: `files` (rel → body) in mirror `id`, a journal
@@ -171,8 +172,10 @@ Deno.test("trim: the journal names a path BEFORE that path moves", async () => {
     // A kill between a move and its journal entry strands the file for good,
     // so observe the journal at the instant of every move out of `.deno`.
     Deno.rename = async (from, to) => {
-      const rel = String(from).split("/.deno/")[1];
-      if (rel && String(to).includes("/.aio/trim.")) {
+      // The journal lists `.deno`-relative paths with `/` on every OS.
+      const rel = String(from).split(`${SEPARATOR}.deno${SEPARATOR}`)[1]
+        ?.replaceAll(SEPARATOR, "/");
+      if (rel && String(to).includes(`${SEPARATOR}.aio${SEPARATOR}trim.`)) {
         const names = (await trimFilesIn(tmp)).filter((n) =>
           /^trim-journal\..+\.json$/.test(n)
         );
@@ -195,7 +198,7 @@ Deno.test("trim: the journal names a path BEFORE that path moves", async () => {
 Deno.test({
   name:
     "trim recovery: a restore that fails keeps the only copy AND its journal; the next build finishes it",
-  ignore: !UNIX || Deno.uid() === 0,
+  ignore: !UNIX || Deno.uid() === 0, // the restore is refused by a read-only directory (POSIX mode)
   async fn() {
     const tmp = await tempDir("trim-rec-fail-");
     const dist = join(tmp, "node_modules/.deno/a@1.0.0/node_modules/a/dist");
@@ -346,7 +349,7 @@ Deno.test("trim: the build's own lock + link journal are --exclude'd from the bi
 Deno.test({
   name:
     "trim: a mirror on another filesystem — one warning, nothing moved, no false count",
-  ignore: Deno.build.os !== "linux",
+  ignore: Deno.build.os !== "linux", // the other filesystem is /dev/shm
   async fn() {
     const tmp = await tempDir("trim-exdev-");
     let shm: string | undefined;
@@ -388,7 +391,7 @@ Deno.test({
 
 Deno.test({
   name: "trim: SIGINT / SIGTERM mid-compile puts the tree back before exiting",
-  ignore: !UNIX,
+  ignore: !UNIX, // Deno.kill is TerminateProcess on Windows: no signal reaches the build
   async fn() {
     for (const [sig, code] of [["SIGINT", 130], ["SIGTERM", 143]] as const) {
       const tmp = await tempDir("trim-signal-");
@@ -533,7 +536,7 @@ Deno.test("trim: a finished build leaves no signal listener behind", async () =>
 Deno.test({
   name:
     "trim: a signal DURING the hold-aside pass stops the pass, never runs the compile, and puts everything back",
-  ignore: !UNIX,
+  ignore: !UNIX, // Deno.kill is TerminateProcess on Windows: no signal reaches the build
   async fn() {
     // The pass is stopped at its first link removal (`link`) or at its first
     // file move (`move`); the signal lands there. What must hold: nothing

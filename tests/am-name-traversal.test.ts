@@ -18,13 +18,13 @@
 // written; the other two never did. One fact, three deciders, one of them
 // correct.
 import { assert, assertEquals, assertMatch } from "@std/assert";
-import { join } from "@std/path";
+import { basename, fromFileUrl, join } from "@std/path";
 import { APP_NAME_RE, appNameError, dirLinkType } from "../src/am/am-utils.ts";
 import { dataRemovalGate } from "../src/am/am-cmd-remove.ts";
 import { appHome, installedAppPaths } from "../src/server/app-dirs.ts";
 import { DENO_DIR } from "./deno-dir-helper.ts";
 
-const AM = new URL("../src/am.ts", import.meta.url).pathname;
+const AM = fromFileUrl(new URL("../src/am.ts", import.meta.url));
 
 /** Run `am` with HOME pointed somewhere disposable. */
 async function am(
@@ -164,14 +164,14 @@ Deno.test("app names: the shapes that make join() escape are unrepresentable", (
 Deno.test("app names: the derived paths stay one level under their roots", () => {
   for (const n of ["demo", "demo-electron", "app.2", "x_y", "A1"]) {
     const p = installedAppPaths(n);
-    assertEquals(p.dir.split("/").pop(), n);
-    assertEquals(p.binLink.split("/").pop(), n);
+    assertEquals(basename(p.dir), n);
+    assertEquals(basename(p.binLink), n);
     // `appHome`, not `appDirs`: the RULE, not whatever a `--home` in some
     // other test happened to register for this id. The last segment is `.<n>`
     // by default and `<n>` under AIO_APPS_DIR — either way it is DERIVED from
     // the name and cannot be `..`, which is the property that failed:
     // `.` → `.${appId}` → ".." → dirname($HOME).
-    const seg = appHome(n).split("/").pop();
+    const seg = basename(appHome(n));
     assertEquals(
       seg === n || seg === `.${n}`,
       true,

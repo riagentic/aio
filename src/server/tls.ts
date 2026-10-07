@@ -16,6 +16,7 @@ import {
   certSubjectAltNames,
   dnsWithinSubtree,
   generateRoot,
+  importPrivateKeyPem,
   ipWithinSubtree,
   issueLeaf as mintLeaf,
 } from "./x509.ts";
@@ -424,6 +425,25 @@ function rootExpiring(certPem: string): Date | null {
   return notAfter.getTime() - Date.now() < ROOT_RENEW_MS ? notAfter : null;
 }
 
+/** Why the root's private key cannot sign, or null when it can. Only a key
+ *  that was READ and then refused by the importer counts: a key file that
+ *  cannot be read is some other fault (permissions, a half-written disk) and
+ *  is never a reason to replace a root. */
+async function rootKeyUnusable(keyPath: string): Promise<string | null> {
+  let pem: string;
+  try {
+    pem = await Deno.readTextFile(keyPath);
+  } catch {
+    return null; // aio-ok: unreadable is not "unusable" — see above
+  }
+  try {
+    await importPrivateKeyPem(pem);
+    return null;
+  } catch (e) {
+    return e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+  }
+}
+
 export async function loadOrCreateAioRoot(): Promise<
   { certPath: string; keyPath: string; cert: string; created: boolean }
 > {
@@ -435,15 +455,40 @@ export async function loadOrCreateAioRoot(): Promise<
   } catch { /* best-effort */ }
 
   let expiring: Date | null = null;
+  let unusable: string | null = null;
   try {
     const cert = await Deno.readTextFile(certPath);
     await Deno.stat(keyPath);
     expiring = rootExpiring(cert);
     if (expiring === null) {
-      warnIfRootUnderConstrained(cert, certPath);
-      return { certPath, keyPath, cert, created: false };
+      unusable = await rootKeyUnusable(keyPath);
+      if (unusable === null) {
+        warnIfRootUnderConstrained(cert, certPath);
+        return { certPath, keyPath, cert, created: false };
+      }
     }
   } catch { /* generate below */ }
+  if (unusable !== null) {
+    // Not "a root the person trusted, swapped behind their back": a root that
+    // cannot sign. Every leaf issue under it threw `DataError: malformed
+    // parameters` with nothing naming the root — TLS was simply dead on that
+    // machine. Measured on a real Mac: aio ≤ 1.0.6 made the root with the
+    // system `openssl`, which there is LibreSSL and writes the P-256 curve as
+    // explicit parameters; WebCrypto reads only the named form, and the
+    // certificate's own public key is spelled the same way, so no rustls
+    // client accepts a chain under it either. Re-spelling the key alone was
+    // tried and is not enough.
+    log.warn(
+      `tls: ⚠ this machine's aio root at ${certPath} cannot be used — its ` +
+        `private key (${keyPath}) does not load (${unusable}). An aio before ` +
+        `1.0.7 made it with this system's openssl, which wrote the curve in ` +
+        `a form neither this runtime nor its TLS clients accept, so no ` +
+        `certificate could be issued under it. Generating a new one. ` +
+        `Browsers and clients that trusted the old root must trust the new ` +
+        `one: re-run \`am trust\`. Every aio app re-issues its leaf ` +
+        `automatically.`,
+    );
+  }
   if (expiring !== null) {
     // Reused "verbatim, forever" meant: from the day its 10 years ran out,
     // every chain it anchored failed verification, on every app at once,

@@ -17,10 +17,11 @@
 // to be ignored, and this one lives in the durability path: the SAME message,
 // on a journal that really cannot be compacted, is the one that must be read.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { createJournal } from "../src/server/journal.ts";
 import { getLogger, setLogger } from "../src/diagnostics/logger-api.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { holdUnshared } from "./proc-helper.ts";
 
 function capture() {
   const warns: string[] = [];
@@ -103,7 +104,6 @@ Deno.test("journal: a compaction that really fails is still loud", async () => {
 Deno.test({
   name:
     "journal: a run of failed compactions is ONE warning, and one line with the count when it compacts again",
-  ignore: Deno.build.os === "windows", // a read-only directory, by mode bits
   async fn() {
     const dir = await tempDir("aio-journal-compact-episode-");
     const { warns, infos, restore } = capture();
@@ -111,11 +111,17 @@ Deno.test({
       const path = join(dir, "actions.journal");
       const j = createJournal(path);
       j.append({ type: "c:m", payload: { n: 1 } }, 1);
-      Deno.chmodSync(dir, 0o500);
+      // What stops a compaction: a directory nothing can be created in, and
+      // on Windows — where a directory has no such mode — the journal held
+      // open, unshared, by another program.
+      const WIN = Deno.build.os === "windows";
+      const release = WIN ? await holdUnshared(path) : undefined;
+      if (!WIN) Deno.chmodSync(dir, 0o500);
       try {
         for (let i = 0; i < 10; i++) j.setWatermark(1); // every persist
       } finally {
-        Deno.chmodSync(dir, 0o700);
+        if (!WIN) Deno.chmodSync(dir, 0o700);
+        await release?.();
       }
       const said = warns.filter((w) => w.includes("could not compact"));
       assertEquals(said.length, 1, warns.join("\n"));
@@ -161,7 +167,7 @@ Deno.test("am replay: an empty journal says why, and where to get a full one", a
         "--dry",
         `--from=${path}`,
       ],
-      cwd: new URL("..", import.meta.url).pathname,
+      cwd: fromFileUrl(new URL("..", import.meta.url)),
       stdout: "piped",
       stderr: "piped",
     }).output();
@@ -198,7 +204,7 @@ Deno.test("am replay: a range with no rows names the range that HAS them", async
         "--dry",
         `--from=${path}`,
       ],
-      cwd: new URL("..", import.meta.url).pathname,
+      cwd: fromFileUrl(new URL("..", import.meta.url)),
       stdout: "piped",
       stderr: "piped",
     }).output();

@@ -34,6 +34,8 @@ Deno.test("aio-client: the window-icon fetch of a ?token= URL keeps the token in
     "loadBounds",
     "trackBounds",
     "_trustedHosts",
+    "__aioIpcBind", // the app-window bind (electron-web-isolation.test.ts)
+    "__aioOrigin",
     `${connectToSrc}\nreturn connectTo;`,
   );
   const connectTo = make(
@@ -48,6 +50,8 @@ Deno.test("aio-client: the window-icon fetch of a ?token= URL keeps the token in
     () => ({ width: 800, height: 600 }),
     () => {},
     new Set(),
+    () => {},
+    (u: string) => new URL(u).origin,
   ) as (win: unknown, url: string) => Promise<void>;
   const win = {
     setIcon() {},

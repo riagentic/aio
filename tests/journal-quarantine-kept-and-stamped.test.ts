@@ -14,13 +14,14 @@
 //     a migration and a crash, the old-shape slice was replayed into the new
 //     shape (`{"list":[]}`). Stamped now, and refused by name.
 import { assert, assertEquals, assertMatch } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { parseJournal } from "../src/server/journal.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const MOD = new URL("../mod.ts", import.meta.url).href;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 async function run(
   dir: string,
@@ -78,7 +79,7 @@ const connect = async () => {
 `;
 
 const QUARANTINE = `
-import { aio, cell } from "${MOD}";
+import { aio, cell } from "${spec(MOD)}";
 ${COMMON}
 // "two" declares a version its op-log cannot fold into (no onMigrate): the
 // cell is quarantined. "three" is the fix — the version the log was written by.
@@ -157,7 +158,7 @@ Deno.test({
 });
 
 const STAMPED = `
-import { aio, cell } from "${MOD}";
+import { aio, cell } from "${spec(MOD)}";
 ${COMMON}
 const notes = cell("notes", {
   sync: true, version: 1, state: { items: [] },

@@ -945,7 +945,7 @@ export async function wrapAppWithCells(
       0.75,
     criticalThreshold: fc.memory?.criticalThreshold ??
       _memoryCfg?.criticalThreshold ?? 0.90,
-    onReport: (report) => {
+    onReport: (report, said) => {
       const code = report.level === "critical"
         ? "MEMORY_CRITICAL"
         : "MEMORY_PRESSURE";
@@ -968,7 +968,9 @@ export async function wrapAppWithCells(
         detail + named,
         { cellName: topCell?.name },
       );
-      reportAioError(err, _cellReportOpts);
+      // An unchanged pressure is said once (memory-monitor.ts); the hook
+      // below still gets every report — it is how an app sheds memory.
+      if (said) reportAioError(err, _cellReportOpts);
       // Observe-only and error-guarded, like every hook. It runs on the
       // monitor's timer, so a throw here was an uncaughtException that took
       // the whole app down — on the one occasion it was warned about memory.

@@ -25,8 +25,13 @@
 //       still the process the lock recorded. The lock file OUTLIVES A REBOOT
 //       whenever XDG_RUNTIME_DIR is unset — the base is then /tmp, which
 //       Debian and Ubuntu do not clear at boot — and pids wrap.
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import {
+  assert,
+  assertEquals,
+  assertMatch,
+  assertStringIncludes,
+} from "@std/assert";
+import { fromFileUrl, join } from "@std/path";
 import {
   AppLock,
   isLockOwnerAlive,
@@ -35,7 +40,7 @@ import {
   type LockData,
   lockDir,
   lockKey,
-  processStartToken,
+  ownerIdentity,
   readLock,
   writeLock,
 } from "../src/server/single-instance-lock.ts";
@@ -47,6 +52,8 @@ import {
 } from "../src/am/am-cmd-process.ts";
 import { amLockKey, overwriteRefusal, targetHome } from "../src/am/am-utils.ts";
 import { appDirs } from "../src/server/app-dirs.ts";
+import { sleeper } from "./proc-helper.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 // ── #4 — a broken lock dir is a machine problem, not "already running" ──
 
@@ -55,7 +62,7 @@ Deno.test({
     "#4 lock: an UNWRITABLE lock dir throws, it does not say 'already running'",
   // The env var is read through lockDir()'s cache, so this test owns the
   // process's lock dir for its duration and restores it after.
-  ignore: Deno.build.os === "windows" || Deno.uid?.() === 0,
+  ignore: Deno.build.os === "windows" || Deno.uid() === 0, // an unwritable directory is a POSIX mode bit
   async fn() {
     const base = await Deno.makeTempDir({ prefix: "ro-runtime-" });
     const prev = Deno.env.get("XDG_RUNTIME_DIR");
@@ -135,7 +142,6 @@ Deno.test("#5 am start: the child is the deno RUNNING am, by absolute path", () 
 
 Deno.test({
   name: "#5 am start: a child that never execs is DEAD, whatever pid came back",
-  ignore: Deno.build.os === "windows",
   async fn() {
     // The exact shape `am start` runs, pointed at a binary that is not there.
     // The pid is real; the process is not. This is what `am` used to report as
@@ -157,7 +163,9 @@ Deno.test({
         "must look before it reports success",
     );
     // The evidence is in the log, which is why the refusal quotes it.
-    const tail = await Deno.readTextFile(log).catch(() => "");
+    // (Windows cannot merge the two streams: stderr is `<log>.err` there.)
+    const tail = await Deno.readTextFile(log).catch(() => "") +
+      await Deno.readTextFile(`${log}.err`).catch(() => "");
     assert(tail.length > 0, "the failure is only ever visible in the log");
   },
 });
@@ -218,17 +226,26 @@ Deno.test("#6 am --home: the lock am writes is the lock am reads", async () => {
 
 Deno.test({
   name: "#8 kill: a recycled pid is not the owner, and is never signalled",
-  ignore: Deno.build.os === "windows",
   async fn() {
-    const token = processStartToken(Deno.pid);
+    // Linux records the kernel's start ticks and Windows the process creation
+    // time (`startToken`); macOS, whose token is null by design, its UTC start
+    // second (`startEpoch`).
+    const { startToken, startEpoch } = ownerIdentity(Deno.pid);
+    const me = { startToken, startEpoch };
     assert(
-      token !== null,
+      startToken !== undefined || startEpoch !== undefined,
       "this platform must be able to say when a pid was started",
     );
-    assert(/^\S+/.test(token!), `a usable token, got ${JSON.stringify(token)}`);
+    if (startToken !== undefined) {
+      assert(/^\S+/.test(startToken), `a usable token, got "${startToken}"`);
+    } else assert(startEpoch! > 0, `a usable epoch, got ${startEpoch}`);
+    // The same field this platform records, naming another moment.
+    const recycled = startToken !== undefined
+      ? { startToken: "0" }
+      : { startEpoch: 1 };
 
     // Ourselves, correctly recorded: the owner is alive.
-    assert(isLockOwnerAlive({ pid: Deno.pid, startToken: token! }));
+    assert(isLockOwnerAlive({ pid: Deno.pid, ...me }));
 
     // The same pid, recorded by a lock written BEFORE this process existed —
     // i.e. the lock survived a reboot and the kernel handed the pid on. Alive
@@ -239,7 +256,7 @@ Deno.test({
       "the pid is alive — that is the whole trap",
     );
     assertEquals(
-      isLockOwnerAlive({ pid: Deno.pid, startToken: "0" }),
+      isLockOwnerAlive({ pid: Deno.pid, ...recycled }),
       false,
       "a lock whose recorded start time does not match names a DIFFERENT " +
         "process that happens to have the same pid",
@@ -253,7 +270,7 @@ Deno.test({
     // refused loudly, not attempted quietly.
     let refused = "";
     try {
-      await killProcess(Deno.pid, 0, { startToken: "0" });
+      await killProcess(Deno.pid, 0, recycled);
     } catch (e) {
       refused = e instanceof Error ? e.message : String(e);
     }
@@ -266,7 +283,6 @@ Deno.test({
 Deno.test({
   name:
     "#8 lock: a new lock records the start time of the process that wrote it",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const appId = `token-${crypto.randomUUID().slice(0, 8)}`;
     const home = await Deno.makeTempDir({ prefix: "token-home-" });
@@ -276,9 +292,14 @@ Deno.test({
       assert(r.ok, "acquire");
       const onDisk = readLock(lock.key);
       assert(onDisk, "the lock is on disk");
+      const { startToken, startEpoch } = ownerIdentity(Deno.pid);
+      assert(
+        startToken !== undefined || startEpoch !== undefined,
+        "this platform must be able to say when a pid was started",
+      );
       assertEquals(
-        onDisk.startToken,
-        processStartToken(Deno.pid),
+        { startToken: onDisk.startToken, startEpoch: onDisk.startEpoch },
+        { startToken, startEpoch },
         "the lock must carry the kernel stamp of its owner, not just its pid",
       );
       assert(isLockOwnerAlive(onDisk));
@@ -287,6 +308,85 @@ Deno.test({
       await Deno.remove(home, { recursive: true }).catch(() => {});
     }
   },
+});
+
+Deno.test("#8 lock: a stale lock naming a live UNRELATED process's pid is not held", async () => {
+  // The real thing, not a synthetic token: an app died, its lock stayed, and
+  // the kernel handed its pid to a process that has nothing to do with aio.
+  const appId = `recycled-${crypto.randomUUID().slice(0, 8)}`;
+  const home = await tempDir("recycled-home-");
+  const stranger = sleeper({ stdout: "null", stderr: "null" });
+  const lock = new AppLock(appId, home);
+  try {
+    const theirs = ownerIdentity(stranger.pid);
+    assert(
+      theirs.startToken !== undefined || theirs.startEpoch !== undefined,
+      "another process's start must be readable too",
+    );
+    // One process, one stamp — whoever reads it, however often.
+    const seenByAChild = new TextDecoder().decode(
+      (await new Deno.Command(Deno.execPath(), {
+        args: [
+          "eval",
+          `import { ownerIdentity } from ${
+            JSON.stringify(
+              new URL("../src/server/single-instance-lock.ts", import.meta.url)
+                .href,
+            )
+          }; const { startToken, startEpoch } = ownerIdentity(${stranger.pid}); ` +
+          `console.log(JSON.stringify({ startToken, startEpoch }));`,
+        ],
+      }).output()).stdout,
+    );
+    assertEquals(
+      JSON.parse(seenByAChild),
+      JSON.parse(JSON.stringify({
+        startToken: theirs.startToken,
+        startEpoch: theirs.startEpoch,
+      })),
+      "the stamp must be the same when read from another process",
+    );
+    assertEquals(ownerIdentity(stranger.pid).startToken, theirs.startToken);
+
+    // The dead owner's stamp: the same field, naming an earlier moment.
+    const dead = theirs.startToken !== undefined
+      ? { startToken: "1" }
+      : { startEpoch: 1 };
+    const stale: LockData = {
+      pid: stranger.pid,
+      port: 1,
+      startedAt: Date.now() - 60_000,
+      status: "started",
+      appId,
+      home,
+      cwd: home,
+      ...dead,
+    };
+    writeLock(stale);
+    assert(isProcessAlive(stranger.pid), "the pid is alive — that is the trap");
+    assertEquals(isLockOwnerAlive(stale), false);
+
+    // So the app starts: the stale lock is taken over, and the stranger is
+    // neither refused-for nor signalled.
+    const r = await lock.acquire(0, false, {});
+    assert(
+      r.ok,
+      `a recycled pid must not read as a running instance: ${
+        JSON.stringify(r)
+      }`,
+    );
+    assertEquals(readLock(lock.key)?.pid, Deno.pid);
+    assert(isProcessAlive(stranger.pid), "the unrelated process is untouched");
+
+    // A lock with NO stamp (written by an older aio) keeps its old meaning:
+    // the pid alone decides, so a live pid is a live owner.
+    assertEquals(isLockOwnerAlive({ pid: stranger.pid }), true);
+  } finally {
+    lock.release();
+    stranger.kill("SIGKILL");
+    await stranger.status;
+    await dropTempDir(home);
+  }
 });
 
 // ── #9 — the cheap ones ──
@@ -349,15 +449,21 @@ Deno.test("#7 kill --stale: a pid that arrives over a socket is a claim, not a f
   assertStringIncludes(stalePidRefusal(dead, none) ?? "", "already gone");
 });
 
+/** A long-lived program that is nobody's aio app, and how the OS names it. */
+const STRANGER = Deno.build.os === "windows"
+  ? { cmd: "ping", args: ["-n", "30", "127.0.0.1"], named: /ping/i }
+  : { cmd: "sleep", args: ["30"], named: /sleep/ };
+
 Deno.test({
   name:
     "#7 kill --stale: a live NON-aio process of ours is refused, not signalled",
-  ignore: Deno.build.os === "windows",
   async fn() {
     // Something innocent of the user's, on a pid `am` was told about. Before
     // the fix this was a SIGTERM primitive for arbitrary pids.
-    const p = new Deno.Command("sleep", { args: ["30"], stdout: "null" })
-      .spawn();
+    const p = new Deno.Command(STRANGER.cmd, {
+      args: STRANGER.args,
+      stdout: "null",
+    }).spawn();
     try {
       // `spawn()` returns at fork, before exec: until then the child is still
       // a copy of Deno (named `tokio-runtime-w`). Ask once it IS sleep.
@@ -367,13 +473,13 @@ Deno.test({
           new Map<number, { appId: string; dir: string }>(),
         );
       let why = ask();
-      for (let i = 0; i < 200 && !why?.includes("sleep"); i++) {
+      for (let i = 0; i < 200 && !STRANGER.named.test(why ?? ""); i++) {
         await new Promise((r) => setTimeout(r, 10));
         why = ask();
       }
-      assert(why, `pid ${p.pid} runs "sleep 30" — am must not SIGTERM it`);
+      assert(why, `pid ${p.pid} is no aio app — am must not SIGTERM it`);
       assertStringIncludes(why, "not an aio process");
-      assertStringIncludes(why, "sleep");
+      assertMatch(why, STRANGER.named);
       assert(isProcessAlive(p.pid), "…and it is still running");
     } finally {
       try {
@@ -412,7 +518,7 @@ Deno.test({
         args: [
           "run",
           "-A",
-          new URL("../src/am.ts", import.meta.url).pathname,
+          fromFileUrl(new URL("../src/am.ts", import.meta.url)),
           `--home=${dir}`,
           "start",
         ],
@@ -433,7 +539,6 @@ Deno.test({
 Deno.test({
   name:
     "#7 kill --stale: the refusal always NAMES the process, never trails off",
-  ignore: Deno.build.os === "windows",
   async fn() {
     // `/proc/<pid>/cmdline` is EMPTY for a kernel thread, for a zombie, and
     // for the instant between fork and execve. It used to be returned as-is,
@@ -441,8 +546,10 @@ Deno.test({
     // exact path that decides whether to signal a stranger's process. Read the
     // pid the moment it exists, which is when the window is open.
     for (let i = 0; i < 25; i++) {
-      const p = new Deno.Command("sleep", { args: ["5"], stdout: "null" })
-        .spawn();
+      const p = new Deno.Command(STRANGER.cmd, {
+        args: STRANGER.args,
+        stdout: "null",
+      }).spawn();
       try {
         const why = stalePidRefusal(p.pid, new Map()) ?? "";
         assert(
@@ -460,12 +567,15 @@ Deno.test({
           // the check below after it. (It was first blamed on pid reuse.)
           // Both are real names; the subject is the line above: never
           // trailing off after the colon.
-          const stillOurs = (await Deno.readTextFile(
-            `/proc/${p.pid}/cmdline`,
-          ).catch(() => "")).includes("sleep");
+          // (Windows has no fork→exec window, and no /proc to re-read: the
+          // pid is ours until the `finally` below.)
+          const stillOurs = Deno.build.os === "windows" ||
+            (await Deno.readTextFile(
+              `/proc/${p.pid}/cmdline`,
+            ).catch(() => "")).includes("sleep");
           if (stillOurs) {
             assert(
-              why.includes("sleep") || why.includes("tokio-runtime"),
+              STRANGER.named.test(why) || why.includes("tokio-runtime"),
               `names neither the program nor the forking thread: ${why}`,
             );
           }

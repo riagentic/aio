@@ -242,6 +242,8 @@ export function hydrate(root: any, App: ComponentFn): MountHandle {
       // It also disposes every signal child's effect and tears portal content
       // out of its target.
       _removeDomCleanup(vnode, state.ctx);
+      // (Their `afterRender`s wait for a commit that never comes; the flush
+      // drops a callback whose instance is gone — `_flushAfterRender`.)
       // ...then release the signal-binding effects and action cleanups for
       // elements hydrated before the mismatch. Without this, those effects
       // stay alive and keep mutating DOM nodes that innerHTML="" is about to

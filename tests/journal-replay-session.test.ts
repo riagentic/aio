@@ -13,17 +13,19 @@
 import { assert, assertEquals } from "@std/assert";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { fromFileUrl } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 
 const MOD = new URL("../mod.ts", import.meta.url).href;
 const JOURNAL = new URL("../src/server/journal.ts", import.meta.url).href;
 const LEDGER =
   new URL("../src/diagnostics/memory-ledger.ts", import.meta.url).href;
-const CONFIG = new URL("../deno.json", import.meta.url).pathname;
+const CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 
 const APP = `
-import { aio, cell } from "${MOD}";
-import { replayJournal } from "${JOURNAL}";
-import { readGauges } from "${LEDGER}";
+import { aio, cell } from "${spec(MOD)}";
+import { replayJournal } from "${spec(JOURNAL)}";
+import { readGauges } from "${spec(LEDGER)}";
 const DIR = Deno.env.get("DIR");
 const phase = Deno.env.get("PHASE");
 const spent = () => readGauges().find((g) => g.name === "journal.replay.entries")?.value;
@@ -55,6 +57,7 @@ const app = await aio.run({
   port: Number(Deno.env.get("PORT")),
   appDir: DIR,
 });
+if (phase === "die") Deno.kill(Deno.pid, "SIGKILL");
 if (phase !== "kill") {
   Deno.writeTextFileSync(DIR + "/out.json", JSON.stringify({ n: c.n, before, after: spent(), restores }));
   await app.close();
@@ -66,7 +69,7 @@ await c.inc();
 Deno.kill(Deno.pid, "SIGKILL");
 `;
 
-async function run(dir: string, phase: string): Promise<void> {
+async function run(dir: string, phase: string): Promise<string | void> {
   await Deno.writeTextFile(`${dir}/app.ts`, APP);
   const out = await new Deno.Command(Deno.execPath(), {
     args: ["run", "-A", "--config", CONFIG, `${dir}/app.ts`],
@@ -79,7 +82,11 @@ async function run(dir: string, phase: string): Promise<void> {
     stdout: "piped",
     stderr: "piped",
   }).output();
-  if (phase !== "kill" && !out.success) {
+  if (phase === "refused") {
+    return new TextDecoder().decode(out.stdout) +
+      new TextDecoder().decode(out.stderr);
+  }
+  if (phase !== "kill" && phase !== "die" && !out.success) {
     throw new Error(
       `${phase} child failed:\n${new TextDecoder().decode(out.stdout)}${
         new TextDecoder().decode(out.stderr)
@@ -91,7 +98,6 @@ async function run(dir: string, phase: string): Promise<void> {
 Deno.test({
   name:
     "replay session: a boot recovering its journal starts from zero — an earlier replay in the process is not its debt",
-  ignore: Deno.build.os === "windows", // SIGKILL
   async fn() {
     const dir = await tempDir("aio-journal-replay-session-");
     try {
@@ -115,7 +121,6 @@ Deno.test({
 Deno.test({
   name:
     "replay session: a second replay INSIDE one boot is charged — the boot does not open a session beside its own replay",
-  ignore: Deno.build.os === "windows", // SIGKILL
   async fn() {
     const dir = await tempDir("aio-journal-replay-reenter-");
     try {
@@ -130,6 +135,68 @@ Deno.test({
         "the boot's own three entries came second in its session, so they " +
           "are what the ceiling counted",
       );
+    } finally {
+      await dropTempDir(dir);
+    }
+  },
+});
+
+/** The one `<journal>.replayed` under `dir`, as `[fromSeq, charged]`. */
+async function marker(dir: string): Promise<{ path: string; is: number[] }[]> {
+  const found: { path: string; is: number[] }[] = [];
+  const walk = async (d: string) => {
+    for await (const e of Deno.readDir(d)) {
+      const p = `${d}/${e.name}`;
+      if (e.isDirectory) await walk(p);
+      else if (e.name.endsWith(".replayed")) {
+        found.push({
+          path: p,
+          is: (await Deno.readTextFile(p)).split(" ").map(Number),
+        });
+      }
+    }
+  };
+  await walk(dir);
+  return found;
+}
+
+// `beginReplaySession` makes each boot a new session — so a loop that re-runs
+// the WHOLE boot was never counted, in one process or across a supervisor's
+// restarts: every pass replayed the tail "for the first time". The marker
+// beside the journal carries the count from boot to boot, and a save ends it.
+Deno.test({
+  name:
+    "replay session: boot after boot over a tail no save compacted is charged — and a crash, a restart and a save costs nothing",
+  async fn() {
+    const dir = await tempDir("aio-journal-replay-boots-");
+    try {
+      await run(dir, "kill");
+      assertEquals(await marker(dir), [], "nothing replayed yet");
+      // Three boots that die after their replay and before any save.
+      await run(dir, "die");
+      const first = await marker(dir);
+      assertEquals(first.length, 1);
+      assertEquals(first[0]!.is[1], 0, "the first replay of a tail is free");
+      await run(dir, "die");
+      assertEquals((await marker(dir))[0]!.is, [first[0]!.is[0]!, 3]);
+      await run(dir, "die");
+      assertEquals((await marker(dir))[0]!.is, [first[0]!.is[0]!, 6]);
+      // At the ceiling the boot is refused, by name — that boot only: the
+      // count starts over, so recovery is never why an app stays down.
+      await Deno.writeTextFile(first[0]!.path, `${first[0]!.is[0]} 2000000`);
+      const said = await run(dir, "refused") as string;
+      assert(said.includes("MEMORY_UNBOUNDED"), said);
+      assert(said.includes('"journal.replay.entries"'), said);
+      assert(said.includes(".replayed"), said);
+      assertEquals((await marker(dir))[0]!.is, [first[0]!.is[0]!, 0]);
+      // The next start replays; it saves on its way out, and the boot after
+      // that has nothing to replay: the marker is gone.
+      await run(dir, "read");
+      const out = JSON.parse(await Deno.readTextFile(`${dir}/out.json`));
+      assertEquals(out.n, 3, "the tail was recovered");
+      assertEquals(out.after, 3, "counted from zero again: this replay only");
+      await run(dir, "read");
+      assertEquals(await marker(dir), [], "no tail, no marker");
     } finally {
       await dropTempDir(dir);
     }

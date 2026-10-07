@@ -22,6 +22,7 @@ import {
   packagedCwd,
 } from "../src/electron/electron-spawn.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { EXE, writeProgram } from "./fake-program-helper.ts";
 
 const ROOTS = ["src/server", "src/electron", "src/media"];
 const SPAWN = /new Deno\.Command\(|symbols\.CreateProcessW\(|child_process/g;
@@ -355,6 +356,8 @@ Deno.test("the window: what it opens starts from the window's own working direct
     }
   }
   assertEquals(Object.fromEntries(opens), {
+    // The connect-mode window: an http(s) link a page opens, nothing else.
+    "src/electron/electron-client-script.ts": 1,
     "src/electron/electron-shared.ts": 3,
     "src/electron/electron-uds.ts": 1,
   });
@@ -364,19 +367,20 @@ Deno.test("the window: what it opens starts from the window's own working direct
 Deno.test({
   name:
     "the window: it is told the app's working directory, and a source run starts it there",
-  ignore: Deno.build.os === "windows", // the stand-in is a shell script
   fn: async () => {
     const dir = await tempDir("el-window-cwd-");
     const had = Deno.env.get("ELECTRON_PATH");
     try {
       const report = join(dir, "report");
-      const fake = join(dir, "electron");
-      await Deno.writeTextFile(
+      const fake = join(dir, "electron" + EXE);
+      // What it was told, and where it was started — written by a program
+      // every OS has (the fake itself has no `pwd`).
+      await writeProgram(
         fake,
-        `#!/bin/sh\nprintf '%s\\n%s\\n' "$AIO_APP_CWD" "$(pwd)" > "${report}.tmp"\n` +
-          `mv "${report}.tmp" "${report}"\n`,
+        `#!/bin/sh\nexec "${Deno.execPath()}" eval "Deno.writeTextFileSync(` +
+          `Deno.args[0], Deno.env.get('AIO_APP_CWD') + String.fromCharCode(10)` +
+          ` + Deno.cwd() + String.fromCharCode(10))" "${report}"\n`,
       );
-      await Deno.chmod(fake, 0o755);
       Deno.env.set("ELECTRON_PATH", fake);
       const lines: string[] = [];
       const log = {

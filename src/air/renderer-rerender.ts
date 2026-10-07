@@ -2,7 +2,11 @@
 // Provides: _scheduleComponentRender, _rerenderComponent, _subscribeComponentDeps, _createHooks.
 
 import { nullSlot } from "./vdom-create.ts";
-import { isDevMode, isDevModeExplicit } from "../state/dev-flag.ts";
+import {
+  _wrongPrefix,
+  isDevMode,
+  isDevModeExplicit,
+} from "../state/dev-flag.ts";
 import {
   _computedCollectEnd,
   _computedCollectStart,
@@ -209,25 +213,26 @@ function _firedBy(inst: ComponentInstance, now: number): string {
  *  can call them conditionally or in loops") — true for `onMount`/`onCleanup`,
  *  which are collected as a list, and false for exactly these three.
  *
- *  Observe-only and dev-only, so prod behaves identically. */
+ *  Observe-only, so prod behaves identically — and prod SAYS it too (see
+ *  `_wrongPrefix`). It used to be dev-only: a packaged app then read the wrong
+ *  slot in silence, and a field report found it only by driving the built
+ *  app. The text is one string, so the page pays for the gate and no more. */
 function _checkHookOrder(
   inst: ComponentInstance,
   count: number,
   name: string,
 ): void {
-  if (!isDevMode()) return;
   const prev = inst._hookCount;
   inst._hookCount = count;
   if (prev === undefined || prev === count) return;
+  const prefix = _wrongPrefix(name);
+  if (prefix === null) return;
   console.error(
-    `[aio-dev] <${name}> called ${count} state hooks this render but ${prev} ` +
-      `last render. useRef/useSignal/useId — and onUnmount, which takes a ` +
-      `slot so it can register once rather than once per render — are ` +
-      `matched by CALL ORDER, so a ` +
-      `hook behind an \`if\` (or in a loop whose length changes) shifts every ` +
-      `later hook onto a different slot — the component silently starts ` +
-      `reading another ref's value. Call them unconditionally at the top of ` +
-      `the body; put the condition inside the value instead.`,
+    `${prefix}<${name}> called ${count} state hooks this render but ${prev} ` +
+      `last render. useRef/useSignal/useId/onUnmount are matched by CALL ` +
+      `ORDER: one behind an \`if\`, a loop or an early \`return\` puts every ` +
+      `later hook on another's slot. Call them before any \`return\`; ` +
+      `\`aiol\` names the line.`,
   );
 }
 
@@ -1080,6 +1085,7 @@ export function _createHooks(rootState: RootState): VDomHooks {
             : null,
         };
         vnode._instance = inst;
+        collector._inst = inst; // for the `afterRender`s the body registered
       } else {
         inst.deps = hs.deps!;
         inst.computeds = hs.collected!;
@@ -1206,6 +1212,8 @@ export function _createHooks(rootState: RootState): VDomHooks {
         // instance to unmount, so those holds are released here or never. A
         // re-render's collector is the live instance, whose holds stay.
         const fresh = hs.collector;
+        // …and its `afterRender`s have no commit to run after.
+        if (fresh && !vnode._instance) fresh._inst = { disposed: true };
         if (fresh && !vnode._instance && fresh.mountCleanupCallbacks?.length) {
           const holds = fresh.mountCleanupCallbacks;
           fresh.mountCleanupCallbacks = [];

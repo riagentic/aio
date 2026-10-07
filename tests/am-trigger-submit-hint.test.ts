@@ -13,8 +13,9 @@
 // The usage path calls Deno.exit, so this drives the real CLI.
 import { assert } from "@std/assert";
 import { childCoverageDir } from "../src/testing/temp-dir.ts";
+import { fromFileUrl } from "@std/path";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 const _covDir = childCoverageDir();
 
 async function amTrigger(args: string[]): Promise<string> {

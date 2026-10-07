@@ -79,6 +79,69 @@ export const View = () => <div class="x">hi</div>;
   }
 });
 
+// A function declaration is hoisted; esbuild's kept-name call for it was
+// not. After a `return` the call never ran, and above the declaration it had
+// not run yet: `fn.name` was the minified letter in the built app and the
+// real name in dev. Every way a declaration is written × every body that can
+// hold one × where the name is read: the module, minified and run, answers
+// what the source answers.
+Deno.test("minify: a function declaration has its name wherever it is read — above it, after a return", async () => {
+  const DECLS = [
+    "function kept() {}",
+    "async function kept() {}",
+    "function* kept() {}",
+    "async function* kept() {}",
+    "function kept<T>(a?: T) { return a; }",
+  ];
+  // `@R` reads the name, `@D` declares the function.
+  const BODIES = [
+    "export const n = [@R]; @D",
+    "export function f() { return [@R]; @D }\nexport const n = f();",
+    'export function f() { "use strict"; return [@R]; @D }\nexport const n = f();',
+    "export function f() { const a = [@R]; @D return a; }\nexport const n = f();",
+    "export function f() { @D return [@R]; }\nexport const n = f();",
+    "export function f(k = true) { if (k) return [@R]; throw new Error(); @D }\nexport const n = f();",
+    "export const f = () => { return [@R]; @D };\nexport const n = f();",
+    "export const o = { get v() { return [@R]; @D } };\nexport const n = o.v;",
+    "export class K { m() { return [@R]; @D } }\nexport const n = new K().m();",
+    "export class K { static n: string[]; static { K.n = [@R]; @D } }\nexport const n = K.n;",
+    "export function f() { return g(); function g() { return [@R, g.name]; @D } }\nexport const n = f();",
+    "export function f() { for (;;) { return [@R]; @D } }\nexport const n = f();",
+    "export function f() { const t = `\n{\n${1}`; return [@R, t.length]; @D }\nexport const n = f();",
+  ];
+  try {
+    const wrong: string[] = [];
+    for (const decl of DECLS) {
+      for (const body of BODIES) {
+        const src = body.replace("@R", "kept.name").replace("@D", decl);
+        const run = async (code: string) =>
+          JSON.stringify(
+            (await import(
+              `data:text/javascript,${encodeURIComponent(code)}`
+            )).n,
+          );
+        // The source as it runs in dev: types gone, nothing renamed.
+        const dev = (await esbuild.transform(src, { loader: "ts" })).code;
+        const built = await minifyModule(esbuild, "/x/n.ts", src);
+        if (await run(built) !== await run(dev)) {
+          wrong.push(`${src}\n→ ${await run(built)}, dev ${await run(dev)}`);
+        }
+        assert((await run(dev)).includes('"kept"'), src);
+      }
+    }
+    assertEquals(wrong, [], `${wrong.length} shapes`);
+    // TSX too: what an element shows is no code, whatever it holds.
+    const tsx = await minifyModule(
+      esbuild,
+      "/x/v.tsx",
+      "export function V() { return <p title={w.name}>it's {'{'} shown</p>; function w() {} }",
+    );
+    assert(/__aioName\(\w+,"w"\)[,;]<p /.test(tsx), tsx);
+  } finally {
+    await stopEsbuildService(() => esbuild.stop());
+  }
+});
+
 /** A tiny project: an entry that imports a module through a SYMLINKED dir
  *  (the `dep/aio` layout), a worker reached only by `--include` under its
  *  REAL path, dist/ with the client map, and a node_modules dir. */

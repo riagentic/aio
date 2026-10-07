@@ -64,7 +64,7 @@ Deno.test("frameworkSpecs: JSR mode (--jsr) pins to this am's version (lockstep)
 Deno.test("frameworkSpecs: source mode uses the dep/aio symlink + carries source deps", () => {
   const fw = frameworkSpecs(true);
   assertEquals(fw.imports["aio"], "./dep/aio/mod.ts");
-  assertEquals(fw.imports["esbuild"], "npm:esbuild@^0.24");
+  assertEquals(fw.imports["esbuild"], "npm:esbuild@^0.25");
   assertStringIncludes(fw.build, "./dep/aio/src/build.ts");
 });
 

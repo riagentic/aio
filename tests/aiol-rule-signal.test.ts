@@ -23,14 +23,15 @@
 //     as a field read — printing a TRUNCATED identifier ("counter.incremen")
 //     while doing it.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { buildContext } from "../aiol/context.ts";
 import { ALL_CHECKS } from "../aiol/checks.ts";
 import type { Issue } from "../aiol/types.ts";
+import { linkDir } from "./symlink-helper.ts";
 
 // ── Harness ─────────────────────────────────────────────────────────
 
-const AIOL_CHECKS = new URL("../aiol/checks.ts", import.meta.url).pathname;
+const AIOL_CHECKS = fromFileUrl(new URL("../aiol/checks.ts", import.meta.url));
 
 /** Every `report(` call site in checks.ts, by 1-based line. */
 function reportSites(): number[] {
@@ -70,7 +71,7 @@ async function lintFixture(
       // framework-pin rule reads `dep/aio` as a link, which no text file can
       // fake.
       if (src.startsWith("symlink:")) {
-        await Deno.symlink(src.slice("symlink:".length), p);
+        await linkDir(src.slice("symlink:".length), p);
       } else await Deno.writeTextFile(p, src);
     }
     const { ctx, report } = await buildContext(dir);
@@ -159,6 +160,23 @@ const cellFile = (name: string, body: string) =>
 type Case = { name: string; files: Record<string, string>; expect: string };
 
 const VIOLATIONS: Case[] = [
+  // State hooks after an early `return`: a field report's component returned
+  // before its hooks while a list was empty, and the render after that read
+  // slots the first one never made. `tests/aiol-hook-order.test.ts` holds the
+  // shapes × wrappers; this one proves the rule can fire through the linter.
+  {
+    name: "a state hook after an early return",
+    files: app({
+      "src/JobsPanel.tsx": `import { useRef } from "aio/air";
+export function JobsPanel({ jobs }: { jobs: string[] }) {
+  if (jobs.length === 0) return null;
+  const list = useRef<HTMLUListElement | null>(null);
+  return <ul ref={list}>{jobs.map((j) => <li key={j}>{j}</li>)}</ul>;
+}
+`,
+    }),
+    expect: "matched across renders by CALL ORDER",
+  },
   // A body-level `onCleanup` tearing down something the body did NOT make.
   // The gallery case from the field report: `slot` comes from a ref, so the
   // next repaint hands the queue place back and nothing takes another — 85 of

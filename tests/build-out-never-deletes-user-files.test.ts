@@ -7,12 +7,12 @@
 // release in `out` (exactly the files its manifest.json lists) is still
 // replaced as before, and dist/ — aio's own staging dir — is exempt.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { foreignOutEntries } from "../src/build/build-shape.ts";
 import { shipApp } from "../src/build/ship.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const BUILD_ALL = new URL("../src/build-all.ts", import.meta.url).pathname;
+const BUILD_ALL = fromFileUrl(new URL("../src/build-all.ts", import.meta.url));
 
 Deno.test("out dir: only what the previous manifest placed counts as the build's own", () => {
   const manifest = {
@@ -88,7 +88,6 @@ Deno.test("out dir: a build pointed at a directory of the user's files refuses a
 Deno.test({
   name:
     "out dir: `--out` at the sources under another spelling — 'src ', 'src.', a link to src — is refused like --out=src",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("aio-out-src-spellings-");
     try {

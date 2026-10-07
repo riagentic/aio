@@ -25,6 +25,8 @@ import {
   pageLinkIssues,
   symbolIssues,
 } from "../scripts/check-docs.ts";
+import { fromFileUrl } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 
 const doc = (rel: string, body: string): DocFile[] => [
   { rel, lines: body.split("\n") },
@@ -156,7 +158,10 @@ Deno.test("gate catches a dead export specifier", async () => {
   // walker, so a LIVE page spelling one is the failure this catches.
   for (const dead of ["aio/react", "aio/adapters/air", "aio/boot"]) {
     const found = symbolIssues(
-      doc("fixture.md", `\`\`\`ts\nimport { useCell } from "${dead}";\n\`\`\``),
+      doc(
+        "fixture.md",
+        `\`\`\`ts\nimport { useCell } from "${spec(dead)}";\n\`\`\``,
+      ),
       surface,
       android,
     );
@@ -284,7 +289,7 @@ Deno.test("both link checks share ONE existence rule", () => {
 Deno.test("check:docs is green on the real docs tree", async () => {
   const cmd = new Deno.Command(Deno.execPath(), {
     args: ["run", "--allow-read", "scripts/check-docs.ts"],
-    cwd: new URL("..", import.meta.url).pathname,
+    cwd: fromFileUrl(new URL("..", import.meta.url)),
     stdout: "piped",
     stderr: "piped",
   });

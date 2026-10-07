@@ -5,6 +5,8 @@
 // failing at dispose with an OS error that named neither the variable nor
 // the fix.
 import { assertEquals, assertThrows } from "@std/assert";
+import { DELIMITER } from "@std/path";
+import { EXE } from "./fake-program-helper.ts";
 import { chromiumBin } from "../src/testing/chromium.ts";
 import { testBrowser } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDirSync } from "../src/testing/temp-dir.ts";
@@ -50,10 +52,10 @@ Deno.test("chromiumBin: a missing $CHROMIUM_BIN is named, before anything runs",
 Deno.test("chromiumBin: a bare command name is looked up on PATH, not stat'ed in the cwd", async () => {
   const dir = tempDirSync("aio-chromium-bin-");
   try {
-    const exe = `${dir}/fake-chromium`;
+    const exe = `${dir}/fake-chromium${EXE}`;
     Deno.writeTextFileSync(exe, "#!/bin/sh\n");
     Deno.chmodSync(exe, 0o755);
-    withEnv("PATH", `${dir}:${Deno.env.get("PATH") ?? ""}`, () => {
+    withEnv("PATH", `${dir}${DELIMITER}${Deno.env.get("PATH") ?? ""}`, () => {
       assertEquals(chromiumBin("x", "fake-chromium"), "fake-chromium");
       assertThrows(
         () => chromiumBin("x", "no-such-chromium-anywhere"),

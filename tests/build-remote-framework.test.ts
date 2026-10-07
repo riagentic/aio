@@ -21,11 +21,13 @@
 // fetch+integrity code path, no network, no publish needed.
 
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { VERSION } from "../src/server/aio-cli.ts";
 import { freePort } from "../src/testing/server-test.ts";
+import { spec as toSpec } from "./module-spec-helper.ts";
+import { fixtureNodeModules } from "./symlink-helper.ts";
 
-const REPO = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+const REPO = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
 
 /** Serve the repo read-only over loopback — stands in for the JSR registry. */
 function serveFramework(): { base: string; stop: () => Promise<void> } {
@@ -93,11 +95,7 @@ export default function App() {
   // deno materializes a JSR package's transitive npm deps as top-level
   // node_modules links (verified against the published package), which is what
   // the plugin's resolveDir points esbuild at.
-  await Deno.mkdir(join(dir, "node_modules"));
-  await Deno.symlink(
-    join(REPO, "node_modules", "immer"),
-    join(dir, "node_modules", "immer"),
-  );
+  await fixtureNodeModules(dir, "npm:immer@10.2.0");
   return dir;
 }
 
@@ -105,8 +103,8 @@ export default function App() {
  *  calls `Deno.exit(1)` when the bundle fails, which would take the test with
  *  it (and hide the very failure being asserted). */
 const DRIVER = `
-import { runBundle } from "${REPO}/src/build/build-bundle.ts";
-import type { BuildConfig } from "${REPO}/src/build/build-config.ts";
+import { runBundle } from "${toSpec(REPO)}/src/build/build-bundle.ts";
+import type { BuildConfig } from "${toSpec(REPO)}/src/build/build-config.ts";
 import { join } from "@std/path";
 
 const [root, base] = Deno.args as [string, string];

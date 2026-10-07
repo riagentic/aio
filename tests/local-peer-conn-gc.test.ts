@@ -14,6 +14,7 @@
 // (tests/memory.test.ts explains why it cannot be this process).
 import { assert, assertEquals } from "@std/assert";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { fromFileUrl } from "@std/path";
 
 const N = 60;
 
@@ -28,9 +29,10 @@ async function probe(): Promise<Result> {
         "-A",
         "--v8-flags=--expose-gc",
         "--config",
-        new URL("../deno.json", import.meta.url).pathname,
-        new URL("./fixtures/local-peer-conn-gc/probe.ts", import.meta.url)
-          .pathname,
+        fromFileUrl(new URL("../deno.json", import.meta.url)),
+        fromFileUrl(
+          new URL("./fixtures/local-peer-conn-gc/probe.ts", import.meta.url),
+        ),
         String(N),
         dir,
       ],
@@ -53,7 +55,7 @@ async function probe(): Promise<Result> {
 Deno.test({
   name:
     "peer listener: an ended connection is collected, however it ended — by the client, the server, a refusal, a deadline, a failed write, or as a stream pair",
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // the node:net peer-credential listener is the unix backend; a pipe reports its peer natively
   async fn() {
     const r = await probe();
     const modes = Object.keys(r);

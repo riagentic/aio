@@ -169,6 +169,84 @@ Full recipe, and the client-call half of the same problem, in
 assumed — `tests/build-e2e.test.ts` runs a compiled binary and checks the main
 isolate keeps ticking while a worker cell burns its thread.
 
+## When the worker crashes
+
+An uncaught error in the worker thread (a stray rejection, a throwing timer or
+FFI callback) kills it. Every call in flight rejects with the crash, and
+`/__aio/health` reports `cell-worker:<name>` degraded. What happens next is the
+cell's choice:
+
+|                                     | After a crash                                                                                      |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `worker: true`                      | The cell is dead: every later call is refused with the crash, by name, until the app restarts.     |
+| `worker: true, workerRespawn: true` | A fresh worker is started at once and serves the next call. Health recovers when it reports ready. |
+
+```ts
+export const reports = cell("reports", {
+  worker: true,
+  workerRespawn: true, // start a crashed worker again
+  // …
+});
+```
+
+`workerRespawn` without `worker: true` is refused when the cell is declared.
+
+A respawn is a new isolate, not a resumed one — know what it keeps:
+
+- **State**: the last COMMITTED state. The main isolate holds every patch the
+  dead worker streamed home, and seeds the new one with it. A write the method
+  had not committed yet (no `await` after it) is gone.
+- **Calls in flight** at the crash are not retried: they reject, exactly as with
+  `worker: true`. Retrying is the caller's decision — the method may have
+  half-run.
+- **`onInit` runs again**, once, in the new worker — it is where the cell opens
+  what its methods need, and all of that died with the old thread. It runs
+  against the committed state, not the declared defaults, so write it to be
+  repeatable. `onDestroy` did NOT run in the thread that died.
+- **Module state** (caches, connections, handles) starts empty.
+- **A crash loop ends**: a third crash within 60 s is not respawned. The cell
+  then stays dead as with `worker: true`, and the error — in the log, in health
+  and in every refused call — says `crash 3 in 60s` and that respawn stopped. A
+  worker that crashes before it was ever ready is a boot failure, never
+  respawned.
+
+**Native resources.** aio ends a worker thread without knowing what native work
+it has pending: at once on a crash, and on shutdown after a 1 s close deadline
+(the worker aborts its methods' `s.$signal`, gets 800 ms to finish writing, then
+runs `onDestroy`) whether or not anything is still running. The isolate's memory
+is freed while the OS or a native library may still complete into it — an async
+FFI call, a `Deno.UnsafeCallback`, a device transfer filling a JS `ArrayBuffer`
+— which can take down the whole process, not just the cell. So a worker cell
+that holds FFI or device handles should: abort and drain its native I/O when
+`s.$signal` aborts and in `onDestroy` (the clean path); keep buffers a native
+call can still write to in native (C) memory that outlives the isolate, never in
+a JS buffer (the crash path — no hook runs there); and expect that a handle the
+dead thread held was never released — with `workerRespawn`, `onInit` must cope
+with a device that is still claimed.
+
+Prove the app's side of it with `crashWorker` from `aio/testing`:
+
+```ts
+import { assertRejects } from "@std/assert";
+import { bootCells, crashWorker } from "aio/testing";
+import { reports } from "./reports.ts";
+
+await using _h = await bootCells([reports]);
+const build = reports.build([1, 2, 3]);
+crashWorker(reports); // as an uncaught error in its thread
+await assertRejects(() => build, Error, "crashed");
+await reports.build([4]); // workerRespawn: served again · without: rejects, by name
+```
+
+Under `testServer({ workers: "real" })` it terminates the real thread, and a
+`workerRespawn` cell gets a real new isolate (`onInit` and all). Under
+`testCell`, `bootCells` and `testUI` the cell runs in process, where there is no
+thread to end: calls are answered as above and the crash-loop cap counts the
+same, but a method body already running runs on (what it writes later still
+commits), module state survives and `onInit` does not run again — use real
+workers when that is what the test is about. In-isolate `testServer` refuses
+`crashWorker`, naming the option.
+
 ## How it works
 
 1. `aio.run()` spawns one worker per flagged cell, with the **app's own entry**
@@ -187,15 +265,16 @@ isolate keeps ticking while a worker cell burns its thread.
    replaced by the loaded state on both sides (a streaming method's writes after
    the re-seed land on the loaded state, on both sides). An `onInit` that throws
    or rejects is an `INIT_ERROR` (to `onError`, as on the main isolate); the
-   cell keeps serving calls. A worker that CRASHES is not respawned: the cell
-   answers every later call with the crash, by name, until the app restarts, and
-   `/__aio/health` reports it degraded (`cell-worker:<name>`) — and a restart
-   (including dev's automatic one when a cell file changes) is a new boot, so
-   `onInit` runs again, once. When the entry is not a local module no worker can
-   be spawned: the cell runs on the main isolate with a warning, and its
-   `onInit` runs there. `app.cells.disable` (or a `circuitBreaker` trip) runs
-   the cell's `onDestroy` and state reset in its worker, and `app.cells.enable`
-   its `onInit` — as for a main-isolate cell
+   cell keeps serving calls. A worker that CRASHES is not respawned unless the
+   cell asks ([below](#when-the-worker-crashes)): the cell answers every later
+   call with the crash, by name, until the app restarts, and `/__aio/health`
+   reports it degraded (`cell-worker:<name>`) — and a restart (including dev's
+   automatic one when a cell file changes) is a new boot, so `onInit` runs
+   again, once. When the entry is not a local module no worker can be spawned:
+   the cell runs on the main isolate with a warning, and its `onInit` runs
+   there. `app.cells.disable` (or a `circuitBreaker` trip) runs the cell's
+   `onDestroy` and state reset in its worker, and `app.cells.enable` its
+   `onInit` — as for a main-isolate cell
    ([lifecycle](lifecycle.md#runtime-control)).
 4. Each commit's patches stream home and are applied through the normal dispatch
    path, so everything downstream sees an ordinary state change. With

@@ -13,15 +13,16 @@
 //
 // `AIO_CRASH_SWEEP_N` widens the sweep, `AIO_CRASH_SWEEP_SEED` replays one.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { fuzzEnvInt } from "./fuzz-seed.ts";
 import { rngOf } from "./sync/properties/_prop.ts";
 
-const APP = new URL("./fixtures/crash-sweep/app.js", import.meta.url)
-  .pathname;
-const TREE = new URL("..", import.meta.url).pathname;
+const APP = fromFileUrl(
+  new URL("./fixtures/crash-sweep/app.js", import.meta.url),
+);
+const TREE = fromFileUrl(new URL("..", import.meta.url));
 
 type Snap = {
   notes: string[];

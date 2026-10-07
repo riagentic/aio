@@ -17,7 +17,7 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { watchTargetDir } from "../src/am/am-cmd-process.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 
 Deno.test("am watch: the directory is the first POSITIONAL, never a flag", () => {
   assertEquals(watchTargetDir([]), "src");
@@ -37,7 +37,7 @@ Deno.test("am watch: a directory that is not there is refused, not 'watched'", a
       args: [
         "run",
         "-A",
-        new URL("../src/am.ts", import.meta.url).pathname,
+        fromFileUrl(new URL("../src/am.ts", import.meta.url)),
         "watch",
         missing,
         "--json",
@@ -69,7 +69,7 @@ Deno.test("am watch: a FILE is not a directory either", async () => {
       args: [
         "run",
         "-A",
-        new URL("../src/am.ts", import.meta.url).pathname,
+        fromFileUrl(new URL("../src/am.ts", import.meta.url)),
         "watch",
         file,
         "--json",

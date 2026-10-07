@@ -17,6 +17,7 @@ import {
   assertStringIncludes,
 } from "@std/assert";
 import { sessionLeaderSpec, spawn } from "../src/server/spawn.ts";
+import { SLEEP_ARGS } from "./proc-helper.ts";
 
 const posix = Deno.build.os !== "windows";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -378,16 +379,19 @@ Deno.test("sessionLeaderSpec: perl sets the session in-process, then execs", () 
 Deno.test({
   name:
     "spawn: a running child is tracked, and stops being tracked when it ends",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     const { _liveSpawned, killAllSpawned, spawn } = await import(
       "../src/server/spawn.ts"
     );
     await killAllSpawned(); // a clean slate, whatever ran before
-    const job = await spawn("sh", { args: ["-c", "sleep 30"] });
+    const job = await spawn(Deno.execPath(), { args: SLEEP_ARGS });
     const live = _liveSpawned();
     assert(live.has(job.pid), `pid ${job.pid} must be tracked while running`);
-    assertEquals(live.get(job.pid), "sh", "…under the command that started it");
+    assertEquals(
+      live.get(job.pid),
+      Deno.execPath(),
+      "…under the command that started it",
+    );
 
     await job.kill();
     // The registry must empty itself on exit, or a long-lived server
@@ -401,14 +405,13 @@ Deno.test({
 
 Deno.test({
   name: "spawn: killAllSpawned kills the ones nobody claimed, and counts them",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     const { _liveSpawned, killAllSpawned, spawn } = await import(
       "../src/server/spawn.ts"
     );
     await killAllSpawned();
-    const a = await spawn("sh", { args: ["-c", "sleep 30"] });
-    const b = await spawn("sh", { args: ["-c", "sleep 30"] });
+    const a = await spawn(Deno.execPath(), { args: SLEEP_ARGS });
+    const b = await spawn(Deno.execPath(), { args: SLEEP_ARGS });
     assertEquals(_liveSpawned().size, 2);
 
     const killed = await killAllSpawned();
@@ -428,7 +431,6 @@ Deno.test({
 Deno.test({
   name:
     "spawn: a child killed through `own` is gone before the backstop sees it",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     // The healthy path. An app that does the right thing must reach shutdown
     // with NOTHING to report — otherwise the warning fires on tidy apps and
@@ -437,7 +439,7 @@ Deno.test({
       "../src/server/spawn.ts"
     );
     await killAllSpawned();
-    const job = await spawn("sh", { args: ["-c", "sleep 30"] });
+    const job = await spawn(Deno.execPath(), { args: SLEEP_ARGS });
     await job.kill(); // what an `own` disposer does
     assertEquals(
       await killAllSpawned(),
@@ -498,7 +500,8 @@ Deno.test({
             "-c",
             "i=0; while [ $i -lt 200 ]; do echo line$i; i=$((i+1)); done; echo last >&2",
           ]
-          : ["/c", "echo line & echo last 1>&2"],
+          // No space before `>`: cmd's echo prints it ("last ").
+          : ["/c", "echo line & echo last>&2"],
         onLine: (l) => lines.push(l),
       });
       await h.status;

@@ -14,7 +14,7 @@ import { renameOver } from "../diagnostics/rename-over.ts";
 import { capDelay } from "../state/timer-ceiling.ts";
 import { looksLikeWrite, statementVerb } from "./sql-shape.ts";
 import { syncDir, syncFile } from "./durable.ts";
-import { dirname, resolve } from "@std/path";
+import { basename, dirname, join, resolve } from "@std/path";
 
 /** Marker phrase every "the db worker isn't in this binary" error carries, so
  *  the condition is recognised by ONE predicate wherever it surfaces. */
@@ -1089,7 +1089,21 @@ export function createDB(path: string, opts: DBOpts = {}): DB {
     //
     // Temp + verify + rename also means a snapshot is never half-written: at
     // every instant `path` is either the previous good snapshot or the new one.
-    async snapshot(path: string): Promise<void> {
+    async snapshot(dest: string): Promise<void> {
+      // The destination FOLDER, with its symlinks resolved. macOS's SQLite
+      // refuses to create a database file whose path passes through one
+      // ("unable to open database") — and there every temp dir is such a
+      // path (`/var/folders` → `/private/var/folders`), as is a home on
+      // another volume. So a snapshot, which is what boot recovery restores
+      // from, rejected on a real Mac (field report, Apple silicon). The file
+      // NAME is kept as given: a snapshot path that is itself a link has
+      // always been replaced by the rename, not followed. A folder that does
+      // not exist is left to fail below, by name, as before.
+      const abs = resolve(dest);
+      const path = await Deno.realPath(dirname(abs)).then(
+        (dir) => join(dir, basename(abs)),
+        () => dest,
+      );
       const tmp = `${path}.tmp-${Date.now().toString(36)}-${
         Math.random().toString(36).slice(2, 8)
       }`;

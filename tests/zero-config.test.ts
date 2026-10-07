@@ -12,9 +12,11 @@ import {
   tempDir,
 } from "../src/testing/temp-dir.ts";
 import { freePort } from "../src/testing/server-test.ts";
+import { fromFileUrl } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 const _childCovDir = childCoverageDir();
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 async function waitFor<T>(fn: () => Promise<T | null>): Promise<T> {
   const deadline = Date.now() + 30_000;
@@ -39,7 +41,7 @@ Deno.test({
         nodeModulesDir: "auto",
         unstable: ["kv"],
         imports: {
-          "aio": `${ROOT}mod.ts`,
+          "aio": `${spec(ROOT)}mod.ts`,
           "immer": "npm:immer@10.2.0",
           "@std/path": "jsr:@std/path@^1",
         },

@@ -264,6 +264,15 @@ a journal of any size boots; passing the ceiling means a recovery path keeps
 re-entering replay — a control-flow bug whose stack trace names the caller, not
 a journal to shrink or a setting to raise.
 
+The count also carries from boot to boot, for the one case a single boot cannot
+see: every boot replays the same tail and stops before its first save — a
+supervisor restarting an app that dies right after recovery. The marker is
+`<journal>.replayed` (the seq the tail began at, and what was charged). A save
+compacts the tail and ends the count, so a crash, a restart and a save costs
+nothing. Past the ceiling that one boot is refused with the same error, and the
+count starts over, so the next start replays: read the log of the boot before
+the refused one for why it stopped. The journal is untouched.
+
 Supervised deployments can scrape the same numbers from `/__aio/metrics`:
 `aio_memory_rss_bytes`, `aio_memory_external_bytes`, and one
 `aio_memory_gauge{name,owner,unit,kind}` per series (with

@@ -100,3 +100,49 @@ Deno.test("nested same-target portals never interleave — updates land in place
     await closeWindow(win);
   }
 });
+
+// Foreign code can remove just the portal's ANCHOR — a sanitiser stripping
+// comments from the body. The region is still on the page; closing the portal
+// must still take its elements away, as it did before the "anchor left the
+// target" branch existed (which released the children and removed nothing).
+Deno.test("a portal whose anchor comment was stripped by foreign code still removes its content on close", async () => {
+  const win = new Window();
+  try {
+    const doc = win.document as unknown as Document;
+    _setDocument(doc);
+    const T = doc.createElement("section");
+    T.appendChild(doc.createElement("header")); // not the portal's
+    doc.body.appendChild(T);
+    const open = signal(true);
+    const label = signal("a");
+    const Item = () => h("li", null, "item");
+    const App = () =>
+      h(
+        "main",
+        null,
+        open.value
+          ? h(
+            Portal,
+            { target: T },
+            h("div", { class: "dialog" }, "dialog"),
+            h("span", null, label.value),
+            h(Item, null),
+          )
+          : null,
+      );
+    const el = doc.createElement("div");
+    doc.body.appendChild(el);
+    const handle = mount(el, App as ComponentFn);
+    handle._flush();
+    assertEquals(T.textContent, "dialogaitem");
+    for (const n of [...T.childNodes]) {
+      if (n.nodeType === 8) T.removeChild(n); // the sanitiser
+    }
+    open.set(false);
+    handle._flush();
+    assertEquals(T.innerHTML, "<header></header>");
+    _unmount(handle);
+  } finally {
+    await closeWindow(win);
+  }
+});

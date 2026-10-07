@@ -28,7 +28,12 @@ import {
   startUpdates,
 } from "../src/server/updates-boot.ts";
 import type { UpdatesSlot } from "../src/state/updates-cell.ts";
-import type { Log } from "../src/diagnostics/logger-api.ts";
+import {
+  getLogger,
+  type Log,
+  setLogger,
+} from "../src/diagnostics/logger-api.ts";
+import { _recordDeps } from "../src/server/install-record.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const quiet = {
@@ -294,7 +299,6 @@ Deno.test("rollback: a marker that never recorded its path — the failed build'
 Deno.test({
   name:
     "rollback: a put-back that could not be written is made again on the next boot",
-  ignore: Deno.build.os === "windows", // chmod
   async fn() {
     const dir = await tempDir("aio-rollback-dir-record-");
     const data = await tempDir("aio-rollback-dir-record-data-");
@@ -303,15 +307,42 @@ Deno.test({
       const record = join(dir, "installed.json");
       await handedToHelper(dir, data, exe);
       const here = join(dir, "notes");
-      await Deno.chmod(record, 0o444);
+      // The record is replaced whole, through a temp beside it — so a record
+      // that cannot be written is one whose temp cannot be made: a folder
+      // (not empty, so nothing clears it) has its name. On every OS, and for
+      // root, which a read-only file never stopped.
+      const nonce = _recordDeps.nonce;
+      _recordDeps.nonce = () => "blocked";
+      const blocked = `${record}.tmp-${Deno.pid}-blocked`;
+      await Deno.mkdir(join(blocked, "x"), { recursive: true });
+      // The writer's own line (path and reason) goes to the process's log.
+      const prev = getLogger();
+      const writer: string[] = [];
+      setLogger(
+        {
+          ...(prev ?? {}),
+          pub: (lvl: string, _cat: string, msg: string) => {
+            if (lvl === "warn") writer.push(msg);
+          },
+        } as unknown as Parameters<typeof setLogger>[0],
+      );
       const first: string[] = [];
-      boot(data, exe, here, "2.0.0", first);
-      await new Promise((r) => setTimeout(r, 200)); // the write that fails
+      try {
+        boot(data, exe, here, "2.0.0", first);
+        for (const end = Date.now() + 10_000; writer.length === 0;) {
+          if (Date.now() > end) throw new Error("no failed write within 10 s");
+          await new Promise((r) => setTimeout(r, 10));
+        }
+      } finally {
+        setLogger(prev);
+        _recordDeps.nonce = nonce;
+      }
+      assertStringIncludes(writer.join("\n"), `could not update ${record}`);
       assertEquals(await recordedVersion(dir, "1.0.0"), "1.0.0");
       // Nothing was corrected, so nothing says it was: the writer's own line
-      // (path and reason) is the one warning of that boot.
+      // is the one warning of that boot.
       assertEquals(await recordLines(first, 0), []);
-      await Deno.chmod(record, 0o644);
+      await Deno.remove(blocked, { recursive: true });
       const second: string[] = [];
       const errors = boot(data, exe, here, "2.0.0", second);
       assertEquals(await recordedVersion(dir, "2.0.0"), "2.0.0");
@@ -688,6 +719,79 @@ Deno.test("rollback: an earlier failed attempt, then the helper puts the old ver
     const errors = boot(data, OLD_EXE, join(dir, "notes"), "1.0.0");
     assertEquals(errors.length, 1);
     assertStringIncludes(errors[0]!, "was rolled back: it failed to come up");
+  } finally {
+    await dropTempDir(dir);
+    await dropTempDir(data);
+  }
+});
+
+// ── the two orders in which the record and the tree can part ────────────────
+//
+// A rollback writes the record BEFORE the helper moves the tree; a forward
+// swap moves the tree and writes NO record. One install, taken through both,
+// with the process gone at the worst moment of each: after every boot that is
+// allowed to decide, the record names the build that runs.
+Deno.test("installed.json: a rollback cut between the record and the move, then a forward swap — each boot leaves the record true", async () => {
+  const dir = await tempDir("aio-rollback-dir-record-");
+  const data = await tempDir("aio-rollback-dir-record-data-");
+  try {
+    const current = join(dir, "notes");
+    const record = join(dir, "installed.json");
+    await Deno.mkdir(current);
+    await Deno.mkdir(`${current}.old-1.0.0`);
+    // The rollback of 2.0.0 got as far as the record — then the process was
+    // gone: no failed record, the marker still there, the tree not moved.
+    await Deno.writeTextFile(record, JSON.stringify(notes("1.0.0")));
+    writePending(data, marker(current));
+    // The failed build boots again. Its judge hands the rollback on once
+    // more; the helper moves nothing, and starts the failed build again.
+    const stop = await judgePendingUpdate(data, quiet, "2.0.0", {
+      os: "windows",
+      swapDirectory: () => ({ previous: "" }),
+      exe: FAILED_EXE,
+    });
+    assertEquals(stop, true, "the rollback is handed to the helper again");
+    assertEquals(readPending(data), null);
+    const warned: string[] = [];
+    const errors = boot(data, FAILED_EXE, current, "2.0.0", warned);
+    assertEquals(errors.length, 1, errors.join("\n"));
+    assertStringIncludes(errors[0]!, "ROLLBACK FAILED");
+    assertEquals(await recordedVersion(dir, "2.0.0"), "2.0.0");
+    assertEquals((await recordLines(warned, 1)).length, 1);
+
+    // Forward: 2.0.0 → 3.0.0. The helper swapped the tree in and wrote
+    // nothing; the new build's first boot is not yet the one that stays.
+    await Deno.remove(failedUpdatePath(data));
+    const forward = marker(current, {
+      from: "2.0.0",
+      to: "3.0.0",
+      previous: `${current}.old-2.0.0`,
+      attempts: 0,
+      fromExe: FAILED_EXE,
+      startedAt: "2026-08-09T00:00:00.000Z",
+    });
+    writePending(data, forward);
+    const judge = () =>
+      judgePendingUpdate(data, quiet, "3.0.0", { os: "linux", exe: NEW_EXE });
+    assertEquals(await judge(), false);
+    const said: string[] = [];
+    boot(data, NEW_EXE, current, "3.0.0", said);
+    await new Promise((r) => setTimeout(r, 100)); // a wrong write would land
+    assertEquals(await recordedVersion(dir, "2.0.0"), "2.0.0");
+    // …and that process is gone before any confirm. The next boot's judge
+    // sees a build that came up twice, and the boot leaves the record true —
+    // whichever of the two (confirm, boot check) writes it.
+    assertEquals(await judge(), false);
+    boot(data, NEW_EXE, current, "3.0.0", said);
+    pendingConfirmer(data, quiet)();
+    assertEquals(await recordedVersion(dir, "3.0.0"), "3.0.0");
+    // A confirm cut after the marker went and before the record: the boot
+    // after it has no marker to wait for, and repairs it — said once.
+    await Deno.writeTextFile(record, JSON.stringify(notes("2.0.0")));
+    assertEquals(readPending(data), null);
+    boot(data, NEW_EXE, current, "3.0.0", said);
+    assertEquals(await recordedVersion(dir, "3.0.0"), "3.0.0");
+    assertEquals((await recordLines(said, 1)).length, 1, said.join("\n"));
   } finally {
     await dropTempDir(dir);
     await dropTempDir(data);

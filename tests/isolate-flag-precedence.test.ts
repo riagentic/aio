@@ -7,14 +7,15 @@
 // one-decider.test.ts missed it because the flag was read into a local first;
 // it now follows such locals). Precedence lives in `isolateOf`.
 import { assert, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
 import { aioTestDir } from "../src/testing/test-strict.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const AIO_ROOT = new URL("..", import.meta.url).pathname;
+const AIO_ROOT = fromFileUrl(new URL("..", import.meta.url));
 
-const APP = `import { aio, cell } from "${join(AIO_ROOT, "mod.ts")}";
+const APP = `import { aio, cell } from "${spec(join(AIO_ROOT, "mod.ts"))}";
 export const alpha = cell("alpha", { state: { n: 0 }, methods: { hi() { return "alpha"; } } });
 export const beta = cell("beta", { state: { n: 0 }, methods: { hi() { return "beta"; } } });
 await aio.run({ appId: "isolate-flag-precedence", cells: [alpha, beta], isolate: ["alpha"] });

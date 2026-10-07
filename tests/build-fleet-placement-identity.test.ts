@@ -22,9 +22,10 @@
 // orchestrator does with the artifacts. The stub's binaries answer `--version`
 // the way a compiled aio app does — `<appId> <version> (aio …)`.
 import { assert, assertEquals, assertMatch } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { buildAll } from "../src/build-all.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { EXE, writeProgram } from "./fake-program-helper.ts";
 
 const STUB = `
 const root = Deno.cwd();
@@ -38,10 +39,12 @@ const entry = arg("--entry=") ?? "src/app.ts";
 const src = await Deno.readTextFile(root + "/" + entry).catch(() => "");
 const id = src.match(/appId: "([^"]+)"/)?.[1] ??
   slug(JSON.parse(await Deno.readTextFile(root + "/deno.json")).title);
+// A host binary is named the way the real build names it: \`.exe\` on Windows.
+const EXE = Deno.build.os === "windows" ? ".exe" : "";
+// The program itself was prepared beside this stub, one per identity.
 const exe = async (name) => {
-  await Deno.writeTextFile(root + "/" + name,
-    "#!/bin/sh\\necho '" + id + " 0.1.0 (aio 1.0.0-beta)'\\n");
-  await Deno.chmod(root + "/" + name, 0o755);
+  await Deno.copyFile(new URL("./prog-" + id, import.meta.url), root + "/" + name + EXE);
+  if (!EXE) await Deno.chmod(root + "/" + name, 0o755);
 };
 if (has("--android")) {
   await Deno.writeTextFile(root + "/" + bin + (has("--remote") ? "-client" : "") + ".apk", "apk");
@@ -50,12 +53,26 @@ if (has("--android")) {
 } else {
   await exe(bin);
   if (has("--service")) {
-    await Deno.writeTextFile(root + "/" + bin + ".service",
-      "# Adjust the path after install (sudo cp " + bin + " /usr/local/bin/" + bin + ").\\n" +
+    await Deno.writeTextFile(root + "/" + bin + EXE + ".service",
+      "# Adjust the path after install (sudo cp " + bin + EXE + " /usr/local/bin/" + bin + ").\\n" +
       "ExecStart=/usr/local/bin/" + bin + "\\n");
   }
 }
 `;
+
+/** Write the stub builder into `dir`, with the program each app identity in
+ *  this file "compiles" to — runnable on this OS, answering `--version`. */
+async function writeStub(dir: string): Promise<string> {
+  for (const id of ["spapp", "relay", "outguard"]) {
+    await writeProgram(
+      join(dir, `prog-${id}`),
+      `#!/bin/sh\necho '${id} 0.1.0 (aio 1.0.0-beta)'\n`,
+    );
+  }
+  const stub = join(dir, "stub-build.ts");
+  await Deno.writeTextFile(stub, STUB);
+  return stub;
+}
 
 type Run = {
   code: number;
@@ -70,8 +87,7 @@ async function fleet(
   body: (r: Run) => Promise<void>,
 ): Promise<void> {
   const dir = await Deno.makeTempDir({ prefix: "aio-fleet-place-" });
-  const stub = join(dir, "stub-build.ts");
-  await Deno.writeTextFile(stub, STUB);
+  const stub = await writeStub(dir);
   await Deno.writeTextFile(join(dir, "deno.json"), JSON.stringify(denoJson));
   for (const [f, text] of Object.entries(files)) {
     await Deno.mkdir(join(dir, f, ".."), { recursive: true });
@@ -126,7 +142,10 @@ Deno.test("fleet: a client's artifact is not labelled twice", async () => {
         !dist.some((f) => /-client-(cli|android)-client/.test(f)),
         `${dist}`,
       );
-      assert(dist.some((f) => /^spapp-.+-client$/.test(f)), `${dist}`);
+      assert(
+        dist.some((f) => f.startsWith("spapp-") && f.endsWith(`-client${EXE}`)),
+        `${dist}`,
+      );
       assert(dist.some((f) => /^spapp-.+-client\.apk$/.test(f)), `${dist}`);
     },
   );
@@ -143,7 +162,7 @@ Deno.test("fleet: targets that DO write the same file are still labelled", async
       );
       assertEquals(bins.length, 2, `${dist}`);
       assertEquals(
-        bins.filter((f) => f.endsWith("-server")).length,
+        bins.filter((f) => f.endsWith(`-server${EXE}`)).length,
         1,
         `${dist}`,
       );
@@ -230,7 +249,7 @@ Deno.test("--print-app-tmpdir: a --name renames the binary, not the directory th
     await Deno.writeTextFile(join(dir, "deno.json"), '{"title":"spapp"}');
     await Deno.mkdir(join(dir, "src"));
     await Deno.writeTextFile(join(dir, "src", "app.ts"), "export {};\n");
-    const aioRoot = new URL("..", import.meta.url).pathname;
+    const aioRoot = fromFileUrl(new URL("..", import.meta.url));
     const ask = async (extra: string[]) => {
       const r = await new Deno.Command(Deno.execPath(), {
         args: [
@@ -267,8 +286,7 @@ Deno.test("fleet: --out=<dir> does not dirty the NEXT build", async () => {
   const dir = await tempDir("aio-fleet-out-");
   const outside = await tempDir("aio-fleet-outstub-");
   try {
-    const stub = join(outside, "stub-build.ts");
-    await Deno.writeTextFile(stub, STUB);
+    const stub = await writeStub(outside);
     await Deno.writeTextFile(
       join(dir, "deno.json"),
       JSON.stringify({

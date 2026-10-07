@@ -392,6 +392,8 @@ Inspect:
   doctor                  DIAGNOSE running process vs dep/aio on disk (→ am restart),
                           and each multi-source setting with who decided it
                           (flag / config / deno.json / env / default).
+                          Hints when the app's Electron is older than the one
+                          this aio is tested with (→ am fix).
                           Not config checks (\`deno task doctor\`), not migrate.
   open [--print]          Open THIS app in a browser (--print writes the URL)
   discover [--timeout=ms] Find exposed aio apps on the LAN (UDP broadcast)

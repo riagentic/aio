@@ -7,9 +7,10 @@
 // Now a child that dies right after a relaunch is a FAILED RESTART: the
 // supervisor stays up, says so, and relaunches on the next save.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { FAILED_RESTART_WINDOW_MS } from "../src/server/dev-restart.ts";
 import { childEnv, freePort, kill } from "./e2e-app-harness.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const appSource = (port: number) =>
   `import { aio } from "aio";
@@ -67,19 +68,18 @@ const alive = (pid: number) => {
 Deno.test({
   name:
     "dev-restart e2e: a typo in the cell file keeps the dev session up; fixing it relaunches",
-  ignore: Deno.build.os === "windows",
   async fn() {
     assert(FAILED_RESTART_WINDOW_MS >= 5_000, "window must cover a slow boot");
     const dir = await Deno.makeTempDir({ prefix: "aio-dev-restart-typo-" });
     const port = freePort();
     const url = `http://127.0.0.1:${port}`;
-    const repo = new URL("../", import.meta.url).pathname;
+    const repo = fromFileUrl(new URL("../", import.meta.url));
     await Deno.writeTextFile(
       join(dir, "deno.json"),
       JSON.stringify({
         imports: {
-          "aio": `${repo}mod.ts`,
-          "aio/": `${repo}src/`,
+          "aio": `${spec(repo)}mod.ts`,
+          "aio/": `${spec(repo)}src/`,
           "immer": "npm:immer@10.2.0",
           "@std/path": "jsr:@std/path@1.1.2",
         },

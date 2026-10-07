@@ -7254,6 +7254,518 @@ function _insideOnMount(code: string, at: number): boolean {
   return false;
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// 42. A STATE HOOK BEHIND A CONDITION, IN A LOOP, OR AFTER AN EARLY RETURN
+// ══════════════════════════════════════════════════════════════════════
+//
+// The renderer matches state hooks across renders BY CALL ORDER: every one
+// takes the next slot (`collector.refIndex++` in
+// `src/air/renderer-lifecycle.ts`), and slot 0 is slot 0 for the life of the
+// instance. A render that calls FEWER of them — because one sits behind an
+// `if`, in a loop whose length moved, or after a `return` that this render
+// took — puts every later hook on another hook's slot. The component then
+// reads state that is not its own, and nothing throws.
+//
+// The renderer says so at runtime (`<X> called 1 state hooks this render but
+// 0 last render`), but only on the render where the count actually moves: a
+// field report shipped the early-return shape because the path that flips it
+// was never taken in a test. The shape itself is visible in the source, so it
+// is said here, before anything runs.
+//
+// WHICH hooks. Not "everything named use*": `onMount`, `onCleanup`,
+// `afterRender`, `useContext`, `useForm` … take no slot and MAY be called
+// conditionally, and the docs say so. The list below is the set that takes
+// one, directly or through a hook it is built on — and it is not kept by
+// hand: `tests/aiol-hook-order.test.ts` mounts every hook-named export of the
+// public entries and counts the slots each one takes, so a hook that starts
+// (or stops) taking a slot turns that test red until this list agrees.
+
+/** The aio hooks that take a state slot. Pinned against the renderer by
+ *  measurement — see the note above. */
+export const SLOT_HOOKS: ReadonlySet<string> = new Set([
+  "onGlobalKey",
+  "onUnmount",
+  "onWindowEvent",
+  "useCallback",
+  "useDimensions",
+  "useEffect",
+  "useHead",
+  "useId",
+  "useInterval",
+  "useLocal",
+  "useMemo",
+  "useOptimistic",
+  "useProjection",
+  "useRaf",
+  "useRef",
+  "useResource",
+  "useSignal",
+  "useState",
+]);
+
+/** One hook call the renderer's call-order rule forbids where it stands. */
+export type HookOrderFinding = {
+  /** Offset of the hook's name in the source. */
+  at: number;
+  /** The name as written at the call (`useRef`, an alias, `air.useRef`). */
+  hook: string;
+  /** `return`: reachable only past a conditional `return` (at `returnAt`).
+   *  `condition`: behind `if`/`else`/`switch`/`try`, or the right side of
+   *  `&&` / `||` / `??` / a ternary. `loop`: in a loop or an array callback. */
+  why: "return" | "condition" | "loop";
+  returnAt?: number;
+  /** The enclosing function's name, when it has one. */
+  fn: string;
+};
+
+type _HookFrame = {
+  /** A real bracket, or a span with no bracket of its own: an arrow's
+   *  expression body, the single statement of a braceless `if`/`for`. */
+  open: "{" | "(" | "[" | "arrow" | "stmt";
+  kind: "fn" | "cond" | "loop" | "plain";
+  /** `(`: the header of `if`/`for`/`while`/`switch`/`catch` — its body is
+   *  this kind. */
+  header?: "cond" | "loop";
+  /** An `&&` / `||` / `??` / `?` seen in this frame since the expression
+   *  began: what follows runs only sometimes. */
+  cond?: boolean;
+  /** `(`: the arguments of an array iteration / of `onMount`/`useEffect`. */
+  iter?: boolean;
+  mount?: boolean;
+  /** `(`: a `function`'s parameter list, and the name it declares. */
+  params?: string;
+  /** `(`: where the bracket opened. */
+  at?: number;
+  /** fn: its name, whether it is an iteration callback, and the first
+   *  conditional `return` in its own body. */
+  name?: string;
+  each?: boolean;
+  returnAt?: number;
+};
+
+const _TYPE_OPERATOR_WORD =
+  /^(?:extends|keyof|typeof|readonly|is|infer|asserts|new|unique|abstract)$/;
+const _ITER_CALL =
+  /(?:\.\s*(?:map|forEach|flatMap|filter|some|every|find|findIndex|findLast|findLastIndex|reduce|reduceRight)|\bArray\s*\.\s*from)\s*$/;
+/** What stands before a METHOD's name — never before a call's. */
+const _METHOD_HEAD =
+  /(?:^|[{};,\n]|\b(?:async|static|get|set|public|private|protected|override)\s|\*)\s*[$\w]+\s*(?:<[^()]*>)?\s*$/;
+/** `const f = (a) =>` / `= async x =>` — the binding IS the function. */
+const _DIRECT_FN =
+  /^\s*(?::[^=]*)?=\s*(?:async\s*)?(?:<[^()]*>\s*)?(?:\((?:[^()]|\([^()]*\))*\)\s*(?::[^=]*)?|[$\w]+\s*)?$/;
+
+/** Offset of the `>` closing the generic list whose `<` is at `open`, or -1.
+ *  A `=>` inside it is an arrow type, not a closer. */
+function _angleClose(code: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < code.length && i < open + 600; i++) {
+    const c = code[i]!;
+    if (c === "(" || c === "[" || c === "{") {
+      i = _bracketClose(code, i);
+      if (i === -1) return -1;
+    } else if (c === "<") depth++;
+    else if (c === ">" && code[i - 1] !== "=" && --depth === 0) return i;
+    else if (c === ";") return -1;
+  }
+  return -1;
+}
+
+/** `i` is just past the `:` of a return type. The offset of the BODY's `{`,
+ *  or -1 when what follows is not `type {`. A `{` where a type is still
+ *  expected (first, or after `|` `&` `=>` `extends` …) is a type literal. */
+function _returnTypeEnd(code: string, i: number): number {
+  let wantsType = true;
+  for (;;) {
+    while (/\s/.test(code[i] ?? "")) i++;
+    const c = code[i];
+    if (c === undefined) return -1;
+    if (c === "{" && !wantsType) return i;
+    if (c === "{" || c === "(" || c === "[" || c === "<") {
+      const end = c === "<" ? _angleClose(code, i) : _bracketClose(code, i);
+      if (end === -1) return -1;
+      i = end + 1;
+      wantsType = false;
+    } else if (c === "=" && code[i + 1] === ">") {
+      i += 2;
+      wantsType = true;
+    } else if ("|&?:.".includes(c)) {
+      i++;
+      wantsType = true;
+    } else if (c === '"' || c === "'" || c === "`") {
+      const end = code.indexOf(c, i + 1);
+      if (end === -1) return -1;
+      i = end + 1;
+      wantsType = false;
+    } else if (/[\w$]/.test(c)) {
+      const word = /^[\w$]+/.exec(code.slice(i, i + 80))![0];
+      i += word.length;
+      wantsType = _TYPE_OPERATOR_WORD.test(word);
+    } else return -1;
+  }
+}
+
+/** One pass over masked code with the given hook names. Returns the findings
+ *  and the named functions whose OWN body calls a hook (so a file's custom
+ *  hooks can be added to the names and the pass repeated). */
+function _hookOrderPass(
+  code: string,
+  names: ReadonlyMap<string, string>,
+  namespaces: ReadonlySet<string>,
+): { findings: HookOrderFinding[]; hookFns: Set<string> } {
+  const findings: HookOrderFinding[] = [];
+  const hookFns = new Set<string>();
+  const stack: _HookFrame[] = [];
+  /** `{` offsets that open a function body, and the function's name. */
+  const bodyAt = new Map<number, string>();
+  /** `(` offsets that open a `function`'s parameters. */
+  const paramsAt = new Map<number, string>();
+  /** The body an `if (…)`/`else`/`do`/`try` is still waiting for. */
+  let pending: "cond" | "loop" | "plain" | null = null;
+  /** The last `const NAME` and where the name ends. */
+  let decl: { name: string; end: number } | null = null;
+  /** The word before the `(` that closed last (a method's name). */
+  let closedParenWord = "";
+  let prev = ""; // the last significant character
+  let prevWord = ""; // the last word, when nothing but space followed it
+  let owner = ""; // the word a `.` was written after
+
+  const top = () => stack[stack.length - 1];
+  const spanless = (f: _HookFrame | undefined) =>
+    f !== undefined && (f.open === "arrow" || f.open === "stmt");
+  const endSpans = (arrowsOnly = false) => {
+    while (
+      spanless(top()) && (!arrowsOnly || top()!.open === "arrow")
+    ) stack.pop();
+  };
+  const nextSig = (i: number) => {
+    while (i < code.length && /\s/.test(code[i]!)) i++;
+    return i;
+  };
+  const fnFrame = () => {
+    for (let j = stack.length - 1; j >= 0; j--) {
+      if (stack[j]!.kind === "fn") return j;
+    }
+    return -1;
+  };
+  const pushFn = (open: "{" | "arrow", name: string) => {
+    // The frame the literal is written IN: an argument list of `.map(…)`
+    // makes it a loop body.
+    stack.push({ open, kind: "fn", name, each: top()?.iter === true });
+  };
+  const declName = (at: number) => {
+    const d = decl;
+    decl = null;
+    return d === null
+      ? { name: "", direct: false }
+      : { name: d.name, direct: _DIRECT_FN.test(code.slice(d.end, at)) };
+  };
+  const directFns = new Set<string>();
+
+  for (let i = 0; i < code.length; i++) {
+    const ch = code[i]!;
+    if (ch === "\n") {
+      const t = top();
+      if ((spanless(t) || t?.cond) && _asiEndsStatement(code, i)) {
+        endSpans();
+        if (top()) top()!.cond = false;
+      }
+      continue;
+    }
+    if (ch === " " || ch === "\t" || ch === "\r") continue;
+
+    // A braceless body: `if (c) return null;` / `else useRef()`.
+    if (pending !== null && ch !== "{") {
+      if (ch !== ";" && pending !== "plain") {
+        stack.push({ open: "stmt", kind: pending });
+      }
+      pending = null;
+    }
+
+    if (/[A-Za-z_$]/.test(ch)) {
+      const word = /^[\w$]+/.exec(code.slice(i, i + 80))![0];
+      const end = i + word.length;
+      const after = nextSig(end);
+      const member = prev === ".";
+      const before = member ? owner : prevWord;
+      prev = word[word.length - 1]!;
+      prevWord = word;
+      i = end - 1;
+      if (member) {
+        if (
+          !namespaces.has(before) || !SLOT_HOOKS.has(word) ||
+          code[after] !== "("
+        ) continue;
+      } else if (word === "function") {
+        const m = /^\s*\*?\s*([$\w]*)\s*(?=[<(])/.exec(code.slice(end));
+        if (m) {
+          let p = end + m[0].length;
+          if (code[p] === "<") p = nextSig(_angleClose(code, p) + 1);
+          if (code[p] === "(") {
+            const d = m[1] ? null : declName(i);
+            if (m[1] || d?.direct) directFns.add(m[1] || d!.name);
+            paramsAt.set(p, m[1] || d?.name || "");
+          }
+        }
+        continue;
+      } else if (word === "const" || word === "let" || word === "var") {
+        const m = /^\s*([$\w]+)/.exec(code.slice(end, end + 200));
+        decl = m ? { name: m[1]!, end: end + m[0].length } : null;
+        continue;
+      } else if (
+        (word === "if" || word === "switch" || word === "while" ||
+          word === "for" || word === "catch") &&
+        (code[after] === "(" || code.startsWith("await", after))
+      ) {
+        const p = code[after] === "(" ? after : nextSig(after + 5);
+        if (code[p] === "(") {
+          stack.push({
+            open: "(",
+            kind: "plain",
+            header: word === "while" || word === "for" ? "loop" : "cond",
+          });
+          prev = "(";
+          prevWord = "";
+          i = p;
+        }
+        continue;
+      } else if (
+        (word === "try" || word === "do" || word === "finally" ||
+          word === "catch") && code[after] === "{"
+      ) {
+        pending = word === "do"
+          ? "loop"
+          : word === "finally"
+          ? "plain"
+          : "cond";
+        continue;
+      } else if (word === "else" && !":=,".includes(code[after] ?? ":")) {
+        pending = "cond";
+        continue;
+      } else if (word === "return" && code[after] !== ":") {
+        const f = fnFrame();
+        if (f !== -1 && stack[f]!.returnAt === undefined) {
+          for (let j = f + 1; j < stack.length; j++) {
+            if (stack[j]!.kind === "cond" || stack[j]!.kind === "loop") {
+              stack[f]!.returnAt = end - word.length;
+              break;
+            }
+          }
+        }
+        continue;
+      }
+      if (!member && (!names.has(word) || before === "function")) continue;
+      // A call: `name(`, or `name<T>(`.
+      let paren = after;
+      if (code[paren] === "<") paren = nextSig(_angleClose(code, paren) + 1);
+      if (code[paren] !== "(") continue;
+      const f = fnFrame();
+      if (f === -1) continue; // module level: not a render
+      const canonical = member ? word : names.get(word)!;
+      // Inside an `onMount` callback `onUnmount` takes no slot (it runs once).
+      if (canonical === "onUnmount" && stack.some((fr) => fr.mount)) continue;
+      const fn = stack[f]!;
+      if (fn.name) hookFns.add(fn.name);
+      let why: HookOrderFinding["why"] | null = fn.each ? "loop" : null;
+      for (let j = f; j < stack.length && why !== "loop"; j++) {
+        const fr = stack[j]!;
+        if (j > f && (fr.kind === "loop" || fr.header === "loop")) why = "loop";
+        else if ((j > f && fr.kind === "cond") || fr.cond) why = "condition";
+      }
+      if (why === null && fn.returnAt !== undefined) why = "return";
+      if (why !== null) {
+        findings.push({
+          at: end - word.length,
+          hook: member ? `${before}.${word}` : word,
+          why,
+          ...(why === "return" ? { returnAt: fn.returnAt } : {}),
+          fn: fn.name ?? "",
+        });
+      }
+      // Past the type arguments: an arrow TYPE in them is not a function.
+      i = paren - 1;
+      continue;
+    }
+
+    owner = ch === "." ? prevWord : "";
+    prevWord = "";
+    if (ch === "(" || ch === "[" || ch === "{") {
+      if (ch === "{") {
+        const body = bodyAt.get(i);
+        if (body !== undefined) pushFn("{", body);
+        else if (pending !== null) stack.push({ open: "{", kind: pending });
+        // `) {` with no keyword before the `(` is a method's body.
+        else if (prev === ")") pushFn("{", closedParenWord);
+        else stack.push({ open: "{", kind: "plain" });
+        pending = null;
+      } else {
+        const head = code.slice(Math.max(0, i - 40), i);
+        stack.push({
+          open: ch,
+          kind: "plain",
+          at: i,
+          ...(ch === "(" && paramsAt.has(i) ? { params: paramsAt.get(i) } : {}),
+          ...(ch === "(" && _ITER_CALL.test(head) ? { iter: true } : {}),
+          ...(ch === "(" && /\b(?:onMount|useEffect)\s*$/.test(head)
+            ? { mount: true }
+            : {}),
+        });
+      }
+    } else if (ch === ")" || ch === "]" || ch === "}") {
+      endSpans();
+      const closed = stack.pop();
+      if (ch === "}" && (closed?.kind === "cond" || closed?.kind === "loop")) {
+        // `else if (…) { … }`: the block was the `else`'s whole statement.
+        while (top()?.open === "stmt") stack.pop();
+      }
+      if (ch === ")" && closed?.header) pending = closed.header;
+      else if (ch === ")" && closed?.at !== undefined) {
+        const head = code.slice(Math.max(0, closed.at - 120), closed.at);
+        closedParenWord = /([$\w]+)\s*(?:<[^()]*>)?\s*$/.exec(head)?.[1] ?? "";
+        const after = nextSig(i + 1);
+        if (
+          code[after] === ":" &&
+          (closed.params !== undefined || _METHOD_HEAD.test(head))
+        ) {
+          const body = _returnTypeEnd(code, after + 1);
+          if (body !== -1) {
+            bodyAt.set(body, closed.params ?? closedParenWord);
+            prev = ")";
+            i = body - 1;
+            continue;
+          }
+        } else if (closed.params !== undefined && code[after] === "{") {
+          bodyAt.set(after, closed.params);
+        }
+      }
+    } else if (ch === "=" && code[i + 1] === ">") {
+      const after = nextSig(i + 2);
+      const d = declName(i);
+      if (d.direct) directFns.add(d.name);
+      if (code[after] === "{") bodyAt.set(after, d.name);
+      else pushFn("arrow", d.name);
+      i++;
+    } else if (ch === ";") {
+      endSpans();
+      if (top()) top()!.cond = false;
+      decl = null;
+    } else if (ch === ",") {
+      endSpans(true);
+      if (top()) top()!.cond = false;
+    } else if (
+      (ch === "&" || ch === "|" || ch === "?") && code[i + 1] === ch
+    ) {
+      if (top()) top()!.cond = true;
+      i += code[i + 2] === "=" ? 2 : 1;
+    } else if (ch === "?") {
+      if (code[i + 1] === "." && !/\d/.test(code[i + 2] ?? "")) i++;
+      // `a?: T`, `(a?)`, `[a?]` are optional markers, not a ternary.
+      else if (!":),=;}]".includes(code[nextSig(i + 1)] ?? ":") && top()) {
+        top()!.cond = true;
+      }
+    } else if (
+      ch === "=" && code[i + 1] !== "=" &&
+      !"=!<>".includes(code[i - 1] ?? "") &&
+      // …but not a JSX attribute's (`title={…}`, written without spaces):
+      // `ok && <p title={useRef()} />` is still behind the `&&`.
+      !(/[\w$-]/.test(code[i - 1] ?? "") && /[{"']/.test(code[i + 1] ?? ""))
+    ) {
+      // An assignment starts a new expression: `const x: A extends B ? C : D
+      // = useRef()` is not conditional.
+      if (top()) top()!.cond = false;
+    }
+    prev = ch === "=" && code[i] === ">" ? ">" : code[i]!;
+  }
+  for (const n of [...hookFns]) if (!directFns.has(n)) hookFns.delete(n);
+  return { findings, hookFns };
+}
+
+/** Every state-hook call in `src` that stands where the renderer's call-order
+ *  rule forbids it. Pure.
+ *
+ *  A name is a hook only when the file IMPORTS it from aio (`isSource`), under
+ *  whatever alias — or when it is one of the file's own `use…` functions
+ *  whose body calls one. A local `useRef` that is not aio's, or a
+ *  hook from another library, is nothing. */
+export function hookOrderFindings(
+  src: string,
+  isSource: (spec: string) => boolean = fix.isAioSpec,
+): HookOrderFinding[] {
+  const names = new Map<string, string>();
+  const namespaces = new Set<string>();
+  for (const st of moduleStatements(src)) {
+    if (st.kind !== "import" || st.typeOnly || !isSource(st.spec)) continue;
+    const ns = /\*\s*as\s+([$\w]+)/.exec(st.clause);
+    if (ns) namespaces.add(ns[1]!);
+    for (const e of st.list?.entries ?? []) {
+      const m = /^([$\w]+)(?:\s+as\s+([$\w]+))?$/.exec(e.text);
+      if (m && SLOT_HOOKS.has(m[1]!)) names.set(m[2] ?? m[1]!, m[1]!);
+    }
+  }
+  if (names.size === 0 && namespaces.size === 0) return [];
+  // Comment delimiters survive `codeText`; here they would read as operators.
+  const code = codeText(src).replace(/\/\/|\/\*|\*\//g, "  ");
+  for (;;) {
+    const { findings, hookFns } = _hookOrderPass(code, names, namespaces);
+    // A function of this file that calls a hook in its own body takes that
+    // hook's slots wherever IT is called.
+    const added = [...hookFns].filter((n) =>
+      /^use[A-Z]/.test(n) && !names.has(n)
+    );
+    if (added.length === 0) return findings;
+    for (const n of added) names.set(n, n);
+  }
+}
+
+export const checkHookOrder: Checker = (ctx) => {
+  const { tsFiles, tsxFiles, report, pass } = ctx;
+  let found = 0, checked = 0;
+  for (const file of [...tsFiles, ...tsxFiles]) {
+    if (/\.test\.tsx?$/.test(file.name)) continue;
+    const raw = file.content;
+    const lineOf = (at: number) => raw.slice(0, at).split("\n").length;
+    const findings = hookOrderFindings(raw);
+    checked++;
+    for (const f of findings) {
+      const line = lineOf(f.at);
+      if (isSuppressed(file.lines, line - 1)) continue;
+      found++;
+      const where = f.fn ? `\`${f.fn}\`` : "this function";
+      report(
+        "warn",
+        "ui",
+        `${file.relative}:${line} — \`${f.hook}()\` ` +
+          (f.why === "return"
+            ? `comes after the early \`return\` on line ${
+              lineOf(f.returnAt!)
+            }, so a render of ${where} that returns there never calls it`
+            : f.why === "loop"
+            ? `is called in a loop, so ${where} calls it as many times as ` +
+              `the loop runs`
+            : `is behind a condition, so a render of ${where} may skip it`) +
+          `. State hooks are matched across renders by CALL ORDER: when ` +
+          `the count moves, every later hook lands on another hook's slot ` +
+          `and the component reads state that is not its own (at runtime: ` +
+          `"called N state hooks this render but M last render").\n` +
+          `      fix: call it unconditionally, before any \`return\`, and ` +
+          `put the condition inside its value or callback. See ` +
+          `docs/ui/air-lifecycle.md.`,
+        {
+          file: file.relative,
+          line,
+          fix: f.why === "return"
+            ? `move ${f.hook}(…) above the early return`
+            : `call ${f.hook}(…) unconditionally`,
+        },
+      );
+    }
+  }
+  if (checked > 0 && found === 0) {
+    pass(
+      "no state hook behind a condition, in a loop or after an early return",
+    );
+  }
+};
+
 export const ALL_CHECKS: Checker[] = [
   checkScanCoverage,
   checkCellStateInterface,
@@ -7295,4 +7807,5 @@ export const ALL_CHECKS: Checker[] = [
   checkClientOnlyInCell,
   checkStyles,
   checkBodyCleanupTeardown,
+  checkHookOrder,
 ];

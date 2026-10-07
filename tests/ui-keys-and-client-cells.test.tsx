@@ -118,7 +118,10 @@ const seq = cell("seq-pad", {
 });
 
 function Sequencer() {
-  useInterval(() => seq.beat(), 15, seq.playing);
+  // 100 ms, not 15: `settle()` needs two quiet rounds BETWEEN beats, and a
+  // round is one timer tick — ~16 ms on Windows, where a 15 ms beat changed
+  // the HTML every round and settle() gave up.
+  useInterval(() => seq.beat(), 100, seq.playing);
   return <div class="beats">{String(seq.beats)}</div>;
 }
 
@@ -126,14 +129,14 @@ Deno.test("useInterval: active starts and stops the timer as state changes", asy
   await using ui = await testUI(Sequencer);
 
   // Mounted INACTIVE — nothing may tick.
-  await new Promise((r) => setTimeout(r, 60));
+  await new Promise((r) => setTimeout(r, 350));
   await ui.settle();
   assertEquals(seq.beats, 0, "inactive at mount ⇒ no ticks");
 
   // …and it can still start afterwards. (The bug: onMount already ran.)
   seq.play();
   await ui.settle();
-  await new Promise((r) => setTimeout(r, 80));
+  await new Promise((r) => setTimeout(r, 450));
   await ui.settle();
   const running = seq.beats;
   assert(running >= 2, `started when active flipped true: ${running}`);
@@ -142,14 +145,14 @@ Deno.test("useInterval: active starts and stops the timer as state changes", asy
   seq.pause();
   await ui.settle();
   const atPause = seq.beats;
-  await new Promise((r) => setTimeout(r, 80));
+  await new Promise((r) => setTimeout(r, 450));
   await ui.settle();
   assertEquals(seq.beats, atPause, "paused ⇒ the timer is really stopped");
 
   // And it can start again — the stop/start pair is reusable, not one-shot.
   seq.play();
   await ui.settle();
-  await new Promise((r) => setTimeout(r, 80));
+  await new Promise((r) => setTimeout(r, 450));
   await ui.settle();
   assert(seq.beats > atPause, "resumes after a pause");
 });

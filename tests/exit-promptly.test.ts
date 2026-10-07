@@ -15,8 +15,10 @@
 // debounce, and each still fires for as long as the app is running.
 // Found by the persistence audit round.
 import { assert, assertStringIncludes } from "@std/assert";
+import { fromFileUrl } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 /** Run `body` as its own process and return how long it took to EXIT. */
 async function timeToExit(body: string): Promise<{ ms: number; out: string }> {
@@ -24,7 +26,7 @@ async function timeToExit(body: string): Promise<{ ms: number; out: string }> {
   const file = `${dir}/probe.ts`;
   await Deno.writeTextFile(
     file,
-    `import { aio, cell } from "${ROOT}mod.ts";\n` +
+    `import { aio, cell } from "${spec(ROOT)}mod.ts";\n` +
       `const dir = ${JSON.stringify(dir)};\n` + body,
   );
   const t0 = performance.now();
@@ -49,7 +51,6 @@ const CEILING_MS = 12_000;
 
 Deno.test({
   name: "exit: a clean embedded boot+close does not linger",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const { ms, out } = await timeToExit(`
 const c = cell("exitclean", { state: { n: 0 }, methods: { bump(s) { s.n++ } } });
@@ -71,7 +72,6 @@ console.log("CLOSED");
 
 Deno.test({
   name: "exit: a REFUSED boot leaves too",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const { ms, out } = await timeToExit(`
 await Deno.mkdir(dir + "/data", { recursive: true });

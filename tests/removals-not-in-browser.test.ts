@@ -14,6 +14,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { CORE_REMOVALS } from "../src/state/removals-core.ts";
 import { REMOVALS } from "../src/state/removals.ts";
+import { fromFileUrl } from "@std/path";
 
 /** Modules a page's bundle reaches that consult the registry. Reaching for
  *  `removals.ts` from one of these puts the whole table back in the bundle. */
@@ -27,7 +28,7 @@ const BROWSER_REACHABLE = [
 ];
 
 Deno.test("removals: no browser-reachable module imports the tooling registry", async () => {
-  const root = new URL("../", import.meta.url).pathname;
+  const root = fromFileUrl(new URL("../", import.meta.url));
   const offenders: string[] = [];
   for (const file of BROWSER_REACHABLE) {
     const src = await Deno.readTextFile(root + file);

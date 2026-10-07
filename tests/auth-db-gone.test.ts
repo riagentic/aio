@@ -12,7 +12,14 @@ import { openUserStore } from "../src/server/auth-users.ts";
 import { openSessionStore } from "../src/server/sessions.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-Deno.test("auth.db deleted under a running app: writes throw, reads still answer", async () => {
+// Windows refuses to delete a file a process holds open (os error 32), so an
+// auth.db cannot vanish under a running app there: neither test has a subject.
+const CANNOT_UNLINK_OPEN = Deno.build.os === "windows";
+
+Deno.test({
+  name: "auth.db deleted under a running app: writes throw, reads still answer",
+  ignore: CANNOT_UNLINK_OPEN,
+}, async () => {
   const dir = await tempDir("aio-authdb-gone-");
   const path = join(dir, "auth.db");
   const users = openUserStore(path);
@@ -46,7 +53,11 @@ Deno.test("auth.db deleted under a running app: writes throw, reads still answer
 // auth.db gone that delete is refused — and the read threw with it. The WS
 // session sweep reads on a timer, so the throw was an uncaughtException: one
 // expired session socket after auth.db was deleted took the whole app down.
-Deno.test("auth.db deleted: reading an expired session answers null, never throws", async () => {
+Deno.test({
+  name:
+    "auth.db deleted: reading an expired session answers null, never throws",
+  ignore: CANNOT_UNLINK_OPEN,
+}, async () => {
   const dir = await tempDir("aio-authdb-gone-exp-");
   const path = join(dir, "auth.db");
   const sessions = openSessionStore(path, 30);

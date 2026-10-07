@@ -12,7 +12,7 @@
 //
 // Every case runs with HOME / AIO_APPS_DIR / AIO_INSTALL_ROOT in a temp dir.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { cmdRemove, isAioDataDir } from "../src/am/am-cmd-remove.ts";
 import { appDirs } from "../src/server/app-dirs.ts";
 import type { GlobalFlags } from "../src/am/am-types.ts";
@@ -168,8 +168,8 @@ Deno.test("am create: a reserved name is refused, before anything is written", a
         "run",
         "-A",
         "--config",
-        new URL("../deno.json", import.meta.url).pathname,
-        new URL("../src/am.ts", import.meta.url).pathname,
+        fromFileUrl(new URL("../deno.json", import.meta.url)),
+        fromFileUrl(new URL("../src/am.ts", import.meta.url)),
         "create",
         "aio",
         "--json",

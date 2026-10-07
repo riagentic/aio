@@ -11,6 +11,7 @@
 // nothing — the client stayed without the write, connected and "synced",
 // until some later push or reconnect happened to repair it.
 import { assertEquals } from "@std/assert";
+import { setImmediate } from "node:timers";
 import { createNet, type NetClient, type State } from "./_net.ts";
 import { getCompactedTs } from "../../src/sync/server-store.ts";
 import type { HLC } from "../../src/sync/types.ts";
@@ -18,6 +19,10 @@ import type { HLC } from "../../src/sync/types.ts";
 type S = { items: string[] };
 const apply = (s: State, action: string, p: unknown): State =>
   action === "add" ? { items: [...(s as S).items, p as string] } : s;
+
+/** One event-loop turn that is not a timer: a 0 ms timer waits out the
+ *  clock's granularity — ~16 ms on Windows, where two drains took 283 ms. */
+const turn = () => new Promise<void>((r) => setImmediate(() => r()));
 
 /** Deliver every frame both ways with no idle waiting — `pump` idles ~40ms
  *  per call, and the whole window under test is the 100ms fold debounce. */
@@ -35,7 +40,7 @@ async function drain(net: ReturnType<typeof createNet>): Promise<void> {
         }
       }
     }
-    await new Promise((r) => setTimeout(r, 0));
+    await turn();
     for (const c of net.clients) {
       while (c.inbox.length) {
         moved = true;
@@ -51,7 +56,7 @@ async function drain(net: ReturnType<typeof createNet>): Promise<void> {
         else if (f.t === "sync-res") await c.engine.handleSyncResponse(f.d);
       }
     }
-    await new Promise((r) => setTimeout(r, 0));
+    await turn();
     idle = moved ? 0 : idle + 1;
   }
 }

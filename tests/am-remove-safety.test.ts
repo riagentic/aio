@@ -8,7 +8,7 @@
 // Every case here works inside a temp AIO_INSTALL_ROOT and AIO_APPS_DIR, so
 // what a failing assertion costs is a temp directory.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { dirname, join, resolve } from "@std/path";
+import { dirname, fromFileUrl, join, resolve } from "@std/path";
 import {
   cmdRemove,
   insideParent,
@@ -142,6 +142,9 @@ async function run(
 }
 
 const said = (r: Run) => r.logs.join("\n") + "\n" + r.errors.join("\n");
+/** A path as it reads inside the `{"error": "…"}` line: a Windows `\\` is
+ *  JSON-escaped there. */
+const quoted = (p: string) => JSON.stringify(p).slice(1, -1);
 const there = async (p: string) => {
   try {
     await Deno.lstat(p);
@@ -243,7 +246,7 @@ Deno.test("am remove --data: a data home outside the apps root is named as the u
       const r = await run(["outhome"], { data: true, force: true });
       assertEquals(r.code, 1, said(r));
       assert(!said(r).includes("bug in aio"), said(r));
-      assertStringIncludes(said(r), outside);
+      assertStringIncludes(said(r), quoted(outside));
       assertStringIncludes(said(r), "by hand");
       assert(await there(join(outside, "data", "state.db")), "deleted");
     } finally {
@@ -264,8 +267,8 @@ Deno.test("am remove --data: the outside-the-root refusal is reached through the
       args: [
         "run",
         "-A",
-        `--config=${new URL("../deno.json", import.meta.url).pathname}`,
-        new URL("../src/am.ts", import.meta.url).pathname,
+        `--config=${fromFileUrl(new URL("../deno.json", import.meta.url))}`,
+        fromFileUrl(new URL("../src/am.ts", import.meta.url)),
         "remove",
         "outhome",
         "--data",
@@ -338,7 +341,7 @@ Deno.test("am remove: an app that is not installed says so, and points at its da
     const msg = said(r);
     assertStringIncludes(msg, "nothing installed");
     // The data is the thing a person is actually looking for.
-    assertStringIncludes(msg, dataDir);
+    assertStringIncludes(msg, quoted(dataDir));
     assertStringIncludes(msg, "--data");
     assertEquals(await there(dataDir), true);
   });
@@ -475,7 +478,8 @@ Deno.test("am remove: the owning directories are the ones an install writes to",
   // drift — the check would silently start passing if they did.
   const parents = installedAppParents();
   const p = installedAppPaths("notes");
-  assertEquals(dirname(p.dir), parents.dir);
-  assertEquals(dirname(p.desktop), parents.desktop);
-  assertEquals(dirname(p.binLink), parents.binLink);
+  // `resolve`: a root from the environment may be spelled with `/` on Windows.
+  assertEquals(dirname(p.dir), resolve(parents.dir));
+  assertEquals(dirname(p.desktop), resolve(parents.desktop));
+  assertEquals(dirname(p.binLink), resolve(parents.binLink));
 });

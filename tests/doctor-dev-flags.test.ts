@@ -8,6 +8,8 @@
 import { assert, assertStringIncludes } from "@std/assert";
 import { manifestReport, scanCapabilities } from "../src/build/capabilities.ts";
 import { _explainTranspileFailure } from "../src/server/server-transpile.ts";
+import { fromFileUrl } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 
 Deno.test("doctor manifest: the flag list says WHICH artifact it describes, and what dev needs on top", () => {
   const report = manifestReport(scanCapabilities([
@@ -35,11 +37,11 @@ Deno.test("transpile: a failure with no --allow-run is named, not blamed on synt
   // -A, so the relabel path is unreachable in-process.
   const dir = await Deno.makeTempDir({ prefix: "aio-transpile-perm-" });
   try {
-    const repo = new URL("../", import.meta.url).pathname;
+    const repo = fromFileUrl(new URL("../", import.meta.url));
     const script = `${dir}/probe.ts`;
     await Deno.writeTextFile(
       script,
-      `import { transpile } from "${repo}src/server/server-transpile.ts";
+      `import { transpile } from "${spec(repo)}src/server/server-transpile.ts";
 try {
   await transpile("export const x: number = 1;", "/x/a.ts");
   console.log("NO-ERROR");

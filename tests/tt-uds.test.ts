@@ -7,11 +7,16 @@ import { assert, assertEquals } from "@std/assert";
 import { createUDSListener } from "../src/server/uds.ts";
 import { dec, enc } from "../src/protocol/envelope.ts";
 import { createBroadcaster } from "../src/server/server-broadcast.ts";
+import {
+  connectRW,
+  localEndpoint,
+  localIdle,
+} from "./local-endpoint-helper.ts";
 
 Deno.test({
   name: "UDS: tt-state greets on connect, tt-cmd routes to the handler",
   async fn() {
-    const sock = `${await Deno.makeTempDir()}/tt.sock`;
+    const sock = localEndpoint(`${await Deno.makeTempDir()}/tt.sock`);
     const commands: [string, number | undefined][] = [];
     const uds = createUDSListener(
       sock,
@@ -26,7 +31,7 @@ Deno.test({
         getBroadcast: () => ({ entries: [{ id: 7, type: "seed" }], index: 0 }),
       },
     );
-    const conn = await Deno.connect({ transport: "unix", path: sock });
+    const conn = await connectRW(sock);
     try {
       // Read greeting lines until tt-state arrives (proto, state, tt-state…).
       const buf = new Uint8Array(65536);
@@ -57,6 +62,7 @@ Deno.test({
     } finally {
       conn.close();
       uds.shutdown();
+      await localIdle();
     }
   },
 });

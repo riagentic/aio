@@ -42,6 +42,7 @@ import { sha256Hex } from "../src/build/ship.ts";
 import { extractZip } from "../src/server/zip-extract.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { linkDir, linkFile } from "./symlink-helper.ts";
 
 const REPO = fromFileUrl(new URL("../", import.meta.url));
 
@@ -320,7 +321,7 @@ Deno.test("the stub is found when aio is imported through a path with a space an
   try {
     const dir = join(tmp, "sp ace é");
     await Deno.mkdir(dir);
-    await Deno.symlink(join(REPO, "src"), join(dir, "src"));
+    await linkDir(join(REPO, "src"), join(dir, "src"));
     await Deno.writeTextFile(
       join(dir, "probe.ts"),
       `import { ensureWindowsSfxStub, prebuiltStubPath } from "./src/build/build-windows-exe.ts";
@@ -704,6 +705,9 @@ Deno.test("a failed pack leaves no .incoming behind", async () => {
   }
 });
 
+// What opening a FOLDER for writing fails with: Windows has no EISDIR.
+const OPEN_FOLDER_ERROR = Deno.build.os === "windows" ? "EINVAL" : "EISDIR";
+
 // A pack that stops while it is reading a file closes that file itself: the
 // resource sanitizer fails this test, and the one after it, when the handle is
 // left for the garbage collector.
@@ -718,7 +722,7 @@ Deno.test("a pack whose output cannot be written leaves no file open", async () 
     await assertRejects(
       () => packAppDirTarZstd(join(tmp, "app"), join(tmp, "p.tar.zst")),
       Error,
-      "EISDIR",
+      OPEN_FOLDER_ERROR,
     );
     const left: string[] = [];
     for await (const e of Deno.readDir(join(tmp, "app"))) left.push(e.name);
@@ -771,7 +775,7 @@ Deno.test("a pack that fails while a file is being opened returns with it closed
       () =>
         packAppDirTarZstd(join(tmp, "app"), join(tmp, "p.tar.zst"), entries),
       Error,
-      "EISDIR",
+      OPEN_FOLDER_ERROR,
     );
     assert(asked, "the pack failed before it reached the file");
     assertExists(opened, "the pack returned before the open had landed");
@@ -864,9 +868,9 @@ Deno.test("a symlink in the app is packed as a copy of its target", async () => 
     await Deno.mkdir(join(app, "dist", "img"), { recursive: true });
     await Deno.writeTextFile(join(app, "dist", "logo.png"), "PNG-BYTES");
     await Deno.writeTextFile(join(app, "dist", "img", "a.svg"), "<svg/>");
-    await Deno.symlink("logo.png", join(app, "dist", "icon.png"));
-    await Deno.symlink("dist/img", join(app, "assets")); // a folder
-    await Deno.symlink("icon.png", join(app, "dist", "tray.png")); // a chain
+    await linkFile("logo.png", join(app, "dist", "icon.png"));
+    await linkDir("dist/img", join(app, "assets")); // a folder
+    await linkFile("icon.png", join(app, "dist", "tray.png")); // a chain
 
     assertEquals(
       (await appDirEntries(app)).map((e) => [e.path, e.size, e.linked]),
@@ -914,7 +918,9 @@ Deno.test("a symlink that cannot be packed as a copy is refused, by name", async
     for (const [target, want, also] of cases) {
       const app = join(tmp, "app");
       await Deno.mkdir(join(app, "dist"), { recursive: true });
-      await Deno.symlink(target, join(app, "dist", "link"));
+      // `..` and `../..` are folders; the rest are (or would be) files.
+      const link = target.endsWith("..") ? linkDir : linkFile;
+      await link(target, join(app, "dist", "link"));
       const e = await assertRejects(
         () => packAppDirTarZstd(app, join(tmp, "p.tar.zst")),
         Error,
@@ -927,8 +933,8 @@ Deno.test("a symlink that cannot be packed as a copy is refused, by name", async
     const app = join(tmp, "app");
     await Deno.mkdir(join(app, "a"));
     await Deno.mkdir(join(app, "b"));
-    await Deno.symlink("../b", join(app, "a", "to-b"));
-    await Deno.symlink("../a", join(app, "b", "to-a"));
+    await linkDir("../b", join(app, "a", "to-b"));
+    await linkDir("../a", join(app, "b", "to-a"));
     await assertRejects(
       () => appDirEntries(app),
       Error,
@@ -950,7 +956,7 @@ Deno.test("an app with a symlink builds a zstd exe that carries the target; one 
   try {
     const cfg = await stagedBuild(tmp);
     const appDir = electronStagingDir(tmp);
-    await Deno.symlink("myapp.exe", join(appDir, "link.exe"));
+    await linkFile("myapp.exe", join(appDir, "link.exe"));
     // A linked file big enough that its copy takes the exe past the zip it is
     // gated against (which holds the file once): the gate counts the copy.
     // 5 MB: zstd packs the copy to almost nothing, and the stub is under 1 MB,
@@ -960,7 +966,7 @@ Deno.test("an app with a symlink builds a zstd exe that carries the target; one 
       crypto.getRandomValues(big.subarray(at, at + 65536));
     }
     await Deno.writeFile(join(appDir, "big.bin"), big);
-    await Deno.symlink("big.bin", join(appDir, "big-link.bin"));
+    await linkFile("big.bin", join(appDir, "big-link.bin"));
     await Deno.writeFile(
       join(tmp, windowsZipName("myapp", "x64")),
       new Uint8Array(4 * 1024 * 1024),
@@ -997,7 +1003,7 @@ Deno.test("an app with a symlink builds a zstd exe that carries the target; one 
     // Outside the app: no exe, exit 1, the path said.
     await Deno.remove(exe);
     await Deno.writeTextFile(join(tmp, "host-file"), "x");
-    await Deno.symlink(join(tmp, "host-file"), join(appDir, "out.txt"));
+    await linkFile(join(tmp, "host-file"), join(appDir, "out.txt"));
     const out = await hushed(() =>
       exits(() => buildSelfContainedWindowsExe(cfg))
     );
@@ -1021,7 +1027,7 @@ Deno.test("the zip fallback of an app with a symlink carries the target, not the
     const cfg = await stagedBuild(tmp);
     const appDir = electronStagingDir(tmp);
     await Deno.writeTextFile(join(appDir, UNPACKABLE), "x");
-    await Deno.symlink("myapp.exe", join(appDir, "link.exe"));
+    await linkFile("myapp.exe", join(appDir, "link.exe"));
     const said = await hushed(() =>
       warnings(() => buildSelfContainedWindowsExe(cfg))
     );

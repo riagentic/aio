@@ -18,6 +18,12 @@ import { createUDSListener } from "../src/server/uds.ts";
 import type { ServerSyncHandler } from "../src/sync/server-handler.ts";
 import { requireLocalPeer } from "../src/server/local-peer.ts";
 import { dropTempDir, tempDirSync } from "../src/testing/temp-dir.ts";
+import { connectLocal, isPipePath } from "../src/server/local-listen.ts";
+import {
+  connectRW,
+  localEndpoint,
+  localIdle,
+} from "./local-endpoint-helper.ts";
 
 // The FFI library is a resource Deno's sanitizer tracks per test: open it here,
 // before any case, so no case opens a library it does not close. The live
@@ -25,7 +31,7 @@ import { dropTempDir, tempDirSync } from "../src/testing/temp-dir.ts";
 requireLocalPeer();
 
 const dir = tempDirSync("local-peer-");
-const sock = `${dir}/peer.sock`;
+const sock = localEndpoint(`${dir}/peer.sock`);
 
 /** Every sink a frame can reach, counted. A foreign frame that is "dropped"
  *  but still lands in one of these is not dropped. */
@@ -92,8 +98,10 @@ const handle = createUDSListener(
 handle.armPeerPid?.(1);
 
 /** The fd-bearing backend binds asynchronously (node), so wait for the socket
- *  file rather than racing it. */
+ *  file rather than racing it. A Windows pipe is no file, and needs no wait:
+ *  its bind is queued before any connect this file makes (local-listen.ts). */
 async function waitBound(p: string): Promise<void> {
+  if (isPipePath(p)) return;
   for (let i = 0; i < 300; i++) {
     try {
       if (Deno.lstatSync(p).isSocket) return;
@@ -110,7 +118,7 @@ async function exchange(
   frame: string | undefined,
   ms = 1200,
 ): Promise<string | null> {
-  const c = await Deno.connect({ transport: "unix", path: p });
+  const c = await connectLocal(p);
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     if (frame !== undefined) {
@@ -239,7 +247,7 @@ Deno.test("local-peer gate: once armed with this window's pid, it is served", as
 
 Deno.test("local-peer gate: the window's own `ctl` reaches the whole handler, unreduced", async () => {
   handle.armPeerPid?.(Deno.pid);
-  const c = await Deno.connect({ transport: "unix", path: sock });
+  const c = await connectRW(sock);
   let got = "";
   const timer = setTimeout(() => c.close(), 3000);
   try {
@@ -280,7 +288,7 @@ Deno.test("local-peer gate: when the window exits the gate is disarmed — its p
 
 Deno.test("local-peer gate: when the window exits, its open session is closed — not left to whoever holds the descriptor", async () => {
   handle.armPeerPid?.(Deno.pid);
-  const c = await Deno.connect({ transport: "unix", path: sock });
+  const c = await connectRW(sock);
   const b = new Uint8Array(1 << 16);
   try {
     // A session: the server greets it.
@@ -322,9 +330,12 @@ Deno.test("local-peer gate: a different same-user process gets no state", async 
   const child = await new Deno.Command(Deno.execPath(), {
     args: [
       "eval",
-      `const c = await Deno.connect({ transport: "unix", path: ${
-        JSON.stringify(sock)
-      } });
+      `const { connectLocal } = await import(${
+        JSON.stringify(
+          new URL("../src/server/local-listen.ts", import.meta.url).href,
+        )
+      });
+       const c = await connectLocal(${JSON.stringify(sock)});
        const w = c.writable.getWriter();
        await w.write(new TextEncoder().encode(JSON.stringify({ v: 2, t: "subs", d: { subs: ["*"] } }) + "\\n"));
        const r = c.readable.getReader();
@@ -338,15 +349,23 @@ Deno.test("local-peer gate: a different same-user process gets no state", async 
   assertEquals(new TextDecoder().decode(child.stdout).trim(), "QUIET");
 });
 
-Deno.test("local-peer gate: shutdown closes the door and removes the socket", async () => {
-  handle.shutdown();
-  await dropTempDir(dir);
-  // A closed listener has no door left to open.
-  let threw = false;
-  try {
-    await Deno.connect({ transport: "unix", path: sock });
-  } catch {
-    threw = true;
-  }
-  assertEquals(threw, true);
+Deno.test({
+  name: "local-peer gate: shutdown closes the door and removes the socket",
+  // The listener was opened by this FILE, before any case. On Windows its
+  // parked accept wait is an op, and closing it here completes an op this
+  // case did not start — which is the whole of what the sanitizer would say.
+  sanitizeOps: Deno.build.os !== "windows",
+  async fn() {
+    handle.shutdown();
+    await localIdle();
+    await dropTempDir(dir);
+    // A closed listener has no door left to open.
+    let threw = false;
+    try {
+      await connectLocal(sock);
+    } catch {
+      threw = true;
+    }
+    assertEquals(threw, true);
+  },
 });

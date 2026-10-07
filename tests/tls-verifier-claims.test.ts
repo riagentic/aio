@@ -17,12 +17,12 @@
 //      "measured", each verifier it names is either PROBED (a test file here
 //      that actually drives it) or the paragraph says "by hand".
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { generateRoot, issueLeaf } from "../src/server/x509.ts";
 import { ROOT_PERMITTED_DNS, ROOT_PERMITTED_IPS } from "../src/server/tls.ts";
 import { freePort } from "../src/testing/server-test.ts";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
 /** Verifier → how a comment names it, and — for the probed ones — the test
  *  file that drives it and the call that proves it runs there (read as text,

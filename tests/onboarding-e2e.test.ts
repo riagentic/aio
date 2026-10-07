@@ -31,6 +31,7 @@ import {
   task,
   waitForHttp,
 } from "./e2e-app-harness.ts";
+import { ownHome } from "./deno-dir-helper.ts";
 
 const GATE = Deno.env.get("AIO_ONBOARD_E2E") === "1";
 const ELECTRON = Deno.env.get("AIO_ONBOARD_ELECTRON") === "1";
@@ -46,6 +47,9 @@ Deno.test({
     try {
       const env = {
         ...Deno.env.toObject(),
+        // install.sh appends its PATH line to ~/.profile and every rc file
+        // that exists — the sandbox's, never the developer's.
+        ...await ownHome(root),
         AIO_HOME: join(root, "lib", "aio"),
         AIO_REPO: REPO_ROOT, // clone from the local repo (git handles file paths)
         DENO_INSTALL_ROOT: join(root, "deno"), // sandbox the global am install
@@ -57,6 +61,11 @@ Deno.test({
         stderr: "piped",
       }).output();
       assertEquals(p.code, 0, `install.sh failed:\n${dec.decode(p.stderr)}`);
+      assertStringIncludes(
+        await Deno.readTextFile(join(root, "home", ".profile")),
+        ".deno/bin",
+        "the PATH line must land in the sandbox HOME's profile",
+      );
 
       // am landed in the sandbox and runs.
       const amBin = join(

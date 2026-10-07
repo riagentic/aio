@@ -34,6 +34,7 @@ import {
   initClientLog,
 } from "../src/server/client-log.ts";
 import { stopChild } from "./stop-child.ts";
+import { fromFileUrl } from "@std/path";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 type N = { n: number };
@@ -64,7 +65,7 @@ function serverChild(
     });`;
   return new Deno.Command(Deno.execPath(), {
     args: ["eval", "--ext=ts", code],
-    cwd: new URL("..", import.meta.url).pathname,
+    cwd: fromFileUrl(new URL("..", import.meta.url)),
     env: { DENO_COVERAGE_DIR: childCoverageDir() },
     stdin: "null",
     stdout: "piped",

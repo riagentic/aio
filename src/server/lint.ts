@@ -313,7 +313,7 @@ export async function lint(
 
   // Check esbuild — needed for dev mode TSX transpilation.
   // B-5: probe reality, not the filesystem. The transpiler loads esbuild via
-  // `import("npm:esbuild@0.24.2")` (Deno's npm cache — no node_modules/ needed),
+  // `import("npm:esbuild@0.25.12")` (Deno's npm cache — no node_modules/ needed),
   // so the old `node_modules/esbuild` stat produced a false "not installed"
   // warning on every standard dev boot and was cwd-dependent. Resolve the same
   // way the transpiler does; only warn if that genuinely fails.

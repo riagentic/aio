@@ -2,8 +2,9 @@
 // be an unknown-flag refusal (exit 1) — the help you asked for, as an error.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { isHelpRequest, SHIP_USAGE } from "../src/build/ship.ts";
+import { fromFileUrl } from "@std/path";
 
-const SHIP = new URL("../src/build/ship.ts", import.meta.url).pathname;
+const SHIP = fromFileUrl(new URL("../src/build/ship.ts", import.meta.url));
 
 Deno.test("isHelpRequest: --help / -h anywhere", () => {
   assert(isHelpRequest(["--help"]));

@@ -39,7 +39,21 @@ self.onmessage = ({ data }: MessageEvent<WorkerRequest>) => {
           data.path,
           data.readonly ? { readOnly: true } : undefined,
         );
-        for (const p of data.pragmas ?? []) db.exec(p);
+        try {
+          for (const p of data.pragmas ?? []) db.exec(p);
+        } catch (e) {
+          // `new DatabaseSync` opens the FILE; whether it is a database is
+          // only known at the first statement. One that is not must not stay
+          // open: the caller's `close()` terminates a worker whose open
+          // failed without asking it anything, so nothing else would ever
+          // close this handle — and on Windows an open file cannot be
+          // deleted ("os error 32"), for the life of the process. Measured on
+          // a real Windows 11: a damaged snapshot could never be pruned.
+          const opened = db;
+          db = null;
+          opened.close();
+          throw e;
+        }
         respond({ id, ok: true, data: empty() });
         break;
       }

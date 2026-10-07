@@ -15,7 +15,7 @@
 //   - the WS connect frame — the one every client gets first — is guarded,
 //   - the text is the same in dev and prod.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import {
   cellSizeFix,
   createBudgetLedger,
@@ -45,8 +45,9 @@ import { headingSlugs } from "../scripts/check-docs.ts";
 import { cell } from "../mod.ts";
 import { testServer } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { localEndpoint } from "./local-endpoint-helper.ts";
 
-const REPO = new URL("../", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("../", import.meta.url));
 const MB = 1024 * 1024;
 
 /** The two halves every size message must carry. */
@@ -429,16 +430,18 @@ Deno.test("large-state dev freeze: the skip notice names the fix and the chapter
 Deno.test({
   name:
     "large-state uds: an inbound frame over the ceiling names the knob and the chapter",
-  ignore: Deno.build.os === "windows", // Deno.connect unix; named pipes elsewhere
   async fn() {
     const dir = await tempDir("aio-uds-ceiling-");
-    const socketPath = join(dir, "c.sock");
+    const socketPath = localEndpoint(join(dir, "c.sock"));
     const uds = createUDSListener(socketPath, () => ({}), () => {}, () => {});
     try {
       // The writer is a CHILD process, as the Electron main process is.
-      const code = `const c = await Deno.connect({ path: ${
-        JSON.stringify(socketPath)
-      }, transport: "unix" });
+      const code = `import { connectLocal } from ${
+        JSON.stringify(
+          new URL("../src/server/local-listen.ts", import.meta.url).href,
+        )
+      };
+const c = await connectLocal(${JSON.stringify(socketPath)});
 c.readable.pipeTo(new WritableStream()).catch(() => {});
 const chunk = new TextEncoder().encode("x".repeat(1 << 20));
 const w = c.writable.getWriter(); // write() alone may write PART of a chunk

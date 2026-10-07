@@ -1,21 +1,25 @@
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, assertThrows } from "@std/assert";
 import {
   copyDir,
   findJdk,
   formatMb,
+  gradlewPath,
   resolveSdk,
   slugify,
   writeDefaultIcon,
 } from "../src/build/build-helpers.ts";
 import { join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { linkFile } from "./symlink-helper.ts";
 
 // ── resolveSdk (ANDROID_HOME may point at the SDK OR its parent) ──
 
 /** Lay down a fake SDK (just platform-tools/adb) under `dir`. */
 async function fakeSdk(dir: string): Promise<void> {
   await Deno.mkdir(join(dir, "platform-tools"), { recursive: true });
-  await Deno.writeTextFile(join(dir, "platform-tools", "adb"), "#!/bin/sh\n");
+  // The SDK's adb is `adb.exe` on Windows, and that is the file looked for.
+  const adb = Deno.build.os === "windows" ? "adb.exe" : "adb";
+  await Deno.writeTextFile(join(dir, "platform-tools", adb), "#!/bin/sh\n");
 }
 
 async function withEnv<T>(
@@ -248,9 +252,9 @@ Deno.test("copyDir: a second pass REPLACES a stale symlink, not fails on it", as
   try {
     // Two "runtimes", each with a link of the same name pointing elsewhere.
     await Deno.writeTextFile(join(a, "real-a"), "a");
-    await Deno.symlink("real-a", join(a, "Current"));
+    await linkFile("real-a", join(a, "Current"));
     await Deno.writeTextFile(join(b, "real-b"), "b");
-    await Deno.symlink("real-b", join(b, "Current"));
+    await linkFile("real-b", join(b, "Current"));
 
     await copyDir(a, dst);
     assertEquals(await Deno.readLink(join(dst, "Current")), "real-a");
@@ -267,5 +271,69 @@ Deno.test("copyDir: a second pass REPLACES a stale symlink, not fails on it", as
     await dropTempDir(a);
     await dropTempDir(b);
     await dropTempDir(dst);
+  }
+});
+
+// ── Android build on a Windows host ──
+//
+// `gradle wrapper` writes `gradlew` (a shell script) and `gradlew.bat`. The
+// build started the first on every host; on Windows that is `NotFound`, so
+// the build generated its wrapper and died starting it.
+
+Deno.test("gradle: the wrapper's name is per host — gradlew.bat on Windows", () => {
+  const dir = join("my app", ".aio", "android");
+  assertEquals(gradlewPath("linux", dir), join(dir, "gradlew"));
+  assertEquals(gradlewPath("darwin", dir), join(dir, "gradlew"));
+  assertEquals(gradlewPath("windows", dir), join(dir, "gradlew.bat"));
+});
+
+Deno.test("gradle: the wrapper really starts on THIS host — from a project path with a space, arguments and exit code intact", async () => {
+  const tmp = await tempDir("aio-gradlew-");
+  try {
+    const dir = join(tmp, "my app", "android");
+    await Deno.mkdir(dir, { recursive: true });
+    // Both files, as `gradle wrapper` writes them: print $1, exit 3.
+    await Deno.writeTextFile(
+      join(dir, "gradlew"),
+      '#!/bin/sh\necho "ran $1"\nexit 3\n',
+      { mode: 0o755 },
+    );
+    await Deno.writeTextFile(
+      join(dir, "gradlew.bat"),
+      "@echo off\r\necho ran %~1\r\nexit /b 3\r\n",
+    );
+    const r = await new Deno.Command(gradlewPath(Deno.build.os, dir), {
+      args: ["assembleDebug"],
+      cwd: dir,
+    }).output();
+    assertEquals(
+      new TextDecoder().decode(r.stdout).trim(),
+      "ran assembleDebug",
+      new TextDecoder().decode(r.stderr),
+    );
+    assertEquals(r.code, 3);
+    // …and what the build did before, on Windows: the shell script by name.
+    if (Deno.build.os === "windows") {
+      assertThrows(
+        () => new Deno.Command(join(dir, "gradlew")).outputSync(),
+        Deno.errors.NotFound,
+      );
+    }
+  } finally {
+    await dropTempDir(tmp);
+  }
+});
+
+Deno.test("resolveSdk: the default location on a Windows host hangs off USERPROFILE (HOME is not set there)", async () => {
+  const home = await tempDir("aio-buildhelp-");
+  const sdk = join(home, "AppData", "Local", "Android", "Sdk");
+  try {
+    await fakeSdk(sdk);
+    await withEnv(
+      { ANDROID_HOME: "", ANDROID_SDK_ROOT: "", HOME: "", USERPROFILE: home },
+      () => assertEquals(resolveSdk(), sdk),
+    );
+  } finally {
+    await dropTempDir(home);
   }
 });

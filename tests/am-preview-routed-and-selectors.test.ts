@@ -9,12 +9,13 @@
 //     a function" — nothing in the am process had bound the cells, while the
 //     live `am surface` (inside the server, cells bound) rendered it.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { toFileUrl } from "@std/path";
+import { fromFileUrl, toFileUrl } from "@std/path";
 import { renderHeadlessSurface } from "../src/server/server-surface.ts";
 import { _getRouterBoot } from "../src/air/router.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("..", import.meta.url));
 
 /** A routed component and a selector-reading one, with no JSX (so the fixture
  *  needs no app-side compiler config) and the app's real imports. */
@@ -25,7 +26,7 @@ async function fixture(): Promise<string> {
   await Deno.writeTextFile(`${dir}/src/app.ts`, "await 1;\n");
   await Deno.writeTextFile(
     `${dir}/src/notes.ts`,
-    `import { cell } from "${REPO}mod.ts";
+    `import { cell } from "${spec(REPO)}mod.ts";
 export const notes = cell("notes", {
   state: { items: [{ open: true }, { open: false }, { open: true }] },
   methods: {},
@@ -36,8 +37,8 @@ export const notes = cell("notes", {
   );
   await Deno.writeTextFile(
     `${dir}/src/Routed.ts`,
-    `import { h } from "${REPO}src/air/vdom.ts";
-import { Route, useRoute } from "${REPO}src/air.ts";
+    `import { h } from "${spec(REPO)}src/air/vdom.ts";
+import { Route, useRoute } from "${spec(REPO)}src/air.ts";
 export function Routed() {
   const r = useRoute();
   return h("div", null,
@@ -48,8 +49,8 @@ export function Routed() {
   );
   await Deno.writeTextFile(
     `${dir}/src/Open.ts`,
-    `import { h } from "${REPO}src/air/vdom.ts";
-import { Route } from "${REPO}src/air.ts";
+    `import { h } from "${spec(REPO)}src/air/vdom.ts";
+import { Route } from "${spec(REPO)}src/air.ts";
 import { notes } from "./notes.ts";
 export function Open() {
   return h(Route, { path: "/" }, h("p", { t: "open" }, "open " + notes.open()));

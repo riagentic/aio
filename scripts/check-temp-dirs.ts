@@ -37,15 +37,16 @@
 import { codeText } from "../src/diagnostics/code-mask.ts";
 import { justified as okMarker } from "../src/diagnostics/ok-marker.ts";
 import { likelyNew, mtimeUnder } from "./ratchet-kit.ts";
+import { fromFileUrl } from "@std/path";
 
 /** Unregistered temp-directory creations allowed in `tests/`.
  *
  *  Only ever edit this DOWNWARD. To lower it, convert calls to
  *  `tempDir()`/`tempDirSync()` and drop the matching `Deno.remove` from the
  *  happy path (the exit sweep is the net, `dropTempDir` the polite version). */
-const CEILING = 767;
+const CEILING = 765;
 
-const ROOT = new URL("../tests/", import.meta.url).pathname;
+const ROOT = fromFileUrl(new URL("../tests/", import.meta.url));
 
 /** `Deno.makeTempDir(…)` and its sync twin — the calls that bypass the
  *  registry. `makeTempFile` is deliberately NOT counted: a file is not a

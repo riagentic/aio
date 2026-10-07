@@ -2,6 +2,8 @@
 // (a) flag + env parsing, one decider; (b) the launch passes the Chromium
 // switch ONLY when asked — a bound debugging port is a port.
 import { assert, assertEquals, assertThrows } from "@std/assert";
+import { join } from "@std/path";
+import { EXE, writeProgram } from "./fake-program-helper.ts";
 import {
   _resetParsedCli,
   cdpPort,
@@ -63,16 +65,21 @@ Deno.test("cdpSwitches: the switch exists only when a port does", () => {
 Deno.test({
   name:
     "launchElectron passes --remote-debugging-port only when cdpPort is set",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     const dir = await Deno.makeTempDir();
     const argv = `${dir}/argv.txt`;
-    const bin = `${dir}/fake-electron`;
-    await Deno.writeTextFile(
+    const bin = join(dir, `fake-electron${EXE}`);
+    // One argument per line. The portable stand-in has no `printf` and no
+    // loop: there it is one `echo` per argument, nine being all it can name.
+    await writeProgram(
       bin,
-      `#!/bin/sh\nprintf '%s\\n' "$@" > ${argv}\nexit 0\n`,
+      Deno.build.os === "windows"
+        ? `#!/bin/sh\necho "$1" > "${argv}"\n` +
+          [2, 3, 4, 5, 6, 7, 8, 9].map((n) => `echo "$${n}" >> "${argv}"\n`)
+            .join("") +
+          "exit 0\n"
+        : `#!/bin/sh\nprintf '%s\\n' "$@" > ${argv}\nexit 0\n`,
     );
-    await Deno.chmod(bin, 0o755);
     const prev = Deno.env.get("ELECTRON_PATH");
     Deno.env.set("ELECTRON_PATH", bin);
     const log = { info() {}, error() {}, warn() {}, debug() {} };

@@ -38,6 +38,8 @@ import {
   writeLock,
 } from "../src/server/single-instance-lock.ts";
 import { appHome } from "../src/server/app-dirs.ts";
+import { EXE, writeProgram } from "./fake-program-helper.ts";
+import { spec } from "./module-spec-helper.ts";
 
 const REPO = dirname(dirname(fromFileUrl(import.meta.url)));
 const DENO_JSON = join(REPO, "deno.json");
@@ -63,12 +65,6 @@ function findNamed(nodes: Node[], name: string): Node | undefined {
 Deno.test({
   name:
     "am over UDS: surface, trigger, state, dispatch reach a zero-port app booted from its own appDir",
-  // Windows: a local aio app listens on a NAMED PIPE, and the window stand-in
-  // (tests/fixtures/uds-window-standin.tsx) connects with `Deno.connect({
-  // transport: "unix" })` — it has no named-pipe variant yet (that needs the
-  // `local-listen.ts` seam). The DECIDER is covered on windows by the unit
-  // tests below; this end-to-end case is not.
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await Deno.makeTempDir({ prefix: "aio-am-uds-" });
     const apps = join(dir, "apps"); // AIO_APPS_DIR — isolates lock dir + homes
@@ -77,7 +73,7 @@ Deno.test({
     await Deno.mkdir(apps);
     await Deno.writeTextFile(
       join(dir, "app.ts"),
-      `import { aio, cell } from "${REPO}/mod.ts";
+      `import { aio, cell } from "${spec(REPO)}/mod.ts";
 const c = cell("c", { state: { n: 1 }, visible: "all", methods: {
   inc(s: { n: number }) { s.n++; },
 } });
@@ -93,13 +89,12 @@ await new Promise(() => {});
       `export default function App() { return <div>Hello</div>; }\n`,
     );
     // The "Electron binary": our window stand-in (see the fixture).
-    const electron = join(dir, "electron");
-    await Deno.writeTextFile(
+    const electron = join(dir, `electron${EXE}`);
+    await writeProgram(
       electron,
       `#!/bin/sh\nexec "${Deno.execPath()}" run -A --config "${DENO_JSON}" ` +
         `"${join(REPO, "tests/fixtures/uds-window-standin.tsx")}" "$@"\n`,
     );
-    await Deno.chmod(electron, 0o755);
 
     const env = {
       ...Deno.env.toObject(),

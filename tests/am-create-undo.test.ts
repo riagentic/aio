@@ -220,7 +220,12 @@ Deno.test("create undo: a restore that FAILS is named, never swallowed", async (
     console.error = (...a: unknown[]) => errs.push(a.map(String).join(" "));
     const e = await assertRejects(() => writeScaffold(dir, DOOMED));
     const msg = (e as Error).message;
-    assert(/^File exists .*src[\\/]app\.ts/.test(msg), `original lost: ${msg}`);
+    // The OS's own words for EEXIST: Windows spells error 183 differently.
+    assert(
+      /^(?:File exists|Cannot create a file when that file already exists\.) .*src[\\/]app\.ts/
+        .test(msg),
+      `original lost: ${msg}`,
+    );
     assertEquals(
       msg.split("\n")[1],
       `  undo incomplete — not put back: ${join(dir, "deno.json")}`,
@@ -240,7 +245,7 @@ Deno.test("create undo: a restore that FAILS is named, never swallowed", async (
 Deno.test({
   name:
     "create undo: a path the failure never created is not an incomplete undo",
-  ignore: Deno.build.os === "windows" || Deno.uid() === 0,
+  ignore: Deno.build.os === "windows" || Deno.uid() === 0, // a read-only directory is a POSIX mode bit
   fn: async () => {
     const base = await tempDir("am-create-undo-absent-");
     const ro = join(base, "mine", "ro");

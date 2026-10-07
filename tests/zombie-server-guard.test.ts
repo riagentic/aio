@@ -12,10 +12,10 @@
 // A real process under a real descriptor limit, because that is the only way
 // to make an accept loop fail the way production does.
 import { assert, assertEquals } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
-const REPO = new URL("..", import.meta.url).pathname;
+const REPO = fromFileUrl(new URL("..", import.meta.url));
 const MOD = new URL("../mod.ts", import.meta.url).href;
 
 const APP = (dir: string) =>
@@ -38,9 +38,12 @@ await new Promise(() => {});
 async function boot(dir: string, fdLimit?: number) {
   const file = join(dir, "app.ts");
   await Deno.writeTextFile(file, APP(dir));
-  const run = `deno run -A --config ${join(REPO, "deno.json")} ${file}`;
-  const child = new Deno.Command("bash", {
-    args: ["-c", fdLimit ? `ulimit -n ${fdLimit}; exec ${run}` : `exec ${run}`],
+  const args = ["run", "-A", "--config", join(REPO, "deno.json"), file];
+  // Only the ceiling needs a shell (`ulimit` is a builtin).
+  const child = new Deno.Command(fdLimit ? "bash" : Deno.execPath(), {
+    args: fdLimit
+      ? ["-c", `ulimit -n ${fdLimit}; exec deno ${args.join(" ")}`]
+      : args,
     env: { AIO_APPS_DIR: dir, NO_COLOR: "1" },
     stdout: "piped",
     stderr: "piped",
@@ -80,7 +83,7 @@ function flood(port: number, n: number): Promise<WebSocket[]> {
 Deno.test({
   // `ulimit` is a POSIX shell builtin; Windows has no equivalent ceiling to
   // push the accept loop past, and the guard is not OS-specific.
-  ignore: Deno.build.os === "windows",
+  ignore: Deno.build.os === "windows", // EMFILE needs `ulimit -n`: Windows has no descriptor ceiling to set
   name:
     "server: an accept loop that dies of EMFILE exits the process, instead of leaving it alive with nothing listening",
   fn: async () => {
@@ -130,7 +133,6 @@ Deno.test({
 });
 
 Deno.test({
-  ignore: Deno.build.os === "windows",
   name: "server: a healthy listener never trips the guard",
   fn: async () => {
     const dir = await tempDir("aio-zombie-ok-");

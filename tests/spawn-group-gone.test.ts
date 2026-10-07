@@ -110,7 +110,7 @@ Deno.test("spawn procStat: fields counted from the last paren", () => {
 Deno.test({
   name:
     "spawn group gone: a group holding only a zombie is forgotten and kill() is prompt",
-  ignore: Deno.build.os !== "linux",
+  ignore: Deno.build.os !== "linux", // a zombie in a process group, read from /proc
   fn: async () => {
     // The leader forks P and exits; P forks Z (exits at once), then
     // setsid()s OUT of the group and never waits: the group is left holding

@@ -9,6 +9,7 @@ import { join } from "@std/path";
 import { createStaticHandler } from "../src/server/server-static.ts";
 import { _packAssetMounts } from "../src/build/build-android.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { linkDir, linkFile } from "./symlink-helper.ts";
 
 async function project(assets: unknown): Promise<string> {
   const root = await tempDir("aio-android-mounts-");
@@ -120,8 +121,8 @@ async function guarded(): Promise<string> {
   for (const [n, body] of bodies) await Deno.writeTextFile(join(c, n), body);
   await Deno.mkdir(join(c, ".hidden"));
   await Deno.writeTextFile(join(c, ".hidden", "x.txt"), "s");
-  await Deno.symlink("top.txt", join(c, "inlink.txt"));
-  await Deno.symlink("en", join(c, "linkdir")); // a directory, inside
+  await linkFile("top.txt", join(c, "inlink.txt"));
+  await linkDir("en", join(c, "linkdir")); // a directory, inside
   return root;
 }
 
@@ -195,16 +196,16 @@ Deno.test("android: a symlink out of the mount is refused, naming it — its tar
   const cases: [string, Make, string][] = [
     ["relative file", async (c, root) => {
       await Deno.writeTextFile(join(root, ".env"), "SECRET=1");
-      await Deno.symlink("../.env", join(c, "env.txt"));
+      await linkFile("../.env", join(c, "env.txt"));
     }, "env.txt"],
     [
       "absolute file",
-      (c) => Deno.symlink(join(secret, "id_rsa"), join(c, "key.txt")),
+      (c) => linkFile(join(secret, "id_rsa"), join(c, "key.txt")),
       "key.txt",
     ],
-    ["directory", (c) => Deno.symlink(secret, join(c, "keys")), "keys"],
-    ["dangling", (c) => Deno.symlink("nope", join(c, "gone.txt")), "gone.txt"],
-    ["loop", (c) => Deno.symlink("..", join(c, "en", "up")), "up"],
+    ["directory", (c) => linkDir(secret, join(c, "keys")), "keys"],
+    ["dangling", (c) => linkFile("nope", join(c, "gone.txt")), "gone.txt"],
+    ["loop", (c) => linkDir("..", join(c, "en", "up")), "up"],
   ];
   try {
     for (const [what, make, name] of cases) {
@@ -231,10 +232,7 @@ Deno.test("android: a symlink out of the mount is refused, naming it — its tar
     // …and the server answers 403 for the same link: one rule, both sides.
     const root = await project({ "/text": "./content" });
     try {
-      await Deno.symlink(
-        join(secret, "id_rsa"),
-        join(root, "content", "k.txt"),
-      );
+      await linkFile(join(secret, "id_rsa"), join(root, "content", "k.txt"));
       const res = await prodServer(root).serveStatic("/text/k.txt");
       await res.body?.cancel();
       assertEquals(res.status, 403);

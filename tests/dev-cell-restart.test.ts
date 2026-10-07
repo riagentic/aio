@@ -6,7 +6,7 @@
 // SERVED STATE changes — i.e. the new cell code is really running — with the
 // port still bound afterwards (the supervisor handed it to a fresh child).
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import {
   isSupervisedChild,
   relaunchArgs,
@@ -19,6 +19,7 @@ import { instances } from "../src/server/single-instance-lock.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { childEnv } from "./e2e-app-harness.ts";
+import { spec } from "./module-spec-helper.ts";
 
 /** `childEnv()` without `AIO_PARENT_PID`.
  *
@@ -155,13 +156,13 @@ async function restartJourney(
   text: string;
 }> {
   const dir = await Deno.makeTempDir({ prefix: "aio-dev-restart-" });
-  const repo = new URL("../", import.meta.url).pathname;
+  const repo = fromFileUrl(new URL("../", import.meta.url));
   await Deno.writeTextFile(
     join(dir, "deno.json"),
     JSON.stringify({
       imports: {
-        "aio": `${repo}mod.ts`,
-        "aio/": `${repo}src/`,
+        "aio": `${spec(repo)}mod.ts`,
+        "aio/": `${spec(repo)}src/`,
         "immer": "npm:immer@10.2.0",
         "@std/path": "jsr:@std/path@1.1.2",
       },
@@ -219,7 +220,6 @@ Deno.test({
     "dev-restart e2e: editing a cell restarts the app and serves the new logic",
   // Spawns a real app process; skipped in the same conditions as the other
   // process-level e2e tests.
-  ignore: Deno.build.os === "windows",
   async fn() {
     const port = freePort();
     const r = await restartJourney("dev-restart-e2e", port);
@@ -240,7 +240,6 @@ Deno.test({
 Deno.test({
   name:
     "dev-restart e2e: an app that named NO port comes back on the port it had",
-  ignore: Deno.build.os === "windows",
   async fn() {
     // The default dev app: `deno task dev`, no --port, a free port picked at
     // boot. Every tab is on that port; the relaunched app has to be too.
@@ -261,6 +260,7 @@ Deno.test({
 Deno.test({
   name:
     "dev-restart e2e: SIGHUP to the supervisor does not end the dev session",
+  ignore: Deno.build.os === "windows", // Windows has no SIGHUP
   // A field report, three times in one session: after a cell edit the app was
   // gone for good and the child had logged "parent process N is gone
   // (AIO_PARENT_PID) — shutting down".
@@ -272,17 +272,16 @@ Deno.test({
   // had just spawned still ignored SIGHUP and then killed ITSELF two seconds
   // later because its parent was gone. Nothing restarted it. Measured on this
   // exact shape before the fix.
-  ignore: Deno.build.os === "windows",
   async fn() {
     const appId = "dev-restart-sighup";
     const dir = await tempDir("aio-dev-restart-hup-");
-    const repo = new URL("../", import.meta.url).pathname;
+    const repo = fromFileUrl(new URL("../", import.meta.url));
     await Deno.writeTextFile(
       join(dir, "deno.json"),
       JSON.stringify({
         imports: {
-          "aio": `${repo}mod.ts`,
-          "aio/": `${repo}src/`,
+          "aio": `${spec(repo)}mod.ts`,
+          "aio/": `${spec(repo)}src/`,
           "immer": "npm:immer@10.2.0",
           "@std/path": "jsr:@std/path@1.1.2",
         },
@@ -361,6 +360,7 @@ Deno.test({
 Deno.test({
   name:
     "dev-restart e2e: a SIGHUP with no child to forward to still ends the supervisor",
+  ignore: Deno.build.os === "windows", // Windows has no SIGHUP
   // The forwarding handler replaced SIGHUP's default action for the WHOLE life
   // of the supervisor, including every stretch in which there is no child to
   // forward to — above all `waitForSourceChange()`, which is unbounded: the
@@ -370,17 +370,16 @@ Deno.test({
   // the session that started it, with nothing on screen and no child to show
   // for it. A supervisor with no child IS a plain process, and a plain process
   // takes the hang-up.
-  ignore: Deno.build.os === "windows",
   async fn() {
     const appId = "dev-restart-hup-nochild";
     const dir = await tempDir("aio-dev-restart-hup2-");
-    const repo = new URL("../", import.meta.url).pathname;
+    const repo = fromFileUrl(new URL("../", import.meta.url));
     await Deno.writeTextFile(
       join(dir, "deno.json"),
       JSON.stringify({
         imports: {
-          "aio": `${repo}mod.ts`,
-          "aio/": `${repo}src/`,
+          "aio": `${spec(repo)}mod.ts`,
+          "aio/": `${spec(repo)}src/`,
           "immer": "npm:immer@10.2.0",
           "@std/path": "jsr:@std/path@1.1.2",
         },

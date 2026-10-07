@@ -3,6 +3,7 @@
 // reclaimed, a takeover never SIGTERMs it, and the app's own refused boot says
 // which op to wait for — not "Already running … am stop", which sent the
 // operator to stop a backup half-way through.
+import { sleeper } from "./proc-helper.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join, toFileUrl } from "@std/path";
 import { tempDir } from "../src/testing/temp-dir.ts";
@@ -37,7 +38,7 @@ Deno.test("maintenance hold: a takeover neither reclaims it nor kills its live h
   const dir = await tempDir("lock-mnt-");
   const was = Deno.env.get("AIO_APPS_DIR");
   Deno.env.set("AIO_APPS_DIR", join(dir, "apps"));
-  const holder = new Deno.Command("sleep", { args: ["30"] }).spawn();
+  const holder = sleeper();
   try {
     const { home } = await plant(dir, holder.pid);
     const r = await new AppLock("mnt", home).acquire(
@@ -46,7 +47,7 @@ Deno.test("maintenance hold: a takeover neither reclaims it nor kills its live h
     );
     assert(!r.ok, "took over a maintenance hold");
     assertEquals(r.existing.maintenance?.op, "am backup");
-    Deno.kill(holder.pid, "SIGCONT"); // throws if the holder was killed
+    Deno.kill(holder.pid, 0); // throws if the holder was killed
     assertEquals(readLock(lockKey("mnt", home))?.pid, holder.pid);
   } finally {
     try {
@@ -60,7 +61,7 @@ Deno.test("maintenance hold: a takeover neither reclaims it nor kills its live h
 
 Deno.test("maintenance hold: the app's refused boot names the op, not `am stop`", async () => {
   const dir = await tempDir("lock-mnt-boot-");
-  const holder = new Deno.Command("sleep", { args: ["30"] }).spawn();
+  const holder = sleeper();
   try {
     const apps = join(dir, "apps");
     const home = join(dir, "home");

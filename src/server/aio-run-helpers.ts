@@ -34,7 +34,8 @@ import {
   STARTUP_GRACE_MS,
 } from "./single-instance-lock.ts";
 import { isPipePath } from "./local-listen.ts";
-import { resolve } from "@std/path";
+import { fromFileUrl, join, resolve } from "@std/path";
+import { buildJournalsIn } from "../build/build-journals.ts";
 import { appDirs, homeOwnerError, homeRequested } from "./app-dirs.ts";
 import { runtimeCount } from "./shutdown.ts";
 import { launchElectronClient } from "../electron/electron.ts";
@@ -1001,7 +1002,7 @@ export async function acquireSingletonLock(
     );
   }
   log.debug(
-    `lock: acquired ${lockDir()}/${appLock.key}.lock (PID ${Deno.pid})`,
+    `lock: acquired ${lockPath(appLock.key)} (PID ${Deno.pid})`,
   );
   return appLock;
 }
@@ -1161,6 +1162,39 @@ export function appDenoJsonLocated():
     return locateDenoJsonAbove(new URL(Deno.mainModule));
   } catch {
     return undefined; // no usable main module (REPL, eval, a data: URL)
+  }
+}
+
+/** Put back what a build that DIED left aside in this project — `node_modules`
+ *  links and the package files in its trim mirror — before the app resolves
+ *  anything. Until now only the next build did: `deno task dev` in between ran
+ *  on a tree with files missing, and failed `Could not resolve "<pkg>"` (or
+ *  `Cannot find module`) with nothing naming the killed build.
+ *
+ *  `root` is the directory of the app's deno.json — where a build of it keeps
+ *  `node_modules` and `.aio`. Nothing to recover is two directory listings
+ *  ({@link buildJournalsIn}); only a journal loads the build's own recovery,
+ *  which leaves a build that is still RUNNING alone. The specifier is computed
+ *  so the build is never part of a compiled binary's graph: the caller asks
+ *  only when running from source. Never throws — a recovery that cannot run
+ *  is said, and the start goes on. */
+export async function recoverInterruptedBuild(root?: string): Promise<void> {
+  root ??= ((dir) => dir && fromFileUrl(dir))(appDenoJsonLocated()?.dir);
+  if (!root || !buildJournalsIn(root)) return;
+  try {
+    const spec = new URL("../build/build-compile.ts", import.meta.url).href;
+    const { recoverInterruptedLinks } = await import(spec) as {
+      recoverInterruptedLinks: (nmDir: string) => Promise<void>;
+    };
+    await recoverInterruptedLinks(join(root, "node_modules"));
+  } catch (e) {
+    log.warn(
+      `build: an interrupted build left ${root}/node_modules incomplete and ` +
+        `it could not be put back (${
+          e instanceof Error ? e.message : e
+        }) — run \`deno task build\`, or remove node_modules and run ` +
+        `\`deno install\`.`,
+    );
   }
 }
 

@@ -105,10 +105,16 @@ export const FLEET_BOOL_FLAGS = [
   // Forwarded verbatim, same reason: the documented spelling is
   // `deno task build --analyze`, and the fleet refused it as unknown.
   "--analyze",
+  // Start what was built and fail when it does not come up clean — see
+  // build/smoke.ts. `--smoke=strict` is the valued form below. The FLEET's
+  // flag only: it runs after every target is placed, which no single-target
+  // build ever sees (`flagHint` says so to a caller who passes it there).
+  "--smoke",
 ] as const;
 
 /** Every `--flag=value` the fleet build understands. */
 export const FLEET_VALUE_FLAGS = [
+  "--smoke",
   "--targets",
   "--platforms",
   "--out",
@@ -231,6 +237,10 @@ export function flagVocabulary(
  *  is a REAL flag of the compiled app, not a typo, so "unknown flag" alone
  *  would read like the build being pedantic. */
 export function flagHint(flag: string): string {
+  if (/^--smoke(?:=|$)/.test(flag)) {
+    return `\n         → \`${flag}\` belongs to the fleet build, which starts ` +
+      `the artifacts after it has placed them: \`deno task build ${flag}\`.`;
+  }
   if (!flag.startsWith("--client=")) return "";
   const mode = flag.slice("--client=".length);
   const build: Record<string, string> = {

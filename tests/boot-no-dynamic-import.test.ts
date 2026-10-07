@@ -15,9 +15,13 @@
 // module's top level.
 import { assert, assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
+import { spec as toSpec } from "./module-spec-helper.ts";
 
-const ROOT = dirname(fromFileUrl(import.meta.url)).replace(/\/tests$/, "");
+const ROOT = dirname(dirname(fromFileUrl(import.meta.url)));
 const dec = new TextDecoder();
+/** Boot, print and close take ~2 s; 10 s was the slowest of 220 runs on a
+ *  loaded Windows VM. */
+const EXIT_WITHIN_MS = 120_000;
 
 /** Boot a real app whose ENTRY top-level-awaits aio.run(), and report what the
  *  process did. The top-level await is the whole point — a harness that wraps
@@ -39,7 +43,7 @@ async function bootTopLevel(config: string): Promise<{
           lib: ["deno.ns", "deno.unstable", "dom", "dom.iterable"],
         },
         imports: {
-          aio: `${ROOT}/mod.ts`,
+          aio: `${toSpec(ROOT)}/mod.ts`,
           immer: "npm:immer@10.2.0",
           "@std/path": "jsr:@std/path@1.1.3",
         },
@@ -57,7 +61,7 @@ console.log("BOOTED");
 await app.close();
 `,
     );
-    const p = await new Deno.Command(Deno.execPath(), {
+    const child = new Deno.Command(Deno.execPath(), {
       args: [
         "run",
         "-A",
@@ -71,11 +75,27 @@ await app.close();
       env: { AIO_APPS_DIR: join(dir, "home") },
       stdout: "piped",
       stderr: "piped",
-    }).output();
-    return {
-      code: p.code,
-      out: dec.decode(p.stdout) + dec.decode(p.stderr),
-    };
+    }).spawn();
+    // Bounded: an app that boots and then never exits (seen twice in a loaded
+    // Windows suite run, alive 20 minutes, never reproduced alone) must be a
+    // red test that shows what the app said — not a suite that stops.
+    let hung = false;
+    const timer = setTimeout(() => {
+      hung = true;
+      try {
+        child.kill("SIGKILL");
+      } catch { /* aio-ok: it exited as the timer fired */ }
+    }, EXIT_WITHIN_MS);
+    const p = await child.output();
+    clearTimeout(timer);
+    const out = dec.decode(p.stdout) + dec.decode(p.stderr);
+    if (hung) {
+      throw new Error(
+        `the app did not exit within ${EXIT_WITHIN_MS / 1000} s of its ` +
+          `spawn and was killed — its output:\n${out.slice(-3000)}`,
+      );
+    }
+    return { code: p.code, out };
   } finally {
     await Deno.remove(dir, { recursive: true }).catch(() => {});
   }

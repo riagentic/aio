@@ -2,11 +2,14 @@
 // "could not look".
 //
 // A window with `getComputedStyle` is not enough. happy-dom 17.6.3 — what
-// `testUI` runs on — answers computed styles WITHOUT a working cascade: any
-// selector that begins with `:root` is taken to match, whatever follows it
-// (`:root[data-palette="contrast"]`, `:root:not(…)`, even `:root .card`), so a
-// custom property comes back as the LAST such declaration in the sheet. Report
-// 9 §1 measured both halves on a 3-palette × 6-accent theme: impossible
+// `testUI` ran on until aio moved to 20.x, and what a document made from an
+// app's own `"happy-dom"` import may still be (RE-MEASURED on 20.14.5: fixed,
+// and this proof finds nothing there) — answers computed styles WITHOUT a
+// working cascade: any selector that begins with `:root` is taken to match,
+// whatever follows it (`:root[data-palette="contrast"]`, `:root:not(…)`,
+// `:root .card`), so a custom property comes back as the LAST such
+// declaration in the sheet. Report 9 §1 measured both halves on a 3-palette
+// × 6-accent theme: impossible
 // findings (`#000000` ink from one palette on `#4a5b78` from another accent —
 // two mutually exclusive selectors) and eleven real sub-AA pairs it could not
 // see, one at 2.95:1, all found at once by the same walk in a real browser.
@@ -251,6 +254,6 @@ export function contrastCascadeNotice(
       `came back as \`${proof.value}\`, which only \`${proof.selector}\` ` +
       `declares, and that selector does not match the root element. The ` +
       `contrast walk is skipped here rather than report colours the app ` +
-      `cannot paint and miss the ones it does (happy-dom, which testUI runs ` +
-      `on, does this).`;
+      `cannot paint and miss the ones it does (happy-dom 17 does this; ` +
+      `20, which aio pins, does not).`;
 }
