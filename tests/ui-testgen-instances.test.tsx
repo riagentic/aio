@@ -126,3 +126,66 @@ Deno.test("testgen: the emitted module type-checks", async () => {
     await dropTempDir(dir);
   }
 });
+
+// `TypedTestUI` keeps every handle's `[name: string]: any`, so a typo type-
+// checks (first block below — the promise in the module header did not hold).
+// `StrictTestUI` is the same client without that door.
+Deno.test("testgen: StrictTestUI makes an unlisted name a compile error, at every depth; TypedTestUI does not", async () => {
+  await using ui = await testUI(App);
+  await ui.settle();
+  const from = new URL("../src/cell-test.ts", import.meta.url).href;
+  const src = generateUITypes(ui.surface(), { importFrom: from });
+  const dir = await tempDir("testgen-strict-");
+  const check = async (body: string) => {
+    await Deno.writeTextFile(`${dir}/ui.gen.ts`, src);
+    await Deno.writeTextFile(
+      `${dir}/use.ts`,
+      `import type { TestUI } from "${from}";\n` +
+        `import type { StrictTestUI, TypedTestUI } from "./ui.gen.ts";\n` +
+        `declare const base: TestUI;\n` +
+        `const loose = base as TypedTestUI;\n` +
+        `const ui = base as StrictTestUI;\n${body}\n`,
+    );
+    const out = await new Deno.Command(Deno.execPath(), {
+      env: { DENO_COVERAGE_DIR: childCoverageDir() },
+      args: ["check", "--no-lock", `${dir}/use.ts`],
+      stdout: "null",
+      stderr: "piped",
+    }).output();
+    return { code: out.code, err: new TextDecoder().decode(out.stderr) };
+  };
+  try {
+    // ONE check. The loose client: every typo passes. The strict client: what
+    // the runtime resolves type-checks, and each unlisted name, at each depth,
+    // is an error — `@ts-expect-error` fails the check on a line that is not.
+    const r = await check(
+      [
+        `loose.App.Bogus.click();`,
+        `loose.Nope.click();`,
+        `loose.App.Button2.sart.click();`,
+        `ui.App.Button2.pause.click();`,
+        `ui.App.Card.surface();`,
+        `await ui.settle();`,
+        `ui.App.find("Button", 3).anything.click();`,
+        `const t: string = ui.App.Button.start.text;`,
+        `void t;`,
+        ...[
+          "ui.Nope",
+          "ui.App.Bogus",
+          "ui.App.Button5",
+          "ui.App.Button2.start",
+          "ui.App.Button.start.clik",
+        ].flatMap((bad) => [`// @ts-expect-error unlisted`, `void ${bad};`]),
+      ].join("\n"),
+    );
+    assertEquals(r.code, 0, r.err);
+    // The instrument: an expectation on a line that DOES type-check is red.
+    const control = await check(
+      `// @ts-expect-error listed\nvoid ui.App.Button2;\nvoid loose;`,
+    );
+    assert(control.code !== 0, "the check cannot see a missing error");
+    assertStringIncludes(control.err, "TS2578");
+  } finally {
+    await dropTempDir(dir);
+  }
+});

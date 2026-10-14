@@ -15,6 +15,7 @@
 // The list now lives once in `src/entries.ts`. These tests bind it to the
 // manifest in BOTH directions, so publishing a new entry without classifying it
 // is a red gate rather than a half-published specifier.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import {

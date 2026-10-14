@@ -10,15 +10,16 @@
 # artifact where it outlives the checkout, and run it. -Dev runs the dev server
 # instead; -NoRun builds and installs only; -NoInstall runs it from dist\.
 #
-# WINDOWS IS NOT TESTED. The lab runs these files under PowerShell 7 on Linux
+# NOT EXECUTED BY A GATE. The lab runs these files under PowerShell 7 on Linux
 # (docker/windows-scripts.ps1): they parse, their pure logic is unit-tested, and
 # 7-only syntax is rejected because Windows ships 5.1 — that check exists
 # because a `??` in this file would have been a parse error on every stock
-# Windows box, and the 7 runtime could not see it. Everything the OS actually
-# does — installing deno, the am.cmd shim, .exe artifacts, shortcuts, symlink
-# privileges, replacing a RUNNING .exe — is unverified until there is a Windows
-# runner. Every path below is the twin of a run.sh path that IS proven on a
-# bare machine.
+# Windows box, and the 7 runtime could not see it. tests/run-sh.test.ts checks
+# this file's text (it runs on Windows too). Since 1.0.19 aio's test suite runs
+# natively on Windows 11, but no test in it executes this file: what the OS
+# does here — installing deno, the am.cmd shim, .exe artifacts, shortcuts,
+# symlink privileges, replacing a RUNNING .exe — is unverified by a gate. Every
+# path below is the twin of a run.sh path that IS proven on a bare machine.
 
 param(
   [switch]$Dev,
@@ -48,6 +49,15 @@ function Info($m) { Say '·' DarkGray $m }
 function Ok($m)   { Say '✓' Green    $m }
 function Warn($m) { Say '!' Yellow   $m $true }
 function Fail($m) { Say '✗' Red      $m $true; exit 1 }
+
+# Windows PowerShell 5.1: once a native program's stderr is REDIRECTED
+# (`2>$null` and `2>&1` alike) every line it writes there is an error record,
+# and under $ErrorActionPreference = 'Stop' the first one ENDS THE SCRIPT -
+# measured: `git clone ... 2>&1` throws on "Cloning into ...", and
+# `git rev-parse HEAD 2>$null` outside a repository throws on git's "fatal:".
+# So every redirected native call runs through here, where a stderr line is
+# only a line; its exit code is still read by the caller.
+function Quiet([scriptblock]$run) { $ErrorActionPreference = 'Continue'; & $run }
 
 function Get-MinDenoFrom($aioHome) {
   $file = Join-Path $aioHome 'src\server\deno-version.ts'
@@ -83,7 +93,7 @@ function Get-InstallName([string]$builder, [string]$fileName) {
   # try/catch as well as the exit code: a machine with no deno on PATH throws
   # here rather than returning one, and an installer that dies on that has
   # forgotten it is the thing that installs deno.
-  try { $out = @(deno run -A $builder "--print-install-name=$fileName" 2>$null) } catch { $out = @() }
+  try { $out = @(Quiet { deno run -A $builder "--print-install-name=$fileName" 2>$null }) } catch { $out = @() }
   if ($LASTEXITCODE -eq 0 -and $out.Count -ge 1 -and $out[0]) {
     return @{
       Base    = $out[0]
@@ -105,10 +115,201 @@ function Get-InstallName([string]$builder, [string]$fileName) {
   return @{ Base = $base; Ext = [IO.Path]::GetExtension($fileName); Version = '' }
 }
 
+# "Home", by the RUNTIME's rule (src/server/paths.ts `homedir`): %HOME% when it
+# is set, else %USERPROFILE%. aio itself looks for its checkout, its versions
+# and every app's data under that folder, so installing under %USERPROFILE%
+# while a custom HOME is set (Git Bash, a login script) put aio where `am`
+# then did not look.
+function Get-AioUserHome() {
+  if ($env:HOME) { return $env:HOME }
+  return $env:USERPROFILE
+}
+
+# Where aio's own checkout lives when AIO_HOME does not say. An installer
+# before 1.0.20 cloned under %USERPROFILE% whatever HOME said, and "am" was
+# installed from that checkout: when it is there it stays THE checkout - used
+# and updated - or a user with HOME set would get a second clone and an "am"
+# that no longer follows the first. Only a machine with none gets the rule
+# above.
+function Get-AioDefaultHome() {
+  if ($env:USERPROFILE) {
+    $old = Join-Path $env:USERPROFILE '.local\lib\aio'
+    if (Test-Path -LiteralPath (Join-Path $old '.git')) { return $old }
+  }
+  return Join-Path (Get-AioUserHome) '.local\lib\aio'
+}
+
+# One line saying where things will live - and a second when the two "home"
+# variables name different folders, because then Explorer's idea of home is
+# not the one aio uses.
+function Show-AioHome([string]$aioHome) {
+  $h = Get-AioUserHome
+  Info "aio: $aioHome - app data: $h\.<appId>"
+  if ($env:HOME -and $env:USERPROFILE -and
+      ($env:HOME.TrimEnd('\', '/') -replace '/', '\') -ne ($env:USERPROFILE.TrimEnd('\', '/') -replace '/', '\')) {
+    Info "note: %HOME% ($($env:HOME)) differs from %USERPROFILE% ($($env:USERPROFILE)) - aio uses %HOME%, here and when an app runs. A program started without that HOME looks under %USERPROFILE% instead."
+    # The checkout an installer before 1.0.20 made (Get-AioDefaultHome).
+    if (-not $env:AIO_HOME -and $aioHome -eq (Join-Path $env:USERPROFILE '.local\lib\aio')) {
+      Info "note: the aio checkout stays at $aioHome, where an earlier install put it - it is the one used and updated."
+    }
+  }
+}
+
+# Write the install record ("am installed", "am upgrade", "am remove" read it)
+# and SAY when that failed. Each field is built as ONE string: in Windows
+# PowerShell `--commit=(git ...)` is two arguments ("--commit=" and the value)
+# and `--aio=$conf.aioVersion` expands $conf and keeps ".aioVersion" as text -
+# measured on 5.1 - so the record held no commit, no artifact and a garbage
+# aio version, and a failed write was discarded with its output.
+function Write-InstallRecord([string]$aioHome, [System.Collections.IDictionary]$fields) {
+  $recArgs = @(); foreach ($k in $fields.Keys) { $recArgs += "--$k=$($fields[$k])" }
+  Quiet { deno run -A (Join-Path $aioHome "src\server\install-record.ts") write @recArgs 2>$null | Out-Null }
+  if ($LASTEXITCODE -ne 0) {
+    Warn "the install record for $($fields['name']) was NOT written (install-record.ts exited $LASTEXITCODE) - 'am installed', 'am upgrade' and 'am remove' will not know this install"
+    return $false
+  }
+  return $true
+}
+
+# Where the trailer of a one-click .exe ENDS in the open file $fs: the end of
+# the file, or - for an Authenticode-SIGNED exe - just before the certificate
+# table the signature appended (the PE's security directory; up to 7 pad
+# bytes sit between). -1: no trailer, not a one-click .exe. The stub finds its
+# own payload by this very rule (build\windows-sfx-stub\src\format.rs,
+# `trailer_end`) and so does am publish (src\build\sfx-trailer.ts): a signed
+# .exe read only at its end was not recognised, and was copied under
+# Programs\ as a second install.
+function Get-SfxTrailerEnd($fs) {
+  $bytes = {
+    param([long]$at, [int]$n)
+    if ($at -lt 0 -or $at + $n -gt $fs.Length) { return $null }
+    [void]$fs.Seek($at, [IO.SeekOrigin]::Begin)
+    $b = New-Object byte[] $n
+    if ($fs.Read($b, 0, $n) -ne $n) { return $null }
+    return ,$b
+  }
+  # ...[payload][header][u32 header length][u64 payload length][8 magic]
+  $magicEndsAt = {
+    param([long]$end)
+    $b = & $bytes ($end - 8) 8
+    return ($end -ge 20 -and $b -and ([Text.Encoding]::ASCII.GetString($b) -like 'AIOSFX0?'))
+  }
+  $u32 = {
+    param([long]$at)
+    $b = & $bytes $at 4
+    if (-not $b) { return [long]-1 }
+    return [long][BitConverter]::ToUInt32($b, 0)
+  }
+  if (& $magicEndsAt $fs.Length) { return $fs.Length }
+  $pe = & $u32 0x3c
+  if ($pe -lt 0 -or (& $u32 $pe) -ne 0x4550) { return [long]-1 }   # "PE\0\0"
+  $opt = $pe + 24                       # past the signature and the COFF header
+  $kind = (& $u32 $opt) -band 0xffff
+  if ($kind -eq 0x20b) { $dirs = $opt + 112 }        # PE32+
+  elseif ($kind -eq 0x10b) { $dirs = $opt + 96 }     # PE32
+  else { return [long]-1 }
+  if ((& $u32 ($dirs - 4)) -le 4) { return [long]-1 }  # no security directory
+  $cert = & $u32 ($dirs + 32)
+  $len = & $u32 ($dirs + 36)
+  if ($cert -le 0 -or $len -le 0 -or $cert -gt $fs.Length) { return [long]-1 }
+  for ($pad = 0; $pad -lt 8; $pad++) {
+    if (& $magicEndsAt ($cert - $pad)) { return [long]($cert - $pad) }
+  }
+  return [long]-1
+}
+
+# Is this the one-click .exe (an SFX: stub + payload + trailer)? Its trailer
+# ends in the magic "AIOSFX0<n>" (build\windows-sfx-stub\src\format.rs). Read
+# from the file, never guessed from its name.
+function Test-OneClickExe([string]$path) {
+  try {
+    $fs = [IO.File]::OpenRead($path)
+    try { return ((Get-SfxTrailerEnd $fs) -ge 0) } finally { $fs.Dispose() }
+  } catch { return $false }
+}
+
+# Can this one-click .exe install itself WITHOUT starting the app? Its stub
+# (aio 1.0.20 and newer) does when its first argument is --aio-sfx-install; an
+# older stub hands that argument to the app and opens it. Read from the stub
+# itself - the bytes before the payload - never guessed from a version.
+function Test-OneClickInstallSwitch([string]$path) {
+  try {
+    $fs = [IO.File]::OpenRead($path)
+    try {
+      $end = Get-SfxTrailerEnd $fs
+      if ($end -lt 0) { return $false }
+      [void]$fs.Seek($end - 20, [IO.SeekOrigin]::Begin)
+      $t = New-Object byte[] 12
+      [void]$fs.Read($t, 0, 12)
+      $stub = $end - 20 - [BitConverter]::ToUInt32($t, 0) - [BitConverter]::ToUInt64($t, 4)
+      if ($stub -lt 1 -or $stub -gt 16MB) { return $false }
+      $b = New-Object byte[] $stub
+      [void]$fs.Seek(0, [IO.SeekOrigin]::Begin)
+      $n = 0
+      while ($n -lt $stub) {
+        $r = $fs.Read($b, $n, $stub - $n)
+        if ($r -le 0) { return $false }
+        $n += $r
+      }
+      return [Text.Encoding]::GetEncoding(28591).GetString($b).Contains('--aio-sfx-install')
+    } finally { $fs.Dispose() }
+  } catch { return $false }
+}
+
+# One argument as CreateProcess wants it: quoted when it holds a space or a
+# quote, a quote escaped, backslashes before a quote doubled. Start-Process
+# joins -ArgumentList with spaces and quotes nothing.
+function ConvertTo-NativeArg([string]$a) {
+  if ($a -ne '' -and $a -notmatch '[\s"]') { return $a }
+  return '"' + (($a -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"'
+}
+
+# Open a one-click .exe and say truthfully whether the app was started.
+#
+# It is a window program: `& $exe` does not wait for one, and $LASTEXITCODE
+# stayed whatever an earlier command had left - "exit $LASTEXITCODE" reported
+# git's exit code as the app's. Its stub exits as soon as the app is installed
+# and started (0), or could not be (non-zero - the reason is in its own
+# message box and on stderr). So the STUB is waited for and never the app: the
+# terminal comes back once the app is up, with a true exit code - what
+# run.sh promises on macOS, where `open` does the same. (WaitForExit, not
+# Start-Process -Wait: that one waits for every process the stub started,
+# which is the app itself. And no -NoNewWindow or redirect: the app would
+# inherit this script's output pipe and hold whoever reads it until the app
+# closes.) Returns the exit code.
+#
+# WHY it failed comes back in a file: the stub (aio 1.0.20 and newer) writes
+# its reason to the path AIO_SFX_REASON_FILE names and keeps that variable
+# from the app. It is said here, on stderr, and kept in
+# $script:OneClickReason; an older stub writes nothing, and then the exit code
+# is all there is.
+function Start-OneClickExe([string]$exe, [string[]]$appArgs) {
+  $with = @{ FilePath = $exe; PassThru = $true }
+  if ($appArgs -and $appArgs.Count -gt 0) {
+    $with.ArgumentList = @($appArgs | ForEach-Object { ConvertTo-NativeArg $_ })
+  }
+  $script:OneClickReason = ''
+  $why = [IO.Path]::GetTempFileName()
+  $env:AIO_SFX_REASON_FILE = $why
+  try {
+    $p = Start-Process @with
+    $null = $p.Handle   # without the handle, ExitCode is empty after the exit
+    $p.WaitForExit()
+    $said = Get-Content -Raw -Encoding UTF8 -ErrorAction SilentlyContinue -LiteralPath $why
+    if ($said) { $script:OneClickReason = $said.Trim() }
+  } finally {
+    Remove-Item Env:AIO_SFX_REASON_FILE -ErrorAction SilentlyContinue
+    Remove-Item -Force -ErrorAction SilentlyContinue -LiteralPath $why
+  }
+  if ($script:OneClickReason) { [Console]::Error.WriteLine("aio SFX: $($script:OneClickReason)") }
+  return $p.ExitCode
+}
+
 function Invoke-AioRun {
   if ($env:AIO_DEV -eq "1") { $script:Dev = $true }
   if ($env:AIO_GIT) { $script:Git = $env:AIO_GIT }
-  $AioHome = if ($env:AIO_HOME) { $env:AIO_HOME } else { Join-Path $HOME ".local\lib\aio" }
+  $AioHome = if ($env:AIO_HOME) { $env:AIO_HOME } else { Get-AioDefaultHome }
+  Show-AioHome $AioHome
   $AioRaw = if ($env:AIO_RAW) { $env:AIO_RAW } else { "https://raw.githubusercontent.com/riagentic/aio/main" }
 
   # -- prerequisites ----------------------------------------------------
@@ -155,7 +356,7 @@ function Invoke-AioRun {
     $name = [IO.Path]::GetFileNameWithoutExtension(($g -replace "\.git$", ""))
     if (Test-Path (Join-Path $name ".git")) {
       Info "updating existing clone .\$name"
-      git -C $name pull --ff-only 2>$null
+      Quiet { git -C $name pull --ff-only 2>$null }
     } elseif (Test-Path $name) {
       Fail ".\$name exists and is not a git clone - move it or cd elsewhere"
     } else {
@@ -204,17 +405,80 @@ function Invoke-AioRun {
   # file, a stable name beside it, a Start Menu shortcut, and the same install
   # record + pruning the POSIX side writes.
   $installed = $artifact.FullName
-  if (-not $NoInstall) {
-    $root = (deno run -A (Join-Path $AioHome "src\build.ts") --print-install-root 2>$null)
+  # A one-click .exe INSTALLS ITSELF the first time it runs - into
+  # %LOCALAPPDATA%\aio-sfx\<name>\, with its own Start Menu shortcut, and it
+  # updates itself there. Copying it under Programs\ as well (what this did:
+  # the newest .exe of an Electron build IS the one-click one) installed the
+  # app twice, with two shortcuts that could open two different versions. So
+  # it is recorded - "am installed", "am upgrade" and "am remove" know it -
+  # and left to install itself.
+  $oneClick = (-not $NoInstall) -and (Test-OneClickExe $artifact.FullName)
+  if ($oneClick) {
+    # ...unless that is what an app installed by an older run.ps1 lives on.
+    # Through 1.0.19 every .exe was copied under Programs\<name>\ with a
+    # Start Menu shortcut to the copy: where that install exists it keeps
+    # being updated, by the branch below, or the shortcut would go on opening
+    # the old version. And an .exe whose stub cannot install itself without
+    # starting the app (built with aio older than 1.0.20) is, under -NoRun,
+    # installed the way 1.0.19 installed it.
+    $root = (Quiet { deno run -A (Join-Path $AioHome "src\build.ts") --print-install-root 2>$null })
+    if (-not $root) { $root = Join-Path $env:LOCALAPPDATA "Programs" }
+    $names = Get-InstallName (Join-Path $AioHome "src\build.ts") $artifact.Name
+    $stable = Join-Path (Join-Path $root $names.Base) "$($names.Base)$($names.Ext)"
+    if (Test-Path -LiteralPath $stable) {
+      Info "$stable is an install made by an earlier run - updating it there (a one-click .exe also installs itself to $(Join-Path $env:LOCALAPPDATA "aio-sfx\$($names.Base)") when it runs)"
+      $oneClick = $false
+    } elseif ($NoRun -and -not (Test-OneClickInstallSwitch $artifact.FullName)) {
+      Info "this one-click .exe (built with aio older than 1.0.20) installs itself only when it is run, and -NoRun was given - installing it under $(Join-Path $root $names.Base), as before"
+      $oneClick = $false
+    }
+  }
+  if ($oneClick) {
+    $names = Get-InstallName (Join-Path $AioHome "src\build.ts") $artifact.Name
+    $base = $names.Base
+    $src = if ($Git) { $Git } else { (Quiet { git config --get remote.origin.url 2>$null }) }
+    if (-not $src) { $src = (Get-Location).Path }
+    $ver = if ($names.Version) { $names.Version } elseif ($conf.version) { $conf.version } else { '' }
+    $target = if ($conf.client) { $conf.client } else { 'electron' }
+    # -NoRun (what "am upgrade" passes) must not open the app. The .exe is
+    # asked to install itself and start nothing; its exit code says whether
+    # it did, and only then is the version recorded - recording a version
+    # nobody installed made "am upgrade" print "1.0.3 -> 1.0.4" over an
+    # install that still held 1.0.3.
+    if ($NoRun) {
+      $sfxDir = Join-Path $env:LOCALAPPDATA "aio-sfx\$base"
+      $errFile = [IO.Path]::GetTempFileName()
+      try {
+        $p = Start-Process -FilePath $artifact.FullName -ArgumentList '--aio-sfx-install' -Wait -PassThru -RedirectStandardError $errFile
+        $said = (Get-Content -Raw -ErrorAction SilentlyContinue $errFile)
+      } finally { Remove-Item -Force -ErrorAction SilentlyContinue $errFile }
+      if ($said) { [Console]::Error.WriteLine($said.Trim()) }
+      if ($p.ExitCode -ne 0) {
+        $why = if ($p.ExitCode -eq 3) { "$base is running - close it and run this again" } else { "the .exe exited $($p.ExitCode)" }
+        Warn "built $($artifact.FullName) - version $ver is NOT installed: $why. Nothing was recorded; $sfxDir holds what it held."
+        exit 1
+      }
+      Ok "installed $ver to $sfxDir (the app was not started)"
+      $inner = Get-Item -Path (Join-Path $sfxDir "win-*\$base.exe") -ErrorAction SilentlyContinue | Select-Object -First 1
+      if ($inner) { $installed = $inner.FullName }
+    }
+    [void](Write-InstallRecord $AioHome ([ordered]@{
+      name = $base; version = $ver; artifact = $artifact.Name; source = $src
+      commit = (Quiet { git rev-parse HEAD 2>$null }); target = $target; aio = $conf.aioVersion
+    }))
+    if (-not $NoRun) { Ok "one-click .exe - it installs itself to $(Join-Path $env:LOCALAPPDATA "aio-sfx\$base") and adds its Start Menu shortcut when it runs (next)" }
+  }
+  if (-not $NoInstall -and -not $oneClick) {
+    $root = (Quiet { deno run -A (Join-Path $AioHome "src\build.ts") --print-install-root 2>$null })
     if (-not $root) { $root = Join-Path $env:LOCALAPPDATA "Programs" }
     $names = Get-InstallName (Join-Path $AioHome "src\build.ts") $artifact.Name
     $base = $names.Base
     $ext = $names.Ext
     $targetDir = Join-Path $root $base
 
-    $src = if ($Git) { $Git } else { (git config --get remote.origin.url 2>$null) }
+    $src = if ($Git) { $Git } else { (Quiet { git config --get remote.origin.url 2>$null }) }
     if (-not $src) { $src = (Get-Location).Path }
-    $prev = (deno run -A (Join-Path $AioHome "src\server\install-record.ts") conflict --name=$base --source=$src 2>$null)
+    $prev = (Quiet { deno run -A (Join-Path $AioHome "src\server\install-record.ts") conflict "--name=$base" "--source=$src" 2>$null })
     if ($prev) {
       Fail @"
 "$base" is already installed here, from a DIFFERENT source:
@@ -262,14 +526,14 @@ function Invoke-AioRun {
     # whole script a parse error on a stock Windows box, before a single line
     # executed. The lab could not see it: its PowerShell is 7 on Linux.
     $target = if ($conf.client) { $conf.client } else { 'electron' }
-    deno run -A (Join-Path $AioHome "src\server\install-record.ts") write `
-      --name=$base --version=$ver --artifact=([IO.Path]::GetFileName($versioned)) `
-      --source=$src --commit=(git rev-parse HEAD 2>$null) --target=$target `
-      --aio=$conf.aioVersion 2>$null | Out-Null
+    [void](Write-InstallRecord $AioHome ([ordered]@{
+      name = $base; version = $ver; artifact = [IO.Path]::GetFileName($versioned); source = $src
+      commit = (Quiet { git rev-parse HEAD 2>$null }); target = $target; aio = $conf.aioVersion
+    }))
 
-    $pruned = (deno run -A (Join-Path $AioHome "src\server\install-record.ts") prune `
-      --name=$base --ext=$ext --keep=$(if ($env:AIO_KEEP_VERSIONS) { $env:AIO_KEEP_VERSIONS } else { 3 }) `
-      --current=$versionDir 2>$null)
+    $keep = if ($env:AIO_KEEP_VERSIONS) { $env:AIO_KEEP_VERSIONS } else { 3 }
+    $pruned = (Quiet { deno run -A (Join-Path $AioHome "src\server\install-record.ts") prune `
+      "--name=$base" "--ext=$ext" "--keep=$keep" "--current=$versionDir" 2>$null })
     if ($pruned) { Info "pruned older version(s): $($pruned -join ' ')" }
 
     # A launcher, so the app is where a Windows user looks for one.
@@ -293,7 +557,15 @@ function Invoke-AioRun {
   Info "running $installed"
   # The commit this artifact was built FROM - an app with a git update source
   # compares against it instead of guessing.
-  $sha = (git rev-parse HEAD 2>$null); if ($sha) { $env:AIO_BUILD_COMMIT = $sha }
+  $sha = (Quiet { git rev-parse HEAD 2>$null }); if ($sha) { $env:AIO_BUILD_COMMIT = $sha }
+  if (Test-OneClickExe $installed) {
+    $code = Start-OneClickExe $installed $AppArgs
+    if ($code -ne 0) {
+      if ($script:OneClickReason) { Warn "$installed exited $code - the app was NOT started (the reason is the line above)." }
+      else { Warn "$installed exited $code - the app was NOT started. Its message box says why; with no desktop to show one on, the reason is on its stderr: Start-Process '$installed' -NoNewWindow -Wait" }
+    }
+    exit $code
+  }
   & $installed @AppArgs
   exit $LASTEXITCODE
 }

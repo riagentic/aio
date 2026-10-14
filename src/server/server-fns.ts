@@ -206,6 +206,25 @@ export function serverFnAllowed(
   return cellAccessAllowed(rule, user, fn, args);
 }
 
+/** A caller that stands where a CLIENT stands (`testUI`): its call is handed
+ *  here instead of straight to the function, so it can be put across the
+ *  wire a browser's call crosses. `direct` is the in-process call. */
+type ClientDoor = (
+  ns: string,
+  name: string,
+  args: unknown[],
+  direct: () => Promise<unknown>,
+) => Promise<unknown>;
+let _clientDoor: ClientDoor | undefined;
+/** Install the door; returns the undo. @internal */
+export function _useServerFnClientDoor(door: ClientDoor): () => void {
+  const prev = _clientDoor;
+  _clientDoor = door;
+  return () => {
+    _clientDoor = prev;
+  };
+}
+
 /** Resolve a namespace to its typed callable map. Server-side impl: returns
  *  the REAL functions (lazy proxy, so import order never matters); the
  *  browser build swaps in the WS proxy with the same signature. */
@@ -223,7 +242,7 @@ export function serverFn<T extends FnMap>(ns: string): Remote<T> {
       if (prop === "then" || prop === "catch" || prop === "finally") {
         return undefined;
       }
-      return (...args: unknown[]) => {
+      const direct = (...args: unknown[]) => {
         const fns = _registry.get(ns);
         // Own-property only — never resolve inherited Object.prototype members
         // (constructor, valueOf, hasOwnProperty…) as if they were registered fns.
@@ -244,6 +263,10 @@ export function serverFn<T extends FnMap>(ns: string): Remote<T> {
           return Promise.reject(e);
         }
       };
+      return (...args: unknown[]) =>
+        _clientDoor
+          ? _clientDoor(ns, prop, args, () => direct(...args))
+          : direct(...args);
     },
   });
 }
@@ -258,6 +281,8 @@ export async function invokeServerFn(
   name: string,
   args: unknown[],
   user?: AioUser,
+  /** `testUI({ enforceAccess: false })` only: the rule is not asked. */
+  _skipAccess = false,
 ): Promise<
   { ok: true; value: unknown } | {
     ok: false;
@@ -274,7 +299,7 @@ export async function invokeServerFn(
   // exist: this app has no such function, and saying more would tell an
   // anonymous caller what a sibling app keeps behind its auth.
   if (!servedHere(ns)) return notRegistered(ns, name);
-  if (!serverFnAllowed(ns, user, name, args)) {
+  if (!_skipAccess && !serverFnAllowed(ns, user, name, args)) {
     log.warn(
       `[aio] auth: serverFn "${ns}.${name}" denied for ${
         user ? `user=${user.id} role=${user.role}` : "anonymous client"

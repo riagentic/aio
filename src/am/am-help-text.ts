@@ -201,6 +201,9 @@ Release:
                           --allow-dirty (publish a -dirty/-nogit build; logged)
                           --data=contract.json | --no-data (when no artifact
                           can be asked its data contract on this machine)
+                          --patch-from=<the release dir published before>
+                          (repeatable; needs the zstd tool): installs of that
+                          release download a small patch, not the whole file
 
 Visual manager:
   ui                      Open amui, the visual app manager (Electron;
@@ -324,7 +327,8 @@ Inspect:
   trigger <idx> <path> <action> [text]  Drive the live UI (click/type/setValue/press/keyDown/keyUp/hover/focus/blur/scroll) — same engine as testUI; path "window" drives an onGlobalKey binding
                           type APPENDS to the field, setValue REPLACES it (as in testUI)
   shot [n] [--out=F.png] [--full]  PNG of the live Electron window via CDP — the app
-                          must run with --cdp (or AIO_CDP=1); --json → {file,bytes,url}
+                          must run with --cdp (AIO_CDP=1 does the same unless the app
+                          sets electron: { ignoreDebugEnv: true }); --json → {file,bytes,url}
   shot --selector='<css>'  CROP the shot to one element (measured in the page,
                           so it is right after a scroll or a transform)
   shot --update=base.png   RECORD a visual baseline
@@ -416,6 +420,8 @@ Diagnose / repair / migrate (three different questions — do not conflate):
   doctor                  running process vs aio on disk? + who decided each setting
   fix                     clone/checkout repair: symlink, env, electron, tasks
                           (--dry-run / --no-download). Not an API migrator.
+                          --harden also sets the opt-in security switches
+                          this app has not decided on (prints what it writes)
   link                    Just the dep/aio symlink (fix does this and more)
   migrate [--from=X]      which retired APIs THIS app still uses (CI exits 1).
                           Rewrites: aiol --safe-fix. Not a clone repairer.

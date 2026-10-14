@@ -8,6 +8,7 @@
 // `script` gives the child a pty (so `am` is in pretty mode and every
 // `isTerminal()` branch is the terminal one). The app is a stub on loopback
 // answering the trojan routes and CDP — no app process, no window.
+import "./store-sandbox.ts";
 import { assert } from "@std/assert";
 import { join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
@@ -22,7 +23,9 @@ const RLM = "‏";
 const C256 = "\x1b[38;5;208m";
 const PLANT = `Z${ZWJ} ${RLM}R ${C256}C\x1b[0m`;
 const AM = join(import.meta.dirname!, "..", "src", "am.ts");
-const ignore = !["linux", "darwin"].includes(Deno.build.os) ||
+// A terminal is made with `script` (util-linux / BSD): Windows has no such
+// tool, and no pty a test can open.
+const ignore = !["linux", "darwin"].includes(Deno.build.os) || // no `script` (pty) on Windows
   !(() => {
     try {
       return new Deno.Command("script", { args: ["-V"], stderr: "null" })

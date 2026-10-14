@@ -11,6 +11,7 @@
 //
 // Driven as a SUBPROCESS against a real clone with real tags and real
 // worktrees: the whole claim is about a machine that has never seen the app.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join, resolve } from "@std/path";
 import { latestTag, readPin } from "../src/am/am-versions.ts";
@@ -276,6 +277,44 @@ Deno.test("am pin lets a modern app move forward without ceremony", async () => 
   try {
     const r = await am(s, "pin", "--latest");
     assertEquals(r.code, 0, `a clean app must not be blocked:\n${r.out}`);
+  } finally {
+    await s.cleanup();
+  }
+});
+
+// The other direction. The preflight cannot read an app for what an older
+// version never had (the newer `am create` writes options the older types do
+// not know): the move is allowed, and says what the next type check will show.
+Deno.test("am pin to an OLDER release says so — and a forward or sideways move says nothing", async () => {
+  const { pinnedBackNote } = await import("../src/am/am-cmd-pin.ts");
+  const note = pinnedBackNote("v1.0.20-beta", "v1.0.19-beta");
+  assert(note, "a move back has a note");
+  assertStringIncludes(note, "v1.0.20-beta → v1.0.19-beta");
+  assertStringIncludes(note, "deno task check");
+  assertStringIncludes(note, "am pin v1.0.20-beta");
+  assertEquals(pinnedBackNote("v1.0.19-beta", "v1.0.20-beta"), null);
+  assertEquals(pinnedBackNote("v1.0.19-beta", "v1.0.19-beta"), null);
+  // Ordered as releases are, not as strings.
+  assert(pinnedBackNote("v1.0.0-alpha62", "v1.0.0-alpha9"));
+  assertEquals(pinnedBackNote("v1.0.0-alpha9", "v1.0.0-alpha62"), null);
+  // Nothing to compare: a first pin, a commit of main, a local checkout.
+  assertEquals(pinnedBackNote(null, "v1.0.19-beta"), null);
+  assertEquals(pinnedBackNote("main-0123abc", "v1.0.19-beta"), null);
+  assertEquals(pinnedBackNote("v1.0.19-beta", "path:/opt/aio"), null);
+
+  // Through the real command: forward is silent, back is said, the pin moves.
+  const s = await sandbox("v1.0.0-alpha26");
+  try {
+    const up = await am(s, "pin", "v1.0.0-alpha70");
+    assertEquals(up.code, 0, up.out);
+    assert(!up.out.includes("moved BACK"), up.out);
+    const down = await am(s, "pin", "v1.0.0-alpha26");
+    assertEquals(down.code, 0, down.out);
+    assertStringIncludes(
+      down.out,
+      "⚠ moved BACK: v1.0.0-alpha70 → v1.0.0-alpha26.",
+    );
+    assertEquals(await readPin(s.app), "v1.0.0-alpha26");
   } finally {
     await s.cleanup();
   }

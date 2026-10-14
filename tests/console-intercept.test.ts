@@ -8,6 +8,7 @@ import {
   uninstallConsoleIntercept,
 } from "../src/browser/console-intercept.ts";
 import { dec } from "../src/protocol/envelope.ts";
+import { _serverHere, printConsole } from "../src/diagnostics/logger-format.ts";
 
 Deno.test("_serialize: strings pass through, objects JSON, errors readable, circular safe", () => {
   assertEquals(_serialize(["hello", 42]), "hello 42");
@@ -155,4 +156,46 @@ Deno.test("_serialize: nested NaN, undefined, functions, symbols and cycles keep
   assert(_serialize([deep]).includes("[Array]"));
   const huge = Array.from({ length: 100_000 }, (_, i) => ({ i }));
   assert(_serialize([huge]).length <= 4096);
+});
+
+// In one process the page's console IS the server's (the in-process harness:
+// a server and a page's runtime side by side). Every line the server logged
+// was forwarded back up the socket to the server that had just said it — and
+// its "closing —" line, said the moment before a close for cause, then sat
+// unread behind that close and cost it its code (a revoked session's 1008,
+// 22 of 30 runs). A browser has no server beside it: there, nothing changes.
+Deno.test("console intercept: a server's own log line is not sent back to it — a page with no server beside it forwards as ever", () => {
+  const msgs: string[] = [];
+  const entry = (msg: string) => ({
+    ts: "2026-01-01 00:00:00.000+00:00",
+    lvl: "info" as const,
+    cat: "aio",
+    msg,
+  });
+  try {
+    installConsoleIntercept((frame) => {
+      msgs.push((dec(frame) as { d: { msg: string } }).d.msg);
+    });
+    // A browser: the framework logger's line is the page's, and is forwarded.
+    printConsole(entry("page-side logger line"));
+    assertEquals(msgs.length, 1);
+    assertStringIncludes(msgs[0]!, "page-side logger line");
+
+    _serverHere(1);
+    try {
+      printConsole(entry("server log line"));
+      assertEquals(msgs.length, 1, "the server's line came back as a frame");
+      // What the page says by hand is still the page's.
+      console.warn("written by the page");
+      assertEquals(msgs.length, 2);
+      assertStringIncludes(msgs[1]!, "written by the page");
+    } finally {
+      _serverHere(-1);
+    }
+    // The server is gone: a browser again.
+    printConsole(entry("after the server"));
+    assertEquals(msgs.length, 3);
+  } finally {
+    uninstallConsoleIntercept();
+  }
 });

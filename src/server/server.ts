@@ -2,6 +2,7 @@
 // Thin orchestrator — delegates to server-*.ts modules
 import { APP_STYLE, appHasStylesheet, UI_ENTRY } from "./app-files.ts";
 import { declaresOverLimit, readBounded } from "./read-body.ts";
+import { answerPinProof } from "./pin-proof.ts";
 import {
   instances,
   isOwnLock,
@@ -26,6 +27,7 @@ import {
 } from "../diagnostics/diagnostic-bus.ts";
 import { setDiagEmit } from "../diagnostics/error.ts";
 import { getLogDir, log } from "../diagnostics/logger-api.ts";
+import { _serverHere } from "../diagnostics/logger-format.ts";
 import {
   disposeClientLog,
   initClientLog,
@@ -43,7 +45,12 @@ export {
 } from "./server-html.ts";
 import { appLocalImmer, hasVendorImmer } from "./server-vendor.ts";
 import { appDenoJson, appDenoJsonLocated } from "./aio-run-helpers.ts";
-import { assetDirCandidates, isCompiled } from "./paths.ts";
+import {
+  assetDirCandidates,
+  isCompiled,
+  mountLeavesProject,
+  mountOutsideMessage,
+} from "./paths.ts";
 import { PIN_TTL_MS, verifyPin } from "./pairing.ts";
 export type { ServerConfig, ServerHandle } from "./server-types.ts";
 export { _timingSafeEqual } from "./server-auth.ts";
@@ -761,6 +768,7 @@ export function createServer(config: ServerConfig): ServerHandle {
       // server. The client half of that fix reads this field.
       ...(config.appId ? { appId: config.appId } : {}),
       ...(config.renderBudget ? { renderBudget: config.renderBudget } : {}),
+      ...(config.wire ? { wire: config.wire } : {}),
       ...(config.syncCells && config.syncCells.length
         ? { syncCells: config.syncCells }
         : {}),
@@ -856,6 +864,7 @@ export function createServer(config: ServerConfig): ServerHandle {
   }
 
   // ── Static handler — HTTP routes, transpilation, trojan API ──
+  const _served = _servedAssets(config.assets, absBaseDir);
   const staticHandler = createStaticHandler({
     prod,
     debug,
@@ -871,7 +880,10 @@ export function createServer(config: ServerConfig): ServerHandle {
     // outside baseDir (prod bundles follow the import themselves), while
     // `assets` is for DATA a running app serves — a model, a font, a sample
     // pack — which prod needs exactly as much as dev does.
-    assets: config.assets,
+    // deno.json's mounts are served too (`_servedAssets`): the build reads
+    // that declaration, so the server must.
+    assets: _served,
+    assetsFill: _mountsDenoJsonOnly(config.assets, _served),
     // …and a compiled binary falls back, per file, to the copy it EMBEDDED —
     // see assetDirCandidates.
     assetFallbacks: _assetFallbacks(config.assets),
@@ -932,6 +944,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     width: config.width,
     height: config.height,
     renderBudget: config.renderBudget,
+    wire: config.wire,
     syncCells: config.syncCells,
     callTimeouts: config.callTimeouts,
     getGraphResult: () => graphValidation?.getResult() ?? null,
@@ -977,6 +990,7 @@ export function createServer(config: ServerConfig): ServerHandle {
       broadcastWs: (msg) => broadcaster.broadcastRaw(msg),
       onReload: config.onReload,
       onCellChange: config.onCellChange,
+      savedBeforeWatch: config.savedBeforeWatch,
       onGraphResult: (result) => graphValidation?.setResult(result),
       prodGraph: graphValidation?.prodGraph,
       runCss: () => _runAppCssStep(absBaseDir, _cssStop.signal),
@@ -1331,6 +1345,47 @@ export function createServer(config: ServerConfig): ServerHandle {
       }
     }
 
+    // Pin proof — the second route before the key gate, for the same reason:
+    // the caller is deciding whether this server may be SENT the key. It
+    // answers only a caller that already holds it (pin-proof.ts), on the
+    // certificate this server serves. A wrong tag is metered like a wrong key.
+    if (
+      pathname === "/__aio/pin-proof" && req.method === "POST" &&
+      config.token && config.cert
+    ) {
+      const json = (status: number, body: unknown) =>
+        new Response(JSON.stringify(body), {
+          status,
+          headers: { "Content-Type": "application/json" },
+        });
+      const PROOF_MAX_BODY = 4096;
+      const tooBig = declaresOverLimit(req, PROOF_MAX_BODY);
+      if (tooBig) {
+        req.body?.cancel().catch(() => {
+          // aio-ok: an oversized body is being dropped, not read
+        });
+      }
+      const raw = tooBig ? null : await readBounded(req, PROOF_MAX_BODY);
+      if (raw === null) {
+        return json(413, { error: "the body must be a small { nonce, tag }" });
+      }
+      let body: unknown;
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        return json(400, { error: "invalid request" });
+      }
+      if (authFailBudgetExceeded(clientKey)) {
+        return new Response("Too Many Requests", { status: 429 });
+      }
+      const answer = await answerPinProof(body, config.token, config.cert);
+      if (answer.ok) {
+        return json(200, { proof: answer.proof, cert: answer.cert });
+      }
+      if (answer.wrong) recordAuthFail(clientKey, "wrong pin-proof tag");
+      return json(answer.wrong ? 401 : 400, { error: answer.error });
+    }
+
     // Auth path 1: per-user auth — resolveUser hook or static users map (AIO-171)
     if (_userResolver) {
       // THE BUDGET GATES FAILED AUTHENTICATION, NEVER SERVICE.
@@ -1524,12 +1579,17 @@ export function createServer(config: ServerConfig): ServerHandle {
         // no credential, at any depth — `/data/app.db`, `/uploads/*.png`,
         // `/backup.sql` — while the same paths on a `users:` app answer 401.
         // See `isShellAsset`.
-        if (!isShellAsset(pathname, !prod)) {
+        const publicDir = config.authFlows?.publicDir;
+        if (!isShellAsset(pathname, !prod, publicDir)) {
           return new Response(
             `Unauthorized — ${pathname} is app DATA, and this app's public ` +
               `surface is its SHELL (the code, styles and fonts the sign-in ` +
               `page needs), not its directory. Sign in; publish a ` +
-              `deliberately-public file through \`serveDirs\`; keep private ` +
+              `deliberately-public file ${
+                publicDir === undefined
+                  ? "with a shell extension, or declare `auth: { publicDir }`"
+                  : `under /${publicDir}/`
+              }; keep private ` +
               `binaries in the blob store, which is refused here too.`,
             { status: 401, headers: extra },
           );
@@ -1538,6 +1598,7 @@ export function createServer(config: ServerConfig): ServerHandle {
         // is not the shell the gate waved through — the file layer refuses it.
         const anonResp = await staticHandler.serveStatic(pathname, req, {
           anonymous: true,
+          publicDir,
         });
         anonResp.headers.set("X-Content-Type-Options", "nosniff");
         if (extra) anonResp.headers.set("Set-Cookie", extra["Set-Cookie"]);
@@ -2210,6 +2271,9 @@ export function createServer(config: ServerConfig): ServerHandle {
   }, 1000);
   Deno.unrefTimer?.(_stallTimer as unknown as number);
 
+  // This process's console is a server's from here to `shutdown` — a page
+  // runtime beside it (the in-process harness) does not forward its log back.
+  _serverHere(1);
   return {
     broadcast: (patches) => broadcaster.broadcast(patches),
     broadcastRaw: (msg, exclude) => broadcaster.broadcastRaw(msg, exclude),
@@ -2226,6 +2290,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     // which carries no abuse-bucket key by design (see `clientKey`).
     control: (req) => handleRequest(req, { remoteAddr: UDS_PEER } as never),
     shutdown: async () => {
+      if (!_shuttingDown) _serverHere(-1);
       _shuttingDown = true;
       clearInterval(_stallTimer);
       watcher?.shutdown();
@@ -2294,6 +2359,92 @@ export function _shareRoots(absBaseDir: string) {
   const raw = (dj.config as { share?: unknown }).share;
   if (raw === undefined) return undefined;
   return resolveShare(fromFileUrl(dj.dir), raw);
+}
+
+/** The `assets` mounts the server serves: deno.json's, under
+ *  `aio.run({ assets })`'s.
+ *
+ *  The BUILD reads deno.json `assets` (the binary embeds each mount, the web
+ *  and Android builds package it) and the server read `aio.run({ assets })`
+ *  alone — so a mount declared where the docs show it first answered 404 in
+ *  dev, with `--prod` and from the binary that carried it, and 200 from the
+ *  web build and the APK. One declaration, both readers. A deno.json mount is
+ *  relative to that file, as the build resolves it (in a compiled binary:
+ *  the embedded copy); a prefix `aio.run` also names is `aio.run`'s, as
+ *  before. A mount the build refuses (not a path; outside the project) is
+ *  not served either, and says so. @internal */
+export function _servedAssets(
+  runAssets: Record<string, string> | undefined,
+  absBaseDir: string,
+): Record<string, string> | undefined {
+  const dj = locateDenoJsonAbove(toFileUrl(join(resolve(absBaseDir), "/")));
+  const declared = (dj?.config as { assets?: unknown } | undefined)?.assets;
+  if (
+    !dj || dj.dir.protocol !== "file:" || !declared ||
+    typeof declared !== "object" || Array.isArray(declared)
+  ) {
+    return runAssets;
+  }
+  const root = fromFileUrl(dj.dir);
+  const out: Record<string, string> = {};
+  for (const [prefix, dir] of Object.entries(declared)) {
+    if (typeof dir === "string" && mountLeavesProject(root, dir.trim())) {
+      // Dev == build: the build refuses this mount, so the server does not
+      // serve it (as before 1.0.20, when no deno.json mount was served).
+      log.warn(
+        "server",
+        `${mountOutsideMessage(prefix, dir)} Nothing is served from it, ` +
+          `and the build refuses it.`,
+      );
+    } else if (typeof dir === "string" && dir.trim()) {
+      out[prefix] = resolve(root, dir.trim());
+    } else {
+      log.warn(
+        "server",
+        `deno.json assets["${prefix}"] is ${JSON.stringify(dir)} — not a ` +
+          `directory path, so nothing is served there (and the build ` +
+          `refuses it).`,
+      );
+    }
+  }
+  // `aio.run`'s first, in the order it gave them (the first prefix that
+  // matches answers), with its value where both name one.
+  return { ...runAssets, ...out, ...runAssets };
+}
+
+/** The prefixes of `served` that deno.json ALONE declares. They FILL IN (see
+ *  `StaticDeps.assetsFill`): served since 1.0.20, such a mount answers only
+ *  what answered 404 before. @internal */
+export function _mountsDenoJsonOnly(
+  runAssets: Record<string, string> | undefined,
+  served: Record<string, string> | undefined,
+): string[] {
+  return Object.keys(served ?? {}).filter((p) =>
+    !Object.hasOwn(runAssets ?? {}, p)
+  );
+}
+
+/** The boot line for the mounts deno.json ALONE declares (`aio.run` names
+ *  none of them) — served since 1.0.20, so said once, dev and prod alike:
+ *  nothing an app serves is a surprise. `open` (exposed, no key, no auth)
+ *  makes it a warning: anyone who can reach the port reads those files.
+ *  `null` when there is no such mount. @internal */
+export function _denoJsonMountsNote(
+  runAssets: Record<string, string> | undefined,
+  served: Record<string, string> | undefined,
+  open: boolean,
+): { level: "info" | "warn"; text: string } | null {
+  const only = _mountsDenoJsonOnly(runAssets, served);
+  if (only.length === 0) return null;
+  const list = only.map((p) => `${p} → ${served![p]}`).join(", ");
+  return open
+    ? {
+      level: "warn",
+      text: `serving deno.json mount(s) ${list} — exposed with no key and ` +
+        `no auth, so anyone who can reach this port reads them. Set a key ` +
+        `(drop \`key: false\`), or remove the mount from deno.json \`assets\`.`,
+    }
+    : { level: "info", text: `serving deno.json mount(s) ${list}` };
 }
 
 /** Per `assets` prefix, the directories a compiled binary falls back to when

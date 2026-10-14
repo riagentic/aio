@@ -65,6 +65,11 @@ private const val FETCH_GLOBAL = "AioNativeFetch"
 private const val FETCH_MAX_BODY = 8 * 1024 * 1024
 private const val FETCH_CONNECT_TIMEOUT_MS = 15_000
 private const val FETCH_READ_TIMEOUT_MS = 30_000
+/** When the WebView's renderer process was last lost (elapsedRealtime), and
+ *  how soon after it a second loss is a loop — see `onRenderProcessGone`.
+ *  Process-wide: it must outlive the activity `recreate()` replaces. */
+private var lastRendererLoss = 0L
+private const val RENDERER_LOSS_LOOP_MS = 10_000L
 
 /**
  * The store a standalone app's state actually lives in.
@@ -206,8 +211,7 @@ private class AioNativeStore(private val dir: File) {
      *  is a directory entry, and a power cut before the directory is flushed
      *  can bring back the OLD name (the previous value, or no file at all on
      *  a first write). `android.system.Os` is the platform's own fsync on a
-     *  directory fd, available from API 21 (minSdk is 24) — `FileChannel.open`
-     *  on a directory needs API 26, and `FileInputStream` refuses one.
+     *  directory fd (minSdk is 29); `FileInputStream` refuses a directory.
      *
      *  A filesystem that refuses fsync on a directory (EINVAL on some FUSE /
      *  sdcardfs mounts) does not undo anything: the rename happened and the
@@ -340,9 +344,213 @@ private object AioNativeFetch : WebViewCompat.WebMessageListener {
     }
 }
 
+/** The JS global the pairing bridge below is installed as — on the connect
+ *  page of a client APK only (`_writeConnectPage` in build-android.ts). */
+private const val CONNECT_GLOBAL = "AioConnect"
+
+/** Is `der` (the certificate a server presented) covered by `pin`?
+ *  A pin is the certificate file an aio server serves — its leaf, then the
+ *  app's own root — as a pairing reply carries it. It is met by the exact
+ *  certificate, or by one SIGNED by a certificate in the pin (the root: the
+ *  leaf is re-issued whenever the machine's addresses change). The signature
+ *  is verified. The same rule the desktop client applies (`pinMatches`). */
+private fun pinMatches(pin: String, der: ByteArray): Boolean {
+    val bodies = pin.replace(Regex("\\s+"), "").split(Regex("-----[A-Z0-9]+-----")).filter { it.isNotEmpty() }
+    if (bodies.contains(android.util.Base64.encodeToString(der, android.util.Base64.NO_WRAP))) return true
+    return try {
+        val cf = java.security.cert.CertificateFactory.getInstance("X.509")
+        val leaf = cf.generateCertificate(der.inputStream())
+        bodies.any { b ->
+            try {
+                leaf.verify(cf.generateCertificate(android.util.Base64.decode(b, android.util.Base64.DEFAULT).inputStream()).publicKey)
+                true
+            } catch (e: Exception) {
+                false
+            }
+        }
+    } catch (e: Exception) {
+        false
+    }
+}
+
+/** `host:port` — what a pin is stored under. */
+private fun authority(host: String?, port: Int): String = (host ?: "") + ":" + (if (port > 0) port else 443)
+
+/**
+ * A client APK and a server whose certificate Android does not trust — every
+ * server run with `--expose` signs its own. The WebView alone can only refuse
+ * it. The connect page asks this bridge one of two questions, and a server
+ * that answers is PINNED: `onReceivedSslError` then lets exactly that
+ * certificate (or one its root signed) through, for that host:port only.
+ *
+ *  - `{ base, pin }`: the pairing code the app shows (`am pair`). POST
+ *    /__aio/pair → the app's key and its certificate file.
+ *  - `{ base, key }`: a share link's key. POST /__aio/pin-proof — the server
+ *    proves it holds the same key, ON the certificate it is presenting
+ *    (src/server/pin-proof.ts), so something answering in its place cannot.
+ *
+ * Both requests are made without judging the certificate — they are the
+ * question that decides whether to trust it — and what was presented is
+ * captured and must be the one the answer names. This is what the desktop
+ * client does (electron-client-script.ts: `pairWith`, `askProof`).
+ *
+ * It also REMEMBERS the address the form opened (`{ remember }`, answered at
+ * the next launch by `{ recall }`). The form kept it in `localStorage` alone,
+ * and the WebView commits that to disk on its own lazy schedule. Measured on
+ * an API 35 emulator: a kill within a second of pairing brought the client
+ * back to "needs its key" — the pairing was gone, and a pairing code works
+ * once. `commit()` returns once the value is on disk, and the form opens the
+ * server only after that.
+ *
+ * SECURITY — installed only when IS_CLIENT, through `addWebMessageListener`
+ * with the app's own asset origin as its only allowed origin: the server's
+ * pages never see it. It POSTs two fixed paths and nothing else. The
+ * remembered address (a share link carries the server's key) stays in this
+ * app's private preferences, beside the pins — where `localStorage` is too.
+ */
+private class AioConnect(private val pins: android.content.SharedPreferences) : WebViewCompat.WebMessageListener {
+    override fun onPostMessage(
+        view: WebView,
+        message: WebMessageCompat,
+        sourceOrigin: Uri,
+        isMainFrame: Boolean,
+        replyProxy: JavaScriptReplyProxy,
+    ) {
+        if (sourceOrigin.host != ASSET_HOST || !isMainFrame) return
+        val raw = message.data ?: return
+        fetchPool.execute {
+            val reply = org.json.JSONObject()
+            try {
+                val req = org.json.JSONObject(raw)
+                reply.put("id", req.getInt("id"))
+                if (req.has("remember")) {
+                    // No colon: never the `host:port` a pin is stored under.
+                    val kept = pins.edit().putString("server", req.getString("remember")).commit()
+                    if (!kept) android.util.Log.e("aio", "the server address could NOT be saved — " +
+                        "this client may ask for it (and its key) again at the next launch")
+                    reply.put("remembered", kept)
+                } else if (req.has("recall")) {
+                    reply.put("server", pins.getString("server", "") ?: "")
+                } else {
+                    val base = java.net.URL(req.getString("base"))
+                    if (base.protocol != "https" && base.protocol != "http") throw IOException("not an http(s) address")
+                    if (req.has("pin")) pair(base, req.getString("pin"), reply)
+                    else prove(base, req.getString("key"), reply)
+                }
+            } catch (e: Exception) {
+                reply.put("error", e.toString())
+            }
+            view.post { replyProxy.postMessage(reply.toString()) }
+        }
+    }
+
+    private class Answer(val status: Int, val json: org.json.JSONObject?, val der: ByteArray?)
+
+    private fun post(base: java.net.URL, path: String, body: org.json.JSONObject): Answer {
+        val conn = java.net.URL(base.protocol, base.host, base.port, path).openConnection() as java.net.HttpURLConnection
+        var der: ByteArray? = null
+        if (conn is javax.net.ssl.HttpsURLConnection) {
+            val ctx = javax.net.ssl.SSLContext.getInstance("TLS")
+            ctx.init(null, arrayOf<javax.net.ssl.TrustManager>(@android.annotation.SuppressLint("CustomX509TrustManager") object : javax.net.ssl.X509TrustManager {
+                override fun checkClientTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {}
+                // Captured, not judged: the caller compares it with the answer.
+                @android.annotation.SuppressLint("TrustAllX509TrustManager")
+                override fun checkServerTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {
+                    der = chain[0].encoded
+                }
+                override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
+            }), null)
+            conn.sslSocketFactory = ctx.socketFactory
+            conn.hostnameVerifier = javax.net.ssl.HostnameVerifier { _, _ -> true }
+        }
+        try {
+            conn.connectTimeout = 8000
+            conn.readTimeout = 8000
+            conn.useCaches = false
+            conn.requestMethod = "POST"
+            conn.setRequestProperty("Content-Type", "application/json")
+            val bytes = body.toString().toByteArray(Charsets.UTF_8)
+            conn.doOutput = true
+            conn.setFixedLengthStreamingMode(bytes.size)
+            conn.outputStream.use { it.write(bytes) }
+            val status = conn.responseCode
+            val text = (if (status >= 400) conn.errorStream else conn.inputStream)?.use { s ->
+                val out = java.io.ByteArrayOutputStream()
+                val buf = ByteArray(8192)
+                while (out.size() < 65536) {
+                    val n = s.read(buf)
+                    if (n < 0) break
+                    out.write(buf, 0, n)
+                }
+                out.toString("UTF-8")
+            } ?: ""
+            val json = try { org.json.JSONObject(text) } catch (e: Exception) { null }
+            return Answer(status, json, der)
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun pin(base: java.net.URL, cert: String) {
+        // commit, not apply: on disk before the form is told it may go on.
+        pins.edit().putString(authority(base.host, if (base.port > 0) base.port else base.defaultPort), cert).commit()
+    }
+
+    private fun pair(base: java.net.URL, code: String, reply: org.json.JSONObject) {
+        val a = post(base, "/__aio/pair", org.json.JSONObject().put("pin", code))
+        reply.put("status", a.status)
+        val key = a.json?.optString("key", "") ?: ""
+        if (a.status != 200 || key.isEmpty()) return
+        if (base.protocol == "https") {
+            val cert = a.json?.optString("cert", "") ?: ""
+            val der = a.der
+            if (cert.isEmpty() || der == null || !pinMatches(cert, der)) {
+                throw IOException("the certificate this server presented is not the one the app says it serves")
+            }
+            pin(base, cert)
+        }
+        reply.put("key", key)
+    }
+
+    private fun hmacHex(key: String, msg: String): String {
+        val mac = javax.crypto.Mac.getInstance("HmacSHA256")
+        mac.init(javax.crypto.spec.SecretKeySpec(key.toByteArray(Charsets.UTF_8), "HmacSHA256"))
+        return mac.doFinal(msg.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+    }
+
+    private fun prove(base: java.net.URL, key: String, reply: org.json.JSONObject) {
+        val nonce = ByteArray(32).also { SecureRandom().nextBytes(it) }.joinToString("") { "%02x".format(it) }
+        val a = post(base, "/__aio/pin-proof", org.json.JSONObject()
+            .put("nonce", nonce).put("tag", hmacHex(key, "aio-pin-proof-v1:c:$nonce")))
+        val proof = a.json?.optString("proof", "") ?: ""
+        val cert = a.json?.optString("cert", "") ?: ""
+        val der = a.der
+        val want = hmacHex(key, "aio-pin-proof-v1:s:$nonce:" + cert.replace(Regex("\\s+"), ""))
+        val proved = a.status == 200 && cert.isNotEmpty() && der != null &&
+            MessageDigest.isEqual(proof.toByteArray(Charsets.US_ASCII), want.toByteArray(Charsets.US_ASCII)) &&
+            pinMatches(cert, der)
+        if (proved) pin(base, cert)
+        reply.put("status", a.status).put("proved", proved)
+    }
+}
+
 class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     private var pendingCameraRequest: PermissionRequest? = null
+    /** `<input type="file">`: the page's callback, held while the system's
+     *  picker is open. It MUST be answered exactly once — null included (the
+     *  user backed out) — or the WebView never opens a picker again. */
+    private var pendingFiles: android.webkit.ValueCallback<Array<Uri>>? = null
+    private val filePicker = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val data = result.data
+        val picked: Array<Uri>? = if (result.resultCode != RESULT_OK || data == null) null
+            else data.clipData?.let { c -> Array(c.itemCount) { c.getItemAt(it).uri } }
+                ?: data.data?.let { arrayOf(it) }
+        pendingFiles?.onReceiveValue(picked)
+        pendingFiles = null
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -394,6 +602,12 @@ class MainActivity : AppCompatActivity() {
                         "WEB_MESSAGE_LISTENER — nativeFetch() will fail. Update Android System WebView.")
                 }
             }
+            // The connect page's pairing bridge — see AioConnect. Its pins
+            // are this app's private preferences.
+            val pins = getSharedPreferences("aio-pins", MODE_PRIVATE)
+            if (IS_CLIENT && WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
+                WebViewCompat.addWebMessageListener(this, CONNECT_GLOBAL, setOf("https://$ASSET_HOST"), AioConnect(pins))
+            }
             webViewClient = object : WebViewClient() {
                 // The bridge belongs to the app's own bundle and to nothing
                 // else. A standalone APK cannot navigate away from it, so this
@@ -411,6 +625,33 @@ class MainActivity : AppCompatActivity() {
                             "never handed to foreign content.")
                     }
                 }
+                // The page runs in the WebView's own renderer PROCESS, and
+                // Android takes that process back on its own when memory is
+                // short. Unanswered, the WebView then aborts the whole app.
+                // Measured (chrome://crash and chrome://kill) on a phone
+                // (Android 14, WebView 141): "Render process's crash wasn't
+                // handled by all associated webviews, triggering application
+                // crash" — the app gone from the screen, the launcher in its
+                // place. So: the dead WebView is dropped and the activity
+                // built again — the page reloads, and what a method committed
+                // comes back from the store (a client: from its server). A
+                // second loss within RENDERER_LOSS_LOOP_MS is a page that
+                // kills its renderer on load: no loop, the app stops as it
+                // did before.
+                override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    val loop = lastRendererLoss != 0L && now - lastRendererLoss < RENDERER_LOSS_LOOP_MS
+                    lastRendererLoss = now
+                    android.util.Log.e("aio", "the WebView's renderer process " +
+                        (if (detail?.didCrash() == true) "CRASHED" else "was KILLED by the system (memory)") +
+                        (if (loop) " again within " + RENDERER_LOSS_LOOP_MS / 1000 + " s — not reloading in a loop; the app stops"
+                        else " — the page is reloaded; anything typed and not yet sent to a method is lost"))
+                    if (loop) return false
+                    (view?.parent as? android.view.ViewGroup)?.removeView(view)
+                    view?.destroy()
+                    recreate()
+                    return true
+                }
                 override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                     val url = request?.url ?: return null
                     return assetLoader.shouldInterceptRequest(url)
@@ -420,6 +661,41 @@ class MainActivity : AppCompatActivity() {
                 override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
                     if (IS_CLIENT && request?.isForMainFrame == true && request.url.host != ASSET_HOST) {
                         view?.loadUrl("https://$ASSET_HOST/assets/index.html#unreachable")
+                    }
+                }
+                // …and one that answers 401 at its root: a keyed server reached
+                // without its key. The form, saying what it needs — not the
+                // server's bare "Unauthorized".
+                override fun onReceivedHttpError(view: WebView?, request: WebResourceRequest?, errorResponse: WebResourceResponse?) {
+                    if (IS_CLIENT && request?.isForMainFrame == true && errorResponse?.statusCode == 401 &&
+                        request.url.host != ASSET_HOST && (request.url.path ?: "/") == "/"
+                    ) {
+                        view?.loadUrl("https://$ASSET_HOST/assets/index.html#keyed")
+                    }
+                }
+                // …and one whose certificate Android does not trust (a server
+                // run with `--expose` signs its own unless told otherwise).
+                // A certificate this client PINNED for that host:port — by a
+                // pairing code or a share link's key, see AioConnect — is let
+                // through; any other is refused, and the form says which case
+                // it is. (The default only cancels the load: the form stayed
+                // as it was, a tap on Connect doing nothing at all.)
+                override fun onReceivedSslError(view: WebView?, handler: android.webkit.SslErrorHandler?, error: android.net.http.SslError?) {
+                    val to = Uri.parse(error?.url ?: "")
+                    val pin = if (IS_CLIENT) pins.getString(authority(to.host, to.port), null) else null
+                    val der = error?.certificate?.let {
+                        android.net.http.SslCertificate.saveState(it)?.getByteArray("x509-certificate")
+                    }
+                    if (pin != null && der != null && pinMatches(pin, der)) {
+                        handler?.proceed()
+                        return
+                    }
+                    handler?.cancel()
+                    val from = view?.url?.let { Uri.parse(it).host }
+                    if (IS_CLIENT && from == ASSET_HOST && to.host != ASSET_HOST) {
+                        android.util.Log.e("aio", "certificate not trusted: " + error?.url + " ($error)" +
+                            (if (pin != null) " — not the one pinned for this server" else ""))
+                        view?.loadUrl("https://$ASSET_HOST/assets/index.html" + (if (pin != null) "#changed" else "#untrusted"))
                     }
                 }
                 override fun shouldOverrideUrlLoading(view: WebView?, request: android.webkit.WebResourceRequest?): Boolean {
@@ -444,7 +720,66 @@ class MainActivity : AppCompatActivity() {
                     return true
                 }
             }
+            // A download — `<a download>`, a `blob:` or `data:` link, a
+            // response the WebView cannot show. A WebView saves nothing by
+            // itself, and with no listener the tap did NOTHING and said
+            // nothing (measured on a phone, Android 14). A link on the network
+            // goes to Android's DownloadManager — into Downloads, with the
+            // system's own notification, carrying this page's cookies (a
+            // signed-in server). A `blob:` or `data:` URL lives in this page
+            // only, so nothing outside it can fetch it — refused, saying so.
+            setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
+                val uri = Uri.parse(url ?: "")
+                if (uri.scheme == "http" || uri.scheme == "https") {
+                    try {
+                        val name = android.webkit.URLUtil.guessFileName(url, contentDisposition, mimeType)
+                        val req = android.app.DownloadManager.Request(uri)
+                            .setMimeType(mimeType)
+                            .addRequestHeader("User-Agent", userAgent)
+                            .setTitle(name)
+                            .setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                            .setDestinationInExternalPublicDir(android.os.Environment.DIRECTORY_DOWNLOADS, name)
+                        android.webkit.CookieManager.getInstance().getCookie(url)?.let { req.addRequestHeader("Cookie", it) }
+                        (getSystemService(DOWNLOAD_SERVICE) as android.app.DownloadManager).enqueue(req)
+                        android.util.Log.i("aio", "download started: $name (Downloads)")
+                    } catch (e: Exception) {
+                        android.util.Log.e("aio", "download NOT started: $uri ($e)")
+                    }
+                } else {
+                    android.util.Log.e("aio", "download NOT saved: a " + (uri.scheme ?: "?") + ": link (" + mimeType +
+                        ") — this APK's WebView cannot write a file the page made. " +
+                        "Saving one needs native code: add it under <app>/android/ " +
+                        "(docs/build/targets.md).")
+                }
+            }
             webChromeClient = object : WebChromeClient() {
+                // `<input type="file">`: the system's own picker (no permission
+                // — the user hands over exactly the files they pick). Without
+                // this a tap on the input did nothing at all, in every APK.
+                override fun onShowFileChooser(
+                    view: WebView?,
+                    callback: android.webkit.ValueCallback<Array<Uri>>?,
+                    params: FileChooserParams?,
+                ): Boolean {
+                    pendingFiles?.onReceiveValue(null)
+                    pendingFiles = callback
+                    try {
+                        val intent = params?.createIntent()
+                            ?: Intent(Intent.ACTION_GET_CONTENT).addCategory(Intent.CATEGORY_OPENABLE)
+                        // A type that is no MIME type (an `accept` of file
+                        // extensions) would match nothing: any file then.
+                        if (intent.type?.contains('/') != true) intent.type = "*/*"
+                        if (params?.mode == FileChooserParams.MODE_OPEN_MULTIPLE) {
+                            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                        }
+                        filePicker.launch(intent)
+                    } catch (e: ActivityNotFoundException) {
+                        android.util.Log.e("aio", "<input type=file>: no app on this device picks a file ($e)")
+                        pendingFiles = null
+                        callback?.onReceiveValue(null)
+                    }
+                    return true
+                }
                 // getUserMedia inside the WebView: grant the page camera access
                 // once the OS-level CAMERA permission is in hand (asking for it
                 // on demand when missing).

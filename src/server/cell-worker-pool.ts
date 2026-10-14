@@ -121,28 +121,49 @@ function hostableEntry(entry: string | undefined): boolean {
 export type Collector = {
   pending: Set<Promise<string | undefined>>;
   why: Set<string>;
+  /** Collect every batch of the cell, whoever wrote it: a call answered
+   *  from ANOTHER call's run (`concurrency: "first"`) wrote nothing itself,
+   *  and the run whose writes it is answered with is not named to it. */
+  all?: boolean;
+  /** The batches NOT named to this call, kept apart: a call learns that it
+   *  was answered from another run (`_adopt`) only after that run's batches
+   *  may have gone by, and they are its from the moment it was routed. */
+  rest?: Collector;
 };
 /** @internal */
 export const _collector = (): Collector => ({
   pending: new Set(),
   why: new Set(),
 });
-/** Hand batch `p` (resolving with its failure sentence, if any) to every
- *  collector running now; each lets go of it the moment it settles.
+/** Hand batch `p` (resolving with its failure sentence, if any) to the
+ *  collectors running now: its own to the calls that wrote it (`by`) — or to
+ *  every one when the worker could not name them — and their `rest` to the
+ *  others; each lets go of it the moment it settles.
  *  @internal */
 export function _collect(
   running: Iterable<Collector> | undefined,
   p: Promise<string | undefined>,
+  by?: readonly Collector[],
 ): void {
-  const into = [...(running ?? [])];
-  if (into.length === 0) return;
-  for (const c of into) c.pending.add(p);
-  void p.then((why) => {
-    for (const c of into) {
-      c.pending.delete(p);
-      if (why !== undefined) c.why.add(why);
-    }
-  });
+  for (const c of [...(running ?? [])]) {
+    const own = by === undefined || c.all === true || by.includes(c);
+    const into = own ? c : (c.rest ??= _collector());
+    into.pending.add(p);
+    void p.then((why) => {
+      into.pending.delete(p);
+      c.pending.delete(p); // folded in since (`_adopt`)
+      if (why === undefined) return;
+      (own || c.rest === into ? into : c).why.add(why);
+    });
+  }
+}
+/** The call is answered from another call's run: every batch is its, the
+ *  ones that went by since it was routed included. @internal */
+export function _adopt(c: Collector): void {
+  c.all = true;
+  for (const p of c.rest?.pending ?? []) c.pending.add(p);
+  for (const why of c.rest?.why ?? []) c.why.add(why);
+  c.rest = undefined;
 }
 /** Stop collecting (`calls` is the cell's running set), wait for what is
  *  still saving, and give the verdict. @internal */
@@ -260,6 +281,9 @@ export function createCellWorkerPool(opts: {
    *  the entry. Capped like the other per-call maps, and never silently: a
    *  live entry pushed out is answered `unsaved` (`_verdictLost`). */
   const byCall = new Map<string, [Set<Collector>, Collector]>();
+  /** A routed call's collector, by the action object its worker holds it
+   *  under — how a batch names the calls that wrote it (`applyPatches`). */
+  const byAction = new WeakMap<object, Collector>();
   const offCallSettle = _onCallSettle((callId) => {
     const entry = byCall.get(callId);
     if (entry === undefined) return undefined;
@@ -285,7 +309,7 @@ export function createCellWorkerPool(opts: {
         countError: () => opts.breaker?.count(name),
         respawn: f.__aio.workerRespawn === true,
         initialState: () => getSlice(name),
-        applyPatches: (cell: string, ops: Patch[]) => {
+        applyPatches: (cell: string, ops: Patch[], by?: object[]) => {
           // In-flight (dispatch.ts INFLIGHT): these ARE a method's writes
           // arriving from the worker isolate — if they land inside the
           // shutdown drain window (dispatch draining, not yet sealed) they
@@ -305,7 +329,11 @@ export function createCellWorkerPool(opts: {
             // answer is the worker's `done`/`fail`.
             () => undefined,
           );
-          _collect(collecting.get(cell), p);
+          _collect(
+            collecting.get(cell),
+            p,
+            by?.flatMap((a) => byAction.get(a) ?? []),
+          );
         },
         runEffect,
       }),
@@ -459,6 +487,9 @@ export function createCellWorkerPool(opts: {
       const mine = _collector();
       const calls = collecting.get(cell) ?? new Set();
       collecting.set(cell, calls.add(mine));
+      if (action !== null && typeof action === "object") {
+        byAction.set(action, mine);
+      }
       const callId = (action as { payload?: { _callId?: unknown } }).payload
         ?._callId;
       if (typeof callId === "string") {
@@ -479,7 +510,12 @@ export function createCellWorkerPool(opts: {
         (onAdopted) => {
           let call: Promise<unknown>;
           try {
-            call = owner.call(action, onAdopted);
+            call = owner.call(action, (rerun) => {
+              // Answered from another run — or, after all, by its own.
+              if (rerun) mine.all = false;
+              else _adopt(mine);
+              onAdopted(rerun);
+            });
           } catch (e) {
             calls.delete(mine); // never posted: no batch can be its
             if (typeof callId === "string") byCall.delete(callId);

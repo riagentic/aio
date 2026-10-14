@@ -18,6 +18,7 @@
 // retired flag would then survive in real projects. This test was written
 // after nearly making that edit.
 
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { standardTasks, TARGETS, TEMPLATES } from "../src/am/am-cmd-create.ts";
 import { REMOVALS } from "../src/state/removals.ts";

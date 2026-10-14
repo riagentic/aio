@@ -5,6 +5,7 @@
 // spelling `<app>/dep/aio/src/am.ts` differed from `<checkout>/src/am.ts` even
 // when dep/aio is a symlink to that checkout — re-exec'd the SAME am as a new
 // process, which read it again (line 2), plus a hand-off note every time.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { tempDir } from "../src/testing/temp-dir.ts";
 import { fromFileUrl, join, toFileUrl } from "@std/path";

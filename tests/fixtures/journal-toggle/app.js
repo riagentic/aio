@@ -43,7 +43,7 @@ const app = await aio.run({
   appDir: DIR,
   journal: E("J", "1") === "1",
   ...(E("MULTI", "") === "1" ? { persistMode: "multi" } : {}),
-  persistDebounceMs: 50,
+  persistDebounceMs: Number(E("DEBOUNCE", "50")),
 });
 const snap = () => {
   const st = app.getState();

@@ -18,10 +18,15 @@ import {
   downloadArtifact,
 } from "../src/server/updates-check.ts";
 import {
+  _ownedDeps,
+  adoptOlder,
   identity,
+  isOwn,
+  moved,
   OLD_STAGE_AGE_MS,
   ownedPath,
   readOwned,
+  setAsideChanged,
   sweepOwned,
 } from "../src/server/updates-owned.ts";
 import { freePort } from "../src/testing/server-test.ts";
@@ -59,6 +64,46 @@ async function world() {
     },
   };
 }
+
+// NTFS gives a file renamed to a name removed seconds ago that name's old
+// creation time (measured on Windows 11). The download's identity is taken
+// before its rename: made again right after its damaged copy was removed, it
+// was "not made by this app's updater" and in the way of its release for good.
+Deno.test("downloads: a download whose creation time changes in the rename to its name is still the updater's — by its bytes, and only by them", async () => {
+  const w = await world();
+  const real = _ownedDeps.lstat;
+  try {
+    const dest = `${w.install}.zip-0.1.6`;
+    // The file system of the test: whatever is at `dest` was born earlier.
+    _ownedDeps.lstat = (p) => {
+      const s = real(p);
+      return p === dest && s.birthtime
+        ? { ...s, birthtime: new Date(s.birthtime.getTime() - 5_000) }
+        : s;
+    };
+    const got = await w.get(dest, { owner: w.data });
+    assert(got.ok, got.ok ? "" : got.error);
+    assert(isOwn(w.data, dest), "the download is on the record as it is now");
+
+    // Other bytes under the name, another identity: the record does not
+    // follow — what is there stays unproven.
+    const before = readOwned(w.data);
+    await Deno.remove(dest);
+    await Deno.writeTextFile(dest, "my archive");
+    _ownedDeps.lstat = (p) => {
+      const s = real(p);
+      return p === dest && s.birthtime
+        ? { ...s, birthtime: new Date(s.birthtime.getTime() - 9_000) }
+        : s;
+    };
+    moved(w.data, dest);
+    assertEquals(readOwned(w.data), before);
+    assert(!isOwn(w.data, dest));
+  } finally {
+    _ownedDeps.lstat = real;
+    await w.end();
+  }
+});
 
 /** The record as a later run of the app reads it. */
 function laterBoot(data: string): void {
@@ -147,6 +192,64 @@ Deno.test("downloads: a file of the user's where the download goes refuses it �
     assertMatch(got.error, /is in the way of the update/);
     assertEquals(await Deno.readTextFile(dest), "my archive");
     assertEquals(names(w.root), ["notes.zip-0.1.6"], "staging left behind");
+  } finally {
+    await w.end();
+  }
+});
+
+// A kept download whose bytes changed where it lies refused its release as
+// "in the way" until somebody removed it by hand. It is moved aside — only
+// the very file on the record, only when its bytes are other ones, and never
+// removed: on NTFS another file can carry the same identity.
+Deno.test("downloads: a download of ours with other bytes is moved aside, whole — and nothing else under its name is touched", async () => {
+  const w = await world();
+  try {
+    const dest = `${w.install}.zip-0.1.6`;
+    const fresh = async () => {
+      const got = await w.get(dest, { owner: w.data });
+      assert(got.ok, got.ok ? "" : got.error);
+    };
+    await fresh();
+    // As it was made: not moved.
+    assertEquals(setAsideChanged(w.data, dest), null);
+    assert(isOwn(w.data, dest));
+
+    // Somebody's file under the name (another object): not ours to move.
+    await Deno.remove(dest);
+    await Deno.writeTextFile(dest, "my archive");
+    if (Deno.build.os !== "windows") { // NTFS hands the new file the old identity
+      assertEquals(setAsideChanged(w.data, dest), null);
+      assertEquals(names(w.root), ["notes.zip-0.1.6"]);
+    }
+    await Deno.remove(dest);
+
+    // The very file, other bytes: moved to a FREE name — one that is taken
+    // is somebody's — with every byte, and off the record.
+    await fresh();
+    await Deno.writeTextFile(`${dest}~damaged`, "mine");
+    await Deno.writeTextFile(dest, "damaged");
+    assertEquals(setAsideChanged(w.data, dest), `${dest}~damaged-2`);
+    assertEquals(await Deno.readTextFile(`${dest}~damaged`), "mine");
+    assertEquals(await Deno.readTextFile(`${dest}~damaged-2`), "damaged");
+    assertEquals(readOwned(w.data).filter((e) => e.path === dest), []);
+    // …and the release downloads to its name again.
+    await fresh();
+    assertEquals(names(w.root), [
+      "notes.zip-0.1.6",
+      "notes.zip-0.1.6~damaged",
+      "notes.zip-0.1.6~damaged-2",
+    ]);
+    // No later start takes the moved file for the updater's and removes it.
+    laterBoot(w.data);
+    // (Even the one look at older builds' things, with a proof that passes
+    // everything: `~` is in none of their names.)
+    assertEquals(adoptOlder(w.data, w.install, () => true), []);
+    const swept = await sweepOwned(w.data, w.install);
+    assertEquals(swept.removed, ["notes.zip-0.1.6"]);
+    assertEquals(swept.left, [
+      "notes.zip-0.1.6~damaged",
+      "notes.zip-0.1.6~damaged-2",
+    ]);
   } finally {
     await w.end();
   }

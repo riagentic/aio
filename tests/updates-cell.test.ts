@@ -556,6 +556,38 @@ testCell(
   },
 );
 
+// The one-time "a Start-menu shortcut was added — the download can be
+// deleted" fact (a field report) reached only the log.
+testCell(
+  cellDef,
+  "readyUpdates() carries the Start-menu shortcut this start added into updates.shortcutAdded",
+  async (t) => {
+    const { _noteShortcutAdded, readyUpdates } = await import(
+      "../src/state/updates-cell.ts"
+    );
+    installUpdatesRuntime({
+      kind: "manifest",
+      channel: "prod",
+      current: "1.2.3",
+      currentUnknown: null,
+      exposed: false,
+      check: () => Promise.reject(new Error("must not be called")),
+      apply: () => Promise.resolve(),
+      setChannel: () => Promise.resolve(),
+    });
+    try {
+      assertEquals(state(t).shortcutAdded, null, "nothing added");
+      _noteShortcutAdded(undefined); // every other start: nothing to say
+      _noteShortcutAdded("C:\\Start\\My App.lnk");
+      readyUpdates();
+      await t.settle?.();
+      assertEquals(state(t).shortcutAdded, "C:\\Start\\My App.lnk");
+    } finally {
+      installUpdatesRuntime(null);
+    }
+  },
+);
+
 // The pre-migration backup path stops being a log line.
 //
 // The applier already computed it, logged it, and wrote it into the pending

@@ -19,7 +19,7 @@
 //   silently WIDEN permissions. Then we fall back to the warning.
 // - opt out with AIO_NO_DEV_RESTART=1
 
-import { basename, dirname, fromFileUrl } from "@std/path";
+import { basename, dirname, fromFileUrl, join } from "@std/path";
 import { log } from "../diagnostics/logger-api.ts";
 import {
   instances,
@@ -185,25 +185,126 @@ export interface RestartCarry {
   port?: () => number | undefined;
 }
 
+/** The supervisor's own word to its child: the TCP port the app was on.
+ *
+ *  Not `AIO_PORT`, which carried it first: that is the OPERATOR's variable,
+ *  and `electron: { ignoreDebugEnv }` exists to stop a desktop app reading it
+ *  from an environment it did not choose. An Electron dev app with that key,
+ *  on a TCP port nobody named (`--expose`), therefore ignored the carry — a
+ *  different free port after every cell edit, and a warning each time that
+ *  `AIO_PORT` "is set and ignored" in a shell that never set it. The carry is
+ *  not ambient: only the supervisor writes it, and only a supervised child
+ *  reads it ({@linkcode carriedPort}). */
+export const RESTART_PORT_ENV = "AIO_DEV_RESTART_PORT";
+
+/** The port the supervisor carried to THIS process — `undefined` outside a
+ *  supervised child, so the variable left in a shell means nothing. Decimal
+ *  digits, 1-65535; anything else is no carry (the app binds as if freshly
+ *  started). Sits on the env rung of the port chain (aio.ts): a flag is
+ *  replayed in argv and equals it, and it IS what a config port bound. Pure. */
+export function carriedPort(
+  get: (name: string) => string | undefined = env,
+): number | undefined {
+  if (get(CHILD_ENV) !== "1") return undefined;
+  const raw = get(RESTART_PORT_ENV) ?? "";
+  if (!/^[0-9]{1,5}$/.test(raw)) return undefined;
+  const n = Number(raw);
+  return n > 0 && n <= 65535 ? n : undefined;
+}
+
+/** The supervisor's word on what the LAST start already found saved:
+ *  `<streak>:<key>,<key>…` — see {@linkcode savedWhileStarting}. Read only in
+ *  a supervised child, as the port is. */
+export const RESTART_SAVED_ENV = "AIO_DEV_RESTART_SAVED";
+
+/** One saved file as the carry names it: FNV-1a of its path and what it
+ *  holds — the list rides in the environment, so it is kept short. */
+const savedKey = (path: string, stamp: string): string => {
+  let h = 0x811c9dc5;
+  for (const c of `${path}\0${stamp}`) {
+    h = Math.imul(h ^ c.codePointAt(0)!, 0x01000193);
+  }
+  return (h >>> 0).toString(16);
+};
+
+/** The carry for the next child. More keys than an environment holds on
+ *  Windows (32 KB in all) are not sent: the child then restarts once for a
+ *  file it need not have, and the streak ends that. Pure. @internal */
+export function savedCarry(
+  streak: number,
+  saved: ReadonlyMap<string, string>,
+): string {
+  const keys = [...saved].map(([p, s]) => savedKey(p, s));
+  return `${streak}:${keys.length > 1_500 ? "" : keys.join(",")}`;
+}
+
+/** The source files under `roots` saved since THIS process loaded its modules
+ *  (`since`, ms) that nothing has acted on — asked once, when the app's file
+ *  watcher is up.
+ *
+ *  A save has a watcher event only once the watcher exists, and the watcher
+ *  starts with the server: after the module graph is loaded, the lock taken
+ *  and the store opened. A cell file saved in that stretch — the lock already
+ *  names the app and its port, so a tool that waits for the app to "be there"
+ *  saves exactly then — was loaded old and never restarted for: the dev loop
+ *  dropped a save without a word.
+ *
+ *  …unless the previous start found the same file holding the same bytes:
+ *  then it is the app's own start that writes it (codegen, a route manifest),
+ *  and restarting for it never ends. A start that writes OTHER bytes each time
+ *  is stopped by the streak: after {@linkcode RESTART_STORM_LIMIT} restarts
+ *  that each came within {@linkcode FAILED_RESTART_WINDOW_MS} of the spawn,
+ *  what is found here is said and not acted on. @internal */
+export function savedWhileStarting(
+  roots: readonly string[],
+  since: number,
+  get: (name: string) => string | undefined = env,
+): string[] {
+  const saved = savedStamps(
+    roots.flatMap((r) => sourcesChangedSince(r, since)),
+  );
+  const [streak, keys = ""] =
+    (get(CHILD_ENV) === "1" ? get(RESTART_SAVED_ENV) ?? "" : "").split(":");
+  const known = new Set(keys.split(","));
+  const fresh = [...saved].filter(([p, s]) => !known.has(savedKey(p, s)))
+    .map(([p]) => p);
+  const [first] = fresh;
+  if (first !== undefined && Number(streak) >= RESTART_STORM_LIMIT) {
+    log.warn(
+      "watch",
+      `${basename(first)}${
+        fresh.length > 1 ? ` and ${fresh.length - 1} more` : ""
+      } changed while the app was starting, as in each of the last ${streak} ` +
+        `starts — the app's own start (or another tool) is rewriting a ` +
+        `source file, so this start is not restarted for it. If the edit ` +
+        `was yours, save the file again.`,
+    );
+    return [];
+  }
+  return fresh;
+}
+
 /** The environment a supervised child is spawned with — pure, so the carry
  *  is a unit test rather than a stopwatch.
  *
- *  `AIO_PORT` is THE port the relaunched app binds. A dev app that named no
- *  port got a free one from the runtime — and the runtime picked a DIFFERENT
- *  free one after every cell edit, so every open tab was orphaned on the old
- *  port while the terminal said "restarting the app" as if nothing moved.
- *  `--port=N` never had the problem (the flag is replayed in argv); an
- *  unnamed port is carried the one way a process with no command line to
- *  hang a flag on can be told its port: the env rung of the port chain
- *  (`envPort()` in paths.ts — the same reader a service unit or a container
- *  uses). A flag or an app-config port still wins over it or equals it, so
- *  the carry can never move an app that named its port. */
+ *  `AIO_DEV_RESTART_PORT` is THE port the relaunched app binds. A dev app
+ *  that named no port got a free one from the runtime — and the runtime
+ *  picked a DIFFERENT free one after every cell edit, so every open tab was
+ *  orphaned on the old port while the terminal said "restarting the app" as
+ *  if nothing moved. `--port=N` never had the problem (the flag is replayed
+ *  in argv); an unnamed port is carried in the environment, the one way a
+ *  process with no command line to hang a flag on can be told its port, and
+ *  read on the env rung of the port chain ({@linkcode carriedPort}). A flag
+ *  or an app-config port still wins over it or equals it, so the carry can
+ *  never move an app that named its port. */
 export function supervisorEnv(
   supervisorPid: number,
   port: number | undefined,
+  saved?: string,
 ): Record<string, string> {
   return {
     [CHILD_ENV]: "1",
+    ...(saved !== undefined ? { [RESTART_SAVED_ENV]: saved } : {}),
     // Die with the supervisor. Without this the child is a plain orphan:
     // close the terminal (or `kill -9` the supervisor) and the supervisor
     // goes while the CHILD survives — holding the port and the
@@ -216,8 +317,33 @@ export function supervisorEnv(
     // (electron-spawn.ts sets it for the same reason) — the supervised
     // child is the case it was written for.
     AIO_PARENT_PID: String(supervisorPid),
-    ...(port !== undefined && port > 0 ? { AIO_PORT: String(port) } : {}),
+    ...(port !== undefined && port > 0
+      ? { [RESTART_PORT_ENV]: String(port) }
+      : {}),
   };
+}
+
+/** What to say beside the first "restarting the app" of a dev session whose
+ *  command line reads as a script's — `--cdp` or `--client=server-only` —
+ *  and `""` otherwise.
+ *
+ *  A save restarts every running dev app, which ends a long scripted run (a UI
+ *  tour, a screenshot pass). `--no-watch` is the switch for that, and a field
+ *  report worked around its absence for weeks with a house rule ("no source
+ *  edits while a run is up") because nothing named it where the restart
+ *  happens. Said once: a relaunched app (`relaunched`) has said it already. */
+export function scriptedRunHint(
+  args: readonly string[],
+  relaunched: boolean,
+): string {
+  if (relaunched) return "";
+  const scripted = args.some((a) =>
+    a === "--cdp" || a.startsWith("--cdp=") || a === "--client=server-only"
+  );
+  return scripted
+    ? "a save restarts this app — if a script is driving it, start it with " +
+      "--no-watch and the run is not cut short"
+    : "";
 }
 
 /** Restart the app process because `path` changed. Tears the app down first
@@ -271,6 +397,8 @@ export async function restartForCellChange(
     return;
   }
   log.info("watch", `${what} changed (${file}) — restarting the app`);
+  const hint = scriptedRunHint(Deno.args, isSupervisedChild());
+  if (hint) log.info("watch", hint);
   // Read BEFORE the shutdown releases the listener: afterwards there is no
   // bound port to read.
   const port = carry.port?.();
@@ -460,11 +588,27 @@ async function superviseForever(
   }
   let rapidStreak = 0;
   let saidStorm = false;
+  /** Failed restarts whose wait for a save ended at once, back to back. */
+  let failStreak = 0;
+  /** The source files the last failed start found saved since its spawn. */
+  let savedLast = new Map<string, string>();
+  /** Restarts that each came soon after the spawn, back to back — and when
+   *  the app before this child loaded its modules: what was saved since is
+   *  what the child is told of (see `savedWhileStarting`). */
+  let soonStreak = 0;
+  let lastStart = performance.timeOrigin;
+  const entryDir = Deno.mainModule.startsWith("file:")
+    ? dirname(fromFileUrl(Deno.mainModule))
+    : null;
   while (true) {
+    const saved = entryDir === null
+      ? new Map<string, string>()
+      : savedStamps(sourcesChangedSince(entryDir, lastStart));
     const spawnedAt = Date.now();
+    lastStart = spawnedAt;
     const child = new Deno.Command(Deno.execPath(), {
       args,
-      env: supervisorEnv(Deno.pid, port),
+      env: supervisorEnv(Deno.pid, port, savedCarry(soonStreak, saved)),
       stdin: "inherit",
       stdout: "inherit",
       stderr: "inherit",
@@ -481,7 +625,13 @@ async function superviseForever(
     // boot reports ("did not shut down cleanly"). Removing it by pid made
     // that end silent.
     if (self && placed !== null) removeLockIf(slotOf(self), placed);
+    soonStreak = status.code === RESTART_EXIT_CODE &&
+        Date.now() - spawnedAt < FAILED_RESTART_WINDOW_MS
+      ? soonStreak + 1
+      : 0;
     if (status.code === RESTART_EXIT_CODE) {
+      failStreak = 0;
+      savedLast = new Map();
       // Same `spawnedAt` guard the crash branch below uses. A restart that
       // arrives within a second of the spawn was not asked for by a human.
       rapidStreak = Date.now() - spawnedAt < RESTART_STORM_MS
@@ -507,7 +657,6 @@ async function superviseForever(
       continue;
     }
     rapidStreak = 0;
-    saidStorm = false;
     // A signal ended it: `am kill`, a `kill -9`, Ctrl-C reaching the child
     // directly. Someone wanted it dead; the supervisor goes too. A clean 0 is
     // `am stop` or the window closing — same answer. A crash after it had
@@ -551,9 +700,51 @@ async function superviseForever(
     }
     // …and a rival that shows up WHILE waiting ends the wait too: the lock
     // slot is polled beside the watcher, never only after the next save.
-    const late = await waitForSourceChange(() => rivalOf(self, 0)?.pid ?? null);
+    //
+    // The mark is the child's SPAWN, not its exit: a fix saved while the
+    // failing child was still booting was read by nobody — the child had
+    // loaded the broken file, and its own watcher never started — and a mark
+    // at the exit waited for a save that had already been made.
+    //
+    // …unless the previous failed start found the same files saved: then it
+    // is the app's own start that writes them (codegen, a route manifest),
+    // each time it runs, and relaunching on them never ends. A fix is a file
+    // that start did not write, or other bytes in one it did; the same bytes
+    // in one it did write are waited for as a watcher event, as every save
+    // was before this look existed.
+    const waitFrom = Date.now();
+    const late = await waitForSourceChange(
+      () => rivalOf(self, 0)?.pid ?? null,
+      (dir) => {
+        const saved = savedStamps(sourcesChangedSince(dir, spawnedAt));
+        const fresh = savedFresh(savedLast, saved);
+        savedLast = saved;
+        return fresh;
+      },
+      // An event for a file the failed start wrote itself, holding what the
+      // look above found in it, is that same write heard late — not a save.
+      (paths) => eventIsNews(savedLast, paths),
+    );
     dropWaiting();
     if (late !== null) stepAside(late);
+    // A start that writes a NEW source file each time it runs is never the
+    // same set twice: each failed start would relaunch at once, without end.
+    // Same guard, same numbers, as a storm of asked-for restarts above.
+    failStreak = Date.now() - waitFrom < RESTART_STORM_MS ? failStreak + 1 : 0;
+    if (failStreak === 0) saidStorm = false;
+    const cool = restartThrottleDelay(failStreak);
+    if (cool > 0 && !saidStorm) {
+      saidStorm = true;
+      log.warn(
+        "watch",
+        `${failStreak} failed starts in a row, each with a source file saved ` +
+          `while it was starting — the app's own start (or another tool) ` +
+          `is rewriting a source file. Throttling to one start every ${
+            RESTART_STORM_COOLDOWN_MS / 1000
+          }s until a start succeeds.`,
+      );
+    }
+    if (cool > 0) await new Promise((r) => setTimeout(r, cool));
     // While we waited, `am start` (or a second `deno task dev`) may have
     // brought the app up on its own. Relaunching would only be refused with
     // "Already running" — say which process owns it and step aside.
@@ -576,6 +767,12 @@ async function superviseForever(
  *  this runs again). */
 async function waitForSourceChange(
   rival: () => number | null = () => null,
+  /** Was a source file under `dir` saved before this wait began? Asked once,
+   *  with the watcher already up. */
+  savedBefore: (dir: string) => boolean = () => false,
+  /** Is an event for these source files a save — or the failed start's own
+   *  write, heard after the fact ({@linkcode eventIsNews})? */
+  isNews: (paths: string[]) => boolean = () => true,
 ): Promise<number | null> {
   let dir: string;
   try {
@@ -601,12 +798,18 @@ async function waitForSourceChange(
   }, RIVAL_POLL_MS);
   log.info("watch", `waiting for a change under ${dir}`);
   try {
+    // A save made BEFORE this watcher existed has no event — while the app
+    // that failed was still starting, or after it died: "fix it and save"
+    // was on screen ~20 ms earlier, and a tool that acted on it at once was
+    // waited for forever (measured, macOS). Looked for once, now that later
+    // saves do have one.
+    if (savedBefore(dir)) watcher.close();
     for await (const ev of watcher) {
-      const hit = ev.paths.some((path) => {
+      const sources = ev.paths.filter((path) => {
         const dot = path.lastIndexOf(".");
         return dot >= 0 && SOURCE_EXT.has(path.slice(dot));
       });
-      if (hit) break;
+      if (sources.length > 0 && isNews(sources)) break;
     }
   } catch {
     /* watcher died — relaunch anyway */
@@ -619,6 +822,125 @@ async function waitForSourceChange(
   if (found !== null) return found;
   await new Promise((r) => setTimeout(r, 150));
   return null;
+}
+
+/** path → what the file holds (length + FNV-1a); a file that cannot be read
+ *  holds "". @internal */
+export function savedStamps(paths: readonly string[]): Map<string, string> {
+  return new Map(paths.map((p) => {
+    try {
+      const b = Deno.readFileSync(p);
+      let h = 0x811c9dc5;
+      for (const x of b) h = Math.imul(h ^ x, 0x01000193);
+      return [p, `${b.length}:${h >>> 0}`];
+    } catch {
+      return [p, ""]; // aio-ok: removed since the listing — not a fix
+    }
+  }));
+}
+
+/** Did this failed start find a save the last one did not — a new file, or
+ *  other bytes in the same one? Two failing starts with the same file saved
+ *  during each (a first try, then the fix) named no new PATH, so the fix read
+ *  as the app's own start rewriting it and waited for one more save. A start
+ *  that rewrites the same bytes still waits. Pure. @internal */
+export function savedFresh(
+  last: ReadonlyMap<string, string>,
+  now: ReadonlyMap<string, string>,
+): boolean {
+  return [...now].some(([p, stamp]) => last.get(p) !== stamp);
+}
+
+/** Is a watcher event for `paths` news to a supervisor whose last look held
+ *  `last` — or the failed start's own write, heard late? macOS delivers the
+ *  events of writes made shortly BEFORE a watch began: a start that wrote its
+ *  generated file and then failed was relaunched by that write's own event,
+ *  again and again until the throttle (measured on macOS 26, 4 runs in 5; in
+ *  1.0.19 too). The same bytes the look already found in that file are not a
+ *  save; other bytes, a file the look did not hold, or one that is gone, are.
+ *  Paths are compared as the files they are (`/tmp` is `/private/tmp` in an
+ *  event there). @internal */
+export function eventIsNews(
+  last: ReadonlyMap<string, string>,
+  paths: readonly string[],
+): boolean {
+  const real = (p: string): string => {
+    try {
+      return Deno.realPathSync(p);
+    } catch {
+      return p; // aio-ok: gone — compared under the name it had
+    }
+  };
+  const byFile = (m: ReadonlyMap<string, string>) =>
+    new Map([...m].map(([p, stamp]) => [real(p), stamp]));
+  return savedFresh(byFile(last), byFile(savedStamps(paths)));
+}
+
+/** The source files under `dir` saved at or after `since` (ms). Dot-dirs and
+ *  `node_modules` are not looked into, as the app's own watcher does not; an
+ *  unreadable entry is not a change.
+ *
+ *  A filesystem that keeps whole seconds (ext3, HFS+, FAT at two) reports a
+ *  save made in the spawn's own second as OLDER than the spawn: there, a
+ *  stamp is compared against the start of `since`'s second. That counts a
+ *  save from just before the spawn too — which costs one start, not a loop
+ *  (the caller relaunches only on what the last look did not hold).
+ *
+ *  WHERE is decided by the tree, never by the one stamp: a file whose
+ *  milliseconds happen to be 000 (one in a thousand) on a filesystem that
+ *  keeps them was read as a coarse stamp, so an app file written just before
+ *  the start read as saved during it and the dev app restarted itself once
+ *  for nothing ({@linkcode wholeSeconds}).
+ *  @internal */
+export function sourcesChangedSince(dir: string, since: number): string[] {
+  const sources: [path: string, at: number][] = [];
+  const stamps: number[] = [];
+  _walkSources(dir, sources, stamps);
+  const mark = wholeSeconds(stamps) ? since - since % 1000 : since;
+  return sources.filter(([, at]) => at >= mark).map(([path]) => path);
+}
+
+/** Does this filesystem keep whole seconds only? Judged by every stamp the
+ *  walk met — files of any kind and the directories themselves, written and
+ *  born: one of them with milliseconds is a filesystem that keeps them. Pure.
+ *  @internal */
+export function wholeSeconds(stamps: readonly number[]): boolean {
+  return stamps.length > 0 && stamps.every((at) => at % 1000 === 0);
+}
+
+function _walkSources(
+  dir: string,
+  sources: [string, number][],
+  stamps: number[],
+): void {
+  const seen = (info: Deno.FileInfo): number => {
+    const at = info.mtime?.getTime() ?? 0;
+    if (info.mtime) stamps.push(at);
+    if (info.birthtime) stamps.push(info.birthtime.getTime());
+    return at;
+  };
+  let entries: Deno.DirEntry[];
+  try {
+    seen(Deno.statSync(dir));
+    entries = [...Deno.readDirSync(dir)];
+  } catch {
+    return; // aio-ok: gone or unreadable — the watcher is what is left
+  }
+  for (const e of entries) {
+    if (e.name.startsWith(".") || e.name === "node_modules") continue;
+    const path = join(dir, e.name);
+    if (e.isDirectory) {
+      _walkSources(path, sources, stamps);
+      continue;
+    }
+    try {
+      const at = seen(Deno.statSync(path));
+      const dot = e.name.lastIndexOf(".");
+      if (dot >= 0 && SOURCE_EXT.has(e.name.slice(dot))) {
+        sources.push([path, at]);
+      }
+    } catch { /* aio-ok: removed between the listing and the look */ }
+  }
 }
 
 /** How often a supervisor waiting for a save checks for a rival start. */

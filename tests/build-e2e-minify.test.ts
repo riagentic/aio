@@ -15,6 +15,7 @@ import {
   task,
 } from "./e2e-app-harness.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { stopChild } from "./stop-child.ts";
 
 const GATE = Deno.env.get("AIO_BUILD_E2E") === "1";
 const COMMENT = "SERVER-DESIGN-NOTE-7731";
@@ -113,7 +114,11 @@ blocking("sum", (n) => {
       );
 
       // Kept aside: the minified build replaces it in place.
-      const plainBin = join(sandbox, "plain-bin");
+      // `.exe` there: Windows runs no file without it ("File not found").
+      const plainBin = join(
+        sandbox,
+        Deno.build.os === "windows" ? "plain-bin.exe" : "plain-bin",
+      );
       await Deno.copyFile(plain.path, plainBin);
       await Deno.chmod(plainBin, 0o755);
 
@@ -155,6 +160,14 @@ Deno.exit(0);
         HOME: join(sandbox, "home"),
         AIO_APPS_DIR: join(sandbox, "apps"),
         PATH: Deno.env.get("PATH") ?? "",
+        // Windows: the home is USERPROFILE, and without SystemRoot no socket
+        // loads ("os error 10106") — the binary never serves.
+        ...(Deno.build.os === "windows"
+          ? {
+            USERPROFILE: join(sandbox, "home"),
+            SystemRoot: Deno.env.get("SystemRoot") ?? "",
+          }
+          : {}),
       });
       const run = async (
         calls: number,
@@ -196,7 +209,9 @@ Deno.exit(0);
           return text.split("\n").find((l) => l.startsWith("COUNT ")) ??
             `no COUNT: ${text}${new TextDecoder().decode(p.stderr)}`;
         } finally {
-          child.kill("SIGTERM");
+          // Asked to stop the way each OS can ask (and a child that already
+          // exited is not an error of its own: what it printed is, below).
+          await stopChild(child, { label: "the minified binary", quiet: true });
           const o = await out;
           const err = new TextDecoder().decode(o.stderr);
           assert(!/Module not found|ERROR/.test(err), err);

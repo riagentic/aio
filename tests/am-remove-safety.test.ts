@@ -7,6 +7,7 @@
 //
 // Every case here works inside a temp AIO_INSTALL_ROOT and AIO_APPS_DIR, so
 // what a failing assertion costs is a temp directory.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join, resolve } from "@std/path";
 import {
@@ -433,6 +434,15 @@ Deno.test("am remove: insideParent refuses the parent itself, not just outside i
   assertEquals(insideParent("/a/b/c/../d", "/a/b"), true);
 });
 
+// Windows has a fourth: the directory a one-click `.exe` installs itself into
+// (`%LOCALAPPDATA%\\aio-sfx\\<name>`, see `installFootprint`). It is built
+// with the same `join()`, so a traversing name escapes it the same way.
+const ESCAPING = ["the app and its versions", "PATH symlink"];
+const WINDOWS_ONLY = Deno.build.os === "windows"
+  ? ["the one-click install"]
+  : [];
+const PATHS = 3 + WINDOWS_ONLY.length;
+
 Deno.test("am remove: every path a traversing name produces is refused by containment", async () => {
   // The exact resolutions measured during the incident:
   //   installedAppPaths("..").binLink     → ~/.local
@@ -448,7 +458,7 @@ Deno.test("am remove: every path a traversing name produces is refused by contai
       // suffix turns `..` into a file literally named `...desktop` INSIDE
       // applications/, which is harmless and correctly accepted — the guard
       // must not be so blunt that it refuses real paths.)
-      for (const kind of ["the app and its versions", "PATH symlink"]) {
+      for (const kind of [...ESCAPING, ...WINDOWS_ONLY]) {
         const f = fp.find((x) => x.kind === kind)!;
         assertEquals(
           insideParent(f.path, f.parent),
@@ -458,11 +468,11 @@ Deno.test("am remove: every path a traversing name produces is refused by contai
       }
       // Whatever containment accepts is a proper descendant by definition —
       // what matters is that the count is non-vacuous: three paths went in.
-      assertEquals(fp.length, 3, "an install occupies three paths");
+      assertEquals(fp.length, PATHS, "an install occupies three paths");
     }
     // …and an ordinary name is accepted by all three, or the guard is useless.
     const ok = await installedFootprint("notes");
-    assertEquals(ok.length, 3, "an install occupies three paths");
+    assertEquals(ok.length, PATHS, "an install occupies three paths");
     for (const f of ok) {
       assertEquals(
         insideParent(f.path, f.parent),

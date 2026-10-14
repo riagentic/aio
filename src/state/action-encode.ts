@@ -32,7 +32,9 @@ import {
   formatLossy,
   type LossyBudget,
   type LossyConversion,
+  wirePayload,
 } from "../protocol/wire-value.ts";
+import { _said } from "../protocol/said-once.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { isDevMode } from "./dev-flag.ts";
 
@@ -56,13 +58,16 @@ const WARN_MAX = 500;
 export function _resetActionWarnings(): void {
   _warned.clear();
   _checked.clear();
+  // …and what a production client has said once (protocol/said-once.ts): the
+  // same memory, kept where `ui` can reach it.
+  _said.clear();
 }
 
 /** Prod checks an action type's first calls only. The walk parses the frame
  *  again — 1 ms on a 190 KB payload, on the dispatch path of every call — and
  *  a method that sent clean arguments sixteen times is not where the loss is.
  *  Dev checks every call. */
-const PROD_CHECKS = 16;
+export const PROD_CHECKS = 16;
 const _checked = new Map<string, number>();
 
 /** Encode an action frame, refusing loudly what the wire cannot carry.
@@ -72,10 +77,27 @@ const _checked = new Map<string, number>();
  *  and a queue holding one is a queue that stops at it on every reconnect. */
 export function encodeAction(
   action: { type: string; payload?: unknown },
+  /** `wire.omitTrailingUndefined` for THIS frame, when the caller holds the
+   *  answer itself (a CLI client: per connection, not per process). */
+  omit?: boolean,
 ): string {
-  const json = _encode(action);
-  _warnLossy(action, json);
+  const sent = wireAction(action, omit);
+  const json = _encode(sent);
+  _warnLossy(sent, json);
   return json;
+}
+
+/** The action as it goes on the wire: `wire.omitTrailingUndefined` applied
+ *  (protocol/wire-value.ts's `wirePayload`, the one decision). The same
+ *  object back when nothing changes. Applied where a FRAME is built — a
+ *  client queue holds the action as it was called, so an action that waited
+ *  for a connection is shaped by the config the page has when it leaves. */
+export function wireAction<A extends { type: string; payload?: unknown }>(
+  action: A,
+  omit?: boolean,
+): A {
+  const payload = wirePayload(action.payload, omit);
+  return payload === action.payload ? action : { ...action, payload };
 }
 
 function _encode(action: { type: string; payload?: unknown }): string {
@@ -147,8 +169,12 @@ export function wireLossCounts(
  *  socket). Throws like {@linkcode encodeAction} for a BigInt or a cycle. */
 export function actionWireTrip(
   action: { type: string; payload?: unknown },
-  json: string = _encode(action),
+  json?: string,
 ): ActionWireTrip {
+  // The same decision the door makes, so the harness's verdict follows the
+  // flag: with it on, a trailing `undefined` is not a loss — it is not sent.
+  action = wireAction(action);
+  json ??= _encode(action);
   const payload = (dec(json)?.d as { payload?: unknown } | undefined)?.payload;
   const lossy: LossyConversion[] = [];
   const budget: LossyBudget = { n: 0 };
@@ -173,6 +199,9 @@ export function actionWireTrip(
  *  so a `Date` that becomes a string means the optimistic view and the
  *  replayed one disagree, and only the second one survives a reload. */
 export function vetWirePayload(what: string, payload: unknown): void {
+  // Idempotent: the browser's sync door already applied it to the payload the
+  // op is built from; here it keeps the VERDICT the same for any other caller.
+  payload = wirePayload(payload);
   let json: string;
   try {
     json = JSON.stringify({ payload });

@@ -53,7 +53,7 @@ Pass = all three; record any silent failure verbatim (that's a P1).
 ```powershell
 irm https://raw.githubusercontent.com/riagentic/aio/main/install.ps1 | iex
 am create win-check; cd win-check
-deno task dev        # browser opens, counter works
+deno task dev --open # --open: the browser opens (plain `dev` prints the URL); counter works
 deno task compile    # binary runs
 deno task test       # starter test green
 ```
@@ -77,6 +77,19 @@ adb install app-release.apk        # on the REAL device (not emulator)
 
 ## Results ledger
 
-| date                                                                         | check | machine/OS | result | notes |
-| ---------------------------------------------------------------------------- | ----- | ---------- | ------ | ----- |
-| _(record each run here — a target claims tier-1 truthfully only with a row)_ |       |            |        |       |
+A row is a run somebody did, on the machine named. None of these is a recorded
+gate — `deno task check:proof` prints the recorded ones (`proof-matrix.json`).
+
+| date       | check                                                  | machine/OS                          | result                                                          | notes                                       |
+| ---------- | ------------------------------------------------------ | ----------------------------------- | --------------------------------------------------------------- | ------------------------------------------- |
+| 2026-10-07 | the full test suite, run natively                      | Linux x64 workstation               | ran; what it found was fixed before the 1.0.19-beta tag         | every release                               |
+| 2026-10-07 | the full test suite, run natively                      | Windows 11 x64, a KVM guest         | ran; what it found was fixed before the tag (CHANGELOG, 1.0.19) | by hand, over ssh                           |
+| 2026-10-07 | the full test suite, run natively                      | Windows 11 x64, a real laptop       | ran; what it found was fixed before the tag                     | by hand, over ssh                           |
+| 2026-10-07 | the full test suite, run natively                      | macOS 26, Apple silicon, a real Mac | ran; what it found was fixed before the tag                     | by hand, over ssh                           |
+| 2026-10-07 | a shipped app: the Windows `.zip` and one-click `.exe` | Windows 11 x64, a real laptop       | the packaged app ran                                            | started from a shell, not by a double-click |
+
+**Not run for 1.0.19-beta**, so nothing in these docs may claim it: sections 2–5
+above as written (the two-machine check, the one-line installers on a clean
+Windows or macOS, a real Android device); a double-click on a real desktop
+(SmartScreen, Gatekeeper, the firewall question); opening a `.dmg` on macOS; an
+Intel Mac; the Windows `.exe` under Wine (`deno task test:wine`).

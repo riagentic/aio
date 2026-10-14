@@ -27,16 +27,28 @@ import { basename, join } from "@std/path";
 import {
   assertServesApp,
   buildFlags,
+  childEnv,
   freePort,
   isPlacedBinary,
   kill,
   makeApp,
   placedBinary,
+  REPO_ROOT,
   spawn,
   task,
   waitForHttp,
 } from "./e2e-app-harness.ts";
 import { versionStamp } from "../src/build/build-bundle.ts";
+import { pngFromRgba } from "../src/build/app-icon.ts";
+import {
+  boxDownscale,
+  decodePng,
+  icoFromLargePng,
+} from "../src/build/png-scale.ts";
+import { icoImages, peIcon, peIconMismatch } from "../src/build/pe-icon.ts";
+import { readSfxTrailerOfFile } from "../src/build/sfx-trailer.ts";
+import { UntarStream } from "@std/tar";
+import zlib from "node:zlib";
 import { VERSION } from "../src/server/aio-cli.ts";
 import { MOUNT_LINE } from "../src/electron/electron-renderer-log.ts";
 import { testDisplayEnv } from "../src/testing/test-display.ts";
@@ -46,6 +58,7 @@ import {
   scanArtifactForBuildTools,
   scanArtifactForForeignPackages,
 } from "../src/build/artifact-audit.ts";
+import { isTrimmedFile } from "../src/build/build-compile.ts";
 
 const GATE = Deno.env.get("AIO_BUILD_E2E") === "1";
 const ELECTRON = Deno.env.get("AIO_BUILD_ELECTRON") === "1";
@@ -896,6 +909,101 @@ Deno.test({
 // rather than execution because Electron needs a display — extraction still
 // catches the failure that shipped (assets missing from the image).
 
+// The download a Windows user double-clicks showed Windows' blank default
+// icon, and the app inside it a generated letter — for an app that ships the
+// 1024 px icon.png every other target uses. Both now wear that picture.
+Deno.test({
+  name:
+    "artifact: electron for Windows — a 1024 px icon.png is the icon of the " +
+    "one-click exe and of the app's exe (AIO_BUILD_ELECTRON=1)",
+  ignore: !GATE || !ELECTRON,
+  fn: async () => {
+    const dir = await makeApp("counter", "build-e2e-electron-win-icon-");
+    try {
+      // Four quadrants — red, green, blue, transparent — so a wrong picture,
+      // a flipped one and a lost alpha channel each read differently.
+      const N = 1024;
+      const px = new Uint8Array(N * N * 4);
+      const colours = [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255]];
+      for (let y = 0; y < N; y++) {
+        for (let x = 0; x < N; x++) {
+          const c = colours[(x < N / 2 ? 0 : 1) + (y < N / 2 ? 0 : 2)];
+          if (c) px.set(c, (y * N + x) * 4);
+        }
+      }
+      const iconPng = await pngFromRgba(px, N);
+      await Deno.writeFile(join(dir, "src", "icon.png"), iconPng);
+      const want = await icoFromLargePng(iconPng);
+      assert(typeof want !== "string", `the icon was not cut: ${want}`);
+      const want256 = boxDownscale(px, N, N, 256);
+
+      const r = await task(
+        dir,
+        "build",
+        "--targets=electron",
+        "--platforms=windows",
+      );
+      assertEquals(r.code, 0, `windows build failed:\n${r.out}\n${r.err}`);
+      const said = r.out + r.err;
+      assert(!said.includes("monogram"), `the icon.png was refused:\n${said}`);
+      assert(!said.includes("has no icon of its own"), said);
+
+      const dist = join(dir, "dist");
+      const exeName = [...Deno.readDirSync(dist)].map((e) => e.name)
+        .find((n) => n.endsWith(".exe"));
+      assert(exeName, "no one-click .exe in dist/");
+      const exe = join(dist, exeName);
+      const trailer = await readSfxTrailerOfFile(exe);
+      assert(trailer, "the one-click exe has no SFX trailer");
+      const bytes = await Deno.readFile(exe);
+
+      // The one-click exe: exactly one icon group, holding the cut icon.
+      assertEquals(
+        peIconMismatch(bytes.subarray(0, trailer.payloadOffset), want),
+        null,
+      );
+
+      // The app's exe inside it. `deno compile` re-cuts the .ico into its own
+      // sizes, so its 256 px image is compared as pixels.
+      assertEquals(trailer.header.format, "tar.zstd");
+      let inner: Uint8Array | null = null;
+      for await (
+        const entry of ReadableStream.from([
+          new Uint8Array(zlib.zstdDecompressSync(
+            bytes.subarray(
+              trailer.payloadOffset,
+              trailer.payloadOffset + trailer.payloadLength,
+            ),
+          )),
+        ]).pipeThrough(new UntarStream())
+      ) {
+        if (entry.path === `${trailer.header.binary}.exe` && entry.readable) {
+          inner = new Uint8Array(
+            await new Response(entry.readable).arrayBuffer(),
+          );
+        } else await entry.readable?.cancel();
+      }
+      assert(inner, "the payload holds no app exe");
+      const innerIcon = peIcon(inner);
+      assertEquals(innerIcon?.groups, 1, "the app's exe: one icon group");
+      const images = icoImages(innerIcon!.ico!);
+      assert(typeof images !== "string", String(images));
+      const big = images.find((i) => i.entry[0] === 0);
+      assert(big, "the app's exe has no 256 px icon image");
+      const got = await decodePng(big.data);
+      assert(typeof got !== "string", `the app's 256 px image: ${got}`);
+      assertEquals([got.w, got.h], [256, 256]);
+      let worst = 0;
+      for (let i = 0; i < want256.length; i++) {
+        worst = Math.max(worst, Math.abs(got.rgba[i]! - want256[i]!));
+      }
+      assert(worst <= 2, `the app's exe icon is off by ${worst} of 255`);
+    } finally {
+      await Deno.remove(dir, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
 Deno.test({
   name: "artifact: `electron` packages a complete AppImage, and its window " +
     "mounts the App over aio:// (AIO_BUILD_ELECTRON=1)",
@@ -1048,7 +1156,7 @@ async function runAppImageAndAssertMounted(
   const proc = new Deno.Command(cmd, {
     args,
     cwd: runCwd,
-    env: {
+    env: childEnv({
       ...display.env,
       AIO_APPS_DIR: home,
       AIO_PARENT_PID: String(Deno.pid),
@@ -1056,7 +1164,10 @@ async function runAppImageAndAssertMounted(
       APPIMAGE_EXTRACT_AND_RUN: "1",
       // Keep the sandbox helper question out of this test's verdict.
       TMPDIR: home,
-    },
+      // The window's profile lands under the config home: keep it out of the
+      // developer's real ~/.config.
+      XDG_CONFIG_HOME: join(home, ".config"),
+    }),
     stdout: "piped",
     stderr: "piped",
   }).spawn();
@@ -1469,9 +1580,20 @@ Deno.test({
       );
       const cfgPath = join(dir, "deno.json");
       const cfg = JSON.parse(await Deno.readTextFile(cfgPath));
+      const aioHappyDom = String(
+        JSON.parse(await Deno.readTextFile(join(REPO_ROOT, "deno.json")))
+          .imports["happy-dom"],
+      ).split("@").at(-1)!;
       cfg.imports = {
         ...(cfg.imports ?? {}),
         "@node-rs/crc32": "npm:@node-rs/crc32@1.10.6",
+        // NOT the version aio pins for itself: `deno compile` installs the
+        // linked framework's own pin beside this one, mid-compile — after
+        // what stays out of the binary was decided. (With `^20`, as scaffolded,
+        // that was true only on days npm had a newer one than the pin.)
+        "happy-dom": `npm:happy-dom@${
+          aioHappyDom === "20.14.6" ? "20.14.5" : "20.14.6"
+        }`,
       };
       await Deno.writeTextFile(cfgPath, JSON.stringify(cfg, null, 2));
       // Loaded and CALLED at start: a binary without its native never serves.
@@ -1524,9 +1646,21 @@ Deno.test({
           assertEquals(noise.includes(said), false, `${nth} build:\n${noise}`);
         }
         const files = await embeddedFilesOf(bin);
+        // What the trim holds aside for the compile is not in the FINISHED
+        // binary either: the rules were asserted on disk during the window,
+        // never on the artifact a user downloads.
+        assertEquals(
+          files.filter((f) =>
+            f.includes("node_modules/") &&
+            isTrimmedFile(f.slice(f.lastIndexOf("/") + 1))
+          ).slice(0, 10),
+          [],
+          `the ${nth} ${platform} build embeds source maps or package docs`,
+        );
         return {
           bin,
           files,
+          out: noise,
           version: manifest.version,
           natives: files.filter((f) => f.endsWith(".node")),
         };
@@ -1581,7 +1715,16 @@ Deno.test({
         first.natives[0]!,
         foreign === "windows" ? "win32-x64" : "linux-x64-gnu",
       );
+      // The first compile installed aio's own happy-dom late: said, and
+      // built again — so the first binary carries none of it.
+      assertStringIncludes(first.out, "Compiling once more");
+      assertEquals(
+        first.files.filter((f) => f.includes("happy-dom")),
+        [],
+        "the first build embeds the dev-only package the compile installed",
+      );
       const second = await built(foreign, "second");
+      assertEquals(second.out.includes("Compiling once more"), false);
       assertEquals(second.files, first.files);
       await clean("second");
       assertMatch(second.version, /^\d+\.\d+\.\d+$/, "publishable");

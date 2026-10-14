@@ -5,6 +5,7 @@
 
 import { walk } from "@std/fs/walk";
 import { fromFileUrl } from "@std/path";
+import { VALID_BUILD_KEYS } from "../src/server/config.ts";
 
 const DOCS_DIR = fromFileUrl(new URL("../docs/", import.meta.url));
 // The PRERELEASE SUFFIX is part of the version, and leaving it out meant this
@@ -150,6 +151,16 @@ async function main(): Promise<void> {
   );
   if (schedIssues.length) fatal.push(...schedIssues);
 
+  const vacuumIssues = vacuumIntoIssues(docs);
+  console.log(
+    `VACUUM INTO in docs examples: ${
+      vacuumIssues.length
+        ? `${vacuumIssues.length} teach the raw statement`
+        : "none (db.snapshot)"
+    }`,
+  );
+  if (vacuumIssues.length) fatal.push(...vacuumIssues);
+
   // A doc that names the test guaranteeing its claim is making a promise on
   // that test's behalf. The promise must at least still be reachable.
   const claimIssues = await checkGateClaims(docs);
@@ -252,6 +263,16 @@ async function main(): Promise<void> {
     }`,
   );
 
+  const buildKeyIss = buildKeyTableIssues(
+    await Deno.readTextFile(new URL(`../${BUILD_KEYS_PAGE}`, import.meta.url)),
+    VALID_BUILD_KEYS,
+  );
+  console.log(
+    `Build keys (${BUILD_KEYS_PAGE} table vs VALID_BUILD_KEYS): ${
+      buildKeyIss.length ? `${buildKeyIss.length} differ` : "the same list"
+    }`,
+  );
+
   // Version-string drift is ADVISORY: docs legitimately reference historical
   // versions (migration notes) and example CLI output, so it warns but never
   // gates. Error-code coverage is EXACT, so it is the hard gate.
@@ -333,13 +354,21 @@ async function main(): Promise<void> {
         `fix — the script exits on an unknown flag):\n${flagIss.join("\n")}`,
     );
   }
+  if (buildKeyIss.length) {
+    fatal.push(
+      `\nThe \`build\` key table and the keys the build reads differ (must ` +
+        `fix — the page says a key outside the table does nothing):\n${
+          buildKeyIss.join("\n")
+        }`,
+    );
+  }
   if (fatal.length) {
     console.log(fatal.join("\n"));
     Deno.exit(1);
   }
   console.log(
     "\n✓ Docs check green: error codes, doc refs, vocabulary, " +
-      "commands, symbols, anchors, routes, script flags.",
+      "commands, symbols, anchors, routes, script flags, build keys.",
   );
 }
 
@@ -670,6 +699,48 @@ function checkScheduleShapes(docs: DocFile[]): string[] {
       if (fenced) block.push(line);
     });
     if (fenced) flush(); // unterminated fence — check what we saw
+  }
+  return out;
+}
+
+/** A backup the docs TEACH as a raw `VACUUM INTO`.
+ *
+ *  `db.snapshot(path)` is that statement done safely: the raw one fails when
+ *  the target exists (so a scheduled backup works once) and, on macOS, when
+ *  the folder is reached through a symlink — every temp dir there. A field
+ *  report copied it from docs/persistence/sqlite.md and lost its backups on a
+ *  Mac. Fenced CODE only: a comment that names the statement (`// VACUUM INTO
+ *  — safe while live`) is the documentation working. A block that really
+ *  needs the raw statement says why in a comment naming `snapshot`. */
+export function vacuumIntoIssues(docs: DocFile[]): string[] {
+  const COMMENT = /(?:\/\/|--|#).*$/;
+  const out: string[] = [];
+  for (const doc of docs) {
+    let block: { line: string; at: number }[] | null = null;
+    const flush = (lines: { line: string; at: number }[]) => {
+      if (
+        lines.some((l) => /snapshot/i.test(COMMENT.exec(l.line)?.[0] ?? ""))
+      ) return;
+      for (const l of lines) {
+        if (/\bVACUUM\s+INTO\b/i.test(l.line.replace(COMMENT, ""))) {
+          out.push(
+            `  ${doc.rel}:${l.at}  a raw VACUUM INTO — teach ` +
+              `db.snapshot(path): the raw statement fails on an existing ` +
+              `target and, on macOS, through a symlinked folder. (A block ` +
+              `that needs it says why in a comment naming snapshot.)`,
+          );
+        }
+      }
+    };
+    doc.lines.forEach((line, i) => {
+      if (line.trimStart().startsWith("```")) {
+        if (block) flush(block);
+        block = block ? null : [];
+        return;
+      }
+      block?.push({ line, at: i + 1 });
+    });
+    if (block) flush(block); // unterminated fence — check what we saw
   }
   return out;
 }
@@ -1073,14 +1144,61 @@ export function symbolIssues(
 // page's structure; GitHub's slug rule is mechanical, so the promise is
 // checkable. Every page is covered — an upgrade guide's links must land too.
 
-/** GitHub's heading → anchor rule: lowercase, strip everything but letters,
- *  digits, spaces, `-` and `_`, then spaces → `-`. A repeated slug in one
- *  page gets `-1`, `-2`, … (see `headingSlugs`). */
+/** Where the hand-written table of deno.json `build` keys is, and its
+ *  heading. The build refuses to stay silent about a key outside
+ *  `VALID_BUILD_KEYS` ("aio never reads …"), and the page says "a key that is
+ *  not in this table … does nothing" — two lists of one fact. */
+export const BUILD_KEYS_PAGE = "docs/build/targets.md";
+const BUILD_KEYS_HEADING = "### Every `build` key";
+
+/** The two ways that table and the code's key list disagree: a key the build
+ *  reads that the table does not document, and a row for a key the build
+ *  warns about. A missing table is its own issue. Pure. */
+export function buildKeyTableIssues(
+  page: string,
+  keys: ReadonlySet<string>,
+): string[] {
+  const lines = page.split("\n");
+  const at = lines.indexOf(BUILD_KEYS_HEADING);
+  if (at === -1) {
+    return [`  ${BUILD_KEYS_PAGE}: no "${BUILD_KEYS_HEADING}" section`];
+  }
+  const rows = new Map<string, number>();
+  for (let i = at + 1; i < lines.length && !lines[i]!.startsWith("#"); i++) {
+    const m = /^\|\s*`([^`]+)`\s*\|/.exec(lines[i]!);
+    if (m) rows.set(m[1]!, i + 1);
+  }
+  return [
+    ...[...keys].filter((k) => !rows.has(k)).map((k) =>
+      `  ${BUILD_KEYS_PAGE}:${at + 1}  the build reads \`build.${k}\` and ` +
+      `the table has no row for it`
+    ),
+    ...[...rows].filter(([k]) => !keys.has(k)).map(([k, line]) =>
+      `  ${BUILD_KEYS_PAGE}:${line}  the table documents \`${k}\`, which ` +
+      `the build does not read (VALID_BUILD_KEYS, src/server/config.ts)`
+    ),
+  ];
+}
+
+/** GitHub's heading → anchor rule: the heading's TEXT, lowercased, with
+ *  everything but letters, digits, spaces, `-` and `_` removed, then spaces →
+ *  `-`. A repeated slug in one page gets `-1`, `-2`, … (see `headingSlugs`).
+ *
+ *  "Text" is what the heading renders as. An HTML tag written in the heading
+ *  (`<br>`, `<kbd>`) is markup and contributes nothing — but `<Switch>` inside
+ *  a code span is TEXT, and GitHub keeps it: ``### `<Switch>` — a toggle`` is
+ *  `#switch--a-toggle`. This used to drop every `<…>`, in code or not, so the
+ *  gate accepted `#--a-toggle`-style links that are dead on GitHub and
+ *  refused the ones that work. */
 export function slugOf(heading: string): string {
   return heading
     .trim()
+    // Odd parts are code spans: their text is kept as written.
+    .split(/(`+)(.*?)\1/)
+    .map((part, i) => i % 3 === 0 ? part.replace(/<[^>]+>/g, "") : part)
+    .filter((_, i) => i % 3 !== 1)
+    .join("")
     .toLowerCase()
-    .replace(/<[^>]+>/g, "")
     .replace(/[^\p{L}\p{N} _-]/gu, "")
     .replace(/ /g, "-");
 }

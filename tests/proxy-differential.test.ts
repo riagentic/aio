@@ -15,6 +15,7 @@
 // is a one-line repro.
 import { assertEquals } from "@std/assert";
 import { fuzzEnvInt } from "./fuzz-seed.ts";
+import { mulberry32 } from "./sync/properties/_prop.ts";
 import {
   ALIAS_KINDS,
   applyOp,
@@ -46,10 +47,9 @@ const SEED = fuzzEnvInt("FUZZ_SEED", 0x6a11f00d) & 0x7fffffff;
 const ROUNDS = fuzzEnvInt("FUZZ_ROUNDS", 120, 1);
 
 Deno.test("differential: a method body behaves identically sync and async", async () => {
-  let seed = SEED;
-  const rnd = () =>
-    (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const rnd = mulberry32(SEED);
   const pick = (n: number) => Math.floor(rnd() * n);
+  const seen = new Set<string>();
 
   for (let round = 0; round < ROUNDS; round++) {
     const drawn: Op[] = Array.from(
@@ -67,6 +67,7 @@ Deno.test("differential: a method body behaves identically sync and async", asyn
     const program: Op[] = drawn.some((o) => DETACHING_KINDS.includes(o.kind))
       ? drawn.filter((o) => !ALIAS_KINDS.includes(o.kind))
       : drawn;
+    for (const o of program) seen.add(o.kind);
     // The seed is part of the repro: without it a sweep failure names a round
     // number that means nothing on the default seed.
     const repro = `FUZZ_SEED=${SEED} round ${round}: ${
@@ -105,5 +106,9 @@ Deno.test("differential: a method body behaves identically sync and async", asyn
     } finally {
       h.dispose();
     }
+  }
+  // A generator that stopped drawing a kind compares nothing about it.
+  if (ROUNDS >= 120) {
+    assertEquals(KINDS.filter((k) => !seen.has(k)), [], "kinds never run");
   }
 });

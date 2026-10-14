@@ -19,7 +19,10 @@ import { join } from "@std/path";
 import {
   ArtifactUnreadable,
   buildToolHitsIn,
+  embeddedBytesOf,
+  formatEmbedded,
   needlePackage,
+  reportEmbedded,
   scanArtifactForBuildTools,
   warnBuildToolsIn,
 } from "../src/build/artifact-audit.ts";
@@ -214,6 +217,105 @@ Deno.test("artifact audit: streams a real file, even across a chunk seam", async
     );
     assertEquals(await scanArtifactForBuildTools(clean, 5), []);
   } finally {
+    await dropTempDir(tmp);
+  }
+});
+
+// `--analyze` answered "where did the page's bytes go" and nothing answered
+// it for the binary: a field report found ~150 MB of a compiler and ~75 MB of
+// the app's own data files in one, with a hex dump.
+Deno.test("--analyze: what a binary embeds — charged per file with its compiled form, once per stored copy, named as the author wrote it", () => {
+  const sizes = embeddedBytesOf(vfs(
+    `[{"Dir":{"n":".aio","e":[{"Dir":{"n":"minify-stage","e":[{"Dir":{"n":"src","e":[` +
+      // source 100 + compiled 50 + source map 25 + export list 5
+      `{"File":{"n":"app.ts","o":[0,100],"m":[100,50],"s":[150,25],"c":[175,5]}}]}}]}}]}},` +
+      `{"Dir":{"n":"node_modules","e":[{"Dir":{"n":".deno","e":[` +
+      `{"Dir":{"n":"@scope+big@1.0.0","e":[{"Dir":{"n":"node_modules","e":[{"Dir":{"n":"@scope","e":[{"Dir":{"n":"big","e":[` +
+      `{"File":{"n":"a.wasm","o":[1000,4000]}},` +
+      // The same stored bytes under a second name: deno keeps them once.
+      `{"File":{"n":"a-copy.wasm","o":[1000,4000]}},` +
+      `{"File":{"n":"empty.js","o":[5000,0]}},` +
+      `{"File":{"n":"next.js","o":[5000,7]}}]}}]}}]}}]}}]}},` +
+      `{"Symlink":{"n":"big","p":["x"]}}]}}]`,
+  ));
+  assertEquals(sizes, {
+    "src/app.ts": 180,
+    "node_modules/.deno/@scope+big@1.0.0/node_modules/@scope/big/a.wasm": 4000,
+    "node_modules/.deno/@scope+big@1.0.0/node_modules/@scope/big/a-copy.wasm":
+      0,
+    "node_modules/.deno/@scope+big@1.0.0/node_modules/@scope/big/empty.js": 0,
+    "node_modules/.deno/@scope+big@1.0.0/node_modules/@scope/big/next.js": 7,
+  });
+  assertThrows(() => embeddedBytesOf(vfs("[]")), ArtifactUnreadable);
+});
+
+Deno.test("--analyze: the binary report folds to packages, sums the tail, and names the largest files", () => {
+  const MB = 1024 * 1024;
+  const files: Record<string, number> = {
+    "src/app.ts": MB,
+    "assets/key.bin": 6 * MB,
+    "node_modules/.deno/a@1.0.0/node_modules/a/x.js": 2 * MB,
+    "node_modules/.deno/a@1.0.0/node_modules/a/y.js": MB,
+    "node_modules/.deno/b@2.0.0_a@1.0.0/node_modules/b/z.js": 5 * MB,
+    "node_modules/.deno/c@3.0.0/node_modules/c/w.js": MB,
+  };
+  const lines = formatEmbedded("app", 100 * MB, files, 2);
+  assertStringIncludes(lines[0]!, "app is 100.0 MB — 16.0 MB of it is 6 ");
+  const at = (label: string) => lines.find((l) => l.includes(label)) ?? "";
+  // Biggest first; the app's own files are one row, a package is one row.
+  assertEquals(lines.slice(1, 5).map((l) => l.trim().split(/\s{2,}/)[0]), [
+    "by package",
+    "(the app and what it links)",
+    "node_modules/b/",
+    "…every other package",
+  ]);
+  assertStringIncludes(at("(the app and what it links)"), "7.0 MB  43.8%");
+  assertStringIncludes(at("(the app and what it links)"), "(2 files)");
+  assertStringIncludes(at("node_modules/b/"), "5.0 MB  31.3%  (1 file)");
+  // The tail is summed, so the rows add up to the embedded total.
+  assertStringIncludes(at("…every other package"), "4.0 MB  25.0%  (3 files)");
+  assertEquals(
+    lines.slice(lines.indexOf(" largest files") + 1).map((l) =>
+      l.trim().split(/\s{2,}/)[0]
+    ),
+    [
+      "assets/key.bin",
+      "node_modules/.deno/b@2.0.0_a@1.0.0/node_modules/b/z.js",
+    ],
+  );
+});
+
+Deno.test("--analyze: a binary whose tree cannot be read is SAID — never an empty report", async () => {
+  const tmp = await tempDir("artifact-report-");
+  const said: string[] = [];
+  const [log, warn] = [console.log, console.warn];
+  console.log = (...a: unknown[]) => void said.push(`log ${a.join(" ")}`);
+  console.warn = (...a: unknown[]) => void said.push(`warn ${a.join(" ")}`);
+  try {
+    const p = join(tmp, "blob.bin");
+    await Deno.writeFile(
+      p,
+      vfs(
+        '[{"Dir":{"n":"src","e":[{"File":{"n":"app.js","o":[0,2097152]}}]}}]',
+      ),
+    );
+    await reportEmbedded(p);
+    assert(said[0]!.startsWith("log binary: blob.bin is "), said.join("\n"));
+    assertStringIncludes(said[0]!, "2.0 MB of it is 1 embedded file(s)");
+    assert(
+      said.some((l) => /^log\s+src\/app\.js\s+2\.0 MB/.test(l)),
+      said.join("\n"),
+    );
+    said.length = 0;
+    await Deno.writeTextFile(p, "not a binary");
+    await reportEmbedded(p);
+    assertEquals(said.length, 1, said.join("\n"));
+    assertStringIncludes(said[0]!, "warn ");
+    assertStringIncludes(said[0]!, "could not be read");
+    assertStringIncludes(said[0]!, "no binary report");
+  } finally {
+    console.log = log;
+    console.warn = warn;
     await dropTempDir(tmp);
   }
 });

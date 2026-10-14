@@ -8,7 +8,7 @@ import { closeWindow } from "../src/testing/close-window.ts";
 import { signal } from "../src/state/signal.ts";
 import { h } from "../src/air/vdom.ts";
 import { _setDocument, _unmount, mount } from "../src/air/aio-renderer.ts";
-import { _resetEventWarnings } from "../src/air/vdom-events.ts";
+import { _resetEventWarnings } from "../src/air/dev-events.ts";
 import { useEffect } from "../src/air/compat.ts";
 
 function createDOM(): {

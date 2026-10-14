@@ -85,7 +85,7 @@ async function aapt2Label(title: string, dir: string): Promise<string | null> {
     // The AppCompat theme lives in a library this link does not have; the
     // label is the only thing under test.
     .replace(
-      "@style/Theme.AppCompat.NoActionBar",
+      "@style/{{APP_THEME}}",
       "@android:style/Theme.Material",
     )
     .replace("<manifest ", '<manifest package="app.aio.labelprobe" ');

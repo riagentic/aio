@@ -44,6 +44,7 @@ import { assembleMacApp } from "../src/build/macos-app.ts";
 import { Browser } from "../src/ui/browser.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { linkFile } from "./symlink-helper.ts";
+import { mulberry32 } from "./sync/properties/_prop.ts";
 
 const BAD = [
   "",
@@ -86,8 +87,7 @@ Deno.test("guest preload path rule: plain relative paths only", () => {
 
 Deno.test("guest preload path rule: no accepted path leaves its directory (property)", () => {
   const alphabet = ["a", "b.cjs", ".", "..", "", "/", "\\", "%2e", " ", "C:"];
-  let seed = 20261006;
-  const rnd = () => (seed = (seed * 1103515245 + 12345) >>> 0) / 2 ** 32;
+  const rnd = mulberry32(20261006);
   for (const sep of [nodePath.posix, nodePath.win32]) {
     for (let i = 0; i < 5000; i++) {
       const n = 1 + Math.floor(rnd() * 6);
@@ -287,23 +287,23 @@ Deno.test("guest preload hook: a declared name resolves to the staged file; noth
     },
   );
 
-  await t.step(
-    "a declared path that is a link out of the directory is refused",
-    async () => {
-      const link = join(dir, "src", "guest", "link.cjs");
-      try {
-        await linkFile(outside, link);
-      } catch (e) {
-        // A file symlink is a privilege a stock Windows account lacks.
-        if (Deno.build.os === "windows") return;
-        throw e;
-      }
+  // A file symlink is a privilege a stock Windows account lacks: there the
+  // step is counted as ignored, never as passed.
+  const linked = await linkFile(outside, join(dir, "src", "guest", "link.cjs"))
+    .then(() => true, (e) => {
+      if (Deno.build.os === "windows") return false;
+      throw e;
+    });
+  await t.step({
+    name: "a declared path that is a link out of the directory is refused",
+    ignore: !linked,
+    fn: () => {
       const h = hook({ dir, files: [...files, "src/guest/link.cjs"] });
       const { wp } = h.attach(guestPreload("src/guest/link.cjs"));
       assertEquals(wp.preload, undefined);
       assertStringIncludes(h.refused()[0]!, "outside");
     },
-  );
+  });
 
   await t.step(
     "nothing declared → every name is refused; a plain path keeps the old rule",

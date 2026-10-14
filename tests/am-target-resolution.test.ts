@@ -17,6 +17,7 @@
 //  3. "app not running (no lock file)" named neither the directory searched
 //     nor AIO_APPS_DIR, the env var that decides it — two shells genuinely
 //     look in different places and the message was true in both.
+import "./store-sandbox.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";

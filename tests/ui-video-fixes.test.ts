@@ -8,8 +8,9 @@
 //   · the light/dark scheme was the recording machine's desktop
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { findChromium } from "../src/testing/chromium.ts";
+import { callerTestFile } from "../src/testing/ui-video.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
-import { fromFileUrl } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
 import { spec } from "./module-spec-helper.ts";
 
 const CHROME = findChromium();
@@ -31,7 +32,7 @@ const FFMPEG = await hasTool("ffmpeg");
 
 const HEAD = `import { testUI } from "aio/testing";
 import { assertEquals } from "@std/assert";
-import App from ${JSON.stringify(TODO + "src/App.tsx")};
+import App from ${JSON.stringify(spec(TODO) + "src/App.tsx")};
 `;
 
 /** `deno test` over `files` (name → body), with `cwd` and `config`. */
@@ -159,10 +160,10 @@ Deno.test({
           },
           imports: {
             aio: `${spec(REPO)}mod.ts`,
-            "aio/air": `${REPO}src/air.ts`,
-            "aio/ui": `${REPO}src/ui/mod.ts`,
-            "aio/jsx-runtime": `${REPO}src/jsx-runtime.ts`,
-            "aio/testing": `${REPO}src/cell-test.ts`,
+            "aio/air": `${spec(REPO)}src/air.ts`,
+            "aio/ui": `${spec(REPO)}src/ui/mod.ts`,
+            "aio/jsx-runtime": `${spec(REPO)}src/jsx-runtime.ts`,
+            "aio/testing": `${spec(REPO)}src/cell-test.ts`,
             "happy-dom": "npm:happy-dom@20.14.5",
             "immer": "npm:immer@10.2.0",
             "@std/path": "jsr:@std/path@1.1.3",
@@ -187,12 +188,22 @@ Deno.test({
         config: `${project}/deno.json`,
       });
       assertEquals(r.code, 0, r.text);
-      assertStringIncludes(r.text, `look from ${project}/src/app.ts`);
+      // Printed paths are in the OS's own spelling (`\\` on Windows).
+      assertStringIncludes(
+        r.text,
+        `look from ${join(project, "src", "app.ts")}`,
+      );
       assertStringIncludes(r.text, 'appId "look-probe"');
     } finally {
       await dropTempDir(dir);
     }
   },
+});
+
+Deno.test("callerTestFile: the test file as a PATH the OS can open, not a URL's pathname", () => {
+  // `new URL(url).pathname` was `/C:/…/x.test.tsx` on Windows: no directory
+  // above THAT holds a deno.json, so the look silently became the cwd's.
+  assertEquals(callerTestFile(), fromFileUrl(import.meta.url));
 });
 
 Deno.test({
@@ -233,7 +244,7 @@ Deno.test({
         args: ["--", `--video=${dir}/vs/`, "--video-pace=100"],
       });
       assertEquals(again.code, 0, again.text);
-      assertStringIncludes(again.text, `${dir}/vs/same-name.mp4`);
+      assertStringIncludes(again.text, join(dir, "vs", "same-name.mp4"));
     } finally {
       await dropTempDir(dir);
     }

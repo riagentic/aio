@@ -7,6 +7,7 @@
 // A reaction a SYNC OP caused is the one kind the journal cannot re-create:
 // the op is in the op-log, not the journal. It is said as exactly that —
 // and counted like a jump in `am record` — never skipped in silence (rev7).
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { generateReplayTest } from "../src/am/record.ts";
 import { planReplay } from "../src/am/am-cmd-timeline.ts";

@@ -82,10 +82,40 @@ export function installFromArgv(checkout: string): string[] {
   ];
 }
 
+/** Where aio's own checkout is when `AIO_HOME` does not say — ONE rule with
+ *  `install.ps1` / `run.ps1` (`Get-AioDefaultHome`), which made it.
+ *
+ *  `HOME`, else `USERPROFILE` (`homedir()`'s order; with `HOME` alone this
+ *  was `/.local/lib/aio` on a stock Windows). But an installer before 1.0.20
+ *  cloned under `%USERPROFILE%` whatever `HOME` said, and the scripts keep
+ *  such a checkout as THE checkout: on Windows it is asked for first, or with
+ *  `HOME` set `am update` / `am upgrade` looked where nothing is. Pure given
+ *  `isCheckout`. */
+export function aioHome(
+  os: string = Deno.build.os,
+  env: (name: string) => string | undefined = (n) => Deno.env.get(n),
+  isCheckout: (dir: string) => boolean = (dir) => {
+    try {
+      Deno.statSync(`${dir}/.git`);
+      return true;
+    } catch {
+      return false; // aio-ok: no checkout there — the HOME rule answers
+    }
+  },
+): string {
+  const set = env("AIO_HOME");
+  if (set !== undefined) return set;
+  const profile = env("USERPROFILE");
+  if (os === "windows" && profile) {
+    const old = `${profile}/.local/lib/aio`;
+    if (isCheckout(old)) return old;
+  }
+  return `${env("HOME") ?? profile ?? ""}/.local/lib/aio`;
+}
+
 /** The canonical install location — what plain `am update` returns you to. */
 function canonicalRoot(): string {
-  return Deno.env.get("AIO_HOME") ??
-    `${Deno.env.get("HOME") ?? ""}/.local/lib/aio`;
+  return aioHome();
 }
 
 /** Why `am update` must not `git checkout --force` in this checkout, or null.

@@ -12,6 +12,7 @@
 //   • the JSX config fix wrote `jsxImportSource: "react"` over an aio app —
 //     the exact opposite of what `am fix` enforces (`"aio"`), which repoints
 //     every JSX element in the app at React's runtime.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { basename, join } from "@std/path";
 import { lintProject } from "../aiol/mod.ts";

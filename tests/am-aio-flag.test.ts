@@ -6,6 +6,7 @@
  * choice of framework checkout vanished without a word, which is the exact
  * failure the pin machinery exists to make impossible.
  */
+import "./store-sandbox.ts";
 import { assertEquals, assertThrows } from "@std/assert";
 import { aioFlagValue, withoutAioFlag } from "../src/am/am-cmd-link.ts";
 

@@ -11,6 +11,7 @@
 // What is asserted here is the CLI layer: that the operator's command actually
 // reaches those guarantees, that it edits the app it was asked to, and that the
 // generated password is one a person can be handed.
+import "./store-sandbox.ts";
 import {
   assert,
   assertEquals,

@@ -19,8 +19,16 @@
 // It is a net, not a guarantee: a process killed with SIGKILL (an outer
 // `timeout` on a hung test) never runs it. That case is `deno task clean:tmp`.
 
-import { _sandboxHomeStores, aioTestRoot } from "./test-strict.ts";
-import { pruneDeadLockDirsTagged } from "../server/single-instance-lock.ts";
+import {
+  _sandboxHomeStores,
+  _setTestDirRecorder,
+  aioTestRoot,
+} from "./test-strict.ts";
+import { join } from "@std/path";
+import {
+  ownerIdentity,
+  pruneDeadLockDirsTagged,
+} from "../server/single-instance-lock.ts";
 
 /** A test that pointed `AIO_APPS_DIR` into a temp dir made a scoped lock dir
  *  in the REAL `$XDG_RUNTIME_DIR` — and a child app it SIGKILLed (or any
@@ -38,6 +46,38 @@ function pruneLockDirsOf(dir: string): void {
 const registry = new Set<string>();
 let sweepArmed = false;
 
+/** `<test root>/.live-<pid>` — this process's OWNER RECORD: one JSON line
+ *  saying who it is (pid and start identity, as a lock says it), then one
+ *  line per directory it registered. `scripts/check-orphans.ts` reads it on
+ *  every OS and never sweeps a dir whose recorded owner is alive.
+ *
+ *  A bare `deno test` (no suite runner, so no `.run-owner`) had nothing that
+ *  said so: its temp dirs are on nobody's command line, and Windows shows
+ *  nobody another process's environment or cwd — one untouched for ten
+ *  minutes was `clean:tmp`'s to delete under the running test. */
+export const LIVE_OWNER = ".live-";
+let ownerFile: string | undefined;
+
+function recordOwned(dir: string): void {
+  if (ownerFile === undefined) {
+    ownerFile = join(aioTestRoot(), `${LIVE_OWNER}${Deno.pid}`);
+    // Whole, not appended: a record a dead process left under this pid is
+    // somebody else's list.
+    Deno.writeTextFileSync(
+      ownerFile,
+      JSON.stringify({ pid: Deno.pid, ...ownerIdentity(Deno.pid) }) + "\n",
+    );
+  }
+  Deno.writeTextFileSync(ownerFile, dir + "\n", { append: true });
+}
+
+// `aioTestDir()` dirs are recorded too — their makers remove them, so the
+// record is all they get here; it goes with the process (`sweep`).
+_setTestDirRecorder((dir) => {
+  arm();
+  recordOwned(dir);
+});
+
 /** Remove every still-registered temp dir. Runs once, at process exit. */
 function sweep(): void {
   for (const dir of registry) {
@@ -53,6 +93,16 @@ function sweep(): void {
     }
   }
   registry.clear();
+  if (ownerFile !== undefined) {
+    try {
+      Deno.removeSync(ownerFile);
+    } catch (e) {
+      if (!(e instanceof Deno.errors.NotFound)) {
+        console.error(`[temp-dir] could not remove ${ownerFile}: ${e}`);
+      }
+    }
+    ownerFile = undefined;
+  }
 }
 
 function arm(): void {
@@ -69,6 +119,7 @@ export function keepTempDir(dir: string): string {
   // harness (tests/am-version-pin.test.ts wrote the REAL version store that
   // way). Every call, not once: see `_sandboxHomeStores`.
   _sandboxHomeStores();
+  if (!registry.has(dir)) recordOwned(dir);
   registry.add(dir);
   return dir;
 }

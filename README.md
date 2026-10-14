@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <code>v1.0.19-beta</code> · <a href="LICENSE">MIT</a> ·
+  <code>v1.0.20-beta</code> · <a href="LICENSE">MIT</a> ·
   <a href="docs/content.md">Docs</a> ·
   <a href="docs/basics/quickstart.md">Quickstart</a> ·
   <a href="CHANGELOG.md">Changelog</a>
@@ -62,9 +62,11 @@ Electron AppImage, and the one-line install on a fresh Ubuntu container. The
 Windows exe under Wine (`test:wine`) is an opt-in gate, not run for every
 release. The desktop packages have been driven by hand on a real Windows 11 and
 a real macOS 14 (Intel) machine in earlier betas; that, the packaged Windows
-exe's security doors, an Android device and iOS have no automated gate.
-`deno task check:proof` prints what has actually been run, when, and at which
-commit — and marks a row stale when that commit is no longer in the repo.
+exe's security doors, an Android device and iOS have no automated gate. Since
+1.0.19 the suite also runs natively on Windows 11 and an Apple-silicon Mac (run
+by hand each release, not a recorded gate). `deno task check:proof` prints what
+has actually been run, when, and at which commit — and marks a row stale when
+that commit is no longer in the repo.
 
 ## 🧠 The idea
 
@@ -145,7 +147,7 @@ screen, `am trigger` acts on it.
 | 🛠️ **Operate** | `am` — status, health, logs, state, dispatch, pins, installs                |
 
 A whole client — renderer, protocol, offline queue, CRDT merge — is **84 KB
-gzipped**, 71 KB brotli. `deno task bench:bundle` prints it, and
+gzipped**, 72 KB brotli. `deno task bench:bundle` prints it, and
 `tests/bundle-size.test.ts` keeps this sentence true — both numbers.
 
 ## 🏃 Run any aio app, from its repo
@@ -162,7 +164,10 @@ PowerShell (Windows):
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/riagentic/aio/main/run.ps1))) -Git owner/repo
 ```
 
-Installs what is missing, builds, starts it. Nothing to read first.
+Installs what is missing, builds, starts it. Nothing to read first. One gap: on
+macOS `run.sh` has no step for the `.dmg` a desktop (Electron) app builds to —
+there, run `deno task compile` in the checkout and open `dist/*.dmg`. Windows
+and macOS specifics: [aio on Windows and macOS](docs/basics/windows-macos.md).
 
 **[→ Every doc on one page](docs/content.md)** ·
 [Concepts](docs/basics/concepts.md) · [Pitfalls](docs/basics/pitfalls.md) ·
@@ -190,17 +195,20 @@ e-shop. Their bug reports shaped much of the framework.
   booted on Linux and in a fresh container. Wine is an opt-in gate, not run for
   every release. A real Windows or macOS machine (driven by hand in earlier
   betas), a physical Android device and iOS are **not** release gates yet —
-  `deno task check:proof` prints exactly what has been run, and when. The suite
-  is large; it is still one machine's opinion.
+  `deno task check:proof` prints exactly what has been run, and when. Since
+  1.0.19 the suite also runs natively on Windows 11 and an Apple-silicon Mac
+  (run by hand each release, not a recorded gate). The suite is large; it is
+  still one machine's opinion.
 - 🧑‍🔬 **Real apps run on it** (listed above). Their field reports drove most of
   what changed since alpha52, and they still find bugs — the first beta was
   re-cut the same evening for one. Expect rough edges; please report them.
 - ✅ **Built for** apps where state is the product — dashboards, ops tools,
-  control panels, internal tools, local-first desktop and mobile.
+  control panels, internal tools, local-first desktop and mobile — and for any
+  single web app, portal or content site: SSR, hydration and a per-page `<head>`
+  (`useHead`) are there.
 - ❌ **Not for** anything that needs a CDN, a static export or horizontal
   scale-out — it is one embedded process, by design — or for native iOS (Deno
-  does not run there; a thin WebView client does). A content site is fine: SSR,
-  hydration and a per-page `<head>` are there; server components are not.
+  does not run there; a thin WebView client does). No server components.
 
 [Positioning & non-goals](docs/basics/positioning.md)
 

@@ -13,6 +13,7 @@
 // `setValue` is composed from the wire actions `clear` + `type`, which run the
 // exact primitives testUI's setValue runs (triggerClear + triggerChar, shared
 // via src/air/ui-trigger.ts and dispatched by src/air/ui-remote.ts:143-153).
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { cmdTrigger } from "../src/am/am-cmd-inspect.ts";
 import { _resetInstanceVerify } from "../src/am/am-http.ts";

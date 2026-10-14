@@ -9,7 +9,7 @@
 import { testDisplayEnv } from "../src/testing/test-display.ts";
 import { aioTestDir } from "../src/testing/test-strict.ts";
 import { childCoverageDir, tempDir } from "../src/testing/temp-dir.ts";
-import { dropBrowserProfile } from "../src/testing/chromium.ts";
+import { browserHomeEnv, dropBrowserProfile } from "../src/testing/chromium.ts";
 import { stopChild } from "./stop-child.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { fromFileUrl } from "@std/path";
@@ -25,14 +25,25 @@ const _childCovDir = childCoverageDir();
 
 const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
+/** THE real browser the e2e tests drive, or null (then they skip). One list
+ *  for every file: seven copies of it knew only the Linux paths, so the whole
+ *  real-browser class never ran on Windows or macOS. `AIO_E2E_BROWSER` names
+ *  one outright; `AIO_E2E=0` switches the class off. */
 export function findBrowser(): string | null {
   if (Deno.env.get("AIO_E2E") === "0") return null;
+  const fromEnv = Deno.env.get("AIO_E2E_BROWSER");
   for (
-    const c of [
+    const c of fromEnv ? [fromEnv] : [
       "/usr/bin/chromium",
       "/usr/bin/chromium-browser",
       "/usr/bin/google-chrome",
       "/usr/bin/google-chrome-stable",
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      // Windows: Edge is Chromium and ships with the OS — with only the
+      // Linux paths here, every real-browser test was skipped there.
+      "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+      "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
     ]
   ) {
     try {
@@ -43,6 +54,20 @@ export function findBrowser(): string | null {
   return null;
 }
 export const BROWSER: string | null = findBrowser();
+
+/** Flags a browser launch needs on THIS OS, spread into every launch's args.
+ *
+ *  Windows: `--guest`. A Chromium there (Edge, measured) tries one
+ *  interactive logon as the Windows user per launch on a fresh profile, which
+ *  fails — Security event 4625 from `msedge.exe` — and Windows' default policy
+ *  locks the ACCOUNT after ten of those in ten minutes: ten test browsers
+ *  locked the machine's user out (and with it every ssh session) for ten
+ *  minutes, twice. A guest window has no profile identity to sign in:
+ *  0 failed logons, measured; `--inprivate`, `--no-first-run` and
+ *  `--disable-sync` each still cost one. */
+export const browserOsFlags: readonly string[] = Deno.build.os === "windows"
+  ? ["--guest"]
+  : [];
 
 // THE one `freePort` (src/testing): it draws from this run's port slice when
 // one is set, where a `port: 0` twin here handed out a number any other
@@ -386,6 +411,7 @@ export async function openTab(server: Server): Promise<Tab> {
   const profile = await tempDir("aio-e2e-prof-");
   const proc = new Deno.Command(BROWSER!, {
     args: [
+      ...browserOsFlags,
       "--headless=new",
       "--no-sandbox",
       "--disable-gpu",
@@ -395,6 +421,7 @@ export async function openTab(server: Server): Promise<Tab> {
       `--user-data-dir=${profile}`,
       `${server.base}/`,
     ],
+    env: browserHomeEnv(profile),
     stdin: "null",
     stdout: "null",
     stderr: "null",

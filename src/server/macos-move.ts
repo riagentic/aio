@@ -17,11 +17,16 @@
  * opens the copy. "Not Now" is remembered in the data directory.
  *
  * Nothing here replaces a bundle: an app of the same name already in
- * Applications means no offer at all.
+ * Applications means no offer at all. Nor is the copy `run.sh` / `am`
+ * installed offered (`inInstallRoot`): it is installed where it is.
  */
 import { basename, dirname, join } from "@std/path";
 import type { Log } from "../diagnostics/logger-api.ts";
-import { macAppDir, RELAUNCH_FLAG } from "./updates-apply.ts";
+import {
+  macAppDir,
+  macAppUpdateBlocker,
+  RELAUNCH_FLAG,
+} from "./updates-apply.ts";
 import { neutralCwd, outlivingParent } from "./no-console.ts";
 import { moveFile } from "../diagnostics/rename-over.ts";
 
@@ -58,6 +63,7 @@ export function moveOffer(f: {
   if (app.startsWith("/Applications/")) return null;
   if (userApps && app.startsWith(`${userApps}/`)) return null;
   const name = basename(app);
+  if (inInstallRoot(app, f.exists)) return null;
   // A copy of that name is already installed: which of the two the user means
   // to keep is theirs to decide, and nothing here replaces a bundle.
   if (f.exists(`/Applications/${name}`)) return null;
@@ -68,11 +74,36 @@ export function moveOffer(f: {
   return { app, dest: `${dir}/${name}` };
 }
 
+/** Is `app` the copy `run.sh` / `am` installed —
+ *  `<root>/versions/<version>/<Title>.app` with the stable link
+ *  `<root>/<Title>.app` beside `versions/`, reached by either path?
+ *
+ *  That copy is installed, updates where it is, and is the one `am upgrade`,
+ *  `am remove` and `installed.json` know. Moved, the whole root stayed behind
+ *  (346 MB, measured) and the copy in Applications was an app none of them
+ *  had heard of. So it is not offered. Judged by the layout, the way the
+ *  updater judges it (`versionedInstall`). Pure. */
+export function inInstallRoot(
+  app: string,
+  exists: (path: string) => boolean,
+): boolean {
+  const versioned = /^(.+)\/versions\/[^/]+\/[^/]+$/.exec(app);
+  const root = versioned ? versioned[1] : dirname(app);
+  return exists(`${root}/versions`) && exists(`${root}/${basename(app)}`);
+}
+
 /** The question, as an `osascript` argv. The text travels as ARGUMENTS, never
- *  inside the script, so a title holding a quote is a title. Pure. */
+ *  inside the script, so a title holding a quote is a title.
+ *
+ *  `updatesHere`: the bundle can replace itself where it runs
+ *  (`macAppUpdateBlocker` says nothing) — one unpacked by hand into a folder
+ *  of the user's. The offer stands, and the reason given is the true one: it
+ *  used to say "opened from where it was downloaded … cannot update itself"
+ *  of an app that was neither. Pure. */
 export function moveDialogArgs(
   title: string,
   icon: string | null,
+  updatesHere = false,
 ): string[] {
   const withIcon = icon ? " with icon POSIX file (item 3 of argv)" : "";
   return [
@@ -91,8 +122,11 @@ export function moveDialogArgs(
     "-e",
     "end run",
     `Move ${title} to your Applications folder?\n\n` +
-    `It was opened from where it was downloaded. There it cannot update ` +
-    `itself. Moving copies it into Applications and reopens it from there.`,
+    (updatesHere
+      ? `It is not in Applications, where macOS and Launchpad look for apps. `
+      : `It was opened from where it was downloaded. There it cannot ` +
+        `update itself. `) +
+    `Moving copies it into Applications and reopens it from there.`,
     title,
     ...(icon ? [icon] : []),
   ];
@@ -281,7 +315,12 @@ export async function offerMoveToApplications(deps: {
       answer = moveAnswer(
         await exec(
           "/usr/bin/osascript",
-          moveDialogArgs(deps.title, isThere(icon) ? icon : null),
+          moveDialogArgs(
+            deps.title,
+            isThere(icon) ? icon : null,
+            macAppUpdateBlocker(offer.app, deps.canWrite ?? dirWritable) ===
+              null,
+          ),
           deps.stopSignal,
         ),
       );

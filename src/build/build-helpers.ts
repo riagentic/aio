@@ -14,6 +14,7 @@ import {
   pngSize,
 } from "./app-icon.ts";
 import { APP_ICON } from "../server/app-files.ts";
+import { icoFromLargePng } from "./png-scale.ts";
 
 /** The appimagetool release this build pins to.
  *
@@ -474,13 +475,20 @@ export async function writeDefaultIcon(
 /** The app's own `.ico`, beside its `icon.png`. */
 export const APP_ICON_ICO = "icon.ico";
 
+/** The `.ico` of a Windows desktop build, in the build scratch beside the
+ *  staged AppDir: written for the inner exe by the compile step, read again
+ *  for the one-click exe. */
+export const WINDOWS_ICON_FILE = "app.ico";
+
 /** The `.ico` a Windows exe carries as its file icon, written to `out`.
  *
- *  An `icon.ico` in the app dir wins; else the app's `icon.png` when Windows
- *  can hold it as-is (square, at most 256 px); else the monogram every other
- *  icon-less surface already shows. A larger `icon.png` is WARNED about, not
- *  silently swapped: the window will wear the PNG and Explorer the monogram,
- *  and the fix is one file. Returns the path written. */
+ *  An `icon.ico` in the app dir wins; else the app's `icon.png` — as it is
+ *  when Windows can hold it (square, at most 256 px), scaled down when it is
+ *  a larger square; else the monogram every other icon-less surface already
+ *  shows. An `icon.png` that cannot be used (not square, or a PNG kind
+ *  png-scale.ts does not read) is WARNED about, not silently swapped: the
+ *  window will wear the PNG and Explorer the monogram, and the fix is one
+ *  file. Returns the path written. */
 export async function writeWindowsIcon(
   out: string,
   opts: {
@@ -505,14 +513,25 @@ export async function writeWindowsIcon(
   if (icon) {
     const png = await Deno.readFile(icon);
     const size = pngSize(png);
-    if (size && size.w === size.h && size.w <= 256) {
+    const square = size !== null && size.w === size.h;
+    if (square && size.w <= 256) {
       await Deno.writeFile(out, icoFromPngs([png]));
+      return out;
+    }
+    // Larger — the 512 or 1024 px one icon.png every other target wants — is
+    // cut down to the sizes Windows asks for.
+    const cut = square ? await icoFromLargePng(png) : "";
+    if (typeof cut !== "string") {
+      await Deno.writeFile(out, cut);
       return out;
     }
     warn(
       `${icon} is ${size ? `${size.w}×${size.h}` : "not a PNG"}, which a ` +
-        `Windows exe icon cannot hold (square, at most 256 px) — the exe ` +
-        `shows the generated monogram instead. Add ` +
+        `Windows exe icon cannot hold (${
+          square
+            ? `it could not be scaled down: ${cut}`
+            : "square, at most 256 px"
+        }) — the exe shows the generated monogram instead. Add ` +
         `${join(opts.appDir, APP_ICON_ICO)} to use your own.`,
     );
   }

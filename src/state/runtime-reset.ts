@@ -27,6 +27,7 @@ import { resetMethodPolicy } from "./method-policy.ts";
 import { resetPendingSignals } from "./pending.ts";
 import { resetPendingCalls } from "../protocol/pending-calls.ts";
 import { resetServerImportStubs } from "./server-import.ts";
+import { _wireLossChecked } from "./wire-fidelity.ts";
 
 /** Reset every module-scoped piece of the cell RUNTIME — bindings, pending
  *  async calls, cancellation registry, subscriptions. Test isolation in one
@@ -110,4 +111,7 @@ export function _resetAioRuntime(): void {
   // order-dependent memory as the hint sets above.
   _resetSwallowedRefusals();
   _resetShortCallWarnings();
+  // How many of a cell's commits a production build has checked for values
+  // the wire cannot carry — a budget one test must not spend for the next.
+  _wireLossChecked.clear();
 }

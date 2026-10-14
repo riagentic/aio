@@ -2,6 +2,7 @@
 // VERSION the process booted with, and a row whose version differs from the
 // `am` reading it is marked — two checkouts on one machine is the normal dev
 // setup, and a mismatch is the first thing to rule out.
+import "./store-sandbox.ts";
 import { assertEquals } from "@std/assert";
 import {
   AppLock,

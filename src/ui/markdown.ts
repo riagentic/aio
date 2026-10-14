@@ -15,6 +15,7 @@
 import { Fragment, h } from "../air/vdom.ts";
 import type { VChild, VNode } from "../air/vdom.ts";
 import { el, pushAll } from "./h-spread.ts";
+import { saysOnce } from "../protocol/said-once.ts";
 
 /** Props for {@link Markdown}. */
 export interface MarkdownProps {
@@ -71,10 +72,17 @@ function normalizeHref(url: string): string | null {
 const _warnedHrefs = new Set<string>();
 
 /** A dropped link is a VISIBLE hole in the page (the text stays, the link is
- *  gone) with no cause anywhere — say what happened, once per href, in dev.
- *  Observe-only: prod drops exactly the same href, silently. */
+ *  gone) with no cause anywhere — say what happened: once per href in dev,
+ *  once in production. Observe-only: both drop exactly the same href. */
 function warnDroppedHref(url: string): void {
-  if ((globalThis as Record<string, unknown>).__aioDev !== true) return;
+  if ((globalThis as Record<string, unknown>).__aioDev !== true) {
+    // Once per page in production, and without the target: the source is
+    // untrusted, and a log line per attacker string is its own problem.
+    saysOnce(
+      "<Markdown> dropped a link/image target with an unsupported scheme",
+    );
+    return;
+  }
   if (_warnedHrefs.has(url)) return;
   if (_warnedHrefs.size >= 50) _warnedHrefs.clear();
   _warnedHrefs.add(url);

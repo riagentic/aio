@@ -35,7 +35,7 @@ Deno.test("android dir fsync: write() fsyncs the directory AFTER the rename", ()
 
 Deno.test("android dir fsync: a directory fd, fsync'd and closed, refusal said once", () => {
   const fn = body("syncDir");
-  // API 21+ (minSdk 24): FileChannel.open on a directory needs API 26.
+  // The platform's own fsync on a directory fd.
   assertStringIncludes(fn, "android.system.Os.open(dir.absolutePath");
   assertStringIncludes(fn, "android.system.OsConstants.O_RDONLY");
   assertStringIncludes(fn, "android.system.Os.fsync(fd)");

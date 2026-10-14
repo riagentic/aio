@@ -13,6 +13,7 @@
  * through its normal dispatch, so regular state broadcasts and the op
  * stream agree.
  */
+import { wirePayload } from "../protocol/wire-value.ts";
 import { randomUuid } from "../rand.ts";
 import { createSyncEngine, type SyncEngine } from "../sync/sync-engine.ts";
 import {
@@ -258,7 +259,10 @@ export function handleSyncLocalAction(
   if (syncDef?.__aio?.asyncMethods?.has(method)) return false;
   const cid = typeof action.cid === "string" ? action.cid : undefined;
   if (cid) _armAckTimer(cid);
-  _engine.handleLocalAction(cell, method, action.payload).then(
+  // The CRDT door: the op is recorded, run locally and sent with what the
+  // wire carries (`wire.omitTrailingUndefined`), so every peer replays the
+  // same arguments this client ran with.
+  _engine.handleLocalAction(cell, method, wirePayload(action.payload)).then(
     () => {
       if (cid) _resolveAck(cid);
     },

@@ -15,6 +15,7 @@
 // Three layers: the decision (pure, runs everywhere), the flag the decision
 // reads (a real process, runs everywhere), and the whole flow with a real
 // Electron on the nested display (opt-in, like the other Electron e2e tests).
+import { accountEnv } from "./e2e-app-harness.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import { electronClosedPlan } from "../src/server/aio-lifecycle.ts";
@@ -24,6 +25,7 @@ import { descendantPids } from "../src/server/single-instance-lock.ts";
 import { stopChild } from "./stop-child.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { spec } from "./module-spec-helper.ts";
+import { fixtureNodeModules } from "./symlink-helper.ts";
 
 const REPO = fromFileUrl(new URL("../", import.meta.url));
 
@@ -208,8 +210,14 @@ Deno.test({
           "immer": "npm:immer@10.2.0",
           "@std/path": "jsr:@std/path@1.1.2",
         },
+        // Its own `node_modules`: the dev server's prod-bundle judge resolves
+        // `immer` from disk, and without one the verdict depended on whether
+        // some folder ABOVE the temp dir happened to have it ("`deno task
+        // build` would fail on this graph").
+        nodeModulesDir: "auto",
       }),
     );
+    await fixtureNodeModules(dir);
     await Deno.writeTextFile(
       join(dir, "App.tsx"),
       "export default function App() { return <div><h1>restart</h1></div>; }\n",
@@ -258,8 +266,10 @@ await aio.run({
         AIO_APPS_DIR: apps,
         ELECTRON_PATH: electronBinary()!,
         ELECTRON_DISABLE_SECURITY_WARNINGS: "1",
-        // The window is real — it goes to the nested display, never yours.
+        // The window is real — it goes to the nested display, never yours,
+        // and its Chromium profile into this run's directory.
         ...testDisplayEnv(),
+        ...accountEnv(),
       },
       stdout: "piped",
       stderr: "piped",

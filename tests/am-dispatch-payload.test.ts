@@ -8,6 +8,7 @@
 // "--body" as the method's first argument and failed inside Immer. Both read as
 // defects in the cell — one of them cost a real detour chasing a bug that was
 // never there.
+import "./store-sandbox.ts";
 import { assertEquals } from "@std/assert";
 import { parseGlobalFlags } from "../src/am/am-utils.ts";
 import {

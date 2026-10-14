@@ -35,6 +35,8 @@ const NEEDS_HARDWARE: Record<string, string> = {
     "a real Windows or macOS host — tracked as `windows (real)` / `macos (real)` in the physical proof matrix",
   AIO_ANDROID_E2E:
     "the Android SDK and an emulator (booted headless if none runs); run by hand as `deno task test:android` — tracked as `android (emulator)` in the physical proof matrix",
+  AIO_WEBKIT_E2E:
+    "Playwright's WebKit build, which nothing here downloads (AIO_PLAYWRIGHT_DIR names where it is installed); run by hand as `deno task test:webkit` — tracked as `ios route (webkit engine)` in the physical proof matrix",
   AIO_WINE_E2E:
     "builds a ~5 GB Wine image; run by hand as `deno task test:wine` — tracked as `windows (wine)` in the physical proof matrix, which records the run that proved it",
 };

@@ -7,6 +7,7 @@
 // `am` is the framework's best debugging tool; this was the one place it made
 // someone write a script. Scoping happens client-side so it behaves identically
 // for a live client and the headless server render.
+import "./store-sandbox.ts";
 import { assertEquals } from "@std/assert";
 import { _scope } from "../src/am/am-cmd-inspect.ts";
 

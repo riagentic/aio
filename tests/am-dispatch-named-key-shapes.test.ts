@@ -4,6 +4,7 @@
 // payload) to `[A-Za-z_$][\w$]*=` fixed the URL and broke three key shapes that
 // had always been named: `due-date=…`, `user.name=…`, `título=…`. They became
 // positionals — no error, just a different payload at the method.
+import "./store-sandbox.ts";
 import { assertEquals } from "@std/assert";
 import { isNamedArg } from "../src/am/am-cmd-state.ts";
 import { parsePayload } from "../src/am/am-utils.ts";

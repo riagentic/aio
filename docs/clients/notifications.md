@@ -26,10 +26,10 @@ export const exporter = cell("exporter", {
 
 It is an **effect**, like `schedule` and `own`: the server hands it to every
 connected UI client, and each client shows it through the one Notification API
-every renderer has — a browser tab, the Electron window (granted without a
-prompt), a PWA. Clicking it brings the app to the front and, with `route`,
-navigates there. The icon is the app's own monogram, so a notification looks
-like the app that sent it.
+every renderer has — a browser tab, the Electron window (aio grants it without a
+browser-style prompt; the OS still decides — see below), a PWA. Clicking it
+brings the app to the front and, with `route`, navigates there. The icon is the
+app's own monogram, so a notification looks like the app that sent it.
 
 **Every** connected client means every user: with per-user auth, a notification
 raised inside alice's call is shown on bob's screen too. Keep one user's data
@@ -51,6 +51,20 @@ A browser grants notifications only from a user gesture. The first `notify`
 asks; when the ask was refused for lack of a gesture, aio warns once and names
 the fix — `requestNotificationPermission()` from `aio/air`, called in a click
 handler. The answer sticks. Electron needs none of this.
+
+## Permission, from the OS
+
+The OS has the last word on a desktop notification, and aio neither asks for nor
+checks it:
+
+| OS      | What decides                                                                                                         |
+| ------- | -------------------------------------------------------------------------------------------------------------------- |
+| macOS   | the user's answer under System Settings → Notifications, per app; switched off, or under a Focus mode, none is shown |
+| Windows | Settings → System → Notifications; Do not disturb sends it to the notification centre without a banner               |
+| Linux   | the desktop's notification daemon; with none running nothing is shown                                                |
+
+A notification the OS suppressed is not an error anywhere in aio. No aio release
+check has looked at a notification on a real Windows or macOS desktop.
 
 ```tsx
 import { requestNotificationPermission } from "aio/air";

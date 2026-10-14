@@ -6,6 +6,7 @@
 //     never a user-customized one.
 //   • `am add cell` generates code in the scaffold's current style, and it
 //     compiles.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { spec } from "./module-spec-helper.ts";

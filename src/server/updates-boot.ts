@@ -20,6 +20,7 @@ import type {
 import {
   _installUpdatesRuntimeIn,
   _isProcessUpdatesSlot,
+  _noteShortcutAdded,
   createUpdatesCell,
   installUpdatesRuntime,
   readyUpdates,
@@ -44,7 +45,12 @@ import {
   recordInstalledSha256,
   writeTrust,
 } from "./updates-check.ts";
-import { adoptOlder, ownedPath, sweepOwned } from "./updates-owned.ts";
+import {
+  adoptOlder,
+  ownedPath,
+  sweepOwned,
+  unsaidLeft,
+} from "./updates-owned.ts";
 import { isProcessAlive } from "./single-instance-lock.ts";
 import { reconcileInstalledVersion } from "./install-record.ts";
 import { basename, dirname, join } from "@std/path";
@@ -557,7 +563,12 @@ export function sweepRecordTmps(
  *  like the updater's but is not on it and was left. First, once per record,
  *  what builds older than the record made is taken onto it (`adoptOlder`).
  *  For a moment when no update is in flight. Never a reason a boot fails. */
-function sweepLeftovers(dataDir: string, install: string, log: Log): void {
+function sweepLeftovers(
+  dataDir: string,
+  install: string,
+  log: Log,
+  keep?: string,
+): void {
   // A run from source has the `deno` binary as its "install": no update is
   // ever applied there, so nothing beside it is ours, and the one-time look
   // must not judge the files next to someone's `deno` by name and content.
@@ -586,7 +597,7 @@ function sweepLeftovers(dataDir: string, install: string, log: Log): void {
           }`,
       );
     }
-    sweeping = sweepOwned(dataDir, install);
+    sweeping = sweepOwned(dataDir, install, { keep });
   } catch (e) {
     log.warn(
       "updates",
@@ -638,11 +649,24 @@ function sweepLeftovers(dataDir: string, install: string, log: Log): void {
           removed.join(", "),
       );
     }
-    if (left.length > 0) {
+    // Once per name: nothing can prove such a thing the updater's, so it
+    // stays, and a line at every start is one nobody can act on twice.
+    let unsaid = left;
+    try {
+      unsaid = unsaidLeft(dataDir, left);
+    } catch (e) {
+      log.warn(
+        "updates",
+        `could not record what was said to be left beside ${install} ` +
+          `(${e}) — it is said again at the next start`,
+      );
+    }
+    if (unsaid.length > 0) {
       log.info(
         "updates",
         `left alone beside ${install}: not made by this app's updater — ` +
-          left.join(", "),
+          `${unsaid.join(", ")} (said once: delete by hand what is a ` +
+          `leftover)`,
       );
     }
   });
@@ -1063,11 +1087,23 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
   if (
     !isThere(pendingPath(deps.dataDir)) && !isThere(firstBootPath(deps.dataDir))
   ) {
-    sweepLeftovers(
-      deps.dataDir,
-      here ?? deps.artifact ?? artifactPath(),
-      deps.log,
-    );
+    const install = here ?? deps.artifact ?? artifactPath();
+    // …but for the archive of a release whose swap could not be made and is
+    // still on offer: the next try uses it (verified again) instead of
+    // downloading it again. It goes when that release is installed, or given
+    // up after MAX_FAILED_SWAPS. A single-file install's download is the
+    // release itself, under the name it is staged at.
+    let keep: string | undefined;
+    try {
+      const again = readTrust(deps.dataDir).failedSwaps;
+      if (again && again.count < MAX_FAILED_SWAPS) {
+        keep = `${install}.${here ? "zip" : "new"}-${again.to}`;
+      }
+    } catch {
+      // aio-ok: no readable trust record — nothing is on offer again, so
+      // nothing is kept; the read is reported where the check makes it
+    }
+    sweepLeftovers(deps.dataDir, install, deps.log, keep);
   }
   // A one-click install says which version runs from it, so an older `.exe`
   // opened later opens this install instead of extracting over it.
@@ -1078,10 +1114,13 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
   );
   // …and gets the Start-menu shortcut its `.exe` did not add (one made by
   // aio 1.0.17 or older), once — so that download can be deleted.
-  ensureSfxShortcut({
-    install: here ?? deps.artifact ?? artifactPath(),
-    log: deps.log,
-  });
+  _noteShortcutAdded(
+    ensureSfxShortcut({
+      install: here ?? deps.artifact ?? artifactPath(),
+      log: deps.log,
+    }),
+    slot,
+  );
 
   /** One check, plus whatever the policy says to do about the answer. */
   // The release this machine rolled back, for this process's life: never

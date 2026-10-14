@@ -174,3 +174,35 @@ Deno.test("client log: the write and its mode fix are drainable", () =>
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }
   }));
+
+Deno.test("log dir: a sink that names no directory is 'none', never the root", async () => {
+  // `logDir: ""` is what a stderr-only sink says (`--aio-data-contract`'s, and
+  // every recording sink a test installs). `""` passed `??`, so the files went
+  // to `/client.log` — refused on Linux, and `C:\client.log`,
+  // `C:\actions.jsonl`, `C:\checkpoint.json` on a real Windows 11
+  // (found 2026-10-12, first written 2026-10-06).
+  const { getLogDir, getLogger, setLogger } = await import(
+    "../src/diagnostics/logger-api.ts"
+  );
+  const { dropTempDir, tempDir } = await import("../src/testing/temp-dir.ts");
+  const dir = await tempDir("aio-logdir-");
+  const prev = getLogger();
+  try {
+    setFallbackLogDir(dir);
+    setLogger(
+      {
+        logDir: "",
+        pub: () => {},
+        perf: () => {},
+        flush: () => Promise.resolve(),
+      } as unknown as Parameters<typeof setLogger>[0],
+    );
+    assertEquals(getLogDir(), dir);
+    setFallbackLogDir(null);
+    assertEquals(getLogDir(), ".aio/log");
+  } finally {
+    setLogger(prev as Parameters<typeof setLogger>[0]);
+    setFallbackLogDir(null);
+    await dropTempDir(dir);
+  }
+});

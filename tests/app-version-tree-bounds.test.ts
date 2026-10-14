@@ -117,7 +117,20 @@ async function withDir(
   try {
     await fn(dir);
   } finally {
-    await Deno.remove(dir, { recursive: true });
+    // Bounded, and still loud: on Windows the `git` on PATH is a launcher
+    // (measured: two `git.exe` per call). A refused listing kills the
+    // launcher; the real git ends when its pipe breaks, a moment later, and
+    // holds `dir` until then — in a full run the remove came first
+    // ("being used by another process", os error 32).
+    for (let i = 0;; i++) {
+      try {
+        await Deno.remove(dir, { recursive: true });
+        break;
+      } catch (e) {
+        if (i >= 50) throw e;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    }
   }
 }
 
@@ -655,15 +668,15 @@ async function withFakeGit(
 for (
   const [what, script] of [
     // The process itself never answers: it has to be killed.
-    ["the process", "exec sleep 30"],
+    ["the process", "exec sleep 120"],
     // The shell is killed and its CHILD lives on, holding the pipe: the read
     // has to be cancelled too, or it waits for as long as the child does.
     // (Windows' stand-in sleeps in-process, so there the child is a deno.)
     [
       "a child it started",
       Deno.build.os === "windows"
-        ? `exec "${Deno.execPath()}" eval 'setTimeout(() => {}, 30000)'`
-        : "sleep 30",
+        ? `exec "${Deno.execPath()}" eval 'setTimeout(() => {}, 120000)'`
+        : "sleep 120",
     ],
   ] as const
 ) {
@@ -682,11 +695,13 @@ for (
             e.reason,
             "`git rev-parse` did not answer within 50 ms",
           );
-          // Under the 30 s the stand-in sleeps: it was stopped, not waited
+          // Under the 120 s the stand-in sleeps: it was stopped, not waited
           // for. (Windows: starting — and ending — a program that was
           // written a moment ago takes seconds on a busy machine; measured
-          // 10.7 s there, so the bound is 20 s rather than 5.)
-          const bound = Deno.build.os === "windows" ? 20_000 : 5000;
+          // 10.7 s there, then 21.0 s and 21.8 s inside a full suite on four
+          // cores, past the 20 s this allowed. So the stand-in sleeps two
+          // minutes and the bound is half of that.)
+          const bound = Deno.build.os === "windows" ? 60_000 : 5000;
           assert(took < bound, `refused after ${Math.round(took)} ms`);
         });
       });

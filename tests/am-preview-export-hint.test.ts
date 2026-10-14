@@ -2,6 +2,7 @@
 // refused with "components exported here: default" — a list that named the
 // very thing the caller wanted under a spelling nobody guesses. The way in
 // (`--export=default`, or no flag at all) is now part of the refusal.
+import "./store-sandbox.ts";
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { previewExportRefusal } from "../src/am/am-cmd-preview.ts";
 

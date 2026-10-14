@@ -23,7 +23,11 @@ import {
   tryPidLock,
   withTag,
 } from "../server/pid-lock.ts";
-import { resolveEntryPath } from "../server/paths.ts";
+import {
+  mountLeavesProject,
+  mountOutsideMessage,
+  resolveEntryPath,
+} from "../server/paths.ts";
 import {
   basename,
   dirname,
@@ -53,15 +57,16 @@ import {
 } from "../server/heap-policy.ts";
 import type { BuildConfig } from "./build-config.ts";
 import { HEY, NO } from "../diagnostics/fmt.ts";
-import { compiled } from "./build-say.ts";
+import { compiled, summaryNote } from "./build-say.ts";
 import { electronStagingDir, freshElectronStaging } from "./build-electron.ts";
-import { writeWindowsIcon } from "./build-helpers.ts";
+import { WINDOWS_ICON_FILE, writeWindowsIcon } from "./build-helpers.ts";
 import { warnMachineBoundImports } from "./machine-bound-imports.ts";
 import { unembeddedReadMessage, unembeddedReads } from "./unembedded-reads.ts";
 import { minifyDeclared, runCompile } from "./minify-server.ts";
 import {
   INSTALL_BIN_DIR,
   INSTALL_STATE_FILES,
+  reportEmbedded,
   warnBuildToolsIn,
 } from "./artifact-audit.ts";
 
@@ -673,14 +678,28 @@ export async function withDevExcluded(
     }
   };
   try {
-    return await _withDevExcluded(
-      nmDir,
-      fn,
-      graph,
-      keepPackages,
-      release,
-      platform,
+    const seen = new Set<string>();
+    const run = () =>
+      _withDevExcluded(nmDir, fn, graph, keepPackages, release, platform, seen);
+    if (!await run()) return false;
+    // What the compile ITSELF installed. `deno compile` resolves more than the
+    // entry reaches — a linked framework's own pinned dependencies among them
+    // — and those arrive after the exclude list and the trim were decided:
+    // measured, an app on `happy-dom@^20` (20.14.6 that day) built against
+    // aio's pinned 20.14.5 carried the whole of it, and its dependencies
+    // through its links, in the FIRST binary and in no later one. So the
+    // later one is built now: once more, with everything on disk.
+    if (seen.size === 0) return true;
+    const late = [...(await readDenoNmGraph(join(nmDir, ".deno"))).keys()]
+      .filter((e) => !seen.has(e)).sort();
+    if (late.length === 0) return true;
+    console.log(
+      `${late.length} package(s) were installed by the compile itself (${
+        late.slice(0, 3).join(", ")
+      }${late.length > 3 ? ", …" : ""}) — after what stays out of the ` +
+        `binary was decided. Compiling once more, now that they are on disk.`,
     );
+    return await run();
   } finally {
     release();
   }
@@ -1504,6 +1523,8 @@ async function _withDevExcluded(
    *  `finally` (a signal). */
   release: () => void = () => {},
   platform: string = hostPlatform(),
+  /** Filled with every `.deno` entry the exclude list was decided over. */
+  seen?: Set<string>,
 ): Promise<boolean> {
   // A killed build may have left links aside and its trim mirror open; put
   // both back first.
@@ -1554,6 +1575,7 @@ async function _withDevExcluded(
   // What is installed: a kept package's link to an entry that is not there
   // (a tree pruned for one system by hand) is excluded too.
   const onDisk = new Set(graph.keys());
+  if (seen) { for (const e of onDisk) seen.add(e); }
   const keep = new Set(keepPackages);
   const devRoots: string[] = [];
   const keepRoots: string[] = [];
@@ -2602,16 +2624,10 @@ export function assetMounts(
       );
     }
     const entry = dir.trim();
-    const rel = relative(root, join(root, entry));
-    if (isAbsolute(entry) || rel.startsWith("..") || isAbsolute(rel)) {
-      throw new Error(
-        `${NO} deno.json assets["${prefix}"] ("${dir}") is outside the ` +
-          `project. An artifact carries paths relative to the project root, ` +
-          `so this directory could not travel with it — move it inside the ` +
-          `project and point the mount at the copy.`,
-      );
+    if (mountLeavesProject(root, entry)) {
+      throw new Error(`${NO} ${mountOutsideMessage(prefix, dir)}`);
     }
-    return { prefix, rel };
+    return { prefix, rel: relative(root, join(root, entry)) };
   });
 }
 
@@ -2901,13 +2917,13 @@ export async function runDenoCompile(
   const windowsGui = doElectron && cfg.os === "windows"
     ? {
       icon: await writeWindowsIcon(
-        join(dirname(electronStagingDir(root)), "app.ico"),
+        join(dirname(electronStagingDir(root)), WINDOWS_ICON_FILE),
         {
           root,
           appDir: cfg.appDir,
           name: cfg.appTitle ?? binaryName,
           id: binaryName,
-          warn: (m) => console.warn(`${HEY} ${m}`),
+          warn: summaryNote,
         },
       ),
     }
@@ -3006,6 +3022,9 @@ export async function runDenoCompile(
         return false;
       }
       await warnBuildToolsIn(compileTarget, keepPackages, cfg.platform);
+      // `--analyze`: the bundle report says where the PAGE's bytes went; this
+      // is the same question for the binary.
+      if (Deno.args.includes("--analyze")) await reportEmbedded(compileTarget);
       compiled(compileTarget, root);
       return true;
     },
@@ -3275,6 +3294,212 @@ export function systemdEnvAssignment(key: string, value: string): string {
   return `Environment="${inner}"`;
 }
 
+/** What the three supervisor files share: the binary, what to call it, the
+ *  runtime flags ({@linkcode serviceExecFlags} — one decider for all three)
+ *  and, when no port is pinned, the stable default the systemd unit carries. */
+type SupervisorOpts = {
+  binaryName: string;
+  title: string;
+  flags: string[];
+  defaultPort?: number;
+};
+
+/** Text safe inside an XML element. */
+function xmlText(s: string): string {
+  // deno-lint-ignore no-control-regex
+  return s.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, " ")
+    .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+/** The loop a launchd job runs instead of the binary itself, as `sh -c` text.
+ *
+ *  launchd cannot say "every exit code but 143": `KeepAlive` true starts the
+ *  app again after `aio.stop()` and `am stop` too. So the job is this loop —
+ *  it starts the app again after any exit but 143, and ends with 0 on 143 —
+ *  under `KeepAlive: { SuccessfulExit: false }`, which starts the LOOP again
+ *  only if it died. `launchctl bootout` sends SIGTERM to the job's process,
+ *  which is the loop: it passes the signal on (a clean stop for the app),
+ *  waits for the app to finish, and ends. Without the trap the shell would
+ *  die at once and launchd would kill the app behind it.
+ *  @internal exported for its test */
+export const LAUNCHD_LOOP = [
+  `trap 'stop=1; kill -TERM "$p" 2>/dev/null' TERM INT`,
+  `while :; do`,
+  `  "$@" & p=$!`,
+  `  wait "$p"; c=$?`,
+  // A trapped signal interrupts `wait`: wait again for the app's real exit.
+  `  while kill -0 "$p" 2>/dev/null; do wait "$p"; c=$?; done`,
+  `  [ -n "$stop" ] && exit 0`,
+  `  [ "$c" -eq 143 ] && exit 0`,
+  `  sleep 5`,
+  `done`,
+].join("\n");
+
+/** A launchd agent for a `server` binary built for macOS — the systemd unit's
+ *  contract in launchd's terms. Pure.
+ *  @internal exported for its test */
+export function launchdPlist(o: SupervisorOpts): string {
+  const str = (v: string) => `    <string>${xmlText(v)}</string>`;
+  const env = [
+    ["AIO_SUPERVISED", "1"],
+    // `am stop` stays down, as `aio.stop()` does (see the systemd unit).
+    ["AIO_STOP_STAYS_DOWN", "1"],
+    ...(o.defaultPort !== undefined
+      ? [[DEFAULT_PORT_ENV, String(o.defaultPort)]]
+      : []),
+  ].map(([k, v]) =>
+    `    <key>${xmlText(k!)}</key>\n    <string>${xmlText(v!)}</string>`
+  ).join("\n");
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ${
+    xmlText(o.title).replaceAll("--", "- -")
+  } (aio): a launchd agent that keeps the server running.
+
+  Install:
+    sudo cp <the macOS binary beside this file> /usr/local/bin/${o.binaryName}
+    cp <this file> ~/Library/LaunchAgents/app.aio.${o.binaryName}.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/app.aio.${o.binaryName}.plist
+  Stop and unload (a clean stop):
+    launchctl bootout gui/$(id -u)/app.aio.${o.binaryName}
+
+  The job is a small loop, because launchd cannot tell exit codes apart:
+    exit 0   (an update, aio.restart())   started again
+    exit 143 (aio.stop(), am stop)        stays down until the next login
+    anything else (a crash)               started again after 5 s
+  AIO_SUPERVISED=1 tells the app it is supervised, so it EXITS after an update
+  instead of starting its own successor. AIO_STOP_STAYS_DOWN=1 makes am stop
+  exit 143 (without it am stop exits 0 and the app is started again).${
+    o.defaultPort !== undefined
+      ? `
+  No port is pinned in the arguments: the app's own port wins (aio.run({ port })
+  or AIO_PORT). ${DEFAULT_PORT_ENV} is only what it binds when it declares none.`
+      : ""
+  }
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>app.aio.${xmlText(o.binaryName)}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+${str(LAUNCHD_LOOP)}
+    <string>aio-supervise</string>
+${str(`/usr/local/bin/${o.binaryName}`)}
+${o.flags.map(str).join("\n")}${o.flags.length ? "\n" : ""}  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+${env}
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+</dict>
+</plist>
+`;
+}
+
+/** A PowerShell single-quoted literal. */
+function psQuote(s: string): string {
+  // deno-lint-ignore no-control-regex
+  return `'${s.replace(/[\u0000-\u001f\u007f]/g, " ").replaceAll("'", "''")}'`;
+}
+
+/** The supervisor of a `server` binary built for Windows: one PowerShell 5.1
+ *  script that IS the restart loop (Task Scheduler cannot tell exit codes
+ *  apart) and registers itself as a logon task with `-Install`. Pure.
+ *  @internal exported for its test */
+export function windowsTaskScript(o: SupervisorOpts): string {
+  const name = o.binaryName;
+  const title = o.title.replace(/[\r\n]+/g, " ");
+  const flags = o.flags.map(psQuote).join(" ");
+  return `# ${title} (aio): keeps the server running under Windows Task Scheduler.
+#
+# Task Scheduler cannot tell exit codes apart, so the loop at the end of this
+# script is the supervisor and the task only starts it at logon:
+#   exit 0   (an update, aio.restart())   started again
+#   exit 143 (aio.stop(), am stop)        stays down until the next logon
+#   anything else (a crash)               started again after 5 s
+#
+# Install - once, in an ADMINISTRATOR PowerShell (a logon task needs one):
+#   powershell -ExecutionPolicy Bypass -File .\\${name}.ps1 -Install -Exe C:\\path\\to\\${name}.exe
+# -Exe defaults to where run.ps1 installs an app. A copy of this script is put
+# beside the .exe and the task runs that copy, so this folder can go.
+# Stop it:   am stop --app=${name}     (a clean stop; the task then ends)
+# Remove it: powershell -ExecutionPolicy Bypass -File .\\${name}.ps1 -Uninstall
+param(
+  [switch]$Install,
+  [switch]$Uninstall,
+  [string]$Exe = (Join-Path $env:LOCALAPPDATA ${
+    psQuote(`Programs\\${name}\\${name}.exe`)
+  })
+)
+$Task = ${psQuote(name)}
+
+if ($Uninstall) {
+  # Stop-ScheduledTask ends the process tree the hard way: stop the app with
+  # "am stop" first when its last write matters.
+  Stop-ScheduledTask -TaskName $Task -ErrorAction SilentlyContinue
+  Unregister-ScheduledTask -TaskName $Task -Confirm:$false -ErrorAction Stop
+  Write-Host "removed the scheduled task '$Task' (the app and its data are untouched)"
+  exit 0
+}
+
+if ($Install) {
+  $ErrorActionPreference = 'Stop'
+  if (-not (Test-Path -LiteralPath $Exe -PathType Leaf)) {
+    Write-Host "no program at $Exe - copy the .exe there, or pass -Exe <path>"
+    exit 1
+  }
+  $Exe = (Resolve-Path -LiteralPath $Exe).Path
+  $self = Join-Path (Split-Path -Parent $Exe) ${
+    psQuote(`${name}-supervise.ps1`)
+  }
+  if ($PSCommandPath -ne $self) { Copy-Item -LiteralPath $PSCommandPath -Destination $self -Force }
+  $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Exe "{1}"' -f $self, $Exe)
+  $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+  # Without these Task Scheduler ends a task after three days and does not
+  # start it on battery.
+  $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit 0 -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+  Register-ScheduledTask -TaskName $Task -Action $action -Trigger $trigger -Settings $settings -Description ${
+    psQuote(`${title} (aio)`)
+  } -Force | Out-Null
+  Start-ScheduledTask -TaskName $Task
+  Write-Host "registered and started the scheduled task '$Task' - it runs $Exe at every logon"
+  exit 0
+}
+
+# Tells the app it is supervised, so it EXITS after an update instead of
+# starting its own successor (two processes fighting over one app lock).
+$env:AIO_SUPERVISED = '1'
+# am stop exits 143 and stays down, as aio.stop() does (without this line it
+# exits 0 and the loop starts the app again).
+$env:AIO_STOP_STAYS_DOWN = '1'
+${
+    o.defaultPort !== undefined
+      ? `# No --port below: the app's own port wins (aio.run({ port }), or AIO_PORT).
+# This is only what it binds when it declares none - without it a restart
+# would come up on a different random port.
+$env:${DEFAULT_PORT_ENV} = '${o.defaultPort}'
+`
+      : ""
+  }do {
+  & $Exe ${flags}
+  $code = $LASTEXITCODE
+  if ($code -ne 143) { Start-Sleep -Seconds 5 }
+} while ($code -ne 143)
+`;
+}
+
 /** Write a systemd .service unit file for the compiled binary. */
 export async function writeServiceFile(cfg: BuildConfig): Promise<void> {
   const { binaryName, appTitle, doRemote, doHeadless } = cfg;
@@ -3290,10 +3515,29 @@ export async function writeServiceFile(cfg: BuildConfig): Promise<void> {
   // unit was `<name>.service`, so `--platforms=host,windows` on a server
   // target collided in the fleet's dist/ and the whole build died after
   // compiling everything.
+  // Those two get the supervisor file THEIR OS has — the same contract in
+  // another spelling: `AIO_SUPERVISED=1`, start again after any exit but 143.
   if (cfg.os === "windows" || cfg.os === "darwin") {
-    console.log(
-      `· no systemd unit for the ${cfg.platform} binary — systemd is Linux-only`,
+    const port = servicePort(cfg.bakedServer);
+    const o = {
+      binaryName,
+      title: appTitle || binaryName,
+      flags: serviceExecFlags({ doRemote, doHeadless, port }),
+      defaultPort: port === undefined ? SERVICE_DEFAULT_PORT : undefined,
+    };
+    const file = join(
+      cfg.outDir ?? cfg.root ?? ".",
+      cfg.os === "darwin"
+        ? `${artifact}.plist`
+        : `${artifact.replace(/\.exe$/i, "")}.ps1`,
     );
+    await Deno.writeTextFile(
+      file,
+      // A BOM for the script: Windows PowerShell 5.1 reads a file without
+      // one in the ANSI code page, and the title may be any text.
+      cfg.os === "darwin" ? launchdPlist(o) : `\uFEFF${windowsTaskScript(o)}`,
+    );
+    compiled(file, cfg.root ?? Deno.cwd());
     return;
   }
   // BUILD-MACHINE IDENTITY, and the unit is copied verbatim to a server.
@@ -3409,6 +3653,10 @@ User=${systemdSpecifierEscape(user)}
 # sets INVOCATION_ID, which aio also honours; this is the explicit spelling for
 # any other supervisor.
 Environment=AIO_SUPERVISED=1
+# \`am stop\` exits 0, so Restart=always starts the app again after RestartSec
+# (as under every unit aio has generated); \`systemctl stop\` is the stop that
+# holds. Uncomment to make \`am stop\` stay down too — it then exits 143:
+#Environment=AIO_STOP_STAYS_DOWN=1
 ${defaultPortLine}# Also a build-machine value — the app's data directory hangs off it.
 ${systemdEnvAssignment("HOME", home)}
 

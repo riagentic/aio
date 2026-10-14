@@ -417,11 +417,14 @@ Deno.test("zombie reclaim: skipped during startup grace", async () => {
   }
 });
 
-Deno.test("isProcessAlive: EPERM means alive — another user's live process is not 'stopped'", () => {
+Deno.test({
+  name:
+    "isProcessAlive: EPERM means alive — another user's live process is not 'stopped'",
+  ignore: Deno.build.os === "windows", // pid 1 is no process on Windows
+}, () => {
   // pid 1 exists on every POSIX system and (unprivileged) signalling it throws
   // EPERM — exactly the shared-deployment case where the app runs as another
   // user. Conflating that with ESRCH made backup/restore treat a live writer
   // as stopped. (Runs as root? kill(1,0) succeeds — same assertion holds.)
-  if (Deno.build.os === "windows") return;
   assertEquals(isProcessAlive(1), true);
 });

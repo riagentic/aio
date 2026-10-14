@@ -18,6 +18,7 @@ import {
   resolvePlatforms,
 } from "../src/build/platforms.ts";
 import { compileArgs, v8FlagsArg } from "../src/build/build-compile.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import {
   HEAP_FLOOR_MB,
   physicalMemoryBytes,
@@ -223,6 +224,8 @@ Deno.test("build-all: cross-compiled artifact names are recognised", async () =>
   assert(isArtifactName("myapp-client", "myapp"));
   assert(isArtifactName("myapp.service", "myapp"));
   assert(isArtifactName("myapp-client.apk", "myapp"));
+  // The signed Android bundle (a release built with AIO_ANDROID_KEYSTORE).
+  assert(isArtifactName("myapp.aab", "myapp"));
   assert(isArtifactName("aio-client-x86_64.AppImage", "myapp"));
   // …and nothing unrelated is swept up.
   assertEquals(isArtifactName("deno.json", "myapp"), false);
@@ -477,4 +480,55 @@ Deno.test("compileArgs: --v8-flags precedes the entry and leaves the argv otherw
   assert(i < withFlags.indexOf("src/app.ts"), "must precede the entry");
   assertEquals(withFlags[0], "compile");
   assertEquals(withFlags[withFlags.length - 1], "src/app.ts");
+});
+
+// The supervisor file of a `server` target for macOS / Windows is an artifact
+// like the systemd unit is. Unrecognised, a fleet build left it in the
+// project ROOT — not "beside the artifact", as the docs say — where it also
+// counted as an uncommitted change: the next build's version said `-dirty`.
+// The names come from the writer itself, so the two cannot drift.
+Deno.test("build-all: a server target's .plist / .ps1 is collected like its .service — by the name the writer gives it, placed name included; the project's own scripts are not", async () => {
+  const { isArtifactName } = await import("../src/testing/internal.ts");
+  const { writeServiceFile } = await import("../src/build/build-compile.ts");
+  const { versionedArtifactName } = await import(
+    "../src/server/app-version.ts"
+  );
+  const { captureConsoleAsync } = await import("./console-capture.ts");
+  const dir = await tempDir("aio-supervisor-names-");
+  try {
+    const kinds = new Set<string>();
+    await captureConsoleAsync(async () => {
+      for (const [platform, spec] of Object.entries(PLATFORMS)) {
+        await writeServiceFile(
+          {
+            binaryName: "myapp",
+            appTitle: "My App",
+            platform,
+            os: spec.os,
+            outDir: dir,
+            root: dir,
+          } as Parameters<typeof writeServiceFile>[0],
+        );
+      }
+    });
+    const wrote = [...Deno.readDirSync(dir)].map((e) => e.name).sort();
+    assertEquals(wrote.length, Object.keys(PLATFORMS).length, `${wrote}`);
+    for (const name of wrote) {
+      kinds.add(name.slice(name.lastIndexOf(".")));
+      assert(isArtifactName(name, "myapp"), `${name} left in the root`);
+      const placed = versionedArtifactName(
+        name,
+        "myapp",
+        "0.1.0-nogit.1c71a68b",
+      );
+      assert(isArtifactName(placed, "myapp"), `${placed} (placed)`);
+    }
+    assertEquals([...kinds].sort(), [".plist", ".ps1", ".service"]);
+  } finally {
+    await dropTempDir(dir);
+  }
+  // A script of the project's own that merely starts with the app's name.
+  for (const own of ["myapp-deploy.ps1", "myapp2.ps1", "myapp.dev.plist"]) {
+    assertEquals(isArtifactName(own, "myapp"), false, own);
+  }
 });

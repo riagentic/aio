@@ -499,8 +499,20 @@ export function createDispatch<S, A, E>(
     // A diagnostic nobody can act on is noise, and noise is how the ones that
     // matter get ignored. Still recorded in perf.log (below) — observable, not
     // an error.
+    //
+    // …and so is a cell's teardown (`:__destroy`): that reduce is the
+    // framework's reset to the declared state, with no line of the app's in
+    // it. A cell DECLARED with ten thousand rows takes 16 ms there the first
+    // time (Immer walks a value it has not frozen yet), and every close of
+    // the app said "make the method async" about a method that does not exist.
+    // `:__init` is the same reduce at the other end of the cell's life — the
+    // declared state laid over what was restored — and said it at every start.
     const perfCell = type?.split(":")[0];
-    if (isFrameworkCell(perfCell)) {
+    if (
+      isFrameworkCell(perfCell) ||
+      (source === "reduce" &&
+        (type?.endsWith(":__destroy") || type?.endsWith(":__init")))
+    ) {
       if (perfLog) {
         perfLog(source, type ?? "unknown", duration, budget, getBreakdown?.());
       }

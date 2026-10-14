@@ -9,8 +9,8 @@
 // `serveHttpOverLocal` over a peer-credential listener, and every connection
 // is put to the app's ONE gate before the handler sees its request.
 //
-// Proven here over a real unix listener with the kernel's own answer; the
-// pipe twin takes the same `refusal` argument (not run here — Windows).
+// Proven here over a real listener with the kernel's own answer: a unix
+// socket's peer credentials, a Windows pipe's client pid.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import net from "node:net";
 import { serveHttpOverLocal } from "../src/server/http-over-conn.ts";
@@ -21,24 +21,20 @@ import {
 } from "../src/server/local-peer.ts";
 import { processStartToken } from "../src/server/single-instance-lock.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import {
+  connectRW,
+  localBound as waitBound,
+  localEndpoint,
+  localIdle,
+} from "./local-endpoint-helper.ts";
 
 // Opened before any case — the sanitizer counts an FFI library per test.
 requireLocalPeer();
 
-async function waitBound(p: string): Promise<void> {
-  for (let i = 0; i < 300; i++) {
-    try {
-      if (Deno.lstatSync(p).isSocket) return;
-    } catch { /* not yet */ }
-    await new Promise((r) => setTimeout(r, 10));
-  }
-  throw new Error(`listener never bound ${p}`);
-}
-
 /** One raw request (it says `Connection: close`); everything the server wrote
  *  until it closed. */
 async function request(path: string, head: string): Promise<string> {
-  const c = await Deno.connect({ transport: "unix", path });
+  const c = await connectRW(path);
   let out = "";
   const timer = setTimeout(() => c.close(), 5000);
   try {
@@ -71,7 +67,7 @@ function setup(
     error: (m) => said.push(m),
   });
   const seen: string[] = [];
-  const sock = `${dir}/app.http.sock`;
+  const sock = localEndpoint(`${dir}/app.http.sock`);
   const server = serveHttpOverLocal(
     listenLocal(sock, { peer: true }),
     (req) => {
@@ -89,7 +85,6 @@ function setup(
 Deno.test({
   name:
     "http door: a foreign process is answered 403 and the handler never sees its request",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("peer-http-");
     const { gate, said, seen, sock, server } = setup(dir);
@@ -127,6 +122,7 @@ Deno.test({
       );
     } finally {
       await server.close();
+      await localIdle();
       await dropTempDir(dir);
     }
   },
@@ -134,7 +130,6 @@ Deno.test({
 
 Deno.test({
   name: "http door: the armed window is served; an Upgrade is refused by name",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("peer-http-");
     const { gate, seen, sock, server } = setup(dir);
@@ -163,6 +158,7 @@ Deno.test({
       );
     } finally {
       await server.close();
+      await localIdle();
       await dropTempDir(dir);
     }
   },
@@ -171,13 +167,12 @@ Deno.test({
 Deno.test({
   name:
     "http door: a window that goes away mid-stream cancels the route's body",
-  ignore: Deno.build.os === "windows",
   async fn() {
     // Under the lockdown this server replaces `Deno.serve` for the app's
     // routes on every OS, so it owes a streaming route what `Deno.serve`
     // gives it: the stream's `cancel` when the client is gone.
     const dir = await tempDir("peer-http-");
-    const sock = `${dir}/app.http.sock`;
+    const sock = localEndpoint(`${dir}/app.http.sock`);
     let cancelled!: () => void;
     const wasCancelled = new Promise<void>((r) => cancelled = r);
     let tick: ReturnType<typeof setInterval> | undefined;
@@ -202,7 +197,7 @@ Deno.test({
     );
     try {
       await waitBound(sock);
-      const c = await Deno.connect({ transport: "unix", path: sock });
+      const c = await connectRW(sock);
       await c.write(
         new TextEncoder().encode("GET /events HTTP/1.1\r\nHost: app\r\n\r\n"),
       );
@@ -218,6 +213,7 @@ Deno.test({
     } finally {
       clearInterval(tick);
       await server.close();
+      await localIdle();
       await dropTempDir(dir);
     }
   },
@@ -241,18 +237,25 @@ async function hold(
     closedAt: number | null;
   }
 > {
-  const c = await Deno.connect({ transport: "unix", path });
+  const c = await connectRW(path);
   const t0 = performance.now();
   let closedAfter: number | null = null;
   let closedAt: number | null = null;
   let answeredAfter: number | null = null;
   let got = "";
-  const timer = setTimeout(() => c.close(), ms);
+  // A pipe's read ENDS when this side closes it (a unix socket's throws):
+  // the deadline's own close is not the server's.
+  let gaveUp = false;
+  const timer = setTimeout(() => {
+    gaveUp = true;
+    c.close();
+  }, ms);
   try {
     if (bytes) await c.write(new TextEncoder().encode(bytes));
     const b = new Uint8Array(1 << 16);
     while (true) {
       const n = await c.read(b);
+      if (gaveUp) break;
       if (n === null) {
         closedAt = performance.now();
         closedAfter = closedAt - t0;
@@ -272,7 +275,6 @@ async function hold(
 Deno.test({
   name:
     "http door: the gate is asked at ACCEPT — a foreign process that never finishes its request is logged, told 403 and closed",
-  ignore: Deno.build.os === "windows",
   async fn() {
     // A peer that connects and never completes a request head used to be
     // held for as long as it liked, unlogged: the gate was only asked once a
@@ -286,7 +288,7 @@ Deno.test({
       gate.arm(1);
       for (const partial of ["", "GET / HTTP/1.1\r\nHost: app\r\nX-Slow: "]) {
         said.length = 0;
-        const c = await Deno.connect({ transport: "unix", path: sock });
+        const c = await connectRW(sock);
         if (partial) await c.write(new TextEncoder().encode(partial));
         // Logged while the connection is still open and its head unfinished.
         for (let i = 0; i < 100 && said.length === 0; i++) {
@@ -341,6 +343,7 @@ Deno.test({
       assertEquals(seen, []);
     } finally {
       await server.close();
+      await localIdle();
       await dropTempDir(dir);
     }
   },
@@ -349,7 +352,6 @@ Deno.test({
 Deno.test({
   name:
     "http door: every connection has a head deadline — the window's own included",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("peer-http-");
     const { gate, seen, sock, server } = setup(dir, { headDeadlineMs: 300 });
@@ -367,6 +369,7 @@ Deno.test({
       );
     } finally {
       await server.close();
+      await localIdle();
       await dropTempDir(dir);
     }
   },
@@ -375,7 +378,6 @@ Deno.test({
 Deno.test({
   name:
     "http door: when the window exits, the connections it was trusted for are closed",
-  ignore: Deno.build.os === "windows",
   async fn() {
     // Refusing NEW connections is half of a disarm: one accepted while the
     // window lived stays open for whoever holds its descriptor — a child the
@@ -403,6 +405,7 @@ Deno.test({
       assertEquals(r.got.includes("PAGE-BODY"), false);
     } finally {
       await server.close();
+      await localIdle();
       await dropTempDir(dir);
     }
   },
@@ -411,12 +414,11 @@ Deno.test({
 Deno.test({
   name:
     "http door: when the window exits, a request STILL being answered is cut — a stream mid-flight, a handler still working",
-  ignore: Deno.build.os === "windows",
   async fn() {
     // The connection with no request yet is the easy half. One whose answer
     // is under way is the one a forked child would go on reading.
     const dir = await tempDir("peer-http-");
-    const sock = `${dir}/app.http.sock`;
+    const sock = localEndpoint(`${dir}/app.http.sock`);
     const gate = createLocalPeerGate({
       selfUid: Deno.uid(),
       startOf: processStartToken,
@@ -466,9 +468,15 @@ Deno.test({
       }
       assertStringIncludes(s.got, "data: 1");
       assertEquals(w.got.includes("LATE-BODY"), false);
+      // The route is told as its connection's read ends — on a pipe that is
+      // a completion of its own, which this client's end of file can beat.
+      for (let i = 0; i < 300 && told.length < 2; i++) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
       assertEquals(told.sort(), ["handler aborted", "stream cancelled"]);
     } finally {
       await server.close();
+      await localIdle();
       await dropTempDir(dir);
     }
   },
@@ -476,10 +484,9 @@ Deno.test({
 
 Deno.test({
   name: "http door: a gate that throws has allowed no one — refused, and said",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("peer-http-");
-    const sock = `${dir}/app.http.sock`;
+    const sock = localEndpoint(`${dir}/app.http.sock`);
     let ran = false;
     const server = serveHttpOverLocal(
       listenLocal(sock, { peer: true }),
@@ -499,6 +506,7 @@ Deno.test({
       assertEquals(ran, false, "a failed gate let the request through");
     } finally {
       await server.close();
+      await localIdle();
       await dropTempDir(dir);
     }
   },
@@ -506,7 +514,6 @@ Deno.test({
 
 Deno.test({
   name: "peer listener: close() wakes an accept loop parked on an empty queue",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const dir = await tempDir("peer-http-");
     const { sock, server } = setup(dir);
@@ -522,6 +529,7 @@ Deno.test({
       clearTimeout(timer);
       assert(closed, "close() never resolved — the accept loop was not woken");
     } finally {
+      await localIdle();
       await dropTempDir(dir);
     }
   },

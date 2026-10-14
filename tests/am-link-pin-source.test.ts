@@ -2,6 +2,7 @@
 // git-ignored `.aio/pin.local`. Doctor already got this right, from the same
 // reader — the two lines disagreed, and the wrong one is the one a developer
 // acts on (they open deno.json and find no pin at all).
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { _linkTarget } from "../src/am/am-cmd-link.ts";

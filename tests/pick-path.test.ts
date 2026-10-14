@@ -11,20 +11,39 @@
 // CI without a human clicking.
 import { tempDirSync } from "../src/testing/temp-dir.ts";
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { DELIMITER, join } from "@std/path";
+import { EXE, writeProgram } from "./fake-program-helper.ts";
 import { pickDirectory, pickFile, pickSpec } from "../src/server/pick-path.ts";
 
 const linux = Deno.build.os === "linux";
+// The stand-in below is the provider this OS spawns. macOS's is written
+// (osascript, and its spoken cancel) but has not been run there.
+const unproven = Deno.build.os === "darwin";
 
-/** Put a fake `zenity` on PATH; returns a restore function. */
-async function fakeZenity(body: string): Promise<() => void> {
+/** The dialog program `_pickDialog` spawns here: Linux tries `zenity` first;
+ *  macOS and Windows have one each. */
+const PROVIDER = linux
+  ? "zenity"
+  : Deno.build.os === "darwin"
+  ? "osascript"
+  : "powershell";
+
+/** What this OS's provider does when the user presses Cancel — the three
+ *  disagree (`_isCancel`): zenity exits 1 in silence, osascript exits 1 and
+ *  says so, PowerShell exits 0 in silence. */
+const CANCEL = linux
+  ? "exit 1"
+  : Deno.build.os === "darwin"
+  ? 'echo "execution error: User canceled. (-128)" >&2\nexit 1'
+  : "exit 0";
+
+/** Put a fake provider on PATH; returns a restore function. */
+async function fakeDialog(body: string): Promise<() => void> {
   const dir = await Deno.makeTempDir({ prefix: "aio-pick-" });
-  const bin = join(dir, "zenity");
-  await Deno.writeTextFile(bin, `#!/bin/sh\n${body}\n`);
-  await Deno.chmod(bin, 0o755);
+  await writeProgram(join(dir, PROVIDER + EXE), `#!/bin/sh\n${body}\n`);
   const oldPath = Deno.env.get("PATH") ?? "";
   const oldDisplay = Deno.env.get("DISPLAY");
-  Deno.env.set("PATH", `${dir}:${oldPath}`);
+  Deno.env.set("PATH", `${dir}${DELIMITER}${oldPath}`);
   Deno.env.set("DISPLAY", oldDisplay ?? ":0"); // a dialog needs a session
   return () => {
     Deno.env.set("PATH", oldPath);
@@ -38,9 +57,9 @@ async function fakeZenity(body: string): Promise<() => void> {
 
 Deno.test({
   name: "pickFile: a chosen path comes back as a path",
-  ignore: !linux,
+  ignore: unproven, // macOS: the osascript stand-in has never been run there
   fn: async () => {
-    const restore = await fakeZenity(`echo /home/u/clip.mp4`);
+    const restore = await fakeDialog(`echo /home/u/clip.mp4`);
     try {
       assertEquals(await pickFile(), "/home/u/clip.mp4");
     } finally {
@@ -51,9 +70,9 @@ Deno.test({
 
 Deno.test({
   name: "pickFile: CANCEL is null — a normal outcome, not an error",
-  ignore: !linux,
+  ignore: unproven, // macOS: the osascript stand-in has never been run there
   fn: async () => {
-    const restore = await fakeZenity(`exit 1`); // zenity's cancel: 1, no output
+    const restore = await fakeDialog(CANCEL);
     try {
       assertEquals(await pickFile(), null);
     } finally {
@@ -64,7 +83,7 @@ Deno.test({
 
 Deno.test({
   name: "pickFile: a MISSING dialog throws — it must never look like a cancel",
-  ignore: !linux,
+  ignore: unproven, // macOS: the osascript stand-in has never been run there
   fn: async () => {
     const empty = await Deno.makeTempDir({ prefix: "aio-nopath-" });
     const oldPath = Deno.env.get("PATH") ?? "";
@@ -74,7 +93,7 @@ Deno.test({
     try {
       const e = await assertRejects(() => pickFile());
       assertStringIncludes((e as Error).message, "no file dialog available");
-      assertStringIncludes((e as Error).message, "zenity");
+      assertStringIncludes((e as Error).message, PROVIDER);
       assertStringIncludes(
         (e as Error).message,
         "NOT the same as the user cancelling",
@@ -90,9 +109,9 @@ Deno.test({
 
 Deno.test({
   name: "pickFile: a BROKEN dialog throws with the tool's own stderr",
-  ignore: !linux,
+  ignore: unproven, // macOS: the osascript stand-in has never been run there
   fn: async () => {
-    const restore = await fakeZenity(`echo "GLib: fatal boom" >&2; exit 2`);
+    const restore = await fakeDialog(`echo "GLib: fatal boom" >&2\nexit 2`);
     try {
       const e = await assertRejects(() => pickFile());
       assertStringIncludes((e as Error).message, "exit 2");
@@ -105,12 +124,12 @@ Deno.test({
 
 Deno.test({
   name: "pickFile: stderr noise on a SUCCESSFUL pick is not an error",
-  ignore: !linux,
+  ignore: unproven, // macOS: the osascript stand-in has never been run there
   fn: async () => {
     // Healthy desktops print GTK module warnings constantly. A wrapper that
     // reads stderr as failure refuses to work on half the machines it runs on.
-    const restore = await fakeZenity(
-      `echo "Gtk-Message: Failed to load module 'canberra'" >&2; echo /tmp/a.mp4`,
+    const restore = await fakeDialog(
+      `echo "Gtk-Message: Failed to load module 'canberra'" >&2\necho /tmp/a.mp4`,
     );
     try {
       assertEquals(await pickFile(), "/tmp/a.mp4");
@@ -122,12 +141,12 @@ Deno.test({
 
 Deno.test({
   name: "pickFile: 'cannot open display' is a failure, never a cancel",
-  ignore: !linux,
+  ignore: !linux, // a dead X display is an X11 failure: zenity/kdialog are the Linux providers
   fn: async () => {
     // The nastiest shape: DISPLAY is SET but dead (a stale value, an ssh
     // session without -X). zenity exits 1 with no stdout — the exact signature
     // of a cancel — and an app told "the user cancelled" never finds this.
-    const restore = await fakeZenity(
+    const restore = await fakeDialog(
       `echo "Unable to init server: Could not connect: Connection refused" >&2; exit 1`,
     );
     try {
@@ -141,15 +160,15 @@ Deno.test({
 
 Deno.test({
   name: "pickFile: multiple returns an array, and cancel stays null (never [])",
-  ignore: !linux,
+  ignore: unproven, // macOS: the osascript stand-in has never been run there
   fn: async () => {
-    let restore = await fakeZenity(`printf '/a.mp4\\n/b.mp4\\n'`);
+    let restore = await fakeDialog(`echo /a.mp4\necho /b.mp4`);
     try {
       assertEquals(await pickFile({ multiple: true }), ["/a.mp4", "/b.mp4"]);
     } finally {
       restore();
     }
-    restore = await fakeZenity(`exit 1`);
+    restore = await fakeDialog(CANCEL);
     try {
       assertEquals(
         await pickFile({ multiple: true }),
@@ -164,7 +183,7 @@ Deno.test({
 
 Deno.test({
   name: "pickDirectory: refuses up front when there is no desktop session",
-  ignore: !linux,
+  ignore: !linux, // DISPLAY/WAYLAND_DISPLAY are the Linux session check; other OSes have none to refuse on
   fn: async () => {
     const oldDisplay = Deno.env.get("DISPLAY");
     const oldWayland = Deno.env.get("WAYLAND_DISPLAY");

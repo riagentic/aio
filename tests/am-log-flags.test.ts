@@ -7,6 +7,7 @@
 // The rule it exists for is unchanged and is what the cases below pin: a flag
 // `am logs` does not know must never be silently demoted to a search word,
 // because "no matches" and "that is not a filter" look identical in the output.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { LOG_FLAGS, logFlagError } from "../src/am/am-cmd-inspect.ts";
 

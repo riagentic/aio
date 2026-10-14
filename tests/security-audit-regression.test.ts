@@ -250,9 +250,11 @@ Deno.test("_exposeOf: a non-loopback host IS exposure", () => {
 
 // ── 4. the app key was written to a world-readable log ───────────────────────
 
-Deno.test("logs: the app log and its directory are owner-only", () =>
+Deno.test({
+  name: "logs: the app log and its directory are owner-only",
+  ignore: Deno.build.os === "windows", // POSIX mode bits do not exist on Windows
+}, () =>
   permissiveUmask(async () => {
-    if (Deno.build.os === "windows") return; // no POSIX mode
     const { AioLogger } = await import("../src/diagnostics/logger-core.ts");
     const dir = await Deno.makeTempDir();
     // A loose directory is the realistic case — $HOME is 0755 on stock distros,
@@ -273,9 +275,11 @@ Deno.test("logs: the app log and its directory are owner-only", () =>
     await Deno.remove(dir, { recursive: true });
   }));
 
-Deno.test("app dirs: home, data and logs are all 0700", () =>
+Deno.test({
+  name: "app dirs: home, data and logs are all 0700",
+  ignore: Deno.build.os === "windows", // POSIX mode bits do not exist on Windows
+}, () =>
   permissiveUmask(async () => {
-    if (Deno.build.os === "windows") return;
     const { appDirs, ensureAppDirs } = await import(
       "../src/server/app-dirs.ts"
     );

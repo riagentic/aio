@@ -2,10 +2,12 @@
 //
 // The process loaded the framework at boot; the disk can move on without it.
 // The decider is two timestamps, and the finding must name the fix.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import {
+  allowScriptsHintFor,
   checkRunningAio,
   doctorLabel,
   driftVerdict,
@@ -209,6 +211,68 @@ Deno.test("doctor: the Electron hint reads the app's deno.json against ITS pinne
       'export const DEFAULT_ELECTRON_VERSION = "0.9.0";\n',
     );
     assertEquals(await electronBehindHintFor(dir), null, "1.0.0 ≥ its 0.9.0");
+  } finally {
+    await dropTempDir(dir);
+  }
+});
+
+Deno.test("doctor: an allowScripts entry on a version the app no longer imports is a hint, and `am fix` rewrites it", async () => {
+  const dir = await tempDir("aio-doctor-scripts-");
+  try {
+    const path = join(dir, "deno.json");
+    const cfg = (entry: string) =>
+      Deno.writeTextFile(
+        path,
+        JSON.stringify(
+          {
+            name: "demo",
+            imports: { esbuild: "npm:esbuild@0.25.12" },
+            allowScripts: [entry],
+          },
+          null,
+          2,
+        ),
+      );
+    await cfg("npm:esbuild@0.25.12");
+    assertEquals(await allowScriptsHintFor(dir), null, "in step");
+    await cfg("npm:esbuild@0.24.2");
+    const hint = (await allowScriptsHintFor(dir))!;
+    assertStringIncludes(
+      hint,
+      '"npm:esbuild@0.24.2" is imported as "npm:esbuild@0.25.12"',
+    );
+    assertStringIncludes(hint, "`am fix` rewrites the entry");
+    const am = new URL("../src/am.ts", import.meta.url).href;
+    const run = async (...args: string[]) => {
+      const o = await new Deno.Command(Deno.execPath(), {
+        args: ["run", "-A", am, ...args],
+        cwd: dir,
+        env: { AIO_APPS_DIR: join(dir, "home"), NO_COLOR: "1" },
+        stdin: "null",
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      return { code: o.code, out: new TextDecoder().decode(o.stdout) };
+    };
+    // The command itself, with nothing running: said, and not a failure.
+    const doctor = await run("doctor", "--json");
+    assertEquals(doctor.code, 0, doctor.out);
+    assertEquals(JSON.parse(doctor.out).hints, [hint]);
+    // …and the repair it names. Dry first: reported, nothing written.
+    const NAME = "allowScripts = the imported versions";
+    const outcome = (o: string) =>
+      (JSON.parse(o).results as { name: string; outcome: string }[])
+        .find((r) => r.name === NAME)?.outcome;
+    const dry = await run("fix", "--dry-run", "--no-download", "--json");
+    assertEquals(outcome(dry.out), "would-fix", dry.out);
+    assertStringIncludes(await Deno.readTextFile(path), "npm:esbuild@0.24.2");
+    const fixed = await run("fix", "--no-download", "--json");
+    assertEquals(outcome(fixed.out), "fixed", fixed.out);
+    assertEquals(
+      JSON.parse(await Deno.readTextFile(path)).allowScripts,
+      ["npm:esbuild@0.25.12"],
+    );
+    assertEquals(await allowScriptsHintFor(dir), null, "repaired");
   } finally {
     await dropTempDir(dir);
   }

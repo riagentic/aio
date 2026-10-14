@@ -10,6 +10,7 @@
 //    `map`), so a path that is not in the state is "found": `am expect
 //    counter.constructor absent` FAILS, and `am state counter.toString --json`
 //    prints `undefined` (not a JSON document) and exits 0.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertNotEquals } from "@std/assert";
 import { resolvePath } from "../src/am/am-utils.ts";
 import { cmdExpect, cmdState } from "../src/am/am-cmd-state.ts";

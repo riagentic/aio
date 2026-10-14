@@ -59,6 +59,11 @@ Release surfaces (must be updated, not just the code — checked, not assumed):
   leaves no diff) — every cell/run option and `aio/air` export on one page
 - `docs/api-snapshot.json` is regenerated when the public surface or VERSION
   changed (`deno task update:api`)
+- the Electron aio tests against (`DEFAULT_ELECTRON_VERSION`,
+  `src/electron/electron-runtime-fetch.ts`) is the newest release of its major —
+  `deno task check:release` asks the registry once and prints an ADVISORY (⚠,
+  never a failure, silent offline) when upstream has moved; bump it, as a tested
+  change of its own, before or right after the release
 - any new example/app is listed AND described in `examples/README.md` (one
   README covers all examples — per-dir READMEs are deliberately not the
   convention)

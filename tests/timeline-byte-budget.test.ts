@@ -7,6 +7,7 @@
 // size" — so an app whose method replaces a 1 MB value kept 500 of them.
 // Measured in a `--prod` run (the timeline is always on): heap 17 MB → 519 MB
 // for a 1 MB cell. A 10 MB value would have taken the server past 5 GB.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import {
   approxRetainedBytes,

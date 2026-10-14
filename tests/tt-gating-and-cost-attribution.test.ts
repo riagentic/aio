@@ -6,6 +6,7 @@
 // broadcast in full on every dispatch, for an app that had explicitly turned
 // time-travel OFF.
 
+import "./store-sandbox.ts";
 import { assertEquals } from "@std/assert";
 import { renderCost } from "../src/am/am-cmd-cost.ts";
 import { createCostMeter } from "../src/vitals/cost-meter.ts";

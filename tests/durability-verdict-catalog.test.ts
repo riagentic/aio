@@ -29,6 +29,7 @@
 //   • the diagnostics checkpoint — observe-only by design (a crash aid, not
 //     the durability promise); a failed write is logged once per distinct
 //     error, never silent (checkpoint.ts `reportWriteError`).
+import "./store-sandbox.ts";
 import {
   assert,
   assertEquals,

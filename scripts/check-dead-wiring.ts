@@ -345,7 +345,6 @@ export const LEDGER: readonly string[] = [
   "src/air/time-travel-panel.ts|setSendFn",
   "src/air/ui-surface.ts|_resetForwardedHandles",
   "src/air/vdom-create.ts|_componentChainOf",
-  "src/air/vdom-events.ts|_resetEventWarnings",
   "src/am/am-cmd-data.ts|_internals",
   "src/am/am-components.ts|componentsRoot",
   "src/am/am-http.ts|_resetInstanceVerify",

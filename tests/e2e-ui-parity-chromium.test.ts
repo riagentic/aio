@@ -15,27 +15,12 @@ import { cdpConnect } from "../src/media/cdp.ts";
 import { stopChild } from "./stop-child.ts";
 import { fromFileUrl } from "@std/path";
 import { spec } from "./module-spec-helper.ts";
+// THE browser lookup (every OS), never a copy of its path list.
+import { browserOsFlags, findBrowser } from "./e2e-harness.ts";
+import { browserHomeEnv } from "../src/testing/chromium.ts";
 
 const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
-function findBrowser(): string | null {
-  if (Deno.env.get("AIO_E2E") === "0") return null;
-  const fromEnv = Deno.env.get("AIO_E2E_BROWSER");
-  for (
-    const c of fromEnv ? [fromEnv] : [
-      "/usr/bin/chromium",
-      "/usr/bin/chromium-browser",
-      "/usr/bin/google-chrome",
-      "/usr/bin/google-chrome-stable",
-    ]
-  ) {
-    try {
-      Deno.statSync(c);
-      return c;
-    } catch { /* not this one */ }
-  }
-  return null;
-}
 const BROWSER = findBrowser();
 
 async function waitFor<T>(
@@ -138,6 +123,10 @@ Deno.test({
       JSON.stringify({
         title: "UI Parity",
         appId: "ui-parity-e2e",
+        // As every other e2e fixture: without it the browser bundle's
+        // `immer` resolves only where a node_modules happens to sit above
+        // the framework source (this repo's own — absent in a bare checkout).
+        nodeModulesDir: "auto",
         compilerOptions: {
           jsx: "react-jsx",
           jsxImportSource: "aio",
@@ -145,8 +134,8 @@ Deno.test({
         },
         imports: {
           "aio": `${spec(ROOT)}mod.ts`,
-          "aio/air": `${ROOT}src/air.ts`,
-          "aio/jsx-runtime": `${ROOT}src/jsx-runtime.ts`,
+          "aio/air": `${spec(ROOT)}src/air.ts`,
+          "aio/jsx-runtime": `${spec(ROOT)}src/jsx-runtime.ts`,
           "immer": "npm:immer@10.2.0",
           "@std/path": "jsr:@std/path@1.1.3",
         },
@@ -186,6 +175,7 @@ Deno.test({
       }, 120_000);
       browser = new Deno.Command(BROWSER!, {
         args: [
+          ...browserOsFlags,
           "--headless=new",
           "--no-sandbox",
           "--disable-gpu",
@@ -196,7 +186,7 @@ Deno.test({
           "--remote-debugging-port=0",
           `${base}/`,
         ],
-        env: testDisplayEnv(),
+        env: { ...browserHomeEnv(profile), ...testDisplayEnv() },
         stdin: "null",
         stdout: "null",
         stderr: "null",

@@ -140,28 +140,48 @@ export function foreignLockAlive(path: string): boolean {
 
 /** This process's identity as hex an older aio's patterns accept:
  *  `d<ns, 8 hex>` (Linux pid namespace) then the kernel start stamp —
- *  `a<ticks>` (Linux), `e<epoch>` (macOS) — "" where the platform has none. */
+ *  `a<ticks>` (Linux), `c<creation time>` (Windows), `e<epoch>` (macOS) — ""
+ *  where the platform has none. */
 export function ownIdTail(): string {
   const ns = ownPidNs();
   const id = ownerIdentity(Deno.pid);
   return (ns === undefined ? "" : `d${ns.toString(16).padStart(8, "0")}`) +
     (id.startToken
-      ? `a${Number(id.startToken).toString(16)}`
+      ? tokenTag(id.startToken)
       : id.startEpoch !== undefined
       ? `e${id.startEpoch.toString(16)}`
       : "");
 }
 
-/** Parse an {@link ownIdTail} back into a {@link ProcId} for `pid`. */
+/** A start token as its tag. A Windows creation time (a FILETIME, ~1.3e17) is
+ *  past what a double holds exactly: written as `a<Number>` it came back
+ *  rounded, never equal to the live process's token, so every live holder
+ *  read as a recycled pid — a second build took a held lock. It gets its own
+ *  letter, exact; an older reader takes an unknown letter as "no stamp" and
+ *  judges by pid. Linux ticks stay `a`, byte for byte. Pure. @internal */
+export function tokenTag(token: string): string {
+  return Number(token) > Number.MAX_SAFE_INTEGER
+    ? `c${BigInt(token).toString(16)}`
+    : `a${Number(token).toString(16)}`;
+}
+
+/** Parse an {@link ownIdTail} back into a {@link ProcId} for `pid`. An `a`
+ *  stamp past a double's exact range (an older aio's rounded Windows creation
+ *  time) names no process any more: no stamp, the pid decides. */
 export function withTag(pid: number, tail: string): ProcId {
   const d = /^d([0-9a-f]{8})/.exec(tail);
   const ns = d ? parseInt(d[1]!, 16) : undefined;
-  const m = /^([ae])([0-9a-f]+)$/.exec(d ? tail.slice(9) : tail);
+  const m = /^([ace])([0-9a-f]+)$/.exec(d ? tail.slice(9) : tail);
+  const n = m ? parseInt(m[2]!, 16) : 0;
   const id: ProcId = !m
     ? { pid }
-    : m[1] === "a"
-    ? { pid, startToken: String(parseInt(m[2]!, 16)) }
-    : { pid, startEpoch: parseInt(m[2]!, 16) };
+    : m[1] === "c"
+    ? { pid, startToken: BigInt(`0x${m[2]}`).toString() }
+    : m[1] === "e"
+    ? { pid, startEpoch: n }
+    : Number.isSafeInteger(n)
+    ? { pid, startToken: String(n) }
+    : { pid };
   if (ns !== undefined) id.ns = ns;
   return id;
 }

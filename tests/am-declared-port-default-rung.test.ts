@@ -21,16 +21,18 @@ const REPO_CONFIG = fromFileUrl(new URL("../deno.json", import.meta.url));
 async function declaredIn(
   entryPort: number | undefined,
   env: Record<string, string>,
+  extra = "",
+  denoJson = `{"appId":"rungprobe"}`,
 ): Promise<string> {
   const proj = await tempDir("aio-am-default-rung-");
   try {
-    await Deno.writeTextFile(join(proj, "deno.json"), `{"appId":"rungprobe"}`);
+    await Deno.writeTextFile(join(proj, "deno.json"), denoJson);
     await Deno.mkdir(join(proj, "src"));
     await Deno.writeTextFile(
       join(proj, "src", "app.ts"),
       `aio.run({ appId: "rungprobe"${
         entryPort === undefined ? "" : `, port: ${entryPort}`
-      } });\n`,
+      }${extra} });\n`,
     );
     await Deno.writeTextFile(
       join(proj, "probe.ts"),
@@ -84,4 +86,33 @@ Deno.test("declaredPort: AIO_DEFAULT_PORT is the rung below aio.run({ port })", 
     "undefined",
   );
   assertEquals(await declaredIn(undefined, {}), "undefined");
+});
+
+// `electron: { ignoreDebugEnv: true }` takes `AIO_PORT` / `AIO_DEFAULT_PORT`
+// out of an Electron client's boot. `am` still counted them, so it aimed at
+// (and refused over) a port the app had said it would not open.
+Deno.test("declaredPort: an app that ignores the debug env has no env rung", async () => {
+  const ignore = ", electron: { ignoreDebugEnv: true }";
+  const env = { AIO_PORT: "9100", AIO_DEFAULT_PORT: "3000" };
+  assertEquals(await declaredIn(undefined, env, ignore), "undefined");
+  assertEquals(await declaredIn(4100, env, ignore), "4100");
+  // Only the Electron client ignores: a server run of the same app reads them.
+  assertEquals(
+    await declaredIn(undefined, env, ignore + ', client: "server-only"'),
+    "9100",
+  );
+  assertEquals(
+    await declaredIn(
+      undefined,
+      env,
+      ignore,
+      `{"appId":"rungprobe","client":"browser"}`,
+    ),
+    "9100",
+  );
+  // `false` is the key unset.
+  assertEquals(
+    await declaredIn(undefined, env, ", electron: { ignoreDebugEnv: false }"),
+    "9100",
+  );
 });

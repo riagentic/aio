@@ -41,6 +41,7 @@ import {
 import {
   forget,
   identity,
+  isOwn,
   made,
   ownEntry,
   readOwned,
@@ -1270,16 +1271,24 @@ export async function swapArtifact(opts: {
     // Windows branch undoes its own first step). A marker left behind claimed
     // an update that never landed — the next healthy boot "confirmed" it, and
     // two unhealthy ones "rolled back" by moving the partial kept-aside copy
-    // over the good binary. Take the marker back, with the half-written copy
-    // and the staged file, and let the failure speak.
+    // over the good binary. Take the marker back, with the half-written copy,
+    // and let the failure speak.
+    //
+    // The staged file stays when it is on the updater's record: it is the
+    // verified release, the swap failing says nothing against it, and the
+    // next try in this run uses it (verified again) instead of downloading
+    // it again. A start with no update in flight removes it, like every
+    // recorded leftover. With no record there is no later look: it goes now.
     if (await Deno.lstat(opts.current).then(() => true, () => false)) {
       if (opts.pending) clearPending(opts.pending.dataDir);
       await Deno.remove(previous).catch(() => {
         // aio-ok: the partial copy may never have been created.
       });
-      await Deno.remove(opts.staged).catch(() => {
-        // aio-ok: the staged file may already be gone.
-      });
+      if (!data || !isOwn(data, opts.staged)) {
+        await Deno.remove(opts.staged).catch(() => {
+          // aio-ok: the staged file may already be gone.
+        });
+      }
     }
     throw e;
   }

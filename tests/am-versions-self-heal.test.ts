@@ -10,6 +10,7 @@
 // own worktree the moment its drive is unmounted (gc waits three months).
 //
 // Everything runs against a THROWAWAY repo made here — never this checkout.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join, normalize } from "@std/path";
 import { ensureVersion, removeVersion } from "../src/am/am-versions.ts";

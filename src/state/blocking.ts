@@ -10,6 +10,12 @@ import { blockingServerOnly } from "./blocking-reason.ts";
 // Contract: the function must be SELF-CONTAINED (no closure over outer scope —
 // it's serialized to source and rebuilt in the worker) and its `arg`/result must
 // be structured-cloneable. Do FFI/`Deno.dlopen` setup INSIDE the function.
+//
+// Or hand the POOL a module instead of a function: `pool.run(id, new
+// URL("./job.ts", import.meta.url), arg)` — the worker imports it and calls its
+// default export.
+// A real module has its own imports, constants and helpers, and no build
+// transform (minify, a bundler helper) can change what its text means.
 
 type Task = {
   id: string;
@@ -17,6 +23,8 @@ type Task = {
   src: string;
   /** `fn.name` — re-applied in the worker (see blocking-worker.ts). */
   name: string;
+  /** The module form: the worker imports this and calls its default export. */
+  url?: string;
   arg: unknown;
   resolve: (v: unknown) => void;
   reject: (e: unknown) => void;
@@ -27,10 +35,11 @@ type WorkerRes =
   | { n: number; ok: false; error: string; stack?: string };
 
 export type BlockingPool = {
-  /** Run a self-contained fn off-thread; rejects if cancelled or the fn throws. */
+  /** Run a self-contained fn — or a module's default export, given its URL —
+   *  off-thread; rejects if cancelled or the fn throws. */
   run<T = unknown>(
     id: string,
-    fn: (arg?: unknown) => T | Promise<T>,
+    fn: ((arg?: unknown) => T | Promise<T>) | URL,
     arg?: unknown,
   ): Promise<T>;
   /** Cancel by id — a queued task is dropped; a running one terminates its
@@ -196,6 +205,7 @@ export function createBlockingPool(opts?: { size?: number }): BlockingPool {
         n: task.n,
         src: task.src,
         name: task.name,
+        url: task.url,
         arg: task.arg,
       });
     } catch (e) {
@@ -239,9 +249,30 @@ export function createBlockingPool(opts?: { size?: number }): BlockingPool {
 
   return {
     size,
-    run<T>(id: string, fn: (arg?: unknown) => T | Promise<T>, arg?: unknown) {
+    run<T>(
+      id: string,
+      fn: ((arg?: unknown) => T | Promise<T>) | URL,
+      arg?: unknown,
+    ) {
       if (disposed) {
         return Promise.reject(new Error("blocking pool disposed"));
+      }
+      const isUrl = fn instanceof URL;
+      // A source STRING (`"(a) => a * 2"`) — and anything else whose
+      // `toString()` is a function's text — ran through 1.0.19 untyped: the
+      // task has always been `fn.toString()`, rebuilt in the worker. It still
+      // does, identically. What never ran (a number, null) is named here.
+      const isText = typeof fn === "string" ||
+        (typeof fn === "object" && fn !== null);
+      if (!isUrl && !isText && typeof fn !== "function") {
+        return Promise.reject(
+          new Error(
+            `blocking('${id}', …): the second argument must be a function or ` +
+              `a module URL (new URL("./job.ts", import.meta.url)) — got ${
+                fn === null ? "null" : typeof fn
+              }`,
+          ),
+        );
       }
       // A second task under an id that is already in flight is almost always a
       // mistake: `schedule.after(id, …)` REPLACES by id, so an app reasonably
@@ -267,11 +298,23 @@ export function createBlockingPool(opts?: { size?: number }): BlockingPool {
         queue.push({
           id,
           n: ++seq,
-          src: fn.toString(),
-          name: fn.name,
+          ...(isUrl
+            ? { src: "", name: "", url: fn.href }
+            : { src: fn.toString(), name: fn.name }),
           arg,
           resolve: resolve as (v: unknown) => void,
-          reject,
+          // A string that is not a function's text (a path, say) fails in
+          // the worker's parse, with nothing saying what a string means here.
+          reject: typeof fn === "string"
+            ? (e) => {
+              if (e instanceof Error) {
+                e.message += `\n\nblocking('${id}', "…"): a string is run ` +
+                  `as the SOURCE of a function ("(arg) => …"). For a module, ` +
+                  `pass new URL("./job.ts", import.meta.url).`;
+              }
+              reject(e);
+            }
+            : reject,
         });
         pump();
       });
@@ -352,10 +395,12 @@ export function blockingUnavailableReason(
   return blockingServerOnly(id);
 }
 
-/** Run a self-contained fn off the main thread. See BlockingPool.run. */
+/** Run a self-contained fn off the main thread — or, given a module URL
+ *  (`new URL("./job.ts", import.meta.url)`), that module's default export.
+ *  See BlockingPool.run. */
 export function blocking<T = unknown>(
   id: string,
-  fn: (arg?: unknown) => T | Promise<T>,
+  fn: ((arg?: unknown) => T | Promise<T>) | URL,
   arg?: unknown,
 ): Promise<T> {
   const why = blockingUnavailableReason(id);

@@ -1,6 +1,7 @@
 // `am eval` takes ONE expression. A statement form fails to parse, and the
 // bare "SyntaxError: Unexpected token ';'" read like a bug in the probe rather
 // than a usage rule (a field report). The hint names the rule and the fix.
+import "./store-sandbox.ts";
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { evalErrorHint, evalOutcome } from "../src/am/am-cmd-eval.ts";
 

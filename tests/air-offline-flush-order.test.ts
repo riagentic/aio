@@ -150,3 +150,50 @@ addEventListener("unload", () => {
   else g.WebSocket = prevWS;
   if (!prevLoc) delete g.location;
 });
+
+// `wire.omitTrailingUndefined` is decided where the frame is built. The queue
+// replays with a bare `enc`, not through the action door — so the replay is a
+// door of its own, on both halves, and it was the one a trim at the door
+// alone would have missed: a call made offline sent `null`, the same call
+// made online did not.
+Deno.test("air offline queue: a replayed call is shaped by wire.omitTrailingUndefined like a live one — both halves", () => {
+  const cfg = globalThis as { __aioConfig?: Record<string, unknown> };
+  const had = cfg.__aioConfig;
+  const argsOf = () =>
+    sent.flatMap((frame) => {
+      const f = JSON.parse(frame) as {
+        t?: string;
+        d?: { type?: string; payload?: { args?: unknown[] } };
+      };
+      return f.t === "action" && f.d?.type?.startsWith("trim:")
+        ? [[f.d.type, f.d.payload?.args]]
+        : [];
+    });
+  const queueBoth = () => {
+    client.send({ type: "trim:air", payload: { args: ["a", undefined] } });
+    coreSend({ type: "trim:core", payload: { args: ["a", undefined] } });
+    client.send({ type: "trim:mid", payload: { args: [undefined, "a"] } });
+  };
+  try {
+    for (const on of [true, false]) {
+      reset();
+      // Called BEFORE the page knows (a shell the build templated learns its
+      // config from the first frames of the connection)…
+      delete cfg.__aioConfig;
+      queueBoth();
+      // …and sent after.
+      if (on) cfg.__aioConfig = { wire: { omitTrailingUndefined: true } };
+      ensureConnected();
+      FakeWS.last?.open();
+      assertEquals(argsOf(), [
+        ["trim:air", on ? ["a"] : ["a", null]],
+        ["trim:core", on ? ["a"] : ["a", null]],
+        ["trim:mid", [null, "a"]],
+      ], `omitTrailingUndefined: ${on}`);
+    }
+  } finally {
+    if (had === undefined) delete cfg.__aioConfig;
+    else cfg.__aioConfig = had;
+    reset();
+  }
+});

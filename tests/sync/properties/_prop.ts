@@ -21,6 +21,24 @@ export function mulberry32(seed: number): () => number {
   };
 }
 
+/** Draw from `xs` as a dealer does: a shuffled deck, dealt to its end before
+ *  it is shuffled again — every kind comes up once per `xs.length` draws,
+ *  where independent picks leave some out of a short run (146 op kinds over
+ *  ~540 picks: three or four never drawn, so never compared). */
+export function dealer<T>(rnd: () => number, xs: readonly T[]): () => T {
+  let deck: T[] = [];
+  return () => {
+    if (deck.length === 0) {
+      deck = [...xs];
+      for (let i = deck.length - 1; i > 0; i--) {
+        const j = Math.floor(rnd() * (i + 1));
+        [deck[i], deck[j]] = [deck[j]!, deck[i]!];
+      }
+    }
+    return deck.pop()!;
+  };
+}
+
 /** A seeded source with the helpers every generator here needs. */
 export interface Rng {
   (): number;

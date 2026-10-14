@@ -11,6 +11,7 @@
 // machine directory, holding the local CA and release keys.
 //
 // Every case runs with HOME / AIO_APPS_DIR / AIO_INSTALL_ROOT in a temp dir.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { cmdRemove, isAioDataDir } from "../src/am/am-cmd-remove.ts";

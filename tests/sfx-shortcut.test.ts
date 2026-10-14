@@ -157,7 +157,9 @@ Deno.test("an install without a shortcut gets one, once — a removed one stays 
           Deno.writeTextFileSync(paths[0], "");
         },
       });
-    start();
+    // The ONE start that adds it says which — what `updates.shortcutAdded`
+    // carries to the app; every other start says nothing.
+    assertEquals(start(), lnk);
     assertEquals(wrote, [[lnk, target, install]]);
     assertEquals(
       await Deno.readTextFile(install + SFX_SHORTCUT_RECORD),
@@ -170,8 +172,8 @@ Deno.test("an install without a shortcut gets one, once — a removed one stays 
     await Deno.remove(lnk);
     await Deno.remove(install, { recursive: true });
     await Deno.mkdir(install);
-    start();
-    start();
+    assertEquals(start(), undefined);
+    assertEquals(start(), undefined);
     assertEquals(wrote.length, 1, "put back a shortcut the user removed");
     assertEquals(lines.length, 1, lines.join("\n"));
   } finally {
@@ -414,12 +416,20 @@ Deno.test({
       const appData = join(tmp, "roaming");
       const local = join(tmp, "local");
       await Deno.mkdir(appData);
-      const ran = await new Deno.Command(exe, {
-        env: { APPDATA: appData, LOCALAPPDATA: local },
-        stdout: "piped",
-        stderr: "piped",
-      }).output();
-      assert(ran.success, new TextDecoder().decode(ran.stderr));
+      // Opened with `--aio-sfx-wait`: the stub then returns when the app it
+      // started has EXITED. A plain open returns as soon as the app is
+      // started, and the install that follows found it still running under
+      // load — "my-app is running … Access is denied", refused as it must be.
+      const open = async (file = exe, args = ["--aio-sfx-wait"]) => {
+        const ran = await new Deno.Command(file, {
+          args,
+          env: { APPDATA: appData, LOCALAPPDATA: local },
+          stdout: "piped",
+          stderr: "piped",
+        }).output();
+        assert(ran.success, new TextDecoder().decode(ran.stderr));
+      };
+      await open();
       const install = join(local, "aio-sfx", "my-app", "win-x64");
       const paths = sfxShortcutPaths(install, appData, HOSTILE);
       assert(await exists(paths.target), "the stub installed elsewhere");
@@ -445,13 +455,174 @@ Deno.test({
             throw new Error("a second shortcut for one app");
           },
         });
+      // The `.exe` recorded the shortcut it made, as the app would have — an
+      // app without `updates` never runs the app's side.
+      assertEquals(
+        await Deno.readTextFile(install + SFX_SHORTCUT_RECORD),
+        `${paths.lnk}\n`,
+      );
       start();
-      assert(await exists(install + SFX_SHORTCUT_RECORD));
       // …and the user's removal holds.
       await Deno.remove(paths.lnk);
       start();
       assertEquals(lines, []);
       assert(!await exists(paths.lnk));
+      // Opening the `.exe` again installs nothing, so it adds nothing…
+      await open();
+      assert(!await exists(paths.lnk), "the .exe put back a removed shortcut");
+      // …and neither does an upgrade: another version's `.exe` installs over
+      // this one (as `am upgrade` runs it) and leaves the removal alone.
+      await Deno.writeTextFile(join(stage, "new-in-1.1.0"), "x");
+      const nextPayload = join(tmp, "payload-next.tar.zst");
+      await packAppDirTarZstd(stage, nextPayload);
+      const next = join(tmp, "my-app-next-win-x64.exe");
+      await writeWindowsSfxExe({
+        stubPath: await ensureWindowsSfxStub(),
+        payloadPath: nextPayload,
+        payloadFormat: "tar.zstd",
+        outPath: next,
+        binaryName: "my-app",
+        archStr: "x64",
+        version: "1.1.0",
+        title: HOSTILE,
+        shortcut: true,
+      });
+      await open(next, ["--aio-sfx-install"]);
+      assert(await exists(join(install, "new-in-1.1.0")), "nothing upgraded");
+      assert(!await exists(paths.lnk), "an upgrade put back a removed one");
+      await open(exe, ["--aio-sfx-install"]); // …nor does going back
+      assert(!await exists(join(install, "new-in-1.1.0")), "did not go back");
+      assert(!await exists(paths.lnk), "a downgrade put back a removed one");
+      // …and the open that installs the app again is the one that adds it.
+      await Deno.remove(install, { recursive: true });
+      await open();
+      assert(await exists(paths.lnk), "installing again added no shortcut");
+    } finally {
+      await dropTempDir(tmp);
+    }
+  },
+});
+
+// WHO adds the shortcut: the `.exe`, when it installs — opened or run with
+// `--aio-sfx-install` (how `am upgrade` and `run.ps1 -NoRun` run it, with
+// nothing started). The app adds one only to an install whose `.exe` did not.
+// So an install-only into a fresh profile has its shortcut before any start —
+// unless the build said `build.windows.shortcut: false`.
+Deno.test({
+  name:
+    "Windows: --aio-sfx-install into a fresh profile leaves the Start-menu shortcut, starting nothing — none when the build opted out",
+  ignore: Deno.build.os !== "windows", // runs the stub PE, a Windows program
+  async fn() {
+    const tmp = await tempDir("sfx-shortcut-");
+    try {
+      const stage = join(tmp, "app");
+      await Deno.mkdir(join(stage, "electron"), { recursive: true });
+      await Deno.copyFile(
+        join(Deno.env.get("SystemRoot")!, "System32", "whoami.exe"),
+        join(stage, "my-app.exe"),
+      );
+      await Deno.writeTextFile(join(stage, "electron", "electron.exe"), "e");
+      const payloadPath = join(tmp, "payload.tar.zst");
+      await packAppDirTarZstd(stage, payloadPath);
+      for (const shortcut of [true, false]) {
+        const exe = join(tmp, `my-app-${shortcut}.exe`);
+        await writeWindowsSfxExe({
+          stubPath: await ensureWindowsSfxStub(),
+          payloadPath,
+          payloadFormat: "tar.zstd",
+          outPath: exe,
+          binaryName: "my-app",
+          archStr: "x64",
+          version: "1.0.0",
+          title: "My App",
+          ...(shortcut ? { shortcut } : {}),
+        });
+        // A profile nothing was ever installed into: no Start Menu folder.
+        const appData = join(tmp, `roaming-${shortcut}`);
+        const local = join(tmp, `local-${shortcut}`);
+        const ran = await new Deno.Command(exe, {
+          args: ["--aio-sfx-install"],
+          env: { APPDATA: appData, LOCALAPPDATA: local },
+          stdout: "piped",
+          stderr: "piped",
+        }).output();
+        const err = new TextDecoder().decode(ran.stderr);
+        assertEquals(ran.code, 0, err);
+        const install = join(local, "aio-sfx", "my-app", "win-x64");
+        const paths = sfxShortcutPaths(install, appData, "My App");
+        assert(await exists(paths.target), "nothing was installed");
+        assertEquals(await exists(paths.lnk), shortcut, err);
+        if (shortcut) {
+          assertEquals(await readLnk(paths.lnk), {
+            target: paths.target,
+            dir: paths.dir,
+          });
+        }
+      }
+    } finally {
+      await dropTempDir(tmp);
+    }
+  },
+});
+
+// A shortcut the `.exe` could not add is said where that run's failures are
+// said (stderr under `--aio-sfx-install`; the message box of a plain open),
+// the app is installed all the same, and nothing is recorded — so the app's
+// own start still adds it.
+Deno.test({
+  name:
+    "Windows: a shortcut the .exe cannot add is said, fails nothing and is left for the app to add",
+  ignore: Deno.build.os !== "windows", // runs the stub PE, a Windows program
+  async fn() {
+    const tmp = await tempDir("sfx-shortcut-");
+    try {
+      const stage = join(tmp, "app");
+      await Deno.mkdir(join(stage, "electron"), { recursive: true });
+      await Deno.copyFile(
+        join(Deno.env.get("SystemRoot")!, "System32", "whoami.exe"),
+        join(stage, "my-app.exe"),
+      );
+      await Deno.writeTextFile(join(stage, "electron", "electron.exe"), "e");
+      const payloadPath = join(tmp, "payload.tar.zst");
+      await packAppDirTarZstd(stage, payloadPath);
+      const exe = join(tmp, "my-app-win-x64.exe");
+      await writeWindowsSfxExe({
+        stubPath: await ensureWindowsSfxStub(),
+        payloadPath,
+        payloadFormat: "tar.zstd",
+        outPath: exe,
+        binaryName: "my-app",
+        archStr: "x64",
+        version: "1.0.0",
+        title: "My App",
+        shortcut: true,
+      });
+      // A Start Menu that cannot be made: its parent is a file.
+      const blocked = join(tmp, "a-file");
+      await Deno.writeTextFile(blocked, "");
+      const local = join(tmp, "local");
+      const ran = await new Deno.Command(exe, {
+        args: ["--aio-sfx-install"],
+        env: { APPDATA: blocked, LOCALAPPDATA: local },
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      const err = new TextDecoder().decode(ran.stderr);
+      assertEquals(ran.code, 0, err);
+      assert(err.includes("aio SFX: no Start-menu shortcut: "), err);
+      const install = join(local, "aio-sfx", "my-app", "win-x64");
+      assert(await exists(join(install, "my-app.exe")), "nothing installed");
+      assert(!await exists(install + SFX_SHORTCUT_RECORD), "recorded a miss");
+      const appData = join(tmp, "roaming");
+      const { log } = said();
+      const lnk = ensureSfxShortcut({
+        install,
+        log,
+        build: { title: "My App" },
+        appData,
+      });
+      assertEquals(lnk, sfxShortcutPaths(install, appData, "My App").lnk);
+      assert(await exists(lnk!));
     } finally {
       await dropTempDir(tmp);
     }

@@ -19,6 +19,10 @@
 import { readDenoJson } from "./server/deno-json.ts";
 import { resolveEntryPath } from "./server/paths.ts";
 import {
+  firstUseKeyWarning,
+  updatesKeyOnFirstUse,
+} from "./build/capabilities.ts";
+import {
   unknownBuildKeys,
   VALID_BUILD_KEYS,
   VALID_BUILD_TARGET_KEYS,
@@ -51,6 +55,9 @@ import {
   resolveEntry,
 } from "./build/build-config.ts";
 import { DIST_DIR } from "./server/app-files.ts";
+// The physical-proof matrix as this aio shipped it: written by gated runs,
+// never by hand (scripts/proof.ts).
+import PROOF from "../proof-matrix.json" with { type: "json" };
 import {
   outDirListing,
   recordOutput,
@@ -68,6 +75,7 @@ import {
   hostPlatform,
   isHostPlatform,
   PLATFORMS,
+  proofLines,
   resolvePlatforms,
 } from "./build/platforms.ts";
 
@@ -317,6 +325,7 @@ import {
 import { iosArtifactName } from "./build/build-ios.ts";
 import { smokeBuild, type SmokeMode, smokeMode } from "./build/smoke.ts";
 import { webArtifactName } from "./build/build-web.ts";
+import { BUILD_NOTES_ENV, readSummaryNotes } from "./build/build-say.ts";
 import {
   artifactVersion,
   BUILD_VERSION_ENV,
@@ -401,12 +410,15 @@ const human = bytes;
 const ARTIFACT_EXTS = new Set([
   ".AppImage",
   ".apk",
+  ".aab", // the signed Android bundle a store upload takes
   ".zip",
   ".dmg",
   ".gz", // `<bin>-mac-<arch>.app.tar.gz`, the signed macOS update artifact
   ".service",
   ".exe",
 ]);
+
+const SUPERVISOR_EXTS = new Set([".plist", ".ps1"]);
 
 /** Is `name` a build artifact for `binaryName`? Per-target builds emit
  *  arch-suffixed names we can't fully predict, so we recognize by prefix+ext
@@ -425,6 +437,17 @@ export function isArtifactName(name: string, binaryName: string): boolean {
   const ext = extname(name);
   if (ARTIFACT_EXTS.has(ext)) {
     return name.startsWith(binaryName) || name.startsWith("aio-client-");
+  }
+  // A server target's supervisor file for macOS / Windows (`writeServiceFile`:
+  // `<artifact>.plist`, `<artifact>.ps1`). Unrecognised, it was the one file
+  // a fleet build left in the project ROOT — not beside the binary it runs,
+  // and an untracked file that marked the next build `-dirty`. By its EXACT
+  // name: `deploy.ps1` in an app called `deploy` aside, a script of the
+  // project's own is never an artifact.
+  if (SUPERVISOR_EXTS.has(ext)) {
+    const base = name.slice(0, -ext.length);
+    return base === binaryName ||
+      Object.keys(PLATFORMS).some((p) => base === `${binaryName}-${p}`);
   }
   if (ext === "") {
     if (
@@ -1210,6 +1233,8 @@ export async function buildAll(): Promise<number> {
   // Same-filesystem staging (survives each build's dist/ clean; rename is safe).
   const staging = join(root, ".aio", `build-staging-${crypto.randomUUID()}`);
   await Deno.mkdir(staging, { recursive: true });
+  // Where a target's build leaves what the summary must repeat (build-say.ts).
+  const notesFile = join(staging, "summary-notes");
 
   // Move the PREVIOUS output out of the per-target builds' reach before any of
   // them runs. `out` defaults to `dist/`, which those builds treat as their own
@@ -1258,6 +1283,8 @@ export async function buildAll(): Promise<number> {
   const serviceInstalls: { target: string; lines: string[] }[] = [];
   /** Placed binaries that boot `aio.run()`, asked for their identity below. */
   const identityProbes: IdentityProbe[] = [];
+  /** What the targets' builds asked to have repeated below the artifacts. */
+  let summaryNotes: string[] = [];
   try {
     for (const t of targetList) {
       const target = t.name;
@@ -1336,7 +1363,10 @@ export async function buildAll(): Promise<number> {
         const { code } = await new Deno.Command("deno", {
           args,
           cwd: root,
-          env: { [BUILD_VERSION_ENV]: JSON.stringify(version) },
+          env: {
+            [BUILD_VERSION_ENV]: JSON.stringify(version),
+            [BUILD_NOTES_ENV]: notesFile,
+          },
           stdout: "inherit",
           stderr: "inherit",
         }).output();
@@ -1390,7 +1420,8 @@ export async function buildAll(): Promise<number> {
           console.error(
             `${C.red}✗ ${label} — ${why}${C.r}\n  ${C.dim}looked for: ` +
               `${targetBin}, ${targetBin}-client, ${targetBin}-<platform>, ` +
-              `${targetBin}*.{AppImage,apk,zip,dmg,app.tar.gz,exe,service}, aio-client-*, ` +
+              `${targetBin}*.{AppImage,apk,zip,dmg,app.tar.gz,exe,service}, ` +
+              `${targetBin}[-<platform>].{plist,ps1}, aio-client-*, ` +
               `the ${iosArtifactName(targetBin)}/ or ${
                 webArtifactName(targetBin)
               }/ directory — new since the ` +
@@ -1624,6 +1655,7 @@ export async function buildAll(): Promise<number> {
           }${C.r}`,
       );
     }
+    summaryNotes = readSummaryNotes(notesFile);
   } finally {
     await Deno.remove(staging, { recursive: true }).catch(() => {});
   }
@@ -1669,6 +1701,22 @@ export async function buildAll(): Promise<number> {
       }${C.r}`,
     );
   }
+  // …and what aio itself has on record for a target outside its gates.
+  for (
+    const [text, recorded] of proofLines(
+      results.filter((r) => r.ok && !r.skipped).map((r) => ({
+        kind: targetList.find((t) => t.name === r.target)?.kind ?? r.target,
+        os: PLATFORMS[
+          isHostPlatform(r.platform) ? hostPlatform() : r.platform
+        ]?.os,
+      })),
+      PROOF,
+    )
+  ) {
+    console.log(
+      `\n  ${C.dim}proof:${C.r} ${recorded ? C.dim : C.yellow}${text}${C.r}`,
+    );
+  }
   if (block.server) {
     console.log(
       `\n  ${C.dim}clients connect to server:${C.r} ${C.blue}${block.server}${C.r}`,
@@ -1678,6 +1726,29 @@ export async function buildAll(): Promise<number> {
     const line of sharedIdentityWarnings(await probeIdentities(identityProbes))
   ) {
     console.warn(`\n  ${C.yellow}⚠ ${line}${C.r}`);
+  }
+  for (const note of summaryNotes) {
+    console.warn(`\n  ${C.yellow}⚠ ${note}${C.r}`);
+  }
+  // An updating app with no signing key in its config: said at every build,
+  // by the entry each built target boots (see `updatesKeyOnFirstUse`).
+  const firstUse = [
+    ...new Set(
+      results.filter((r) => r.ok && !r.skipped).map((r) =>
+        r.entry ?? resolveEntryPath(denoJson, undefined)
+      ),
+    ),
+  ].filter((e) => {
+    try {
+      return updatesKeyOnFirstUse(Deno.readTextFileSync(join(root, e)));
+    } catch {
+      return false; // aio-ok: an entry this summary cannot read claims nothing
+    }
+  });
+  if (firstUse.length > 0) {
+    console.warn(
+      `\n  ${C.yellow}⚠ ${firstUseKeyWarning(firstUse.join(", "))}${C.r}`,
+    );
   }
   for (const { target, lines } of serviceInstalls) {
     console.log(

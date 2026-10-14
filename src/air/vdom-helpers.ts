@@ -3,7 +3,8 @@
 
 import { effect } from "../state/signal.ts";
 import type { Signal } from "../state/signal.ts";
-import { _devWarn } from "./vdom-types.ts";
+import { _devWarn, _wrong } from "./vdom-types.ts";
+import { saysOnce } from "../protocol/said-once.ts";
 import { isDevMode } from "../state/dev-flag.ts";
 import type { VNode } from "./vdom-types.ts";
 
@@ -36,30 +37,36 @@ function _sigWarnId(sig: Signal<unknown>): string {
   return id;
 }
 
+const _SIG_OBJECT =
+  "A signal used as a child holds an object — a signal child renders as TEXT.";
+
 /** Bind `vnode`'s signal to `node`: the text follows the signal from now on. */
 export function _bindSignalText(vnode: VNode, node: Text): void {
   vnode._unbind?.();
   const sig = vnode._sig as Signal<unknown>;
   vnode._unbind = effect(() => {
     const val = sig.value;
-    // Dev-only: a signal child renders as TEXT. A value that is an object, an
-    // array or a vnode turns into "[object Object]" / "a,b" on screen, which
-    // looks like a rendering bug when it is a shape mistake — say what it is
-    // and what to do instead, once per signal.
-    if (isDevMode() && val !== null && typeof val === "object") {
-      _devWarn(
-        _sigWarnId(sig),
-        `A signal used as a child holds ${
-          Array.isArray(val)
-            ? "an array"
-            : "tag" in (val as Record<string, unknown>)
-            ? "a vnode"
-            : "an object"
-        } — a signal child renders as TEXT, so this shows as ${
-          JSON.stringify(_sigText(val))
-        }. To render nodes from a signal, read it inside the component ` +
-          `({sig.value}) or derive a string (computed(() => …)).`,
-      );
+    // A signal child renders as TEXT. A value that is an object, an array or
+    // a vnode turns into "[object Object]" / "a,b" on screen, which looks
+    // like a rendering bug when it is a shape mistake — dev says what it is
+    // and what to do instead, once per signal; a production page, where the
+    // value may be the first of its shape, says the fact once.
+    if (val !== null && typeof val === "object") {
+      if (isDevMode()) {
+        _devWarn(
+          _sigWarnId(sig),
+          `A signal used as a child holds ${
+            Array.isArray(val)
+              ? "an array"
+              : "tag" in (val as Record<string, unknown>)
+              ? "a vnode"
+              : "an object"
+          } — a signal child renders as TEXT, so this shows as ${
+            JSON.stringify(_sigText(val))
+          }. To render nodes from a signal, read it inside the component ` +
+            `({sig.value}) or derive a string (computed(() => …)).`,
+        );
+      } else saysOnce(_SIG_OBJECT);
     }
     node.textContent = _sigText(val);
   });
@@ -139,9 +146,9 @@ export function _applyActions(el: HTMLElement, actions: unknown): void {
   const list = _actionList(actions);
   if (!list) {
     // Not a function and not a list of them — the prop cannot mean anything,
-    // and it used to be skipped in silence. Observe-only: prod still skips.
+    // and it used to be skipped in silence. Observe-only: both modes skip.
     if (actions != null && actions !== false) {
-      _devWarn(
+      _wrong(
         "use-not-action",
         `A \`use\` prop holds ${typeof actions} — it must be an action function, or an array of them (with ` +
           `their arguments). Nothing was applied.`,

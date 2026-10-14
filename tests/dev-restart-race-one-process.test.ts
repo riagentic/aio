@@ -14,6 +14,7 @@
 //
 // Deterministic: the relaunched child sleeps before it boots (a slow module
 // graph, stretched), so the window is seconds wide instead of milliseconds.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { processList } from "./proc-helper.ts";

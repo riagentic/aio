@@ -10,6 +10,7 @@
 //
 // Driven through a REAL `am` process from a subdirectory: the record and the
 // child's `Deno.cwd()` are two facts that only a spawn can put side by side.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { lockDir } from "../src/server/single-instance-lock.ts";

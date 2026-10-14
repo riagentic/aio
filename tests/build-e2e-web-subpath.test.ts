@@ -12,11 +12,12 @@ import { assert, assertEquals } from "@std/assert";
 import { copy } from "@std/fs";
 import { extname, join } from "@std/path";
 import { buildFlags, freePort, makeApp } from "./e2e-app-harness.ts";
-import { findBrowser } from "./e2e-harness.ts";
+import { browserOsFlags, findBrowser } from "./e2e-harness.ts";
 import { cdpConnect } from "../src/media/cdp.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { testDisplayEnv } from "../src/testing/test-display.ts";
 import { stopChild } from "./stop-child.ts";
+import { browserHomeEnv } from "../src/testing/chromium.ts";
 
 const GATE = Deno.env.get("AIO_BUILD_E2E") === "1";
 const BROWSER = findBrowser();
@@ -114,6 +115,7 @@ Deno.test({
 
       browser = new Deno.Command(BROWSER!, {
         args: [
+          ...browserOsFlags,
           "--headless=new",
           "--no-sandbox",
           "--disable-gpu",
@@ -125,7 +127,7 @@ Deno.test({
           "about:blank",
         ],
         cwd: foreign,
-        env: testDisplayEnv(),
+        env: { ...browserHomeEnv(profile), ...testDisplayEnv() },
         stdin: "null",
         stdout: "null",
         stderr: "null",

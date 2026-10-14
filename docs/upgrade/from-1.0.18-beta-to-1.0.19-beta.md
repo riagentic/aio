@@ -69,7 +69,7 @@ Everything else needs nothing.
 | `__aioShell.clearPartition(name)`         | Clears a guest session's cookies, storage and cache (for "lock" in an app)       |
 | `workerRespawn: true` (cell)              | A crashed `worker: true` cell is started again                                   |
 | `crashWorker(cell)` (`aio/testing`)       | Crashes a worker cell in a test                                                  |
-| `deno task build --smoke` / `build.smoke` | Starts each built artifact and fails the build when it does not come up clean    |
+| `deno task build --smoke` / `build.smoke` | Starts each artifact (a desktop package: Linux host only); an unclean one fails  |
 | `// aio-ok(read): <why>`                  | Marks a file read the build check should not judge                               |
 | aiol: hook order                          | A state hook after an early `return`, behind a condition or in a loop is flagged |
 
@@ -122,11 +122,13 @@ app:
 
 - **A component whose hook count changes between renders** (a hook after an
   early `return`) read another hook's state. A production page now logs one
-  error per component. The new aiol rule finds these before they run: `am lint`.
+  error per component. The new aiol rule finds these before they run:
+  `deno task lint` in an app.
 - **`onMount`, `onCleanup`, `onUnmount` or `useHead` called outside a render**
   was dropped. Logged once.
 - **A call whose arguments JSON cannot carry intact** (a `Date`, a `Map`) is
-  logged once per method by a production client. What is sent is unchanged.
+  logged once per method by a production client, if it happens within that
+  method's first 16 calls. What is sent is unchanged.
 - **A refused guest preload** carries the fix in its log line, and the page
   receives an `aio:guest-preload-refused` event.
 
@@ -142,11 +144,11 @@ app:
   `undefined` (`add({ text, due })`) is fine: the key arrives absent, as in the
   app. Awaited return values are JSON too. `testCell`, `bootCells` and calls
   between cells are unchanged.
-- **happy-dom is 20.** `testUI` makes its window with the framework's own
-  happy-dom, whatever the app pins. Two things differ from 17: a `<script>` in
-  rendered HTML is not run, and the parser closes a `<p>` at a nested `<div>` as
-  a browser does — server HTML of that shape is a hydration mismatch, in the
-  test as in the browser.
+- **happy-dom is 20.** `testUI` makes its window with the `happy-dom` the app's
+  deno.json names; `am pin` to this release writes `20.14.5` there. Two things
+  differ from 17: a `<script>` in rendered HTML is not run, and the parser
+  closes a `<p>` at a nested `<div>` as a browser does — server HTML of that
+  shape is a hydration mismatch, in the test as in the browser.
 - **Contrast and selector audits run on every mount.** They ran only for an app
   with cells, so a second cell-less mount in the same file was not checked.
 - **`history.back()` after a `#hash` change** lands where a browser lands.
@@ -161,8 +163,9 @@ app:
 | Electron  | 44.4.1 | 44.5.1  |
 | happy-dom | 17.6.3 | 20.14.5 |
 
-- An app whose deno.json still says `esbuild@0.24.2` or `happy-dom@^17` builds
-  and tests as before: the framework loads its own.
+- An app whose deno.json still says `esbuild@0.24.2` builds as before: the
+  framework loads its own esbuild. One that still says `happy-dom@^17` tests
+  with 17 as before: `testUI` uses the app's entry.
 - An app whose deno.json says `electron@44.4.1` builds with 44.5.1 and says so
   in one line that names `am fix`. `am doctor` has the same line.
 
@@ -202,8 +205,9 @@ app:
 - **A sync app killed in the instant it refused a change** no longer refuses to
   boot: that change is removed at the next start, with one warning. The database
   gains one nullable column (`sync_ops.settled`); an older aio still opens it. A
-  row left this way by an older aio still stops the start, and the message gives
-  the one-line repair. An app that sets `PRAGMA synchronous = FULL` pays a
+  row left this way by an older aio still stops the start in dev, and the
+  message gives the one-line repair; a production build sets the cell aside
+  (quarantine) and starts. An app that sets `PRAGMA synchronous = FULL` pays a
   second sync per accepted change; the default setting pays nothing measurable.
   See [CRDT](../persistence/crdt.md).
 - Several copies of an app started at once no longer fail on the lock folder (a
@@ -222,6 +226,8 @@ app:
 - **A UI test that checks call arguments by hand for `Date` or `Map`**: `testUI`
   fails on them.
 - **A release step that starts the built app to see whether it comes up**:
-  `deno task build --smoke`.
+  `deno task build --smoke` (a desktop package is started on a Linux host only;
+  on Windows and macOS its row says "not smoke-tested" and the build passes
+  unless `--smoke=strict`).
 
 The full list is in [the changelog](../../CHANGELOG.md).

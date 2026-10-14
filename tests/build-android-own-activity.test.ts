@@ -6,8 +6,21 @@
 // losing a change on a kill 122 ms after it — and the build said nothing.
 
 import { assertEquals, assertStringIncludes } from "@std/assert";
-import { ownActivityLosses } from "../src/build/build-android.ts";
+import {
+  _androidStrict,
+  ownActivityLosses,
+  ownActivityRefusal,
+} from "../src/build/build-android.ts";
 import { ANDROID_TEMPLATE } from "../src/build/android-template.ts";
+import { fromFileUrl, join } from "@std/path";
+import {
+  childCoverageDir,
+  dropTempDir,
+  tempDir,
+} from "../src/testing/temp-dir.ts";
+import { spec } from "./module-spec-helper.ts";
+
+const REPO = fromFileUrl(new URL("../", import.meta.url));
 
 const TEMPLATE_ACTIVITY =
   ANDROID_TEMPLATE["app/src/main/java/aio/app/MainActivity.kt"]!;
@@ -156,4 +169,100 @@ Deno.test("own MainActivity.kt: an overlay that never asks the page about Back w
   assertEquals(w.length, 2);
   assertStringIncludes(w[1]!, "onBackButton");
   assertStringIncludes(w[1]!, "__aioBack");
+});
+
+// `build.android.strict` (opt-in): the same losses stop the build. Off when
+// absent, so a build that warned and produced an APK still does.
+Deno.test("build.android.strict: off by default the losses only warn; on, any loss refuses the build; a non-boolean is refused by name", () => {
+  const losses = ownActivityLosses(BARE_OVERLAY, { standalone: true });
+  assertEquals(losses.length, 3);
+  assertEquals(_androidStrict({}), false);
+  assertEquals(_androidStrict(undefined), false);
+  assertEquals(_androidStrict({ build: { android: {} } }), false);
+  assertEquals(
+    _androidStrict({ build: { android: { strict: false } } }),
+    false,
+  );
+  assertEquals(_androidStrict({ build: { android: { strict: true } } }), true);
+  for (const bad of ["true", 1, null, {}]) {
+    assertEquals(_androidStrict({ build: { android: { strict: bad } } }), null);
+  }
+  assertEquals(ownActivityRefusal(losses, false), null);
+  assertEquals(ownActivityRefusal([], true), null);
+  const refusal = ownActivityRefusal(losses, true);
+  assertStringIncludes(refusal ?? "", "build.android.strict");
+  assertStringIncludes(refusal ?? "", "no APK was built");
+  assertStringIncludes(refusal ?? "", "3 things");
+  // The template's own activity loses nothing: strict changes nothing for it.
+  assertEquals(
+    ownActivityRefusal(
+      ownActivityLosses(TEMPLATE_ACTIVITY, { standalone: true }),
+      true,
+    ),
+    null,
+  );
+});
+
+// …and its TYPE is checked by every build, not only the android one: a key
+// validated only by the target that reads it is a typo that waits for
+// release day.
+Deno.test({
+  name:
+    "build.android.strict: a non-boolean is refused by the build config of ANY target, by name; a boolean and an absent key are not",
+  sanitizeOps: false, // aio-ok(sanitizers): a child per case, awaited
+  sanitizeResources: false, // aio-ok(sanitizers): same
+  async fn() {
+    const dir = await tempDir("aio-android-strict-");
+    try {
+      await Deno.mkdir(join(dir, "src"));
+      await Deno.writeTextFile(join(dir, "src/app.ts"), "");
+      const runner = join(dir, "runner.ts");
+      await Deno.writeTextFile(
+        runner,
+        `import { loadBuildConfig } from "${
+          spec(REPO)
+        }src/build/build-config.ts";
+await loadBuildConfig();
+console.log("CONFIG OK");
+`,
+      );
+      const load = async (build: unknown) => {
+        await Deno.writeTextFile(
+          join(dir, "deno.json"),
+          JSON.stringify({ title: "strict-type", build }),
+        );
+        const out = await new Deno.Command(Deno.execPath(), {
+          env: { DENO_COVERAGE_DIR: childCoverageDir(), NO_COLOR: "1" },
+          args: ["run", "-A", `--config=${REPO}deno.json`, runner],
+          cwd: dir,
+          stdout: "piped",
+          stderr: "piped",
+        }).output();
+        const dec = new TextDecoder();
+        return [out.code, dec.decode(out.stdout) + dec.decode(out.stderr)] as [
+          number,
+          string,
+        ];
+      };
+      for (const bad of ["true", 1, null]) {
+        const [code, said] = await load({ android: { strict: bad } });
+        assertEquals(code, 1, said);
+        assertStringIncludes(
+          said,
+          `build.android.strict must be true or false, not ${
+            JSON.stringify(bad)
+          }`,
+        );
+      }
+      for (
+        const build of [{ android: { strict: true } }, { android: {} }, {}]
+      ) {
+        const [code, said] = await load(build);
+        assertEquals(code, 0, said);
+        assertStringIncludes(said, "CONFIG OK");
+      }
+    } finally {
+      await dropTempDir(dir);
+    }
+  },
 });

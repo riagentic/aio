@@ -10,6 +10,7 @@
 //       the window as in 1.0.12, and that site then gets neither IPC nor the
 //       app's permissions.
 // Unit-level twin: electron-ipc-sender-guard.test.ts.
+import { childEnv } from "./e2e-app-harness.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import {
@@ -168,7 +169,7 @@ async function run(scheme: "http" | "aio"): Promise<{ r: any; err: string }> {
       args: [file, "--no-sandbox"],
       // A main.cjs that throws shows a dialog and never exits: bound it.
       signal: AbortSignal.timeout(90_000),
-      env: { ...testDisplayEnv(), ELECTRON_ENABLE_LOGGING: "0" },
+      env: childEnv({ ...testDisplayEnv(), ELECTRON_ENABLE_LOGGING: "0" }),
       stdout: "piped",
       stderr: "piped",
     }).output();

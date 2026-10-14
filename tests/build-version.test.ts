@@ -9,6 +9,7 @@
  * naming grammar, the artifact recognition, the publish refusal and the update
  * decision are pinned here for every target kind.
  */
+import "./store-sandbox.ts";
 import {
   assert,
   assertEquals,

@@ -93,6 +93,21 @@ Deno.test("revoked session: the tab stops reconnecting and shows signed out", as
     assertEquals(connected.value, true, "the signed-in tab connected");
     assertEquals(upgrades, 1);
 
+    // One answered call first, as in `air-signed-out-resumes-on-focus`: the
+    // handshake's own frames are paced out AFTER "connected", and a close
+    // with unread data behind it loses its code (red 2 runs of 3 beside
+    // other files, 2026-10-12). Every frame sent before the ack has been read.
+    {
+      const cid = crypto.randomUUID();
+      const landed = _registerAck(cid, {
+        deferTimer: true,
+        methodKey: "revk:inc",
+      });
+      const inc = c.__aio.actions.inc as () => { type: string };
+      client.send({ ...inc(), cid } as { type: string });
+      await landed;
+    }
+
     // Revoked out of band (another tab signed out, an admin ended it).
     const out = await srv.fetch("/__aio/auth/logout", {
       method: "POST",

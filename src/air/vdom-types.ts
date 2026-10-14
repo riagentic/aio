@@ -3,6 +3,7 @@
 
 import type { Signal } from "../state/signal.ts";
 import { isDevMode, setDevModeOverride } from "../state/dev-flag.ts";
+import { saysOnce } from "../protocol/said-once.ts";
 
 // ── SVG tag set ────────────────────────────────────────────────────
 // The runtime namespace switch. jsx-runtime.ts lists these same tags in
@@ -327,4 +328,40 @@ export function _devWarn(id: string, msg: string): void {
   if (_devWarned.size >= _DEV_WARN_CAP) _devWarned.clear();
   _devWarned.add(id);
   console.warn(`[aio-dev] ${msg}`);
+}
+
+/** @internal How the reconciler's own failures end — said in production too:
+ *  an update that stops landing is not a dev nicety, and the report this asks
+ *  for can only come from where it happened. */
+export const _BUG =
+  " This is an aio bug; please report the component's child shape.";
+
+/** @internal …for a line whose cause can also be the page: a text node that is
+ *  not where the renderer left it was moved by SOMETHING, and a translator
+ *  wrapping every text node in a `<font>` is the usual something. */
+export const _MOVED =
+  " Something outside aio changed this DOM (a page translator, an " +
+  "extension, a script) — or this is an aio bug: please report the " +
+  "component's child shape.";
+
+/** @internal The prefix of a line both modes say. */
+export const _tag = (): string => isDevMode() ? "[aio-dev] " : "[aio] ";
+
+/** A line about the app (or the reconciler) doing the WRONG thing: an update
+ *  lost, a prop dropped, server markup thrown away. `_devWarn` is for advice;
+ *  this is for a defect, and a packaged build that has the same defect in
+ *  silence is the forbidden difference (CLAUDE.md, dev == prod).
+ *
+ *  `what` is the fact and `fix` the advice. Dev says both, once per `id`,
+ *  exactly as `_devWarn` does. Prod says `what`, once per `kind` — the id
+ *  unless that carries app data (a key, a list of attributes). One string
+ *  split in two, so the page pays for the gate and no more. Observe-only. */
+export function _wrong(
+  id: string,
+  what: string,
+  fix = "",
+  kind: string = id,
+): void {
+  if (isDevMode()) _devWarn(id, what + fix);
+  else saysOnce(what, kind);
 }

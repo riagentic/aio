@@ -85,7 +85,9 @@ Deno.test("ci: check:release keeps its required lanes, and only the lab may skip
   // overlap soak, the seeded sync properties, the dead-wiring ratchet (which
   // carries check:persist-decider), the mutation ledger, the frozen public
   // surface (check:api — the surface is additive-only, and this is the only
-  // gate that sees a removed export), and the page's download size.
+  // gate that sees a removed export), the page's download size, and the perf
+  // floors (check:bench — outside this list for nine releases, during six of
+  // which boot measured 50% over its floor).
   const gates = await releaseGates();
   const REQUIRED = [
     "deno task test:hosts",
@@ -95,6 +97,7 @@ Deno.test("ci: check:release keeps its required lanes, and only the lab may skip
     "deno task check:mutations",
     "deno task check:api",
     "deno task check:bundle-size",
+    "deno task check:bench",
   ];
   assertEquals(
     REQUIRED.filter((g) => !gates.includes(g)),

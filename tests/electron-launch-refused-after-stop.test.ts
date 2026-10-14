@@ -12,6 +12,7 @@
 // never answers. SIGTERM once the installer is provably on the wire, then
 // assert that no process is left in the app's cwd and the launch never
 // happened. Linux-only: `/proc/<pid>/cwd` is how the survivors are found.
+import { childEnv, ownAccount } from "./e2e-app-harness.ts";
 import { assert, assertEquals } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
@@ -113,11 +114,11 @@ for (const sig of ["SIGTERM", "SIGHUP"] as const) {
           `--port=${freePort()}`,
         ],
         cwd,
-        env: {
+        env: childEnv({
           ...testDisplayEnv(),
           ELECTRON_PATH: "", // the dev lookup, not an override
           AIO_APPS_DIR: join(dir, "home"),
-        },
+        }),
         stdout: "piped",
         stderr: "piped",
       }).spawn();
@@ -209,6 +210,7 @@ Deno.test({
     const fake = join(dir, "electron");
     await Deno.writeTextFile(fake, `#!/bin/sh\ntouch "${marker}"\n`);
     await Deno.chmod(fake, 0o755);
+    using _home = ownAccount(); // the window's profile: this run's, not yours
     const was = Deno.env.get("ELECTRON_PATH");
     Deno.env.set("ELECTRON_PATH", fake);
     const lines: string[] = [];
@@ -387,6 +389,7 @@ Deno.test({
     const fake = join(dir, "electron");
     await Deno.writeTextFile(fake, `#!/bin/sh\ntouch "${marker}"\n`);
     await Deno.chmod(fake, 0o755);
+    using _home = ownAccount(); // the window's profile: this run's, not yours
     const was = Deno.env.get("ELECTRON_PATH");
     Deno.env.set("ELECTRON_PATH", fake);
     const log = { info() {}, warn() {}, error() {}, debug() {} };

@@ -48,8 +48,10 @@ const modeOf = async (p: string) => (await Deno.stat(p)).mode! & 0o777;
 
 // ─── Checkpoint: permissions ────────────────────────────────────────────────
 
-Deno.test("checkpoint: is owner-only, like the journal beside it", async () => {
-  if (Deno.build.os === "windows") return;
+Deno.test({
+  name: "checkpoint: is owner-only, like the journal beside it",
+  ignore: Deno.build.os === "windows", // POSIX mode bits do not exist on Windows
+}, async () => {
   await withDir(async (dir) => {
     const cp = createCheckpoint(dir, 0);
     cp.schedule({
@@ -67,8 +69,10 @@ Deno.test("checkpoint: is owner-only, like the journal beside it", async () => {
   });
 });
 
-Deno.test("checkpoint: an existing lax file is not left lax by the next write", async () => {
-  if (Deno.build.os === "windows") return;
+Deno.test({
+  name: "checkpoint: an existing lax file is not left lax by the next write",
+  ignore: Deno.build.os === "windows", // POSIX mode bits do not exist on Windows
+}, async () => {
   await withDir(async (dir) => {
     // A checkpoint left by an older build, or by a laxer umask.
     await Deno.writeTextFile(`${dir}/checkpoint.json`, "{}", { mode: 0o664 });
@@ -87,8 +91,10 @@ Deno.test("checkpoint: an existing lax file is not left lax by the next write", 
   });
 });
 
-Deno.test("checkpoint: the crash-path sync write is owner-only too", async () => {
-  if (Deno.build.os === "windows") return;
+Deno.test({
+  name: "checkpoint: the crash-path sync write is owner-only too",
+  ignore: Deno.build.os === "windows", // POSIX mode bits do not exist on Windows
+}, async () => {
   await withDir(async (dir) => {
     const cp = createCheckpoint(dir, 5000);
     cp.writeSync({

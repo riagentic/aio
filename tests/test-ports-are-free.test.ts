@@ -6,7 +6,7 @@
 // 19840, so a lingering listener made whichever test ran second fail — a real
 // flake we chased (auth-client, 2026-07-25). `freePort()` asks the OS for a port
 // that is free right now, which removes the bookkeeping AND the flake class.
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { appDirs } from "../src/server/app-dirs.ts";
 import { codeMask } from "../aiol/scan.ts";
 import { portSliceFor } from "../scripts/test-shards.ts";
@@ -96,6 +96,102 @@ Deno.test("tests: the suite is running against a pinned data home", () => {
   );
 });
 
+/** `src` with every template literal's text blanked (newlines kept, so a
+ *  finding still names its line). Read as code, not by pairing backticks: a
+ *  backtick in a comment (`am upgrade`, PowerShell's own) or a template
+ *  nested in a `${…}` put a pairing regex out of step, and from there on it
+ *  blanked the file's CODE and read its fixtures — a child script's
+ *  mkdir of `dist` was reported as this suite writing the repo root.
+ *  Pure. */
+export function blankTemplates(src: string): string {
+  const out = src.split("");
+  let i = 0;
+  const template = (): void => { // from just inside the opening backtick
+    while (i < src.length && src[i] !== "`") {
+      if (src[i] === "\\") {
+        out[i] = " ";
+        if (src[i + 1] !== "\n") out[i + 1] = " ";
+        i += 2;
+      } else if (src[i] === "$" && src[i + 1] === "{") {
+        out[i] = out[i + 1] = " ";
+        i += 2;
+        code(true);
+      } else {
+        if (src[i] !== "\n") out[i] = " ";
+        i++;
+      }
+    }
+    i++; // the closing backtick stays
+  };
+  // `inExpr`: inside a template's `${…}` — its text is fixture data too, and
+  // it ends at the matching `}`.
+  const code = (inExpr: boolean): void => {
+    let depth = 0;
+    // The last significant character: what tells a regex's `/` from a divide.
+    let prev = "";
+    while (i < src.length) {
+      const c = src[i]!;
+      const before = prev;
+      if (!/\s/.test(c)) prev = c;
+      if (c === "/" && src[i + 1] === "/") {
+        while (i < src.length && src[i] !== "\n") i++;
+      } else if (c === "/" && src[i + 1] === "*") {
+        i = src.indexOf("*/", i + 2);
+        i = i < 0 ? src.length : i + 2;
+      } else if (c === "/" && /^$|[=(,:[!&|?{;]/.test(before)) {
+        // A regex literal may hold a quote or a backtick (`/\`\r?\n/`).
+        i++;
+        for (let cls = false; i < src.length && src[i] !== "\n"; i++) {
+          if (src[i] === "\\") i++;
+          else if (src[i] === "[") cls = true;
+          else if (src[i] === "]") cls = false;
+          else if (src[i] === "/" && !cls) break;
+        }
+        i++;
+      } else if (c === '"' || c === "'") {
+        const from = i++;
+        while (i < src.length && src[i] !== c && src[i] !== "\n") {
+          i += src[i] === "\\" ? 2 : 1;
+        }
+        i++;
+        if (inExpr) { for (let k = from; k < i; k++) out[k] = " "; }
+      } else if (c === "`") {
+        i++;
+        template();
+      } else if (inExpr && c === "{") {
+        depth++;
+        i++;
+      } else if (inExpr && c === "}") {
+        out[i++] = " ";
+        if (depth-- === 0) return;
+      } else {
+        if (inExpr && c !== "\n") out[i] = " ";
+        i++;
+      }
+    }
+  };
+  code(false);
+  return out.join("");
+}
+
+Deno.test("blankTemplates: fixture text is blanked whatever it nests — code and comments around it are read as they are", () => {
+  // Spelled in two halves: this file is scanned by the gate below.
+  const WRITE = "Deno." + "mkdirSync";
+  const src = [
+    "// run by `am upgrade` — and PowerShell's own ` in a comment",
+    "await flow(dir, `" + WRITE + '("dist"); ${',
+    '  JSON.stringify(`touch "${marker}"`)',
+    "} tail`);",
+    WRITE + '("real");',
+  ].join("\n");
+  const blank = blankTemplates(src);
+  assertEquals(blank.length, src.length);
+  assertEquals(blank.split("\n").length, 5);
+  assert(!blank.includes('"dist"') && !blank.includes("marker"), blank);
+  assert(blank.includes(WRITE + '("real");'), blank);
+  assert(blank.includes("// run by `am upgrade`"), blank);
+});
+
 Deno.test("tests: no test writes into the repo root", () => {
   // A test that writes a file into the shared cwd changes another test's
   // ANSWER. `am.test.ts` wrote `.aio.log` there, and `logPathFor` resolves that
@@ -123,10 +219,7 @@ Deno.test("tests: no test writes into the repo root", () => {
     // the comment exemption in tests/context-vocabulary.test.ts: a rule that
     // cannot tell a program from a program it is quoting reports noise, and a
     // gate with false positives gets switched off.)
-    const src = raw.replace(
-      /`(?:[^`\\]|\\.)*`/g,
-      (m) => m.replace(/[^\n]/g, " "),
-    );
+    const src = blankTemplates(raw);
     // A bare relative path handed to a writer — no `join(dir, …)`, no `/tmp`.
     for (
       const m of src.matchAll(
@@ -221,8 +314,19 @@ Deno.test("tests: one freePort — no port-0 twin in tests/ or scripts/", () => 
   for (const dir of ["tests", "scripts"]) {
     for (const path of sourceFiles(dir)) {
       if (path === "tests/test-ports-are-free.test.ts") continue;
+      // A file that was listed and is gone a moment later is another test's
+      // own scratch file (tests/app-flags.test.ts writes one beside itself and
+      // removes it), not a source of this tree: listed, deleted, then read
+      // here — "No such file" and a red shard, once (2026-10-13).
+      let text: string;
+      try {
+        text = Deno.readTextFileSync(path);
+      } catch (e) {
+        if (e instanceof Deno.errors.NotFound) continue;
+        throw e;
+      }
       read.add(path);
-      for (const line of portZeroTwins(Deno.readTextFileSync(path))) {
+      for (const line of portZeroTwins(text)) {
         twins.push(`${path}:${line}`);
       }
     }

@@ -24,7 +24,11 @@ import {
   stopEsbuild,
   transpile,
 } from "../src/server/server-transpile.ts";
-import { _childPids, _stoppedByUs } from "../src/build/esbuild-shared.ts";
+import {
+  _childPids,
+  _esbuildChildPids,
+  _stoppedByUs,
+} from "../src/build/esbuild-shared.ts";
 import { getLogger, setLogger } from "../src/diagnostics/logger-api.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { join, toFileUrl } from "@std/path";
@@ -47,13 +51,16 @@ function fresh(): { tag: string; src: string; path: string } {
 let foreign = new Set<number>();
 /** Call first in a test that counts services. */
 const onlyOurServices = () => void (foreign = new Set(everyServicePid()));
-/** The esbuild service children this test started (Linux; [] elsewhere). */
+/** The esbuild service children this test started ([] on macOS). */
 function servicePids(): number[] {
   return everyServicePid().filter((p) => !foreign.has(p));
 }
 
-/** Every esbuild service child of this process (Linux; [] elsewhere). */
+/** Every esbuild service child of this process (Linux: `/proc`, read here;
+ *  Windows: the process table, read by the product's own listing; []
+ *  elsewhere). */
 function everyServicePid(): number[] {
+  if (Deno.build.os === "windows") return _esbuildChildPids();
   if (!linux) return [];
   const tasks = [...Deno.readDirSync("/proc/self/task")].map((t) => t.name);
   return _childPids(
@@ -157,7 +164,7 @@ Deno.test({
   name:
     "stopEsbuild: the service killed under a transform — the transform rejects and the stop returns",
   ...strict,
-  ignore: !linux, // the child is found through /proc
+  ignore: Deno.build.os === "darwin", // macOS lists no children (no /proc, no process-table read): no service pid to kill
   fn: async () => {
     onlyOurServices();
     const up = fresh();
@@ -344,7 +351,7 @@ Deno.test({
 Deno.test({
   name: "stopEsbuild: a child that is not the service is not waited for",
   ...strict,
-  ignore: !linux, // the scan under test reads /proc
+  ignore: !linux, // the scan under test is the /proc one; Windows cannot tell services apart and has its own rule (esbuild-child-pids.test.ts)
   fn: async () => {
     onlyOurServices();
     const up = fresh();
@@ -374,7 +381,7 @@ Deno.test({
   name:
     "stopEsbuild: a service that does not exit is named, and the stop returns",
   ...strict,
-  ignore: !linux, // SIGSTOP, and the child found through /proc
+  ignore: !linux, // SIGSTOP wedges the service (Windows has none); macOS: the service is found through /proc
   fn: async () => {
     onlyOurServices();
     const up = fresh();
@@ -405,7 +412,7 @@ Deno.test({
   name:
     "stopEsbuild: returns when the service is REAPED, not a fixed moment later",
   ...strict,
-  ignore: !linux, // SIGSTOP, and the child found through /proc
+  ignore: !linux, // SIGSTOP wedges the service (Windows has none); macOS: the service is found through /proc
   fn: async () => {
     onlyOurServices();
     const up = fresh();
@@ -440,7 +447,7 @@ Deno.test({
   name:
     "stopEsbuild: a service another esbuild instance owns is neither waited for nor named",
   ...strict,
-  ignore: !linux, // the services are told apart through /proc
+  ignore: !linux, // the services are told apart by their stdin pipe in /proc; where they cannot be, the rule is the Windows one in esbuild-child-pids.test.ts
   fn: async () => {
     onlyOurServices();
     const w = new Worker(

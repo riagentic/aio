@@ -290,10 +290,18 @@ export async function persistOp(
  * changed method — that one quarantines). This mark is the difference, so it
  * is written before anyone is told the op landed (ack, broadcast).
  *
+ * Several ids are ONE statement — one commit (the handler marks the ops in
+ * flight on different cells together).
+ *
  *  @internal Engine/framework wiring — not public API.
  */
-export async function settleOp(db: DB, id: string): Promise<void> {
-  await db.execute("UPDATE sync_ops SET settled = 1 WHERE id = ?", [id]);
+export async function settleOp(db: DB, ...ids: string[]): Promise<void> {
+  await db.execute(
+    `UPDATE sync_ops SET settled = 1 WHERE id IN (${
+      ids.map(() => "?").join(", ")
+    })`,
+    ids,
+  );
 }
 
 /** Does the store still KNOW this op id — a live row in `sync_ops`, or the

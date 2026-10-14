@@ -817,17 +817,27 @@ export function createWsManager(deps: WsDeps): WsManager {
       _adoptUser(socket, meta, fresh); // a role change lands here too
       return true;
     }
-    deps.debug(
+    // An operator's line, not a debug one: a user who reports "it signed me
+    // out" is asking about exactly this moment, and the log had nothing.
+    log.info(
+      "ws",
       `ws: closing ${meta.id.slice(0, 8)} — session revoked or expired (user=${
         meta.user?.id ?? "anon"
       })`,
     );
     meta.sessionToken = undefined; // one close, not one per frame
-    try {
-      socket.close(1008, "session revoked");
-    } catch { /* already closing */ }
+    // Out of `connections` NOW — it must stop receiving that identity's state
+    // at once — but closed only after what it already sent has been read
+    // (`_closeAfterRead`). This runs on every inbound frame, so the frame that
+    // finds an EXPIRED session usually has the rest of a burst behind it, and
+    // a close from inside its handler loses the 1008 and its reason on the
+    // way: the tab then cannot tell "signed out" from "connection lost" and
+    // reconnects for ever. `meta.closing` also discards those frames unparsed
+    // — with the token cleared above, nothing else would have stopped them
+    // being dispatched as the user whose session had just died.
     connections.delete(socket);
     _clearTimers(meta);
+    _closeAfterRead(socket, meta, 1008, "session revoked");
     return false;
   }
 
@@ -1515,6 +1525,8 @@ export function createWsManager(deps: WsDeps): WsManager {
         } (${connections.size} total)`,
       );
       if (deps.onConnect) _runConnHook("onConnect", deps.onConnect, meta.user);
+      const _sendsCfg = !!deps.clientConfig &&
+        Object.keys(deps.clientConfig).length > 0;
       // A3: version handshake — server speaks first, before any state.
       // `rate` rides along so the client can PACE itself: the inbound budget
       // used to be a number only this side knew, and the only way to learn it
@@ -1531,6 +1543,9 @@ export function createWsManager(deps: WsDeps): WsManager {
             // the 100/sec fallback instead.
             rate: Math.min(wsRateLimit, 1_000_000),
             maxMessageBytes: wsMaxMessage,
+            // Whether the `cfg` frame below is sent: a client that waits for
+            // it knows here that there is nothing to wait for.
+            cfg: _sendsCfg,
           }),
         );
       } catch { /* socket closing during onopen (AIO-155) */ }
@@ -1581,7 +1596,7 @@ export function createWsManager(deps: WsDeps): WsManager {
       try {
         socket.send(enc("boot", { id: deps.bootId }));
       } catch { /* socket closing during onopen (AIO-155) */ }
-      if (deps.clientConfig && Object.keys(deps.clientConfig).length > 0) {
+      if (_sendsCfg) {
         try {
           socket.send(enc("cfg", deps.clientConfig));
         } catch { /* socket closing */ }
@@ -1699,10 +1714,10 @@ export function createWsManager(deps: WsDeps): WsManager {
    *  unread as before) and closed on the first quiet tick. A peer that never
    *  stops writing is closed at the ceiling, as abruptly as it always was.
    *
-   *  NOT the revocation closes: they also take the socket out of
-   *  `connections` at once, and measured clean as they are — a revocation is
-   *  acted on by a sweep or by the sign-out itself, not inside the handler of
-   *  a frame with more behind it. */
+   *  The SESSION close goes through here too (`_revalidate` runs per frame,
+   *  so an expiry is found by a frame with a burst behind it). NOT the
+   *  `resolveUser` credential close (`_closeRevoked`): that one is acted on by
+   *  a sweep only, never inside the handler of a frame with more behind it. */
   function _closeAfterRead(
     socket: WebSocket,
     meta: ClientMeta,

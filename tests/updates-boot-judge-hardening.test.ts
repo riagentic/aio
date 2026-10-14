@@ -180,8 +180,10 @@ Deno.test("judge: a torn or null update-failed.json never stops the boot — set
   }
 });
 
-Deno.test("judge: an attempt that cannot be recorded does not kill the boot", async () => {
-  if (Deno.build.os === "windows" || Deno.uid() === 0) return; // the mode is the seam
+Deno.test({
+  name: "judge: an attempt that cannot be recorded does not kill the boot",
+  ignore: Deno.build.os === "windows" || Deno.uid() === 0, // the seam is a POSIX mode, which Windows does not have; root passes through it
+}, async () => {
   const dir = await swapped();
   try {
     Deno.removeSync(firstBootPath(dir));
@@ -317,8 +319,11 @@ Deno.test("judge: a Windows helper rollback that did not happen is said as a FAI
 // The failed record is replaced whole (temp + rename), like the marker: a
 // reader never sees half of one, and a leftover the process may not WRITE
 // (read-only, from a copy or a restore) is still replaced.
-Deno.test("judge: the failed record is replaced atomically, never written in place", async () => {
-  if (Deno.build.os === "windows" || Deno.uid() === 0) return; // the mode is the seam
+Deno.test({
+  name:
+    "judge: the failed record is replaced atomically, never written in place",
+  ignore: Deno.build.os === "windows" || Deno.uid() === 0, // the seam is a POSIX mode, which Windows does not have; root passes through it
+}, async () => {
   const dir = await swapped();
   try {
     // A VALID record of an older update: an unparseable one is moved aside by

@@ -16,11 +16,15 @@
 // through these functions, and a format known to two writers is a format that
 // drifts.
 
-import { basename, dirname, join } from "@std/path";
+import { basename, dirname, join, resolve } from "@std/path";
 import { installedAppPaths } from "./app-dirs.ts";
 import { log } from "../diagnostics/logger-api.ts";
-import { renameOver } from "../diagnostics/rename-over.ts";
-import { isProcessAlive } from "./single-instance-lock.ts";
+import { HeldOpenError, renameOver } from "../diagnostics/rename-over.ts";
+import {
+  ownPidNs,
+  ownPidTag,
+  taggedOwnerGone,
+} from "./single-instance-lock.ts";
 
 /** What an install knows about itself. Every field is optional except `name`:
  *  a record written from a directory with no git, no version and no remote is
@@ -46,11 +50,29 @@ export function recordPath(name: string): string {
   return join(installedAppPaths(name).dir, "installed.json");
 }
 
+/** `rec` with the one field 1.0.19's `run.ps1` damaged put right. Under
+ *  Windows PowerShell 5.1 its `--aio=$conf.aioVersion` expanded the whole
+ *  parsed `deno.json` and kept `.aioVersion` as text, so the record names
+ *  `@{name=…; aioVersion=1.0.19-beta; …}.aioVersion` as the aio version — the
+ *  true pin is inside it. (The same call lost `artifact` and `commit`: the
+ *  next update or install writes the first, nothing reads the second.) Any
+ *  other record is returned as it is. Pure. */
+export function repairedRecord(rec: InstallRecord): InstallRecord {
+  const dump = typeof rec.aioVersion === "string"
+    ? rec.aioVersion.match(/^@\{(.*)\}\.aioVersion$/s)?.[1]
+    : undefined;
+  if (dump === undefined) return rec;
+  const pin = dump.match(/(?:^|; )aioVersion=([^;]*)/)?.[1];
+  return { ...rec, aioVersion: pin || undefined };
+}
+
 export async function readRecord(name: string): Promise<InstallRecord | null> {
   try {
     const text = await Deno.readTextFile(recordPath(name));
     const parsed = JSON.parse(text) as InstallRecord;
-    return parsed && typeof parsed.name === "string" ? parsed : null;
+    return parsed && typeof parsed.name === "string"
+      ? repairedRecord(parsed)
+      : null;
   } catch {
     return null; // absent or unreadable — an install from before this existed
   }
@@ -62,32 +84,86 @@ export async function readRecord(name: string): Promise<InstallRecord | null> {
  *  read while it is empty reads as "no record": `am installed` drops the app,
  *  the next boot's check takes the install for one `am` does not manage, and a
  *  process killed in that instant leaves it so for good (found on macOS: a
- *  reader took `Unexpected end of JSON input` from a record being corrected). */
+ *  reader took `Unexpected end of JSON input` from a record being corrected).
+ *
+ *  What the in-place write did for the FILE is kept: a record that is a
+ *  symbolic link is written THROUGH it (the temp goes beside what it names,
+ *  the link stays), and the file keeps its mode. */
 async function writeWhole(path: string, rec: InstallRecord): Promise<void> {
-  sweepDeadTemps(path);
+  const file = await throughLink(path);
+  sweepDeadTemps(file);
+  const text = JSON.stringify(rec, null, 2) + "\n";
   // A name of this CALL's own, made new: two writes of one record that
   // overlap in a process (a boot's correction beside the updater's) shared
   // `.tmp-<pid>` — the second emptied what the first had filled, and the
   // first renamed that into place.
-  const tmp = `${path}.tmp-${Deno.pid}-${_recordDeps.nonce()}`;
+  const tmp = `${file}.tmp-${ownPidTag()}-${_recordDeps.nonce()}`;
   const f = await Deno.open(tmp, { write: true, createNew: true });
   try {
     try {
-      const bytes = new TextEncoder().encode(
-        JSON.stringify(rec, null, 2) + "\n",
-      );
+      const bytes = new TextEncoder().encode(text);
       for (let n = 0; n < bytes.length;) n += await f.write(bytes.subarray(n));
       await f.sync();
     } finally {
       f.close();
     }
+    const mode = await modeOf(file);
+    if (mode !== null) await Deno.chmod(tmp, mode);
   } catch (e) {
     await Deno.remove(tmp).catch(() => {
       // aio-ok: not removable — `e` is what is said
     });
     throw e;
   }
-  await renameOver(tmp, path); // removes `tmp` itself when it fails
+  try {
+    await renameOver(tmp, file); // removes `tmp` itself when it fails
+  } catch (e) {
+    // Windows: a program that has the record open (a reader without delete
+    // sharing, a backup tool) refuses the rename for as long as it looks —
+    // and a held record must not stop an update. So, as before 1.0.19: over
+    // the file in place, which such a holder allows. Said, since a reader may
+    // catch that write half done; a failure of it is the rename's error.
+    if (!(e instanceof HeldOpenError)) throw e;
+    try {
+      await Deno.writeTextFile(file, text);
+    } catch {
+      throw e; // aio-ok: the rename's refusal names the file and the cause
+    }
+    if (!e.repeat) {
+      log.warn(
+        `${file} is open in another program and could not be ` +
+          `replaced — written in place instead (${e.message})`,
+      );
+    }
+  }
+}
+
+/** The file a write to `path` lands in: what a symbolic link there names
+ *  (itself not there yet, when the link names nothing), else `path`. */
+async function throughLink(path: string): Promise<string> {
+  try {
+    if (!(await Deno.lstat(path)).isSymlink) return path;
+  } catch {
+    return path; // aio-ok: no record yet — it is made at `path`
+  }
+  try {
+    return await Deno.realPath(path);
+  } catch {
+    // aio-ok: a link to a file that is not there — where the link points
+    return resolve(dirname(path), await Deno.readLink(path));
+  }
+}
+
+/** The permission bits of the file at `path`; null when there is none, or
+ *  on Windows, where they are not the file's access. */
+async function modeOf(path: string): Promise<number | null> {
+  if (Deno.build.os === "windows") return null;
+  try {
+    const mode = (await Deno.stat(path)).mode;
+    return mode === null ? null : mode & 0o777;
+  } catch {
+    return null; // aio-ok: a new record — the umask's default, as ever
+  }
 }
 
 /** What a test replaces: the part of a temp's name that is one write's own.
@@ -96,24 +172,44 @@ export const _recordDeps = {
   nonce: (): string => crypto.randomUUID().slice(0, 8),
 };
 
+/** A record's temp: `<record>.tmp-<pid tag>-<nonce>` — and the shapes older
+ *  builds wrote, `.tmp-<pid>-<nonce>` (1.0.19) and `.tmp-<pid>`. Groups: pid,
+ *  namespace hex, nonce. */
+const TEMP_TAG = /^(\d+)(?:d([0-9a-f]{8}))?(-[0-9a-z]+)?$/;
+
 /** Remove the temps beside the record at `path` whose writer is gone: a
  *  process killed between the write and the rename left its
- *  `installed.json.tmp-<pid>-<nonce>` for good. One a LIVE process names is a
- *  write in flight and stays — this process's own too, except in the older
- *  `.tmp-<pid>` shape, which this build never writes. */
+ *  `installed.json.tmp-<pid tag>-<nonce>` for good. One a LIVE process names
+ *  is a write in flight and stays — this process's own too, except in the
+ *  older `.tmp-<pid>` shape, which this build never writes.
+ *
+ *  A pid is judged only in the namespace that wrote it (`taggedOwnerGone`):
+ *  a container and its host share `~/app/<name>` through a bind mount, and
+ *  the host took the container's write in flight for a dead process's — its
+ *  pid is nobody's out here. Another namespace's temp, or one that names
+ *  none where there is one, goes by age alone. */
 function sweepDeadTemps(path: string): void {
   const name = basename(path);
+  let entries: Deno.DirEntry[];
   try {
-    for (const e of [...Deno.readDirSync(dirname(path))]) {
-      if (!e.isFile || !e.name.startsWith(`${name}.tmp-`)) continue;
-      const m = /^(\d+)(-[0-9a-z]+)?$/.exec(e.name.slice(name.length + 5));
-      if (!m) continue;
-      const pid = Number(m[1]);
-      if (pid === Deno.pid ? m[2] !== undefined : isProcessAlive(pid)) continue;
-      Deno.removeSync(join(dirname(path), e.name));
-    }
+    entries = [...Deno.readDirSync(dirname(path))];
   } catch {
-    // aio-ok: no folder yet, or gone meanwhile — nothing to remove
+    return; // aio-ok: no folder yet — nothing to remove
+  }
+  // EACH one: a remove that failed (a sibling swept it first) used to end
+  // the sweep for every temp after it.
+  for (const e of entries) {
+    if (!e.isFile || !e.name.startsWith(`${name}.tmp-`)) continue;
+    const m = TEMP_TAG.exec(e.name.slice(name.length + 5));
+    if (!m) continue;
+    const file = join(dirname(path), e.name);
+    const pid = Number(m[1]);
+    const ours = pid === Deno.pid &&
+      (m[2] === undefined ? undefined : parseInt(m[2], 16)) === ownPidNs();
+    if (ours ? m[3] !== undefined : !taggedOwnerGone(file, pid, m[2])) continue;
+    try {
+      Deno.removeSync(file);
+    } catch { /* aio-ok: swept by a sibling first — the next one is tried */ }
   }
 }
 
@@ -155,7 +251,7 @@ export async function reconcileInstalledVersion(
   }
   if (!rec || typeof rec.name !== "string") return false;
   const updated: InstallRecord = {
-    ...rec,
+    ...repairedRecord(rec),
     version: next.version ?? rec.version,
     artifact: next.artifact ?? rec.artifact,
     installedAt: new Date().toISOString(),
@@ -261,6 +357,12 @@ export async function pruneVersions(opts: {
 // `run.sh` has every value at hand and no business formatting JSON in shell:
 // a second writer of this format is how the reader and the writer come to
 // disagree about a field name, silently, months later.
+//
+// What a command ANSWERS is printed as plain lines: the scripts take stdout as
+// the value (`prev_src=$(… conflict …)`), and through the logger each line
+// arrived as "2026-… INFO aio <value>" — which is what `run.sh` then showed as
+// the pruned versions and as "installed from:". A refusal goes to stderr
+// through the logger as before; no script reads it.
 
 if (import.meta.main) {
   const [cmd, ...rest] = Deno.args;
@@ -284,12 +386,12 @@ if (import.meta.main) {
       target: kv.get("target") || undefined,
       aioVersion: kv.get("aio") || undefined,
     });
-    log.info(path);
+    console.log(path); // aio-ok: the answer itself — a script reads it
     Deno.exit(0);
   }
   if (cmd === "conflict") {
     const prev = await conflictingSource(name, kv.get("source") ?? "");
-    if (prev) log.info(prev);
+    if (prev) console.log(prev); // aio-ok: the answer itself, as above
     Deno.exit(0);
   }
   if (cmd === "prune") {
@@ -298,7 +400,7 @@ if (import.meta.main) {
       keep: Number(kv.get("keep") ?? "3"),
       current: kv.get("current") || undefined,
     });
-    for (const r of removed) log.info(r);
+    for (const r of removed) console.log(r); // aio-ok: the answer itself
     Deno.exit(0);
   }
   log.error(`install-record: unknown command "${cmd}"`);

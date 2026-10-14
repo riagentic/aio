@@ -13,9 +13,11 @@ import { permissiveUmask } from "./permissive-umask.ts";
 
 const modeOf = (p: string) => (Deno.statSync(p).mode ?? 0) & 0o777;
 
-Deno.test("journal: compaction keeps the file owner-only (0600)", () =>
+Deno.test({
+  name: "journal: compaction keeps the file owner-only (0600)",
+  ignore: Deno.build.os === "windows", // POSIX mode bits do not exist on Windows
+}, () =>
   permissiveUmask(async () => {
-    if (Deno.build.os === "windows") return; // POSIX modes only
     const dir = await Deno.makeTempDir({ prefix: "aio-journal-perms-" });
     try {
       const path = join(dir, "actions.journal");

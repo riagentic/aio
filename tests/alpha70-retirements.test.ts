@@ -7,6 +7,7 @@
 // dev==prod rule; never a silent divergence).
 //
 // Each test here goes red if its retirement is reverted.
+import "./store-sandbox.ts";
 import {
   assert,
   assertEquals,

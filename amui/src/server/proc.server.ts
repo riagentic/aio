@@ -21,6 +21,8 @@ import {
   childSaid,
   detachedSpawnSpec,
   launchDetached,
+  SLOW_START_WAIT_MS,
+  slowStartReason,
 } from "../../../src/am/am-cmd-process.ts";
 import { pathKey, pathOf, readProjectMeta } from "./scan.server.ts";
 
@@ -270,7 +272,13 @@ export function startLogTail(dir: string, n = 6): Promise<string> {
 }
 
 /** Wait for a freshly-spawned app to REGISTER as running. Resolves as soon as
- *  it does; gives up early when its process is already gone. */
+ *  it does; gives up early when its process is already gone.
+ *
+ *  A child whose log says it is still fetching (Deno downloading the app's
+ *  modules on a first run, the Electron runtime) has not begun to boot: it
+ *  gets `am start`'s longer bound, by `am start`'s own rule
+ *  (`slowStartReason`) — the default bound read such a start as failed and
+ *  left the app coming up behind a "failed to start". */
 export async function awaitBoot(
   dir: string,
   pid?: number,
@@ -278,11 +286,15 @@ export async function awaitBoot(
   /** Pids already registered from `dir` before the spawn — a sibling that
    *  was up all along is not this boot succeeding. */
   before?: readonly number[],
+  /** The bound for a start whose log says it is still fetching. */
+  slowWaitMs = SLOW_START_WAIT_MS,
 ): Promise<{ up: true } | { up: false; reason: string }> {
   const { isProcessAlive } = await import(
     "./control.server.ts"
   );
-  const deadline = Date.now() + timeoutMs;
+  const startedAt = Date.now();
+  let deadline = startedAt + timeoutMs;
+  let slow = false;
   let died = false;
   while (Date.now() < deadline) {
     await sleep(REGISTRY_POLL_MS);
@@ -290,6 +302,11 @@ export async function awaitBoot(
     if (pid !== undefined && !isProcessAlive(pid)) {
       died = true;
       break;
+    }
+    if (!slow && slowStartReason(childSaid(startLogPath(dir)).text)) {
+      slow = true;
+      timeoutMs = Math.max(timeoutMs, slowWaitMs);
+      deadline = startedAt + timeoutMs;
     }
   }
   const tail = await startLogTail(dir);

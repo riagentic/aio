@@ -1,7 +1,10 @@
 # Where Files Live
 
-One app, one directory. Everything an aio app writes is under `~/.<appId>/`, and
-the part you back up is one subdirectory of it.
+One app, one directory. Everything an aio app **owns** — state, logs, keys, your
+files — is under `~/.<appId>/`, and the part you back up is one subdirectory of
+it. `~` is `$HOME`; on Windows `%HOME%` when it is set, else `%USERPROFILE%`.
+What lives outside that directory is listed [below](#outside-the-app-directory):
+none of it is state.
 
 ```
 ~/.wallet/
@@ -30,12 +33,16 @@ $XDG_RUNTIME_DIR/aio/   ← ③ must NOT survive a reboot
   wallet.http.sock      ┘ running with no TCP port
 ```
 
-`$XDG_RUNTIME_DIR` unset (containers, no systemd, plain ssh) → `/tmp/aio/`;
-Windows → `%TEMP%\aio\`, with named pipes instead of socket files. Under
+`$XDG_RUNTIME_DIR` unset (containers, no systemd, plain ssh, and macOS, which
+has none) → `/tmp/aio/`; Windows → `%TEMP%\aio\`, with named pipes instead of
+socket files (`\\.\pipe\aio-wallet`, `\\.\pipe\aio-wallet-http`). Under
 `AIO_APPS_DIR` the directory is scoped to it — `aio-<that path, as a slug>` — so
-a sandboxed instance never shares a lock with the real one. If the shared
-directory belongs to another user, a private `aio-u<uid>` sibling is used and
-boot says so.
+a sandboxed instance never shares a lock with the real one. The slug is the
+path's last 48 ASCII letters and digits: two roots with the same ending share
+one lock folder (a start under one is refused while the same appId runs under
+the other, and `am kill --stale` under either ends an app that left no lock) —
+give such roots different endings. If the shared directory belongs to another
+user, a private `aio-u<uid>` sibling is used and boot says so.
 
 Four tiers, and the only question that separates them is **what a backup
 contains**:
@@ -54,8 +61,11 @@ homes while `/run/user` is tmpfs, and socket paths have a ~108-character limit
 that a long home path can blow. `am data` prints the location, so you never have
 to remember it.
 
-`data/` is created `0700` — it holds the auth store and a TLS private key, so
-the mode assumes the worst file in the tree.
+On Linux and macOS `data/` is created `0700` — it holds the auth store and a TLS
+private key, so the mode assumes the worst file in the tree. On Windows no mode
+is applied: the files are protected only by the ACL of the folder they are in —
+private under `%USERPROFILE%`, not under a shared `appDir` or `AIO_APPS_DIR`.
+Only `control.key` gets an owner-only ACL of its own there.
 
 An app that updates itself keeps the updater's records in `data/` too:
 `update-trust.json` (the signing key it trusts and what is installed),
@@ -125,6 +135,20 @@ writes it holds the fd for the life of the run. Two launches in the same moment
 did, and another process starting within 3 seconds of it appends to the live
 files instead of archiving them.
 
+## Outside the app directory
+
+| What                                  | Where                                                                                                               | Lose it and…                                                           |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| The desktop window's profile          | `~/.config/<title-slug>/` · macOS `~/Library/Application Support/<title-slug>/` · Windows `%APPDATA%\<title-slug>\` | window size and position, Chromium's cache and web storage start empty |
+| A Windows one-click `.exe`'s install  | `%LOCALAPPDATA%\aio-sfx\<name>\` + a Start-menu shortcut                                                            | open the `.exe` again                                                  |
+| aio's local root certificate + key 🔒 | `~/.aio/ca/` — one per user, shared by every app                                                                    | a new root is made; devices that trusted the old one warn again        |
+| Release signing keys 🔒               | `~/.aio/keys/` (`ship keygen`)                                                                                      | **you can no longer publish an update your installs accept**           |
+| Build tool cache                      | `$XDG_CACHE_HOME/aio/tools`, else `~/.cache/aio/tools` (Electron runtimes, `appimagetool`)                          | it is downloaded again                                                 |
+
+`am backup` copies `data/` and none of these. The signing key is the one to keep
+a copy of yourself. Every location, per OS, in one table:
+[aio on Windows and macOS](../basics/windows-macos.md#where-things-are).
+
 ## The program vs its data
 
 `run.sh` installs a built app into a directory you can open, and keeps its data
@@ -138,6 +162,16 @@ where the app itself writes:
 ~/.<appId>/                                       ← everything the app OWNS
 ```
 
+`run.ps1` does the same on Windows, where the convention differs:
+
+```
+%LOCALAPPDATA%\Programs\<name>\versions\<version>\<name>.exe   the artifact
+%LOCALAPPDATA%\Programs\<name>\<name>.exe                      the stable name (a symlink where Windows
+                                                               allows one, else a copy)
+%APPDATA%\Microsoft\Windows\Start Menu\Programs\<name>.lnk
+%USERPROFILE%\.<appId>\                                        ← everything the app OWNS
+```
+
 The VERSION is the directory and the file keeps the app's name, deliberately: a
 deno-compiled binary derives its identity from its own file name at runtime, so
 installing it as `<name>-<version>` renamed the app — it wrote to
@@ -148,9 +182,10 @@ its data survives being renamed at all.
 
 The split is the contract. `am remove <name>` deletes the first group and keeps
 `~/.<appId>/`, saying so; `am remove <name> --data` deletes both, and nothing
-implies it. An update writes a NEW versioned file beside the old one and
-re-points the stable symlink — so the previous version is the rollback, and a
-launcher pointing at the stable name never breaks.
+implies it. On Windows it removes the `Programs\<name>\` folder and leaves the
+Start-menu `.lnk` — delete that by hand. An update writes a NEW versioned file
+beside the old one and re-points the stable symlink — so the previous version is
+the rollback, and a launcher pointing at the stable name never breaks.
 
 ```
 ~/app/<name>/installed.json     where it came from: repo, commit, version,
@@ -195,7 +230,8 @@ they cannot disagree. That includes the diagnostic **checkpoint**, which holds
 current state rather than actions (minus every `persist: "none"` cell and every
 `persist`-excluded field, which are never in it) and so cannot redact per
 action: the whole slice of a listed cell is withheld (`"[redacted]"` in place of
-the state), and the file is created `0600` like the journal. An async method's
+the state), and the file is created `0600` like the journal (Linux and macOS; on
+Windows the folder's ACL is the protection, as above). An async method's
 write-set commit (`cell:__setMethod`) is covered by whichever pattern covers the
 method itself, so an exact `"vault:unlockWith"` protects both. A trailing `*`
 matches by prefix, because a list of individual method names is the list that
@@ -219,9 +255,10 @@ commented, unreproducible gap instead of a call with no arguments. Redact
 narrowly — an action whose payload you need for crash recovery should not be on
 the list.
 
-The journal file is created `0600`. Turning the action log or checkpoint **off**
-also deletes what it already wrote — a flag that only stops new writes leaves
-the old secret sitting there.
+The journal file is created `0600` on Linux and macOS; on Windows it has the ACL
+of its folder. Turning the action log or checkpoint **off** also deletes what it
+already wrote — a flag that only stops new writes leaves the old secret sitting
+there.
 
 ## Ask the app
 
@@ -249,12 +286,15 @@ leftover `.partial` (a killed backup) is refused by name. A restore copies into
 `data.restoring-<timestamp>` first and swaps only a complete copy in. Ctrl-C
 aborts either one cleanly at the next file (exit 130; SIGTERM 143), with the
 data untouched; a second Ctrl-C abandons a large file still copying and exits at
-once. `am restore` has no such override — a running app holds the databases open
-and would write its in-memory pages straight back over the restored file. The
-data being replaced is **moved** to `data.replaced-<timestamp>` (`-2`, `-3`, …
-when that name is taken), never deleted, so restoring the wrong archive is
-undoable. It is a copy like a backup: a `persist: "none"` slice an older build
-left in it is scrubbed at the next boot, like every other copy.
+once. Windows has no SIGTERM: there Ctrl-C is the clean abort, and `am kill`
+ends the copy at once and then removes the incomplete copy itself (the copy
+carries a mark naming the process that was writing it). `am restore` has no such
+override — a running app holds the databases open and would write its in-memory
+pages straight back over the restored file. The data being replaced is **moved**
+to `data.replaced-<timestamp>` (`-2`, `-3`, … when that name is taken), never
+deleted, so restoring the wrong archive is undoable. It is a copy like a backup:
+a `persist: "none"` slice an older build left in it is scrubbed at the next
+boot, like every other copy.
 
 Nothing stops you doing it by hand — that's the point of one directory:
 
@@ -320,7 +360,9 @@ const { home } = homeWasRequested()
   ? resolveHome({ appId: "wallet" }) // --profile=tasks → ~/.wallet-tasks
   : resolveHome({
     appId: "wallet",
-    appDir: `${Deno.env.get("HOME")}/.wallet-dev`,
+    appDir: `${
+      Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE")
+    }/.wallet-dev`,
   });
 ```
 

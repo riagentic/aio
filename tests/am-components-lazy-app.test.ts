@@ -13,6 +13,7 @@
 // Sandbox: HOME, AIO_APPS_DIR, AIO_INSTALL_ROOT, DENO_INSTALL_ROOT,
 // XDG_RUNTIME_DIR in one temp dir, the environment cleared,
 // GIT_CEILING_DIRECTORIES at the temp root.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";

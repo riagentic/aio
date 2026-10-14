@@ -35,6 +35,7 @@
 //
 // Usage: deno run --allow-read --allow-env scripts/check-home-clean.ts
 //          [--save=<file> (needs --allow-write) | --against=<file>]
+//          [--list — every stray install/profile path, on stdout]
 import { dirname, join } from "@std/path";
 
 type Env = Record<string, string | undefined>;
@@ -176,7 +177,17 @@ export function straysIn(names: string[]): string[] {
  *  (`~/app/app-1a2b3c4d`), its PATH link, its menu entry, its Electron profile.
  *  Only the shapes that carry 8 random hex digits — nobody names a real
  *  program that, and these directories are full of the user's own. */
-const INSTALL_SHAPE = /^(app|e2e|ver-probe)-[0-9a-f]{8}(\.desktop)?$/;
+const INSTALL_SHAPE =
+  /^(?:(app|e2e|ver-probe)-[0-9a-f]{8}(-\d+\.\d+(\.\d+)?(-[0-9A-Za-z.]+)?)?(\.desktop)?|app-[0-9a-f]{8}@[0-9a-f]{8})$/;
+
+/** Is `name` a test app's install, link, menu entry or profile? Two shapes
+ *  the bare `app-<id>` did not cover, both MEASURED 2026-10-08 with this gate
+ *  green: 6 installs named `app-<id>-0.1.0-nogit.<hash>` in `~/app`, each
+ *  with its link in `~/.local/bin` (a build's NAME carries its version), and
+ *  73 Electron profile directories `app-<id>@<hash>` in `~/.config`. Pure. */
+export function isInstallStray(name: string): boolean {
+  return INSTALL_SHAPE.test(name);
+}
 
 /** The REAL directories an INSTALLED app occupies outside `~/.<appId>` — what
  *  `run.sh` and a launched artifact write, none of which follows
@@ -187,7 +198,9 @@ const INSTALL_SHAPE = /^(app|e2e|ver-probe)-[0-9a-f]{8}(\.desktop)?$/;
  *  - `~/.local/bin` — a headless target's PATH link;
  *  - `~/.local/share/applications` — a GUI target's `<name>.desktop`;
  *  - `~/.config` and `~/.cache` (or XDG's) — an Electron artifact's profile,
- *    and the private unpack dir the menu entry makes.
+ *    and the private unpack dir the menu entry makes;
+ *  - `~/Library/Application Support` and `%APPDATA%` — that profile on macOS
+ *    and Windows.
  *
  *  MEASURED 2026-10-07: `tests/run-sh-e2e.test.ts` ran run.sh with the
  *  developer's HOME — 794 programs in `~/app` (~140 GB, a full disk) and as
@@ -201,14 +214,39 @@ export function installDirs(env: Env): string[] {
     env.LOCALAPPDATA ? join(env.LOCALAPPDATA, "Programs") : undefined,
     home ? join(home, ".local", "bin") : undefined,
     home ? join(home, ".local", "share", "applications") : undefined,
-    env.XDG_CONFIG_HOME ?? (home ? join(home, ".config") : undefined),
-    env.XDG_CACHE_HOME ?? (home ? join(home, ".cache") : undefined),
+    // `||`: an EMPTY XDG variable means unset (the spec, and Electron) — with
+    // `??` it named no directory at all, and `~/.config` went unwatched.
+    env.XDG_CONFIG_HOME || (home ? join(home, ".config") : undefined),
+    env.XDG_CACHE_HOME || (home ? join(home, ".cache") : undefined),
+    // The same profile where the OS has another parent for it.
+    home ? join(home, "Library", "Application Support") : undefined,
+    env.APPDATA,
   ];
   return [...new Set(dirs.filter((d): d is string => !!d))];
 }
 
-/** The test-shaped entries of every {@link installDirs} directory, as full
- *  paths. A missing directory has none. */
+/** Is `dir` an Electron profile no Electron ever opened — nothing in it but
+ *  aio's own `aio-main/`, where a launch writes the window's main script?
+ *
+ *  A real window fills its profile with Chromium's files at once, and a
+ *  launch that ends removes an empty one. What stays is a launch whose
+ *  "Electron" was a test's stand-in and whose app was killed: MEASURED
+ *  2026-10-10, 178 `~/.config/aio-app@<hash>` on one workstation, some with
+ *  the main script (it carries the launch URL) still in them, under a name —
+ *  the DEFAULT appId — no shape here could claim, because a person's own app
+ *  has it too. The content says what the name cannot. */
+export function isStubProfile(dir: string): boolean {
+  try {
+    const names = [...Deno.readDirSync(dir)].map((e) => e.name);
+    return names.length === 1 && names[0] === "aio-main";
+  } catch {
+    return false; // aio-ok: a file, or gone meanwhile — not a profile
+  }
+}
+
+/** The test-shaped entries of every {@link installDirs} directory, and the
+ *  stub profiles ({@link isStubProfile}), as full paths. A missing directory
+ *  has none. */
 export function installStrays(env: Env): string[] {
   const out: string[] = [];
   for (const dir of installDirs(env)) {
@@ -220,10 +258,30 @@ export function installStrays(env: Env): string[] {
       throw e; // unreadable is not "empty" — the gate cannot vouch for it
     }
     for (const n of names.sort()) {
-      if (INSTALL_SHAPE.test(n)) out.push(join(dir, n));
+      if (INSTALL_SHAPE.test(n) || isStubProfile(join(dir, n))) {
+        out.push(join(dir, n));
+      }
     }
   }
   return out;
+}
+
+/** Everything test-shaped in the real home, as full paths: the app homes
+ *  (`~/.app-1a2b3c4d`) and {@link installStrays}. What the suite runner
+ *  compares around a run — an entry that was not there before it is the
+ *  run's. Unreadable directories throw, as in {@link installStrays}. */
+export function homeStrays(env: Env): string[] {
+  const home = env.HOME ?? env.USERPROFILE;
+  let names: string[] = [];
+  try {
+    if (home) names = [...Deno.readDirSync(home)].map((e) => e.name);
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  }
+  return [
+    ...straysIn(names).map((n) => join(home!, n)),
+    ...installStrays(env),
+  ];
 }
 
 /** The install check. Exit code: 0 clean, 1 dirty. */
@@ -232,8 +290,8 @@ function checkInstalls(): number {
   const strays = installStrays(env);
   if (strays.length === 0) return 0;
   console.error(
-    `✗ ${strays.length} test INSTALL artefact(s) outside every sandbox — a ` +
-      `test installed an app with the real HOME:\n`,
+    `✗ ${strays.length} test INSTALL/PROFILE artefact(s) outside every ` +
+      `sandbox — a test installed or launched an app with the real HOME:\n`,
   );
   for (const dir of installDirs(env)) {
     const mine = strays.filter((s) => dirname(s) === dir);
@@ -248,10 +306,12 @@ function checkInstalls(): number {
       `  artifact keeps its profile in ~/.config/<name>. AIO_APPS_DIR moves NONE\n` +
       `  of these. A test that runs run.sh or an installed artifact gives the\n` +
       `  child its own HOME and AIO_INSTALL_ROOT (\`ownHome()\` in\n` +
-      `  tests/run-sh-e2e.test.ts) and removes that directory when it ends.\n` +
+      `  tests/deno-dir-helper.ts) and removes that directory when it ends; one\n` +
+      `  that starts an app with a window (\`--client=electron\`, a stand-in\n` +
+      `  Electron included) spreads \`childEnv()\` (tests/e2e-app-harness.ts).\n` +
+      `  A profile holding only \`aio-main/\` is a window that never ran.\n` +
       `\n  These are yours to remove, not this gate's:\n` +
-      `      ls -d ~/app/app-???????? ~/.local/bin/app-???????? \\\n` +
-      `            ~/.config/app-???????? 2>/dev/null\n` +
+      `      deno task check:home-clean --list    # every path, one per line\n` +
       `      # review the list, then delete it`,
   );
   return 1;
@@ -300,6 +360,12 @@ function checkStores(): number {
 }
 
 if (import.meta.main) {
+  // `--list`: the paths and nothing else, for the person who removes them.
+  if (Deno.args.includes("--list")) {
+    const strays = installStrays(Deno.env.toObject());
+    for (const p of strays) console.log(p);
+    Deno.exit(strays.length > 0 ? 1 : 0);
+  }
   const storesBad = Math.max(checkStores(), checkInstalls());
   const home = Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE");
   if (!home) {

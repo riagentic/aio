@@ -8,6 +8,7 @@ import WebKit
 /// shape as `android-client`.
 class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
     private var webView: WKWebView!
+    private var index: URL!
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -30,7 +31,44 @@ class ViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
         guard let index = Bundle.main.url(forResource: "index", withExtension: "html", subdirectory: "www") else {
             fatalError("aio: www/index.html is missing from the bundle — rebuild with `deno task build --targets=ios-client`")
         }
+        self.index = index
         webView.loadFileURL(index, allowingReadAccessTo: index.deletingLastPathComponent())
+    }
+
+    /// Back to the connect form, saying why by HASH — the page reads it on
+    /// load and on every hash change (`why()` in the connect page).
+    private func showForm(_ why: String) {
+        guard let url = URL(string: "#" + why, relativeTo: index) else { return }
+        webView.loadFileURL(url.absoluteURL, allowingReadAccessTo: index.deletingLastPathComponent())
+    }
+
+    // A server that cannot be reached: the form, saying so. Without this the
+    // failed load left the form as it was — a tap on Connect doing nothing.
+    // Only URL-loading failures of a server address: a load this shell
+    // cancelled itself (below, or a newer navigation) is not one.
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        let e = error as NSError
+        guard e.domain == NSURLErrorDomain, e.code != NSURLErrorCancelled else { return }
+        guard let failed = e.userInfo[NSURLErrorFailingURLErrorKey] as? URL, !failed.isFileURL else { return }
+        showForm("unreachable")
+    }
+
+    // …and one that answers 401 at its root: a keyed server opened without
+    // its key. The form, saying what it needs — not a bare "Unauthorized".
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationResponse: WKNavigationResponse,
+        decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
+    ) {
+        if navigationResponse.isForMainFrame,
+           let http = navigationResponse.response as? HTTPURLResponse,
+           http.statusCode == 401,
+           let url = http.url, !url.isFileURL, url.path.isEmpty || url.path == "/" {
+            decisionHandler(.cancel)
+            showForm("keyed")
+            return
+        }
+        decisionHandler(.allow)
     }
 
     // Camera / microphone for pages that ask (QR scanning) — grant once the

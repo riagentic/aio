@@ -423,3 +423,31 @@ Deno.test("perf: perfLog fires even when action type is missing", () => {
   assertEquals(logged.length, 1);
   assertEquals(logged[0]!.type, "unknown");
 });
+
+// A cell's teardown is the framework's own reduce (the reset to the declared
+// state): measured, never billed to the app — as a framework cell's is.
+Deno.test("perf: a slow `:__destroy` reduce is logged to perf.log, not reported as the app's BUDGET_REDUCE; a slow method beside it still is", () => {
+  const errors: AioError[] = [];
+  const logged: string[] = [];
+  const deps = createTestDeps({
+    reduce: (state) => {
+      const start = performance.now();
+      while (performance.now() - start < 3) { /* over the 1 ms budget */ }
+      return { state, effects: [] };
+    },
+    reportOpts: { onError: (err) => errors.push(err) },
+    perfCheck: "on",
+    perfBudget: { reduce: 1 },
+    perfLog: (_source, type) => logged.push(type),
+  });
+  const dispatch = createDispatch(deps);
+  dispatch({ type: "notes:__destroy" } as unknown as TestAction);
+  assertEquals(errors, []);
+  assertEquals(logged, ["notes:__destroy"]);
+  // …and so is its start: the same framework reduce, no line of the app's.
+  dispatch({ type: "notes:__init" } as unknown as TestAction);
+  assertEquals(errors, []);
+  assertEquals(logged, ["notes:__destroy", "notes:__init"]);
+  dispatch({ type: "notes:add" } as unknown as TestAction);
+  assertEquals(errors.map((e) => e.code), ["BUDGET_REDUCE"]);
+});

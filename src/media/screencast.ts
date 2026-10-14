@@ -31,6 +31,10 @@ export type Recording = {
   frames: RecordedFrame[];
   /** How long the recording ran, µs. */
   endUs: number;
+  /** When the screencast was asked to start, µs after the start screenshot
+   *  was asked for (frame times count from there). The screenshot's own
+   *  duration: 20 ms idle, hundreds on a loaded machine. */
+  startedUs?: number;
   /** The page went away (window closed) before `stop` fired. */
   lost: boolean;
 };
@@ -121,10 +125,16 @@ export async function recordScreencast(
     try {
       await p;
     } catch (e) {
-      await Promise.race([gone, new Promise((r) => setTimeout(r, 200))]);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        gone,
+        new Promise((r) => timer = setTimeout(r, 200)),
+      ]);
+      clearTimeout(timer); // the socket's verdict came first
       if (!lost) throw e;
     }
   };
+  const startedUs = (Date.now() - t0) * 1000;
   try {
     await unlessLost(
       cdp.call("Page.startScreencast", { format: "jpeg", quality: 90 }),
@@ -136,7 +146,7 @@ export async function recordScreencast(
   }
   const endUs = Math.max((Date.now() - t0) * 1000, frames.at(-1)!.us + 1000);
   await Promise.all(writes);
-  return { frames, endUs, lost };
+  return { frames, endUs, lost, startedUs };
 }
 
 /** Frames per call into the page — bounded so one `Runtime.evaluate` never

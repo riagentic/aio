@@ -10,6 +10,7 @@
 // (`mod.ts`) whose own top level is `root`.
 //
 // Throwaway repos only — never the aio repo, never a real HOME.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { join, relative } from "@std/path";
 import {

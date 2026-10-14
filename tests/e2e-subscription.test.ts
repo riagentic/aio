@@ -41,14 +41,24 @@ export default function App() {
         const bv = await tab.text("bv");
         return Number(av) >= 3 && Number(bv) >= 3 ? true : null;
       }, 15_000);
-      const st = await server.state() as {
-        a?: { n?: number };
-        b?: { m?: number };
-      };
+      // The ticker does not stop for the three looks: "equal at one moment"
+      // failed whenever a tick landed between them (a loaded Windows run).
+      // What holds at any speed: the page reaches every count the server
+      // had, and never shows one the server has not reached.
+      type St = { a: { n: number }; b: { m: number } };
+      const st = await server.state() as St;
+      const [av, bv] = await waitFor("the page catches up", async () => {
+        const at = [
+          Number(await tab.text("av")),
+          Number(await tab.text("bv")),
+        ];
+        return at[0]! >= st.a.n && at[1]! >= st.b.m ? at : null;
+      }, 15_000);
+      const later = await server.state() as St;
       assert(
-        (await tab.text("av")) === String(st.a?.n) &&
-          (await tab.text("bv")) === String(st.b?.m),
-        "both directly-read cells must track the server",
+        av! <= later.a.n && bv! <= later.b.m,
+        `both directly-read cells must track the server: page ${av}/${bv}, ` +
+          `server ${later.a.n}/${later.b.m}`,
       );
     });
   },

@@ -4,6 +4,7 @@ import {
   extractImports,
   extractSourceImports,
   resolveSpecifier,
+  unmanagedWorkers,
   validateGraph,
 } from "../src/server/graph-validator.ts";
 import { basename, join, resolve, SEPARATOR } from "@std/path";
@@ -878,23 +879,31 @@ Deno.test("validateGraph: a missing mapping in an EAGER module still blocks", as
 
 // ── an unmanaged Worker: a build product that silently goes stale ───────────
 //
-// `new Worker(new URL("./x.ts", import.meta.url))` resolves its URL at RUNTIME,
-// so no static graph can follow it — not this walk, not esbuild, not the dev
-// watcher. A field report lost an afternoon to the consequence: edits to the
-// worker did nothing at all, with no error and no warning, while the app booted,
-// ran and transcribed using the PREVIOUS version of the code. A build product
-// silently going stale is indistinguishable from working code.
+// A Worker's URL is resolved at RUNTIME, so no static graph follows it — not
+// this walk, not esbuild, not the dev watcher. A field report lost an
+// afternoon to the consequence: edits to the worker did nothing at all, with
+// no error and no warning, while the app booted, ran and transcribed using
+// the PREVIOUS version of the code. A build product silently going stale is
+// indistinguishable from working code. The one spelling that IS followed
+// (`new URL("./x.ts", import.meta.url)`, a literal) is bundled and not
+// reported — tests/browser-worker-bundle.test.ts; every other one is named.
 
 Deno.test("validateGraph: a client-reachable Worker is named, and never blocks", async () => {
   const dir = await tempDir("aio-graph-worker-");
   try {
     await Deno.writeTextFile(
       join(dir, "App.tsx"),
-      `const w = new Worker(new URL("./transcribe.ts", import.meta.url), { type: "module" });\n` +
+      `const w = new Worker("./transcribe.ts", { type: "module" });\n` +
+        `const followed = new Worker(new URL("./transcribe.ts", import.meta.url));\n` +
         `export default function App() { return null; }`,
     );
     await Deno.writeTextFile(join(dir, "transcribe.ts"), `export const x = 1;`);
     const result = await validateGraph(join(dir, "App.tsx"), {}, mockTranspile);
+    assertEquals(
+      result.errors.filter((e) => e.category === "unmanaged-worker").length,
+      1,
+      "the worker aio bundles was reported too",
+    );
     assertEquals(
       result.valid,
       true,
@@ -903,13 +912,53 @@ Deno.test("validateGraph: a client-reachable Worker is named, and never blocks",
     const e = result.errors.find((e) => e.category === "unmanaged-worker");
     assert(e, "the Worker went unreported — this is the silence being fixed");
     assertStringIncludes(e!.message, "transcribe.ts");
-    // The fix has to name the CONSEQUENCE, not just the fact. "Editing it does
-    // nothing" is the sentence that would have saved the afternoon.
-    assertStringIncludes(e!.fix, "NOTHING");
-    assertStringIncludes(e!.fix, "compile.include");
+    // The fix has to name the CONSEQUENCE and a way out that is true. It used
+    // to say "editing it may do NOTHING … list it in compile.include": a
+    // `.ts` a compiled binary carries is still never served, so the worker
+    // that ran in dev did not load in any build (measured in Chromium —
+    // tests/browser-worker-dev-only.test.ts).
+    assertStringIncludes(e!.message, "dev only");
+    assertStringIncludes(e!.fix, "does not load");
+    assertStringIncludes(e!.fix, `new URL("./worker.ts", import.meta.url)`);
+    assertStringIncludes(e!.fix, `"assets": { "/workers": "./workers" }`);
+    assertStringIncludes(e!.fix, `new Worker("workers/transcribe.js")`);
   } finally {
     await dropTempDir(dir);
   }
+});
+
+Deno.test("unmanagedWorkers: what differs between dev and a build is named; what does not is left alone", () => {
+  const found = (code: string) =>
+    unmanagedWorkers(code, "/app/App.tsx", () => true).map((e) => e.message);
+  // Source by plain path, classic or module.
+  for (
+    const code of [
+      `new Worker("/w.mts")`,
+      `new  Worker (\n  './w.ts', { type: "module" })`,
+      `new Worker(new URL("/w.tsx", import.meta.url))`,
+    ]
+  ) {
+    assertEquals(found(code).length, 1, code);
+    assertStringIncludes(found(code)[0]!, "dev only");
+  }
+  // The same request in dev and in a build, what aio bundles, and what is
+  // not this app's file.
+  for (
+    const code of [
+      `new Worker("workers/w.js")`,
+      `new Worker("/workers/w.js", { type: "module" })`,
+      `new Worker(new URL("./w.ts", import.meta.url), { type: "module" })`,
+      `new Worker(new URL("../lib/w.tsx", import.meta.url))`,
+      `new Worker("https://cdn.example.com/w.ts")`,
+      `new Worker(new URL("blob:x"))`,
+      `new Worker(url)`,
+    ]
+  ) assertEquals(found(code), [], code);
+  // A `.js` by URL literal is the app's own file, never re-bundled: from a
+  // module in another folder than the bundle it is another request there.
+  const js = found(`new Worker(new URL("../lib/w.js", import.meta.url))`);
+  assertEquals(js.length, 1);
+  assertStringIncludes(js[0]!, "does not follow");
 });
 
 Deno.test("validateGraph: a remote Worker URL is not a stale build product", async () => {

@@ -3,6 +3,7 @@
 // UTC wearing no marker at all. The terminal read 21:11 while the clock on the
 // wall said 23:11 — and a line pasted into an issue carried no way to tell
 // which zone it meant. Local time WITH the offset fixes both halves at once.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertMatch } from "@std/assert";
 import { now } from "../src/diagnostics/logger-types.ts";
 import { formatText } from "../src/diagnostics/logger-format.ts";

@@ -4,6 +4,7 @@
 // failed (here: a read-only deno.json) left dep/aio on the new version while
 // the app still declared the old one — the disagreement doctor and aiol flag.
 // Runs against a THROWAWAY framework repo, never this checkout.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";

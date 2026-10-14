@@ -12,9 +12,17 @@ import {
   mutationJobs,
 } from "../scripts/check-mutations.ts";
 
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+
 const SCRIPT = fromFileUrl(
   new URL("../scripts/check-mutations.ts", import.meta.url),
 );
+
+const exists = (p: string) =>
+  Deno.stat(p).then(() => true, (e) => {
+    if (e instanceof Deno.errors.NotFound) return false;
+    throw e;
+  });
 
 Deno.test("check:mutations --jobs: a whole number ≥ 1, or a refusal", () => {
   assertEquals(mutationJobs(undefined), 4);
@@ -87,4 +95,56 @@ Deno.test("check:mutations --jobs=0 exits 1 before it checks nothing", async () 
     assert(out.includes(`--jobs=${jobs}`), out);
     assert(!out.includes("genuinely guarded"), out);
   }
+});
+
+// A run ended early left a copy of the repo per worker in the temp dir
+// (`aio-mutate-<n>-*`): its removal was the line after the last row.
+Deno.test({
+  // Windows ends a process without telling it; there the copies are
+  // `clean:tmp`'s (they match its `aio-*` sweep).
+  ignore: Deno.build.os === "windows",
+  name:
+    "check:mutations: a run ended by a signal takes its scratch trees with it",
+  async fn() {
+    const tmp = await tempDir("mutate-signal-");
+    const scratches = () =>
+      [...Deno.readDirSync(tmp)].map((e) => e.name)
+        .filter((n) => n.startsWith("aio-mutate-"));
+    const p = new Deno.Command(Deno.execPath(), {
+      // One cheap row: the run has a scratch tree and a test child in it.
+      args: ["run", "-A", SCRIPT, "--jobs=1", "--only=patch-compact.test.ts"],
+      env: { TMPDIR: tmp },
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+    const done = p.output();
+    try {
+      // The last thing a scratch setup makes.
+      const deadline = Date.now() + 120_000;
+      for (;;) {
+        const [dir] = scratches();
+        if (dir && await exists(`${tmp}/${dir}/.aio-test-home`)) break;
+        const ended = await Promise.race([
+          done,
+          new Promise<null>((r) => setTimeout(() => r(null), 50)),
+        ]);
+        const text = ended &&
+          new TextDecoder().decode(ended.stdout) +
+            new TextDecoder().decode(ended.stderr);
+        assert(!ended, `the run ended before its scratch was ready:\n${text}`);
+        assert(Date.now() < deadline, "no scratch tree after 120 s");
+      }
+      p.kill("SIGTERM");
+      assertEquals((await done).code, 130);
+      assertEquals(scratches(), []);
+    } finally {
+      try {
+        p.kill("SIGKILL");
+      } catch {
+        // aio-ok: it ended as the test asked it to
+      }
+      await done;
+      await dropTempDir(tmp);
+    }
+  },
 });

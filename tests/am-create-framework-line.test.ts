@@ -1,6 +1,7 @@
 // `am create` says which framework the new app runs. The F3 benchmark agent
 // found `dep/aio` pointing at the installed release rather than the checkout
 // it expected, and "nothing said this would happen".
+import "./store-sandbox.ts";
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { frameworkSentence } from "../src/am/am-cmd-create.ts";
 import { VERSION } from "../src/server/aio-cli.ts";

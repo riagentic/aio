@@ -1,3 +1,4 @@
+import "./store-sandbox.ts";
 import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { permissiveUmask } from "./permissive-umask.ts";
 import {

@@ -8,6 +8,7 @@
 //
 // Both measured by a hunter running `am` as a user; (1) is pinned here
 // against a real app over the real trojan, the way am-dispatch-args does.
+import "./store-sandbox.ts";
 import { assertEquals } from "@std/assert";
 import { cell } from "../src/state/cell-create.ts";
 import { testServer } from "../src/testing/server-test.ts";

@@ -1010,6 +1010,16 @@ await aio.run({ perfBudget: { methods: { "models:scan": { timeout: 0 } } } });
     expect: "public already: `am check`",
   },
   {
+    // The same reach through a PATH install's import map (`"aio/": "../aio/"`):
+    // JSR refuses `aio/src/…`, a local path resolves it — silently.
+    name: "aio/src/… import of framework internals",
+    files: app({
+      "src/deep.ts": `import { x } from "aio/src/state/dispatch.ts";\n` +
+        `export const v = x;\n`,
+    }),
+    expect: "`aio/src/…` is not a published entry",
+  },
+  {
     name: "Node.js API",
     files: app({ "src/n.ts": `export const d = __dirname;\n` }),
     expect: "Node.js API",

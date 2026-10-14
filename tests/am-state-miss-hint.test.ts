@@ -6,6 +6,7 @@
 // correctly. The hint named nothing that would fix the path. It now names the
 // keys where the walk stopped: `counter` resolved, `cnt` did not, so the
 // choices are counter's own keys.
+import "./store-sandbox.ts";
 import { assertEquals } from "@std/assert";
 import { _missHint } from "../src/am/am-cmd-state.ts";
 

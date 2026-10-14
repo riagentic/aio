@@ -20,6 +20,7 @@
 // `am preview ui/Card.tsx`. The verb now resolves a file argument the way a
 // shell user means it (cwd first — tests/am-file-arg-resolution.test.ts), so
 // the brief teaches the path tab completion writes.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
   agentBrief,

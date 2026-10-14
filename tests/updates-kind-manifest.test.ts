@@ -115,6 +115,9 @@ Deno.test("kind manifest: a zip install is OFFERED the zip release beside a bina
  *  manifest is always served, and `kind` answers for the zip's. */
 async function httpChannel(
   kind: (req: Request) => Response | Promise<Response>,
+  /** What the platform's own manifest is: the `.exe`'s (a Windows channel),
+   *  or the zip's — a platform whose only artifact is the zip. */
+  own: "binary" | "electron-zip" = "binary",
 ) {
   const texts: Record<string, string> = {};
   for (const target of ["binary", "electron-zip"] as const) {
@@ -141,7 +144,7 @@ async function httpChannel(
         return kind(req);
       }
       asked.platform++;
-      return new Response(texts.binary);
+      return new Response(texts[own]);
     },
   );
   return {
@@ -230,11 +233,15 @@ Deno.test("kind manifest: a channel that has one is asked ONCE per check — nev
 // Every channel published before the kind manifest existed answers "absent"
 // on every check: the kind manifest must not double its requests for good.
 // Only "no such file" (404, 410) is believed for a day; a 403, a 408, a 429
-// or a 5xx can be a bad moment, and is asked again.
+// or a 5xx can be a bad moment, and is asked again. (The platform's manifest
+// here is one a zip install can use; the `.exe`'s is the case below.)
 Deno.test("kind manifest: a channel that answered absent is not asked again each check", async () => {
   const cases = [[404, 1], [410, 1], [403, 2], [408, 2], [429, 2], [500, 2]];
   for (const [status, asks] of cases) {
-    const ch = await httpChannel(() => new Response("{}", { status }));
+    const ch = await httpChannel(
+      () => new Response("{}", { status }),
+      "electron-zip",
+    );
     try {
       const base = ch.base(`/absent-${status}`);
       for (let i = 0; i < 2; i++) {
@@ -247,6 +254,52 @@ Deno.test("kind manifest: a channel that answered absent is not asked again each
     } finally {
       await ch.close();
     }
+  }
+});
+
+// From a field report: a publish wrapper dropped the `.zip`, so the kind
+// manifest was a 404 and every check fell back to the `.exe`'s manifest and
+// was refused. Believing that 404 for a day meant the REPAIRED channel was
+// not seen until the next day, or a restart.
+Deno.test("kind manifest: a 404 whose fallback is refused (published without its .zip) is asked again on the next check", async () => {
+  let repaired = false;
+  const ch = await httpChannel(() =>
+    repaired ? new Response(ch.kindText) : new Response("{}", { status: 404 })
+  );
+  const root = await tempDir("kind-manifest-repaired-");
+  try {
+    const rt = createUpdatesRuntime({
+      config: resolveUpdates({
+        source: ch.base("/repaired").replace(/\/prod\/[^/]+$/, ""),
+        channel: "prod",
+        allowUnsigned: true,
+      }),
+      dataDir: root,
+      appName: "app",
+      appVersion: "1.0.0",
+      local: { schema: 1, cells: {} },
+      exposed: false,
+      log: silentLog,
+      argv: [],
+      installedTarget: "electron-zip",
+      canInstall: ["electron-zip"],
+      exit: () => {},
+      relaunch: () => {},
+      shutdown: () => Promise.resolve(),
+    });
+    for (let check = 1; check <= 2; check++) {
+      const r = await rt.check({ dismissed: null });
+      assertEquals(r.kind, "error", JSON.stringify(r));
+      assertStringIncludes(JSON.stringify(r), "without its .zip");
+      assertEquals(ch.asked, { kind: check, platform: check });
+    }
+    repaired = true;
+    const r = await rt.check({ dismissed: null });
+    assertEquals(r.kind, "offer", JSON.stringify(r));
+    assertEquals(ch.asked, { kind: 3, platform: 2 });
+  } finally {
+    await ch.close();
+    await dropTempDir(root);
   }
 });
 

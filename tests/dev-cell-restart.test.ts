@@ -8,9 +8,11 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import {
+  carriedPort,
   isSupervisedChild,
   relaunchArgs,
   RESTART_EXIT_CODE,
+  RESTART_PORT_ENV,
   restartBlockedReason,
   restartForCellChange,
   supervisorEnv,
@@ -68,15 +70,37 @@ Deno.test("dev-restart: an opted-out app warns and keeps running", async () => {
 Deno.test("dev-restart: the supervised child is told the port the app was on", () => {
   // An app that named no port got a free one — and, before this, a DIFFERENT
   // free one after every cell edit, orphaning every open tab. The bound port
-  // rides the env rung of the port chain (`AIO_PORT`, the one reader in
-  // paths.ts), so the relaunch binds the same port. No TCP port (zero-port
-  // electron) carries nothing: the relaunch must not grow a listener.
+  // rides the environment in a variable of its own, so the relaunch binds the
+  // same port. No TCP port (zero-port electron) carries nothing: the relaunch
+  // must not grow a listener.
   const env = supervisorEnv(4242, 51234);
-  assertEquals(env.AIO_PORT, "51234");
+  assertEquals(env[RESTART_PORT_ENV], "51234");
+  assertEquals(RESTART_PORT_ENV, "AIO_DEV_RESTART_PORT");
   assertEquals(env.AIO_DEV_SUPERVISED, "1");
   assertEquals(env.AIO_PARENT_PID, "4242");
-  assertEquals("AIO_PORT" in supervisorEnv(4242, undefined), false);
-  assertEquals("AIO_PORT" in supervisorEnv(4242, 0), false);
+  assertEquals(RESTART_PORT_ENV in supervisorEnv(4242, undefined), false);
+  assertEquals(RESTART_PORT_ENV in supervisorEnv(4242, 0), false);
+  // NOT the operator's `AIO_PORT`: an Electron dev app with
+  // `electron: { ignoreDebugEnv }` does not read that one, so on a TCP port
+  // nobody named it moved after every edit — and was told each time that an
+  // `AIO_PORT` nobody had set "is set and ignored".
+  assertEquals("AIO_PORT" in env, false);
+});
+
+Deno.test("dev-restart: the carried port is read by a supervised child only, and only as a port", () => {
+  const from = (e: Record<string, string>) => carriedPort((k) => e[k]);
+  // What the supervisor wrote is what the child reads.
+  assertEquals(from(supervisorEnv(4242, 51234)), 51234);
+  assertEquals(from(supervisorEnv(4242, undefined)), undefined);
+  // Left in a shell, it is nobody's word: no supervisor, no carry.
+  assertEquals(from({ [RESTART_PORT_ENV]: "51234" }), undefined);
+  for (const bad of ["", "0", "65536", "0x1F90", "1e3", "+3000", " 80", "x"]) {
+    assertEquals(
+      from({ AIO_DEV_SUPERVISED: "1", [RESTART_PORT_ENV]: bad }),
+      undefined,
+      JSON.stringify(bad),
+    );
+  }
 });
 
 Deno.test("dev-restart: the relaunch argv reproduces this process", async () => {
@@ -89,13 +113,17 @@ Deno.test("dev-restart: the relaunch argv reproduces this process", async () => 
 
 /** A minimal app that SERVES the live cell's marker on a plain route, so the
  *  test can tell which version of the cell code is actually running. */
-const appSource = (appId: string, port: number | undefined) =>
+const appSource = (
+  appId: string,
+  port: number | undefined,
+  client = `client: "server-only",`,
+) =>
   `import { aio } from "aio";
 import { probe } from "./cell.ts";
 await aio.run({
   appId: "${appId}",
   cells: [probe],
-  client: "server-only",
+  ${client}
   persist: false,
   ${port === undefined ? "" : `port: ${port},`}
   routes: { "/mark": () => new Response(probe.mark) },
@@ -254,6 +282,114 @@ Deno.test({
     );
     assertEquals(r.portAfter, r.portBefore, "the port did not move");
     assertStringIncludes(r.text, "restarting the app");
+  },
+});
+
+Deno.test({
+  name:
+    "dev-restart e2e: an exposed Electron app with ignoreDebugEnv comes back on the port it had, and no AIO_PORT is named",
+  ignore: Deno.build.os === "windows", // the stand-in window is a shell script
+  sanitizeResources: false, // aio-ok: the spawned app owns its pipes; teardown kills it
+  sanitizeOps: false, // aio-ok: the spawned app owns its pipes; teardown kills it
+  async fn() {
+    // The one app whose TCP port nobody named AND whose environment is not
+    // read for one: a desktop app, exposed, with `ignoreDebugEnv`. The
+    // supervisor carried the port as `AIO_PORT`, which that key ignores.
+    const appId = "dev-restart-e2e-ignore-env";
+    const dir = await tempDir("aio-dev-restart-el-");
+    const repo = fromFileUrl(new URL("../", import.meta.url));
+    await Deno.writeTextFile(
+      join(dir, "deno.json"),
+      JSON.stringify({
+        imports: {
+          "aio": `${spec(repo)}mod.ts`,
+          "aio/": `${spec(repo)}src/`,
+          "immer": "npm:immer@10.2.0",
+          "@std/path": "jsr:@std/path@1.1.2",
+        },
+      }),
+    );
+    await Deno.writeTextFile(
+      join(dir, "app.ts"),
+      appSource(
+        appId,
+        undefined,
+        `client: "electron", expose: true, electron: { ignoreDebugEnv: true },`,
+      ),
+    );
+    await Deno.writeTextFile(join(dir, "cell.ts"), cellSource("v1"));
+    await Deno.writeTextFile(
+      join(dir, "App.tsx"),
+      "export default function App() { return <div>Hello</div>; }\n",
+    );
+    // The window: a process that IS what the server launched and opens
+    // nothing; a display NAME so the launch happens at all
+    // (tests/electron-ignore-debug-env.test.ts).
+    const stub = join(dir, "electron");
+    await Deno.writeTextFile(stub, "#!/bin/sh\nexec sleep 600\n");
+    await Deno.chmod(stub, 0o755);
+    const child = new Deno.Command(Deno.execPath(), {
+      args: ["run", "-A", join(dir, "app.ts")],
+      cwd: dir,
+      env: {
+        ...devChildEnv(),
+        WAYLAND_DISPLAY: "aio-standin",
+        ELECTRON_PATH: stub,
+        // Nothing ambient: what the child is told, the supervisor told it.
+        AIO_PORT: "",
+        AIO_DEFAULT_PORT: "",
+        AIO_CDP: "",
+      },
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+    const live = () => instances(appId).find((i) => i.alive && i.port > 0);
+    const answers = async (port: number): Promise<true | null> => {
+      try {
+        (await Deno.connect({ hostname: "127.0.0.1", port })).close();
+        return true;
+      } catch {
+        return null; // aio-ok: not listening (yet) — asked again
+      }
+    };
+    let before: { pid: number; port: number } | null = null;
+    let after: { pid: number; port: number } | null = null;
+    let text = "";
+    try {
+      before = await waitFor(() => Promise.resolve(live() ?? null), 30_000);
+      assert(before, "the app never recorded a TCP port");
+      // The listener answers — as the cases above wait for `/mark` — before
+      // the edit: a save made while the app is still starting is not this
+      // case's subject.
+      await waitFor(() => answers(before!.port), 30_000);
+      await Deno.writeTextFile(join(dir, "cell.ts"), cellSource("v2"));
+      // The relaunched app is another process, LISTENING where its record
+      // says. (The record alone proves nothing: the supervisor files one for
+      // the child, with the port it carries, before the child has bound.)
+      after = await waitFor(async () => {
+        const l = live();
+        return l && l.pid !== before!.pid && await answers(l.port) ? l : null;
+      }, 30_000);
+    } finally {
+      try {
+        child.kill("SIGTERM");
+      } catch { /* already gone */ }
+      const out = await child.output();
+      text = new TextDecoder().decode(out.stdout) +
+        new TextDecoder().decode(out.stderr);
+      await dropTempDir(dir);
+    }
+    if (Deno.env.get("AIO_DEBUG_RESTART")) console.log(text);
+    assert(after, `the app was not relaunched:\n${text.slice(-4000)}`);
+    assertEquals(
+      after.port,
+      before!.port,
+      `the port moved:\n${text.slice(-4000)}`,
+    );
+    assert(
+      !/AIO_PORT[^\n]*set and ignored/.test(text),
+      `a variable nobody set was reported as ignored:\n${text.slice(-4000)}`,
+    );
   },
 });
 

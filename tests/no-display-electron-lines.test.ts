@@ -11,6 +11,7 @@
 // And `deno task dev` IS `--client=electron`: with no display no window
 // launches, the install lives in the window launch (findElectronBin), and the
 // binary was still missing when the run was killed.
+import { childEnv } from "./e2e-app-harness.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { noDesktopSessionWarning } from "../src/server/aio-lifecycle.ts";
@@ -131,13 +132,15 @@ Deno.test({
       join(app, "src", "app.ts"),
       `import "./cell.ts";\nimport { aio } from "aio";\nawait aio.run({});\n`,
     );
-    const env: Record<string, string> = {
+    // `childEnv` first: where it gives the child a home of its own (the
+    // window's profile hangs off it), the developer's is not copied over it.
+    const env = childEnv({
       ELECTRON_PATH: fake,
       AIO_APPS_DIR: join(dir, "home"),
-    };
+    });
     for (const k of ["HOME", "PATH", "DENO_DIR", "XDG_CACHE_HOME", "TMPDIR"]) {
       const v = Deno.env.get(k);
-      if (v !== undefined) env[k] = v;
+      if (v !== undefined && !(k in env)) env[k] = v;
     }
     const child = new Deno.Command(Deno.execPath(), {
       // No `--port`: an explicit port makes the app bind TCP, where the URL

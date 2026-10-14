@@ -1,5 +1,452 @@
 # Changelog
 
+## v1.0.20-beta — the clean-desk round: browser workers run in every build, updates the size of the change, signed Android builds; the safer values are opt-ins (2026-10-13)
+
+> **One floor moves: an Android app built with this release needs Android 10 (it
+> was Android 7) — the owner's decision; the WebView below it no longer gets
+> updates.** Otherwise:
+>
+> **Nothing is removed or renamed, and no default moves. Added: the opt-ins
+> `electron.strictPin`, `electron.ignoreDebugEnv`, `auth.maxSessions`,
+> `auth.publicDir`, `wire.refuseShortCalls`, `wire.omitTrailingUndefined` and
+> `android.colorScheme`; `am fix --harden`; `am publish --patch-from`;
+> `bindInput`; `blocking()` with a function or a URL; `testUI`'s
+> `wire: { strict: true }`; `--smoke=desktop`; Android signing through
+> `AIO_ANDROID_KEYSTORE`.** An app upgrades with `am pin` and `am fix` and no
+> edit by hand. What an existing app can notice: a `.ts` browser worker that was
+> dead in a build now runs; a local APK applies the options `app.ts` gives
+> `aio.run()`; `am doctor` prints up to four new hints; new log lines say in a
+> package what only dev said; a connection that died silently says
+> "Reconnecting…" in about 5 s. Added on 2026-10-12: `build.android.strict`,
+> `testPageFetch`. See
+> [the upgrade guide](docs/upgrade/from-1.0.19-beta-to-1.0.20-beta.md).
+
+### Opt-ins: the safer values, off until set
+
+Each of these is the value a new app should have and an existing app may not be
+ready for. `am create` writes them into a new app; `am doctor` names the ones an
+existing app has not decided; `am fix --harden` writes them. A plain `am fix` is
+unchanged. `tests/am-harden.test.ts`.
+
+- **`electron: { strictPin: true }`** (`"build": { "strictPin": true }` for a
+  packaged client, `--strict-pin` for one run): a paired server that presents a
+  certificate its pin does not cover is refused, and the connect page says why.
+- **`electron: { ignoreDebugEnv: true }`**: the desktop app does not read
+  `AIO_CDP` or `AIO_PORT` from its environment. `am` no longer aims at an
+  ambient `AIO_PORT` for such an app.
+- **`auth: { maxSessions: n }`**: a ceiling on one account's live sessions.
+  **`auth: { publicDir: "public" }`**: what an anonymous visitor may read is a
+  folder, not a rule over file extensions.
+- **`wire: { refuseShortCalls: true }`**: a frame from a hand-written client
+  that carries no argument list, for a method that declares arguments, is
+  refused before anything runs (unset, it runs with `undefined`).
+  **`wire: { omitTrailingUndefined: true }`**: `m(a, undefined)` is sent as
+  `m(a)`, by the page, the desktop window and `connectCli` alike. A misspelled
+  key inside `wire` stops the boot, as one inside `auth` does.
+- **`"android": { "colorScheme": "system" }`** (deno.json): the page of an
+  Android build follows the phone's light/dark setting. Without the key it sees
+  dark, as before; `"light"` and `"dark"` fix it.
+- **`testUI(App, name, { wire: { strict: true } }, fn)`**, or
+  `AIO_TEST_WIRE=strict` for a whole run: a rejected call from the UI is a plain
+  `Error` with a `code`, `serverFn` called from a component crosses the wire,
+  and `useAio().send` runs the action — what a real client gets. Without it a
+  test behaves as on 1.0.19, and one line per kind says what strict would have
+  changed. `tests/testui-wire-strict-is-opt-in.test.tsx`.
+- **`deno task build --smoke=desktop`** (`"smoke": "desktop"`) starts the
+  desktop package on a Windows or macOS host too. Plain `--smoke` lists it as
+  not smoke-tested there and starts nothing, as before.
+  `tests/build-smoke-desktop-hosts.test.ts`.
+- **`AIO_STOP_STAYS_DOWN=1`**: `am stop` of a supervised app
+  (`AIO_SUPERVISED=1`) exits 143, so a systemd unit with `Restart=always` leaves
+  it down. Without it `am stop` exits 0 and the service comes back, as before.
+  The generated unit carries the line as a comment.
+
+### Browser workers
+
+- **`new Worker(new URL("./w.ts", import.meta.url))` runs in every target** —
+  dev, `--prod`, a compiled binary, Electron, web and an APK. A `.ts`, `.tsx` or
+  `.jsx` worker (and a `SharedWorker`) is bundled, bare imports included, and
+  the same bundle is served in dev and in a build; `dist/` gains `worker-*.js`.
+  Such a worker used to run nowhere but by luck. A `.js` worker is left exactly
+  as written. `--smoke` fetches the worker bundles.
+  `tests/browser-worker-bundle.test.ts`.
+- **A worker that cannot be bundled is a warning; the build stays green.** The
+  line names the worker, the import it stopped on (a missing package: the
+  install command), and the way out. A computed worker URL and a literal that
+  names a missing file are warned about too, in dev on the hot reload that
+  introduces them.
+- **A worker started by a worker works in a standalone APK** (Android's WebView
+  133 and later could not load one). See "A worker's own worker" in
+  `docs/build/runtime-differences.md`.
+- **`assets` mounts that only deno.json declares are served** (they answered
+  404), in dev and prod, and are reachable in a packaged Electron window. One
+  boot line lists them, as a warning when the app is exposed with no key and no
+  auth. Such a mount resolves from the project root.
+
+### Updates and the Windows one-click `.exe`
+
+- **Patches: an update the size of the change.** `am publish --patch-from=<dir>`
+  publishes the difference from an earlier release beside the new one (24.7 KB
+  for a 112 MB binary a commit apart). A single-file install — a compiled
+  binary, a CLI, an AppImage — whose file is the build a patch starts from
+  downloads the patch and makes the release from it; the result must have the
+  manifest's signed SHA-256, or the whole release is downloaded. The patch list
+  has a signature of its own. An install unpacked into a folder (a Windows
+  `.zip` or one-click install, a macOS `.app`) always downloads the release. An
+  app built with 1.0.19 or older ignores the new manifest keys. `aio/ship` gains
+  `ReleasePatch`, `patchesCore`, `usablePatches` and `withPatches`.
+  `tests/updates-patch.test.ts`.
+- **`am upgrade <app>` upgrades a one-click install** without opening it, and
+  can go back to an older source; a running app is refused before the build. The
+  `.exe` takes `--aio-sfx-install` (install, start nothing; exit 0, 3 when the
+  app is running, 1 otherwise) and `--aio-sfx-wait` (exit with the app's code)
+  as its own first argument. An `.exe` built with 1.0.19 or older passes them to
+  the app, and `am upgrade` says so truthfully instead of printing a new
+  version.
+- **A removed Start-menu shortcut stays removed.** The `.exe` records the
+  shortcut it added; a later start, update, newer `.exe` or `am upgrade` adds
+  none over an install that has the record. `updates.shortcutAdded` tells the
+  app, on the one start that added it, that the download can be deleted.
+- **The `.exe` shows a progress window while it extracts**, and where nobody can
+  press OK (ssh, a service) it shows nothing: one stderr line and exit 1.
+- **A second try does not download the release again.** The archive of a `.zip`
+  or `.app` release (`<install>.zip-<version>`) is kept until the update is
+  confirmed or given up, and used only if it verifies against the signed
+  manifest again. A zip install sees a repaired channel at the next check, not a
+  day later.
+- **Things beside the install that the updater did not make** are named once,
+  not at every start.
+- `am publish --no-zip` is accepted by `am`. The zstd `.exe` is no longer
+  declined beside free memory; the fallback warning names the size.
+
+- **The one-click Windows `.exe` wears the app's icon** (a field report: the
+  download showed Windows' blank icon). The build writes the staged `.ico` into
+  its copy of the stub (`src/build/pe-icon.ts`) and checks it after; when it
+  cannot, the build goes on and says so in one line. The prebuilt stub is the
+  same bytes. `tests/pe-icon.test.ts`.
+- **One `icon.png` is enough for Windows**: a square PNG over 256 px is scaled
+  down to 256/48/32/16 instead of being replaced by the monogram
+  (`src/build/png-scale.ts`). An `icon.ico`, or a PNG of at most 256 px, is used
+  as before. An icon the Windows build cannot use is repeated in the build's
+  closing summary, naming the `icon.ico` to add. `tests/png-scale.test.ts`.
+
+### Android and the web target
+
+- **Signed release builds.** `AIO_ANDROID_KEYSTORE` (with
+  `AIO_ANDROID_KEYSTORE_PASSWORD`, `AIO_ANDROID_KEY_ALIAS`,
+  `AIO_ANDROID_KEY_PASSWORD`) and `--release` give a signed, non-debuggable APK
+  and an `.aab`. A build without them is as before.
+- **The options `app.ts` gives `aio.run()` reach a local APK and a web build**:
+  `ui.theme`, `layout`, `lang`, `dir`, `head`, `viewport`, and `persist`,
+  `persistDebounceMs`, `cellDefaults`, `circuitBreaker`, `refusalsReject`,
+  `perfBudget`, `effectTimeoutMs`. The build reads them by running the entry
+  once in a process that may only read (`AIO_BUILD_PROBE=1` is set there); an
+  entry that cannot be read this way bakes nothing and the build says why.
+  `persist: false` is applied on a new install only: an install that already
+  holds saved state keeps it and says so once.
+- **The Android client pairs by code**, and a self-signed `--expose` server
+  works once paired by code or share link: its certificate is pinned, and a
+  changed one is refused with the reason. A keyed server at a bare address says
+  what it needs; the connect form says when a connect fails and when the
+  certificate is not trusted.
+- **An engine too old for the bundle gets a message**, in an APK, a web build
+  and a server-served page, instead of a blank page.
+- The emulator lane runs on API 35 and 36; `AIO_ANDROID_SERIAL` picks the device
+  for `test:android`.
+
+### Desktop and the aio client
+
+- **A changed certificate has to prove itself.** A paired server that presents a
+  certificate its pin does not cover is asked, before anything is sent, to prove
+  it holds the app's key (`POST /__aio/pin-proof`, on keyed TLS servers; the key
+  never crosses the wire). A server that made a new certificate is pinned again
+  with no prompt. One that cannot prove it is opened without the key, and the
+  client says so. A pairing that has never seen its server prove — the server
+  runs 1.0.19 or older — is warned about and reached as before.
+  `tests/pin-proof.test.ts`.
+- **macOS: an app installed by `run.sh` or `am` is not asked "Move to
+  Applications?"**, and the question no longer says "cannot update itself" for a
+  copy that can. `run.sh` installs and opens a desktop app on macOS. The bundle
+  states why it uses the local network (macOS 15 asks once).
+- **Windows: notifications are filed under the app's title**, so per-app
+  notification settings start fresh once.
+- A no-port app's "server still running" and "window could not be started" lines
+  name the local socket, not a URL. The window's own search calls its callback
+  once.
+- A server build on macOS or Windows gets a launchd file or a task script beside
+  the artifact. `deno task build --analyze` also prints what each compiled
+  binary embeds. New scaffolds carry a `.gitattributes`.
+- **A package `deno compile` installs by itself mid-compile** (a linked
+  framework's own pinned `happy-dom` beside the app's) was embedded in the first
+  binary only. The build compiles once more when that happens, and says so.
+
+### Renderer, calls and tests
+
+- **A `value` input with no handler keeps typed text, as before** — and says
+  once that the control shows what its prop does not, naming `defaultValue`.
+  `bindInput(form, "age")` (`aio/air`) is `form.bind` with the field's type.
+  `tests/air-keeps-typed.test.ts`, `tests/controlled-drift-warns.test.ts`.
+- **A `<Portal>` that never mounted** (behind a sibling that threw) no longer
+  removes its target's own first node when the target changes. **A boundary that
+  falls back on an update** unmounts the children behind the end of its region:
+  no second copy of a portal's content, and `onUnmount` runs.
+- **`blocking(id, fn, arg)` takes a function or a
+  `new URL("./job.ts", import.meta.url)`**; a source string works as before.
+  **`checkCells(cells)`** is the whole call — `config` and `baseDir` are
+  optional.
+- **Worker cells: `unsaved` goes to the call that wrote the failed batch**, not
+  to every call in flight; a nested call's failed save reaches its author.
+- `testMultiClient().call()` rejections carry `code`. `am testgen` output gains
+  a `StrictTestUI` block. aiol warns on an import of `aio/src/…`, and
+  `--safe-fix` fixes a `.ts` file that holds `</` in a string, a regex or a
+  comment.
+- The state-diff debug line no longer costs the size of the state; patching a
+  frozen array is about 9× faster.
+
+### Said in a release build too
+
+- **About state**: a duplicate cell name, `cell.state` / `cell.selectors`, an
+  unknown `__aio.` name, a refused action whose listener ran, and a `Map` or
+  `Set` in state in a compiled build — one line each, once. The check can no
+  longer fail a commit.
+- **About components**: a `memo(C, compare)` that is ignored, `class` beside
+  `className`, `dangerouslySetInnerHTML` beside children, a signal child that
+  holds an object, `<Progress>` out of range — once each, in the console and
+  `client.log`.
+- A text-diff line names a change made from outside, such as a page translator.
+  `setDevMode(true)` on a production bundle says which checks are absent.
+
+### Sync
+
+- **A sync op its own cell refused gets no journal commit**, so a kill before
+  its row is removed ends, at the next boot, in the row removed and the author's
+  resend answered `op-rejected` — not acknowledged. (With `journal: true`, on an
+  action another cell `listensTo`.)
+- **A marked op is never removed at boot**; a mark that could not be written is
+  retried at the cell's next op, on a resend and at a clean stop. The boot
+  warning says "ACCEPTED" only for an op a mark or a journal commit proves was
+  accepted; otherwise "kept — nothing records that it accepted it".
+- A quarantined cell refuses client writes (`op-rejected`, not stored).
+
+### `am` and running an app
+
+- **Two apps dirs that share a lock folder name.** The lock folder is named as
+  on 1.0.19 for every `AIO_APPS_DIR`. A start that another root's app holds
+  names that root; `am stop`, `kill`, `restart`, `dispatch` and `trigger` refuse
+  to act on the other root's app, and reads mark it (`am instances --json`:
+  `otherAppsDir`). `tests/am-other-apps-root.test.ts`.
+- **`am pin` and `am fix` move `allowScripts` entries with the imports**, and
+  `am doctor` hints at a stale one; `am fix` says when `deno.lock` changed.
+- **Windows: `am kill` asks the app first** and says how it ended (JSON gains
+  `how`; it can take 3 s longer). `am remove` removes the one-click install and
+  a Start-menu shortcut it can prove opens this app.
+- `am kill --stale` clears a compiled app's orphan. `am surface --depth=` with
+  an empty value and `am shot ""` are refused.
+- **Dev: a fix saved while a failing start is still booting is seen**, not
+  waited for; a failing start that rewrites its own source is slowed, with a
+  warning. A missing package's advice gives the install command, and names
+  `"nodeModulesDir": "auto"` first when the project lacks it.
+- The lock folder is checked again after the socket is bound.
+
+### Windows and macOS
+
+- **Windows: a local pipe that is already hosted stops the start**, by name,
+  instead of an app running without its door; a pipe transport without
+  `--allow-ffi` is refused before "running". A liveness probe before the first
+  accept no longer costs the app its door; bursts of local connects no longer
+  fail (at most 128 wait; a busy pipe errors after 2 s, by name). Under an
+  `AIO_APPS_DIR` the pipe name carries the scope (`aio+<scope>+<key>`), so two
+  copies of one app in two apps dirs no longer share a pipe; without one it is
+  unchanged.
+- **Windows: `install.ps1` and `run.ps1`** install under `%HOME%` when it is
+  set, else `%USERPROFILE%`, and print which; a checkout already at
+  `%USERPROFILE%\.local\lib\aio` stays the checkout, and `am update` and
+  `am upgrade` find it. They work under PowerShell 5.1, in an app that is not a
+  git repo, and with a signed one-click `.exe`; `run.ps1` exits with the stub's
+  exit code. `AIO_NO_PATH_WRITE` leaves `PATH` alone.
+- **Windows: a second build, link recovery or Electron unpack** no longer takes
+  a lock from a live holder; quitting during a stalled update check leaves no
+  git helper behind.
+- **macOS: a start no longer fails on the lock folder** when a sibling app quits
+  at that instant.
+- Test browsers: Edge and Brave are found, on Windows paths too.
+
+### The todo list and an outside audit, worked through (2026-10-12)
+
+Connections and the client:
+
+- **A connection that dies without saying so is announced.** Airplane mode, a
+  sleeping device or a changed network can leave a socket that never closes; the
+  page said nothing for 25–90 s while taps went nowhere. The page now counts its
+  own unanswered pings — only on a connection that has answered one, and only
+  beats that really ran, so a throttled tab or a busy server is not judged —
+  asks the server once over HTTP, and then runs the same path a close runs:
+  "Reconnecting…" in about 5 s, queued sends kept, calls in flight rejected
+  `connection lost`. A healthy connection is unchanged.
+  `tests/air-transport-silent-socket.test.ts`.
+- **`am discover` and the client's search ask on every network interface.** The
+  one limited broadcast left by one interface — with a VPN up, not the LAN's. An
+  app on this machine is listed once. "The probe could not be sent" now means no
+  interface took it.
+- **A key that was withheld stays withheld** (aio client, not strict): the next
+  connect in that run sent it to the certificate that had just failed to prove,
+  and a keyless load could still carry it in the window's cookie. Both closed;
+  the second is proven with a real window.
+- **An open client window follows a server that made a new certificate** and
+  proves it, without a restart; a proof question that got no answer is asked
+  again. A changed certificate that did not prove leaves
+  `⚠ certificate
+  changed` on that recent, and recents are shown with the key
+  masked.
+- The aio client logs `cannot open <address>: <cause>` when a direct launch
+  cannot reach its server (the window is as before). The Electron shell says
+  when its offline queue drops sends, and how many.
+- **Electron: a send made during a reconnect attempt was lost without a word** —
+  written into a socket that was still connecting, and gone when the attempt
+  failed (in 1.0.19 too, on every OS; found on a Mac by the new drop counter
+  coming up one short). It goes to the offline queue.
+- **Android: the floor is Android 10** (`minSdk` 29, was 24). An APK built with
+  this release does not install on Android 7–9; those phones keep the app's last
+  older build. `tests/android-floor.test.ts`.
+- **Android client: a pairing survives a kill right after it** (the shell keeps
+  the address itself; the WebView wrote it to disk about a second late).
+  `build.android.strict: true` turns every loss an app's own `MainActivity.kt`
+  causes into a build error (opt-in; `am doctor` hints it).
+
+Builds and updates:
+
+- **A `deno.json`-only `assets` mount fills in.** As first prepared it claimed
+  its whole prefix — `{"/": "./public"}` would have answered 404 for the app's
+  own modules. Routes, `aio.run` mounts, `serveDirs`, `share` and the app's own
+  files answer first. One that points outside the project is not served, and
+  says so, as the build does.
+- **The build says when a browser worker will be missing**: a script named by
+  `new Worker("/x.js")` that the artifact does not carry, an absolute worker
+  path in a `web` build, a relative `importScripts` in a classic worker in a
+  sub-folder. Warnings; exit codes are the same. A build that reuses a cached
+  bundle prints its worker warnings again.
+- The build summary names, per target outside the Linux gates, the recorded
+  proof run or that there is none.
+- **An app with `updates` and no key is told so** by the build, `am doctor`,
+  `am fix --harden` and `am publish`, which prints the public key to paste. (The
+  first verifying key is still trusted on first use; nothing is embedded for
+  you.)
+- **A kept update download that is damaged** no longer refuses its release until
+  removed by hand: it is moved to `<name>~damaged`, said, and downloaded again.
+  A single-file install's verified download survives a restart.
+- A server build's launchd file or task script lands in `dist/` under the
+  artifact's name; it was left in the project root, where it marked the next
+  build `-dirty`.
+
+Windows and macOS:
+
+- **Windows: an Electron app with a named port and no `--allow-ffi` starts** as
+  it did in 1.0.19, port only, with an ERROR line (as first prepared, 1.0.20
+  refused the start).
+- **The one-click `.exe`: an install right after the app closed** retries its
+  move for 3 s instead of saying "is running". `run.ps1` with no desktop prints
+  why the `.exe` failed. `am installed` shows the real aio version for an
+  install made by 1.0.19's `run.ps1`.
+- **`run.sh` no longer marks a clean checkout `-dirty`** (its own marker file
+  sat in the app root): one version per commit. On macOS it says when the app is
+  already open, and then replaces and prunes nothing.
+- `run.sh` and `run.ps1` print pruned versions without a log prefix.
+- **Windows: an update downloaded again right after its kept archive was removed
+  is not refused as "in the way of the update".** NTFS gives a file renamed onto
+  a name freed seconds ago that name's old creation time, so the updater did not
+  know its own download.
+- **Android, found on a real phone (Android 14): three things every APK was
+  missing.** (1) When Android took back the WebView's renderer process — it
+  does, when memory is short — the whole app died and the launcher showed; the
+  page is now built again with its saved state, and a second loss within 10 s
+  stops instead of looping. (2) A tap on `<input type="file">` did nothing; it
+  opens the system's picker. (3) A download link did nothing and said nothing;
+  an http(s) download goes to Android's DownloadManager with the page's cookies,
+  and a `blob:` / `data:` download — which a WebView cannot save — is refused
+  with a logcat line that says so. In the template's activity; an app with its
+  own `MainActivity.kt` is unchanged.
+- **`am doctor` tells an app about help it does not use yet.** A `worker: true`
+  cell without `workerRespawn`, a hand-written `VACUUM INTO` (use
+  `db.snapshot()`), and a package that carries guest preloads or
+  `compile.include` files but is never started by `build.smoke`. Hints: no exit
+  code, nothing written, a new app gets none. From a field report that listed
+  five of its own asks as open two releases after they shipped.
+- **`testUI(App, { fetch })` — the test's network, from the first mount on.**
+  `testUI` mounts before the test body runs, so a `fetch` stub the body installs
+  is too late for a request `onMount` makes: it has already gone to the real
+  network (a field report's test failed 2 of 6 runs with a download's speed).
+  The option answers every request the component makes and is restored when the
+  test ends. And a `settle()` that gives up on a call waiting on a `fetch` names
+  the URL and says whether the test gave `testUI` one. Additive; without the
+  option nothing changes.
+- **A script-driven dev app is told about `--no-watch`.** A save restarts every
+  running dev app, which ends a scripted run; the first restart of an app
+  started with `--cdp` or `--client=server-only` now names the switch, and
+  `--no-watch` is in the dev-mode flag table (it was in no doc). From a field
+  report that lived with a "no source edits during a run" rule for weeks.
+- **A mount handle's `_flush()` renders everything that is pending.** It stopped
+  at the scheduler's 12 ms budget and left the rest to a microtask, so on a slow
+  machine the DOM a test read on its next line was half rendered — 88 test files
+  and `testUI`'s own settle call it. Found by a randomized renderer test that
+  went red once on a loaded Windows VM for a DOM that was right a microtask
+  later. The scheduled flush keeps its budget.
+- **Windows: a lost error code no longer closes the app's pipe.** The listener
+  reads `GetLastError()` after a `ConnectNamedPipe` that returned FALSE; once,
+  under a full suite on a real Windows 11, that read 0 — no answer the call has
+  — and the listener closed for good ("ConnectNamedPipe failed … Win32 error
+  0"), the app deaf to its window and to `am`. A code of 0 is now answered from
+  the instance itself (waiting, connected, or a client that came and left).
+- **Windows: a logger that names no folder no longer writes to the drive root.**
+  A sink with `logDir: ""` (the one behind `--aio-data-contract`, or a recording
+  sink in a test) sent `client.log`, `actions.jsonl` and `checkpoint.json` to
+  `C:\`; on Linux and macOS the same write was refused without a word. An empty
+  folder now means "none": the app's own log folder is used.
+- **Windows: `am start` answers "still starting" for a slow boot** instead of
+  waiting 180 s under "Deno is downloading the app's modules" for an app that
+  had already spoken (the child's two log files were read as one).
+
+Dev, calls and `am`:
+
+- **A server-side file saved while the dev app is starting restarts it.** The
+  watcher starts after the modules load; a save in between was dropped silently.
+  A fix saved during two failing starts in a row is seen (the look compared file
+  names, not what the files hold). Dev restart keeps the port of an exposed
+  Electron app with `ignoreDebugEnv`.
+- **macOS: a dev app whose start writes a generated file and then fails is
+  relaunched once, not again and again** — the file's own write was heard as a
+  save after the fact (in 1.0.19 too). A dev start is also no longer restarted
+  for a file whose time stamp merely has no milliseconds.
+- `connectCli`: no held call and no extra `resync` against a 1.0.20 server; a
+  server restarted without `wire.omitTrailingUndefined` is called in its own
+  shape again (a default parameter took its default).
+- A plain action's failed save no longer marks unrelated open calls `unsaved`. A
+  cell's `__init` is exempt from the reduce-budget report, as `__destroy` is.
+- `am start` and amui wait, announced, while Deno fetches an app's modules for
+  the first time, and only that long. `am pin` to an older version says that
+  newer keys may fail the check there. The refusal for an unmarked sync row
+  names the file and a one-line repair that needs no `sqlite3`.
+- Renderer: a ref of an element that was never built is not called with `null`
+  at teardown; no false "removed without its DOM position" when an ErrorBoundary
+  that is its parent's last child falls back.
+
+Testing:
+
+- **`testPageFetch(srv)`** (`aio/testing`) carries a `testServer`'s cookies into
+  a `testUI` mount, and `new FormData(form)` works in a submit handler there: a
+  login is one test (`tests/auth-login-joined.test.tsx`).
+- `AIO_TEST_BROWSER_HOME=own` (Linux) gives a test browser its own home, with
+  the user's fonts; aio's own suite no longer writes under `~/.config`.
+- A test page in one process with its server no longer sends the server's log
+  lines back up the socket.
+
+### Packages
+
+- Electron 44.5.1 → 44.7.0. An app pinned to 44.5.1 builds with 44.7.0 and is
+  told so in one line that names `am fix`.
+- The page bundle is 84 KB gzipped, as before: checks only dev can act on left
+  the production bundle (−1 KB), and the watch for a connection that dies
+  silently put 0.8 KB back.
+
 ## v1.0.19-beta — tested on Windows and macOS as on Linux; what only dev said is said in a package (2026-10-07)
 
 > **Nothing is removed or renamed. Added: `build.guestPreloads` and
@@ -74,9 +521,10 @@
   condition, or in a loop is flagged. The hook list is the renderer's own,
   pinned by a test. `tests/aiol-hook-order.test.ts`.
 - **Arguments JSON cannot carry intact** are logged by a production client, once
-  per method; the frame is unchanged. `testUI` puts a call from a component, a
-  handler or the test body through the production encode and decode, and fails
-  on a changed argument by path; an optional field left `undefined` is not one.
+  per method, if it happens within that method's first 16 calls; the frame is
+  unchanged. `testUI` puts a call from a component, a handler or the test body
+  through the production encode and decode, and fails on a changed argument by
+  path; an optional field left `undefined` is not one.
   `tests/wire-harness-differential.test.tsx` compares its verdict with a real
   WebSocket.
 
@@ -116,8 +564,9 @@ there found:
   change now carries a mark that is set once it is accepted. At start, a cell's
   last change that has no mark and is refused is removed with one warning; a
   marked change that fails still stops the start. A row left this way by an
-  older aio still stops it, and the message gives the one-line repair. Cost: one
-  more small write per accepted change — none measured under the default
+  older aio still stops it in dev, and the message gives the one-line repair; a
+  production build sets the cell aside (quarantine) and starts. Cost: one more
+  small write per accepted change — none measured under the default
   `synchronous = NORMAL`, a second sync per change under `FULL` (about 5 ms → 10
   ms on NVMe). Found by the upgrade sweep on a real Windows laptop.
   `tests/sync-op-killed-before-settle.test.ts`.
@@ -131,7 +580,7 @@ there found:
   fallback folder where `am` does not look. The folder is made private in one
   step, and every create in it goes through one helper that remakes the folder
   and retries for up to 2 s, then fails by name. Six processes, 3 000 rounds
-  each: about 19 % of rounds failed before, none of 36 000 after.
+  each: about 19 % of rounds failed before, none in two rounds of 18 000 after.
   `tests/lock-dir-removed-under-create.test.ts`.
 - **Windows: two processes could be inside the lock mutex at once.** "Is the
   file I locked still the one at the path" compared file ids, which are 64 bits

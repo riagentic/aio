@@ -4,6 +4,7 @@ import {
   APP_ICON,
   APP_ICON_SVG,
   BUNDLE_JS,
+  isWorkerBundle,
   svgIconHint,
   UI_ENTRY,
 } from "./app-files.ts";
@@ -48,7 +49,14 @@ import {
 import { htmlOpen } from "./server-html-gen.ts";
 import { escHtml } from "./server-html-constants.ts";
 import type { ShareRoot } from "./app-dirs.ts";
-import type { GraphResult } from "./graph-validator.ts";
+import {
+  devWorkerBundle,
+  devWorkerProbe,
+  type GraphResult,
+  rewriteWorkers,
+  workerEntries,
+  type WorkerEntry,
+} from "./graph-validator.ts";
 import type { UiTheme } from "./aio-types.ts";
 import {
   type EsbuildMessage,
@@ -128,6 +136,10 @@ const DEV_MODULE: ReadonlySet<string> = new Set([
   ".js",
   ".mjs",
 ]);
+
+/** DEV ONLY: the query that asks for a module as a browser worker's bundle,
+ *  its value the worker's format (`esm` | `iife`). */
+const DEV_WORKER_PARAM = "aio-worker";
 
 /** A relative import specifier in esbuild's ESM output: `from "…"`
  *  (import/export), `import("…")`, and a bare `import "…"`. The same
@@ -379,7 +391,8 @@ export function isProtectedPath(pathname: string, prod = false): boolean {
  *  The code itself already states the principle two lines above the hole —
  *  "Blob BYTES are app data, not app shell" — and `docs/auth/auth.md` promises
  *  only that the SHELL is public. This is that principle, applied to the
- *  filesystem. Deliberately-public assets belong in `serveDirs`. */
+ *  filesystem. Deliberately-public files belong in the directory
+ *  `auth: { publicDir }` names. */
 const SHELL_EXT: ReadonlySet<string> = new Set([
   ".js",
   ".mjs",
@@ -423,7 +436,11 @@ const SHELL_FILES: ReadonlySet<string> = new Set([
  *  `.tsx`: the dev shell's import map makes the browser fetch sources BY NAME,
  *  so refusing them would make the sign-in page itself unrenderable — and in
  *  prod `isProtectedPath` denies them to everyone anyway. */
-export function isShellAsset(rawPathname: string, dev: boolean): boolean {
+export function isShellAsset(
+  rawPathname: string,
+  dev: boolean,
+  publicDir?: string,
+): boolean {
   // DECIDE ON THE SAME SPELLING THE FILE LAYER READS.
   //
   // This gate ran on the RAW pathname and `serveFile` runs on the decoded one,
@@ -459,6 +476,8 @@ export function isShellAsset(rawPathname: string, dev: boolean): boolean {
   const last = segments[segments.length - 1];
   // No file named at all → the SPA shell (a client route).
   if (!last) return true;
+  // `auth: { publicDir }`: the declared directory, whole — any file type.
+  if (publicDir !== undefined && _inPublicDir(pathname, publicDir)) return true;
   // Extensionless → a client route, served the shell. Only the SHELL, though:
   // an extensionless FILE (`/uploads/3f9a2c`, `/LICENSE`) is refused by the
   // file layer, which is the only place that can see whether one exists —
@@ -466,7 +485,42 @@ export function isShellAsset(rawPathname: string, dev: boolean): boolean {
   if (fileExt(last) === "" && !SHELL_FILES.has(last.toLowerCase())) {
     return true;
   }
-  return _isShellFile(last, dev);
+  return publicDir === undefined
+    ? _isShellFile(last, dev)
+    : _isBuiltShellPath(pathname, dev);
+}
+
+/** Is the (decoded) `pathname` inside `auth.publicDir`? Pure. */
+export function _inPublicDir(pathname: string, publicDir: string): boolean {
+  return pathname.startsWith(`/${publicDir}/`);
+}
+
+/** With `auth: { publicDir }` set, the files OUTSIDE it an anonymous caller
+ *  may still read: what the framework's own shell loads, by exact path. In
+ *  dev also code by extension — the import map fetches every module by name,
+ *  so without it the sign-in page could not render (the same hard reason
+ *  `_isShellFile` admits `.ts` in dev). An image, a font or an `.html` page
+ *  the sign-in page uses belongs in the public directory. Pure. */
+const BUILT_SHELL_PATHS: ReadonlySet<string> = new Set([
+  "/app.js",
+  "/app.js.map",
+  "/style.css",
+  "/index.html",
+  ...[...SHELL_FILES].map((f) => `/${f}`),
+]);
+const DEV_CODE_EXT: ReadonlySet<string> = new Set([
+  ".js",
+  ".mjs",
+  ".cjs",
+  ".css",
+  ".map",
+]);
+export function _isBuiltShellPath(pathname: string, dev: boolean): boolean {
+  if (BUILT_SHELL_PATHS.has(pathname)) return true;
+  // A browser worker's bundle is the shell's code, beside `/app.js`.
+  if (isWorkerBundle(pathname.slice(1))) return true;
+  const ext = fileExt(pathname);
+  return dev && (DEV_TRANSPILED.has(ext) || DEV_CODE_EXT.has(ext));
 }
 
 /** THE extension of a file name, lower-cased — one definition for every
@@ -883,6 +937,12 @@ export interface StaticDeps {
    *  `assetDirCandidates`). The mount's own dir always answers first, so a
    *  file the running app wrote there is served as it always was. */
   assetFallbacks?: Record<string, string[]>;
+  /** The `assets` prefixes that FILL IN instead of claiming their prefix —
+   *  the mounts deno.json alone declares, served since 1.0.20. Such a mount
+   *  answers a path only when it holds that file and nothing that answered
+   *  before it does (another root's prefix, the app dir), so an app that
+   *  declared one sees 404 → 200 and no other change. */
+  assetsFill?: readonly string[];
   /** Present only when `security.cspNonce` is on. `nonce()` mints one per
    *  response; `policy()` returns the SAME policy the server-wide headers
    *  would have sent, with that nonce in it. Handed in as a pair rather than
@@ -916,6 +976,7 @@ export interface StaticDeps {
   width?: number;
   height?: number;
   renderBudget?: RenderBudget;
+  wire?: { omitTrailingUndefined?: boolean };
   syncCells?: string[];
   callTimeouts?: CallTimeouts;
   uiEntry?: string; // AIO-8.1
@@ -1001,6 +1062,10 @@ export interface ServeStaticOptions {
    *  half only the file layer can do: an existing file that is not a shell
    *  file answers 401 instead of its bytes. */
   anonymous?: boolean;
+  /** `auth: { publicDir }`, with `anonymous`: an existing file is then served
+   *  only from that directory or when it is the built shell's own
+   *  (`_isBuiltShellPath`) — no longer by extension. */
+  publicDir?: string;
 }
 
 /** A refused production stop, said — never silently a 404 alone: `am stop`
@@ -1078,7 +1143,9 @@ export function createStaticHandler(deps: StaticDeps): {
     // is the one that should be working in dev — a mount that resolves
     // differently either side of a build is the whole class of bug this repo
     // calls WYSIDIWYSIP.
-    ...Object.entries(deps.assets ?? {}).map(([prefix, dir]) => ({
+    ...Object.entries(deps.assets ?? {}).filter(([prefix]) =>
+      !deps.assetsFill?.includes(prefix)
+    ).map(([prefix, dir]) => ({
       prefix,
       withSlash: prefix.endsWith("/") ? prefix : prefix + "/",
       dir: resolve(dir),
@@ -1102,6 +1169,16 @@ export function createStaticHandler(deps: StaticDeps): {
       checked: true,
     })),
   ];
+
+  // The mounts that fill in (`assetsFill`) — asked last, per file.
+  const _fillRoots = Object.entries(deps.assets ?? {}).filter(([prefix]) =>
+    deps.assetsFill?.includes(prefix)
+  ).map(([prefix, dir]) => ({
+    prefix,
+    withSlash: prefix.endsWith("/") ? prefix : prefix + "/",
+    dir: resolve(dir),
+    checked: false,
+  }));
 
   // THE app-dir ladder, resolved once. `absBaseDir` is always first and always
   // present, so every existing caller reads the same value it always did; a
@@ -1281,6 +1358,7 @@ export function createStaticHandler(deps: StaticDeps): {
         width: deps.width,
         height: deps.height,
         renderBudget: deps.renderBudget,
+        wire: deps.wire,
         uiEntry: deps.uiEntry,
         viewport: deps.viewport,
         headExtra: deps.headExtra,
@@ -1550,7 +1628,11 @@ export function createStaticHandler(deps: StaticDeps): {
     // ── Prod: serve bundled assets from distDir ──
     if (
       prod && absDistDir &&
-      (pathname === "/app.js" || pathname === "/style.css")
+      (pathname === "/app.js" || pathname === "/style.css" ||
+        // A browser worker's bundle, beside the bundle that starts it. One
+        // that is not in dist/ is the app's own file of that name: below.
+        (isWorkerBundle(pathname.slice(1)) &&
+          await _pathExists(join(absDistDir, pathname.slice(1)))))
     ) {
       // Read-only like every served file: this branch ran before the check
       // below, so DELETE /app.js answered 200 with the bundle.
@@ -2243,6 +2325,33 @@ export function createStaticHandler(deps: StaticDeps): {
         break;
       }
     }
+    // A mount that fills in: the first that HOLDS the file, and only when no
+    // app dir does — what was served before it existed is served as it was.
+    const _isFile = (p: string) =>
+      Deno.stat(p).then((s) => s.isFile, () => false);
+    for (const r of matchedRoot ? [] : _fillRoots) {
+      if (!pathname.startsWith(r.withSlash)) continue;
+      if (!r.checked) {
+        r.checked = true;
+        if (!(await Deno.stat(r.dir).then((s) => s.isDirectory, () => false))) {
+          log.warn(
+            `deno.json assets["${r.prefix}"] → ${r.dir} is not a directory ` +
+              `— nothing is served from it`,
+          );
+        }
+      }
+      const inMount = pathname.slice(r.withSlash.length);
+      if (!(await _isFile(resolve(r.dir, inMount)))) continue;
+      let appHas = false;
+      for (const dir of _appRoots) {
+        appHas ||= await _isFile(resolve(dir, rel));
+      }
+      if (appHas) break;
+      root = r.dir;
+      rel = inMount;
+      matchedRoot = true;
+      break;
+    }
     // No `serveDirs` prefix claimed it: walk the app-dir ladder and let the
     // first root that HAS the file serve it. Per-FILE, not per-directory: a
     // compiled binary's embedded dir always exists (the entry module is in
@@ -2315,13 +2424,20 @@ export function createStaticHandler(deps: StaticDeps): {
     if (
       opts.anonymous && kind === "file" &&
       !pathname.startsWith("/.well-known/") &&
-      !_isShellFile(filepath.split(/[\\/]/).pop() ?? "", !prod)
+      !(opts.publicDir === undefined
+        ? _isShellFile(filepath.split(/[\\/]/).pop() ?? "", !prod)
+        : _inPublicDir(pathname, opts.publicDir) ||
+          _isBuiltShellPath(pathname, !prod))
     ) {
       return new Response(
         `Unauthorized — ${rawPathname} is app DATA, and this app's public ` +
           `surface is its SHELL (the code, styles and fonts the sign-in page ` +
           `needs), not its directory. Sign in; publish a deliberately-public ` +
-          `file through \`serveDirs\`.`,
+          `file ${
+            opts.publicDir === undefined
+              ? "with a shell extension, or declare auth: { publicDir }"
+              : `under /${opts.publicDir}/`
+          }.`,
         { status: 401 },
       );
     }
@@ -2368,6 +2484,54 @@ export function createStaticHandler(deps: StaticDeps): {
     // Before the transpile: a module that fails to compile is still on the
     // page, and the edit that fixes it must reload it.
     if (devModule) deps.onModuleServed?.(filepath);
+
+    // Dev only: a browser worker's script (`workerEntries`). The module that
+    // starts it asks for it at this URL, and it is answered BUNDLED, as the
+    // build bundles it — a worker has no import map, so served module by
+    // module its first bare import (`immer`) was a network error.
+    const workerUrl = (e: WorkerEntry) => {
+      const url = _canonicalUrl(e.abs, e.spec);
+      return url === null ? e.spec : `${url}?${DEV_WORKER_PARAM}=${e.format}`;
+    };
+    const asWorker = devModule && req
+      ? new URL(req.url).searchParams.get(DEV_WORKER_PARAM)
+      : null;
+    if (asWorker !== null) {
+      const w = await devWorkerBundle(absBaseDir, {
+        abs: filepath,
+        format: asWorker === "esm" ? "esm" : "iife",
+      }, workerUrl);
+      // Its sources are on the page too: an edit to one reloads. (Not an
+      // installed package's files: nothing edits those under a dev server.)
+      for (const input of w.inputs) {
+        if (!/[\\/]node_modules[\\/]/.test(input)) {
+          deps.onModuleServed?.(input);
+        }
+      }
+      const said = w.errors.length
+        ? `the worker ${filename} cannot be bundled — ` + w.errors.join("\n")
+        : null;
+      if (said) log.error("server", said);
+      return new Response(
+        said ? `throw new Error(${JSON.stringify(said)})` : w.code,
+        { headers: { "Content-Type": "application/javascript", ...noCache } },
+      );
+    }
+    if (devModule) {
+      // Decided before the rewrite: a worker that cannot be bundled keeps
+      // its literal, and is served as source — as it always was.
+      const left = new Set<string>();
+      for (const e of workerEntries(body, filepath)) {
+        if ((await devWorkerProbe(absBaseDir, e)).skipped) {
+          left.add(`${e.abs}\0${e.format}`);
+        }
+      }
+      body = rewriteWorkers(
+        body,
+        filepath,
+        (e) => left.has(`${e.abs}\0${e.format}`) ? e.spec : workerUrl(e),
+      );
+    }
 
     let contentType = withUtf8(MIME[ext] ?? "text/plain");
 

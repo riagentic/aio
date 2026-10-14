@@ -7,6 +7,7 @@
 // then had to correct. So the block is compared with what create writes:
 // `scaffold()`'s deno.json, plus the two things create adds after it — the
 // `aioVersion` pin and the framework's exact dep versions (`syncFrameworkDeps`).
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertMatch } from "@std/assert";
 import { scaffold } from "../src/am/am-cmd-create.ts";
 import { FRAMEWORK_DEPS } from "../src/am/am-versions.ts";

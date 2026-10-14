@@ -18,6 +18,7 @@
 // The probe is injected, so these run on a box with no X at all — the policy
 // is the part that has bugs, and a test that needs a desktop is a test CI
 // skips.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import {
   displayChoice,
@@ -354,4 +355,28 @@ Deno.test("a client that never opens a tab gets no 'tabs suppressed' note", () =
   assertEquals(clientOpensTabs("browser"), true);
   assertEquals(clientOpensTabs("electron"), true);
   assertEquals(clientOpensTabs(undefined), true, "framework default = browser");
+});
+
+// Windows and macOS have no Xephyr and always have a desktop: the Linux
+// sentence ("no desktop session — nothing to contain") was printed there while
+// the window opened on the real desktop.
+Deno.test("a contained GUI launch on Windows/macOS says where the window really opens", () => {
+  const noParent = { ...UP, hasParent: () => false };
+  const say = (os: string) =>
+    planDisplay({
+      choice: "auto",
+      gui: true,
+      interactive: false,
+      probe: noParent,
+      os,
+    });
+  for (const [os, name] of [["windows", "Windows"], ["darwin", "macOS"]]) {
+    const plan = say(os!);
+    assertEquals(plan.env, { AIO_NO_OPEN: "1" });
+    assert(!plan.note!.includes("nothing to contain"), plan.note);
+    assert(plan.note!.includes(`${name} has no nested display`), plan.note);
+    assert(plan.note!.includes("opens on the desktop"), plan.note);
+  }
+  // Linux with no DISPLAY: unchanged, word for word.
+  assertEquals(say("linux").note, "no desktop session — nothing to contain");
 });

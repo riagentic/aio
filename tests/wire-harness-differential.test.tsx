@@ -26,6 +26,7 @@
 //
 // The RETURN direction has its own table: what the test awaits under testUI is
 // what the real client's ack carries.
+import { fromFileUrl } from "@std/path";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { cell } from "../mod.ts";
 import { testUI } from "../src/testing/ui-test.ts";
@@ -306,6 +307,11 @@ const methods = {
     s.calls++;
     return describe([a, b, c]);
   },
+  /** How many arguments ARRIVED, and what they were. */
+  seen(s: { calls: number }, ...rest: unknown[]) {
+    s.calls++;
+    return `${rest.length}:${describe(rest)}`;
+  },
   /** The OWN keys the body can see. */
   keys(s: { calls: number }, v: Record<string, unknown>) {
     s.calls++;
@@ -521,6 +527,154 @@ Deno.test("wire differential: positional undefined — testUI fails exactly the 
       assertEquals(harness.calls, before);
     });
   }
+});
+
+// WHY A TRAILING `undefined` IS NOT TRIMMED BEFORE ENCODING.
+//
+// `add("x", undefined)` reaches the server as `["x", null]`, so `due = today`
+// does not apply — and dropping the trailing slot on the client would make the
+// server see exactly what an in-process call sees. It is also a change an
+// existing app can observe on the same wire, three ways, which is what the
+// frozen surface forbids: a body that tests `arg === null` (the documented
+// way to tell "cleared" from "left out"), one that stores the argument (state
+// holds `null` today — a value JSON, persistence and every client keep — and
+// would hold `undefined`, which all three drop), and one that counts its
+// arguments. So the wire stays as it is, the call is NAMED on every path (the
+// table above, the dev and production warnings), and this pins the three
+// observables: a trim that ships by default turns this red on purpose.
+Deno.test("wire differential: a trailing undefined arrives as null — observable by the method, so it is reported, not rewritten", async () => {
+  await using m = await testMultiClient({ cells: [real] }, 1);
+  const call = (...args: unknown[]) =>
+    m.clients[0]!.call<string>("wirediff-real", "seen", ...args);
+  assertEquals(await call("a"), '1:["a"]');
+  assertEquals(await call("a", null), '2:["a",null]');
+  assertEquals(
+    await call("a", undefined),
+    '2:["a",null]',
+    "the slot is there, holding null: `arg === null` and a rest/arguments " +
+      "count both see it",
+  );
+  assertEquals(await call("a", undefined, undefined), '3:["a",null,null]');
+  // …and in process (no wire: a server-side call, a standalone build) the
+  // same call hands the body `undefined` — the difference the warnings name.
+  assertEquals(methods.seen({ calls: 0 }, "a", undefined), '2:["a",undefined]');
+});
+
+// ── `aio.run({ wire: { omitTrailingUndefined: true } })` ───────────────────
+//
+// The opt-in. The page learns it as `__aioConfig.wire` (the shell, or the
+// `cfg` frame — tests/wire-option-reaches-client.test.ts), and ONE function
+// reads it for every door. Here the page's global is set by hand and the
+// rest is production: the client's encode, a real socket, the server's
+// decode.
+async function withWireFlag<T>(on: boolean, fn: () => Promise<T>): Promise<T> {
+  const g = globalThis as { __aioConfig?: Record<string, unknown> };
+  const had = g.__aioConfig;
+  if (on) g.__aioConfig = { ...had, wire: { omitTrailingUndefined: true } };
+  try {
+    return await fn();
+  } finally {
+    if (had === undefined) delete g.__aioConfig;
+    else g.__aioConfig = had;
+  }
+}
+
+/** [method, args] — every shape a trailing `undefined` comes in. */
+const TRAILING: ["seen" | "take3", unknown[]][] = [
+  ["seen", ["a"]],
+  ["seen", ["a", null]],
+  ["seen", ["a", undefined]],
+  ["seen", ["a", undefined, undefined]],
+  ["seen", [undefined]],
+  ["seen", []],
+  ["seen", ["a", null, undefined]],
+  ["take3", ["a", undefined, undefined]],
+  ["take3", ["a", "b", undefined]],
+];
+
+Deno.test("wire.omitTrailingUndefined: off, a trailing undefined arrives as null; on, the socket hands the method what an in-process call does", async () => {
+  await using m = await testMultiClient({ cells: [real] }, 1);
+  const over = (method: string, args: unknown[]) =>
+    m.clients[0]!.call<string>("wirediff-real", method, ...args);
+  const inProcess = (method: "seen" | "take3", args: unknown[]) =>
+    (methods[method] as (s: unknown, ...a: unknown[]) => string)(
+      { calls: 0 },
+      ...args,
+    );
+  for (const [method, args] of TRAILING) {
+    const trailing = args.length > 0 && args.at(-1) === undefined;
+    const off = await withWireFlag(false, () => over(method, args));
+    const on = await withWireFlag(true, () => over(method, args));
+    const local = inProcess(method, args);
+    const name = `${method}(${describe(args)})`;
+    if (trailing) {
+      assert(off !== local, `${name}: the default changes it (${off})`);
+      // In process a rest parameter still COUNTS the undefined; on the wire
+      // it is not there to count. What the method can read from each
+      // parameter is the same.
+      assertEquals(
+        on,
+        method === "seen"
+          ? inProcess(
+            method,
+            args.slice(0, args.findLastIndex((a) => a !== undefined) + 1),
+          )
+          : local,
+        name,
+      );
+    } else {
+      assertEquals(off, local, name);
+      assertEquals(on, off, `${name}: nothing to omit, nothing changes`);
+    }
+  }
+  // The default parameter gets its default — the reason the option exists.
+  assertEquals(
+    await withWireFlag(true, () => over("take3", ["a", undefined, undefined])),
+    describe(["a", "dflt", "dflt"]),
+  );
+  assertEquals(
+    await withWireFlag(false, () => over("take3", ["a", undefined, undefined])),
+    describe(["a", null, null]),
+  );
+  // Not trailing: it cannot be dropped without moving the argument after it,
+  // so it is `null` with the flag on too.
+  for (const on of [false, true]) {
+    assertEquals(
+      await withWireFlag(on, () => over("seen", [undefined, "a"])),
+      '2:[null,"a"]',
+    );
+  }
+});
+
+Deno.test("wire.omitTrailingUndefined: testUI follows the flag — a trailing undefined passes and is not delivered, a non-trailing one still fails", async () => {
+  const g = globalThis as { __aioConfig?: unknown };
+  const before = g.__aioConfig;
+  {
+    await using ui = await testUI(App, {
+      cells: [harness],
+      wire: { omitTrailingUndefined: true },
+    });
+    assertEquals(await harness.seen("a", undefined), '1:["a"]');
+    assertEquals(
+      await harness.take3("a", undefined, undefined),
+      describe(["a", "dflt", "dflt"]),
+    );
+    await assertRejects(
+      async () => await harness.seen(undefined, "a"),
+      Error,
+      "args[0]: undefined → null",
+    );
+    await ui.settle();
+  }
+  assertEquals(g.__aioConfig, before, "the mount's wire config left with it");
+  // …and without the option the same call is the failure it always was.
+  await using ui = await testUI(App, { cells: [harness] });
+  await assertRejects(
+    async () => await harness.seen("a", undefined),
+    Error,
+    "args[1]: undefined → null",
+  );
+  await ui.settle();
 });
 
 Deno.test("wire differential: an optional field left undefined passes, and the method receives the key absent", async () => {
@@ -764,4 +918,577 @@ Deno.test("wire warning: a production client says a changed argument too — onc
     setDevModeOverride(null);
     _resetAioRuntime();
   }
+});
+
+// ── A thrown error ────────────────────────────────────────────────────────
+//
+// In process the caller of a failing method got the server's own object: its
+// class, its `cause`, its properties, its stack. A client gets a failed ack —
+// two fields, `error` and `code` — and rebuilds a plain Error from them. A
+// test checking `instanceof`, `e.cause` or `e.status` under `testUI` was green
+// over a call the app answers with none of them.
+
+class HttpError extends Error {
+  status = 422;
+  constructor(message: string) {
+    super(message, { cause: new Error("root") });
+    this.name = "HttpError";
+  }
+}
+const THROWS: Record<string, () => unknown> = {
+  "plain Error": () => new Error("plain"),
+  TypeError: () => new TypeError("typed"),
+  "subclass with a property and a cause": () => new HttpError("unprocessable"),
+  "Error with a code": () => Object.assign(new Error("coded"), { code: "MY" }),
+  "a string": () => "nope",
+  "an object": () => ({ reason: "x" }),
+  "empty message": () => new Error(""),
+  "unicode message": () => new Error('a"b\\c\ndé\u{1F600}'),
+};
+const failing = {
+  fail(_s: unknown, k: string) {
+    throw THROWS[k]!();
+  },
+  // deno-lint-ignore require-await
+  async failNow(_s: unknown, k: string) {
+    throw THROWS[k]!();
+  },
+  async failLater(_s: unknown, k: string) {
+    await Promise.resolve();
+    throw THROWS[k]!();
+  },
+};
+const FAILING = ["fail", "failNow", "failLater"] as const;
+const realThrow = cell("wirediff-throw-real", {
+  state: { n: 0 },
+  methods: failing,
+});
+const uiThrow = cell("wirediff-throw-ui", {
+  state: { n: 0 },
+  methods: failing,
+});
+
+/** Everything about a rejection a test could check. */
+function sayRejection(e: unknown): string {
+  if (!(e instanceof Error)) return `not an Error: ${describe(e)}`;
+  return [
+    e.constructor.name,
+    e.name,
+    JSON.stringify(e.message),
+    `code=${String((e as { code?: unknown }).code)}`,
+    `own=${Object.keys(e).join("+")}`,
+    e.cause === undefined ? "no cause" : "cause",
+  ].join(" | ");
+}
+
+/** The harness and the real client log the server's failure; that is not what
+ *  is compared here. */
+async function quietly<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = getLogger();
+  setLogger(
+    {
+      logDir: "",
+      pub: () => {},
+      perf: () => {},
+      flush: () => Promise.resolve(),
+      // deno-lint-ignore no-explicit-any
+    } as any,
+  );
+  try {
+    return await fn();
+  } finally {
+    setLogger(prev);
+  }
+}
+
+// The three crossings below are `wire.strict` — opt-in, because a test that
+// was green on 1.0.19's harness must stay green (the default is pinned by
+// tests/testui-wire-strict-is-opt-in.test.tsx). Stated on each mount, so this
+// file proves harness == wire whatever environment runs it.
+const STRICT = { strict: true } as const;
+
+Deno.test("wire differential: a method that throws rejects its testUI caller with exactly what the real ack rejects a client with", async (t) => {
+  const wire = new Map<string, string>();
+  const ui = new Map<string, string>();
+  await quietly(async () => {
+    {
+      await using m = await testMultiClient({ cells: [realThrow] }, 1);
+      for (const method of FAILING) {
+        for (const k of Object.keys(THROWS)) {
+          wire.set(
+            `${method}: ${k}`,
+            await m.clients[0]!.call("wirediff-throw-real", method, k).then(
+              () => "resolved",
+              sayRejection,
+            ),
+          );
+        }
+      }
+    }
+    await using _ui = await testUI(() => <div />, {
+      cells: [uiThrow],
+      wire: STRICT,
+    });
+    for (const method of FAILING) {
+      for (const k of Object.keys(THROWS)) {
+        ui.set(
+          `${method}: ${k}`,
+          await (uiThrow[method](k) as unknown as Promise<unknown>).then(
+            () => "resolved",
+            sayRejection,
+          ),
+        );
+      }
+    }
+  });
+  assertEquals(wire.size, FAILING.length * Object.keys(THROWS).length);
+  for (const [row, w] of wire) {
+    await t.step(row, () => {
+      assert(w.startsWith("Error | Error | "), `the real client got: ${w}`);
+      assertEquals(ui.get(row), w);
+    });
+  }
+});
+
+// The method is called from the server's side — another cell, `testCell` —
+// and crosses no wire: its caller keeps the error itself.
+const throwCaller = cell("wirediff-throw-caller", {
+  state: { saw: "" },
+  methods: {
+    async relay(s: { saw: string }, k: string) {
+      s.saw = await (uiThrow.failLater(k) as unknown as Promise<void>).then(
+        () => "resolved",
+        (e) =>
+          `${e instanceof HttpError} ${(e as HttpError).status} ${
+            (e as Error).cause !== undefined
+          }`,
+      );
+    },
+  },
+});
+
+Deno.test("wire differential: a cell calling a method that throws catches the error itself, as on a server", async () => {
+  await quietly(async () => {
+    await using _ui = await testUI(() => <div />, {
+      cells: [uiThrow, throwCaller],
+    });
+    await throwCaller.relay("subclass with a property and a cause");
+    assertEquals(throwCaller.saw, "true 422 true");
+  });
+});
+
+// A test that could only pass because the error never left the process fails
+// now — and is told why, in the failure itself.
+Deno.test("wire differential: a test that checks the class of a rejection fails under testUI with the reason in its message", async () => {
+  const { dropTempDir, tempDir } = await import("../src/testing/temp-dir.ts");
+  const dir = await tempDir("wirediff-why-");
+  try {
+    const root = new URL("../", import.meta.url).href;
+    await Deno.writeTextFile(
+      `${dir}/why.test.ts`,
+      `import { cell } from "${root}mod.ts";
+import { testUI } from "${root}src/testing/ui-test.ts";
+import { h } from "${root}src/air/vdom.ts";
+class HttpError extends Error { status = 422; }
+const c = cell("why", { state: { n: 0 }, methods: {
+  async save() { await Promise.resolve(); throw new HttpError("unprocessable"); },
+} });
+testUI(() => h("div", null), "relies on the class", { wire: { strict: true } }, async () => {
+  try { await c.save(); } catch (e) {
+    if (!(e instanceof HttpError)) throw new Error("expected an HttpError");
+  }
+});
+`,
+    );
+    const out = await new Deno.Command(Deno.execPath(), {
+      args: [
+        "test",
+        "-A",
+        "--config",
+        fromFileUrl(new URL("../deno.json", import.meta.url)),
+        `${dir}/why.test.ts`,
+      ],
+      env: { NO_COLOR: "1", AIO_APPS_DIR: dir },
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    const text = new TextDecoder().decode(out.stdout) +
+      new TextDecoder().decode(out.stderr);
+    assertEquals(out.success, false, text);
+    for (
+      const part of [
+        "expected an HttpError",
+        "what the caller received is what a real client receives",
+        "why.save() — class HttpError, .status",
+        "errorCode(e)",
+      ]
+    ) assert(text.includes(part), `the failure says "${part}":\n${text}`);
+  } finally {
+    await dropTempDir(dir);
+  }
+});
+
+// The handle form's body fails outside the harness, so no failure message is
+// there to carry the reason: it is said when the rejection loses something,
+// once per run — and the wrapper form, which words the failure, does not
+// say it twice.
+Deno.test("wire differential: the handle form says what a rejection lost on the wire, once — the wrapper form keeps it for the failure", async () => {
+  const { dropTempDir, tempDir } = await import("../src/testing/temp-dir.ts");
+  const dir = await tempDir("wirediff-handle-");
+  try {
+    const root = new URL("../", import.meta.url).href;
+    const file = (form: "handle" | "wrapper") =>
+      `import { cell } from "${root}mod.ts";
+import { testUI } from "${root}src/testing/ui-test.ts";
+import { h } from "${root}src/air/vdom.ts";
+class HttpError extends Error { status = 422; }
+const c = cell("why", { state: { n: 0 }, methods: {
+  async save() { await Promise.resolve(); throw new HttpError("unprocessable"); },
+} });
+const App = () => h("div", null);
+const body = async () => {
+  for (let i = 0; i < 2; i++) await c.save().catch(() => {});
+  try { await c.save(); } catch (e) {
+    if (!(e instanceof HttpError)) throw new Error("expected an HttpError");
+  }
+};
+` + (form === "handle"
+        ? `Deno.test("relies on the class", async () => {
+  await using _ui = await testUI(App, { wire: { strict: true } });
+  await body();
+});
+`
+        : `testUI(App, "relies on the class", { wire: { strict: true } }, body);
+`);
+    const run = async (form: "handle" | "wrapper") => {
+      await Deno.writeTextFile(`${dir}/${form}.test.ts`, file(form));
+      const out = await new Deno.Command(Deno.execPath(), {
+        args: [
+          "test",
+          "-A",
+          "--config",
+          fromFileUrl(new URL("../deno.json", import.meta.url)),
+          `${dir}/${form}.test.ts`,
+        ],
+        env: { NO_COLOR: "1", AIO_APPS_DIR: dir },
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      const text = new TextDecoder().decode(out.stdout) +
+        new TextDecoder().decode(out.stderr);
+      assertEquals(out.success, false, text);
+      assert(text.includes("expected an HttpError"), text);
+      return text;
+    };
+    const said = "[aio] testUI: why.save() rejected, and its caller " +
+      "received what a real client receives";
+    const handle = await run("handle");
+    assertEquals(handle.split(said).length - 1, 1, handle);
+    for (
+      const part of ["not carried: class HttpError, .status", "errorCode(e)"]
+    ) {
+      assert(handle.includes(part), `the hint says "${part}":\n${handle}`);
+    }
+    assert(!(await run("wrapper")).includes(said));
+  } finally {
+    await dropTempDir(dir);
+  }
+});
+
+// ── `serverFn` ────────────────────────────────────────────────────────────
+//
+// A component's `serverFn("ns").f(x)` is a frame too. Under testUI it reached
+// the function itself: `x` by reference, no access rule, the thrown error by
+// identity, the result by reference.
+
+import { serverFn, serverFns } from "../src/server/server-fns.ts";
+import { serverUser } from "../src/server/auth-context.ts";
+import { testServer } from "../src/testing/server-test.ts";
+import { dec, enc } from "../src/protocol/envelope.ts";
+import { serializeArgs } from "../src/protocol/wire-value.ts";
+import { sfnArgsDropped, sfnError } from "../src/browser/server-fns-client.ts";
+
+const apiDef = serverFns("wirediff-api", {
+  take: (v: unknown) => describe(v),
+  give: (name: string) => ROWS.find((r) => r.name === name)!.make(),
+  fail: (k: string) => {
+    throw THROWS[k]!();
+  },
+  who: () => serverUser()?.id ?? "anonymous",
+});
+serverFns("wirediff-admin", { secret: () => "s3" }, { access: "admin" });
+const api = serverFn<typeof apiDef>("wirediff-api");
+const admin = serverFn<{ secret: () => string }>("wirediff-admin");
+
+type SfnOutcome = { received?: string; error?: string };
+type SfnCall = [ns: string, name: string, args: unknown[]];
+
+/** Each call as a browser makes it: its own argument vetting, an `sfn` frame
+ *  on a real WebSocket, its own reader of the `sfnr` reply. */
+async function sfnOverRealWire(calls: SfnCall[]): Promise<SfnOutcome[]> {
+  await using srv = await testServer({ cells: [real] });
+  const ws = new WebSocket(srv.url.replace("http", "ws") + "/ws");
+  const replies = new Map<string, (d: Record<string, unknown>) => void>();
+  ws.onmessage = (e) => {
+    const f = typeof e.data === "string" ? dec(e.data) : null;
+    if (f?.t !== "sfnr") return;
+    const d = f.d as { cid: string };
+    replies.get(d.cid)?.(d as Record<string, unknown>);
+  };
+  await new Promise<void>((ok, fail) => {
+    ws.onopen = () => ok();
+    ws.onerror = () => fail(new Error("no WebSocket to the test server"));
+  });
+  const out: SfnOutcome[] = [];
+  try {
+    for (const [i, [ns, name, args]] of calls.entries()) {
+      const what = `serverFn("${ns}").${name}`;
+      const { args: safe, dropped } = serializeArgs(args, what);
+      if (dropped) {
+        out.push({ error: sfnArgsDropped(what).message });
+        continue;
+      }
+      const cid = `c${i}`;
+      const reply = new Promise<Record<string, unknown>>((r) =>
+        replies.set(cid, r)
+      );
+      ws.send(enc("sfn", { cid, ns, name, args: safe }));
+      const r = await reply;
+      out.push(
+        r.ok
+          ? { received: describe(r.value) }
+          : { error: sayRejection(sfnError(r)) },
+      );
+    }
+  } finally {
+    const closed = new Promise((r) => ws.onclose = r);
+    ws.close();
+    await closed;
+  }
+  return out;
+}
+
+async function sfnUnderTestUI(
+  calls: SfnCall[],
+  opts: Parameters<typeof testUI>[1] = {},
+): Promise<SfnOutcome[]> {
+  await using _ui = await testUI(() => <div />, {
+    cells: [harness],
+    wire: STRICT,
+    ...opts,
+  });
+  const out: SfnOutcome[] = [];
+  for (const [ns, name, args] of calls) {
+    const fn = (serverFn(ns) as Record<string, (...a: unknown[]) => unknown>)[
+      name
+    ]!;
+    out.push(
+      await (fn(...args) as Promise<unknown>).then(
+        (v) => ({ received: describe(v) }),
+        (e) => ({
+          error: (e as Error).message.startsWith("testUI:") ||
+              (e as Error).message.includes("nothing was sent")
+            ? (e as Error).message
+            : sayRejection(e),
+        }),
+      ),
+    );
+  }
+  return out;
+}
+
+Deno.test("wire differential: serverFn arguments — testUI hands the function what the real socket hands it, and fails where the socket changes it", async (t) => {
+  const calls: SfnCall[] = ROWS.map((
+    r,
+  ) => ["wirediff-api", "take", [r.make()]]);
+  const wire = await quietly(() => sfnOverRealWire(calls));
+  const ui = await quietly(() => sfnUnderTestUI(calls));
+  for (const [i, row] of ROWS.entries()) {
+    await t.step(`${row.kind}: ${row.name}`, () => {
+      const w = wire[i]!, u = ui[i]!;
+      if (row.kind === "refused") {
+        assert(w.error?.includes("nothing was sent"), JSON.stringify(w));
+        assertEquals(u.error, w.error, "refused with the same words");
+        return;
+      }
+      if (row.kind === "exact" || row.kind === "omitted") {
+        assertEquals(u, w, "same value in the function body");
+        return;
+      }
+      assert(w.received !== undefined, "the real call is sent, changed");
+      for (
+        const part of [
+          'testUI: serverFn("wirediff-api").take()',
+          row.lost!,
+          "fix: change the CALLER",
+        ]
+      ) {
+        assert(u.error?.includes(part), `names "${part}":\n${u.error}`);
+      }
+    });
+  }
+});
+
+Deno.test("wire differential: serverFn results, thrown errors, the access rule and an unknown function — testUI answers as the real socket does", async (t) => {
+  const calls: SfnCall[] = [
+    ...ROWS.filter((r) => r.kind !== "refused").map((r): SfnCall => [
+      "wirediff-api",
+      "give",
+      [r.name],
+    ]),
+    ...Object.keys(THROWS).map((k): SfnCall => ["wirediff-api", "fail", [k]]),
+    ["wirediff-api", "who", []],
+    ["wirediff-admin", "secret", []],
+    ["wirediff-api", "nope", []],
+    ["wirediff-none", "f", []],
+    ["wirediff-api", "toString", []],
+  ];
+  const wire = await quietly(() => sfnOverRealWire(calls));
+  const ui = await quietly(() => sfnUnderTestUI(calls));
+  assertEquals(wire.length, calls.length);
+  assert(calls.length > 0);
+  for (const [i, [ns, name, args]] of calls.entries()) {
+    await t.step(`${ns}.${name}(${args.map(String).join(",")})`, () => {
+      assertEquals(ui[i], wire[i]);
+    });
+  }
+  // The rule is the server's: an admin passes it, and is who the function
+  // sees; `enforceAccess: false` drives it deliberately.
+  const asAdmin = await quietly(() =>
+    sfnUnderTestUI([["wirediff-admin", "secret", []], [
+      "wirediff-api",
+      "who",
+      [],
+    ]], { user: { id: "ada", role: "admin" } })
+  );
+  assertEquals(asAdmin, [{ received: '"s3"' }, { received: '"ada"' }]);
+  assertEquals(
+    await quietly(() =>
+      sfnUnderTestUI([["wirediff-admin", "secret", []]], {
+        enforceAccess: false,
+      })
+    ),
+    [{ received: '"s3"' }],
+  );
+  // Outside a mount nothing is in the way: a server-side caller.
+  assertEquals(
+    await api.take(new Date(0)),
+    `Date(${new Date(0).toISOString()})`,
+  );
+  assertEquals(await admin.secret(), "s3");
+});
+
+// ── `useAio().send` ───────────────────────────────────────────────────────
+//
+// The raw door: any action, no ack. Under testUI there is no transport, so
+// the action was queued as "offline" and never ran — a click that did nothing.
+
+import { useAio } from "../src/browser-air.ts";
+
+const sent = cell("wirediff-send", {
+  state: { log: [] as string[] },
+  methods: {
+    take(s: { log: string[] }, v: unknown = "dflt") {
+      s.log.push(describe(v));
+    },
+    boom() {
+      throw new Error("send-boom");
+    },
+  },
+});
+
+function Sender() {
+  const { send } = useAio();
+  const act = (type: string, ...args: unknown[]) => () =>
+    send({ type, payload: { args } });
+  return (
+    <div>
+      <button class="button" onClick={act("wirediff-send:take", "milk")}>
+        Plain
+      </button>
+      <button
+        class="button"
+        onClick={act("wirediff-send:take", { rows: [1, null] })}
+      >
+        Nested
+      </button>
+      <button
+        class="button"
+        onClick={() => send({ type: "wirediff-send:take" })}
+      >
+        Bare
+      </button>
+      <button class="button" onClick={act("wirediff-send:take", new Date(0))}>
+        Rich
+      </button>
+      <button class="button" onClick={act("wirediff-send:boom")}>Boom</button>
+      <button class="button" onClick={act("wirediff-send:nope")}>
+        Unknown
+      </button>
+      <button class="button" onClick={act("wirediff-send:__destroy")}>
+        Internal
+      </button>
+    </div>
+  );
+}
+
+Deno.test("wire differential: useAio().send — testUI runs the action the real socket runs, and fails the ones the app loses", async () => {
+  const ACTIONS: unknown[][] = [["milk"], [{ rows: [1, null] }]];
+  // REAL: the frame a tab sends, no cid.
+  let wire: string[];
+  {
+    await using srv = await testServer({ cells: [sent] });
+    const ws = new WebSocket(srv.url.replace("http", "ws") + "/ws");
+    await new Promise<void>((ok, fail) => {
+      ws.onopen = () => ok();
+      ws.onerror = () => fail(new Error("no WebSocket to the test server"));
+    });
+    const log = () =>
+      (srv.state() as Record<string, { log: string[] }>)["wirediff-send"]!.log;
+    for (const args of ACTIONS) {
+      ws.send(encodeAction({ type: "wirediff-send:take", payload: { args } }));
+    }
+    ws.send(encodeAction({ type: "wirediff-send:take" }));
+    const deadline = Date.now() + 5_000;
+    while (log().length < 3 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    wire = [...log()];
+    const closed = new Promise((r) => ws.onclose = r);
+    ws.close();
+    await closed;
+  }
+  assertEquals(wire, ['"milk"', "{rows:[1,null]}", '"dflt"']);
+
+  await quietly(async () => {
+    const ui = await testUI(Sender, { cells: [sent], wire: STRICT });
+    try {
+      ui.PlainButton.click();
+      ui.NestedButton.click();
+      ui.BareButton.click();
+      await ui.settle();
+      assertEquals([...sent.log], wire, "the same three calls ran");
+      // What the socket would change is the test's failure, as for a call.
+      ui.RichButton.click();
+      let err = await assertRejects(() => ui.settle(), Error);
+      assert(err.message.includes("args[0]: Date → string"), err.message);
+      // A method that throws: no ack tells the app's client, so the ledger
+      // tells the test.
+      ui.BoomButton.click();
+      err = await assertRejects(() => ui.settle(), Error);
+      assert(err.message.includes("send-boom"), err.message);
+      // An action no method has, and an internal one: refused by the server.
+      for (const b of ["UnknownButton", "InternalButton"] as const) {
+        ui[b].click();
+        err = await assertRejects(() => ui.settle(), Error);
+        assert(
+          err.message.includes("no method of a cell booted in this test"),
+          err.message,
+        );
+      }
+      assertEquals(sent.log.length, 3, "none of those ran the method");
+    } finally {
+      await ui.dispose();
+    }
+  });
 });

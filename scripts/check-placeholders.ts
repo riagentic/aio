@@ -52,6 +52,52 @@ export function scanText(src: string): { line: number; text: string }[] {
   const setPrev = (c: string | undefined) => {
     if (c && !/\s/.test(c)) prev = c;
   };
+  /** From just inside a template literal's opening backtick to just past
+   *  its closing one. Inside `${…}` it is CODE again: a quoted string there
+   *  may hold a backtick or a brace, an object literal has braces of its own,
+   *  and a nested template its own backticks. Counting `}` alone took the
+   *  `}` of `{ publicDir }` inside a quoted string for the expression's end,
+   *  the string's backtick for the template's — and everything after it in
+   *  the file was read inside-out (three true templates reported). */
+  const skipTemplate = (from: number): number => {
+    let j = from;
+    while (j < src.length) {
+      const ch = src[j];
+      if (ch === "\\") j += 2;
+      else if (ch === "`") return j + 1;
+      else if (ch === "$" && src[j + 1] === "{") j = skipExpr(j + 2);
+      else {
+        if (ch === "\n") line++;
+        j++;
+      }
+    }
+    return j;
+  };
+  /** From just inside `${` to just past its matching `}`. */
+  const skipExpr = (from: number): number => {
+    let j = from, depth = 0;
+    while (j < src.length) {
+      const ch = src[j];
+      if (ch === "`") j = skipTemplate(j + 1);
+      else if (ch === '"' || ch === "'") {
+        j++;
+        while (j < src.length && src[j] !== ch && src[j] !== "\n") {
+          j += src[j] === "\\" ? 2 : 1;
+        }
+        j++;
+      } else if (ch === "{") {
+        depth++;
+        j++;
+      } else if (ch === "}") {
+        j++;
+        if (depth-- === 0) return j;
+      } else {
+        if (ch === "\n") line++;
+        j++;
+      }
+    }
+    return j;
+  };
   while (i < src.length) {
     const c = src[i];
     if (c === "\n") {
@@ -102,33 +148,9 @@ export function scanText(src: string): { line: number; text: string }[] {
       }
       // Not a regex after all (a stray divide at a line end) — fall through.
     }
-    // template literal: `${…}` is correct here, so skip it whole, tracking the
-    // nesting so a nested template or string inside `${…}` cannot end it early
+    // template literal: `${…}` is correct here, so skip it whole
     if (c === "`") {
-      i++;
-      let depth = 0;
-      while (i < src.length) {
-        if (src[i] === "\\") {
-          i += 2;
-          continue;
-        }
-        if (src[i] === "\n") line++;
-        if (src[i] === "$" && src[i + 1] === "{") {
-          depth++;
-          i += 2;
-          continue;
-        }
-        if (depth > 0 && src[i] === "}") {
-          depth--;
-          i++;
-          continue;
-        }
-        if (depth === 0 && src[i] === "`") {
-          i++;
-          break;
-        }
-        i++;
-      }
+      i = skipTemplate(i + 1);
       prev = "`";
       continue;
     }

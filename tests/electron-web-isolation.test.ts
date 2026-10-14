@@ -11,6 +11,7 @@
 // Electron does, and a stub that agrees with a guess is not evidence. Its
 // control case is the measurement the rules stand on: without them, a page in
 // a `<webview>` with no partition reads what the app serves on aio://.
+import { childEnv } from "./e2e-app-harness.ts";
 import {
   assert,
   assertEquals,
@@ -1302,7 +1303,7 @@ ${
     await Deno.writeTextFile(file, main);
     const { stdout, stderr } = await new Deno.Command(ELECTRON_BIN, {
       args: [file, "--no-sandbox"],
-      env: { ...testDisplayEnv(), ELECTRON_ENABLE_LOGGING: "0" },
+      env: childEnv({ ...testDisplayEnv(), ELECTRON_ENABLE_LOGGING: "0" }),
       stdout: "piped",
       stderr: "piped",
     }).output();

@@ -118,7 +118,7 @@ notice instead.
 **What to do:** nothing. If you were filtering that line yourself, you can stop.
 An error with the same wording thrown from your OWN bundle is untouched and
 stays loud. Details in
-[the Electron client docs](../clients/electron.md#the-invalid-guestinstanceid-line-after-closing-a-).
+[the Electron client docs](../clients/electron.md#the-invalid-guestinstanceid-line-after-closing-a-webview).
 
 ## A macOS `.app` now refuses updates instead of breaking itself
 

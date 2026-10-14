@@ -35,12 +35,26 @@ if (PHASE === "read") {
 // Big enough that a save takes a while: a reply that does not wait for it
 // is answered — and killed — first.
 const BIG = Array.from({ length: 20000 }, (_, i) => "x".repeat(90) + i);
+// A userland serial queue (the p-queue shape): a job runs from whichever
+// call's continuation drains it, not from the call that queued it.
+const jobs = [];
+let draining = false;
+const queued = (job) => new Promise((done) => {
+  jobs.push(async () => { await job(); done(); });
+  if (draining) return;
+  draining = true;
+  (async () => {
+    for (let j; (j = jobs.shift());) { await new Promise((r) => setTimeout(r, 3)); await j(); }
+    draining = false;
+  })();
+});
 export const wk = cell("wk", {
   worker: true,
+  concurrency: { addFirst: "first" },
   state: { big: BIG, items: [] },
   // The store refuses anything holding "BAD" (honest mode only).
   onPersist: (s) => {
-    if (MODE === "honest" && PHASE === "go" && s.items.some((t) => t.startsWith("BAD"))) {
+    if (MODE !== "kill" && PHASE === "go" && s.items.some((t) => t.startsWith("BAD"))) {
       throw new Error("disk says no");
     }
     return s;
@@ -52,6 +66,25 @@ export const wk = cell("wk", {
     async addSlow(s, t) {
       s.items.push(t);
       await new Promise((r) => setTimeout(r, 400));
+    },
+    // In flight, and writes nothing.
+    async idle() {
+      await new Promise((r) => setTimeout(r, 600));
+      return "idle";
+    },
+    // Written from inside the shared queue.
+    async addQueued(s, t) {
+      await queued(() => { s.items.push(t); });
+    },
+    // One run answers every caller that arrives while it is going.
+    async addFirst(s, t) {
+      await new Promise((r) => setTimeout(r, 25));
+      s.items.push(t);
+    },
+    // An async body's own write-set.
+    async addAsync(s, t) {
+      await new Promise((r) => setTimeout(r, 20));
+      s.items.push(t);
     },
   },
 });
@@ -97,6 +130,32 @@ if (MODE === "kill") {
   out.trojan = await trojan("T1");
   out.ws = await call("W1");
   out.wsSlow = await call("W2", "wk:addSlow");
+} else if (MODE === "whose") {
+  // A call in flight on the cell while each failing save is made; only the
+  // calls that WROTE are told.
+  const idle = call("x", "wk:idle");
+  out.sync = await call("BAD1");
+  out.async = await call("BAD2", "wk:addAsync");
+  out.idle = await idle;
+} else if (MODE === "prop") {
+  // Every save fails from here on (the slice holds BAD0): each call below
+  // either wrote or is answered with a run that did.
+  out.bad = await call("BAD0");
+  let seed = Number(Deno.env.get("SEED"));
+  // Math.imul and the high bits: the plain product passes 2^53 and its low
+  // bits are then always 0.
+  const rnd = (n) => ((seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff) >>> 12) % n;
+  const kinds = ["wk:add", "wk:addAsync", "wk:addSlow", "wk:addQueued", "wk:addFirst"];
+  out.calls = [];
+  for (let round = 0; round < 6; round++) {
+    await Promise.all(Array.from({ length: 12 }, async (_, i) => {
+      const type = kinds[rnd(kinds.length)];
+      const wait = rnd(30);
+      await sleep(wait);
+      const d = await call("r" + round + "." + i, type);
+      out.calls.push({ type, wait, round, ok: d.ok, unsaved: d.unsaved ?? null });
+    }));
+  }
 } else {
   out.trojan = await trojan("BAD1");
   out.ws = await call("BAD2");
@@ -107,7 +166,12 @@ Deno.writeTextFileSync(DIR + "/expected.json", JSON.stringify(wk.items));
 Deno.kill(Deno.pid, "SIGKILL");
 `;
 
-async function run(dir: string, phase: string, mode: string): Promise<string> {
+async function run(
+  dir: string,
+  phase: string,
+  mode: string,
+  seed = 0,
+): Promise<string> {
   const out = await new Deno.Command(Deno.execPath(), {
     args: ["run", "-A", "--config", CONFIG, join(dir, "app.ts")],
     env: {
@@ -116,6 +180,7 @@ async function run(dir: string, phase: string, mode: string): Promise<string> {
       AIO_APPS_DIR: dir,
       PHASE: phase,
       MODE: mode,
+      SEED: String(seed),
     },
     stdout: "piped",
     stderr: "piped",
@@ -126,11 +191,11 @@ async function run(dir: string, phase: string, mode: string): Promise<string> {
   return text;
 }
 
-async function go(mode: string) {
+async function go(mode: string, seed = 0) {
   const dir = await tempDir(`aio-worker-owed-${mode}-`);
   try {
     await Deno.writeTextFile(join(dir, "app.ts"), CHILD);
-    const log = await run(dir, "go", mode);
+    const log = await run(dir, "go", mode, seed);
     const read = async (f: string) =>
       JSON.parse(
         await Deno.readTextFile(join(dir, f)).catch(() => {
@@ -171,4 +236,37 @@ Deno.test("worker cell: a failed stand-in save is `unsaved` on the call's reply,
   // batch left the pool's set as it settled), and the call read as saved.
   assert(out.wsSlow.ok, JSON.stringify(out.wsSlow));
   assertMatch(String(out.wsSlow.unsaved), said, JSON.stringify(out.wsSlow));
+});
+
+Deno.test("worker cell: a failed save is `unsaved` on the calls that wrote the batch — a call in flight that wrote nothing is not told", async () => {
+  const { out, expected } = await go("whose");
+  const said = /^persist failed: \S/;
+  assertEquals(expected, ["a1", "BAD1", "BAD2"], "live");
+  for (const k of ["sync", "async"]) {
+    assert(out[k].ok, JSON.stringify(out));
+    assertMatch(String(out[k].unsaved), said, `${k}: ${JSON.stringify(out)}`);
+  }
+  assert(out.idle.ok, JSON.stringify(out.idle));
+  assertEquals(out.idle.unsaved, undefined, JSON.stringify(out));
+});
+
+// The property behind naming a batch's calls: fewer calls are told, never a
+// wrong one. Seeded interleavings of every way a worker call writes — its own
+// reduce, an async body's write-set (before and after an await), a write a
+// shared userland queue runs from ANOTHER call's continuation, and a call
+// answered with another call's run (`concurrency: "first"`).
+Deno.test("worker cell: under any interleaving, no call that wrote a batch whose save failed — or is answered with the run that did — is told it was saved", async () => {
+  const seed = Number(Deno.env.get("AIO_TEST_SEED")) ||
+    Math.floor(Math.random() * 2 ** 31);
+  const { out } = await go("prop", seed);
+  assertMatch(String(out.bad.unsaved), /^persist failed: \S/);
+  assertEquals(out.calls.length, 72);
+  const toldSaved = out.calls.filter((c: { unsaved: unknown }) =>
+    typeof c.unsaved !== "string"
+  );
+  assertEquals(
+    toldSaved,
+    [],
+    `seed ${seed} (AIO_TEST_SEED=${seed} replays it)`,
+  );
 });

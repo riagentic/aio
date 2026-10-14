@@ -1,2716 +1,466 @@
 # Road to 1.0.0-final
 
-> **The desk is triaged, not clear.** Every reported finding is fixed with a
-> test, refused in writing in `feedback/refused.md`, recorded as major-version
-> material in `untracked/v2.md`, or listed below as accepted-and-not-yet- built.
-> The nine-report round of 2026-09-08 added the fourth pile: ~50 asks that are
-> additive, agreed, and real work. Nothing is left unrouted.
->
-> Shipped work lives in `CHANGELOG.md`; what was fixed or refused from field
-> reports lives in `feedback/resolved.md` and `feedback/refused.md`.
-
-## Current: 1.0.19-beta (2026-10-07) — tested on Windows and macOS as on Linux
-
-- **1.0.15-beta** (2026-09-30), **1.0.16-beta** (2026-10-01) and **1.0.17-beta**
-  (2026-10-03) are published.
-- **1.0.18-beta** (2026-10-04) is published: the Windows one-click `.exe` stub
-  is Rust (no Go is left in aio).
-- **1.0.19-beta** is the current release: the suite runs natively on Windows 11
-  and on an Apple-silicon Mac, and what that found is fixed (the lock folder and
-  its mutex, a sync app killed mid-refusal, the install record); packaged
-  desktop apps ship guest preloads and treat embedded pages as outsiders; what
-  only dev said is said in a package. What it changed is in `CHANGELOG.md`; what
-  it left open is under [Open work](#open-work) → "Left open by the 1.0.19-beta
-  round".
-- Still owed on real machines (Windows, macOS): a real app updating itself from
-  the one-click `.exe`, and a double-click on a real desktop session.
-
-### The 1.0.15-beta list — close the external review list as far as v1 allows (shipped; two items still open)
-
-Agreed with the external reviewer 2026-09-27. Pins and additive options only; no
-new targets. Rule: a Must item whose planted bug a test already catches needs
-nothing — build only where a mutation stays green.
-
-- [x] **Mutation audit of 4 likely-missing rows** — planted each bug; every
-      mutant went red. No new test/ledger row (already caught):
-  - [x] two views sharing a snapshot cache key →
-        `tests/broadcast-view-key-subs-unambiguous.test.ts`
-        (`broadcast: subs {'a,b'} and {'a','b'} are different views`) and
-        `tests/foruser-leak.test.ts` (`forUser memo: same id, different role`)
-  - [x] a deleted `auth.db` cannot commit → `tests/auth-db-gone.test.ts`
-        (`auth.db deleted under a running app: writes throw, reads still answer`)
-  - [x] home lock by `/etc/machine-id` → `tests/profile-home-identity.test.ts`
-        (`claimHome: the same lock PATH on another host (or pid namespace) is
-        another process`)
-  - [x] declared-type write guard → `tests/declared-type-write-guard.test.ts`
-        (`dev: a write that changes a declared field's type is refused`) —
-        emptying `shapeDriftDeciders.typeChanges` turns both the refuse and the
-        prod warn red
-- [x] **One copies test** → `tests/persist-none-scrub-once.test.ts` (live db,
-      snapshot, backup, logs/actions+checkpoint, every-file scan after boot; a
-      new `persist:"none"` value reaches no file). Journal + `data.replaced-*`
-      scrub of the same one filter:
-      `tests/persist-none-scrub-journal-copies.test.ts`,
-      `tests/persist-none-scrub-replaced.test.ts`.
-- [x] **Log token gate** → `tests/no-token-in-logs.test.ts` (source gate;
-      exactly two `aio-ok(token-log)` share-link lines) and
-      `tests/log-files-mask-credentials.test.ts` (token + pair code masked on
-      every log-file sink; terminal share/pair lines stay whole).
-- [x] **Every persist path inside the resolved home** — `dbPath` is the only
-      configurable persist path; under `--profile`/`--home` it is refused by
-      `dbPathOutsideHomeError` (`tests/resolve-home.test.ts`). Journal /
-      snapshot / WAL are sidecars of that path (same check); `auth.db`,
-      `app.key`, logs are `appDirs()`-derived under the home by construction.
-- [ ] Optional, additive (defaults unchanged): `electron.permissions: "strict"`;
-      `build.android.strict: true` — **left unchecked this pass** (not
-      quick-and-correct: permissions is an object map today; activity losses are
-      warn-only). Breaking defaults parked in `untracked/v2.md` §26–§27.
-- [ ] Then the next weekly hunt, and move `air/control-drift.ts` into the dev
-      chunk (bundle ceiling back to 82/85 — see below). **STILL OPEN:**
-      `_recordControlled` must run on every render before the async dev chunk
-      lands (unlike observe-only audits that de-dupe on the committed tree); a
-      straight move races early keystrokes. Needs a thin always-bundled record
-      stub or an eager sync install — not this pass. Ceiling stays 83/86.
-
-Not v1 (recorded in `untracked/v2.md` §26–§33, do not "fix"): global
-`routePath`, `cell()` registry, unkeyed `collectHead()` return, intermediate CA,
-default-deny Electron permissions, fail-closed old `MainActivity`, mixed sync +
-`listensTo` as an error, device CI. The review list has no 1→100 map; say
-"closed as far as v1 allows", never "all 100 fixed" or "bug-free".
-
-**Core principle:** all breaking changes died in alpha70; from here the surface
-is frozen — additive only, bugfix-only through beta; 1.0.0 = boring.
-
----
-
-## DONE — 1.0.11-beta (agreed 2026-09-23: close what 1.0.10 opened, no new theme)
-
-From an outside review of 1.0.10, checked by MUTATION, not by reading: every
-1.0.10 claim broken on purpose in a scratch copy, its test required to go red.
-Surface after this: frozen again — 1.0.11 adds exactly one optional parameter.
-
-- [x] **Mutation audit of 1.0.10** → 97 ledger rows in `check:mutations` (lock,
-      profiles, crash replay, upgrade boot, `am` exits, persist decider and
-      scrub, CLI token header, Electron crash exit, `unsaved` at every door, SSR
-      route). Survivors got tests; `check:release` cannot lose a lane.
-- [x] **Cross-sync boot warning** — the 1.0.10 item above was ticked but never
-      built; the audit found it. One line per `listensTo` pair across the sync
-      line, `aio.run` and every harness alike.
-- [x] **No app key in a log line** — one redactor, a source gate that follows
-      copies, 7 sites fixed.
-- [x] **`persist: "none"` scrub said once**, second boot silent (pinned).
-- [x] **Route on render** — `renderToString(v, { route })`,
-      `renderToStream(v, key, { route })`: every route read of that render,
-      computeds and `trackedMemo` included, routes by it; the global signal
-      graph is never disturbed (pinned by a seeded differential fuzzer). The
-      global-route form keeps a best-effort warning for the shared-promise race.
-
-Out of 1.x (v2): delete the global `routePath`, explicit `cell()` registry,
-persist spelling collapse, `kind: replicated | authoritative`.
-
-## DONE — 1.0.10-beta blueprint (agreed 2026-09-22, shipped in 1.0.10-beta)
-
-From an outside code-and-docs review, checked against HEAD. Already done and
-dropped from the list: one persist filter (`buildDBStateGetter`, both hosts,
-1.0.8) · one dispatch loop (`createDispatch` on server, standalone and worker
-cells) · `bundle-dev-chunk.test.ts` · `multi-instance.test.ts` ·
-`scripts/proof.ts`. Refused: `am trust --replace` (new surface, and it fights
-the "warn, don't regenerate" TLS freeze — rotation stays delete + `am trust`).
-Nothing gets added to this list until `test:hosts` has failed once for a real
-reason and been fixed.
-
-- [x] **`test:hosts` lane.** One app × {server, standalone, packaged Electron} →
-      `persist: "none"` never reaches disk and never comes back · the last write
-      survives shutdown drain · the packaged doors hold (snapshot route off, CSP
-      meta). Transport policy ALREADY exists (`resolveTransport`,
-      `src/server/paths.ts:185`: electron ∧ ¬expose → uds, but an explicit
-      `transport: "ws"` wins). So assert the DEFAULT on the built ARTIFACT (no
-      TCP listen socket), and never ban the explicit `ws` opt-in: banning it
-      would break compat.
-- [x] **Persist-decider gate.** CI goes red when any `src/` host persists state
-      without `buildDBStateGetter` (`state/cell-persist-filter.ts`). The only
-      allowed fallback is a raw `initStandalone` (no cells, whole state).
-- [x] **SSR soak inside `check:release`.** N overlapping renders plus a
-      mid-stream abort; extends `air-ssr-concurrent-render-state.test.ts`.
-- [x] **`test:sync` lane + a cross-sync boot warning.** Property tests (HLC
-      order, ack, offline replay, compaction). Warn at boot when linked cells
-      disagree on `sync`.
-- [x] **`am` exit-code sweep.** One test loops over every verb: a failed side
-      effect → exit 1, and no success JSON after it.
-- [x] **`@decider` wiring.** A function tagged `@decider` must be imported by a
-      `tests/*.test.ts`; enforced in `check:dead-wiring`. Never grep for the
-      word "decider" (85 files use it, so the gate would be all noise).
-
-REFUSED in 1.0.10-beta (user verdict 2026-09-23, "approve all") — design limits,
-each documented where a user meets it; not open items:
-
-- [refused] Unkeyed `collectHead()` under concurrent streaming can still hand
-  out another page's head or an empty one (as 1.0.9); `collectHead(req)` is
-  exact. Deno's `enterWith` leaks across requests, so no ALS fix exists.
-- [refused → answered in 1.0.11 by route on render] `routePath` is one
-  process-wide signal: set it and render in one synchronous step.
-  `renderToStream(); routePath.set(); renderToString()` in one step keeps the
-  call's route with NO warning (indistinguishable from two correct requests on a
-  shared promise).
-- [refused] `journal: true` with listened sync ops costs ~5–10% ops/s (up to
-  ~30% with MB-sized listener state); journal off is unchanged.
-- [refused] Data last run by 1.0.9 re-derives no `listensTo` reaction of a sync
-  op — each listener is named once; the user checks it. Downgrading an app with
-  a store-persisted listener of a sync cell double-counts on every 1.0.9 boot
-  (1.0.9's own behavior; documented, no safe way back).
-- [refused] A v1.0.9 `am kill` still removes a backup/restore hold's lock.
-- [refused] macOS nohup detection is a TTY heuristic.
-- [refused] `ssr-fragment-nest` ratio bench: deep Fragment chains are now faster
-  than 1.0.9, but the WeakSet in `vdom-create.ts` (`_literal`) keeps its peak
-  table size (bounded by the largest page, same as 1.0.9).
-
-Checked and deliberately NOT added: a `check:vacuous` rule for "handler ran zero
-times". The 1.0.8 `press()` trap was a test with no assertion about the handler
-at all, and no static shape can see that. It is fixed where it can be seen: a
-dev warning inside the listener. If this class grows, extend that runtime probe
-to the other drive helpers (click on disabled, type into readonly). Don't build
-a lint rule for it.
-
-1.0.0 (no suffix) = a date, not a feature: once the first three items have been
-boring for several WEEKS. The user's call.
-
----
-
-## RESUME HERE — post-1.0.7-beta verify round (2026-09-21, HELD, NOT RELEASED)
-
-**Status: fixed in the working tree, deliberately NOT released.** 1.0.7-beta is
-pushed as `b0369cb71`. A verify round run AFTER that push found real defects in
-what shipped. The user's call was **fix but hold** — so everything below is in
-the tree, uncommitted, and the next release carries it. This is not a violation
-of the never-release-with-known-issues rule: the rule binds what is PUSHED as a
-release, and nothing is being pushed. It does mean 1.0.7-beta as tagged has
-known defects, which is exactly why there is no 1.0.8 tag yet.
-
-### Fixed here, each mutation-checked
-
-- [x] **`persist: "none"` was ignored by the standalone/Android runtime.** A
-      cell marked not-to-persist had its state written AND read back, and
-      `exclude`/`onPersist` were no-ops too. Since 1.0.7-beta that slice is
-      `fsync`'d on EVERY dispatch, so it was also the expensive path. The
-      release's own new warning told people to write `persist: false`, which is
-      not a valid `CellFieldFilter` and would not have worked either. Cause:
-      `getDBState = (s) => s` in `initStandalone`. The rule now lives once, in
-      `src/state/cell-persist-filter.ts` — moved, not copied.
-- [x] **The localStorage→native adoption path could destroy good data.**
-      `AioNativeStore.get` returned `null` for both "nothing saved" and "the
-      read failed", so a failed read looked like a fresh install: adoption wrote
-      the stale pre-upgrade copy over intact state and LOGGED IT AS SUCCESS,
-      then re-armed on every boot. Fixed with a real `has(key)` stat on the
-      bridge.
-- [x] **The SSR head leak was only half closed in 1.0.7-beta.** `collectHead()`
-      answered with the most recently STARTED render, so request B starting
-      inside A's gap was served A's `<title>`. It now tracks the most recently
-      FINISHED render.
-- [x] **One abandoned SSR stream permanently 500'd every later `collectHead()`**
-      — the liveness set was never cleared. The set is gone.
-- [x] **Attribute-name validation threw in PRODUCTION on names Chromium
-      accepts.** `_isAttrName` omitted `[#x10000-#xEFFFF]`, so `data-🎉` threw.
-      Astral range added, `u` flag on.
-- [x] **`onUnmount` wrote into a hook slot it did not own.** A conditional call
-      landed on a neighbour's `useRef` slot and SILENTLY LEAKED THE HOLD in
-      production — the exact bug `onUnmount` exists to prevent, and the dev
-      tripwire did not catch it. Fixed with a module-private sentinel plus a
-      symbol brand.
-- [x] **`collectHead(key)` with an unknown key returned `""` in silence** — now
-      a dev warn.
-- [x] **X.509: a Tailscale/CGNAT (`100.64/10`) address produced a cert rejected
-      for EVERY name, including `localhost`.**
-- [x] **X.509: `"999.888.777.666"` was minted as `231.120.9.154`** — a
-      certificate for a different host than the one asked for.
-- [x] **X.509: a stolen root key could sign email/UPN/URI/code-signing certs**
-      (the eDellRoot class). `serverAuth` EKU on the root. The
-      `excludedSubtrees` alternative was rejected after measuring that Go and
-      openssl disagree on empty bases.
-- [x] **X.509: the upgrade-path test could never fail** (openssl compares DNs
-      canonically). Replaced with a PrintableString root and a real handshake.
-- [x] **X.509: private keys were written `0644`, then chmod'd.** `mode: 0o600`
-      at open.
-- [x] **12 KB gz off every page load.** The `am surface` / `am trigger` engine,
-      the dev overlay and the contrast/selector audits now live behind a dynamic
-      import that production never takes
-      (`src/browser/dev-diagnostics
-      .ts`, `src/air/dev-hooks.ts`). Counter
-      app 91.9 → 79.9 KB gz; ceilings 90 → 79 (AIR) and 92 → 82 (app). Six
-      modules were deliberately NOT moved because production DOES reach them
-      (`am logs`, `useTimeTravel()`, the profiler). New gate
-      `tests/bundle-dev-chunk.test.ts` — whose own test 2 was vacuous at first
-      (it matched the URL inside its failure message) and the mutation check
-      caught it.
-- [x] **`bench:bundle`'s "AIR alone" figure measured a bundle nobody ships** —
-      it ran a bare esbuild instead of the real client bundler.
-- [x] Ratchets reconciled after the concurrent agents: temp dirs back to 776
-      (both new calls go through `src/testing/temp-dir.ts`), silent catches 324
-      → 322, promise handlers held at 84 (the dev-chunk loader now names which
-      audits are not running instead of discarding the reason).
-
-### Found by the suite itself, after the fixes above
-
-- [x] **Four sibling processes walked the port slice in LOCKSTEP.**
-      `AIO_TEST_PORT_SLICE` is inherited through the environment, and
-      `tests/cookbook-recipes.test.ts` spawns `deno test --parallel` whose
-      workers are four sibling processes — each with its own empty `_issued` set
-      and its own cursor, all starting at `first`. They therefore handed out THE
-      SAME ports in THE SAME ORDER: not a race that sometimes fires, the
-      arrangement. It surfaced as recipe 14 dying on
-      `port 24256 already
-      in use` while recipe 15 held it, and it reads as
-      a product bug (the message is aio's own singleton guard) while being a
-      harness one. The cursor now starts at `first + (pid % n)`. Pinned by a
-      test that runs four real child processes; with the fix reverted all four
-      return the same port and it fails naming them.
-- [x] **`tests/on-unmount.test.ts` leaked a timer in a shard** — one `cleanup()`
-      among five was not awaited, and `cleanup` is `() => closeWindow(win)`,
-      which is async. Green alone, red in a shard. This is the THIRD instance of
-      this exact class.
-- [x] **So the hygiene gate was widened to see it.** It matched the literal
-      `closeWindow(` only, and every one of these files reaches the closer
-      through an alias a helper returned, so it was blind to the shape that
-      keeps shipping. It now resolves aliases. The first version of the widening
-      fired on eight correct lines (a method named `cleanup()`, and
-      `await b.cleanup()` reached through an object) — caught before it landed,
-      because a gate that fires on correct code gets muted, which costs more
-      than it saves.
-
-### The CA decision — MEASURED AND DECIDED: no intermediate, two locks instead
-
-RFC 5280 §6.1 begins path validation AFTER the trust anchor, so a self-signed
-root's own extensions are, by the letter, advisory. The question was which
-verifiers actually behave that way. All of them have now been asked from their
-own OS, each against a control, and the answer is that Java and Conscrypt are
-the outliers rather than the rule:
-
-| verifier                        | anchor name constraints | anchor EKU  |
-| ------------------------------- | ----------------------- | ----------- |
-| openssl                         | enforces                | enforces    |
-| rustls / NSS / Go               | enforces                | —           |
-| Windows CryptoAPI (Win11 26200) | enforces                | enforces    |
-| macOS Security.framework 14.8.9 | enforces                | **IGNORES** |
-| Java `CertPathValidator`        | **IGNORES**             | **IGNORES** |
-| Android/Conscrypt 2.5.2         | **IGNORES**             | **IGNORES** |
-
-The verdict, and the reasoning, so it is not re-litigated:
-
-- **No intermediate, for now.** It would close the Java and Conscrypt rows and
-  nothing else. It is not free: existing roots are `CA:TRUE, pathlen:0`, which
-  FORBIDS them signing an intermediate, so it needs a NEW root and every
-  developer who ran `am trust` has to re-trust. That is a migration for two
-  outlier verifiers that behave alike, against an attacker who must already be
-  able to read `~/.aio/ca` — which means they can already read the home
-  directory. The cost is certain and the benefit is still narrow. Conscrypt is
-  measured (below): an Android app using `HttpsURLConnection` is exactly this
-  row, and it does not change the verdict.
-- **Two locks instead, because no single one covers every verifier.** The
-  `serverAuth` EKU carries Windows and openssl; the rfc822Name/URI bases carry
-  macOS, which ignores the EKU entirely. Either alone leaves a real gap.
-- **Do not let the EKU read as bigger than it is.** A forged website certificate
-  needs exactly `serverAuth`, so the EKU is no obstacle to the one case that
-  matters most on a verifier that skips the anchor. `tls.ts` and `x509.ts` both
-  say so in place.
-- **`otherName` (the Windows UPN form) stays unconstrained** — RFC 5280 offers
-  no way to constrain it. It is covered by the EKU on Windows and openssl, and
-  NOT on macOS; macOS has no smartcard-logon path that consumes a UPN, so the
-  residual there is theoretical rather than exploitable. Written down rather
-  than argued away.
-
-What was measured, in order:
-
-- [x] **macOS MEASURED (14.8.9, `security verify-cert`, with controls).** Two
-      answers, one of them a defect: - Security.framework **does** honour an
-      anchor's name constraints. A forged `login.acmebank.com` leaf under the
-      aio root was refused; the same name under a root with no constraints was
-      accepted (so it was the constraints, not the name and not CT); a permitted
-      `localhost` leaf under the constrained root was accepted (so it was not
-      the chain or the dates). - Security.framework does **NOT** apply an
-      anchor's extendedKeyUsage. With the `serverAuth` EKU alone it ACCEPTED an
-      S/MIME certificate for `ceo@bigbank.com` signed by the aio root —
-      identically to a control root carrying no EKU at all, so the extension was
-      doing nothing there. The comment in `x509.ts` claimed Windows and macOS
-      "enforce the same nesting"; that was written from documentation and is
-      FALSE for macOS.
-- [x] **FIXED: the root now constrains `rfc822Name` and
-      `uniformResourceIdentifier` too**, permitted to `.invalid` (RFC 2606 —
-      never a real address or host), which is the narrowest legal way to say
-      "none", since a name type left out of permittedSubtrees is UNRESTRICTED.
-      Measured: macOS now refuses the S/MIME forgery while the legitimate
-      `localhost` leaf still verifies; openssl refuses it at depth 0 for the
-      base and at depth 1 for the EKU. Two independent locks, because the
-      verifiers that ship disagree about which one they check. `generateRoot`
-      with no DNS or IP base now THROWS rather than writing an empty (malformed)
-      permittedSubtrees that some verifiers ignore — "ignored" means the root is
-      unconstrained while looking safe.
-- [x] **FIXED (D10): an existing root is reused VERBATIM forever**, so every
-      machine that already ran aio keeps a root with no email/URI bases and
-      nothing would ever have noticed. `loadOrCreateAioRoot` now reads the
-      constraints off the root it loads and warns, once per root, naming what is
-      unrestricted and the exact fix (delete it, re-run `am trust`). It does NOT
-      regenerate — that would break every browser that trusted the old root
-      without asking. Tested in both directions, fires on the old shape and
-      silent on a current one, because a warning with no silence test is one
-      that eventually fires on every boot for everyone.
-- [x] **Windows CryptoAPI MEASURED (Win11 26200, `X509Chain`, with controls AND
-      an instrument check).** It enforces BOTH: the forged `login.acmebank.com`
-      under the constrained aio root is `HasNotPermittedNameConstraint`, the
-      same name under an unconstrained root is accepted, the legitimate
-      `localhost` leaf is accepted, and the S/MIME leaf is `NotValidForUsage`
-      where a no-EKU control root accepts it. So Windows is the safest of the
-      three and macOS is the odd one out.
-- [x] **A false result was nearly recorded here, and the lesson is the reusable
-      part.** The first Windows run put the root in .NET's
-      `ChainPolicy.ExtraStore` instead of a trust store, so nothing had to be
-      installed. It reported NO objection to the forged name — which read as
-      "CryptoAPI ignores anchor name constraints" and would have been written
-      down as a measurement. It was a blind instrument: with an untrusted root,
-      CryptoAPI does not evaluate name constraints AT ALL, not even on an
-      intermediate. EKU violations ARE still reported, which is exactly what
-      made the setup look like it worked. The positive control that caught it —
-      the same violation moved down onto an intermediate — is now the first line
-      of the probe. A null result is not a result until the instrument has
-      produced a positive one.
-- [x] **Android/Conscrypt MEASURED (2.5.2 openjdk-uber / OpenJDK 21,
-      `TrustManagerImpl.checkServerTrusted` / `checkClientTrusted`, with
-      controls AND an instrument check).** Same three-way as macOS/Windows.
-      Anchor name constraints: **IGNORES** — forged `login.acmebank.com` under
-      the constrained aio root is ACCEPTED; the unconstrained control accepts it
-      too; `localhost` under the aio root is accepted. The instrument is not
-      blind: the same forgery under an intermediate that carries the NC is
-      refused with `name constraints check failed` (stock PKIX under Conscrypt's
-      TrustManager — the Windows ExtraStore lesson, applied here). Anchor EKU:
-      **IGNORES** — `checkClientTrusted` ACCEPTs a `clientAuth` leaf under the
-      `serverAuth`-only aio root, identically to a no-EKU control. (Do not read
-      `checkServerTrusted` on an `emailProtection` leaf as an EKU answer:
-      Conscrypt refuses that leaf for lacking `serverAuth` before any anchor
-      check.) So Conscrypt joins the Java row, not Windows. Probe + pinned test:
-      `tests/x509-conscrypt.test.ts` (skips cleanly without a JDK + the uber
-      jar; fetch URL in the file header). No cert shape change; `otherName`
-      still unconstrained.
-- [ ] **`otherName` (the Windows UPN form) is STILL unconstrained**, and RFC
-      5280 gives no way to constrain it. Only the EKU covers it and macOS
-      ignores the EKU, so on macOS a stolen key can still mint a UPN client
-      certificate. The intermediate is the fix for this one too.
-- [ ] **THEN decide the intermediate**, with the migration written first: new
-      root, `am trust` re-run, chain file layout, and what an app that still has
-      the old root on disk does. The EKU measurement above lowers the value of
-      the "EKU bounds the rest" argument — on a verifier that skips the anchor
-      the EKU may buy nothing at all, and the name-constraint bases are what
-      carry the property.
-
-### Residuals recorded, deliberately not fixed
-
-- **`_isAttrName` is still stricter than browsers for `1abc` and `-a`.** Those
-  are legal HTML attribute names and aio refuses them. Refusing is the safe
-  direction and no app has asked; left as a known narrowing, not a silent one.
-- **`SsrRender.ended` is a dead field** — nothing reads it since the liveness
-  set was removed.
-- **`<button form="other-form">` click behaviour cannot be tested in
-  happy-dom**, so `am surface` gets `form="id"` wrong in BOTH directions and the
-  fix cannot be proven in-process. Needs the real-browser lane.
-- ~~**Android: no directory `fsync` after `renameTo`.**~~ Closed: `syncDir()`
-  fsyncs the store directory through `Os.open`/`Os.fsync` after every rename
-  (tests/android-native-store-dir-fsync.test.ts); a filesystem that refuses a
-  directory fsync is logged once — nothing more can be done from the app.
-- ~~**Android: a failed native read at boot can still overwrite good state** in
-  paths the `has(key)` fix does not cover.~~ Closed: `exists` answers from
-  `Os.stat` (only ENOENT is "absent" — `File.isFile` said no on a failed stat
-  too), and a `has`-less bridge (an activity copied from 1.0.7) reads twice and
-  warns before a null counts as "never saved". The has-less window itself cannot
-  close from the page; the build already tells that app to re-copy.
-- **Write-burst cost, measured:** at 1.08 MB of state, the per-dispatch fsync
-  path costs 0.710 ms/key and wrote 211 MB over 200 dispatches — 35.9× the
-  debounced path. The `persist` filter fix removes it for excluded slices; it
-  does not make the included path cheap.
-
----
-
-## RESUME HERE — round of 2026-09-21 (re-opening 1.0.7-beta)
-
-**Why this round exists.** 1.0.7-beta was pushed green, and then a standing rule
-was made explicit and absolute: **a release is never pushed while a known bug is
-unresolved.** So the tag was re-opened and every real defect still on this file
-was fixed before the re-push. Seven parallel area passes, each one measuring the
-bug on real hardware before touching it.
-
-**Fixed this round.**
-
-- **Automatic HTTPS could not work on Windows at all.** `tls: "auto"` shelled
-  out to `openssl` four times — generate the machine root, make a CSR, sign the
-  leaf, read a cert's SANs — and Windows ships no openssl, so `--expose` there
-  died at boot with `NotFound: Failed to spawn 'openssl': entity not found`. A
-  headline feature, absent on a whole supported target, undocumented anywhere in
-  `docs/`. The subtlest part was `certSans`, which CAUGHT that failure and
-  returned `null` — indistinguishable from "this certificate names no addresses"
-  — so the cached cert was first declared stale for the wrong reason, and only
-  then the boot died: the repo's own "config validated only when it FIRES" trap.
-  Both certificates are now built in-process by `src/server/x509.ts` (~330
-  lines, zero dependencies, ECDSA P-256 via WebCrypto), and NOTHING on `PATH` is
-  consulted on any OS. `tests/tls-no-external-binary.test.ts` runs the whole
-  path with an empty `PATH` and with `Deno.Command` replaced by a throwing stub,
-  so a future change that shells out to anything is red on every OS.
-
-  A hand-written DER encoder is only worth trusting if something other than its
-  author agrees, so `tests/x509.test.ts` uses four instruments that fail
-  differently: openssl PARSES it (all 11 name-constraint subtrees, line for
-  line), openssl VERIFIES the chain, a REAL rustls handshake serves and connects
-  with a client trusting only the generated root, and — the one that checks the
-  security property rather than the bytes — a leaf minted for `example.com`
-  under that root is REFUSED with "permitted subtree violation". Two upgrade
-  paths are pinned too: a leaf issued under a root OPENSSL generated still
-  chains and handshakes (every existing machine keeps its pinned anchor), and
-  IPv6 SANs still read back fully expanded, so no cached certificate becomes
-  stale. Verified on the real Windows 11 VM.
-
-  Weighed against a library first, and measured rather than assumed:
-  `@peculiar/x509` is correct but costs a 19-package / 2.06 MB graph that drags
-  `tsyringe` + `reflect-metadata` into `src/server` and adds 2.2 MB to each of
-  the five binaries aio ships; `pkijs` is the same with more ceremony;
-  `node-forge` cannot sign with ECDSA at all; `@fidm/x509` is parse-only and
-  unmaintained since 2019; JSR has nothing. The vendored encoder adds 0 MB.
-
-- **SSR shared one render scope.** Two concurrent `renderToStream`s swapped each
-  other's `<head>` — one visitor's title, description and canonical URL inside
-  another's page — and every `useId` after the first was wrong, so every
-  `<label for>` the server wrote pointed at the wrong element. A third defect
-  fell out of the same measurement: the open-`<select>` stack was module-global
-  too, so an interleaved stream marked the OTHER render's option selected. Fixed
-  with per-render state carried in the scope the writers already thread, not a
-  lock. `renderToStream(vnode, key?)` / `collectHead(key?)` are ADDITIVE
-  optional params — an unkeyed `collectHead()` still answers for the current
-  render and THROWS rather than guess when two streams overlapped.
-- **SSR wrote attribute NAMES unvalidated** — `{"x onload=alert(1)": 1}` became
-  raw HTML on the server where the client path already threw. One shared decider
-  now, dev and prod alike.
-- **An embedded app (`libraryMode`) died on `ulimit -f`.** The SIGXFSZ listener
-  rode on `AppLock`, which `libraryMode` never takes. The guard is a property of
-  the PROCESS, so it is refcounted and held by every boot, lock or no lock.
-- **`socketFetch` had no timeout** — six unanswered requests wedged the whole
-  desktop transport. Bounded to the FIRST byte only, so a slow stream is not cut
-  off.
-- **Windows handle reuse in `win-pipe.ts`** — fixed, and then the FIX'S OWN
-  JUSTIFICATION was found overstated, which is the more useful result.
-  Generation-stamped claims now gate every deferred path. But verifying on the
-  real Windows 11 VM measured four probes against one live OVERLAPPED:
-
-      GetOverlappedResult(hA, ovlA)        ok=true  bytes=11111  (the owner)
-      GetOverlappedResult(hB, ovlA)        ok=true  bytes=11111  (other handle)
-      GetOverlappedResult(<closed>, ovlA)  ok=true  bytes=11111  (closed value)
-      GetOverlappedResult(0xDEAD, ovlA)    ok=true  bytes=11111  (nonsense)
-
-  With `bWait=FALSE` the call IGNORES its handle argument — the count comes from
-  the OVERLAPPED's own `InternalHigh`, which each `PipeConn` owns. So the
-  headline claim ("a resumed frame could put a stranger's byte count into the
-  stream") cannot happen on the path this file uses, and the pre-existing
-  `#closed` flag already prevented a double close. A 400-connection storm with
-  the FFI pool measured at exactly 32 — so ~368 flushes were genuinely queued as
-  their timers fired — produced 0 corruption and 0 ownership warnings, WITH the
-  table and against pre-fix HEAD alike. The refactor is kept because it is
-  correct, cheap, and puts the rule in place before a future deferred path that
-  DOES read through its handle needs it; both module comments now state the
-  measurement instead of the claim. `DuplicateHandle` was REFUSED with the
-  reason written down: it keeps the pipe instance alive, so `FlushFileBuffers`
-  would never return and the bounded drain's whole point is lost.
-- **The transport is now verified on real Windows**, not inferred: 1000 NDJSON
-  lines including a 1 MB frame, 8 concurrent clients, a 20 MB streamed GET
-  sha256-verified and a 5 MB POST byte-for-byte, on Deno 2.9.6 / Win 11.
-- **Electron allowed `eval` in every packaged app.** Measured on a real Electron
-  44.4.1 window: no `script-src`, so Chromium's `_isEvalAllowed()` was true and
-  the renderer logged an insecure-CSP warning at every launch. `basic` now names
-  every source a page could already use and withholds exactly `'unsafe-eval'`.
-- **A macOS `.app` would have accepted a plain-binary update** and renamed it
-  over a file inside a signed bundle. It refuses now, and says where to get the
-  real download.
-- **7.7 GB of stale Electron runtimes with no way to clean up** — `am prune`,
-  which reports and deletes nothing until `--yes`, never offers the shipped
-  version, and never treats "unknown age" as unused.
-- **Android lost a change killed within ~1 s.** Measured on API 35: a kill 122
-  ms after a change lost it; at 933 ms it survived, which is why every earlier
-  test (all waiting 3 s) was green. A native `@JavascriptInterface` store now
-  writes temp → `fsync` → atomic rename, and the debounce is REMOVED for a
-  durable store rather than shortened. Re-measured: killed at 52 ms, survived.
-  `targetSdk` 34 → 35, which forced edge-to-edge and was drawing the page under
-  the status bar — fixed and asserted.
-- **`am surface` called a working submit button inert.** It reported
-  `events: []` for `<button>` inside `<form onSubmit>` while
-  `am trigger …
-  click` genuinely worked, so an agent choosing a target from
-  the surface alone read the one button that works as dead. One decider shared
-  with the trigger.
-- **The dev error badge was permanently lit** by Electron's own
-  `Invalid guestInstanceId` on every `<webview>` close — fail-loud inverted.
-  Annotated (message AND source anchored, never a blanket filter), and kept out
-  of `errors=`.
-- **`errors=` on the stopped line counted only async method failures**, so an
-  app that lost every write to a deleted database still printed `errors=0`.
-- **`onUnmount` (new) registered once per RENDER**, so a component that rendered
-  three times released its held resource three times — a double-free dressed as
-  a leak fix. Found by its own first test.
-
-**Shipped alongside.** A tested cookbook (`docs/basics/cookbook.md`, 20 recipes,
-every one DRIVEN by `tests/cookbook-recipes.test.ts`, not merely type-checked);
-`MAX_WITHOUT_EXAMPLE` 156 → 128; an `aiol` rule for a body-level `onCleanup`
-that tears down what the body did not create.
-
-**New, found while writing the cookbook — genuinely open.**
-
-- **`visible.forUser` and `sync` cannot both hold.** "A per-user list that works
-  offline" — the shape people actually ask for — has no answer today. A design
-  decision, not a patch. This is why the cookbook has no sync recipe.
-- **No in-process driver for a login flow end to end.** `<SignIn/>` talks to
-  `/__aio/auth/*` from a browser and `testServer` has no browser, so the server
-  half of auth can only be proven e2e. The cookbook ships the client half and
-  says so.
-- **`useForm().bind()` types `value` as `unknown`**, so every bound input must
-  repeat `value={form.fields.x.value}`. Frozen surface → `untracked/v2.md`.
-
-**Known and NOT fixed, stated rather than buried.**
-
-- **The Windows `drain()` residual — measured, NOT reproduced, still open in
-  principle.** The `nonblocking` `FlushFileBuffers` FFI binds the raw handle
-  value at call time and runs on a pool thread; when the pool is saturated —
-  exactly when the timeout matters — the call can still be queued as the timer
-  fires and the value is closed. JS cannot reach that argument, so the guard
-  cannot be extended to it.
-
-  It was driven on real Windows rather than reasoned about. The pool was
-  measured at exactly 32 (32 → 1 wave, 64 → 2, 640 → 20), so at 400 stalled
-  responses ~368 flushes were genuinely queued when their timers fired, while 12
-  churn loops recycled handle values through 264k round-trips: 400 drain
-  timeouts, **0 corruption, 0 hangs, 0 ownership warnings**. The reason it stays
-  benign is structural — a stray `FlushFileBuffers` on a recycled value can only
-  flush a stranger's handle; it carries no byte count and closes nothing, and
-  its worst case is a briefly parked pool thread, itself bounded by the same 3 s
-  timeout. A different severity class from the read/write path. Reopen if
-  `drain` ever grows a path that READS through its handle.
-- **Release signing / AAB / Play upload** needs a keystore only the user can
-  provide; the release APK is still unsigned. **iOS** has never been built
-  (needs Xcode on the macOS VM, and the `.xip` needs an Apple ID). The Windows
-  `gradlew` path is unverified.
-
----
-
-## RESUME HERE — round of 2026-09-20b (towards 1.0.7-beta)
-
-**State.** 1.0.7-beta cut and tagged locally, NOT pushed (user's instruction).
-On main since the v1.0.6-beta tag: the twelve wallet-audit commits, then
-`am
-help` in three tiers, the stale-APK refusal, the proof matrix's honesty, the
-`@tier` tags, the out-of-process `t=` note, a verify round attacking the audit
-fixes (14 bugs found INSIDE the fixes), a release stage in the derived version
-(field report §17), `dist/` emptied rather than replaced so a lab's bind mount
-survives a rebuild (a field report §11), and one more bug found INSIDE this
-round's own preload sweep: it armed its signal handler after creating the
-directory, so a SIGTERM in that window still leaked one. The suite caught it
-under load, which is the second time this release that running the thing beat
-reading it.
-
-**`feedback/` is retired to two files (2026-09-20).** Every one of the seven
-field reports was re-checked against the tree and bucketed into
-`feedback/resolved.md` or `feedback/refused.md`; the report files are gone (the
-dir is gitignored, so this is permanent — a backup was taken first). Four
-reports had been badly stale: `cc.md` had every box unticked with 16 of 18 asks
-shipped or refused, `mdview.md` §10 ended "confirmed, unfixed" after shipping in
-1.0.6-beta and being verified on the real Windows 11 machine, and the wallet's
-report §8–§18f all read as open with every one of them shipped. Nothing a report
-marked fixed was actually broken — the drift runs one way, and the fix is to
-re-audit against the TREE, never against a status line.
-
-Everything those reports still asked for is below. What is genuinely open, in
-the order worth doing:
-
-- **field report §15 — the demo driver has no supported door.** Three parts:
-  `src/media/{cdp,screencast,encoder}.ts` are reachable only by a
-  `dep/aio/src/...` path (one refactor breaks every demo repo);
-  ~~`am shot --video --json` prints nothing until the end~~ **DONE
-  (2026-09-22):** `shotVideoProgress` announces on stderr in `--json` (same
-  channel rule as `restartNote`), so a script can know recording started while
-  stdout stays the one final document — pinned by `tests/am-shot-video.test.ts`;
-  and no Xephyr/WebGL line (a 3D scene records blank without
-  `--enable-unsafe-swiftshader`).
-- **mdview A1 — no Electron main-process extension point** (already listed below
-  as designed-not-built): `dialog`, dock/app menus, `webUtils.getPathForFile`,
-  `shell.showItemInFolder` are each unreachable until aio builds them one at a
-  time, as §8 and §10 just were.
-- **mdview A5 — real-guest verification is memory again.** The proof matrix
-  honestly marks `windows/macos app-on-real` NO GATE, and no such row has ever
-  been written; `.katana/release.md` requires nothing. The practice that found
-  the named-pipe drain, the DMG layout and the Windows console window is
-  unenforced.
-- **cc 1b — the named `CellState` bound.** The type exists and is exported, but
-  `MethodsCellConfig` still bounds `S extends Record<string, unknown>`, so the
-  first line of a `deno check` failure is unchanged. A one-token change rippling
-  ~12 generics across a frozen surface; the in-file comment
-  (`cell-config-types.ts:69-71`) already calls it deliberate and the aiol rule
-  fires at the cause. Treat as closed-as-refused unless someone disagrees.
-- **skinscan §3 — does `theme: "full"` paint the Android WebView?** The rule is
-  there (`body{background:var(--aio-bg);color:var(--aio-text)}`,
-  `src/build/app-theme.ts:268`, in the visual region so absent under `"tokens"`)
-  and `build-android.ts:405-435` ships the sheet disabled for `_applyShellUi` to
-  enable at boot — but that carry landed in the SAME release the reporter
-  measured black-on-dark on, so reading cannot tell whether it works or whether
-  `_applyShellUi` never enables it. One APK boot settles it. The only report
-  item that could not be bucketed by reading. **Answered by reading after all
-  (2026-09-25): `_applyShellUi` never runs in a local APK** — its entry does not
-  import `app.ts`. See "APK: bake app.ts config into the bundle" under Android /
-  iOS.
-- **`am start --scratch`** (mdview A3): one flag for a distinct appId + private
-  nested display + throwaway data home removed on stop.
-- **`am build` does not label an unproven target** (frustration F7 residual) —
-  it needs the proof matrix embedded in the shipped framework, not just in the
-  repo.
-- [x] **A docs cookbook: 20 tested copy-paste recipes** (frustration F9) —
-      `docs/basics/cookbook.md`. Every recipe is DRIVEN by
-      `tests/cookbook-recipes.test.ts` (real clicks, a real HTTP server, a real
-      multipart upload, two real WS clients), not merely type-checked, and it
-      reuses the existing `tests/docs-snippets-check.test.ts` type-check gate
-      rather than adding a second decider. Writing them caught three lies in the
-      first draft: a `cancelOn` recipe that did not cancel (cancelling aborts
-      `s.$signal`; it does not stop the function), a path-traversal assertion
-      that proved nothing (the client normalises `..` before the request
-      leaves), and a `useForm` snippet that did not compile.
-- [x] **Lowered the `MAX_WITHOUT_EXAMPLE` ratchet 156 → 128** in
-      `scripts/gen-reference.ts` by writing `@example` blocks for the 28 entries
-      an app touches first — every `cell({…})` key (`state`, `methods`, `scope`,
-      `ttl`, `selectors`, `listensTo`, `validate`, `persist`, `visible`,
-      `worker`, `transaction`, `version`, `onMigrate`, `onInit`, `onDestroy`)
-      and the `aio.run` keys (`appId`, `appDir`, `dbPath`, `routes`, `users`,
-      `key`, `auth`, `port`, `expose`, `tls`, `host`, `assets`, `client`).
-      Writing them found a wrong one before it shipped: the `users` example gave
-      `AioUser` a `name`, and the type is `{ id, role }`.
-- **Minor, and written down because dropping a stricter gate silently is the
-  habit this file exists to break:** frustration F1 proposed "a hook in
-  `am agent` needs a real example app that uses it". It was not built;
-  `tests/hook-tiers.test.ts` gates tier honesty instead, which is weaker, and no
-  reason for the swap was recorded at the time.
-
-**Left alone, measured — from the Electron verify round (2026-09-20).** Both
-were found, driven against real Electron 44.4.2, and deliberately not changed:
-
-- **A child window opened by `openWindow` has no popup policy of its own.** The
-  main window has `setWindowOpenHandler` + `will-navigate` +
-  `will-attach-webview`; the child has none. Measured rather than assumed: a
-  `window.open()` from that child gets a FRESH renderer with `sandbox: true`, no
-  preload and no node — even when the parent is `sandbox: false` with the app
-  preload. So it is an inconsistency (a popup opens as a plain window instead of
-  going to the system browser), not an escalation, and denying popups there
-  would break legitimate flows such as an OAuth window.
-- **`launchElectronClient` (`--client=electron` connect mode) never passes
-  `requireSandbox`.** That window belongs to no app config, so there is nothing
-  to read the key from. Documented in docs/clients/electron.md rather than
-  invented.
-
-**Refused, with the reason — `am shot` has no X11/Wayland capture fallback**
-(asked for in `feedback/frustration.md` F8b). A second capture path would be a
-second decider for what `am shot` produces, and its failure modes are worse than
-the current refusal: on X11 it can only guess which window is the app's (or hand
-back the whole desktop, including whatever else the user has open), and on
-Wayland it needs a portal permission dialog — which is the one thing `am`
-promises never to put on the user's screen. The present answer is a door, not a
-wall: it names `am restart <app> --cdp`, says why the port is opt-in, and now
-also names `am surface --json`, which reads the live UI as text without
-restarting anything. Reopen this only if `am shot` can identify the app's own
-window with certainty on both display servers.
-
----
-
-## Round of 2026-09-20 (the 1.0.6-beta release)
-
-**State.** 1.0.6-beta is cut: `check:release` green including the heavy tier,
-the tree stamped, benchmark run (68 s, 1 check try, 0 `src/` reads, 4/4).
-
-**Accepted, not built — from the release benchmark (2026-09-20).** The agent's
-friction list, kept because the kata says each item is fixed or written down:
-
-- **No headless UI client.** With "no window may open" as a constraint,
-  `am trigger` answers _"no UI client is connected, so there is nothing to
-  drive"_ and there is no third option: `--client=electron` opens a window,
-  `--client=browser` needs one, and `am surface` only observes. `testUI` in a
-  test file is the only way to drive a click. A `--client=headless` (happy-dom
-  in-process, the harness's own window) would close it. THE item of this round.
-- **Handle names are PascalCase when derived and verbatim when given**, so one
-  test reads `ui.add.click()` beside `ui.DeleteCoffeeButton.click()`. Documented
-  in `am agent --task=ui`, still a wart.
-- ~~**A submit button's surface entry lists no events**~~ — FIXED. The surface
-  reports the INHERITED event: a form's submit control carries the form's
-  `submit`, so `<button>Add</button>` inside `<form onSubmit>` reads
-  `["submit"]` instead of `[]`. One decider — `isSubmitControl()` in
-  `src/air/ui-trigger.ts`, the same rule implicit submission uses to find the
-  default button — so the surface and `am trigger` cannot disagree. Measured on
-  `examples/todo` before and after (`am surface --json`); pinned by
-  `tests/surface-submit-button-events.test.tsx`, whose last case CLICKS every
-  control in a form and requires the surface's claim to equal what ran.
-- ~~**`am instances` prints raw JSON with or without `--json`**~~ — was already
-  fixed (alpha73). Measured: on a TTY it prints the table (APP/PID/LISTENING/UP/
-  AIO + tally + hints), and a PIPE gets JSON because `detectMode()` makes that
-  the house rule for EVERY am command, not something special to this one.
-- ~~**`am create --help` lists the templates bare**~~ — FIXED. The help now
-  renders one sentence per template AND per target, from the same objects
-  `am agent` prints: `BRIEF_TEMPLATES` / `BRIEF_TARGETS` moved into the leaf
-  `am-help-text.ts` beside the lists they describe, and `am-agent-text.ts`
-  re-exports them. `tests/am-create-help-describes-templates.test.ts` pins the
-  same OBJECT (assertStrictEquals) and that both surfaces render it, so a second
-  hand-kept copy cannot ship. It also retired the prose that explained three of
-  the five targets and left `cli`/`server` unsaid.
-
-**Also accepted, not built — from the hunt rounds of 2026-09-19/20:**
-
-- ~~Concurrent `renderToStream`s share one SSR id/head scope~~ — DONE. Every
-  top-level render owns its state (`src/air/ssr-render.ts`), carried in the SSR
-  context scope the writers already thread through every element, so two streams
-  never touch one object and nothing is serialised. The `<select>` scope stack
-  was the third thing in that shared scope — measured, an interleaved stream
-  marked the other render's `<option>` — and moved with it.
-  `renderToStream(vnode, key)` / `collectHead(key)` name a render (both
-  parameters optional and additive), so a concurrent stream's head is exact;
-  unnamed, `collectHead()` throws rather than hand one page's title to another.
-  Pinned by `tests/air-ssr-concurrent-render-state.test.ts`.
-- ~~SSR writers do not validate attribute NAMES~~ — DONE. One decider
-  (`_assertAttrName`, `src/air/prop-write.ts`) reproduces the XML `Name`
-  production `setAttribute` enforces, and both the SSR props writer and
-  `_writeProp` call it, so the server can no longer emit
-  `<div x onload=alert(1)="1">` where the client throws. Pinned by
-  `tests/air-ssr-attr-name.test.ts`.
-- The always-on timeline estimator still reads ~4.3× low for one huge value
-  among small rows (fixing it costs an O(n) scan in production).
-- A per-account session ceiling (60 logins in 3 s are all accepted today), and
-  whether `updates.allowCrossOrigin` should become a real config key.
-- An Electron main-process extension point, and `am start --scratch` — both
-  designed in the 2026-09-20 session, neither built.
-
----
-
-## RESUME HERE — round of 2026-09-18 (macOS builds, 1.0.4-beta)
-
-**State.** 1.0.4-beta is prepared (version triple, CHANGELOG, upgrade guide,
-`update:api`, `update:docs`) and **the full `check:release` is green** —
-including the heavy tier (`test`, `test:onboard`, `test:build`, mutations and
-the fresh Ubuntu lab). Not pushed. The lab first failed on the known `umask 077`
-git permissions (`chmod -R a+rX .git` is the documented fix; applied this
-session).
-
-**This round: macOS stops being rubbish, and every package gets smaller.**
-`electron --platforms=macos[-arm64]` now assembles a real signed `.app` in a
-`.dmg`. Verified end to end on a real macOS 14 (x86_64) QEMU guest over SSH:
-Counter mounts inside the DMG, the Dock/menu say "Counter" (`app.aio.counter`),
-the window renders over `aio://app/` (`ui mounted 10 element(s)`), and
-`codesign -v --deep --strict` passes. arm64 is packaged + arch/format-verified.
-
-- New: `src/build/macos-app.ts` (bundle assembly, pure-TS ICNS, plist editor),
-  `src/build/dmg.ts` (native / SSH-remote `hdiutil` / loud refusal),
-  `src/build/electron-locales.ts` (locale trim on every OS).
-- The Deno binary is `CFBundleExecutable`; the nested Electron carries the same
-  `CFBundleIdentifier` + icon (that is what names the Dock entry); the whole
-  bundle is signed inside-out (ad-hoc). `Contents/MacOS/` holds only the
-  executable — a `dist/` there breaks the code seal, and none is needed (the
-  binary serves its embedded VFS `dist/` over the app socket).
-- The artifact is always ONE file: `.dmg` with a Mac, else a `.zip` of the
-  `.app`. Returning the bare `.app` directory made `--platforms=macos` fail with
-  "produced no recognized artifact" on every host without a Mac.
-- Deleted `default_app.asar` broke Electron silently (exit 1, no output) —
-  measured; it stays. Licence files (`LICENSE`, `LICENSES.chromium.html`) now
-  ship in `Contents/Resources/` as they already did on Linux/Windows.
-- One Electron version framework-wide, pinned EXACTLY at **44.4.1** (newest
-  installable — Deno's 24 h `minimumDependencyAge` refuses 44.4.2, published 1.7
-  h ago, and that blocked the whole example suite). `am create` pins it, the
-  examples pin it, and `tests/electron-version-consistency.test.ts` gates it
-  (freshness against upstream's `latest` is REPORTED, never fatal).
-- `aio ship` recognises a `.dmg` (UDIF magic is at the END) and refuses one by
-  name rather than mislabelling it `binary`.
-
-**Follow-up for a future round:** an unsigned arm64 `.app` (the no-Mac `.zip`
-path) cannot RUN on Apple Silicon, because editing the nested `Info.plist`
-invalidates Electron's shipped signature. Producing a shippable arm64 zip with
-no Mac would need either a Developer ID signature or a way to avoid editing the
-nested plist. The `.dmg` path (a Mac, local or `$AIO_MACOS_SSH`) signs
-correctly.
-
-**Review pass on the same day (Claude).** It re-ran the release on the real
-OSes: an `am create` electron app built for 4 platforms from Linux, with every
-package's contents listed. The Windows zip and the one-file exe were
-double-clicked on Windows 11 from a cold cache, on a Czech-locale system, so the
-locale trim was tested too. The `.dmg` was installed and run on macOS 14, and so
-was the no-Mac zip. All rendered the UI with zero TCP ports. The five fixes are
-in the CHANGELOG ("Review round"). Open items it found and left:
-
-- [x] A compiled binary still prefers `./node_modules/.bin/electron` (rung 3 in
-      `findElectronBin`) over the runtime it carries — gated on `!compiled`
-      (1.0.5-beta, tests/electron-aio-decides.test.ts).
-- [x] Old Electron runtimes in `~/.cache/aio/tools/electron/` are never pruned —
-      **`am prune` (1.0.7-beta)**. Measured on this machine: 32 entries, **7.7
-      GB**, Electron 41.2.1 → 44.4.2. Not a blind prune and not automatic: a
-      launch stamps the runtime it used (`touchRuntimeUse`/`.aio-last-used`), so
-      age is a FACT rather than a guess, and `am prune` REPORTS every entry with
-      its size and the sentence that decided it — `--yes` deletes exactly that
-      list and nothing else. The version this aio ships is never offered at any
-      age, unknown age is never "unused", a lock is never touched, and
-      `--keep=43.4.1` protects a version an app here is pinned to. Rejected
-      (each in the module comment): prune on launch/`am fix` (the app next door
-      goes offline), keep-N-newest (version order is not need order),
-      keep-this-platform-only (cross-build runtimes are inputs).
-      `src/build/electron-cache.ts`, `src/am/am-cmd-prune.ts`,
-      tests/electron-cache-prune.test.ts.
-- [x] The log says "launching Electron (fetched runtime…)" even when the runtime
-      was unpacked from the exe itself — now "runtime carried by this app"
-      (1.0.5-beta).
-- [x] Every packaged app logs Electron's "Insecure Content-Security-Policy"
-      warning — **fixed in 1.0.7-beta by removing the cause**. The meta CSP this
-      release added did not silence it: Electron's check is literally
-      `if (!mainFrame._isEvalAllowed())`, and `"basic"` said nothing about
-      scripts. `"basic"` now carries
-      `script-src * data: blob: 'unsafe-inline' 'wasm-unsafe-eval'` — every
-      source a page could already reach, minus `'unsafe-eval'`. Measured on a
-      real Electron 44.4.1 window over `aio://`: warning gone, `EVAL: blocked`,
-      `WASM: allowed`, `INLINE: allowed`, module still loading.
-      `ELECTRON_DISABLE_SECURITY_WARNINGS` was NOT used and a test keeps it out
-      of `src/`. Opt out by name: `cspDirectives: { "script-src": false }`.
-      tests/electron-csp-eval.test.ts (pure + a real window under
-      `test:electron`).
-- [x] field report §11 — Electron's `Invalid guestInstanceId` on every
-      `<webview>` detach lit the dev overlay's error badge permanently.
-      **Annotated, not filtered, in 1.0.7-beta.** Reproduced on Electron 44.4.1
-      with aio's own window preferences and `will-attach-webview` hook:
-      `window.onerror` message `Uncaught Error: Invalid guestInstanceId: 2`,
-      filename `node:electron/js2c/isolated_bundle:1:7012`, and a stack with no
-      app frame at all — so the SOURCE is the only discriminator there is. Fires
-      on every removal, settled guest or mid-attach.
-      `src/diagnostics/upstream-noise.ts` recognises it by message AND source,
-      both anchored (a test enforces the anchoring and that every rule names a
-      tracker item), so an app that throws the same words from its own bundle
-      stays loud and an Electron that renames the bundle goes back to noisy
-      rather than quietly swallowed. The line still reaches the log, at info,
-      reading "…— known upstream issue (electron#53989), not this app: …"; it
-      never reaches `errors=N`, never colours the overlay badge and never opens
-      the panel, and is listed there as a muted `notice`. ONE decider: the
-      Electron main script's copy is STRINGIFIED from the same array
-      (`upstreamNoiseMatcherSource`) and a test pins that the two agree.
-      Verified end to end — aio's real generated diagnostics block against a
-      real `<webview>` detach now writes
-      `[aio:renderer:info] … electron#53989
-      …` where it used to write
-      `[aio:renderer:error]`. tests/upstream-renderer-noise.test.ts,
-      docs/clients/electron.md.
-- [x] macOS `.app` self-update had no install strategy — and worse, it did not
-      KNOW that. Measured before the fix:
-      `classifyTarget({execPath: "/Applications/Counter.app/Contents/MacOS/Counter"})`
-      answered `"binary"` and `installableTargets` answered `["binary"]`, so a
-      bundle would have accepted a plain-binary release and renamed it over
-      `Contents/MacOS/<exe>` — a file inside a signed bundle, which leaves an
-      app macOS refuses to launch. 1.0.7-beta gives it a target of its own
-      (`"macos-app"`), which installs NOTHING and refuses with the remedy named
-      (the download link, drag to /Applications, and where the data lives) — the
-      same shape Android already had. `apply` throws too, for the `updates.auto`
-      door. tests/updates-macos-app.test.ts.
-
-      **1.0.13-beta: a real macOS install strategy** (target
-      `"electron-app"`): the Mac that signs the `.app` also packs it as
-      `<bin>-mac-<arch>.app.tar.gz`; `am publish` names it in
-      `darwin-<arch>.json` and copies the `.dmg` beside it (found by its `koly`
-      trailer). The client stages the bundle beside `X.app`, runs
-      `codesign --verify --deep --strict` and the bundle executable's
-      `--version`, then the detached shell swaps the folders and relaunches
-      with `open -n`. A translocated or unwritable copy refuses before
-      downloading. Verified on the macOS 14 VM (swap + relaunch, seal and
-      sha256 refusals, real App Translocation).
-      tests/macos-app-self-update.test.ts, tests/updates-e2e.test.ts.
-- [x] macOS `.app` / Electron `.zip` rollback when the new version never boots:
-      the swap helper waits 120 s for the first boot to take the first-boot
-      token (one atomic claim on each side), then stops the new version, puts
-      the old folder back and relaunches it. The next boot logs it and dismisses
-      that version (no reinstall loop). Verified on the macOS 14 VM (a v2 that
-      exits at start: v1 back after 120 s) and on Windows 11 (the PowerShell
-      helper, both outcomes). tests/updates-first-boot-rollback.test.ts.
-
-      Verify on the real OS before believing any of it — `ssh aio-macos`,
-      `.katana/targets.md`.
-- [ ] A downloaded `.dmg` meets Gatekeeper (not notarized). This is documented,
-      but only a Developer ID signature fixes it.
-- VM note: a Windows VM whose display has gone to sleep paints Electron windows
-  WHITE in screenshots, while the DOM is fine.
-  `powercfg /change
-  monitor-timeout-ac 0` is now set on `w11pro`. Check the
-  DOM (`--cdp`) before believing a blank screenshot.
-
-**The 2026-09-17 round is closed** (Windows builds, 1.0.3-beta).
-
-**Windows, for the record.** A Windows desktop app opens on the first
-double-click from either artifact on a machine with nothing installed, and the
-one-file exe binds **zero TCP ports**. Verified on a real Windows 11 VM (zip +
-self-contained exe, `ui mounted 7 element(s)`, no listening TCP port).
-
-- Spawn: a `--no-terminal` GUI exe has no console, so inheriting stdout threw
-  `Invalid handle`; retry with the std handles discarded (`electron-spawn.ts`).
-- One Electron version per build (`installedElectronVersion` requires a real
-  `dist/`; one `resolveElectronVersion` decider) and one platform per package
-  (fresh staging + executable-format check) — the zip shipped 44.4.1 beside a
-  43.0.0 exe, and both platforms in one 350 MB zip.
-- Zero ports for the one-file exe: the embedded VFS `dist/` is served over the
-  app socket instead of opening a loopback port (`resolveZeroPort`).
-- The named pipe is drained (`FlushFileBuffers`) before `DisconnectNamedPipe`:
-  real Windows DISCARDS unread buffered bytes on disconnect, so the first page
-  request answered `read EPIPE` and the window failed to load. Wine never
-  reproduced it.
-- Built-in zip reader (`server/zip-extract.ts`); the exe carries Electron's own
-  release zip and unpacks it through the same verified installer a download
-  uses.
-- The build stops embedding dev-only npm closure (esbuild/electron/happy-dom
-  graph walk) and bakes `--client=…` from the target flags.
-
-**The 2026-09-16 round is closed** (areas A–H committed at 2fb9ebe57).
-
-Small follow-ups from the fixers:
-
-- [x] Android runtime (`src/standalone-air.ts`) lacks the serverUser /
-      serverRequest / serverAuth / blocking stubs; stale comment atop
-      `src/server/auth-context.ts`. Both done: the four facades now live on the
-      standalone entry (throwing, naming the WebView), and auth-context's header
-      no longer claims the browser gets a harmless `undefined` —
-      `tests/android-server-only-stubs.test.ts` pins the bundle, the call and
-      (by metafile) that no client bundle holds that module at all.
-- [x] Count the shutdown "database file is GONE" ERROR in `errors=`
-      (`src/diagnostics/logger-core.ts` hook). DONE earlier: counted above the
-      level gate; pinned by `tests/logger-errors-counted.test.ts` and
-      `tests/db-vanished-at-shutdown.test.ts`.
-- [x] `am check` is green with the `aio` import mapping removed
-      (`src/server/graph-validator.ts`). FIXED: the browser map injects `aio`,
-      `aio/ui`, … unconditionally, so the walk never saw the app's own
-      deno.json. `validateGraph` now takes `{ appImports }` (passed by
-      `am check`) and refuses every `AIO_LIBRARY_ENTRIES` specifier the app does
-      not map, by name, with the line to add — inferred from the app's own aio
-      source. Pinned by `tests/am-check-bundle-truth.test.ts` (e2e) and three
-      cases in `tests/graph-validator.test.ts`.
-- [x] The production dispatch loop does not log a self-call that runs after its
-      caller threw (testCell does). FIXED: `dispatch.ts` warns at the dispatch
-      site, naming caller and queued action, through `selfCallSurvivedLine()` —
-      ONE wording now shared with `testCell`. It corrects the rejection line
-      printed beside it, which claims "no state changed". Pinned by
-      `tests/testcell-self-call-queue.test.ts` (testServer, the real loop).
-- [x] `docs/clients/app-manager.md`: document `am dispatch --args=@file` / `-`.
-      DONE — the "Action dispatch" section now shows all three spellings
-      (`--args=@file`, `--args=-`, `--body=@file`) and says what they are for (a
-      payload the kernel refuses as an argv entry), how a path resolves, and
-      what an unreadable file answers. Every line was RUN against a live
-      `examples/todo` before it was written. `tests/am-dispatch-args.test.ts`
-      gained a case that keeps the guide naming them, and cross-checks the error
-      wording it quotes against `readFlagPayload`'s own.
-
-Hunter reports with repro scripts: scratchpad `h1`–`h8` (session 26af1791…).
-They are temporary; the findings are summarised above.
-
-**Still open after that** (from the full triage of this file):
-
-- [x] Ratchet tightening left over: the silent-catch ceiling is at its exact
-      count (330 blocks / 91 handlers); lower it as the remaining swallows in
-      `src/state/blocking.ts:175` and `src/sync/browser-storage.ts:81` are
-      justified or made loud. `tests/browser-server-only-stubs.test.ts:118` is
-      still vacuous. **DONE (2026-09-22):** blocking/async-db terminate +
-      browser-storage adopt justified in place (`aio-ok:`); ceiling 322 → 319.
-      Stub test no longer a mere `!==` reference check — proves the Deno export
-      stays callable (silent `undefined`) while the browser stub throws the
-      teachable line.
-- [x] **Dev-only chunk — done (2026-09-21). MEASURED 12.0 KB gz off every page
-      load**; the ceilings came down with it, 90 → 79 (AIR) and 92 → 82 (app).
-      `src/browser/dev-diagnostics.ts` holds the lot, reached through the one
-      dynamic import in the tree (`browser-air-commands.ts`) that
-      `esbuild-plugin.ts` marks external at `/__aio/browser/dev-diagnostics.ts`
-      — the dev server's own live-transpile route, so the specifier is real
-      wherever dev is real and 404s exactly where prod closes that namespace.
-      Counter app, esbuild metafile: 250,996 → 218,118 raw, 94,065 → 81,765 gz.
-      What left: `ui-trigger` + `ui-surface` + `ui-remote` (the `am surface` /
-      `am trigger` executor — driven only by trojan frames, and the trojan is
-      never mounted in prod), `dev-overlay`, `contrast-audit`, `selector-audit`,
-      `dev-readonly-hint`. Every one category (a): observe-only, or a channel
-      prod does not open. Verified end to end — `am surface` and `am trigger`
-      drive a live dev app through the chunk; the prod server serves the page
-      and 404s the chunk. Gate: `tests/bundle-dev-chunk.test.ts` (greps a real
-      build's metafile, both directions), mutation-checked. · What could NOT
-      move, so nobody re-litigates it from the size alone: `console-intercept`
-      (2.6 KB — forwards the page's console to the server log in PRODUCTION,
-      which is what `am logs` reads), `component-profile` (1.4 —
-      `am eval '__aioProfile()'` on a live prod app), `time-travel-panel` (4.5 —
-      public `useTimeTravel()`), `untracked-read` (1.5 — half of it is the prod
-      render path), `devtools-tree` (0.6 — public `connectReduxDevTools()`).
-      Moving any of them would make prod LESS capable than dev, which is the
-      forbidden direction. · Found on the way, and fixed in the same change:
-      `bench:bundle`'s "AIR alone" figure was measured with a bare esbuild
-      rather than the build's own plugin, so it reported a bundle nobody ships
-      (90 KB gz against the 80 a page downloaded). It runs `aioBrowserPlugin()`
-      now.
-- [x] **Missing update channel named the release, not a raw ENOENT/404**
-      (2026-09-22). `fetchManifest` rewrote HTTP 404 and file:// missing as
-      `no release manifest at <url> — …` (same mouth for both), so a mistyped
-      channel no longer looks like a transport fault or like "you are up to
-      date". Vacuous `error.length > 0` in the e2e pin replaced with the channel
-      path. Pins: `tests/updates-fetch.test.ts`, `tests/updates-e2e.test.ts`.
-- [x] **`.pressed` / `.expanded` were the checked callable-lie again**
-      (2026-09-22). `aria-pressed` / `aria-expanded` (the documented
-      meaningful-false attributes) were not on the surface, so
-      `assertEquals(ui.Mute.pressed, false)` read back a lazy callable. Promoted
-      next to `checked`; `.attr` remains for everything else. Pins:
-      `tests/ui-surface-aria-pressed.test.tsx`.
-- [x] **Sync-method browser-replay differential** (2026-09-22). Same sync method
-      in-process vs real Chromium via `withE2E`; state + return compared; JSON
-      losses pinned with `wireBecomes`. Skips cleanly when no browser. Pin:
-      `tests/transport-differential-browser.test.ts`.
-- [x] Flaky-test remainder: `tests/am.test.ts`, `tests/spawn.test.ts` onto
-      `stopChild` with stderr + exit code kept. (2026-09-22) Root causes were
-      harness, not product: am fixtures wrote a stub `App.tsx` that started a
-      real esbuild child via graph validation on every trojan server — under
-      load that child outlived `stopEsbuild`'s 2 s bound and the sanitizer
-      blamed the next test. Fix: no `App.tsx` (validation short-circuits), wait
-      for the port to answer instead of `sleep(50)`, `assertAmCode` keeps
-      stdout/stderr/exit. spawn fixtures left a bare `sleep 300 &` inheriting
-      pipes so the drain bound could expire with reads still open; redirected
-      the grandchild, replaced post-kill sleeps with `until(!alive)`, and
-      `stopSpawn` (product `kill()` already escalates — no ChildProcess for
-      `stopChild` without a surface break) keeps the exit code on failure.
-      Verified: spawn 16/16 ×3, am 87/87 ×2, sanitizers on.
-- [x] **`am prune --yes` reported success after a failed removal** (2026-09-22).
-      Printed `outError` per failure, then "Removed N, freed <planned>" and
-      exited 0 — so `am prune --yes && …` claimed success while runtimes stayed,
-      and `--json` emitted two documents (`{error}` then the result). Now: one
-      document with `failed` + actual `freed`, exit 1. Same dual-doc class fixed
-      on `am doctor --json` (findings + error in one object). Pinned by
-      `tests/electron-cache-prune.test.ts`.
-- [x] **`am lab --stop` / `--reset` and `am restart --json` honesty**
-      (2026-09-22). Same dual-doc / false-success class as prune/doctor:
-      `labStop` printed `outError` on a failed `docker stop`, then force-rm'd
-      and claimed `{stopped:true}` exit 0; `labReset` ignored a failed `rm` and
-      claimed `{reset:true}`; `am restart --json` emitted note documents
-      (replay/defaults/unsaved/switch-checkout) before the start result so
-      `JSON.parse(stdout)` failed. Now: `fail` on stop/rm failure (no fall-
-      through), and restart notes ride on stderr in `--json`. Pins:
-      `tests/am-lab.test.ts`, `tests/am-restart-keeps-port.test.ts`.
-- [x] **`am shot --video --json` announces recording started** (2026-09-22).
-      Progress rode on stderr in pretty only; `--json` stayed silent until the
-      final `{file,…}` document — a script drove a scene into a dead recorder
-      (field report §15). Same channel rule as `restartNote`: announce on
-      stderr, one document on stdout. Pins: `tests/am-shot-video.test.ts`.
-
-- [ ] Clear-out: move the DONE items below to `feedback/resolved.md`, the policy
-      sections (beta gate, alpha70 decisions, standing policy, facts) to
-      `.katana/` / docs, then delete them here; delete the per-app reports left
-      in `feedback/` once each item is in resolved/refused (back them up first —
-      `feedback/` is gitignored, and `check:report-dirs` keeps it that way).
-
-**Answered, no work queued:** a one-file `deno run` build is feasible (measured:
-2 MB, 560 KB gz) but today fails to boot — the SQLite worker file and the page
-bundle are not inside it. GitHub releases exist: `deno task ship github`.
-
-## Open work
-
-### Left open by the 1.0.19-beta round (real Windows + macOS hardware)
-
-- [ ] Android emulator and iOS lanes: moved here from 1.0.19 by agreement.
-- [ ] 26 Windows tests still skipped: local-peer auth over named pipes, and
-      runner fixtures. `tests/test-shards-leftover.test.ts` has 7 of them.
-- [ ] `tests/stop-child.ts` is a hard kill on Windows (SIGTERM is
-      TerminateProcess there), so the 34 files that use it never ask an app to
-      stop on Windows.
-- [ ] `check:orphans` reads a recycled pid as a live orphan when the lock has no
-      start token (a pre-1.0.19 lock, a hand-written fixture).
-- [ ] About 12 dev-only renderer warnings are still silent in a packaged app.
-- [ ] A trailing positional `undefined` argument arrives as `null`; `testUI`
-      fails it and says why, the wire is unchanged.
-- [ ] A sync row left by a kill under 1.0.9–1.0.18 (no `settled` mark) still
-      stops the start; the message gives the one-line repair. Automatic repair
-      can drop an acknowledged change, so it is manual.
-- [ ] The `settled` mark is a second sync per accepted change under
-      `PRAGMA synchronous = FULL` (about 5 ms → 10 ms on NVMe).
-- [ ] The portal teardown has two deciders for the never-mounted case (the
-      `_anchor` guard and the `gone` skip); only the pair is guarded by a test.
-- [ ] A real double-click of the one-click `.exe` on a Windows desktop session
-      (it ran from ssh session 0: no window on screen), the macOS DMG
-      double-click path, and Bluetooth/USB/serial pickers in a real window.
-- [ ] `build --smoke` drives the desktop artifact on a Linux host only.
-- [ ] Test runs rewrite the tracked `proof-matrix.json` in the checkout.
-- [ ] macOS: a whole-suite run at background QoS with the display asleep is 4×
-      slower and fails timing tests; the lab fence runs it at normal priority.
-
-### macOS: offer "Move to Applications" — built in 1.0.18-beta
-
-- [x] A `.app` opened from the mounted `.dmg` or from Downloads asks once, after
-      its window is up, to be copied into Applications and reopened from there
-      (`src/server/macos-move.ts`). Run on macOS 14 from the image and from a
-      quarantined, translocated copy.
-- [ ] The two buttons were never pressed on a real Mac (no remote click on the
-      test Mac; `AIO_MOVE_TO_APPLICATIONS=move` drove the move). A person should
-      press each once.
-- [ ] A real browser download (Gatekeeper's first-open hold, then the offer) was
-      not run end to end, for the same reason.
-
-### Left open by the 1.0.17-beta audit round (2026-10-02) — accepted, not yet built
-
-Skipped or left open by the fixes that went into 1.0.17-beta. One line each.
-
-Found late in the round, deliberately not built in 1.0.17:
-
-- [ ] Per-call attribution of a worker cell's patch batches: tag each batch with
-      the call id(s) whose actions produced it and attribute `unsaved` by tag,
-      as the main isolate does (today every call in flight on the cell shares a
-      failed save's verdict). Audit every async write path in the worker first —
-      each must carry its call id.
-- [ ] Keep a verified download across update retries (recorded with its signed
-      digest, re-verified before reuse, removed on dismiss or install) — today a
-      refused release is downloaded again on every retry.
-- [ ] aiol: give the code mask the file's path so a `.ts` file gets the plain
-      (non-JSX) rules; today a `.ts` holding `"</p>"` in a string is left
-      `[manual]` (~130 mask call sites to thread).
-- [x] A production build started with `--host=0.0.0.0` prints a `trojan` row;
-      the listener is keyed (401 without it), but the row name reads as the dev
-      API. (1.0.19: the row is labelled `control`.)
-- [ ] A tree an older updater left half-made under another version
-      (`<install>.staged-<v>`) cannot be proven the updater's and is named at
-      every start; find a sound proof or a one-time prompt.
-
-Build / trim:
-
-- [ ] Recover an interrupted trim at dev boot too (today: Ctrl-C, the next
-      compile, and `deno task build`'s first step).
-- [ ] A directory in `compile.include` is not a module-graph root.
-- [ ] The "graph loads it" trim guard sees one entry per npm package, not its
-      files: a CJS package that `require`s from its own root-level `test/` is
-      not detected (`build.keepPackages` is the escape).
-- [x] `cli` targets keep unreached packages (`keepUnreached`);
-      `docs/build/targets.md` says "for every target except `cli`".
-- [x] `build.chromiumExtras` was validated only by Electron builds — a build
-      that packages no Electron now warns about a bad value
-      (`chromiumExtrasNote`).
-- [ ] Minify: esbuild refuses TS parameter decorators ("could not minify"), and
-      a nested function declared after a `return` loses its name.
-- [ ] `docs/build/environment.md` (`AIO_STRIP_CHROMIUM`) still says "software
-      Vulkan fallback"; it could also mention the automatic fat-exe fallback.
-
-Windows one-click `.exe`:
-
-- [x] Run a real app's self-update on Windows end to end (build → publish →
-      update → reopen the old `.exe`) — done on Windows 11 for 1.0.17-beta,
-      including a 1.0.16 install updated by 1.0.16 and then 1.0.17.
-- [ ] The stub always exits 0 — it does not propagate the app's exit code.
-- [x] An older `.exe` opened over a newer install downgrades it — the header
-      carries the version, the install says its own in `.aio-sfx-version`, and
-      the stub keeps a newer install (an `.exe` built before this still wins).
-- [x] A channel that publishes only the `.exe` offers SFX installs a release
-      they refuse — `am publish` refuses a one-click `.exe` without its `.zip`
-      (`--no-zip` is the way out), and the install's refusal names the missing
-      zip instead of "reinstall".
-- [ ] No progress UI during the first extraction.
-- [x] The Deno-side `readSfxTrailer` parses a signed `.exe`
-      (`src/build/sfx-trailer.ts`).
-- [ ] Untested: the remote stub fetch against the real registry, a Windows build
-      host, the 10-minute lock timeout and an abandoned mutex.
-
-Local-peer lockdown:
-
-- [ ] Run it on Windows (`-http` pipe gate, `electron.cmd` resolution) and macOS
-      (`LOCAL_PEERPID`, direct spawn of the app bundle's binary). Identity there
-      is pid only — no start time — plus disarm-on-exit.
-- [ ] The window's "refused by its server" surface is log + title only, no
-      dialog; it was run against a stub `electron`.
-- [ ] Prod is stricter than dev here (dev is open for `am`/amui), so only the
-      new e2e exercises the prod gate.
-- [ ] Add the lockdown guards to `check:mutations` / the proof matrix; the
-      identity-read-at-accept change has no test.
-- [ ] `tests/electron-main-relay.test.ts`: cases whose server never greets could
-      see a reconnect if stretched past 5 s under load.
-
-Version / memory / updates:
-
-- [ ] Directory rollback writes `installed.json` before the helper moves the
-      folders; the forward directory swap never reconciles it.
-- [x] The replay ceiling catches re-entry within one boot only; a loop that
-      re-runs the whole boot block starts a fresh session each time. (1.0.19: a
-      tail replayed start after start is charged against the ceiling.)
-- [x] `pressure` memory reports still repeat every interval;
-      `docs/debugging/production.md` does not mention the said-once rule.
-      (1.0.19: said once, and again as it worsens.)
-- [x] The budget error carries `.code` (`MEMORY_UNBOUNDED`).
-
-Core:
-
-- [x] `_adoptUser` missed an in-place mutation of the same user object — the key
-      is stored on the client's meta at connect (`userKey`). A record with NO
-      key (a `Set`, a class instance) edited in place is still not seen.
-- [ ] aio client pin: the warning has no durable surface once the app page
-      loads; a CA-valid certificate that differs from the pin raises no
-      `certificate-error`; the token is still sent after the warning. Refusing a
-      changed pin is major-version material.
-- [x] The server's `AIO_DISCOVERY_PORT` fell back to 8099 in silence for a
-      non-decimal value — said now (`discoveryPortRefusal`).
-- [ ] The pin handler was exercised through the evaluated script, not a real
-      Electron window.
-
-Tooling:
-
-- [x] `am create --css=tailwind`'s refusal (`tailwindRefusal`) is documented
-      (`docs/ui/css-toolchain.md`).
-- [x] The typographic-quote PowerShell escape is in `src/server/pick-path.ts`
-      (`_psEscape`) too.
-- [ ] `aiol --safe-fix`: a nested function that shadows an imported `call` is
-      still rewritten; JSX prose next to a `{…}` child is read as code;
-      `codeMask` is not JSX-aware.
-- [ ] No root cause was found for the lock dirs the shard runner used to see
-      held; the gate is back, the cause is not known.
-- [ ] `check:orphans` does not sweep stale `/tmp/xdg-shard-*` dirs.
-- [ ] Ledger rows to add: `shardPassed`, `pollBackoffSites`' `every` guard,
-      `runsFrom`'s `file:` check, the new minify/audit guards.
-
-### Android / iOS — after the first real run (2026-09-18, 1.0.5-beta)
-
-`deno task test:android` now runs both APKs on an emulator (three shipped
-defects fixed, see CHANGELOG). Still open, from the same audit:
-
-- [x] **A kill within ~1 s of a change loses it** (standalone APK). Fixed:
-      `AioNativeStore`, a `@JavascriptInterface` writing a real file (temp →
-      fsync → atomic rename) before the write call returns, chosen over
-      localStorage by one decider (`_pickPersistStore`) that logs which store
-      the run picked. Measured on API 35, examples/counter: SIGKILL 122 ms after
-      a change LOST it before, SURVIVES a 50 ms kill after. The bridge is
-      installed only for a standalone APK (`!TALKS_TO_SERVER`) — never for a
-      client/dev APK that opens a server's pages. The e2e step kills the app as
-      fast as adb can deliver it.
-- [ ] Release APK is debug-signed + debuggable; no AAB. Needs a signing story (a
-      keystore only the user can provide) before any store upload. AGP 8.7.3.
-      targetSdk is 35 now (Play's floor), verified on an emulator: edge-to-edge
-      is handled by insetting the WebView's frame, and the screenshots
-      before/after the bump match. R8 was checked too (dexdump on release APKs
-      built three ways): AGP 8.7.3 already keeps the native store's
-      `@JavascriptInterface` methods, so NO `proguardFiles` line is needed —
-      adding one repackages every class for nothing.
-- [x] `CAMERA` is declared for every APK, used or not. Opt-in now
-      (`android: { "camera": true }`), with MainActivity logging the exact key
-      when a page asks for a camera it cannot have. Building the APK for real
-      found a second defect in the same line: the permission implies a REQUIRED
-      `android.hardware.camera`, so both features are declared optional —
-      `tests/build-android-camera.test.ts` measures it with aapt2.
-- [x] Windows host: the build's `gradlew` / `gradle.bat` path is unverified.
-      (1.0.19: a Windows host starts `gradlew.bat`.)
-- [ ] **iOS: never built.** Needs Xcode on the macOS VM (`ssh aio-macos`, 16 GB
-      now) — the user downloads the `.xip` (Apple ID). Read-only findings to
-      verify there: ATS `NSAllowsLocalNetworking` makes `NSAllowsArbitraryLoads`
-      ignored (http to a LAN hostname blocked?); `derivedData` inside the
-      artifact dir ships in dist; simulator-only `.app`; icon alpha;
-      `MARKETING_VERSION` with a suffix; no shared scheme; no UIScene.
-- [ ] A real phone (proof row `android (device)`), once one is attached.
-- [ ] **APK: bake app.ts config into the bundle** (answers the APK theme item
-      (§3) above, found 2026-09-25). A local APK never runs `app.ts`:
-      `makeEntryCode` (`src/build/client-bundle.ts`) imports `App.tsx` only, so
-      NOTHING passed to `aio.run({...})` reaches the phone —
-      `ui.theme`/`layout`/`lang`/`dir` (`_applyShellUi` never fires), the hooks,
-      `persist`, `cellDefaults`, `localFirst`, `circuitBreaker`, `perfBudget`.
-      Verified by bundling examples/counter for android: its inputs are
-      `App.tsx` + `cell.ts`, no `app.ts`. Today the build WARNS naming each
-      option the entry sets (`src/build/android-run-options.ts`, a source scan;
-      `tests/android-run-options-warning.test.ts`). The fix: a build-time config
-      probe that evaluates the entry's SERIALIZABLE options and bakes them into
-      the bundle for `runStandalone`, with the hooks still refused by name (they
-      are server code). Then shrink the warning to what is left.
-
-### ~~Two browser-bundle gaps left after report 9 (2026-09-13)~~ — DONE
-
-- ~~`docs/auth/auth.md` imports `serverUser` into a cell module~~ — browser
-  stubs throw the teachable line; `tests/browser-server-only-stubs.test.ts` pins
-  the docs examples bundle.
-- ~~`blocking` on the browser bundle~~ — facade in `browser-air` uses
-  `blocking-reason.ts` (no worker pool on the page); real `blocking.ts` defers
-  its worker URL to first use.
-
-### A size pass on the page (1.0.1-beta, 2026-09-13)
-
-The page grew 71 → 81 KB gz across three hunt rounds (+26 KB minified, all
-fixes; itemised in `tests/bundle-size.test.ts`). Measure message prose vs code
-in the metafile before raising the ceiling again (the dev-only diagnostics
-already moved to the dev-only chunk).
-
-### ~~The read-your-writes overlay is QUADRATIC in an async method~~ — DONE (measured 2026-09-21)
-
-`effectiveRoot()` (`src/state/cell-impl.ts`) memoises on
-`(committed, pendingArray, pending.length)`, so EVERY write invalidates it and
-the next read deep-clones committed state and replays the entire pending batch.
-A loop that reads its own writes is therefore O(n²) in both time and allocation.
-Measured on the identical body (`push`, then read `length`):
-
-    N=  250   sync   4ms   async     76ms
-    N=  500   sync   5ms   async    218ms
-    N= 1000   sync   6ms   async    768ms
-    N= 2000   sync  12ms   async  3,176ms
-    N= 4000   sync  23ms   async 12,882ms
-
-Sync is linear; async is quadratic. A bulk import or scan that reads its own
-writes blocks the whole server loop for seconds, and the only diagnostic the
-author gets is `BUDGET_EFFECT … hand CPU work to blocking("id", fn, arg)` —
-advice about a cause that is not theirs. Rewriting the identical body as a sync
-method is a 560× speedup nobody is told about.
-
-ATTEMPTED and REVERTED: applying only the new tail of the batch to the memoised
-root (same base, same array identity, count grew) takes the 4000-item case from
-12,882ms to 82ms — and `tests/proxy-differential.test.ts` found a real
-divergence at seed 1779560461, round 14: an `objarr_push` following a
-`read_map_json` was missing from the async read. `applyMutations` is a plain
-sequential loop and `batch.mutations` is only appended to within a batch, so the
-equivalence LOOKS sound and is not; the reason was not found in the time
-available, and this is the framework's most delicate file. The fuzzer is right
-and the change is out.
-
-**It shipped, and this entry was stale.** `effectiveRoot()` applies only the
-batch's new TAIL onto the overlay it already holds, under the same identity
-memo, with an `owned` map carrying the aliasing the full rebuild used to
-recreate — which is the answer to the question this entry ended on ("what does
-the full rebuild give a caller that a mutated-in-place root does not"): the
-ownership map, not the clone.
-
-Re-measured on this tree, the identical bodies:
-
-    N=  250   sync  4.0ms   async   5.3ms      (was  76ms)
-    N= 1000   sync  4.7ms   async   8.4ms      (was 768ms)
-    N= 2000   sync 10.6ms   async  24.1ms      (was 3,176ms)
-    N= 4000   sync 12.7ms   async  62.1ms      (was 12,882ms — 208× faster)
-
-Linear, and the sync/async gap is ~5× rather than 560×.
-
-Pinned by `tests/overlay-read-your-writes-linear.test.ts`, which counts DEEP
-CLONES rather than milliseconds — a timing assertion on a shared machine is a
-flake generator, and the quantity that regressed was never time. With the memo
-reuse disabled it reports **1,600 clones for 400 writes**; with it, under 100.
-
-Two things this cost, worth remembering: the first benchmark I wrote measured
-`0.00ms` at every N and I nearly filed the bug as fixed on it — `testCell`
-REGISTERS a `Deno.test`, so under `deno run` the body never executes and an
-empty measurement looks like a fast one. And the first mutation I used to check
-the test was a syntax error, which fails loudly enough to look like a red test.
-Verify the instrument, then verify the thing that verifies it.
-
-### Found in the post-beta audit (2026-09-12), verified, not yet fixed
-
-Both reproduced; neither is a correctness bug in shipped behaviour, which is why
-they are here rather than in the round's commits. The round's fixes are in
-`git log v1.0.0-beta..`, and what would need a major version is in
-`untracked/v2.md`.
-
-- ~~**`uiNames(ui)` and the miss listing are two producers of one fact**~~ —
-  **DONE (1.0.2-beta).** `collectElementPaths` is the one walker; miss
-  `available:` lists the same element paths as `uiNames` / `am surface --names`
-  (components stay as ordinal hints). Guard covers nested components.
-- ~~**Two deciders for test scratch directories**~~ — **DONE.** `tempDir()`
-  creates under `aioTestRoot()` (`AIO_TEST_ROOT` / `~/tmp/aio`); orphans sweep
-  covers that tree.
-
-### 1.0.1-beta — per-page head (proposed 2026-09-11)
-
-aio is one process by design — no load balancer, no CDN, no static-site export;
-"these things break simplicity and maintainability a lot" (user). With that
-settled, the README's ❌ ("not for content sites, SEO") rests on ONE missing
-primitive, and it is small:
-
-- [x] **`useHead({ title, meta, link })`** from `aio/air` — shipped in
-      1.0.0-beta (2026-09-12). Hoisted into `<head>` on SSR — AIR's render is
-      sync, so one pass collects it before `renderToStream` writes the head, no
-      second request — and swapped on route change on the client
-      (`document.title`, the meta tags it owns). Today `ui.head` is one string
-      for the whole app and there is no per-route primitive at all. New export,
-      no reshape; a `testUI` case that reads the title after `navigate()`, and
-      an SSR case that finds the article's title in `<head>`, not the body.
-- After it, the README reads ✅ "simple yet powerful enough for any single web
-  app or portal" and the ❌ is one clause: one process, by design.
-
-### Accepted from the nine-report round (2026-09-08)
-
-Nine field reports against alpha74–77. What was FIXED is in
-`feedback/resolved.md`; what was refused, with reasons, is in
-`feedback/refused.md`; what needs a major version is in `untracked/v2.md`. What
-follows is the rest: additive, agreed, not built yet. Ordered by what the
-reports themselves said it cost them.
-
-**The meta-finding, which several of these serve.** Three reports independently
-withdrew a complaint after reading the source, and two named the same cause:
-_"aio's features are consistently better than aio's discoverability."_ An agent
-greps `am help` for a keyword, does not find its exact word, and composes
-primitives it already knows — it will not browse. Two of the four withdrawn
-complaints cost their authors nothing but embarrassment; the third cost four
-hand-rolled parsers and a bug class they defended against by hand.
-
-#### 1 · Discoverability (report 3 §7, report 9 §8.0/§9.7, report 7 §7, report 4 §10.1, report 6 §8) — ALL DONE 2026-09-08
-
-The round's meta-finding: _"aio's features are consistently better than aio's
-discoverability."_ An agent greps `am help` for its own word, does not find it,
-and composes primitives it already knows — it will not browse. All six are done.
-
-- ~~`am help` should carry INTENT words, not just names~~ — the help lines lead
-  with ASSERT / TEST / verify for `expect` and GENERATE A TEST for `record`, so
-  a grep for the intent finds the verb.
-- ~~One `docs/AGENTS.md`, five lines~~ — written: five verbs, an "I want to…"
-  table, and the loop that works, with the `--cdp` prerequisite named once.
-- ~~A tip line in the `am status` footer~~ — every running app's status now ends
-  with `am surface --path=App` · `am expect <path> eq <v>` · `am help` ·
-  docs/AGENTS.md. Pretty mode only: `--json` is parsed by scripts, and prose in
-  a data channel is noise. `am status` is the command everyone runs first and
-  runs often, which makes it the one place a pointer is actually read.
-- ~~`aio/ui` is missing from `docs/basics/api-reference.md`~~ — listed under
-  Focused imports with the kit's own section. One report hand-rolled eight
-  components and ~889 lines of CSS with the kit one import away.
-- ~~A task-shaped doc index beside the domain-shaped one~~ — `docs/content.md`
-  now opens with an "I want to…" table, curated in the GENERATOR (one home, so
-  it cannot drift) and every target checked by `check:docs`, so a renamed page
-  breaks the gate instead of rotting.
-- ~~`docs/state/real-time.md` was found by accident, four levels down~~ — linked
-  from `basics/concepts.md` and `state/README.md`, the two pages where the
-  cadence decision is actually made.
-
-#### 2 · `am`, the surface every report calls the best thing in the box
-
-- ~~**`am restart` drops the argv the app was started with**~~ (report 4 §5,
-  report 1 §22.4) — **DONE 2026-09-08.** Replay was all-or-nothing: ANY flag on
-  the restart command line skipped the recorded launch entirely, so
-  `am restart --force` — where `--force` steers the RESTART and says nothing
-  about how the app boots — threw away `--cdp --port=8140`. Merging is per FLAG
-  now: an explicit `--port=9000` overrides the recorded one and everything else
-  is replayed, `am`'s own flags (`--force`, `--json`, `--wait`, …) are
-  transparent to replay, and both the replayed and the OVERRIDDEN flags are
-  reported — silently replacing a recorded flag is the same silence in the other
-  direction. `mergeLaunchFlags` is pure and pinned by six cases.
-- ~~**`am dispatch` has two argument shapes and the wrong one fails deep inside
-  the app**~~ (report 3 §4) — **DONE 2026-09-08.** Both readings are legal —
-  `--args` is the argument LIST, so `--args='["a","b"]'` passes two arguments
-  and a method taking one array wants `--args='[["a","b"]]'` — so the CLI cannot
-  refuse either. What it can do is stop the app's own message
-  (`v.startsWith is not a function`, about a value the author never knowingly
-  passed) from being the only thing said: a FAILED `--args` dispatch now carries
-  one extra line offering the other reading, with the exact command line to
-  type. Only on failure, only with `--args`, never on an empty list — a hint
-  that fires every time buries the message it sits under.
-- ~~**`am surface` has no geometry**~~ (report 6 §10.2) — **DONE 2026-09-11.**
-  `am surface --rects` attaches `w x h @x,y` per element. The measurement was
-  the easy half: `getBoundingClientRect()` answers everywhere and answers `0x0`
-  with no layout engine behind it, which reads as a real measurement of a
-  collapsed UI — the exact bug someone reaching for `--rects` is hunting. So the
-  counts travel with the rects (`measurable` / `laidOut`), the server-side
-  render REFUSES `--rects` instead of answering with zeroes, and a live client
-  that measures all-zero exits 1 naming both readings. Found a gate defect on
-  the way: `check:api` reported the four fields of one NEW OPTIONAL member as
-  four REQUIRED additions — the frozen-surface gate calling the additive shape a
-  break.
-- ~~`am surface --names` / `ui.names()`~~ (report 6 §5a) — **DONE 2026-09-08.**
-  `am surface --names` on a running app, `uiNames(ui)` in a test: full
-  `Component…:Element` paths, the form `am trigger` takes. A test pins that the
-  list AGREES with what a miss reports as `available:`, because two producers of
-  one fact is how they come to disagree. Shipped as a free function, not a
-  `ui.names()` member: `TestUI` is frozen, so a member could only be added as
-  OPTIONAL and every caller would write `ui.names?.()` forever. One spelling, no
-  `?.`.
-
-- ~~**Gate defect found while doing the above**~~ — **DONE 2026-09-08.**
-  `api-snapshot.ts` reported an added OPTIONAL member of a public type as
-  BREAKING — the one change that provably breaks nobody, and which the file
-  already has a rule for. Two causes, both in `objectMembers`: a typeLiteral's
-  `methods` were never read (only `properties`, so a type written in method
-  syntax had an empty member map), and an intersection's parts were looked for
-  under `intersection`/`types` when `deno doc` puts every payload under `value`
-  — so an intersection type read as having no members at all. With no member map
-  `diffMembers` correctly refuses to guess and the blunt whole-symbol verdict
-  applies. Dumped the real doc JSON rather than guessing the shape again;
-  `TestUI` now carries a 17-member map, and the classifier is verified BOTH
-  ways: adding an optional member reports `additive`, removing one still reports
-  `BREAKING`. This mattered well beyond one item — §6 is largely optional config
-  members on public types, and every one of them would have looked like a compat
-  break.
-- ~~`am logs --tag= --level= --since=` (+ `--follow`)~~ (report 7 §6, §8.8;
-  report 4 §9.8) — **DONE 2026-09-08.** `--level=warn` means warn AND above,
-  `--tag=cell` matches the NAMESPACE (so `cell:todo` and `cell:notes`, never
-  `checkpoint`), `--since=` takes a duration or a timestamp. The unit is the
-  EVENT, so an `ERROR` keeps its stack. `--follow` applies the same filters as
-  the tail it continues — filtering differently there would answer one question
-  two ways. An unparseable header passes every filter (dropping what cannot be
-  classified is how a filter hides the line that mattered), and an unreadable
-  `--since` is REFUSED, never ignored.
-- ~~`am state --watch <path>`~~ (report 7 §6) — **DONE 2026-09-08.** A line per
-  CHANGE, not per poll. `--wait=N` already re-read and re-printed every N
-  seconds, which is a poll loop with nicer syntax — and both reports wrote
-  `until` loops around `am state` anyway. Compared by VALUE (the state arrives
-  freshly parsed each poll, so identity comparison would mean "changed" ==
-  "polled"); the first reading prints too, because a change with no baseline is
-  unreadable. `--wait=N` now sets the interval for both modes. Fixed while
-  there: the path was `args[0]`, so `am state --watch todo.items` looked up a
-  key called "--watch".
-- ~~**`am start --instance=<name>`**~~ (report 6 §4) — **DONE 2026-09-08.** A
-  private copy beside anyone else's: its own lock, data home, socket and logs.
-  An agent's `am dispatch` used to land in the human's session and their clicks
-  in the agent's measurements; `--takeover` steals the lock, it never gave an
-  isolated one. NOT a new mechanism — `single-instance-lock.ts` already says
-  "AIO_APPS_DIR relocates the apps' DATA root — the lock/socket dir scopes with
-  it, so ONE env var isolates an instance completely." This is a name for that,
-  bound before any command resolves a lock, so `am` and the child it starts land
-  in the same private world without either knowing about the flag. An explicit
-  `AIO_APPS_DIR` wins (the more specific instruction), and a path-shaped name is
-  refused rather than turned into a directory.
-- ~~`am shot --selector` (report 3 §11.7)~~ — **DONE 2026-09-11.** Crops to one
-  element's box, MEASURED IN THE PAGE (`getBoundingClientRect`), so it survives
-  a scroll or a transform; a selector matching nothing, or an element measuring
-  `0x0`, is an error rather than a 1x1 image — the same "answered with zeroes"
-  refusal `am surface --rects` already makes. The "restart with --cdp" half was
-  already done: `noCdpMessage` names the client first and says what to type.
-- ~~`am shot --check` / `--update` against a committed baseline (report 4
-  §10.7)~~ — **DONE 2026-09-11.** aio had the three hard parts; this is the
-  comparison, and the comparison is where the traps are. It compares PIXELS, not
-  bytes (a re-encode is a different file and a gate that fails on an identical
-  screenshot gets deleted), with a per-channel tolerance defaulting to 2 because
-  antialiasing moves one or two. A MISSING baseline FAILS — the one case where
-  "nothing to compare" and "nothing changed" look the same. A failure writes
-  `<baseline>.actual.png`, and a size change is reported as a size change rather
-  than as 100% of pixels. Needed a PNG reader (`src/am/png-compare.ts`, 8-bit
-  non-interlaced, types 0/2/4/6, anything else refused by name); driven by the
-  two REAL PNGs already in the repo — one from an external tool, one from aio's
-  own encoder — plus an exact round-trip, because a fixture I encode myself only
-  proves my decoder agrees with my encoder.
-- ~~`am shot` must detect the stale-surface case rather than returning success
-  with old pixels~~ (report 6 §2) — **DONE 2026-09-08.** It now waits for the
-  window to COMMIT a frame (a double `requestAnimationFrame`, the browser's own
-  definition of "something was painted since you asked") before capturing, and
-  reports `painted: true|false`. An unconfirmed frame still writes the file — it
-  is worth having — but carries a warning and a `! STALE RISK` line naming the
-  cause (a hidden, minimised or occluded window is not composited) and the two
-  remedies. The caveat is in `docs/clients/electron.md` and the `am shot` docs.
-  Mutation-checked: hard-code `painted = true` and the test fails.
-- ~~`am instances` should print the DATA path beside each row~~ (report 1 §20) —
-  **DONE 2026-09-08.** The lock now records `dataDir`; `--json` reports it on
-  every row (`null` for a lock written before 1.0.0-beta — a field that appears
-  conditionally is one a script has to guess about), and `--long` shows a `DATA`
-  column when it DIFFERS from `home`, since a column repeating the obvious is
-  noise. The three spellings are tabulated in the docs, because the trap is that
-  `AIO_APPS_DIR` _appears_ to work: it moves the lock and the discovery files,
-  so `am` follows the app, while an `appDir` set in code leaves the database
-  where it was.
-- ~~`am restart <appId>` refuses an app id that is also not a component name~~
-  (report 3 §5) — **DONE 2026-09-08.** The positional was read ONLY as a
-  component label, so an id typed straight out of `am instances` was refused
-  with "this project declares no components, so it names nothing" — true about
-  components and useless about the thing the user was holding. A positional
-  naming a RUNNING instance now resolves to `--app`, at every `processPlan` call
-  site (start, stop, restart, watch): a plan that resolves while the command
-  acts on the wrong app would be worse than the refusal it replaced. A DECLARED
-  component still wins, because in a repo that declares one the label is that
-  component's name by definition — otherwise what a command means would depend
-  on what happens to be running. The refusal, when it stands, now points at
-  `am instances`.
-- ~~`am heap <app>`~~ (report 2 §9.4) — **DONE 2026-09-08.** `am state` says
-  what an app SERVES; nothing said what it HOLDS. A new trojan route reports
-  heapUsed against the real V8 ceiling (`heap_size_limit`, not the lazily
-  allocated `heapTotal`, which always sits just above heapUsed and always looks
-  reassuring), RSS, external, and per-cell serialized size sorted biggest first.
-  The percentage is `null` when the runtime cannot say — a hard-coded 0 reads as
-  "plenty of room". The output states that cell state is serialized SIZE, not
-  retained heap, so "my cells are small, so the leak is aio's" has to be
-  reasoned to rather than assumed.
-- ~~`am add server <name>` scaffolding the module AND its line in `app.ts`~~ —
-  **DONE 2026-09-11.** Writes `src/server/<name>.server.ts` (the `.server.ts`
-  name is the convention aio enforces, so a generator producing `<name>.ts`
-  would put the keys in the browser bundle) AND adds the import that registers
-  it. The wiring is the half that matters: a `serverFns` namespace nobody
-  imports is registered NOWHERE, so calling it fails at runtime with "unknown
-  namespace" while the author has a file that looks finished. No app entry is
-  SAID (`wired: null`), never silently skipped; idempotent on a second run.
-  (report 3 §12.6).
-- ~~`am preview <Component> --props=` (report 3 §12.5)~~ — **DONE 2026-09-11.**
-  `am preview src/Card.tsx --export=Card --props='{"title":"Inbox"}'` renders
-  one component in a state you choose, with the app not running, and prints the
-  same `Component:Element` paths `am trigger` takes — so what you read is what
-  you would address. It reuses `renderHeadlessSurface` (the path `am surface`
-  and `am testgen` already use) with an export name and props threaded through;
-  a second renderer would be answering a question about itself. `--props` is
-  refused unless it is a JSON OBJECT: a number spreads into nothing, and a
-  component rendering with every prop `undefined` looks exactly like the bug
-  someone is hunting. A component that renders nothing addressable says so
-  rather than printing an empty screen that could mean either thing.
-- ~~`am migrations` — a way to SEE the version chain~~ (report 5 §8.9) —
-  **ALREADY DONE**, verified 2026-09-08: `am migrations` reports declared vs
-  stored versions per cell, what the last boot's migration pass did, and any
-  unaccounted shape drift. Listed in `am help`. The report predates it.
-- ~~**`useResource({ key, open, close })`** (report 7 §2, §8.5)~~ — **DONE
-  2026-09-11.** All three of the report's own bugs are refused by construction,
-  and each has its own test: ONE OPEN PER KEY, reference-counted (so three
-  holders open once and close when the last lets go — which is also report 4
-  §10.4's "three components fire three identical requests, and there is no key
-  to dedup on"); a STALE OPEN cannot install itself over a newer one, because
-  every open carries a generation and a late one closes what it made rather than
-  leaking it — that is the `alive(s)` guard at twenty call sites, deleted; and
-  the CLOSE is attached to the open that made it, so changing the key closes
-  before opening and two pipelines never fight over one device. `scope` keeps
-  two unrelated resources that share an id apart, a number key and a string key
-  are different resources, and a `close` that throws still releases the slot — a
-  slot nobody can release is the leak the whole module prevents.
-- ~~**A client-side reaction** — `onChange(selector, fn)` (report 7 §5, §8.4)~~
-  — **DONE 2026-09-11.** Not tied to a component, so a change from anywhere —
-  `am dispatch` included — reaches it. Three things it does that a bare `effect`
-  does not, all of which the report would have hit: only the SELECTOR is tracked
-  (so a reaction that reads state while working does not subscribe to it and
-  re-run forever), it WAITS for a change (an effect runs immediately, so "when
-  the camera id changes, reopen it" would open one on boot), and the returned
-  cleanup runs BEFORE the next change, so close-then-open is one function rather
-  than two rules that have to agree. Typed as a union of two signatures rather
-  than `=> void | Dispose`: TypeScript forgives a non-void return one signature
-  at a time, so the single-type spelling rejects
-  `onChange(sel, v => list.push(v))`.
-- ~~**An error boundary** (report 1 §22.1)~~ — **DONE 2026-09-11.**
-  `<ErrorBoundary>` existed and `docs/ui/air-lifecycle.md` already promised it
-  caught "initial render, signal-triggered re-render, and lazy component
-  rejection". Two of the three were true: a throw in a component's OWN
-  signal-triggered re-render kept the last good output (AIO-138) and the subtree
-  quietly stopped updating, which is the wallet's blank window wearing the old
-  screen's face. The failing component now renders the boundary's FALLBACK by
-  re-entering its own render path — one renderer, not two. The failed render's
-  signal deps are carried into the fallback's subscriptions (a fallback reads no
-  signals, so without that the fallback is PERMANENT), and a fallback that
-  itself throws degrades to AIO-138 instead of looping. With no boundary above,
-  AIO-138 is unchanged and newly pinned.
-- ~~**A dev-time error overlay** (report 3 §12.4, report 7 §8.7)~~ — **DONE
-  2026-09-11.** The seam had existed since alpha52 and nothing filled it:
-  `_deliverDiag` calls `window._aioDiag` with a comment saying "overlay when the
-  page has one, console otherwise", and only the console branch ever ran "since
-  nothing injects it". `src/browser/dev-overlay.ts` is the injection — plain
-  DOM, no AIR (the renderer is one of the things that breaks, and an overlay
-  needing a working renderer to report a broken one reports nothing), dev-only
-  and observe-only. It COUNTS: the per-frame failure that motivated it is one
-  problem, and two thousand rows of it is the same silence in a different font.
-  Bounded at 20 so a misbehaving page does not also leak, `pointer-events: none`
-  everywhere it is not a control, and it CHAINS an app's own `_aioDiag` rather
-  than replacing it. Found while testing: `protocol-diagnostics` captures its
-  window at MODULE LOAD, so the seam cannot be driven end-to-end from a Deno
-  test — noted in the test rather than worked around.
-- ~~**Source maps** (report 5 §8.2)~~ — **DONE 2026-09-11.** Not a missing
-  esbuild flag: NO browser applies a source map to the string form of
-  `Error.stack` (devtools maps frames for display only), so turning esbuild's
-  flag on would have changed nothing in `client.log`. The SERVER applies it, in
-  the one place that renders the text. The build writes `dist/.app.js.map` —
-  dot-prefixed because `.map` is in `SHELL_EXT` and `dist/app.js.map` would have
-  served the app's whole source over an unauthenticated read — and
-  `client-log.ts` remaps every forwarded position before writing it. Pure VLQ
-  decoder in `diagnostics/sourcemap.ts`, driven by a REAL esbuild map (a fixture
-  I encode myself only proves my decoder agrees with my encoder). Found the trap
-  on the way: THREE surfaces have to agree (bundle write · `dist/` staging
-  allowlist · server read) and the first version silently failed at the second —
-  the allowlist in `build.ts` deleted the map before `deno compile` saw it. One
-  `BUNDLE_MAP` constant, one named `keepInDistStaging` predicate, and the build
-  now REPORTS the staged map like every other artifact.
-- ~~**The renderer console keeps the interceptor's call site** (report 7 §8.6)~~
-  — **DONE (already shipped).** `_callSite()` in `browser/console-intercept.ts`
-  walks past this file's own frames and attaches the caller's location; the
-  forwarded entry carries it as `source`. As of the source-map work above that
-  location is also REMAPPED, so it names the author's file rather than a
-  position in the bundle.
-
-#### 4 · Build products that go stale in silence
-
-- ~~**A browser `Worker` entry is not in the renderer build graph**~~ (report 7
-  §1) — **PARTLY DONE 2026-09-08: the silence is closed.** The graph validator
-  now reports `new Worker(new URL("./x.ts", import.meta.url))` in a
-  client-reachable module as `unmanaged-worker` — a warning, not a block, since
-  the worker genuinely runs — and the fix text names the CONSEQUENCE ("editing
-  it may appear to do NOTHING: the app keeps running the previous build") plus
-  the three things to do about it. A remote/blob URL is not reported: nothing
-  local goes stale, and a warning nobody can act on is how a real one gets
-  ignored. Still open, and now merely a feature rather than a trap: bundling app
-  workers for real (a `workers:` list, or following the constructor).
-- ~~**Hot reload does not cover server-side dynamic imports** (report 4 §6)~~ —
-  **DONE 2026-09-11**, by the better of the two routes the report offered: the
-  warning fires on the RELOAD EVENT and names the changed file, because that is
-  the moment the question is being asked. It says why (the module registry hands
-  back the copy it already has), states the mismatch outright ("the browser
-  reloaded; this file did not" — which is the sentence that would have stopped
-  the author re-reading correct code), what to do, and `am where` for any other
-  file. Once per file per session, `.server.tsx` as well as `.server.ts`, and an
-  ordinary module says nothing — a warning that fires on every save is how a
-  real one gets ignored.
-- ~~**`*.server.ts` modules must be hand-registered in `app.ts`**~~ (report 3
-  §3, report 8 §13) — **DONE 2026-09-08.** Every `*.server.ts` / `*.server.tsx`
-  is now auto-embedded by `assetIncludes`, the same zero-config walk `.wasm`
-  already got: the naming convention IS the registration. MEASURED first,
-  because the reported shape did not reproduce as stated — on Deno 2.9, running
-  from a foreign cwd with sources deleted, a literal `import("./io.server.ts")`
-  and a template ``import(`./${n}.server.ts`)`` are both analysed and embedded;
-  only an OPAQUE specifier (a variable, what a registry or plugin loader writes)
-  is missed, and that binary dies at the call. That is the shape the reports
-  hit, and the rule that guarded it was a comment enforced by nothing.
-- ~~**Dev does not watch `dep/aio`** when it is a symlink into a working tree
-  (report 2 §9.6)~~ — **DONE 2026-09-11.** Two facts made it invisible: the
-  checkout is not under `absBaseDir`, and `Deno.watchFs` does not follow
-  symlinks anyway. The watcher now also watches the framework's `src/`, derived
-  from the IMPORT MAP rather than by looking for `dep/aio` — the import map is
-  what actually decides where `aio` comes from, so any path pin gets it and a
-  `jsr:`/`npm:` pin correctly gets nothing (no working tree, and handles spent
-  on a read-only cache are handles spent on nothing). The REAL path, because
-  that is what the watcher's events carry. `src/` only: the checkout also holds
-  `.git`, `node_modules` and a `dist/` a build rewrites constantly, and a
-  watcher over those is a reload storm. An explicit `watch: [...]` is left alone
-  — an app that narrowed the watcher because its boot reloads gigabytes has said
-  what it wants watched.
-
-#### 5 · Composition inside a cell
-
-- ~~**A cell method cannot call a sibling**~~ (report 8 §6, §9; report 3 §6) —
-  **DONE 2026-09-11.** `s.$call.bench(kind)`: the sibling's body runs against
-  the CALLER's draft, in the caller's commit. One action, one draft, one
-  publish, where `myCell.bench()` would have been three of each. Served on every
-  draft, sync and async (the parity contract). Refuses by name: an async sibling
-  from a sync method (no way to await it, and a floating promise would write
-  after the commit), an unknown name (with what IS available), and a cycle after
-  32 nested calls — `$call` runs the body inline, so `a → b → a` recurses rather
-  than queueing. **The types had to be found, not assumed.** `check:api` refused
-  the first shape: adding `$call` to `MethodDraftMeta` breaks anyone who
-  CONSTRUCTS one, and a second type parameter is refused on principle. The
-  additive shape is a separate opt-in `MethodDraftCalls<C>` — exactly what
-  `Partial<MethodDraftMeta>` is for `$signal`. Its default is `any` rather than
-  a mapped index signature, because under `noUncheckedIndexedAccess` (which aio
-  itself sets) the obvious spelling forces `s.$call.bench!(…)` on everyone; and
-  the precise form is an interface, not `typeof methods`, which is circular
-  inside the literal the methods live in.
-- ~~**The workaround escapes `aiol`**~~ (report 8 §7) — **DONE 2026-09-11.**
-  `$call` removes the reason to move a body out of the cell, and `$call` itself
-  joins `DRAFT_META` so the documented way to compose is not reported as the
-  post-await hazard it replaces. The test pins the exemption AND that a genuine
-  read is still reported, so the silence means "exempt" and not "the analyser
-  stopped working".
-
-#### 6 · Declared policy instead of per-app invention
-
-- ~~**`s.$append("partial", chunk)`**~~ (report 8 §12) — **DONE, and better than
-  asked.** The `append` WIRE OP exists (protocol v3) and `narrowPatches` emits
-  it automatically at patch generation: a grown string travels as its SUFFIX, a
-  grown array as its adds. Nothing to call, so every method that already does
-  `s.partial += chunk` gets it — including the ones written before the op
-  existed. Verified 2026-09-11 and pinned as the report's own MEASUREMENT rather
-  than the op name: `tests/streaming-append-broadcast.test.ts` compares narrowed
-  against raw bytes over 40 chunks and asserts the per-chunk cost does not scale
-  with the reply. A string under `APPEND_MIN_LENGTH` deliberately stays a
-  `replace`, and that silence is asserted too.
-- ~~**`$pending`**~~ (report 8 §14, report 9 §9.5) — **DONE 2026-09-11.**
-  Spelled `cell.$pending("scan")` (reactive, so a component re-renders) rather
-  than `s.$pending` — the consumer is the UI, not the method. A COUNT, never a
-  flag, which is the bug cc shipped. NOT state: never broadcast, persisted,
-  migrated, or in the cell's shape. The count was already being kept on both
-  sides — `trackCall` on the server, the ack registry in a client — and simply
-  never exposed; the counter lives in `protocol/` (dependency-free, the folder
-  both may import) with the signal wrapper in `state/`. Reading returns the LIVE
-  count while subscribing through the signal, because `signal.set` is scheduled
-  and returning `.value` reported one update behind — two overlapping calls read
-  as one, the exact bug a count exists to avoid.
-- ~~**`concurrency: "first" | "newest" | "queue"` and `ttl:`**~~ (report 8 §15)
-  — **DONE 2026-09-11.** `"newest"` IS `cancelOn: "self"` and folds into that
-  map at `cell()` time, so there is one mechanism rather than two that can
-  disagree — declaring both is refused. `"first"` resolves the second caller
-  with the RUNNING call's result, which is the difference between a policy and
-  the silent drop that report shipped. `"queue"` reuses the transactional
-  serialize chaining, per method. `ttl` caches only SUCCESSES and is keyed by
-  the arguments, so `fetchUser(1)` never answers `fetchUser(2)`. Both keys are
-  validated at `cell()`: an unknown name, and a SYNC method (which can never
-  overlap itself, so the policy would silently do nothing). My own test caught
-  the one real bug: a function inside an array serializes as `null`, so
-  `scan(fnA)` and `scan(fnB)` would have shared a cache key.
-- ~~**An optional per-method argument schema**~~ (report 9 §9.6, report 3 §12.7)
-  — **DONE 2026-09-11.** `args: { setAge: [z.coerce.number().min(0)] }`.
-  STANDARD SCHEMA, not a DSL of aio's own — Zod, Valibot and ArkType all
-  implement it, so it is the app's existing validator doing the job it already
-  does; an app with none can pass a plain predicate. Checked in `methodArgs`,
-  the ONE place both method kinds pass through, so `am dispatch`, a form, a URL
-  and an agent are guarded identically. It COERCES as well as refuses — the
-  parsed value is what the method receives, which is the dozen hand-written
-  coercions deleted. Failures name cell, method and POSITION. An ASYNC schema is
-  refused by name: the dispatch path is synchronous for a sync method, and a
-  schema that silently did not run is worse than none.
-- ~~**`onPersist(state)`**~~ (report 9 §8.4) — **DONE 2026-09-11.** `persist`
-  FILTERS; `onPersist` SHAPES. It receives the slice after include/exclude and
-  returns what is written, and pairs by NAME with `onRestore` — a shape that
-  only drops fields needs no partner, one that reshapes needs an `onRestore`
-  that knows it. NOT error-guarded, unlike the observe-only hooks: it runs on
-  the persist path, where "the write quietly stopped happening" is the worst
-  outcome there is, so a throw is reported as a failed WRITE, names the cell and
-  turns `/health` degraded. Refused on a `sync: true` cell, same rule as a
-  filter. The report's other spelling — `persist: { transform }` — was built
-  first and `check:api` refused it: widening `persist` breaks anyone who assigns
-  it to a `CellFieldFilter`. `onPersist` adds a key and moves nothing, and is
-  the better shape anyway.
-- ~~**A `budgets` block**~~ (report 2 §9.3) — **DONE 2026-09-11.**
-  `aio.run({ budgets: { cellState: "1MB", broadcastRate: "20/s", payload:
-  "500KB" } })`.
-  NOT a second mechanism: every limit already existed and was reachable (a
-  hard-coded 1 MiB in the broadcaster, `vitals.pressure`'s two thresholds) —
-  this is one obvious door onto them in human units, which is the round's own
-  meta-finding again. An explicit `vitals.pressure` still wins. They FAIL rather
-  than only warn: `/health` carries the verdict and a breach turns the app
-  `degraded`, so `am health` is a CI step. The ledger keeps the WORST reading —
-  "it went over once" is the fact. An app that declared none gets no field at
-  all, never a green tick. An unreadable value throws at boot, naming the key.
-  Measured on the broadcast path AND on demand at `/health`, because an app with
-  no client connected would otherwise report a budget it had never once
-  measured.
-- ~~**`aio/server-only` and `aio/client-only` marker modules**~~ (report 2 §9.1)
-  — **DONE 2026-09-11.** The `*.server.ts` convention works and has one hole: it
-  is a FILENAME, and you cannot always rename a file twenty places import, that
-  is generated, or that is published under that name. `import "aio/server-only"`
-  is the same statement made IN the file; the audit treats the two identically,
-  so dev boot and `deno task build` cannot disagree (they already share one
-  decider). It also throws if ever evaluated in a browser — unreachable in
-  practice, and there for the paths a build cannot see. The two halves are
-  deliberately NOT symmetric, because the failures are not: a server module in
-  the browser LEAKS (refused at build, throws at runtime); a browser module on
-  the server BREAKS, loudly, escaping nothing — so `aio/client-only` has no
-  runtime guard and would break SSR if it did. `aiol` refuses a CELL that
-  imports it, since a cell method runs on the server.
-
-#### 7 · Test-harness reach
-
-- ~~**A stubbing tier between `testCell` and `bootCells`**~~ (report 9 §8.6,
-  §9.3) — **DONE 2026-09-11.**
-  `bootCells(cells, { stub: { "./claude.server.ts": … } })` — exactly the
-  spelling the report asked for. NOTHING can intercept a raw `await import(…)`
-  in Deno (there is no loader hook a test process can install after the fact),
-  so the seam is a function the cell calls on purpose:
-  `serverImport(spec, import.meta.url)`. That price is stated rather than hidden
-  behind a stub that silently does not apply. Unstubbed it IS the import it
-  replaces — specifier resolved against the caller, module still out of the
-  browser bundle (the audit reads the specifier, not the spelling). Keyed by the
-  specifier AS WRITTEN, so a test stubs the string it can see; a specifier
-  nobody stubbed still loads for real, because the map is not a whitelist.
-- ~~**`testUI`'s window is not `globalThis`**~~ (report 1 §19.2) — **DONE
-  2026-09-08.** The false green was already closed (testUI THROWS on a
-  bare-global DOM listener); what remained was the ceremony. `onWindowEvent` now
-  resolves the component's OWN window — correct in a browser, in an Electron
-  child window, in a `<webview>` and under the harness — and removes the
-  listener on unmount. Making the bare global work was considered and refused:
-  aio mounts into more than one window, so `globalThis` is genuinely the wrong
-  target, and a harness that accepted it would be lying. See
-  `feedback/refused.md`.
-- ~~**Geometry in tests**~~ (report 1 §19.1, §22.2; report 6 §10.1) — **DONE
-  2026-09-11**, by the narrow shape the report itself said "would close most of
-  it", and without a second runner. `uiRects(roots)` keys real rects by the same
-  `Component…:Element` paths everything else uses, fed by a surface a REAL
-  client measured (`testServer` + `testBrowser` + `surface/N?rects=1`, or
-  `am surface --rects`). It deliberately does NOT read the harness's DOM: under
-  happy-dom that answers 0×0 and makes a layout assertion PASS, which is how
-  those two defects hid behind 1546 green tests. An unmeasured element is ABSENT
-  rather than reported at the origin — a missing key fails loudly, a plausible
-  zero does not. NOT DONE, and deliberately not claimed: the full
-  `engine: "browser"` runner mirroring the whole `testUI` API. The parts exist
-  (`testBrowser`, the trojan surface, `--rects`) and the recipe is documented; a
-  second runner is its own piece of work and doing it badly would be worse than
-  the recipe.
-- ~~**`waitFor` failure dumped the whole tree**~~ (report 9 §9.0) — **DONE
-  2026-09-11.** The JSON half of `surfaceDigest` was capped and the component
-  TREE was not, so a wide app turned one timeout into 31 769 characters. Now
-  bounded by the same `NAME_LIMIT` every other name list uses, with the same
-  `AIO_TEST_NAMES=all` escape — two spellings of "how much do we print" is how
-  they come to disagree. Tested on a 200-row app: under 4 kB, still shows the
-  tree, says how many are hidden, and the escape really prints all of it.
-- ~~**`t=` is a handle, not an attribute**~~ (report 1 §19.3) — **DONE
-  2026-09-11.** A callout in `docs/testing/ui-testing.md` beside the naming
-  table: it is stripped from the DOM, so it is absent from `ui.html()` and
-  `[t="save"]` matches nothing in a test OR in the app; address it by name, or
-  use `data-testid` when you genuinely need an attribute in the markup.
-- ~~**Typed test locators**~~ (report 8 §11, §18) — **DONE 2026-09-11**, as
-  `am testgen`. The GENERATOR already existed and already answered the ask — and
-  types the RENDER rather than the source, which is strictly better: a `t=` prop
-  inside a branch that never renders is not a locator anyone can use. What was
-  missing was a way to run it without hand-writing a script (happy-dom, a
-  document, the App, the cells, and remembering to re-run), which is why an app
-  that HAD the feature kept using string keys. One command, default
-  `tests/ui.gen.ts`, loud when there is no UI entry. Needed a deliberate
-  boundary widening (`am → testing` for the generator, `am → air` type-only);
-  the laundering check caught the attempt to sneak it through a root entry.
-- ~~**Mount-time rehydration is racy and silent** (report 8 §11)~~ — **DONE
-  2026-09-11.** `testUI` now settles ONCE before handing the UI over, so the
-  first observation is always of a mounted, quiesced app. A rule enforced by
-  remembering to write `await ui.settle()` is not enforced. What the measurement
-  actually showed, and why the test looks the way it does: the race was masked.
-  A synchronous `onMount` dispatch lands before the test body either way, and so
-  do 0ms, 25ms, 100ms and 200ms rehydrations — the mount path already spans that
-  long on its dynamic imports. Every test I wrote on those passed BOTH ways and
-  asserted nothing. At 400ms it discriminates: red without the settle, green
-  with it. That incidental window IS the defect, restated: a guarantee that
-  holds because the harness happens to be slow enough is one any refactor can
-  take away in silence. The wait is now on purpose and bounded by `settle`'s own
-  budget; non-strict, so a mount that never quiesces is reported by the first
-  real observation rather than as a mount failure naming the harness.
-- ~~**A trace artifact on failure**~~ (report 2 §9.5) — **DONE 2026-09-11.**
-  Every miss and every `waitFor` timeout writes `.aio/traces/ui-<ts>-<id>.json`
-  and NAMES it in the error: the calls this test made in order (arguments
-  summarised — a trace that inlines a 2 MB payload is one nobody opens, and a
-  secret does not belong in a file the test leaves behind), the surface, the
-  HTML and each cell's state. Written SYNCHRONOUSLY, because `fail()` throws and
-  there is nothing to await it — an async write would be reported by the leak
-  sanitizers against whoever ran next, which is the class this repo has already
-  spent two suite runs on. Bounded at 20: an unbounded artifact directory is one
-  nobody ever cleans. A trace that cannot be written leaves the assertion's own
-  error untouched.
-
-#### 8 · Styling and the shell
-
-- ~~**`theme: "base"`** (report 5 §4)~~ — **DONE 2026-09-11**, as
-  `ui.layout:
-  false` rather than a fifth `theme` value. `UiTheme` is frozen
-  public surface and `check:api` refused the widening — and the additive shape
-  is the better design: "how much look" and "does it place my boxes" are
-  separate questions, so the switch composes with every `theme` answer
-  (`theme:"full", layout:false` = controls without layout, always;
-  `theme:"auto", layout:false` = the same until you ship CSS). Kept: canvas,
-  dark mode, type, every form control, focus rings, tables, code, `::selection`,
-  and the three environments. Dropped: the `<main>` page container with its
-  header/footer alignment, and the six classes. Sliced from the ONE stylesheet
-  by banner, exactly as `appThemeTokensCss` is, so a third variant cannot drift
-  into a third palette — and a missing banner REFUSES rather than guessing,
-  because both wrong answers are invisible. Setting it on `"tokens"`/`"none"`
-  warns instead of doing nothing.
-- ~~**Scoped styles** (report 3 §12.1, report 4 §10.3, report 5 §8.5)~~ — **DONE
-  2026-09-11, both halves.** The worst UI bug of one build: a `class="track"`
-  collision silently clipped every music row to one line, with no error, a
-  correct DOM and a correct component tree.
-  - ~~the LINT half~~ — **DONE 2026-09-11.** `checkStyles` in `aiol` reports a
-    class defined in two places that disagree about the SAME PROPERTY, naming
-    both sites and both values. Narrow on purpose, because a rule people silence
-    takes its true positives with it: agreement, complementary properties, a
-    more specific selector (`.track:hover`, `.list .track`), the same class
-    inside `@media`, and custom properties are all left alone, and a generated
-    stylesheet (`/*!` — Tailwind's output) is skipped entirely.
-    `topLevelClassRules` / `collidingClasses` are pure and tested on their own;
-    verified end to end by planting the reported bug in a real scaffolded app
-    and watching the linter name it.
-  - ~~Opt-in hashed classes are the fuller answer~~ — **DONE 2026-09-11.**
-    `css\`…\``from`aio/ui`returns a class named after a HASH of the rule, so
-    two components cannot collide however they name things — and two writing
-    the identical rule share one class rather than shipping it twice.
-    Content-addressed rather than counted, because a counter depends on module
-    evaluation ORDER and a server-rendered page would hydrate against names the
-    client numbered differently — wrong in exactly the way nobody looks for. No
-    build step (a scoping scheme needing a bundler plugin does not work in`deno
-    task
-    dev`, which serves modules untouched, and would be a dev/prod
-    divergence in the part of an app people judge by looking at it), and
-    unlayered so it beats the generated theme without`!important`.`&`works, including inside an at-rule;`collectCss()`is for`renderToString`. My own tests caught two real parser bugs: a nested block
-    swallowed everything after it, and leading declarations were absorbed into
-    the next block's SELECTOR (`color:
-    red; .c:hover{…}` — which no browser applies and nothing reports).
-- ~~**A `<Browser>` component and `docs/clients/webview.md`** (report 5 §2)~~ —
-  **DONE 2026-09-11.** Both traps closed in the component rather than described
-  in a doc: `src` is applied IMPERATIVELY and only when it changed, so the
-  `onNavigate` → state → `src` cycle that looks obviously wrong is exactly what
-  an author is supposed to write; and `keepAlive="id"` PARKS the guest in a
-  hidden holder on unmount instead of letting Electron destroy it with the
-  page's scroll, forms and login. It renders a plain `<webview>`, so the whole
-  Electron API stays true and reachable through `ref` — a wrapper that hid it
-  would be a second, worse API. `docs/clients/webview.md` says the
-  `childWindows` gate out loud (it was documented in exactly one place: a source
-  comment) and covers `partition` and what the guest cannot reach.
-- ~~**A CSP that can drop `base-uri`, and a nonce for the inline shell** (report
-  5 §3, report 1 §11)~~ — **DONE 2026-09-11.** `security.cspDirectives`
-  overrides or REMOVES one directive of the computed policy
-  (`{"base-uri": false}`), which is the point: writing a verbatim policy to lose
-  one directive meant re-deriving `frame-ancestors` from `allowedOrigins` by
-  hand and keeping it in sync forever. Ignored for a verbatim policy — two ways
-  to say one thing with one of them silent is the shape this repo refuses — and
-  an empty result sends no header rather than `""`. `security.cspNonce` mints a
-  nonce PER RESPONSE (a reused one is a replayable one) and `"strict"` then
-  sends `script-src 'self' 'nonce-…'` instead of the waiver. Stamped by ONE rule
-  applied to the finished shell rather than threaded through the six places it
-  writes a `<script>`: a missed tag is not a degraded page, it is a blank one,
-  and the test counts tags rather than checking the ones I remembered. Styles
-  deliberately keep `'unsafe-inline'` — that directive also governs the `style=`
-  ATTRIBUTE, which `style={{…}}` produces on ordinary components.
-- ~~**Standard Schema in `useForm`** (report 4 §10.6, report 5 §8.7)~~ — **DONE
-  2026-09-11.** `useForm(config, { schema })`, reusing the `isStandardSchema`
-  the cell `validate` hook already had, so it really did pay off twice and still
-  costs no dependency. ONE schema for the form, not one per field — that is the
-  shape apps actually hold (`z.object({…})` already exists somewhere) — with
-  issues attributed to fields by `path`, reading BOTH spellings (Zod emits bare
-  keys, Valibot emits `{ key }` wrappers; reading one would put every issue from
-  the other library on the form and look like the schema half-working). An issue
-  that names no field becomes `form.formError` rather than being dropped, which
-  is how a form refuses to submit while every field looks fine. `rules`
-  untouched and still the more specific statement. Async refused by name. Two
-  shapes the freeze forced, both better: `schema` went on `FormOptions` (param0
-  is frozen), and coercion went on a separate `parsed()` instead of into
-  `values()` — `values(): T` is inferred from each field's `initial`, so
-  coercing there would make the signature say `string` for a value that is a
-  number. Exported `FormOptions`/`CrossFieldValidator`/`AsyncValidationRule`
-  while there: `useForm`'s own option type was reachable only structurally.
-- ~~**`resource()` keys, dedup and invalidation** (report 4 §10.4)~~ — **DONE
-  2026-09-11, through `useResource` rather than by keying `resource()`.** A
-  `key` option on `resource()` would have been an added optional parameter,
-  which the freeze refuses by name — and the new door is the better answer
-  anyway: `useResource({ key, open, close })` dedups by key with reference
-  counting, which is what "three components, one request" actually needs, and it
-  invalidates by changing the key. `resource()` is untouched.
-- ~~**More templates** (report 6 §10.6)~~ — **DONE 2026-09-11** for
-  `--template=canvas` and `--template=assets`; `desktop-panels` REFUSED for now
-  (see below). Each encodes the knowledge another report produced: `canvas` is
-  the shape that makes a canvas app testable — a pure `step()` the scaffolded
-  test drives with no GPU, and an imperative shell with no branches left in it
-  (report 6 §6) — and `assets` ships the deno.json mount AND the directory
-  together, because either alone is a 404 and one of them looks like a build
-  problem (report 6 §7). The per-file ternary chain became a function on the
-  way: it held exactly two templates, could not hold a third without every line
-  growing a branch, and the branches had already drifted (the UI's had a `css`
-  case the entry's did not). Found while doing it: `denoJson()` was passed a
-  hardcoded `"counter"`, so every template's tasks were the counter's —
-  invisible because the two templates that existed agreed. And a gate the parse
-  check could not give: every template is now TYPE-CHECKED against the
-  framework, in a real project with a real link. A `ref` callback with the wrong
-  parameter type shipped in the canvas template and was found by scaffolding one
-  by hand, which is not a gate. Verified red by breaking a return type on
-  purpose. `desktop-panels` is not scaffolded: unlike the other two it encodes
-  no specific finding from a report, and a template nobody can describe the
-  purpose of is a maintenance cost with no lesson in it.
-- ~~**`aio.run({ assets: { "/x": "./assets/x" } })`** (report 6 §7, §10.5)~~ —
-  **DONE 2026-09-11.** The twenty lines, once. It is `serveDirs`' machinery
-  without the `prod ? undefined` and with the build half attached, because the
-  two answer different questions: `serveDirs` exists so the DEV server can
-  resolve a MODULE outside baseDir (prod bundles follow the import themselves)
-  and is dev-only on purpose; `assets` is DATA, which production needs exactly
-  as much as dev does. Route, MIME, caching, range and every baseDir guard come
-  free from the static path — an extra root is never a weaker root, and that is
-  asserted through the REAL handler, not just the predicate. The
-  `compile.include` half is zero-config: declared in deno.json, `assetIncludes`
-  embeds the directory, so there is no second place to keep in sync and a mount
-  pointing outside the project is REFUSED at build time rather than dropped.
-  Pre-compression already rides the same entry (the response finisher);
-  `build.lean` does not and is not claimed.
-- ~~**An open index signature for unknown JSX tags**~~ (report 5 §6) — **REFUSED
-  2026-09-11, blocked by the frozen surface; the app-side answer is documented
-  and tested.** The complaint is real and reproduces. Widening the index is the
-  general fix and `check:api` refuses it — the index type is published, and
-  "provably breaks nobody" is the argument the policy already answers. The
-  optional spelling is not even legal (TS2411). What an app has today is better
-  than a cast: TypeScript's own interface merging, four lines, typed exactly as
-  the app wants — so a typo in `partition` is still a compile error, which a
-  blanket widening would have cost. See `feedback/refused.md`,
-  `docs/clients/electron.md`, and `tests/jsx-unknown-tag-attrs.test.tsx`.
-
-#### 9 · Dev-loop cost
-
-- ~~**A `patch` watcher signal** (report 5 §8.3, report 3 §12.2, report 7 §8.2,
-  report 1 §22.4)~~ — **DONE 2026-09-11**, for the one case where it is provably
-  safe. When the ONLY changed file in a burst is the UI entry, the server sends
-  `patch` instead of `reload`: the browser re-imports that module and
-  `swapRootComponent` hands it to AIR, whose diff patches the DOM in place — so
-  a `<webview>` session, a loaded model, focus and scroll are the same elements
-  afterwards. THE CONDITION IS THE WHOLE DESIGN. Re-importing a module gives a
-  fresh copy and every module that imported the OLD one still holds it; nothing
-  in the client graph imports the ENTRY, so nothing can be left stale, and that
-  is not true of any other file. A hot reload that silently does not apply an
-  edit to a child is worse than a reload that always works, so anything else —
-  two changed files, a child module, a cell — is the reload it always was. Cells
-  are deliberately never re-imported: a component holding an unbound twin of
-  every cell is the failure that makes naive HMR "sometimes work". Every failure
-  falls back to `location.reload()`, so the worst case is today's behaviour.
-  Found a real bug in my own first version: `_rerenderRoot` diffs `h(state.App)`
-  against the old root vnode, and a different function is a different component
-  — the subtree was REPLACED and the `<video>` really was a new element.
-  Retagging the old vnode says what happened (same component, new
-  implementation), the instance is reused, and the diff runs on the rendered
-  output. Pinned by a test that asserts element IDENTITY, not markup.
-
-- ~~**`am dev --no-watch` and a `watch:` path list**~~ (report 7 §3) — **DONE
-  2026-09-11.** `aio.run({ watch: false })` / `{ watch: ["src/ui"] }`, and
-  `--no-watch` / `--watch=false` / `--watch=src/ui,src/style.css` on the command
-  line, where a flag beats the config value (a flag is a decision about THIS
-  run). `false` is honoured by never opening the watcher rather than by ignoring
-  its events, so the process holds no file handles for a feature nobody asked
-  for. An empty `--watch=` is refused: silently watching nothing is
-  indistinguishable from the watcher being broken.
-- ~~**`am dev --devtools[=PORT]`**~~ (report 7 §4) — **DONE 2026-09-11**, as
-  discoverability rather than a second spelling. `--cdp[=PORT]` already existed
-  and does exactly this; the reporter wrote a launcher shim exploiting
-  `$ELECTRON_PATH` because they could not FIND it. A second flag would
-  contradict "one vocabulary", so `am help` now lists it under `dev` with the
-  words someone would grep for — DEVTOOLS / INSPECT / DEBUG — which is the
-  meta-finding's own remedy.
-- ~~**`deno task dev` follows the launching terminal**~~ (report 6 §3) — **DONE
-  2026-09-11.** The scaffold README now says it plainly, and `am help`'s `dev`
-  entry says `am start` is the form an AGENT wants. Both, because the reporter
-  found `am start` near the end by reading `am help` for something else — so the
-  answer had to be in the place they were already looking AND in the file a new
-  app opens first. The "session leader as no parent" idea was considered and
-  left alone: `am start` is the supervised form and already answers it; a second
-  way for a foreground process to outlive its terminal would be two mechanisms
-  for one decision.
-- ~~**A component profiler / re-render log** (report 8 §16, report 1 §22.3)~~ —
-  **DONE 2026-09-11.** Not new instrumentation: `_dtRenders`, `_dtLastMs` and
-  `deps.size` were already on every instance and `_componentTree()` already
-  walked them — nothing added the numbers up, which is why the finding cost an
-  afternoon of code-reading before CDP confirmed it. `__aioProfile()` on the
-  page, so `am eval '__aioProfile()'` answers it; a GLOBAL rather than a sixth
-  `am` round-trip, because `am eval` is already the documented tool for what
-  `am surface` cannot see and the aggregation was the missing half. Summed BY
-  NAME (400 Rows is the finding; the same fact in a hundred pieces is not),
-  stable order so two runs can be diffed, and TIMINGS ARE OPT-IN because two
-  `performance.now()` calls per render are not free at 60fps — the first call
-  turns them on and says `timings OFF` rather than reporting zeros as though
-  every render were instant. Printed as well as returned, so it lands in
-  `client.log` beside everything around it.
-- ~~**A bundle treemap / `--analyze`** (report 5 §8.9, report 1 §22.7)~~ —
-  **DONE 2026-09-11.** `deno task build --analyze`: same artifact, one extra
-  report. The answerable version of "a treemap" is "which twenty things are most
-  of my bundle, and is anything in here that should not be", and the number that
-  makes it honest is `bytesInOutput` — what reached the output after
-  tree-shaking — because a 400 KB dependency that shakes down to 3 KB is not a
-  400 KB problem and a report saying it is costs someone a day. Folds a
-  dependency to its PACKAGE (the unit you can act on; Deno's nested
-  `node_modules/.deno/pkg@ver/node_modules/pkg` layout needs the LAST segment,
-  or you get a row per version) and the framework per AREA. The tail is
-  summarised, never dropped — rows plus "everything else" always sum to the
-  bundle. Pure and tested on its own, then run on a real build: 192.5 KB, 131
-  modules, aio/air 39.5%.
-
-#### 10 · Found by the coverage audit, not the reading pass
-
-Cross-referencing every numbered section against the routing docs turned up
-thirteen findings that had been read and not written down (see the audit note in
-`feedback/resolved.md`). One was a real bug and is fixed; these are the rest.
-
-- ~~**A green `deno check` precedes a failing bundle**~~ (report 4 §1 — the ONLY
-  thing that report calls a defect) — **DONE 2026-09-08.** The fix is not a
-  better error; the error was already good (dev boot names file, line, column
-  and fix). It is that `deno task check` stops being green. `am check` walks the
-  client graph and exits non-zero on anything that would stop the bundle, and
-  the scaffolded `check` task now runs BOTH halves — the same treatment `lint`
-  already gets, where one task runs `deno lint` AND `aiol` because a task's name
-  has to be true. `am fix` adds it to an existing app. Finding no UI entry
-  prints `NOTHING CHECKED` on stderr in every mode, including `--json`:
-  reproducing this command's own bug one layer up would be a poor joke. Still
-  open, and now cosmetic: typing `deps` from the literal so the source-text
-  heuristic can go.
-- ~~**Selector deps discriminate on SOURCE TEXT** (report 4 §4)~~ — **ADDRESSED
-  2026-09-11, and the proposed fix does not work.** Typing `deps` from the
-  literal cannot replace the heuristic, because the thing being discriminated is
-  not expressible in a type: with ONE dep, `fn: (s, prices)` (retired spread)
-  and `fn: (s, deps) => deps[0]` (current, named parameter) are the SAME
-  function at runtime — one argument after the slice, no `[` to read — and no
-  signature can tell a caller's intent apart from its arity. Two or more deps
-  were never ambiguous; the arity already separates them. What WAS wrong, and is
-  fixed: the ambiguous case resolves toward the retired form, so the second
-  spelling receives the slice where it expects a tuple and `deps[0]` is
-  `undefined` — correct-looking code, wrong number, no error. MEASURED and
-  pinned. The resolution is unchanged (prod must keep degrading the same way),
-  but the refusal now names BOTH readings and the one-character fix, because the
-  author of the second one was being told they had used a form they have never
-  heard of. `refuseRetired` gained an optional `detail` for exactly this shape;
-  the unambiguous multi-dep case still gets the plain registry line, pinned so
-  the note cannot spread into messages that were already right. Documented in
-  `docs/state/cells.md` as a rule: destructure the tuple.
-- ~~**aiol rule 23 flags the spelling its own docs call correct**~~ (report 8
-  §2) — **DONE 2026-09-11.** BOTH fixes, not either: it now fires only on
-  `timeout: 0` — the shape that means "forever", which is what `long:` replaces
-  and what people copy out of the retired example — so a real ceiling, the
-  spelling `docs/state/methods.md` calls the right tool for a specific number,
-  is silent. And it routes through `isSuppressed`, so a deliberate `timeout: 0`
-  can be acknowledged like every other rule; reporting directly left nowhere to
-  put the acknowledgement, and the finding was permanent whatever you did.
-- ~~**`am fix` rewrites the app's version at `fixed` severity**~~ (report 8 §3)
-  — **DONE 2026-09-08.** Now `advise`, and the advice names the alternative and
-  how to take it. The guard does a REAL `am fix` and asserts `deno.json` is
-  unchanged, because an outcome string that says "advise" while the writer still
-  runs is the same bug with a new label.
-- ~~**`am fix --migrate-tasks` would delete a working task by name**~~ (report 8
-  §4) — **DONE 2026-09-11.** It no longer deletes. A pristine old-matrix task
-  stays in `deno.json` and is reported as advice with its replacement SPELLED
-  OUT (`dev:browser → deno task dev --client=browser`), the same treatment the
-  neighbouring check already gave customized ones. "Pristine" is a fact about
-  the COMMAND and says nothing about whether the NAME is in the app's README,
-  its CLAUDE.md and everyone's fingers. Deriving the fleet from those names is
-  what made removal survivable; keeping them is what makes it safe.
-- ~~**A version pin makes `.katana/_aio.md`'s own instruction unreachable**~~
-  (report 8 §5, report 2 §7) — **DONE 2026-09-08.** Both halves were the same
-  defect: the instruction named `dep/aio/feedback/`, which is absent from a
-  release worktree AND inside the version store, so an app that pinned had
-  nowhere to write and an app that upgraded lost what it had written.
-  `am
-  feedback` is now the one decider for the path — outside the version
-  store, `$AIO_FEEDBACK_DIR`/`XDG_DATA_HOME` aware, with `--create` from a
-  template — and the kata names the command instead of a path that drifts. The
-  guard that matters asserts the location is not under `versionsDir()`.
-- ~~**Adding a state key gives no migration signal either way** (report 8 §10)~~
-  — **DONE 2026-09-11.** `detectNewFields` is the direction the boot detector
-  already walked and threw away, and boot now says
-  `state shape: N new field(s), no migration needed — cfg.retries (number)` at
-  info level, pointing at the "shape drift" line for the case that is NOT safe.
-  A SEPARATE type and line, not a fifth `issue` on the drift union: the remedy
-  differs (there isn't one), and a reader scanning for problems must not have to
-  filter the reassurance out of the warning. A rename shows as both, once in
-  each, which is exactly what a rename is. A brand-new CELL is not a pile of new
-  fields, a wholly new subtree is one arrival rather than five, and an open
-  record's keys stay data. Found a real bug writing the test: the cap was only
-  checked on entry to the walk, so one level with 300 new keys pushed 300 — the
-  pre-existing drift walk checks inside its loop and was fine.
-- ~~**The 100-msg/sec WS budget is tripped by a legitimate burst**~~ (report 1
-  §10) — **DONE**, by a third route the report did not list and which is better
-  than both it did: the SERVER ADVERTISES its budget in the hello (`rate`) and
-  the client PACES ITSELF against it, so "over budget" stops being reachable by
-  ordinary use. A single op still sends inline — only a burst queues, and it
-  queues frames, never the only copy (the op is durable in the buffer before it
-  is ever sent, so the queue is dropped offline rather than double-sending on
-  reconnect). A peer that advertises nothing is paced at the server's own
-  default, never left unpaced. Verified 2026-09-11 by the report's own scenario,
-  `tests/sync/op-pacing.test.ts`: 1000 ops, asserted as a RATE; with the pacing
-  removed the same test measures 268/sec against an advertised 100.
-- ~~**A canvas app is invisible to `testUI`, and the workaround deserves a
-  page**~~ (report 6 §6) — **DONE 2026-09-11**, `docs/testing/canvas-and-3d.md`.
-  The report's own pattern, written up as the blessed answer: the decisions come
-  out of the imperative shell, so "what did the ray hit" and "what should light
-  up" are pure functions of what the renderer knows and only the GL calls stay
-  untestable. Plus the half the report did not name — canvas state (selection,
-  camera, tool mode) belongs in a cell, where `testCell` reaches it with no DOM
-  at all — and the two tools that cover what is genuinely left: `am eval` for
-  "did the context initialise" (a real GPU is the only place that has a true
-  answer) and `am shot --check` for the drawn pixels, which landed earlier the
-  same day. Says plainly not to stub `getContext`: a test against a fake GL is a
-  test about the fake, and it goes green on exactly the changes that break the
-  real thing.
-
-#### Move the controlled-input drift warning into the dev-only chunk
-
-`air/control-drift.ts` (5.4 KB raw) is observe-only and runs only when
-`isDevMode()`, yet it ships in every production page because the render path
-imports it statically (`vdom-props`, `vdom-events`, `renderer-hydrate`,
-`aio-renderer`). Route its three entry points through `devHooks` like the other
-dev audits, keep `tests/controlled-drift-warns.test.ts` green, and lower the
-`air` bundle ceiling 83 → 82 and `app` 86 → 85 (raised for 1.0.14-beta).
-
-#### ~~11 · The dev audits ship to production~~ — DONE (dev-only chunk, `tests/bundle-dev-chunk.test.ts`)
-
-#### 12 · Smaller, each named once
-
-- ~~`aio-ok` vs `aiol-ok`~~ (report 3 §8.1) — **DONE 2026-09-11.** One marker,
-  in `src/diagnostics/ok-marker.ts`, read by all eight checkers: both spellings
-  everywhere, so the wrong one can no longer be silent. And it gained the scope
-  it never had — `// aio-ok(silent-catch): why` binds to one gate, while the
-  unscoped form keeps meaning exactly what the hundreds of existing ones mean.
-  `aiol` keeps its optional reason (dozens of bare `aiol-ok` lines exist and
-  tightening them would be a silent change for no finding); the script gates
-  keep requiring one. A test refuses any new private marker regex in `scripts/`
-  or `aiol/`.
-- ~~An `aiol` rule for accessible names~~ (report 9 §9.4) — **DONE 2026-09-08.**
-  An interactive element with no name gets no semantic path: absent from
-  `am surface`, unreachable by `am trigger`, no handle in `testUI`. The runtime
-  already warns for `<input>` at render time; this catches the ones a render
-  never reaches. DELIBERATELY NARROW — one line, empty body, no naming attribute
-  — because a name can come from a variable, a child component or a multi-line
-  body, none of which is knowable from source. Ten cases pin the SILENCE as hard
-  as the finding: text content, five naming attributes, an `id` that may pair
-  with `<label htmlFor>`, a multi-line body, and `aio-ok`.
-- ~~The bundle auditor false-positives on path-shaped strings~~ (report 5 §6) —
-  **DONE.** `FS_ROOT_RE` in `assetUrlsIn` drops `/home`, `/Users`, `/tmp` and
-  the rest of an OS's roots: no aio app routes them, and a build warning that
-  cries wolf costs more than it is worth, because the REAL finding (an asset
-  that works in dev and 404s in the artifact) is the one that then goes unread.
-  Pinned by `tests/build.test.ts`.
-- ~~`am trigger … press "Enter"` refused on a visible, focusable `<input>`~~
-  (report 5 §6) — **NOT REPRODUCIBLE 2026-09-11, and now pinned.** Driven
-  against the same two functions the CLI calls: `parseChord` turns the
-  positional into a key (chords, and the literal `+`), and `runUITrigger`
-  delivers it — the handler sees `Enter` and the form submits. `assertOperable`
-  is deliberately strict, which is the kind of guard that grows one condition
-  too many, so `tests/trigger-press-enter.test.ts` asserts BOTH that a plain
-  text input passes it and that a disabled / hidden / `type="hidden"` one still
-  does not.
-- ~~`am stop` could not find a demonstrably running app; `--port=N` worked~~
-  (report 5 §6) — **DONE 2026-09-08.** Two halves. `am stop <appId>` now works
-  at all (see the positional fix above — an id from `am instances` used to be
-  read only as a component label). And the "not running" refusal now NAMES what
-  is running: one instance gets `did you mean --app=<id>?`, several are listed.
-  It already pointed at `am instances`, and a pointer costs a round trip at the
-  exact moment someone is staring at "not running" for an app they can see in
-  their own browser.
-- ~~`am surface` prints ~8 kB as one unwrapped JSON line~~ (report 3 §8.2) —
-  **DONE 2026-09-11.** `--json` is serialized for whoever is reading it: a pipe
-  gets the compact form a parser wants, a terminal gets it indented. Same
-  document either way — `JSON.parse` cannot tell them apart — so it is the call
-  colour output already makes, on the same fact.
-- ~~`am shot /path/to/file.png` suggests `--out=`~~ (report 3 §8.4) — **DONE.**
-  A positional ending in an image extension is a detectable mistake, and
-  "invalid window index: shots/home.png" explained the parser instead of the
-  fix. Pinned by `tests/am-shot.test.ts`.
-- ~~A `worker: true` hint when a cell's tick exceeds a frame budget, and the
-  module-graph checker's output in the default build summary~~ (report 2 §3) —
-  **DONE.** The hint has shipped for a while (`_budgetMisses`, THREE misses
-  before advising a thread — a cold start, a first big import and one unlucky GC
-  are each a single slow tick, and advising on the strength of one is how a hint
-  becomes noise; `tests/budget-worker-hint.test.ts`). The graph checker already
-  ran per target and REFUSED the artifact; what was missing was that the final
-  summary never named it, so a summary-only reader saw "it compiled".
-  `deno task build` now ends with what was checked, counted over ARTIFACTS
-  rather than attempts — and a test asserts the refusal that makes the claim
-  legal, because the line is only honest while an artifact really cannot reach
-  disk unaudited.
-- ~~A documented known-good Electron switch set for headless and VM hosts~~
-  (report 2 §7, §9.7) — **DONE 2026-09-11.** Environment variables already
-  reached Electron; Chromium SWITCHES had no way in, so half the remedy was
-  unreachable. `AIO_ELECTRON_ARGS` takes them, appended LAST so an operator can
-  override one of aio's own, and a token that is not a `--switch` is named in
-  the log rather than dropped — "I set the flag and nothing changed" is the
-  failure it exists to end. `docs/clients/electron.md` carries four sets (no
-  GPU, small `/dev/shm`, software rasteriser, and `xvfb-run` for a host with no
-  display at all) and deliberately hands out NO `--no-sandbox`: aio adds that
-  itself, only after measuring the two conditions under which Chromium aborts.
-- ~~`feedback/` lives inside the versioned directory~~ (report 2 §7) — **DONE.**
-  `am feedback` writes to `$XDG_DATA_HOME/aio/feedback` (or `AIO_FEEDBACK_DIR`),
-  outside anything an upgrade replaces; `docs/clients/app-manager.md` says not
-  to write into `dep/aio/feedback/` and why. Pinned by
-  `tests/am-feedback-survives-pin.test.ts`.
-- ~~A CI recipe for an app built on aio~~ (report 5 §8.9) — **DONE 2026-09-11.**
-  `docs/build/ci.md`: a working GitHub Actions workflow, and the three
-  aio-specific facts that decide whether it catches anything. Chiefly that CI
-  must run `deno task check`, not `deno check` — `"aio"` resolves to `mod.ts`
-  for the type-checker and to the browser entry for the bundle, so a server-only
-  import reachable from a cell type-checks and then fails to build, and the task
-  is the half that walks the client graph. Same for `deno task lint` vs
-  `deno lint`. Plus the two things a headless runner cannot do (Electron needs a
-  display, an e2e needs a browser), the target matrix, and the cache.
-  `tests/docs-ci-recipe.test.ts` checks every task name against the scaffold and
-  the pinned Deno version against `MIN_DENO`, because a copy-pasteable workflow
-  is read once and trusted for years.
-- ~~`am migrate --from=alpha76`~~ (report 1 §22.7) — **DONE 2026-09-11.** Every
-  piece already existed with no front door: `REMOVALS` carries each retired
-  spelling with its hint and guide, `removalsInSource` finds them,
-  `aiol
-  --safe-fix` rewrites the renames. `am migrate` SCANS rather than lists
-  — "everything removed since alpha76" is a changelog and the changelog exists;
-  the useful answer is the intersection with your code. `--from` narrows to what
-  was removed after a release (default: the app's own pin); exits 1 so it works
-  in CI; `[fixable]` marks the renames and a hit under `tests/` is marked a
-  probable fixture, the same call `am pin` makes. Running it on a real tree
-  found its own defect first: `removalsInSource` documents itself as taking a
-  cell CONFIG BLOCK, and fed whole files it read
-  `{ seed: number; actions:
-  string[] }` as a retired cell key — so the file is
-  now handed over twice, each time as the thing the contract describes (66
-  findings → 39 on this repo, all cell-config false positives gone).
-- ~~A named way to keep a cell out of the dev action journal~~ (report 2 §7) —
-  **DONE 2026-09-11.** `cell({ diagnostics: false })`. A separate word on
-  purpose: `persist: "none"` was read as covering this too, and it does not —
-  `persist` is the STATE STORE, the journal is a dev diagnostic. The BOUNDARY is
-  the design and is what the tests pin: IN are `logs/actions.jsonl`, the
-  state-diff debug log, the checkpoint's recentActions and `am timeline`; OUT
-  are the durability journal (`journal: true` — dropping a cell from the replay
-  log would be data loss dressed as a privacy feature) and persistence itself.
-  Registered per boot from `composed.cells`, replaced not accumulated, and
-  cleared by `_resetAioRuntime`.
-
-### The leak sanitizers are off (found 2026-09-04, audit round) — DONE 2026-09-04
-
-Done: the flags are on `test`, `test:core` and `check:coverage`;
-`check:sanitizers` is red if they go missing; the full suite is green with them.
-Measured before the fix: **729 of 7210** failed with the flags on. The bulk was
-the framework's own teardown, fixed at the source (dev == prod): a completed
-async call left its half-way heartbeat timer armed (`cell-impl.ts`); an app's
-Phase 5 `onStop` re-armed the diagnostics checkpoint debounce after the final
-flush (`checkpoint.ts`); a boot that REFUSED left the lock, the vitals sampler,
-the logger heartbeat, SQLite and the worker pool running (`aio.ts` unwinds them
-now); `race({ timeout })` kept the losing timer (`async-helpers.ts`); a throwing
-`onStop` skipped the logger teardown (`aio-cells-bridge.ts`); process-wide
-signal listeners outlived the last app (`shutdown.ts`); the AIR transport's
-reconnect timer was untracked (`browser-air-transport.ts`); `testUI`'s
-refused-mount teardown closed its window fire-and-forget (`ui-test.ts`). The
-rest was tests closing what they opened. `tests/sanitizer-leak-floor.test.ts`
-pins each one with the sanitizers on regardless of flags. The original entry,
-for the record:
-
-Deno 2.9 made `--sanitize-ops` / `--sanitize-resources` opt-**in**; they used to
-be on by default and no aio task passes them. So `deno task test` has no leak
-floor at all: a test can leave a timer, a socket, a file or a child process
-behind and stay green, and `check:sanitizers` — which freezes the count of
-unexplained opt-outs at zero — has been ratcheting a mechanism that does not
-run. `docs/testing/README.md` said "Sanitizers stay on"; it now says what is
-true, and the gate prints the same thing on every run.
-
-Measured over the whole suite with both flags on: **702 failures of 7009**,
-dominated by one shape — a booted test app (`aio.run({ libraryMode: true })`)
-that leaves its live-reload file watcher and timers running, plus `testUI`'s
-fire-and-forget happy-dom close. Both are fixable in the harness rather than in
-702 test files, which is what makes this tractable at all.
-
-The work: close the watcher on `app.close()` (or make the harness own it), make
-`_teardownPartialMount`/`unmount()` await the window close, then add
-`--sanitize-ops --sanitize-resources` to `test`, `test:core` and
-`check:coverage` and delete the warning branch in `scripts/check-sanitizers.ts`.
-
-## Resolved: `check:api` was red inside `check:release`, green in a shell
-
-**Found while cutting v1.0.0-beta; fixed the same day.** Kept because the shape
-of the mistake is more instructive than the bug.
-
-**Cause.** `deno doc --json` writes ANSI colour escapes INTO the JSON it emits.
-A type whose `repr` interpolates comes back as
-`"${\u001b[38;5;12mPrefix\u001b[0m}:${…}"` and as `"${Prefix}:${K}"` under
-`NO_COLOR`. The digest is taken over that string, so the same unchanged tree
-hashed two ways — and the release harness sets `NO_COLOR`, which is why exactly
-one context disagreed with the ~20 that agreed. The four symbols named
-(`Catalog`, `CellFieldFilter`, `CellVisibility`, `SelfAction.type`) were simply
-the only public types whose `repr` contains an interpolation. Nothing on the
-surface had moved.
-
-**Fix.** `docOnce()` spawns `deno doc` with `NO_COLOR=1` so the reading is
-canonical wherever it runs, and `normalize()` strips SGR escapes from every
-string before it reaches a digest. Snapshot re-baselined: 4 digests, 0
-structural changes, verified symbol-by-symbol. Pinned by
-`tests/api-snapshot-colour-independent.test.ts`, which asserts the hazard is
-real on this Deno _and_ that the gate is immune to it — mutation-checked three
-ways.
-
-**The lesson, twice over.** The gate had a false BREAKING that pointed at
-innocent types, and the honest reaction to a break you cannot explain is to
-distrust the gate rather than regenerate the snapshot to quiet it — regenerating
-is precisely the motion that would launder a real break. And the first probe
-written to test the colour theory searched raw stdout for an ESC _byte_, found
-none, and briefly "disproved" a diagnosis that was correct: the escape is
-JSON-_escaped_ as six characters. Verify the instrument before believing what it
-says about the subject.
-
-## The gate to beta (user rule, 2026-07-19)
-
-Ten consecutive alpha releases with **no major/critical/blocker bug and no
-compat break**. A corruption-class bug found during an alpha resets the count —
-that is the gate working, not a setback.
-
-- **Streak: 1** — alpha71 (2026-08-28), the first release after the deliberate
-  last compat break. Additive only; no major/critical/blocker bug reported
-  against it.
-- **alpha72 (2026-08-29) — the streak call is YOURS, and here are the facts.**
-  Additive only, no compat break. But a randomized audit of alpha71 found
-  defects that were IN alpha71, and the rule says a corruption-class bug found
-  during an alpha resets the count. None of these is corruption-class — no data
-  is lost or wrongly written — so by the letter of the rule the streak advances
-  to 2. Two of them are availability-class, which is the closest call:
-  - a boot that REFUSED (corrupt `state.db`) never exited: the caller got a
-    clean error and a process that hangs forever
-  - every `libraryMode` app lingered 5,054 ms after `app.close()` returned
-  - `logging: false` silently stopped writing the action log and the crash
-    checkpoint — the two artifacts that exist to explain a crash
-  - nothing was ever compressed and `no-cache` could not revalidate (a 3x wire
-    cost on every page load)
-  - `visible: { include: ["rows.field"] }` dropped an EMPTY list from the
-    client's view entirely — `state.rows.map(…)` on `undefined` in the one state
-    every app starts in, and a delta the client then could not apply (it
-    recovered by resyncing, so no data was wrong: correctness-of-view, not
-    corruption)
-
-  Say the word either way and the line above gets the number you decide.
-
-## Decided in alpha70, so it is not re-litigated
-
-- **Refused, with the reason on record** (see `feedback/refused.md`):
-  `aio migrate` as a separate codemod tool — `aiol --safe-fix` IS the codemod
-  and every retirement ships a rule for it; an `io:` method kind — `long: true`
-  removes the ceiling, and an async method holds no mutex unless
-  `transaction: true`, so the shape already exists (an aiol rule now refuses I/O
-  in a sync method body); a terminal renderer for AIR — AIR's contract is the
-  DOM, and `aio/cli` covers rich CLIs without a second renderer;
-  `UI_CSS`/`UiStyles` consolidation — two spellings of a stylesheet cost nothing
-  and break themes.
-- **Deliberate non-features**, recorded so they are not re-proposed: a
-  `scratch:` cell slice duplicates `visible`/`persist` excludes; a `listensTo`
-  low-latency fan-out queue serves one app's perf profile; serverFn response
-  writes are HTTP, and `route()` owns that; starter cells are app policy, not
-  framework capability.
-
-## Standing policy
-
-- **Post-alpha70 insurance**: additive-only evolution — new features behind new
-  exports and options, never changed semantics. `@experimental` is the only
-  escape hatch for unstable surface. Keep the field-report ritual, and pin
-  field-report keep-lists as tests wherever possible.
-- **Every gate is a ratchet**: `check:silent-catch`, `check:vacuous`,
-  `check:sanitizers`, `check:log-prefix`, `check:dead-wiring` freeze a count and
-  only ever lower it. Raising a ceiling costs an argument in the commit.
-
-## Measured: a one-row change costs O(WHOLE STATE), and it is not persistence
-
-A field-report framing calls whole-slice arrays and coarse dirty tracking the
-largest design debt, and names PERSISTENCE as the cost. Measured on this machine
-(2026-09-01), changing one boolean in one row of an `items` array, median of 120
-dispatches:
-
-| rows   | dev defaults | diagnostics off | state core only | `kv.set` alone |
-| ------ | ------------ | --------------- | --------------- | -------------- |
-| 1,000  | 0.53 ms      | —               | 0.12 ms         | 0.05 ms        |
-| 10,000 | 5.86 ms      | 2.16 ms         | 1.10 ms         | 0.49 ms        |
-| 50,000 | 39.97 ms     | 17.48 ms        | 7.27 ms         | 3.87 ms        |
-
-What the numbers say, and it is not what the framing says:
-
-- **Persistence is not the cost.** `persist: true` vs `persist: false` is
-  identical within noise (36.3 vs 35.6 ms at 50k). Finer-grained persistence
-  would buy approximately nothing here.
-- **Neither is the freeze.** `freezeState` on vs off is identical within noise,
-  so Immer's deep freeze is not what scales.
-- **The whole pipeline is O(state), not O(change)** — every layer of it, from
-  the state core up.
-- **About half of the dev cost is diagnostics** (`stateDiffs`, `timeTravel`,
-  `checkpoint` are DEV_DEFAULTS and touch whole state). That half is absent in
-  production, which also means a developer's feel for the cost is ~2x worse than
-  what ships.
-
-So the target for anyone picking this up is per-dispatch O(state) work in the
-state core and the server path — NOT persist granularity. The practical boundary
-today is around 10k rows: 2 ms of prod-side work per keystroke-driven change is
-fine, 17 ms at 50k is not.
-
-Numbers are from one machine and one shape (a flat array of small objects);
-re-measure before designing against them.
-
-## Known gap: a handful of tests fail NON-DETERMINISTICALLY, in one shape
-
-Measured 2026-09-06, five full runs on one tree (bar the fixes each prompted),
-on a machine also running the developer's own apps:
-
-| 15-min load | result                        |
-| ----------- | ----------------------------- |
-| 9.49        | 16 failed                     |
-| ~7          | 2 failed (a different pair)   |
-| 6.35        | 0 failed                      |
-| ~6          | 1 failed (a gate, not a leak) |
-| 9.69        | 0 failed                      |
-
-**Load is suggestive, not established.** The last run was GREEN at a 15-minute
-load of 9.69 — higher than the run that failed sixteen — so "the machine was
-busy" does not predict it. What is established: the failures are
-non-deterministic on an unchanged tree, and every one is resource-leak shaped
-rather than a wrong answer.
-
-Every one of those failures was a RESOURCE LEAK, never a wrong answer: 15 in
-`tests/am.test.ts` ("a child process was started during the test, but not
-closed"), one in `tests/spawn.test.ts` (child stdout/stderr not closed), and
-earlier `tests/examples.test.ts` sat on one test for ten minutes because a
-spawned child had already died. Both files pass 86/86 and 11/11 alone,
-repeatedly, at the same load.
-
-The shape is always the same: a child process that does not exit inside the
-teardown's window leaves its handle open, and the sanitizer reports it against
-whichever test runs next — so the failure names a file that did nothing wrong.
-WHY the child is late — CPU contention, disk, or a race in the teardown itself —
-is not known, and anyone picking this up should find out before assuming: a fix
-aimed at the wrong cause will look like it worked, on a suite whose failures
-already come and go.
-
-This matters beyond a developer's busy laptop: a CI runner is a busy machine by
-definition, and a suite that goes red at no defect teaches its readers to re-run
-rather than read (the same argument as the orphan-directory ceiling).
-
-**CLOSED 2026-09-22** — the WHY was found, and it was not "teardown too short"
-in the abstract:
-
-- `tests/am.test.ts`: every trojan fixture wrote a stub `App.tsx`, which made
-  `startGraphValidation` spawn a real esbuild native child. Under load that
-  child outlived `stopEsbuild`'s 2 s bound; the sanitizer blamed the next test.
-  Fixtures no longer write `App.tsx` (validation short-circuits), wait for the
-  port to _answer_ instead of `sleep(50)`, and `assertAmCode` keeps
-  stdout/stderr/exit. Short-lived `am` CLIs still use `.output()` — there is
-  nothing for `stopChild` to stop.
-- `tests/spawn.test.ts`: a bare `sleep 300 &` inherited the pipes; under load
-  the product's `DRAIN_BOUND_MS` could expire with reads still open ("stdout/
-  stderr not closed"). Grandchild now redirects to `/dev/null`; post-kill sleeps
-  became `until(!alive)`; `stopSpawn` keeps the exit code. Product `kill()`
-  already escalates — `SpawnHandle` does not expose a `ChildProcess` for
-  `stopChild` without a surface break.
-- `tests/examples.test.ts` was already on `stopChild` with stderr+exit.
-
-## Known gap: the harness cannot cross a transport boundary
-
-`CLAUDE.md` names this and says it is tracked here; it was not, which is how a
-sentence became the only place it lived.
-
-The in-process harness (`testUI` / `testCell` / `bootCells`) runs dev-strict, so
-every tripwire fires in a test — but it never crosses a real transport, so a
-structured-clone hop, a worker-pool round trip, and a client-context replay are
-all invisible to it (since the round after 1.0.18-beta `testUI` does put a
-client call's arguments and return value through the action wire — see the last
-DONE item below). Field reports keep landing here, and so did the hook-guard
-false alarm in this release: every unit test of the validator passed while it
-warned on every boot of every app, because the object the CALLER hands it is
-what was wrong. A regression test written for that bug used `libraryMode: true`,
-never reached the cells bridge, and stayed green with the bug reinstated.
-
-The shape that would close it is the one this repo already trusts for sync/async
-parity (`tests/proxy-differential.test.ts`): run the same scenario in-process
-AND over loopback, then assert identical state and effects. Differential, not a
-second set of hand-written expectations that can drift from the first.
-
-**Started**: `tests/transport-differential.test.ts` does this for METHOD
-PAYLOADS — the same call dispatched in-process and over a real WebSocket, with
-the resulting state compared. It found and now pins divergences the harness had
-been accepting silently: `{ gone: undefined }` keeps its key in-process and
-loses the KEY over the wire (so `"gone" in state` is true in a test and false in
-a browser); `undefined` in an _array_ becomes `null` (slot kept); `-0` arrives
-as `0`; `NaN`/`±Infinity` arrive as `null`; a `Set` arrives as `{}`. A `Date`
-payload is an instance in-process and an ISO string on the wire. A `BigInt`
-payload lands in-process and `enc()` refuses to send (JSON throws — not a silent
-loss). All are JSON facts (or JSON refusals), not aio defects, and all are
-executable now rather than surprises.
-
-The RETURN path is covered too, and it came out well: `serializeReturn` already
-knew that `Map`/`Set`/`RegExp`/`Error` become `{}`, `Date` → ISO string, `NaN` →
-`null`, and warns — in dev AND prod — that "the caller receives a DIFFERENT
-value than the method returned". BigInt is dropped to `undefined` with the
-louder "cannot carry AT ALL" warning. The test pins the value AND the warning,
-because an unwarned change is the bug and a warned one is the design. That path
-is the model state was missing until this release.
-
-Async methods are covered as well, both the value and the throw. The contract is
-`_callId`: `aio-server.ts` says "an ASYNC method carries `_callId`; the executor
-resolves that id with the method's RETURN value when it completes … SYNC/void
-methods have no `_callId`; dispatch() already resolves with their value". A
-socket caller that omits it gets the early reduce result and no correlation —
-which is the contract, and which the first version of these tests mistook for
-two serious defects.
-
-Still to cover, in rough order of what has already bitten:
-
-- ~~worker-cell parity~~ **DONE** — `tests/worker-parity.test.ts`. Two cells
-  with identical config in one spawned app, one `worker: true` and one not,
-  compared server-side across state, a `Date` payload (the hops differ:
-  structuredClone vs JSON), sync returns, async returns, async throws, and a
-  returned schedule effect. They agree on all six. Mutation-verified against the
-  REAL historical bug: stop posting a worker's schedule effects home and it
-  fails on `/parity/later` — so it catches the thing that actually happened, not
-  a proxy for it.
-- effects and their payloads — lower value than it looks: a reducer runs
-  server-side whether the dispatch arrived over a socket or in-process, so the
-  transport does not change them. The worker hop is where effects DO cross a
-  boundary, which folds this into the item above.
-- ~~the client-context replay of a sync method~~ **DONE** —
-  `tests/transport-differential-browser.test.ts`. Same sync `take` in-process
-  and from a real Chromium tab via `withE2E`; state (trojan) + return (DOM after
-  await) compared; `undefined` member / `Date` / `NaN` pinned with
-  `wireBecomes`. Skips when `BROWSER === null`. Own file so an ignored empty
-  case cannot break `check:vacuous`.
-- ~~`testUI` hands the method the caller's own object~~ **DONE** — a call the UI
-  makes (component, handler, test body) crosses the action wire in `testUI`:
-  `actionWireTrip` (`state/action-encode.ts`) is production's encode + decode +
-  the lossy walk, the method receives the decoded arguments, a lossy argument
-  FAILS the test (cell, method, `args[1].when`, `Date → string`, the fix), and
-  the return value comes back through `serializeReturn` as the ack carries it.
-  Server-origin calls (`isServerOrigin`: a method body, an effect, `onInit`) and
-  `scope: "client"` cells cross nothing, as in the app.
-  `tests/wire-harness-differential.test.tsx` runs one table (33 values) through
-  `testUI` and through `testMultiClient().call()` and requires the same verdict
-  — red on the previous harness for every lossy row. The console warning is no
-  longer dev-only: a production client says it once per `cell:method`. Still NOT
-  crossed in `testUI`: a thrown error keeps its identity and stack (over a
-  socket it is a message), `serverFn` arguments, and `useAio().send`. `testCell`
-  / `bootCells` stay server-side on purpose — they have no client entry;
-  `testMultiClient().call()` is the real one.
-
-Until then the standing rule is the cheap half of it: **a new validator is
-proven by BOOTING an app, not only by unit tests.**
-
-## Facts this side cannot change
-
-- **Needs the user's machines**: a real Windows pass (the named-pipe transport
-  is proven under Wine and by inspection), a real macOS pass (Electron and the
-  `ios-client` Xcode project cross-build fine; `xcodebuild` and a device run
-  need a Mac), a real-Android device pass, the 72-hour soak, and the off-box
-  remote field report.
-- **`install.sh` against a repo committed under a restrictive umask** — git
-  writes loose objects with the process umask, so `umask 077` commits are
-  unreadable to another user (the onboarding lab). Not fixable on the
-  installer's side; `install.sh` names the cause and the fix
-  (`chmod -R o+rX <repo>/.git`, `umask 022` before committing), and since
-  alpha71 `deno task lab` refuses BEFORE the first container with the same words
-  — it hit this three times, each time reading as a git error. Diagnosed in
-  alpha69, closed.
+Shipped work: `CHANGELOG.md`. Field reports: `feedback/resolved.md`,
+`feedback/refused.md`. Needs a major: `untracked/v2.md`. This file holds only
+what is OPEN, what is DECIDED (so it is not argued again), and measured facts.
+
+## 1. State
+
+- Current release: 1.0.19-beta (2026-10-07). The clean-desk round of 2026-10-10
+  and the todo/audit round of 2026-10-12 are prepared locally as 1.0.20-beta
+  (version, `CHANGELOG.md`, upgrade guide); not tagged, not pushed.
+- Surface frozen since 2026-09-04: additive only, bugfix-only through beta.
+  1.0.0 = a date, once releases have been boring for several weeks — the owner's
+  call.
+- Compatibility rule (owner, 2026-10-10): never flip a default; a green build
+  stays green; an app upgrades with `am pin` + `am fix` and no manual edits. The
+  better-but-breaking behaviour ships as an opt-in; its default flip goes to
+  `untracked/v2.md`.
+- Say "closed as far as v1 allows", never "all fixed" or "bug-free".
+
+## 2. Standing policy
+
+- Additive-only: new features behind new exports/options, never changed
+  semantics; `@experimental` is the only escape hatch. What needs a break goes
+  to `untracked/v2.md` with the four facts (wrong / shipped instead / v2 /
+  breaks).
+- A release is never pushed with a known unresolved bug.
+- Every gate is a ratchet (`check:silent-catch`, `check:vacuous`,
+  `check:sanitizers`, `check:log-prefix`, `check:dead-wiring`): a count only
+  goes down; raising one costs an argument in the commit.
+- A new validator is proven by BOOTING an app, not only by unit tests.
+- A status line is not evidence: re-audit a report against the TREE.
+- Discoverability is a feature: a reader greps `am help` for their own word and
+  will not browse — help lines carry INTENT words; one fact has one producer.
+- A null result is not a result until the instrument produced a positive one. A
+  seeded test must prove it met every case (2026-10-10: an overflowing LCG made
+  `rnd(4)` always 0, so a property test never met its subject).
+- A gate that fires on correct code gets muted: check a new gate's SILENCE as
+  hard as its finding.
+- A flaky test is a resource leak with a cause — find WHY the child is late
+  before lengthening a wait.
+
+## 3. Decided — do not re-litigate
+
+Refused (one line each; long form in `feedback/refused.md`):
+
+- `aio migrate` codemod (`aiol --safe-fix` is it) · an `io:` method kind · a
+  terminal renderer for AIR · `UI_CSS`/`UiStyles` merge · a `scratch:` slice · a
+  `listensTo` fan-out queue · serverFn response writes · starter cells.
+- `am trust --replace` · `am shot` X11/Wayland capture fallback · a
+  `check:vacuous` rule for "handler ran zero times" · the named `CellState`
+  bound · an open JSX index signature for unknown tags · typing selector `deps`
+  from the literal (`docs/state/cells.md`).
+- `--client=headless` (`testUI` is the headless driver) · `am start --scratch`
+  (`--instance=<name>` is the private copy) · an `aio/media` export
+  (`am shot --video`, `testUI --video`) · a generic Electron main-process
+  extension point (one door per capability) · `updates.allowCrossOrigin`.
+- `electron.permissions: "strict"` (`permissions: {}` already denies all) · a
+  `getCellHealth` server key (no caller) · a dialog for "refused by its server"
+  (cannot tell busy from refusing) · following worker files in `validateGraph`
+  (the skip reason carries `file:line`).
+- Seven renderer warnings stay dev-only, each with its reason in
+  `tests/prod-says-guard.test.ts` (slot swap, untracked read, missing/mixed
+  keys, child desync, unknown event, control drift).
+- Automatic repair of a sync row left unmarked by 1.0.9–1.0.18: nothing those
+  builds wrote proves the row unacknowledged.
+- Builds: `zip -9` / `.7z` · a DMG strip list · a shared or CDN Electron runtime
+  · a custom Electron build · UPX · ICU/Deno trimming.
+
+Design limits, documented where a user meets them:
+
+- Unkeyed `collectHead()` under concurrent streaming (v2 §30) · global
+  `routePath` (v2 §28) · `visible` filter + `sync` on one cell is refused at
+  boot (`docs/state/cell-visibility.md`).
+- `journal: true` with listened sync ops costs ~5–10% ops/s, and two fsyncs per
+  op under `synchronous = FULL`.
+- Data last run by 1.0.9 re-derives no `listensTo` reaction of a sync op; a
+  1.0.9 `am kill` still removes a backup hold's lock.
+- macOS nohup detection is a TTY heuristic. The timeline byte estimator samples
+  large containers (`src/diagnostics/retained-bytes.ts`). Attribute names follow
+  `setAttribute`: `1abc` / `-a` are refused on both sides.
+- Electron: a child window from `openWindow` has no popup policy of its own;
+  `--client=electron` connect mode has no `requireSandbox`.
+- The trim guard does not see a path computed at run time
+  (`build.keepPackages`). A `blocking()` job module must be in a compiled
+  binary's graph (a static import).
+- Handler-less `value`/`checked` controls keep typed text (1.0 behaviour, one
+  decider `_keepsTyped`, `tests/air-keeps-typed.test.ts`); the hint names
+  `defaultValue`.
+- Update patches cover single-file installs only (`binary`, AppImage). Zip,
+  one-click `.exe`, `.app` and Android installs download whole.
+
+The CA decision (2026-09-21): no intermediate; two locks instead.
+
+| verifier                 | anchor name constraints | anchor EKU |
+| ------------------------ | ----------------------- | ---------- |
+| openssl                  | enforces                | enforces   |
+| rustls / NSS / Go        | enforces                | —          |
+| Windows CryptoAPI        | enforces                | enforces   |
+| macOS Security.framework | enforces                | IGNORES    |
+| Java / Android Conscrypt | IGNORES                 | IGNORES    |
+
+- `serverAuth` EKU carries Windows + openssl; rfc822Name/URI bases (`.invalid`)
+  carry macOS. An intermediate closes only the Java row and costs a new root +
+  `am trust` on every machine → v2 §31.
+- An existing root is reused verbatim and WARNED about once, never regenerated.
+
+## 4. Open work
+
+Triaged on 2026-10-12 (59 boxes + an outside audit): what was real and needed no
+owner is built and in `CHANGELOG.md`; what would break an app is in
+`untracked/v2.md` §65–§73. What is left needs a decision, a person, hardware, or
+is small and known.
+
+### Owner decides (each has a recommendation)
+
+- [ ] Pairing by code trusts the first certificate it sees. The sound answer is
+      a PAKE; designed and probed (CPace on X25519, no new dependency), not
+      built: three hand-written implementations, one in Kotlin, and a device
+      test (v2 §65). Opt-in in 1.0.x, or v2? Recommended: opt-in, after 1.0.20.
+- [ ] Update patches for directory installs: keep the installed release's
+      archive as the base (one archive of disk per install, 100–190 MB for an
+      Electron zip; ~80 lines client, 15 publisher, half a day with a VM run).
+      `.app.tar.gz` cannot patch without a format change. AppImage and zip patch
+      sizes are not measured.
+- [ ] Let `build.strictPin` cover the Android client: refuse a keyed
+      non-loopback `http://` link and the https→http fallback of a pairing typed
+      without a scheme. Recommended: yes (only new or hardened apps change).
+- [ ] The keyless load to a changed, unproved certificate still sends that
+      host's non-key cookies (a login session). Dropping them logs users out
+      whenever a server regenerates its certificate.
+- [ ] Android, each small and additive: unsigned `.aab` for an unsigned release
+      build (~15 lines, adds bundle time — yes, low priority); keystore path +
+      alias in `deno.json` (`build.android.keystore`, `keyAlias`; env wins;
+      passwords never — ~35 lines in `releaseSigning`); deep links as
+      `android.schemes` (~150 lines + a page event; when an app asks).
+- [ ] `am create` does not write `build.android.strict`: the 1.0.19 linter
+      reports any unknown `build.*` key as an ERROR, so a scaffold pinned back
+      would fail `deno task lint`. That holds for every future scaffold key.
+- [ ] macOS: an installed app is not in Launchpad. Design measured on macOS 14
+      (a symlink in `~/Applications` is listed within 5 s): opt-in
+      `AIO_APPLICATIONS_LINK=1` in `run.sh`, and `am remove` deletes the link
+      first. Also: `open -W` so `run.sh` waits for the app as it does on Linux?
+- [ ] `scripts/proof.ts --require-current` as a release gate (report-only
+      today). A Windows CI job (YAML in the audit worker's notes; cannot be
+      proven without a push; `continue-on-error`).
+- [ ] The one-click stub checks only the stamp, `<name>.exe` and
+      `electron\electron.exe` before its fast path; another damaged file still
+      launches broken. Design: the stub writes `.aio-sfx-files` (path + size) at
+      extract and verifies it when present; `carrySfxStamp` does not carry it.
+      Needs a stub rebuild and a VM run.
+- [ ] v2 §25 promises a subpath export "when asked"; the `aio/media` refusal
+      says no. Pick one.
+- [ ] Windows: taskbar pins after the AppUserModelID change (pin a 1.0.19
+      window, upgrade, start: does the window join the pin?). `am kill --json`
+      there: 1.0.20 adds `"how"`, asks first (app exit 0, was 1), and can say
+      `killed: false` with exit 1 when the process survives.
+
+### Known and small
+
+- [ ] Electron zero-port (IPC): the main process holds the socket; no
+      silent-socket watchdog there (the page's rule is in
+      `src/browser/browser-vitals.ts`). `src/server/cli-client.ts` has its own
+      ping, not examined. The page watchdog is proven on the Android WebView and
+      by fake-socket tests, not in a desktop browser with a black-holed socket;
+      the 20-beat ceiling is unit-tested only.
+- [ ] Discovery: a remote host on two shared subnets is listed twice (needs a
+      machine id in the ad — an additive wire field). The real-socket test
+      assumes a machine hears its own broadcast (true on Linux; not run
+      elsewhere).
+- [ ] aio client: in a picker-launched window every in-page navigation re-enters
+      `connectTo`; a tokenless link in a keyed app would answer 401 (read, not
+      run). A host with no pin gets the jar's cookies whatever certificate it
+      shows later. Not strict: Chromium's own connections are not checked
+      against the pin (strict / v2 §58 closes it).
+- [ ] Updates: a damaged kept download whose record entry was already swept
+      still refuses its release; a single-file release that keeps failing its
+      swap is never dismissed (dismissal is directory-only). `allowScripts`
+      drift is decided only for exact entry against exact import (a lock-based
+      rule was refused: ~40 lines, low value).
+- [ ] Build: the outside-project mount warning can print twice per boot
+      (`_servedAssets` runs in `aio-server.ts` and `server.ts`); the
+      machine-bound-imports warning says the binary "runs here" where it runs
+      nowhere (the smoke run refuses it); the relative-`importScripts` finding
+      reads the worker's entry file only; no test covers the `stubRebuildNow`
+      spawn or the build-summary key warning wiring (pure parts are tested).
+- [ ] Dev: the catch-up look does not cover `watch: ["file.ts"]` (a file, not a
+      directory); one extra restart at dev start for an app whose start rewrites
+      a cell file with the same bytes. `am start` cannot tell "Deno still
+      fetching" from "fetched, app silent" (it reads the last log line). A
+      local-socket listener re-created on the same path right after `shutdown()`
+      in one process was unreachable for 10 s once (test only, not traced).
+- [ ] Sync: a row left by a kill under 1.0.9–1.0.18 still stops the start; the
+      message names the file and a tool-free repair. `am sync drop-op` refused.
+- [ ] Android lane: 15/15 on API 35 and API 36, twice each (2026-10-12, load
+      11–35). Its taps are not retried. Record the proof at release:
+      `AIO_PROOF_RECORD=1 deno task test:android`; WebKit lane green 3/3
+      (`AIO_PLAYWRIGHT_DIR`), row not recorded.
+- [ ] Under the mutation gate's load (4 workers, 45 min) two tests were red
+      unmutated once and green alone: `tests/test-shards-leftover.test.ts` (its
+      planted suite was not green) and a lock dir of a test process's
+      `apps-<pid>` sandbox was still there when `check:orphans` looked (gone
+      later; the `test` gate had failed before it, so the suite's own post-check
+      did not run).
+- [ ] Linux, seen once (full release check 2026-10-14, loaded box), not
+      reproduced 0/42 (12 alone, 30 under 10-way load):
+      `shutdown-signal-says-why-e2e` SIGHUP — app.log had a `stopped uptime=`
+      line ABOVE the `SIGHUP received` one, outside the 2000-char tail the
+      message showed. The message now prints every log file in full; the next
+      sighting says whether it was a second boot (a dev restart) or a log order.
+- [ ] Windows VM under suite load (4 cores), alone-green ×3: `workers: "real"`
+      tests miss the 30 s ready deadline because `deno test` type-checks the
+      worker entry's graph when the worker starts (6 s idle, twice in one shard)
+      — let the shard runner check the worker fixtures first, or run the shards
+      `--no-check` (check is its own gate); `retained-bytes`'s timing ratio
+      (estimate ×20 < `JSON.stringify`). Updates: creation-time tunnelling may
+      also touch `record(previous, …, { is: identity(current),
+      moving })`
+      in `updates-apply.ts` (folders did not tunnel when measured).
+- [ ] Windows: tests that name `/tmp/…` or `/nonexistent/path` as a literal make
+      `C:\tmp` (`xdg-int-*`, `xdg-left-*`, `.X11-unix`) and
+      `C:\nonexistent\path` on the VM. Find them with a guard that fails when a
+      suite run leaves a new entry in the drive root (removed by hand
+      2026-10-12).
+- [ ] Tests: the chaos fuzz's draws depend on timer order (a `FUZZ_SEED` replay
+      is not exact under load); `auth-db-busy-timeout`'s measured unit is not
+      confirmed at macOS background priority; own-HOME for test browsers is
+      Linux only; `tests/electron-handshake-watch.test.ts` now runs in the
+      serialized real-window lane.
+- [ ] Windows: no ledger row for the stub's Rust (a `cargo test` row made the
+      real checkout reuse the mutant's binary); the first `am state` after a
+      1.0.19 app boots timed out once (8 s, fixture without `node_modules`). The
+      stub's message box for a shortcut it cannot add was never seen.
+- [ ] macOS: Spotlight lists every kept version of an installed app;
+      `pruneVersions` knows one `current`, not a running version (guarded in
+      `run.sh` for the bundle only); an app that exits at start under `open` is
+      silent and `run.sh` exits 0. Full runs on the Mac keep their ssh session
+      open: a detached job cannot send LAN broadcasts there.
+- [ ] Code health (audit): `single-instance-lock.ts` is 196 KB; the smallest
+      safe first cut is "App ID Resolution" (lines 369–686, no lock state) into
+      its own file, re-exported. 294 silent-catch blocks, ratcheted.
+- [ ] Deno: a close for cause can lose its code to an unread frame
+      (`_closeAfterRead` narrows it; the reconnect's 401 ends it right);
+      `node:dgram` reports EHOSTUNREACH as `UNKNOWN`.
+- [ ] Page size: message prose is a fifth of the download; codes would need a
+      source convention at ~300 sites (v2 §68).
+
+- [ ] Android, from the real-phone round (Saga, Android 14, 2026-10-13):
+  - A `blob:` / `data:` download cannot be saved (a standalone app's "export"
+    button) — refused out loud since 1.0.20. Build: the page reads the blob, a
+    native bridge takes the bytes, the user saves through
+    `ACTION_CREATE_DOCUMENT`. The download listener does not get the
+    `download="name"` attribute.
+  - A download from a client paired to a self-signed `--expose` TLS server: not
+    measured; `DownloadManager` does not know the app's pin, so expect a
+    failure. Fetch natively with the pinned certificate.
+  - The dev overlay says `[transport] frozen … Check network stability` after 90
+    s on Home (1/1): a hidden page's timers stop, the server reads the missing
+    heartbeat as a stalled network. The client should say it is hidden with its
+    last beat; the server then names that, not the network. (`frozen` itself
+    must stay — the broadcast skips frozen clients.)
+  - A font-scale or display-size change reloads the page (committed state kept,
+    typed text lost). `fontScale|density` in `configChanges` might stop the
+    WebView picking up the new scale — measure first.
+  - Not done on the phone (battery at 2 %, the port charges at 900 mA): the
+    whole lane with the three new steps (they passed there alone, and 17/17 on
+    the API 35 emulator), share link and TLS over real Wi-Fi, split screen,
+    picking a real file, keyboard insets on Android 15+.
+- [ ] Windows: `GetLastError()` is a second FFI call and read 0 once after a
+      FALSE `ConnectNamedPipe` (fixed there: `connectCodeFromFacts`). The other
+      sites in `win-pipe.ts` (reads, writes, `GetOverlappedResult`) still trust
+      it; a 0 there closes one connection, not the listener. Take the status
+      from the OVERLAPPED's `Internal` field instead.
+- [ ] Windows: `Deno.Command.spawn()` of a program that has never run stops the
+      app's event loop while the system checks the file — 1–11 s measured (2–5
+      ms the second time). An app that starts its window answers nothing
+      meanwhile: `am state` got "accepted the connection but never answered
+      (waited 8000ms)". Once per install or update for a real app. Two ways out,
+      both measured or sized, the owner picks: (a) create the exe once SUSPENDED
+      on a pool thread and end it, then spawn (0 of 80 after; the next spawn 3–6
+      ms) — the patch is kept as `untracked/round3/first-run-verdict.patch`, but
+      "create suspended" is a shape security tools watch; (b) do the real spawn
+      in a Worker and proxy pid/status/stderr/kill — larger. The other `spawn()`
+      sites (`spawn.ts`, `updates-apply.ts`, `updates-check.ts`,
+      `open-external.ts`, `app-version.ts`, `dev-restart.ts`) pause the same
+      way.
+- [ ] Windows Defender (signatures of 2026-10-12): a compiled binary that
+      carries `esbuild.exe` whole in its data was refused at start as
+      Trojan:Win32/Cloxer in 15 of 20 builds — a CLOUD verdict (a file never run
+      scans clean; each `deno compile` is a new file to it). What the build
+      ships leaves esbuild out and was never flagged (cli 0/5, server 0/3); the
+      one test that compiled with no excludes now builds as `buildCli` does.
+      Open: `build.keepPackages: ["esbuild"]` embeds it again — warn there; the
+      Electron-target server exe was not measured. Lasting answers are the
+      owner's: a code-signing certificate, or a false-positive report to
+      Microsoft.
+- [ ] `am publish`'s summary line "an install made by the one-click .exe is a
+      zip install too" has no test (needs a publish with both artifacts).
+
+### Before the release
+
+- [ ] One full `check:release` green end to end on Linux; the full suite on the
+      Windows VM and the real Mac at the release commit; `test:onboard` and
+      `test:build`; the three build-lane browser tests edited for
+      `browserHomeEnv`; a cold stub rebuild (`check:release` now says when it
+      was skipped).
+- [ ] Record the proof rows (today: 1 of 16 proven, 5 never recorded, 4 stale,
+      android BEHIND its build path): `deno task update:proof`.
+- [ ] `docs/clients/electron.md` and the doctor hints say "1.0.20" (adjust if
+      the number differs).
+
+## 5. Needs a human
+
+- The Windows icon (1.0.20): the downloaded one-click `.exe` shows the app's
+  icon in Explorer, the Downloads folder and on the desktop; the Start-menu
+  shortcut shows it too. Proven through the shell's API on the VM, never looked
+  at by a person.
+
+- Windows one-click `.exe`, real desktop session (proof rows `app-on-real`):
+  1. First open: "Installing <name>…", a moving bar, no Cancel; it closes and
+     the app window follows — content, not white. Start menu: one shortcut.
+  2. Second open: no progress window. Two fast double-clicks on a fresh install:
+     one progress window, one app.
+  3. App running + another version's `.exe`: "… is running … Nothing was
+     changed". Close it, open the newer `.exe`: new version, one shortcut. Then
+     the older `.exe`: the newer app opens.
+  4. Delete the download while the app runs: allowed. A truncated `.exe`: a
+     message box with the reason. Note what SmartScreen / Defender show.
+  5. Terminal: `am upgrade <name>` (app closed) opens no window and prints
+     `installed <v> … (the app was not started)`; `run.ps1` returns once the
+     window is up, `$LASTEXITCODE` 0.
+  6. Sign an `.exe` with the real certificate, `run.ps1 -NoRun`: one install
+     under `aio-sfx\`, none under `Programs\`.
+  7. A real app updating itself from the `.exe`; Bluetooth/USB/serial pickers.
+- macOS: press each "Move to Applications" button once on a Mac. Then a real
+  download: Safari's allow-downloads click, Open Anyway (`spctl` rejects the
+  ad-hoc app from a quarantined image), then the offer; the DMG double-click.
+  The `aio-macos` desktop may still show a Safari sheet or a "control Safari"
+  prompt. `sudo safaridriver --enable` there, once.
+- iPad, 10 minutes, same Wi-Fi (`deno task build --targets=web`, serve
+  `dist/<name>-web/`; server steps: `--expose --no-tls --client=server-only`):
+  1. Note the iPadOS version. Open the URL in Safari: themed app, no blank page,
+     no sideways scroll (below 15.4: "the browser engine is too old").
+  2. Tap + three times, reload: 3. Rotate: layout follows, count stays. Tap a
+     text field: no zoom. Switch to Dark: the page follows.
+  3. Share → Add to Home Screen → open: no Safari bars, nothing under the status
+     bar, count 3. (https only) Airplane mode: still renders, + gives 4.
+  4. Open the server's share link, tap +. Home for 60 s, return: reconnects by
+     itself, count current. Wi-Fi off, tap +, Wi-Fi on: "Reconnecting…" clears
+     and the tap arrives. Done 2026-10-12 on an iPad mini 5, iPadOS 26.7.1,
+     Safari, share link to a dev server: the page opens, taps reach the server
+     (count 3), no client error. Not done: reload, rotate, Dark, Home Screen,
+     leave and return, Wi-Fi off and on. With a USB cable to the Mac (trust
+     once, Settings → Safari → Advanced → Remote Automation) `safaridriver` can
+     drive most of these.
+- Android phone: USB debugging on, accept the prompt, then
+  `AIO_ANDROID_SERIAL=<serial> AIO_PROOF_RECORD=1 deno task test:android` (never
+  run on hardware). Play upload needs the owner's keystore.
+- Xcode: download `Xcode_16.2.xip` (Apple ID) for the macOS 14 VM, plus the iOS
+  simulator runtime (`xcodebuild -downloadPlatform iOS`). The first build must
+  check what was written by reading only (2026-10-12): `ViewController.swift`'s
+  load-failure handling (`#unreachable`, `#keyed`) compiles and `loadFileURL`
+  keeps the fragment; the iOS connect page offers the share link only. Then ATS,
+  icon alpha, no shared scheme, no UIScene.
+- Done 2026-10-13 on a real phone (Saga, Android 14, WebView 141):
+  `test:android` 15/15 twice; the run now takes its client APK and its
+  `adb reverse` rule back off a phone. Record the `android (device)` row on the
+  release commit while the phone is attached.
+- An Android 10 phone proves the floor (`minSdk` 29 since 1.0.20; a bare
+  emulator image's WebView is older than the 98 the bundle needs, so no emulator
+  can); any real phone proves hardware and `android.colorScheme`. One level
+  each, the owner's: Android 10, iOS / iPadOS 15.4 (where `structuredClone` and
+  `Object.hasOwn` arrived). An iPad run counts for the engine, not for the notch
+  or a phone-sized keyboard.
+- A Developer ID (Apple Developer Program, Team ID; a "Developer ID Application"
+  certificate in the signing Mac's keychain; notary credentials via
+  `xcrun notarytool store-credentials aio`). aio signs ad-hoc only
+  (`src/build/dmg.ts` `codesignScript`); the by-hand steps are
+  `codesign
+  --force --options runtime --timestamp -s "Developer ID Application: …"`,
+  `notarytool submit --wait`, `stapler staple`, then re-make the `.app.tar.gz`
+  and `.dmg`. Unproven here: no certificate. Authenticode for the Windows `.exe`
+  likewise.
+- File the Immer issue (needs the account): `shallowCopy` uses `slice`, V8's
+  slow path on a frozen array. Text and a repro that ran are ready (round-3
+  notes, `immer-issue.md`).
+- The Windows VM holds about 14 GB this project's tests made (`C:\aio-test`, lab
+  folders, ~150 test profiles, two scheduled tasks `\fixD-*`); the list is in
+  the round-3 notes. Nothing is deleted without the owner's yes. Same for
+  `~/.cache/aio/tools/windows-sfx-stub-target` here (an old shared cargo cache,
+  unused since the cache is keyed per checkout).
+- This workstation: (verify) remove the test-made profiles in `~/.config`
+  (`deno task check:home-clean --list`; also `Electron`, `ipc-test`,
+  `reload-cfg-e2e`, `route-e2e`, `aio-csp-probe`, `aio-android-e2e@…`);
+  `git worktree prune` for two entries under `/tmp/run-sh-e2e-*`.
+- Still owed: the 72-hour soak; an off-box remote report. `install.sh` against a
+  repo committed under `umask 077` names the cause; it cannot fix it.
+
+## 6. Measured facts worth keeping
+
+- A one-row change costs O(whole state), not persistence. Median per toggle
+  (2026-10-10, one core): 1k rows 0.07 ms core / 0.35 ms dev; 10k 0.40 / 0.72;
+  50k 2.0 / 3.0 (dev was 19.4 before the state-diff line stopped serializing the
+  value). Four fifths of the core is Immer: `slice()` on a frozen 50k array 0.96
+  ms, unfrozen 0.095, `[].concat(x)` 0.107, spread 0.018 (fills holes).
+  `s.items = tenThousandFreshRows` spends ~29 ms in finalize. Immer 11.1.21 is
+  slower on this shape. `fixKeyOrder` is 13%.
+- Sync op under `synchronous = FULL`: two fsyncs, `op-door-full` p10 ~8.9 ms;
+  one fsync measured ~5.6 ms and was rolled back (v2).
+- Standalone/Android per-dispatch fsync at 1.08 MB state: 0.710 ms/key, 35.9×
+  the debounced path.
+- Page (2026-10-12): 223.2 KB raw / 82.6 gz / 79.1 served; its 317 messages 41.5
+  / 15.6 KB; codes would save at most 15.9 KB gz (19.3%) against a 16.7 KB gz
+  table, and 288 of the 317 reach their sink through a helper.
+- A socket in airplane mode: one on wifi is destroyed (close in 0.5–2.3 s); one
+  on mobile data keeps existing with no route and never closes. Android WebView
+  writes `localStorage` to disk about a second late.
+- A limited broadcast (255.255.255.255) leaves by ONE interface — the VPN's when
+  one is up. macOS: a detached job whose login session ended cannot send to the
+  LAN at all (EHOSTUNREACH).
+- An import-map value pointing into a folder with a JSR-package `deno.json`
+  makes Deno 2.9.7 resolve that package's bare deps through its own map
+  (relative values, run and compile; not an absolute or `file:` value under
+  `deno compile`).
+- Binary: 6.7 MB embedded in ~107 MB (counter); `.d.ts` is 1.1% of a 132 MB
+  binary. One-click `.exe` 133.5 MB against a 171 MB zip.
+- Update patch between two 104.6 MB binaries one commit apart: 10.7 KB, 27 s to
+  make, 0.1 s and ~210 MB to apply. Deno's `node:zlib` ignores a zstd
+  `dictionary`; `systemMemoryInfo().available` is 0 on Windows.
+- Windows: `%APPDATA%` alone does not move Electron's `userData`,
+  `%USERPROFILE%` does. A lock held share `None` for `Read` is still readable.
+  Named pipe: `GetOverlappedResult(bWait=FALSE)` ignores its handle; the FFI
+  pool is exactly 32; reopen if `drain` ever READS through its handle.
+- macOS background QoS stretches sleeps ~3.5× (SQLite's 1 s busy wait took 3517
+  ms).
+- Android: a kill 122 ms after a change lost it before the native store; now
+  survives at 52 ms. WebView floor 98, Safari/iPadOS floor 15.4.
+- Controls: a handler-less input costs 0.29 ms per 1000 (was 0.05) since the
+  decider reads the live value.
+- A one-file `deno run` build (2 MB) does not boot: the SQLite worker file and
+  the page bundle are not inside it. x509 alternatives refused: `@peculiar/x509`
+  = 19 packages / 2.06 MB; `node-forge` has no ECDSA signing. Deleting
+  Electron's `default_app.asar` breaks it silently.
+
+## 7. Known gap: the harness cannot cross a transport boundary
+
+(The project instructions point here.) `testUI`/`testCell`/`bootCells` run
+dev-strict but in-process. Closed so far, each by a DIFFERENTIAL (same scenario
+in-process and over the real hop, identical state required):
+
+- method payloads + returns over a real WebSocket —
+  `tests/transport-differential.test.ts`
+- worker-cell parity — `tests/worker-parity.test.ts`
+- sync-method replay in real Chromium —
+  `tests/transport-differential-browser.test.ts`
+- `testUI` client calls, thrown errors, `serverFn` and `useAio().send` cross the
+  action wire — `tests/wire-harness-differential.test.tsx`. For errors,
+  `serverFn` and `send` this is opt-in (`TestUIOptions.wire.strict` /
+  `AIO_TEST_WIRE=strict`; new scaffolds and aio's own suite are strict); the
+  default is the 1.0.19 harness plus one stderr line per kind.
+
+- a login: form → server → cookie → reload → sign-out in one test —
+  `tests/auth-login-joined.test.tsx` (`testPageFetch`).
+
+Still not crossed: the page's socket after a login (cell state there comes from
+`testUI`'s in-process cells; e2e only).

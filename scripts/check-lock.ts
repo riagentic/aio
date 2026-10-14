@@ -95,6 +95,23 @@ export function unpinnedImports(src: string): string[] {
   return out;
 }
 
+/** Who wrote the unbounded lock line `spec`: the tracked files that import
+ *  it with no version (`hits`, from `sourceHits`), or — when none does — a
+ *  command somebody ran in the checkout. Measured: `deno eval` (or `deno run`
+ *  of a scratch file anywhere under the checkout) with an unversioned
+ *  `jsr:`/`npm:` import adds exactly such a line, resolved to the newest
+ *  version the lock already holds. Pure. */
+export function lockLineWriter(spec: string, hits: readonly string[]): string {
+  const pkg = spec.replace(/@(?:\*|latest)?$/, "");
+  const by = hits.filter((h) => h.endsWith(` imports ${pkg}`))
+    .map((h) => h.trim().split(/\s+/)[0]!);
+  return by.length > 0
+    ? `written by ${by.join(", ")}`
+    : `no tracked file imports \`${pkg}\` unversioned: a command run by ` +
+      `hand in the checkout wrote it (\`deno eval\` / \`deno run\` of code ` +
+      `with that import) — delete the line`;
+}
+
 async function sourceHits(dirs: string[]): Promise<string[]> {
   const hits: string[] = [];
   const walk = async (d: string) => {
@@ -119,6 +136,13 @@ if (import.meta.main) {
     await Deno.readTextFile(join(ROOT, "deno.lock")),
   ) as { specifiers?: Record<string, string> };
   const loose = unpinnedSpecifiers(lock);
+  const inSource = await sourceHits([
+    "src",
+    "tests",
+    "scripts",
+    "aiol",
+    "amui/src",
+  ]);
   if (loose.length > 0) {
     console.error(
       `✗ ${loose.length} unpinned dependenc(ies) in deno.lock — these resolve ` +
@@ -127,6 +151,7 @@ if (import.meta.main) {
     );
     for (const s of loose) {
       console.error(`  ${s}  → currently ${lock.specifiers![s]}`);
+      console.error(`      ${lockLineWriter(s, inSource)}`);
     }
     console.error(
       `\n  fix: import through the mapping in deno.json's "imports" (which is\n` +
@@ -138,13 +163,6 @@ if (import.meta.main) {
     );
     Deno.exit(1);
   }
-  const inSource = await sourceHits([
-    "src",
-    "tests",
-    "scripts",
-    "aiol",
-    "amui/src",
-  ]);
   if (inSource.length > 0) {
     console.error(
       `✗ ${inSource.length} import(s) name a dependency with no version — ` +

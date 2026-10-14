@@ -7,6 +7,8 @@
 // hole). Static + heuristic: it can't see permissions reached only through
 // fully-dynamic indirection, so it's a STARTING manifest to review, not a proof.
 
+import { classifySource } from "../server/updates-core.ts";
+
 /** The permission categories an app's source shows signs of needing — the input
  *  to its least-privilege run flags. Conservative: any sign of use ⇒ true. */
 export type Capabilities = {
@@ -226,4 +228,58 @@ export function manifestReport(
     );
   }
   return lines.join("\n");
+}
+
+/** `src` with its comments blanked — a key in a comment is not set. Strings
+ *  are kept (a `//` inside one is not a comment). Pure. */
+export function stripComments(src: string): string {
+  return src.replace(
+    /("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.)*`)|\/\/[^\n]*|\/\*[\s\S]*?\*\//g,
+    (_m, str) => str ?? " ",
+  );
+}
+
+/** Does this entry configure `updates` from a signed-manifest source and
+ *  leave the signing key to be trusted ON FIRST USE — no `key`, no `keys`,
+ *  no `allowUnsigned`? Only what the text itself settles: a source that is
+ *  computed, spread in, a git repository (nothing is signed there) or of a
+ *  kind `classifySource` will not guess answers false. Pure. */
+export function updatesKeyOnFirstUse(entrySrc: string): boolean {
+  const code = stripComments(entrySrc);
+  const lit = "([\"'`])([^\"'`\\n$]*)\\1";
+  const m = new RegExp(`\\bupdates\\s*:\\s*(?:${lit}|\\{)`).exec(code);
+  if (!m) return false;
+  let source: string | undefined = m[2];
+  let kind: "git" | "manifest" | undefined;
+  if (source === undefined) {
+    let depth = 1, end = m.index + m[0].length;
+    for (; end < code.length && depth > 0; end++) {
+      depth += code[end] === "{" ? 1 : code[end] === "}" ? -1 : 0;
+    }
+    const body = code.slice(m.index + m[0].length, end);
+    if (/\b(?:keys?|allowUnsigned)\b|\.\.\./.test(body)) return false;
+    source = new RegExp(`\\bsource\\s*:\\s*${lit}`).exec(body)?.[2];
+    kind = /\bkind\s*:\s*["'`](git|manifest)["'`]/.exec(body)?.[1] as
+      | typeof kind
+      | undefined;
+    if (source === undefined) return false;
+  }
+  try {
+    return classifySource(source, kind) === "manifest";
+  } catch {
+    return false; // aio-ok: a source of no decidable kind — boot refuses it by name
+  }
+}
+
+/** The build's line for an entry {@linkcode updatesKeyOnFirstUse} is true
+ *  of. `key` — the public key, when the caller holds it (`am publish`, having
+ *  signed with it). A warning: the build is as green as it was. Pure. */
+export function firstUseKeyWarning(entry: string, key?: JsonWebKey): string {
+  return `${entry} configures updates with no signing key: each install ` +
+    `trusts the key of the FIRST signed release it is shown, for good — ` +
+    `whoever answers that first check from your release host chooses it. ` +
+    `Ship the key inside the app: updates: { source: …, key: ${
+      key ? JSON.stringify(key) : "<the public key `am publish` prints>"
+    } } in aio.run() (docs/deploy/updates.md). An install that already ` +
+    `trusts this key notices nothing.`;
 }

@@ -13,6 +13,8 @@ page is the short door.
 - [App Architectures](app-architectures.md) — one app many surfaces · service +
   rich clients
 - [Project Structure](project-structure.md) — file organization
+- [aio on Windows and macOS](windows-macos.md) — PowerShell spellings, where
+  files are, firewall, startup, stopping, uninstalling
 - [Tutorial](tutorial.md) — step-by-step from zero to running
 - [Migration](migration.md) — adopting aio in an existing app
 - [Common Pitfalls](pitfalls.md) — traps people hit, each with the avoiding rule

@@ -4,7 +4,13 @@
 // One task at a time — a blocking FFI/CPU call occupies the whole worker, which
 // is the point: it can't freeze the main event loop / rendering.
 
-type Req = { n: number; src: string; name?: string; arg: unknown };
+type Req = {
+  n: number;
+  src: string;
+  name?: string;
+  url?: string;
+  arg: unknown;
+};
 type Res =
   | { n: number; ok: true; data: unknown }
   | { n: number; ok: false; error: string; stack?: string };
@@ -40,8 +46,33 @@ function selfContainedHint(e: unknown): string | null {
 }
 
 self.onmessage = async ({ data }: MessageEvent<Req>) => {
-  const { n, src, name, arg } = data;
+  const { n, src, name, url, arg } = data;
   try {
+    // The module form (`pool.run(id, new URL(…), arg)`): a real module, with
+    // its own imports — nothing is rebuilt from text.
+    if (url !== undefined) {
+      const job = (await import(url).catch((e) => {
+        // Measured in a `deno compile` binary: a module nothing imports
+        // statically is not in it, and the bare "Module not found" names a
+        // path inside /tmp/deno-compile-… that reads as a broken install.
+        if (!/module not found/i.test(String(e?.message))) throw e;
+        throw new Error(
+          `${e.message}\n\nblocking() imports this module in a Worker. In a ` +
+            `compiled build it must be part of the binary: import it once ` +
+            `from the app (\`import "./job.ts"\`), or pass it to the compile ` +
+            `with --include.`,
+        );
+      })).default;
+      if (typeof job !== "function") {
+        throw new Error(
+          `blocking(): ${url} has no default export that is a function — ` +
+            `the worker calls \`export default (arg) => …\``,
+        );
+      }
+      const res: Res = { n, ok: true, data: await job(arg) };
+      self.postMessage(res);
+      return;
+    }
     // The function stringifies to a valid expression (arrow or `function …`);
     // wrap in parens so it parses as an expression, not a declaration.
     const fn = (0, eval)("(" + src + ")") as (a: unknown) => unknown;

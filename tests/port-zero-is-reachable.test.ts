@@ -25,7 +25,6 @@ const REPO = dirname(dirname(fromFileUrl(import.meta.url)));
 
 Deno.test({
   name: "port 0: the resolved port reaches the banner, the lock and the wire",
-  ignore: Deno.build.os === "windows", // named pipes, no TCP port to resolve
   async fn() {
     const dir = await Deno.makeTempDir({ prefix: "aio-port-zero-" });
     const appId = `pz-${crypto.randomUUID().slice(0, 8)}`;
@@ -116,7 +115,9 @@ await new Promise(() => {});
  *  Mirrors the scoping rule rather than importing it, so a change to that
  *  rule shows up here as a failure instead of being followed silently. */
 function lockDirOf(dir: string): string {
-  const base = Deno.env.get("XDG_RUNTIME_DIR") ?? "/tmp";
+  const base = Deno.build.os === "windows"
+    ? (Deno.env.get("TEMP") ?? Deno.env.get("TMP") ?? "C:\\Temp")
+    : (Deno.env.get("XDG_RUNTIME_DIR") ?? "/tmp");
   const scope = "-" +
     dir.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(-48);
   return join(base, "aio" + scope);

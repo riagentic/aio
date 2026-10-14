@@ -10,6 +10,7 @@
 //
 // Requires: Electron installed at node_modules/.bin/electron + a display (DISPLAY or WAYLAND_DISPLAY)
 
+import { childEnv } from "./e2e-app-harness.ts";
 import { assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { createServer } from "../src/server/server.ts";
@@ -175,14 +176,16 @@ async function launchElectron(
     ],
     stdout: "null",
     stderr: "null",
-    env: {
+    // `childEnv`: a real Electron keeps a whole Chromium profile — in this
+    // run's directory, not in the developer's `~/.config`.
+    env: childEnv({
       ...Deno.env.toObject(),
       ELECTRON_DISABLE_SECURITY_WARNINGS: "1",
       // The window opens on the NESTED display, not the desktop this test
       // is running on. Without it every run (and every retry) maps a window
       // over whatever the developer is typing into.
       ...testDisplayEnv(),
-    },
+    }),
   }).spawn();
 }
 

@@ -184,17 +184,25 @@ What is particular to the pipe:
   to Everyone), the same door a `0700` socket directory is on Unix. Remote
   clients are rejected at the pipe.
 - **A second instance fails at the bind** (`FILE_FLAG_FIRST_PIPE_INSTANCE`), as
-  a Unix bind does — one pipe name, one process.
+  a Unix bind does — one pipe name, one process. Both names are taken at boot,
+  before the `running` line: an app whose pipe name is already hosted refuses to
+  start, and so does one that needs a pipe without `--allow-ffi` (the message
+  names `--transport=ws`).
+- **The name carries the apps directory.** With no `AIO_APPS_DIR` it is
+  `aio-<lockKey>`, unchanged. Under one it is `aio+<scope>+<lockKey>`, so two
+  copies of one app in two apps directories do not share a pipe.
 
 The boot line reads `running (dev, electron, pipe — no TCP port)` and
 `transport: named pipe at \\.\pipe\aio-<x>`. The WS + TCP path remains for
 exactly what needs a URL: `--transport=ws`, a browser client, `--expose`.
 
-**Status:** proven under Wine in CI (`tests/wine-pipe-e2e.test.ts` — the pipe
-server, overlapped I/O, the HTTP-over-pipe streaming path, concurrent clients,
-the named errors); one pass on real Windows is still pending. A pipe connection
-kept for a second request is not part of that run: keep-alive over a stream pair
-is pinned on Linux, by the differential test's stream-only connection.
+**Status:** proven under Wine (`tests/wine-pipe-e2e.test.ts`, an opt-in gate —
+the pipe server, overlapped I/O, the HTTP-over-pipe streaming path, concurrent
+clients, the named errors). Since 1.0.19 the suite also runs natively on Windows
+11 (a VM and a real laptop), where the local socket is this pipe; that run is by
+hand each release, not a recorded gate. A pipe connection kept for a second
+request is not part of that run: keep-alive over a stream pair is pinned on
+Linux, by the differential test's stream-only connection.
 
 ## `routes` vs `serverFn` — what each costs you
 
@@ -216,7 +224,11 @@ Flips everything to TCP: bind `0.0.0.0` (or one address with `--host`), HTTPS
 with an auto-issued, self-re-issuing certificate (`--tls-cert`/`--tls-key` to
 bring your own, `--no-tls` for an already-encrypted network path), transport WS,
 a single shared key (`key: true`) or per-user auth. UDS is never used under
-`--expose` — a remote client has no path to a local socket.
+`--expose` — a remote client has no path to a local socket. `am trust` prints
+how to make this machine's certificates trusted
+([auth](../auth/auth.md#remote-access---expose)); a server other machines cannot
+reach is usually the
+[OS firewall](../basics/windows-macos.md#the-firewall-when-you---expose).
 
 ## Who may connect to the local socket
 

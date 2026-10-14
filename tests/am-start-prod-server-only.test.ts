@@ -9,6 +9,7 @@
 // guards `am start`'s single-instance check, where "not answering" means
 // "zombie — kill it". The app's door answers on `/__aio/health`, which every
 // aio server serves in every mode; a refused page is not a dead server.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";

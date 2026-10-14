@@ -70,6 +70,14 @@ Deno.test("revoked session: a sign-in in another tab resumes this one when it is
   console.error = (...a: unknown[]) => void lines.push(a.map(String).join(" "));
 
   await import("../src/browser/browser-air-transport.ts");
+  // One process here, so the page's console IS the server's. The page's
+  // console forwarding used to send every server log line back up the socket
+  // — and the server's own "closing — session revoked" line, said the moment
+  // before the close, was then unread data behind it: a close with unread
+  // data loses its code (measured: 1008 arrived in 22 of 30 runs on Linux, 2
+  // of 10 on macOS). The forwarding now knows a server's line when it shares
+  // a process with one (`_isServerLogLine`), so it stays ON here, as in a
+  // browser.
   const { client, ensureConnected } = await import(
     "../src/browser/browser-protocol.ts"
   );
@@ -86,6 +94,22 @@ Deno.test("revoked session: a sign-in in another tab resumes this one when it is
     for (let i = 0; i < 150 && !connected.value; i++) await sleep(20);
     assertEquals(connected.value, true, "the signed-in tab connected");
     assertEquals(upgrades, 1);
+
+    // The handshake's own frames (proto, type) are paced out AFTER
+    // "connected": a revoke landing 18 ms later found the second one still
+    // on its way (measured, 1 run in 45) — and a close with unread data
+    // behind it loses its code. One answered call first: every frame sent
+    // before it has been read.
+    {
+      const cid = crypto.randomUUID();
+      const landed = _registerAck(cid, {
+        deferTimer: true,
+        methodKey: "revk:inc",
+      });
+      const inc = c.__aio.actions.inc as () => { type: string };
+      client.send({ ...inc(), cid } as { type: string });
+      await landed;
+    }
 
     // Revoked out of band (another tab signed out, an admin ended it).
     const out = await srv.fetch("/__aio/auth/logout", {

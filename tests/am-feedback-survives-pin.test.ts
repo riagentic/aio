@@ -16,6 +16,7 @@
 //
 // The guard that matters is the last test: the location must not be under the
 // version store. Everything else is spelling.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { feedbackDir, feedbackFile } from "../src/am/am-cmd-feedback.ts";

@@ -1496,6 +1496,8 @@ export {
   freePort,
   type TestBrowser,
   testBrowser,
+  type TestPageFetch,
+  testPageFetch,
   type TestServer,
   testServer,
 } from "./server-test.ts";

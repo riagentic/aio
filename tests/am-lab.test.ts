@@ -10,6 +10,7 @@
 // cannot start must say the cause AND the exact command that fixes it. A raw
 // `docker: Error response from daemon: …` is the failure mode this whole
 // command exists to prevent, so the fix text is asserted, not just the error.
+import "./store-sandbox.ts";
 import {
   assert,
   assertEquals,

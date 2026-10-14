@@ -13,8 +13,13 @@ import {
 import {
   BUNDLE_ENTRY_KEY,
   bundleClient,
+  bundleWorker,
+  type ClientBundleOpts,
   type EsbuildModule,
+  explainMissingPackage,
   judgeClientBundle,
+  probeWorker,
+  skippedWorkerMessage,
 } from "../build/client-bundle.ts";
 import {
   aioOwnSpecAdvice,
@@ -49,12 +54,10 @@ export type ErrorCategory =
    *  module scope, or a bundle whose top level throws. Blocking — the build
    *  refuses the same finding with the same words. */
   | "bundle-refused"
-  /** A `new Worker(new URL("./x.ts", import.meta.url))` in a client-reachable
-   *  module. The Worker constructor takes a URL at RUNTIME, so the module it
-   *  names is invisible to every static graph — aio's, esbuild's, the dev
-   *  watcher's. Not blocking (the worker does run), but the file is outside
-   *  everything that keeps a build product fresh, and a stale build product is
-   *  indistinguishable from working code. */
+  /** A `new Worker(…)` in a client-reachable module whose script aio cannot
+   *  bundle (`workerEntries` decides which it can). Not blocking (the dev
+   *  page may work), but it does not load in a build — see
+   *  `unmanagedWorkers`. */
   | "unmanaged-worker"
   | "unknown";
 
@@ -325,6 +328,332 @@ import { SERVER_ONLY_AIO_SYMBOLS } from "../entries.ts";
 import { codeMask, codeText } from "../diagnostics/code-mask.ts";
 import { count } from "../diagnostics/fmt.ts";
 
+/** A browser `Worker` whose script aio bundles: where the literal sits in the
+ *  source, the file it names and the format it is built in. */
+export type WorkerEntry = {
+  /** Offsets of the specifier's text, between its quotes. */
+  start: number;
+  end: number;
+  spec: string;
+  /** The script, absolute. */
+  abs: string;
+  /** `esm` for `{ type: "module" }`, else `iife` (a classic worker). */
+  format: "esm" | "iife";
+};
+
+type WorkerSite =
+  & { index: number; spec: string }
+  & (
+    | { kind: "managed"; entry: WorkerEntry }
+    | { kind: "missing"; abs: string }
+    | { kind: "computed" }
+    | { kind: "unbundled"; viaUrl: boolean; meta: boolean }
+  );
+
+const WORKER_HEAD_RE = /new\s+(?:Shared)?Worker\s*\(\s*/g;
+const WORKER_URL_RE = /new\s+URL\s*\(\s*/y;
+const WORKER_LITERAL_RE = /(['"`])([^'"`$\n]+)\1/y;
+const WORKER_META_RE = /\s*,\s*import\.meta\.url\s*\)/y;
+const WORKER_SOURCE_RE = /\.(?:[mc]?tsx?|jsx)$/;
+const WORKER_MODULE_RE = /\s*,\s*\{[^{}]*\btype\s*:\s*(['"`])module\1/y;
+
+function isFileSync(path: string): boolean {
+  try {
+    return Deno.statSync(path).isFile;
+  } catch {
+    return false; // aio-ok: absent (or unreadable) is "not a file"
+  }
+}
+
+/** Every `new Worker(…)` / `new SharedWorker(…)` in real code (never one in
+ *  a comment or a string), classified. THE scan both deciders below read. */
+function workerSites(
+  code: string,
+  file: string,
+  exists: (path: string) => boolean,
+): WorkerSite[] {
+  const sites: WorkerSite[] = [];
+  let mask: Uint8Array | undefined;
+  const sticky = (re: RegExp, at: number) => {
+    re.lastIndex = at;
+    return re.exec(code);
+  };
+  WORKER_HEAD_RE.lastIndex = 0;
+  let m;
+  while ((m = WORKER_HEAD_RE.exec(code)) !== null) {
+    mask ??= codeMask(code, /x$/i.test(file));
+    if (!mask[m.index]) continue;
+    let at = m.index + m[0].length;
+    const url = sticky(WORKER_URL_RE, at);
+    if (url) at += url[0].length;
+    const lit = sticky(WORKER_LITERAL_RE, at);
+    if (!lit) {
+      // A variable is whatever its value is; a URL built here is a script
+      // this app names and no build can follow.
+      if (url) sites.push({ index: m.index, spec: "", kind: "computed" });
+      continue;
+    }
+    const spec = lit[2]!;
+    // A remote or in-memory URL is not a file of this app.
+    if (/^(?:https?:|blob:|data:)/.test(spec)) continue;
+    const meta = url ? sticky(WORKER_META_RE, at + lit[0].length) : null;
+    // SOURCE only. A `.js` named this way is a file the app serves as it is:
+    // from a module beside the bundle it was the same request in dev and in
+    // every build before aio bundled workers, and it stays that request —
+    // bundled, a classic script's top-level names would stop being globals
+    // and its `importScripts("./x.js")` would resolve from another URL.
+    if (!meta || !/^\.\.?\//.test(spec) || !WORKER_SOURCE_RE.test(spec)) {
+      sites.push({
+        index: m.index,
+        spec,
+        kind: "unbundled",
+        viaUrl: !!url,
+        meta: !!meta,
+      });
+      continue;
+    }
+    const abs = resolve(hostPath.dirname(file), spec);
+    if (!exists(abs)) {
+      sites.push({ index: m.index, spec, kind: "missing", abs });
+      continue;
+    }
+    const module = sticky(
+      WORKER_MODULE_RE,
+      at + lit[0].length + meta[0].length,
+    );
+    sites.push({
+      index: m.index,
+      spec,
+      kind: "managed",
+      entry: {
+        start: at + 1,
+        end: at + 1 + spec.length,
+        spec,
+        abs,
+        format: module ? "esm" : "iife",
+      },
+    });
+  }
+  return sites;
+}
+
+/** The browser workers of one module that aio BUNDLES — in dev on request, in
+ *  a build beside `app.js`, the same in every target.
+ *
+ *  The Worker constructor names its script by a URL evaluated at RUNTIME, so
+ *  nothing that reads imports follows it. One spelling is static enough to
+ *  follow, and it is the one every guide shows:
+ *
+ *    new Worker(new URL("./transcribe.ts", import.meta.url), { type: "module" })
+ *
+ *  a string literal, relative to this module, naming a SOURCE file
+ *  (`.ts`, `.tsx`, `.jsx`, …) that exists.
+ *  `SharedWorker` is the same constructor shape and the same request. Without
+ *  `{ type: "module" }` in the call the worker is classic, and is built as
+ *  one (`iife`). `file` is absolute; `exists` is a seam for the test. */
+export function workerEntries(
+  code: string,
+  file: string,
+  exists: (path: string) => boolean = isFileSync,
+): WorkerEntry[] {
+  if (!code.includes("Worker")) return [];
+  return workerSites(code, file, exists).flatMap((s) =>
+    s.kind === "managed" ? [s.entry] : []
+  );
+}
+
+/** `code` with each bundled worker's specifier replaced by `to(entry)` — THE
+ *  rewrite the build and the dev server both make. `code` itself (the same
+ *  string) when the module starts none. */
+export function rewriteWorkers(
+  code: string,
+  file: string,
+  to: (entry: WorkerEntry) => string,
+): string {
+  const entries = workerEntries(code, file);
+  let out = code;
+  for (const e of entries.reverse()) {
+    out = out.slice(0, e.start) + to(e) + out.slice(e.end);
+  }
+  return out;
+}
+
+/** A browser worker started from a script the app SERVES as it is — a
+ *  literal that names no source: `new Worker("/workers/x.js")`,
+ *  `new Worker(new URL("./x.js", import.meta.url))`. Nothing bundles it, so
+ *  whether an artifact carries the file is the build's question
+ *  (`servedWorkerNotes`). */
+export type ServedWorker = {
+  line: number;
+  spec: string;
+  /** `new URL(spec, import.meta.url)` — resolved from the module in dev and
+   *  from the bundle in a build; else a plain string, resolved from the
+   *  page. */
+  meta: boolean;
+};
+
+/** The {@linkcode ServedWorker}s of one module. A URL on another base
+ *  (`new URL("./x.js", location.href)`) is not one: where it points is not
+ *  read here. */
+export function servedWorkers(code: string, file: string): ServedWorker[] {
+  if (!code.includes("Worker")) return [];
+  return workerSites(code, file, isFileSync).flatMap((s) =>
+    s.kind === "unbundled" && !WORKER_SOURCE_RE.test(s.spec) &&
+      s.viaUrl === s.meta
+      ? [{
+        line: code.slice(0, s.index).split("\n").length,
+        spec: s.spec,
+        meta: s.meta,
+      }]
+      : []
+  );
+}
+
+const IMPORT_SCRIPTS_RE =
+  /\bimportScripts\s*\(\s*(['"`])(\.\.?\/[^'"`$\n]*)\1/g;
+
+/** The first RELATIVE literal a worker's script hands `importScripts` in
+ *  real code (never one in a comment or a string); `undefined` when there is
+ *  none or the script cannot be read. */
+function relativeImportScripts(abs: string): string | undefined {
+  let code: string;
+  try {
+    code = Deno.readTextFileSync(abs);
+  } catch {
+    return undefined; // aio-ok: unreadable — the bundler names that itself
+  }
+  if (!code.includes("importScripts")) return undefined;
+  const mask = codeMask(code, /x$/i.test(abs));
+  for (const m of code.matchAll(IMPORT_SCRIPTS_RE)) {
+    if (mask[m.index]) return m[2];
+  }
+  return undefined;
+}
+
+/** A browser `Worker` aio does not bundle (see `workerEntries` for the one
+ *  it does), where that makes dev and a build differ — or fail alike.
+ *
+ *  - a script named by a COMPUTED url (`new URL(name, import.meta.url)`): no
+ *    build can follow it. In dev `import.meta.url` is the module's own URL
+ *    and the server transpiles source on request; in a build it is the
+ *    bundle's (`/app.js`) and no source is served — measured in Chromium
+ *    against `--prod` and a compiled binary: the Worker's `error` event,
+ *    with no message, is everything the page is told.
+ *  - SOURCE named by a plain path (`new Worker("/w.ts")`): the same.
+ *  - a literal that names no file: it fails everywhere.
+ *
+ *  - a BUNDLED classic worker in another folder than `appDir` that hands
+ *    `importScripts` a relative literal: it resolves from the worker's own
+ *    URL, its source's in dev and the bundle's folder in a build.
+ *
+ *  A warning, not a block. A script named by plain path
+ *  (`new Worker("workers/x.js")`, served from an `assets` mount) is the same
+ *  request in dev and in a build, and is not reported — and so is a `.js`
+ *  named relative to a module in `appDir` itself (the folder the bundle is
+ *  served from), when the caller knows that folder. The dev server and the
+ *  build both say it. `file` is absolute; `exists` is a seam for the test. */
+export function unmanagedWorkers(
+  code: string,
+  file: string,
+  exists: (path: string) => boolean = isFileSync,
+  appDir?: string,
+): GraphError[] {
+  if (!code.includes("Worker")) return [];
+  const errors: GraphError[] = [];
+  const BUNDLED = `aio bundles a worker named by a string literal relative ` +
+    `to its module — \`new Worker(new URL("./worker.ts", import.meta.url), ` +
+    `{ type: "module" })\` — into every target, dev included.`;
+  const MOUNT = `a directory the app serves — deno.json "assets": ` +
+    `{ "/workers": "./workers" } — and start it by that path`;
+  const DOC = ` See docs/debugging/performance.md ("Browser workers").`;
+  for (const s of workerSites(code, file, exists)) {
+    if (s.kind === "managed") {
+      // A classic worker's `importScripts("./x.js")` resolves from the
+      // worker's OWN url: its source's in dev (/workers/w.ts), the bundle's
+      // folder in a build (/w-….js) — the same line, two files, unless the
+      // script sits in `appDir` itself.
+      const dir = hostPath.dirname(s.entry.abs);
+      const rel = s.entry.format === "iife" && appDir !== undefined &&
+          resolve(dir) !== resolve(appDir)
+        ? relativeImportScripts(s.entry.abs)
+        : undefined;
+      if (rel) {
+        const at = "/" +
+          hostPath.relative(appDir!, resolve(dir, rel)).replaceAll("\\", "/");
+        errors.push({
+          file,
+          line: code.slice(0, s.index).split("\n").length,
+          category: "unmanaged-worker",
+          message: `the classic worker "${s.spec}" calls importScripts(` +
+            `"${rel}") — a relative URL there names one file in dev and ` +
+            `another in a build`,
+          fix: `It resolves from the worker's own URL: its source's in dev ` +
+            `(${at} is asked for), the bundle's folder in a build (where ` +
+            `the worker is written beside app.js). Name it from the root — ` +
+            `importScripts("${at}") — or \`import\` it: what a worker ` +
+            `imports is bundled into it.` + DOC,
+        });
+      }
+      continue;
+    }
+    const source = WORKER_SOURCE_RE.test(s.spec);
+    if (s.kind === "unbundled" && !source && !s.viaUrl) continue;
+    // Beside the bundle, `import.meta.url` names the same folder either side
+    // of a build: the same request.
+    if (
+      s.kind === "unbundled" && !source && s.meta && appDir !== undefined &&
+      /^\.\.?\//.test(s.spec) &&
+      resolve(hostPath.dirname(file)) === resolve(appDir)
+    ) continue;
+    // aio-ok: path-split — a URL specifier, not an OS path
+    const name = s.spec.slice(s.spec.lastIndexOf("/") + 1);
+    const built = source ? name.replace(/\.[^.]+$/, ".js") : name;
+    const [message, fix] = s.kind === "missing"
+      ? [
+        `"${s.spec}" is started as a Worker, and ${s.abs} does not exist`,
+        `The script is named relative to this module. Create it or correct ` +
+        `the path: ${BUNDLED}`,
+      ]
+      : s.kind === "computed"
+      ? [
+        `a Worker is started from a computed URL — no build can follow it`,
+        `${BUNDLED} Name each script that way (one literal per worker). A ` +
+        `script only known at run time has to be built by you (\`deno ` +
+        `bundle --platform browser -o workers/<name>.js <source>\`) into ` +
+        `${MOUNT}: \`new Worker("workers/" + name)\`. In a build ` +
+        `import.meta.url is the bundle's (/app.js), not this module's, and ` +
+        `no source is served.`,
+      ]
+      : source
+      ? [
+        `"${s.spec}" is started as a Worker from source — that runs in dev only`,
+        `The dev server transpiles ${s.spec} when the browser asks for it. ` +
+        `A build serves no source: with --prod, in a compiled binary and ` +
+        `in the web build this worker does not load, and only its ` +
+        `\`error\` event says so. ${BUNDLED} Or build it yourself ` +
+        `(\`deno bundle --platform browser -o workers/${built} <the ` +
+        `worker's source>\`) into ${MOUNT}: \`new Worker("workers/` +
+        `${built}")\`.`,
+      ]
+      : [
+        `"${s.spec}" is started as a Worker by a URL this build does not ` +
+        `follow — it resolves from the bundle there`,
+        `In dev import.meta.url is this module's own URL; in a build it is ` +
+        `the bundle's (/app.js), so from a module in another folder ` +
+        `the same line asks for another file there. ${BUNDLED} Or put ${name} in ${MOUNT}: \`new Worker(` +
+        `"workers/${built}")\`.`,
+      ];
+    errors.push({
+      file,
+      line: code.slice(0, s.index).split("\n").length,
+      category: "unmanaged-worker",
+      message,
+      fix: fix + DOC,
+    });
+  }
+  return errors;
+}
+
 /** Detect server-only APIs in browser-bound code.
  *  AIO-427: severity is split by CERTAINTY of breakage —
  *  a *static import* of something the browser build can't provide (`node:*`
@@ -332,7 +661,11 @@ import { count } from "../diagnostics/fmt.ts";
  *  `server-only-import` (BLOCKING, shows the diagnostic page). `@std/*` (often
  *  browser-safe) and `Deno.*` *usage* (only breaks if that path runs client-
  *  side) are CONDITIONAL → `server-only-api` (warning). */
-export function checkPlatformSafety(code: string, file: string): GraphError[] {
+export function checkPlatformSafety(
+  code: string,
+  file: string,
+  appDir?: string,
+): GraphError[] {
   const errors: GraphError[] = [];
   let m;
   // (1) Server-only MODULE imports. `node:` builtins cannot resolve in the
@@ -371,44 +704,8 @@ export function checkPlatformSafety(code: string, file: string): GraphError[] {
       });
     }
   }
-  // (1b) A Worker whose module the static graph cannot see.
-  //
-  // `new Worker(new URL("./transcribe.ts", import.meta.url))` is the only way
-  // to start one, and the argument is a URL evaluated at RUNTIME. Nothing that
-  // reads imports can follow it: not this walk, not esbuild, not the dev
-  // watcher. A field report lost an afternoon to the consequence — edits to
-  // the worker did nothing at all, no error and no warning, while the app
-  // booted, ran and transcribed using the PREVIOUS version of the code.
-  //
-  // A build product silently going stale is indistinguishable from working
-  // code, which is the failure mode this framework refuses everywhere else. So
-  // it is named, once, at the site — a warning rather than a block, because
-  // the worker genuinely does run.
-  const WORKER_RE =
-    /new\s+Worker\s*\(\s*(?:new\s+URL\s*\(\s*)?['"]([^'"]+)['"]/g;
-  while ((m = WORKER_RE.exec(code)) !== null) {
-    const spec = m[1]!;
-    // A remote or absolute URL is not a build product of this app, so there is
-    // nothing here to go stale.
-    if (/^(?:https?:|blob:|data:)/.test(spec)) continue;
-    const lineNum = code.slice(0, m.index).split("\n").length;
-    errors.push({
-      file,
-      line: lineNum,
-      category: "unmanaged-worker",
-      message:
-        `"${spec}" is started as a Worker, and no static graph can see it`,
-      fix:
-        `The Worker constructor resolves its URL at runtime, so ${spec} is ` +
-        `outside the module graph aio walks, the one esbuild bundles and the ` +
-        `one the dev watcher reloads. Editing it may appear to do NOTHING: ` +
-        `the app keeps running the previous build of that file. Until aio ` +
-        `bundles workers for you, treat it as a separate build product — ` +
-        `restart the app after editing it, add its directory to the dev ` +
-        `watch list, and for a compiled binary list it in \`compile.include\` ` +
-        `so it ships. See docs/build/imports.md.`,
-    });
-  }
+  // (1b) A Worker the build does not carry — see `unmanagedWorkers`.
+  errors.push(...unmanagedWorkers(code, file, isFileSync, appDir));
 
   // (2) Server-only SYMBOLS from the isomorphic "aio"/"aio/db" entry (createDB,
   //     connectCli, …). Omitted from the browser build → guaranteed link
@@ -512,6 +809,10 @@ export type GraphValidateOptions = {
    *  imports live in the workspace root — got three fabricated BLOCKING errors
    *  from a `deno check`-clean tree. Never pass {} for "I don't know"; omit. */
   appImports?: Record<string, string>;
+  /** The app's folder — the one the bundle is served from. Known, a `.js`
+   *  worker named relative to a module IN it is not reported (see
+   *  `unmanagedWorkers`). */
+  appDir?: string;
 };
 
 /** Validate the full import graph starting from entrypoint.
@@ -550,26 +851,39 @@ export function createProdGraphCheck(opts: {
   /** Aborted when the dev server closes: a running evaluation stops. */
   signal?: AbortSignal;
 }): ProdGraphCheck {
-  let last: { hash: string; errors: GraphError[] } | null = null;
+  let last:
+    | { hash: string; errors: GraphError[]; files: string[]; stamp: string }
+    | null = null;
+  // The graph hash is of the PAGE's modules. A browser worker's sources are
+  // not among them (no import names a worker), so a verdict that depended on
+  // one is kept only while those files are as they were — else a worker that
+  // could not be bundled kept its warning after it was fixed.
   return async (graphHash) => {
-    if (last && last.hash === graphHash) {
+    if (
+      last && last.hash === graphHash &&
+      last.stamp === await stampOf(last.files)
+    ) {
       return { errors: last.errors, ms: 0, cached: true };
     }
     const t0 = performance.now();
-    const errors = await prodGraphErrors(opts);
-    if (!opts.signal?.aborted) last = { hash: graphHash, errors };
+    const seen: WorkersSeen = { files: [] };
+    const errors = await prodGraphErrors(opts, seen);
+    last = opts.signal?.aborted ? null : {
+      hash: graphHash,
+      errors,
+      files: seen.files,
+      stamp: await stampOf(seen.files),
+    };
     return { errors, ms: performance.now() - t0, cached: false };
   };
 }
 
-async function prodGraphErrors(opts: {
-  absBaseDir: string;
-  uiEntry: string;
-  shell?: "browser" | "electron";
-  debug?: (msg: string) => void;
-  signal?: AbortSignal;
-}): Promise<GraphError[]> {
-  const { absBaseDir, uiEntry } = opts;
+/** What a prod-graph check learned about the app's browser workers: the
+ *  files its verdict on them was read from. */
+type WorkersSeen = { files: string[] };
+
+/** Where the dev server's bundles resolve from — the build's own answers. */
+function bundleContext(absBaseDir: string) {
   // ONE decider for "project root" (remote-desktop field report §1): this used to look
   // in the UI folder and ONE folder up only, so an entry at `src/agent/app.ts`
   // got root = src/agent/, no imports and no node_modules — esbuild could not
@@ -582,6 +896,125 @@ async function prodGraphErrors(opts: {
   const frameworkBase = new URL("..", import.meta.url);
   const isRemote = frameworkBase.protocol !== "file:";
   const frameworkSrcDir = isRemote ? "" : fromFileUrl(frameworkBase);
+  return { dj, root, config, frameworkBase, frameworkSrcDir };
+}
+
+function devBundleOpts(absBaseDir: string) {
+  const { root, config, frameworkBase, frameworkSrcDir } = bundleContext(
+    absBaseDir,
+  );
+  return async (): Promise<ClientBundleOpts> => ({
+    esbuild: await loadEsbuild<EsbuildModule>(),
+    root,
+    appDir: absBaseDir,
+    uiEntry: "",
+    standalone: false,
+    imports: (config as { imports?: Record<string, string> }).imports ?? {},
+    // Throws on a declaration the build refuses: the probe's reason.
+    shares: resolveShare(root, (config as { share?: unknown }).share),
+    frameworkSrcDir,
+    frameworkBase,
+  });
+}
+
+/** `mtime:size` of each file, or `gone` — what a verdict is kept by. */
+const stampOf = async (files: string[]) =>
+  (await Promise.all(files.map((f) =>
+    Deno.stat(f).then(
+      (st) => `${f}:${st.mtime?.getTime()}:${st.size}`,
+      () => `${f}:gone`,
+    )
+  ))).join("\n");
+
+type DevProbe = Awaited<ReturnType<typeof probeWorker>>;
+const devProbes = new Map<
+  string,
+  Promise<{ files: string[]; stamp: string; probe: DevProbe }>
+>();
+
+/** DEV: can this worker be bundled (`probeWorker`, the build's own question)?
+ *  Asked before the module that starts it is served, so a worker that cannot
+ *  be keeps its literal — the page loads, that worker is served as source, as
+ *  it always was. Kept while every file the answer was read from is as it
+ *  was: a broken worker is not bundled again on every save. */
+export async function devWorkerProbe(
+  absBaseDir: string,
+  entry: Pick<WorkerEntry, "abs" | "format">,
+): Promise<DevProbe> {
+  const key = `${absBaseDir}\0${entry.abs}\0${entry.format}`;
+  const kept = await devProbes.get(key);
+  if (kept && kept.stamp === await stampOf(kept.files)) return kept.probe;
+  const fresh = (async () => {
+    let probe: DevProbe;
+    try {
+      const opts = devBundleOpts(absBaseDir);
+      probe = await esbuildWork(
+        (async () => probeWorker(await opts(), entry))(),
+      );
+    } catch (e) {
+      const reason = `deno.json "share": ${e instanceof Error ? e.message : e}`;
+      const base = { code: "", entryKey: entry.abs, inputs: {}, nested: [] };
+      probe = {
+        ...base,
+        watch: [],
+        skipped: { entryKey: entry.abs, reason, watch: [] },
+      };
+    }
+    const root = bundleContext(absBaseDir).root;
+    const files = probe.skipped
+      ? probe.skipped.watch
+      : Object.keys(probe.inputs).map((k) => resolve(root, k));
+    return { files, stamp: await stampOf(files), probe };
+  })();
+  devProbes.set(key, fresh);
+  return (await fresh).probe;
+}
+
+/** DEV: one browser worker's script, bundled in memory the way the build
+ *  bundles it (`bundleWorker`) — so a worker's bare import (`immer`) resolves
+ *  in dev as it does in a build; a worker has no import map to ask. `to`
+ *  names the dev URL of each worker this one starts (one that cannot be
+ *  bundled keeps its literal, as in a build). `inputs` are the files it was
+ *  built from (absolute), for the watcher. `errors` is why it cannot be
+ *  bundled — the page was then never pointed here (`devWorkerProbe`). */
+export async function devWorkerBundle(
+  absBaseDir: string,
+  entry: Pick<WorkerEntry, "abs" | "format">,
+  to: (entry: WorkerEntry) => string,
+): Promise<{ code: string; inputs: string[]; errors: string[] }> {
+  const probe = await devWorkerProbe(absBaseDir, entry);
+  if (probe.skipped) {
+    return { code: "", inputs: [], errors: [probe.skipped.reason] };
+  }
+  const opts = devBundleOpts(absBaseDir);
+  const w = probe.nested.length
+    ? await esbuildWork((async () =>
+      bundleWorker(
+        await opts(),
+        entry,
+        async (e) =>
+          (await devWorkerProbe(absBaseDir, e)).skipped ? e.spec : to(e),
+      ))())
+    : probe;
+  const root = bundleContext(absBaseDir).root;
+  return {
+    code: w.code,
+    inputs: Object.keys(w.inputs).map((k) => resolve(root, k)),
+    errors: [],
+  };
+}
+
+async function prodGraphErrors(opts: {
+  absBaseDir: string;
+  uiEntry: string;
+  shell?: "browser" | "electron";
+  debug?: (msg: string) => void;
+  signal?: AbortSignal;
+}, seen: WorkersSeen): Promise<GraphError[]> {
+  const { absBaseDir, uiEntry } = opts;
+  const { dj, root, config, frameworkBase, frameworkSrcDir } = bundleContext(
+    absBaseDir,
+  );
   const refusal = (message: string, fix: string): GraphError[] => [{
     file: join(absBaseDir, uiEntry),
     category: "bundle-refused",
@@ -613,6 +1046,21 @@ async function prodGraphErrors(opts: {
       frameworkSrcDir,
       frameworkBase,
     }))());
+  seen.files = [
+    ...bundle.workers.flatMap((w) =>
+      Object.keys(w.inputs).map((k) => resolve(root, k))
+    ),
+    ...bundle.workersSkipped.flatMap((w) => w.watch),
+  ];
+  // A worker that cannot be bundled: the build's sentence, and the page
+  // still loads — that worker is left as written there too.
+  const skipped: GraphError[] = bundle.workersSkipped.map((w) => ({
+    file: resolve(root, w.entryKey),
+    category: "unmanaged-worker",
+    message: skippedWorkerMessage(w),
+    fix: "Fix what the reason names (or build the worker yourself into an " +
+      '`assets` mount). See docs/debugging/performance.md ("Browser workers").',
+  }));
   opts.debug?.(
     `graph: prod bundle ${bundle.ok ? "built" : "FAILED"} in memory (${
       bundle.ms.toFixed(0)
@@ -644,7 +1092,16 @@ async function prodGraphErrors(opts: {
     // was resolved the way the build resolves it — from the app's own
     // deno.json. With none found there is no build to speak for: say what
     // WAS tried instead of predicting a build failure that may not happen.
-    const esb = bundle.errors.join("; ");
+    // …and a package nobody installed gets the command that installs it:
+    // the build says it, and dev printed esbuild's bare line.
+    const esb = bundle.errors.map((e) => {
+      const missing = explainMissingPackage(
+        e,
+        root,
+        hostPath.relative(root, join(absBaseDir, uiEntry)),
+      );
+      return missing ? `${e} — ${missing}` : e;
+    }).join("; ");
     return dj
       ? refusal(
         `\`deno task build\` would fail on this graph — esbuild (project ` +
@@ -671,14 +1128,17 @@ async function prodGraphErrors(opts: {
         verdict.ok ? "ok" : `${count(verdict.findings.length, "refusal")}`
       }`,
   );
-  return verdict.findings.map((f) => ({
-    file: resolve(root, f.file),
-    line: f.line,
-    category: "bundle-refused" as const,
-    message: f.message +
-      (f.chain.length > 1 ? ` (via ${f.chain.join(" → ")})` : ""),
-    fix: f.fix,
-  }));
+  return [
+    ...verdict.findings.map((f) => ({
+      file: resolve(root, f.file),
+      line: f.line,
+      category: "bundle-refused" as const,
+      message: f.message +
+        (f.chain.length > 1 ? ` (via ${f.chain.join(" → ")})` : ""),
+      fix: f.fix,
+    })),
+    ...skipped,
+  ];
 }
 
 export async function validateGraph(
@@ -800,7 +1260,11 @@ export async function validateGraph(
     }
 
     // Run on source (not transpiled) — esbuild may rewrite @std/node: imports
-    const platformErrors = checkPlatformSafety(source, filePath);
+    const platformErrors = checkPlatformSafety(
+      source,
+      filePath,
+      opts?.appDir,
+    );
     errors.push(...platformErrors);
 
     // THE import list is the SOURCE's, not esbuild's output: esbuild elides an

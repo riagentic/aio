@@ -39,6 +39,8 @@
 // and it is the MUTATION, not the assignment, that is lossy.
 
 import { log } from "../diagnostics/logger-api.ts";
+import { PROD_CHECKS } from "./action-encode.ts";
+import { MAX_NODES } from "../protocol/wire-value.ts";
 import { isRunningFromSource } from "../diagnostics/logger-types.ts";
 
 /** What JSON would do to this value, or null when it survives intact. */
@@ -79,43 +81,80 @@ const LOST: Record<string, string> = {
  *  Depth-first and short-circuiting: one report per commit is enough to send
  *  someone to the line, and walking a whole state tree on every dispatch is
  *  the kind of cost this codebase measures before paying. Callers pass a
- *  PATCH value, so the walk is O(change), not O(state). */
+ *  PATCH value, so the walk is O(change), not O(state).
+ *
+ *  ITERATIVE, and the path is built only for a hit. The recursive walk threw
+ *  `Maximum call stack size exceeded` on a value ~6000 deep — one
+ *  `JSON.stringify` carries without complaint — and built a path string for
+ *  every node of a value that had nothing wrong with it. `budget.left` is the
+ *  number of values it may still look at; it stops, answering null, at zero. */
 export function findWireLoss(
   root: unknown,
   path: string,
   seen = new Set<unknown>(),
+  budget: { left: number } = { left: Infinity },
 ): WireLoss | null {
-  const kind = KIND(root);
-  if (kind) return { path, kind, lost: LOST[kind]! };
-  if (root === null || typeof root !== "object") return null;
-  // A cycle cannot be JSON'd either, but `structuredClone`-shaped state can
-  // legitimately share references; bail rather than loop.
-  if (seen.has(root)) return null;
-  seen.add(root);
-  // A SYMBOL-KEYED property is invisible to `Object.entries` — the walk below
-  // would step straight past it and report nothing, which is the same silence
-  // this module exists to break: `JSON.stringify({ [Symbol("k")]: 1 })` is
-  // `{}`, so the property is not "changed on the wire", it is absent.
-  const syms = Object.getOwnPropertySymbols(root);
-  if (syms.length > 0) {
-    return {
-      path: `${path}[${String(syms[0])}]`,
-      kind: "symbol key",
-      lost: LOST["symbol key"]!,
+  type Frame = {
+    v: Record<string | number, unknown>;
+    keys: string[] | null;
+    i: number;
+    key?: string | number;
+  };
+  const stack: Frame[] = [];
+  const at = (leaf?: string | number): string => {
+    let out = path;
+    const step = (k: string | number | undefined) => {
+      if (k === undefined) return;
+      out = typeof k === "number" ? `${out}[${k}]` : out ? `${out}.${k}` : k;
     };
-  }
-  if (Array.isArray(root)) {
-    for (let i = 0; i < root.length; i++) {
-      const hit = findWireLoss(root[i], `${path}[${i}]`, seen);
-      if (hit) return hit;
+    for (const f of stack) step(f.key);
+    step(leaf);
+    return out;
+  };
+  let v = root;
+  let key: string | number | undefined;
+  for (;;) {
+    if (budget.left-- <= 0) return null;
+    const kind = KIND(v);
+    if (kind) return { path: at(key), kind, lost: LOST[kind]! };
+    // A cycle cannot be JSON'd either, but `structuredClone`-shaped state can
+    // legitimately share references; skip rather than loop.
+    if (v !== null && typeof v === "object" && !seen.has(v)) {
+      seen.add(v);
+      // A SYMBOL-KEYED property is invisible to `Object.keys` — the walk
+      // would step straight past it and report nothing, which is the same
+      // silence this module exists to break: `JSON.stringify({ [Symbol("k")]:
+      // 1 })` is `{}`, so the property is not "changed on the wire", it is
+      // absent.
+      const syms = Object.getOwnPropertySymbols(v);
+      if (syms.length > 0) {
+        return {
+          path: `${at(key)}[${String(syms[0])}]`,
+          kind: "symbol key",
+          lost: LOST["symbol key"]!,
+        };
+      }
+      stack.push({
+        v: v as Frame["v"],
+        keys: Array.isArray(v) ? null : Object.keys(v),
+        i: 0,
+        key,
+      });
     }
-    return null;
+    // The next value: the deepest open container's next child.
+    for (;;) {
+      const f = stack[stack.length - 1];
+      if (!f) return null;
+      const n = f.keys ? f.keys.length : (f.v as unknown as unknown[]).length;
+      if (f.i < n) {
+        key = f.keys ? f.keys[f.i]! : f.i;
+        f.i++;
+        v = f.v[key];
+        break;
+      }
+      stack.pop();
+    }
   }
-  for (const [k, v] of Object.entries(root as Record<string, unknown>)) {
-    const hit = findWireLoss(v, path ? `${path}.${k}` : k, seen);
-    if (hit) return hit;
-  }
-  return null;
 }
 
 /** The fix sentence for each kind. One generic "store plain data instead
@@ -143,6 +182,11 @@ const FIX: Record<string, string> = {
  *  with the same line. Keyed by code positions, of which an app has finitely
  *  many. Exported for the test that proves the de-duplication. @internal */
 export const _wireLossSeen = new Set<string>();
+const firstSeen = (key: string): boolean =>
+  !_wireLossSeen.has(key) && !!_wireLossSeen.add(key);
+
+/** Commits checked so far, per cell — cleared by `_resetAioRuntime`. @internal */
+export const _wireLossChecked = new Map<string, number>();
 
 /** Warn about any patch value the wire cannot carry.
  *
@@ -156,43 +200,68 @@ export function warnWireLoss(
     path: readonly (string | number | symbol)[];
     value?: unknown;
   }[],
+  /** @internal A test's stand-in for "this is a compiled build". */
+  fromSource: boolean = isRunningFromSource(),
 ): void {
-  // Where a developer can act on it: `__aioDev` is set by the test harness, the
-  // browser shell, and the dev server itself (stamped when the server graph is
-  // imported — aio-boot.ts). `isRunningFromSource()` also covers a `--prod` run
-  // from source, which is still the person most able to fix a Map in their own
-  // state. A compiled binary matches neither and pays one boolean. The message
-  // is observe-only, so showing it in both is the allowed half of the dev/prod
-  // split.
-  if (
-    !(globalThis as Record<string, unknown>).__aioDev && !isRunningFromSource()
-  ) return;
-  for (const p of patches) {
-    // `String(seg)`, never `join` — an Immer patch path carries the KEY, and a
-    // symbol key made `join(".")` throw "Cannot convert a Symbol value to a
-    // string" from inside the reporter. That throw escaped through the reduce,
-    // so the method failed with `REDUCE_ERROR … check action payload shape` —
-    // the wire-loss reporter killing the very write whose loss it exists to
-    // describe, under a message about something else entirely.
-    const where = p.path.map((seg) => String(seg)).join(".");
-    const symKey = p.path.find((seg) => typeof seg === "symbol");
-    const loss = symKey !== undefined
-      ? { path: where, kind: "symbol key", lost: LOST["symbol key"]! }
-      : findWireLoss(p.value, where);
-    if (!loss) continue;
-    const key = `${cellName}.${loss.path}:${loss.kind}`;
-    if (_wireLossSeen.has(key)) continue;
-    _wireLossSeen.add(key);
+  // Dev (`__aioDev`: every harness, the browser shell, the dev server) and a
+  // run from source check every commit. A compiled binary used to check
+  // NOTHING — "pays one boolean" — so a Map in state was intact on the server
+  // and gone in every client and in state.db with no line anywhere, which is
+  // the one place nobody is watching a console. It now checks a cell's first
+  // commits only (the walk visits every patched value, on the dispatch path)
+  // and says what it finds, once per path: observe-only either way.
+  const compiled = !(globalThis as Record<string, unknown>).__aioDev &&
+    !fromSource;
+  if (compiled) {
+    const n = _wireLossChecked.get(cellName) ?? 0;
+    // A compiled build checks each cell's first commits only.
+    if (n >= PROD_CHECKS) return;
+    _wireLossChecked.set(cellName, n + 1);
+  }
+  // Observe-only, whatever the value is. The walk READS it — an own getter
+  // that throws, a revoked Proxy — and a throw from here escaped through the
+  // reduce: the method failed over a diagnostic about a commit that was fine.
+  // A compiled build also looks at no more than `MAX_NODES` values per commit:
+  // a first load of a million rows is not where a second is worth spending.
+  const budget = { left: compiled ? MAX_NODES : Infinity };
+  try {
+    for (const p of patches) {
+      // `String(seg)`, never `join` — an Immer patch path carries the KEY, and a
+      // symbol key made `join(".")` throw "Cannot convert a Symbol value to a
+      // string" from inside the reporter. That throw escaped through the reduce,
+      // so the method failed with `REDUCE_ERROR … check action payload shape` —
+      // the wire-loss reporter killing the very write whose loss it exists to
+      // describe, under a message about something else entirely.
+      const where = p.path.map((seg) => String(seg)).join(".");
+      const symKey = p.path.find((seg) => typeof seg === "symbol");
+      const loss = symKey !== undefined
+        ? { path: where, kind: "symbol key", lost: LOST["symbol key"]! }
+        : findWireLoss(p.value, where, new Set(), budget);
+      if (!loss) continue;
+      const key = `${cellName}.${loss.path}:${loss.kind}`;
+      if (_wireLossSeen.has(key)) continue;
+      _wireLossSeen.add(key);
+      log.warn(
+        "cell",
+        `${cellName}: state.${loss.path} ${
+          loss.kind === "symbol key"
+            ? "is keyed by a symbol"
+            : `holds a ${loss.kind}`
+        }, which the wire ` +
+          `cannot carry — ${loss.lost}. State is broadcast and persisted as ` +
+          `JSON, so this value is intact here and gone in every client and in ` +
+          `state.db. ${FIX[loss.kind] ?? FIX.default}`,
+      );
+    }
+  } catch (e) {
+    if (!firstSeen(`${cellName}:unreadable`)) return;
     log.warn(
       "cell",
-      `${cellName}: state.${loss.path} ${
-        loss.kind === "symbol key"
-          ? "is keyed by a symbol"
-          : `holds a ${loss.kind}`
-      }, which the wire ` +
-        `cannot carry — ${loss.lost}. State is broadcast and persisted as ` +
-        `JSON, so this value is intact here and gone in every client and in ` +
-        `state.db. ${FIX[loss.kind] ?? FIX.default}`,
+      `${cellName}: the check for values the wire cannot carry stopped on a ` +
+        `value it could not read (${
+          e instanceof Error ? e.message : String(e)
+        }). The commit itself is unaffected; if that value is broadcast, ` +
+        `JSON will meet the same thing.`,
     );
   }
 }

@@ -8,6 +8,7 @@
 //     `"available":["window"]` — a missing button.
 // Both true, neither the answer: the page had a boot error, and the client
 // was the one party that knew it (the shell's `data-aio-blank-screen` card).
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { Window } from "happy-dom";
 import { closeWindow } from "../src/testing/close-window.ts";

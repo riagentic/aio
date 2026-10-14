@@ -52,6 +52,32 @@ type AuthOptionsBase = {
    *  `/__aio/auth` login issues its token AND sets its cookie Max-Age from this
    *  one. Both set is refused at boot (`configConflicts`). */
   ttlMs?: number;
+  /** The most live sessions one account may hold (default: no ceiling). A
+   *  login past it revokes that account's OLDEST sessions — a warning in the
+   *  log names the user, and their open sockets are closed as on any logout.
+   *  A correct password is never rate-limited, so without this a script that
+   *  knows one password can mint sessions without bound.
+   *
+   *  @example
+   *  ```ts
+   *  auth: { maxSessions: 10 },   // the 11th login signs out the oldest
+   *  ```
+   */
+  maxSessions?: number;
+  /** The ONE directory (relative to the app dir, served at `/<publicDir>/…`)
+   *  whose files are readable without signing in. Unset, an anonymous caller
+   *  may read any app-dir file with a shell-shaped extension (`.png`, `.html`,
+   *  `.js`, fonts…) — so `/uploads/passport.png` is public. Set, only this
+   *  directory and the built shell (`/app.js`, `/style.css`, `/index.html`,
+   *  `/manifest.json`, `/favicon.ico`, `/robots.txt`) are; move the sign-in
+   *  page's logo and fonts into it.
+   *
+   *  @example
+   *  ```ts
+   *  auth: { publicDir: "public" },   // /public/logo.png — yes; /uploads/x.png — 401
+   *  ```
+   */
+  publicDir?: string;
   /** Set the HttpOnly session cookie on login (default true). */
   cookie?: boolean;
   /** Allow TOTP 2FA enrollment (default true). */
@@ -177,6 +203,43 @@ export type ElectronConfig = {
    *  client. It is then open to EVERY process of the user, as it is in dev.
    *  Says so in the boot log. Default: false. See docs/auth/auth.md. */
   allowLocalPeers?: boolean;
+  /** Do not read `AIO_CDP`, `AIO_PORT` or `AIO_DEFAULT_PORT` from the
+   *  environment when this app runs as an Electron client.
+   *
+   *  Each of them opens a door beside the local socket — a DevTools port, a
+   *  loopback TCP listener — and a desktop app inherits its environment: a
+   *  variable left over from another aio app would open it here. `true`
+   *  ignores all three (one boot warning names the ones that are set); the
+   *  typed flags `--cdp` and `--port` keep working. The same in dev and
+   *  prod; a server or service run of the app (`client: "server-only"`) still reads
+   *  them. Default: false.
+   *
+   *  @example
+   *  ```ts
+   *  aio.run({ cells, electron: { ignoreDebugEnv: true } });
+   *  ``` */
+  ignoreDebugEnv?: boolean;
+  /** The aio CLIENT (`--server-url`, `--client=electron` against a remote
+   *  app) refuses a paired host whose certificate no longer matches its pin.
+   *
+   *  A client that paired by PIN, or imported an `.aioapp`, pins the app's
+   *  certificate. By default a pinned host that presents ANOTHER certificate
+   *  is asked to prove it holds the app's key before the key is sent: a
+   *  server that regenerated its certificate proves it and is re-pinned, so
+   *  no paired client is locked out. One that cannot prove is not sent the
+   *  key — unless the pairing has never seen the server prove (a server on
+   *  an aio older than the proof), where it is warned about and reached as
+   *  before, key included. `true` refuses instead, proof or not: nothing is
+   *  sent, the page does not load, and the way back is to pair again by PIN
+   *  (or import a fresh `.aioapp`). A packaged client takes the same switch
+   *  from deno.json `build.strictPin`; `--strict-pin` sets it for one run.
+   *  Default: false.
+   *
+   *  @example
+   *  ```ts
+   *  aio.run({ cells, electron: { strictPin: true } });
+   *  ``` */
+  strictPin?: boolean;
 };
 
 /** One Electron permission name (Electron's own spelling). */
@@ -584,6 +647,31 @@ export type AioConfig<S, A, E> = {
   watch?: false | string[];
   budgets?: Budgets;
   renderBudget?: RenderBudget; // override render staleness/patch thresholds (sent to browser)
+  /** How a method call's arguments are put on the wire. Sent to every client
+   *  (page shell + `cfg` frame), because the CLIENT encodes the call.
+   *
+   *  `omitTrailingUndefined: true` — `cell.m(a, undefined)` is sent as
+   *  `m(a)`, so the method runs with one argument and its default parameter
+   *  applies, exactly as it does in process. Unset (the default, unchanged):
+   *  JSON has no `undefined`, a trailing one arrives as `null`, and a default
+   *  parameter does not apply to `null`. An `undefined` that is NOT trailing
+   *  (`m(undefined, 1)`) still arrives as `null` either way, and is still
+   *  reported.
+   *
+   *  `refuseShortCalls: true` — read by the SERVER. A WebSocket or local-
+   *  socket frame that carries no `payload.args` array (`{type}`,
+   *  `payload: {}`, named args) for a method that declares arguments is
+   *  refused with `ACTION_REFUSED` before anything runs, as `am dispatch` and
+   *  the trojan route always have. Unset (the default, unchanged): it runs
+   *  with `undefined`, and the ack carries a `short` note. aio's own clients
+   *  always send `args`; this is for apps with hand-written ones.
+   *
+   *  @example
+   *  ```ts
+   *  aio.run({ cells, wire: { omitTrailingUndefined: true } });
+   *  aio.run({ cells, wire: { refuseShortCalls: true } });
+   *  ``` */
+  wire?: { omitTrailingUndefined?: boolean; refuseShortCalls?: boolean };
   /** How long an async method may run before the framework stops waiting for
    *  it (default 30000). It bounds BOTH sides of the same call: the effect
    *  tracker abandons the effect, and `await cell.method()` rejects. Neither
@@ -672,8 +760,11 @@ export type AioConfig<S, A, E> = {
    *  set `electron: { webviewTag: true }` instead. */
   childWindows?: boolean;
   /** The Electron process's own security decisions (sandbox policy,
-   *  permissions, and `allowLocalPeers` — the opt-out of the production
-   *  local-peer lockdown) — see {@linkcode ElectronConfig}.
+   *  permissions, `webviewTag` — the `<webview>` tag without `openWindow` —,
+   *  `guestDownloads` — let a guest or child page save files —,
+   *  `allowLocalPeers` — the opt-out of the production local-peer lockdown —,
+   *  and `ignoreDebugEnv` — ambient `AIO_CDP` / `AIO_PORT` open nothing) —
+   *  see {@linkcode ElectronConfig}.
    *
    *  @example A wallet: never open a window Chromium cannot sandbox, and let
    *  no child window ask for an unsandboxed one.
@@ -1167,6 +1258,14 @@ export type CellsConfig = {
    *  (page shell + `cfg` frame). Was accepted by the option validator but
    *  missing from this type AND dropped by the bridge; all three now agree. */
   renderBudget?: import("../vitals/types.ts").RenderBudget;
+  /** `wire` — see `CellsConfig.wire`. Sent to the client, which encodes.
+   *
+   *  @example
+   *  ```ts
+   *  aio.run({ cells, wire: { omitTrailingUndefined: true } });
+   *  aio.run({ cells, wire: { refuseShortCalls: true } });
+   *  ``` */
+  wire?: { omitTrailingUndefined?: boolean; refuseShortCalls?: boolean };
   /** How long `await cell.method()` waits for an async method (default
    *  30000; 0 = forever) before rejecting. The method itself is not
    *  cancelled. */
@@ -1248,8 +1347,11 @@ export type CellsConfig = {
    *  set `electron: { webviewTag: true }` instead. */
   childWindows?: boolean;
   /** The Electron process's own security decisions (sandbox policy,
-   *  permissions, and `allowLocalPeers` — the opt-out of the production
-   *  local-peer lockdown) — see {@linkcode ElectronConfig}.
+   *  permissions, `webviewTag` — the `<webview>` tag without `openWindow` —,
+   *  `guestDownloads` — let a guest or child page save files —,
+   *  `allowLocalPeers` — the opt-out of the production local-peer lockdown —,
+   *  and `ignoreDebugEnv` — ambient `AIO_CDP` / `AIO_PORT` open nothing) —
+   *  see {@linkcode ElectronConfig}.
    *
    *  @example A wallet: never open a window Chromium cannot sandbox, and let
    *  no child window ask for an unsandboxed one.

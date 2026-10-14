@@ -16,8 +16,9 @@
 // Nothing here re-implements the reducer: "applied" is observed as "the
 // dispatch of this action changed committed state" (every method bumps a seq,
 // so an accepted reduce always moves state and a refused one never does).
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { fuzzEnvInt } from "./fuzz-seed.ts";
+import { mulberry32 } from "./sync/properties/_prop.ts";
 import { cell } from "../src/state/cell-create.ts";
 import { composeCells } from "../src/state/cell-compose.ts";
 import { createDispatch } from "../src/state/dispatch.ts";
@@ -118,14 +119,15 @@ function harness(k: number) {
 }
 
 Deno.test("D11 property: acked ⟺ applied, op-rejected ⟺ refused", async () => {
-  let seed = SEED;
-  const rnd = () =>
-    (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const rnd = mulberry32(SEED);
   const pick = (n: number) => Math.floor(rnd() * n);
   // Relative to NOW — see STALE_OP_REASON: an epoch-era stamp would be
   // refused as older than the tombstone window before it reached dispatch.
   let clock = Date.now();
   const hlc = (): HLC => [clock++, 0, "c1"];
+  // What the generator chose between, counted: a run that never drew one
+  // side of a branch checked nothing about it.
+  const drew = { poison: 0, set: 0, warm: 0, cold: 0 };
 
   for (let round = 0; round < ROUNDS; round++) {
     const k = 2 + pick(3);
@@ -141,10 +143,12 @@ Deno.test("D11 property: acked ⟺ applied, op-rejected ⟺ refused", async () =
           ? { id, cell: c, action: "poison", args: [id] }
           : { id, cell: c, action: "set", args: [id, pick(4) - 1] },
       );
+      drew[ops.at(-1)!.action as "poison" | "set"]++;
     }
     // A warm-up op (or not) shifts the await parity between the concurrent
     // chains — which of them resumes inside another's dispatch→read window.
     const warm = pick(2) === 0;
+    drew[warm ? "warm" : "cold"]++;
     try {
       if (warm) {
         await h.handler.handleOp(
@@ -216,6 +220,14 @@ Deno.test("D11 property: acked ⟺ applied, op-rejected ⟺ refused", async () =
       }
     } finally {
       h.close();
+    }
+  }
+  if (ROUNDS >= 40) {
+    for (const [what, n] of Object.entries(drew)) {
+      assert(
+        n > 0,
+        `the generator never drew "${what}": ${JSON.stringify(drew)}`,
+      );
     }
   }
 });

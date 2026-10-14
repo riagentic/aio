@@ -8,6 +8,7 @@
 // back) put a DEAD element on the page: a blank box after the first remount.
 // It now keeps the page the guest was on. Opt-in like every real-window test
 // (ELECTRON_E2E=1), and ONLY on the nested test display.
+import { childEnv } from "./e2e-app-harness.ts";
 import { assert, assertEquals } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import * as esbuild from "esbuild";
@@ -121,7 +122,7 @@ app.whenReady().then(() => {
       await Deno.writeTextFile(file, main);
       const { stdout, stderr } = await new Deno.Command(ELECTRON_BIN, {
         args: [file, "--no-sandbox"],
-        env: { ...testDisplayEnv(), ELECTRON_ENABLE_LOGGING: "0" },
+        env: childEnv({ ...testDisplayEnv(), ELECTRON_ENABLE_LOGGING: "0" }),
         stdout: "piped",
         stderr: "piped",
       }).output();

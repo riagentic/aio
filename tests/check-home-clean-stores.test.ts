@@ -242,6 +242,7 @@ Deno.test("check:home-clean: the install directories watched are every one insta
     join("/h", ".local", "share", "applications"),
     join("/h", ".config"),
     join("/h", ".cache"),
+    join("/h", "Library", "Application Support"),
   ]);
   // The user's own relocations are watched beside the defaults.
   assertEquals(
@@ -258,11 +259,22 @@ Deno.test("check:home-clean: the install directories watched are every one insta
       join("/h", ".local", "share", "applications"),
       "/x/config",
       "/x/cache",
+      join("/h", "Library", "Application Support"),
     ],
+  );
+  // An EMPTY XDG variable is unset: the default directory is still watched.
+  assert(
+    installDirs({ HOME: "/h", XDG_CONFIG_HOME: "", XDG_CACHE_HOME: "" })
+      .includes(join("/h", ".config")),
   );
   // Windows: installRoot() is %LOCALAPPDATA%\\Programs.
   assert(
     installDirs({ USERPROFILE: "C:\\U\\d", LOCALAPPDATA: "C:\\U\\d\\L" })
       .includes(join("C:\\U\\d\\L", "Programs")),
+  );
+  // …and an Electron profile's parent there is %APPDATA%.
+  assert(
+    installDirs({ USERPROFILE: "C:\\U\\d", APPDATA: "C:\\U\\d\\R" })
+      .includes("C:\\U\\d\\R"),
   );
 });

@@ -2542,6 +2542,38 @@ export const checkPatterns: Checker = (ctx) => {
       }
     }
 
+    // `aio/src/…` — the same reach into internals, through a PATH install's
+    // import map (`"aio/": "../aio/"`). JSR refuses the specifier outright; a
+    // local path resolves it, so nothing told the app that a refactor inside
+    // `src/` breaks it with no deprecation. A warning, per line.
+    const SRC_RE =
+      /(?:^|\n)([ \t]*(?:(?:import|export)\b[^\n]*|\})\s*from\s*['"]aio\/(src\/[^'"]+)['"])/g;
+    for (const m of codeMatches(file.content, SRC_RE)) {
+      const at = m.index! + (m[0]!.startsWith("\n") ? 1 : 0);
+      const lineIdx = file.content.slice(0, at).split("\n").length - 1;
+      if (isSuppressed(file.lines, lineIdx)) continue;
+      const rel = m[2]!;
+      const entry = Object.entries(AIO_ENTRY_PATHS)
+        .find(([, path]) => path === rel)?.[0];
+      report(
+        "warn",
+        "patterns",
+        `${file.relative}:${lineIdx + 1} — "aio/${rel}" imports framework ` +
+          `INTERNALS: \`aio/src/…\` is not a published entry (JSR refuses it; ` +
+          `only a path install resolves it), so it can move on any upgrade. ` +
+          (entry
+            ? `This one is the published entry \`${entry}\` — import that.`
+            : `No \`aio/*\` entry exports it; if you need it, say so — an ` +
+              `entry can be added. Acknowledge a deliberate one with ` +
+              `\`// aio-ok\`.`),
+        {
+          file: file.relative,
+          line: lineIdx + 1,
+          ...(entry ? { fix: `import { ... } from '${entry}'` } : {}),
+        },
+      );
+    }
+
     // Node.js APIs
     const nodeApis = [
       "require(",

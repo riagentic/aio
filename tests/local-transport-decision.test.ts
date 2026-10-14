@@ -3,8 +3,9 @@
 // functions, so the windows rows run on Linux CI.
 
 import { assert, assertEquals, assertMatch } from "@std/assert";
-import { join } from "@std/path";
+import { basename, join } from "@std/path";
 import {
+  _pipeName,
   isPipePath,
   resolveSocketPath,
   resolveTransport,
@@ -68,8 +69,13 @@ Deno.test("resolveSocketPath: windows → \\\\.\\pipe\\aio-<lockKey>[-http], nev
   const key = heldLockKey("some-app");
   const ndjson = resolveSocketPath("some-app", undefined, "windows");
   const http = resolveSocketPath("some-app", "http", "windows");
-  assertEquals(ndjson, `\\\\.\\pipe\\aio-${key}`);
-  assertEquals(http, `\\\\.\\pipe\\aio-${key}-http`);
+  // Under an `AIO_APPS_DIR` (every suite run) the lock dir's scope is in the
+  // name; the unscoped `aio-<lockKey>` is pinned to the byte, in a child
+  // without one, by tests/win-pipe-burst.test.ts.
+  const name = _pipeName(basename(lockDir()), key);
+  assertEquals(name.startsWith("aio-"), basename(lockDir()) === "aio", name);
+  assertEquals(ndjson, `\\\\.\\pipe\\${name}`);
+  assertEquals(http, `\\\\.\\pipe\\${name}-http`);
   assert(isPipePath(ndjson) && isPipePath(http));
   assert(ndjson !== http, "two listeners, two names");
   assert(!ndjson.includes("/") && !ndjson.includes(".sock"));

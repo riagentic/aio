@@ -6,31 +6,18 @@
 import { assert, assertStringIncludes } from "@std/assert";
 import { testDisplayEnv } from "../src/testing/test-display.ts";
 import { stopChild } from "./stop-child.ts";
+import { cdpConnect } from "../src/media/cdp.ts";
 import { childCoverageDir, tempDir } from "../src/testing/temp-dir.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { fromFileUrl } from "@std/path";
 import { spec } from "./module-spec-helper.ts";
+// THE browser lookup (every OS), never a copy of its path list.
+import { browserOsFlags, findBrowser } from "./e2e-harness.ts";
+import { browserHomeEnv } from "../src/testing/chromium.ts";
 const _childCovDir = childCoverageDir();
 
 const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
-function findBrowser(): string | null {
-  if (Deno.env.get("AIO_E2E") === "0") return null;
-  for (
-    const c of [
-      "/usr/bin/chromium",
-      "/usr/bin/chromium-browser",
-      "/usr/bin/google-chrome",
-      "/usr/bin/google-chrome-stable",
-    ]
-  ) {
-    try {
-      Deno.statSync(c);
-      return c;
-    } catch { /* next */ }
-  }
-  return null;
-}
 const BROWSER = findBrowser();
 
 async function waitFor<T>(
@@ -124,6 +111,84 @@ export const c = cell("probe", { state: { n: 0 }, methods: { inc(s) { s.n++; } }
 
 /** Boot a probe app, load it in dump-dom chromium (failure path), return
  *  the rendered DOM + server log; cleans up everything. */
+/** What a failure page looks like in the DOM — either layer. */
+const FAILURE_PAGE = /Module Errors|data-aio-blank-screen/;
+
+async function dumpDom(profile: string, port: number): Promise<string> {
+  const chrome = await new Deno.Command(BROWSER!, {
+    args: [
+      ...browserOsFlags,
+      "--headless=new",
+      "--no-sandbox",
+      "--disable-gpu",
+      "--disable-dev-shm-usage",
+      `--password-store=basic`,
+      `--use-mock-keychain`,
+      `--user-data-dir=${profile}`,
+      // fast-forwards timers so the sync overlay is present at dump time;
+      // WS state round-trips do NOT complete under virtual time, so this
+      // path is for FAILURE cases only (see the live healthy test).
+      "--virtual-time-budget=8000",
+      "--dump-dom",
+      `http://localhost:${port}/`,
+    ],
+    env: browserHomeEnv(profile),
+    stdout: "piped",
+    stderr: "null",
+  }).output();
+  return new TextDecoder().decode(chrome.stdout);
+}
+
+/** Windows: the same page's DOM, read from the live tab. `--dump-dom` prints
+ *  NOTHING from a guest window (measured: 0 bytes), and a browser there must
+ *  be a guest one (`browserOsFlags`). Waits for the failure page, bounded;
+ *  what it returns on a timeout is the DOM the asserts then report. */
+async function liveDom(profile: string, port: number): Promise<string> {
+  const chrome = new Deno.Command(BROWSER!, {
+    args: [
+      ...browserOsFlags,
+      "--headless=new",
+      "--no-sandbox",
+      "--disable-gpu",
+      `--user-data-dir=${profile}`,
+      "--remote-debugging-port=0",
+      `http://localhost:${port}/`,
+    ],
+    env: browserHomeEnv(profile),
+    stdin: "null",
+    stdout: "null",
+    stderr: "null",
+  }).spawn();
+  let cdp: Awaited<ReturnType<typeof cdpConnect>> | null = null;
+  try {
+    const wsUrl = await waitFor("devtools", async () => {
+      const p = Number(
+        (await Deno.readTextFile(`${profile}/DevToolsActivePort`))
+          .split("\n")[0],
+      );
+      const targets = await (await fetch(`http://127.0.0.1:${p}/json`))
+        .json() as { type: string; webSocketDebuggerUrl: string }[];
+      return targets.find((t) => t.type === "page")?.webSocketDebuggerUrl ??
+        null;
+    });
+    cdp = await cdpConnect(wsUrl);
+    let dom = "";
+    const until = Date.now() + 30_000;
+    while (!FAILURE_PAGE.test(dom) && Date.now() < until) {
+      const r = await cdp.call("Runtime.evaluate", {
+        expression: "document.documentElement.outerHTML",
+        returnByValue: true,
+      }) as { result?: { value?: string } };
+      dom = r.result?.value ?? "";
+      if (!FAILURE_PAGE.test(dom)) await new Promise((r) => setTimeout(r, 150));
+    }
+    return dom;
+  } finally {
+    await cdp?.close();
+    await stopChild(chrome, { quiet: true });
+  }
+}
+
 async function renderBroken(appTsx: string): Promise<{
   dom: string;
   log: string;
@@ -131,29 +196,13 @@ async function renderBroken(appTsx: string): Promise<{
   const { dir, port, proc, logRef } = await bootProbe(appTsx);
   try {
     const profile = await tempDir("aio-blank-prof-");
-    const chrome = await new Deno.Command(BROWSER!, {
-      args: [
-        "--headless=new",
-        "--no-sandbox",
-        "--disable-gpu",
-        "--disable-dev-shm-usage",
-        `--password-store=basic`,
-        `--use-mock-keychain`,
-        `--user-data-dir=${profile}`,
-        // fast-forwards timers so the sync overlay is present at dump time;
-        // WS state round-trips do NOT complete under virtual time, so this
-        // path is for FAILURE cases only (see the live healthy test).
-        "--virtual-time-budget=8000",
-        "--dump-dom",
-        `http://localhost:${port}/`,
-      ],
-      stdout: "piped",
-      stderr: "null",
-    }).output();
+    const dom = Deno.build.os === "windows"
+      ? await liveDom(profile, port)
+      : await dumpDom(profile, port);
     await Deno.remove(profile, { recursive: true }).catch(() => {});
     // give the client-error POST a beat to land in the server log
     await new Promise((r) => setTimeout(r, 500));
-    return { dom: new TextDecoder().decode(chrome.stdout), log: logRef.buf };
+    return { dom, log: logRef.buf };
   } finally {
     await stopChild(proc, { quiet: true });
     await Deno.remove(dir, { recursive: true }).catch(() => {});
@@ -224,6 +273,7 @@ Deno.test({
     const profile = await tempDir("aio-blank-prof-");
     const chrome = new Deno.Command(BROWSER!, {
       args: [
+        ...browserOsFlags,
         "--headless=new",
         "--no-sandbox",
         "--disable-gpu",
@@ -233,6 +283,7 @@ Deno.test({
         `--user-data-dir=${profile}`,
         `http://localhost:${port}/`,
       ],
+      env: browserHomeEnv(profile),
       stdin: "null",
       stdout: "null",
       stderr: "null",
@@ -267,6 +318,7 @@ Deno.test({
     const profile = await tempDir("aio-blank-prof-");
     const chrome = new Deno.Command(BROWSER!, {
       args: [
+        ...browserOsFlags,
         "--headless=new",
         "--no-sandbox",
         "--disable-gpu",
@@ -276,6 +328,7 @@ Deno.test({
         `--user-data-dir=${profile}`,
         `http://localhost:${port}/`,
       ],
+      env: browserHomeEnv(profile),
       stdin: "null",
       stdout: "null",
       stderr: "null",

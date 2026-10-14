@@ -7,6 +7,7 @@
 // substrings of the output, which a broken file satisfies as well as a working
 // one. This lays the output out beside real cells and runs `deno check` and
 // `deno test` on it.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { generateReplayTest } from "../src/am/record.ts";

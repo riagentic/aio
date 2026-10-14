@@ -9,6 +9,7 @@
 // The render is the SAME path `am surface` and `am testgen` use, so what is
 // tested here is the two things `preview` adds: reading props off a command
 // line, and printing what came back in the vocabulary `am trigger` takes.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { parsePreviewProps, previewLines } from "../src/am/am-cmd-preview.ts";
 import type { UISurfaceNode } from "../src/air/ui-surface.ts";

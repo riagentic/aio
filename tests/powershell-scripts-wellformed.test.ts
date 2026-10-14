@@ -10,6 +10,7 @@
 // This host has no Windows PowerShell. Where `pwsh` is installed the scripts
 // are handed to the real parser; everywhere, their quotes and brackets must
 // balance — the mistake a generator makes first.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { _swapSpec, unpackCommand } from "../src/server/updates-apply.ts";
 import { _openSpec } from "../src/server/open-external.ts";

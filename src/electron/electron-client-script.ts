@@ -14,7 +14,10 @@ import {
 /** The client's `app.name` — the name of its profile directory. */
 export const CLIENT_PROFILE = "aio-client";
 
-export function electronClientScript(bakedUrl?: string | null): string {
+export function electronClientScript(
+  bakedUrl?: string | null,
+  opts?: { strictPin?: boolean },
+): string {
   // The address the BUILD already knew. Without it a shipped client opens a box
   // asking the user to type a server they were never told — the build recorded
   // `build.server`, printed it, refused the build without it, and then dropped
@@ -23,6 +26,21 @@ export function electronClientScript(bakedUrl?: string | null): string {
   const baked = bakedUrl ? JSON.stringify(bakedUrl) : "null";
   return `
 const __AIO_BAKED_URL = ${baked};
+// The strict pin (opt-in: 'electron: { strictPin }' for a launched client,
+// 'build: { strictPin }' for a packaged one, --strict-pin for one run): a
+// pinned host presenting a certificate its pin does not cover is REFUSED —
+// before the request line (and the token in it) is written, and before the
+// page loads — and stays refused until it is paired again by PIN or a fresh
+// .aioapp is imported. Off, the mismatch is warned about and the host is
+// reached as before (see warnPinChanged).
+const __AIO_STRICT_PIN = ${
+    opts?.strictPin === true
+  } || process.argv.includes('--strict-pin');
+// One connection per request, so each one has a handshake to judge — a
+// kept-alive socket was last looked at before the pin it now answers to (and
+// one opened by a request that is not held to the pin could carry the next
+// request, token and all, past it).
+const __AIO_PIN_AGENT = false;
 const { app, BrowserWindow, Menu, nativeImage } = require('electron');
 const http = require('http');
 const https = require('https');
@@ -58,7 +76,7 @@ function fetchPage(url, maxRedirects = 5) {
     const mod = url.startsWith('https') ? https: http;
     // aio --expose serves a self-signed cert; a dedicated aio client trusts
     // it (a generic browser can't — that's the point of this client).
-    const req = mod.get(url, { timeout: 8000, rejectUnauthorized: false }, (res) => {
+    const req = mod.get(url, { timeout: 8000, rejectUnauthorized: false, agent: __AIO_PIN_AGENT }, (res) => {
       if (res.statusCode < 200 || res.statusCode >= 400) {
         res.resume();
         return reject(new Error('Server returned ' + res.statusCode));
@@ -74,25 +92,229 @@ function fetchPage(url, maxRedirects = 5) {
       res.on('data', (chunk) => data += chunk);
       res.on('end', () => resolve(data));
     });
-    // The pin is looked at HERE, on the connection that is about to carry the
-    // request line (and the ?token= in it): 'secureConnect' runs inside the
-    // handshake-done callback, before the buffered request is written.
-    req.on('socket', (sock) => {
-      if (mod !== https) return;
-      sock.once('secureConnect', () => {
-        try {
-          const peer = sock.getPeerCertificate();
-          if (peer && peer.raw && pinMismatch(new URL(url).host, peer.raw.toString('base64'))) {
-            warnPinChanged(new URL(url).host);
-          }
-        } catch {}
-      });
-    });
+    guardPin(req, mod, url, reject);
     req.on('error', reject);
     req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
   });
 }
 
+// The pin is looked at HERE, on the connection that is about to carry the
+// request line (and the ?token= in it): 'secureConnect' runs inside the
+// handshake-done callback, before the buffered request is written. Strict:
+// the request is destroyed there, so nothing is sent (refuse(err) answers the
+// caller first — the destroy's own error is a bare "socket hang up"); a
+// certificate that cannot be read is a mismatch (fail closed).
+// Not strict: the request is destroyed there too, UNLESS this certificate has
+// been decided for this run (see decidePin) — the caller gets a pinUndecided
+// error naming the certificate, decides, and asks again.
+function guardPin(req, mod, url, refuse) {
+  if (mod !== https) return;
+  req.on('socket', (sock) => {
+    sock.once('secureConnect', () => {
+      const host = new URL(url).host;
+      try {
+        const peer = sock.getPeerCertificate();
+        const der = peer && peer.raw ? Buffer.from(peer.raw).toString('base64') : '';
+        if (pinMismatch(host, der)) {
+          if (!__AIO_STRICT_PIN) {
+            if (der && (_pinDecided.get(host) === der || (_pinKeyless.get(host) === der && !hasToken(url)))) return;
+            const e = new Error('The certificate pinned for ' + host + ' has changed.');
+            e.pinUndecided = { host, der };
+            refuse(e); req.destroy();
+            return;
+          }
+          const note = warnPinChanged(host);
+          if (__AIO_STRICT_PIN) { refuse(pinRefusal(new Error(note))); req.destroy(); }
+        }
+      } catch (e) {
+        if (__AIO_STRICT_PIN && _pinnedCerts.has(host)) { refuse(pinRefusal(e)); req.destroy(); }
+      }
+    });
+  });
+}
+
+// ── A changed certificate, not strict: may this server be sent the key? ──
+// What a server that regenerated its certificate still has, and something
+// answering in its place does not, is the app's key. So the key is not sent
+// to find out: the server is asked to PROVE it holds it, for the certificate
+// it is presenting (the server side is src/server/pin-proof.ts).
+//   • proved            → that certificate becomes the pin; connect as before.
+//   • not proved, and this app HAS proved before (recents: proves) → the key
+//     is withheld: the address is opened without it.
+//   • not proved, never has (a server older than the proof) → as before:
+//     warned about, and reached with the key. Refusing here would lock a
+//     paired client out of a server that only regenerated its certificate.
+// host -> the base64 DER decided for this run (guardPin lets it through).
+const _pinDecided = new Map();
+// host -> the base64 DER that was decided AGAINST: it is opened without the
+// key, so only a request that carries none goes through. One that carries the
+// key (the same recent, clicked again) is undecided again, and asks again —
+// in one map with the above, the second click sent the key to what had just
+// failed to prove.
+const _pinKeyless = new Map();
+function hasToken(url) { return /[?&]token=/.test(url); }
+function hmacHex(key, msg) { return crypto.createHmac('sha256', key).update(msg).digest('hex'); }
+// One proof exchange with the server at base. token: sent only by learnProof,
+// on a connection the pin already covers. Resolves { valid, cert, der }.
+function askProof(base, key, token, onSocket) {
+  return new Promise((resolve) => {
+    const nonce = crypto.randomBytes(32).toString('hex');
+    const payload = Buffer.from(JSON.stringify({ nonce, tag: hmacHex(key, 'aio-pin-proof-v1:c:' + nonce) }));
+    let der = '';
+    // answered: the server SAID something that is not a proof. Not answered
+    // (its time ran out, the connection broke) decides nothing — see provePin.
+    const none = (answered) => resolve({ valid: false, cert: null, der, answered: answered === true });
+    const url = base + '/__aio/pin-proof' + (token ? '?token=' + encodeURIComponent(token) : '');
+    const req = https.request(url, {
+      method: 'POST', timeout: 8000, rejectUnauthorized: false, agent: false,
+      headers: { 'content-type': 'application/json', 'content-length': payload.length },
+    }, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { if (data.length < 65536) data += chunk; });
+      res.on('end', () => {
+        let j = null; try { j = JSON.parse(data); } catch {}
+        if (res.statusCode !== 200 || !j || typeof j.proof !== 'string' || typeof j.cert !== 'string') return none(true);
+        const want = hmacHex(key, 'aio-pin-proof-v1:s:' + nonce + ':' + normPem(j.cert));
+        const a = Buffer.from(j.proof), b = Buffer.from(want);
+        // The proof is for THE certificate this connection presented.
+        const valid = a.length === b.length && crypto.timingSafeEqual(a, b) && !!der && pinMatches(j.cert, der);
+        resolve({ valid, cert: j.cert, der, answered: true });
+      });
+    });
+    req.on('socket', (sock) => sock.once('secureConnect', () => {
+      try {
+        const peer = sock.getPeerCertificate();
+        der = peer && peer.raw ? Buffer.from(peer.raw).toString('base64') : '';
+      } catch {}
+      if (onSocket && onSocket(der) === false) { none(); req.destroy(); }
+    }));
+    req.on('error', () => none());
+    req.on('timeout', () => { req.destroy(); none(); });
+    req.write(payload); req.end();
+  });
+}
+// Every recent of this app at this host: (host, key) names the pairing.
+function patchRecents(host, key, patch) {
+  try {
+    const list = loadRecents().map((r) => {
+      let h = ''; try { h = new URL(r.url).host; } catch {}
+      return h === host && r.key === key ? Object.assign({}, r, patch) : r;
+    });
+    fs.writeFileSync(recentsPath(), JSON.stringify(list), { mode: 0o600 });
+    try { fs.chmodSync(recentsPath(), 0o600); } catch {}
+  } catch {}
+}
+function pairingOf(host, key) {
+  return loadRecents().find((r) => { try { return new URL(r.url).host === host && r.key === key; } catch { return false; } });
+}
+// A connect that met its pin: learn, once per pairing, that this server can
+// prove — from then on "cannot prove" is not something it would say.
+function learnProof(url) {
+  try {
+    const u = new URL(url);
+    const appKey = u.searchParams.get('token');
+    if (u.protocol !== 'https:' || !appKey || !_pinnedCerts.has(u.host)) return;
+    const rec = pairingOf(u.host, appKey);
+    if (!rec || rec.proves) return;
+    askProof(u.origin, appKey, appKey, (der) => !pinMismatch(u.host, der)).then((p) => {
+      if (p.valid) patchRecents(u.host, appKey, { proves: true });
+    });
+  } catch {}
+}
+// The decision for one changed certificate. Resolves the URL to open: the
+// one asked for, or the same address WITHOUT the key.
+async function decidePin(url, undecided) {
+  const u = new URL(url);
+  const appKey = u.searchParams.get('token');
+  // host:port of the certificate that was presented — never the address
+  // (which carries the key): the lines below are printed.
+  const pinnedHost = undecided.host;
+  if (!appKey) {
+    // No key in this address: nothing to withhold. Said, and reached.
+    warnPinChanged(pinnedHost);
+    _pinDecided.set(pinnedHost, undecided.der);
+    return { url, withheld: false };
+  }
+  const p = await askProof(u.origin, appKey, null, null);
+  if (p.valid && p.der === undecided.der) {
+    repin(pinnedHost, appKey, p.cert);
+    return { url, withheld: false };
+  }
+  const rec = pairingOf(pinnedHost, appKey);
+  // What the lines below say is gone once a page loads: it is kept with the
+  // pairing, and the connect page shows it on that recent until the
+  // certificate is pinned again (a proof, or pairing).
+  patchRecents(pinnedHost, appKey, { changed: new Date().toISOString() });
+  if (rec && rec.proves) {
+    _pinKeyless.set(pinnedHost, undecided.der);
+    u.searchParams.delete('token');
+    const note = 'The certificate pinned for ' + pinnedHost + ' has CHANGED, and what answers there could not prove it holds this app\\'s key — so the key was NOT sent. ' +
+      'If the server of this app was reinstalled, pair again (or import a fresh .aioapp). If it was not, something between this client and the app is answering in its place — do not enter anything you would not hand to a stranger.';
+    console.error('[aio-client] WARNING: ' + note);
+    return { url: u.href, withheld: true, note };
+  }
+  _pinDecided.set(pinnedHost, undecided.der);
+  warnPinChanged(pinnedHost);
+  return { url, withheld: false };
+}
+// A proved certificate becomes the pin, in this run and in the pairing.
+function repin(hostName, key, cert) {
+  pinCert(hostName, cert);
+  patchRecents(hostName, key, { cert, proves: true, changed: undefined });
+  console.error('[aio-client] The certificate pinned for ' + hostName + ' changed, and the server proved it holds this app\\'s key: the new certificate is pinned.');
+}
+// A certificate the pin does not cover, met by the WINDOW (the server
+// regenerated it while the page was open — no connect is there to decide):
+// the server is asked to prove, with each key paired at that address. Only a
+// proof opens it; anything else stays refused until the next connect decides.
+// One question per certificate and run — one that was ANSWERED. A question
+// that got no answer (a server still starting: its 8 s ran out, or the
+// connection broke) used to count as "cannot prove" until the client was
+// restarted; it decides nothing, so the window's next request asks again.
+// (What is sent to ask is a nonce and its HMAC, never the key.)
+const _pinProving = new Map();
+function provePin(host, der) {
+  const id = host + ' ' + der;
+  if (!_pinProving.has(id)) _pinProving.set(id, (async () => {
+    const keys = new Set();
+    for (const r of loadRecents()) { try { if (r.key && new URL(r.url).host === host) keys.add(r.key); } catch {} }
+    let unanswered = false;
+    for (const key of keys) {
+      const p = await askProof('https://' + host, key, null, null);
+      if (p.valid && p.der === der) { repin(host, key, p.cert); return true; }
+      if (!p.answered) unanswered = true;
+    }
+    if (unanswered) _pinProving.delete(id);
+    return false;
+  })().catch(() => false));
+  return _pinProving.get(id);
+}
+
+// The page the WINDOW loads carries what a request of this script never does:
+// the cookie jar. A connect made with the key leaves it there too (the server
+// hands the page 'aio_key_<app>' for its follow-up requests, for as long as
+// this run lasts) — so an address opened WITHOUT the key, because what
+// answers there did not prove it holds it, was sent the key all the same, by
+// the window. It is taken out of the jar first. Nothing is lost: the keyless
+// page was fetched (by this script, with no cookie) before it is loaded, so
+// whatever served it asks for no key. A jar that cannot be read throws, and
+// the page is not loaded.
+async function dropKeyCookies(win, url) {
+  const name = new URL(url).hostname.replace(/^[[]|[\]]$/g, '');
+  const jar = win.webContents.session.cookies;
+  for (const c of await jar.get({})) {
+    if (!c.name.startsWith('aio_key_')) continue;
+    const domain = String(c.domain || '').replace(/^[.]/, '').replace(/^[[]|[\]]$/g, '');
+    if (domain !== name) continue;
+    await jar.remove((c.secure ? 'https://' : 'http://') + (domain.includes(':') ? '[' + domain + ']' : domain) + (c.path || '/'), c.name);
+  }
+}
+
+// A strict refusal, marked: connectTo answers it with the connect page (the
+// one place to pair again) when the launch went straight to an address.
+function pinRefusal(e) { try { e.pinRefused = true; } catch {} return e; }
+
+// Pairing only: its answer is what REPLACES a pin, so it is not held to one.
 function postJson(url, body) {
   return new Promise((resolve, reject) => {
     const mod = url.startsWith('https') ? https: http;
@@ -114,7 +336,7 @@ function postJson(url, body) {
 function fetchBuffer(url, maxBytes = 1048576) {
   return new Promise((resolve) => {
     const mod = url.startsWith('https') ? https: http;
-    const req = mod.get(url, { timeout: 5000, rejectUnauthorized: false }, (res) => {
+    const req = mod.get(url, { timeout: 5000, rejectUnauthorized: false, agent: __AIO_PIN_AGENT }, (res) => {
       if (res.statusCode !== 200) { res.resume(); return resolve(null); }
       const chunks = [];
       let size = 0;
@@ -125,6 +347,8 @@ function fetchBuffer(url, maxBytes = 1048576) {
       });
       res.on('end', () => resolve(Buffer.concat(chunks)));
     });
+    // Its own connection, and the URL carries the token too.
+    guardPin(req, mod, url, () => resolve(null));
     req.on('error', () => resolve(null));
     req.on('timeout', () => { req.destroy(); resolve(null); });
   });
@@ -162,50 +386,122 @@ const DISCOVERY_PORT = (() => {
 // connect page sweeps repeatedly), with no address in it. macOS refuses the
 // broadcast to an app without the Local Network permission — "No route to
 // host", while everything else on the network works.
-let _discoveryUnsentSaid = false;
-function discoveryUnsent(why) {
-  if (_discoveryUnsentSaid) return;
-  _discoveryUnsentSaid = true;
-  console.error('[aio-client] discovery: the probe could not be sent (' +
-    ((why && (why.code || why.message)) || why) + ') — nothing was asked, so an ' +
-    'empty result says nothing about what is running. Type the address instead.' +
+//
+// The same for a socket that could not be made, and for one that FAILED after
+// the probe left (its 'error' event): the sweep then ends with an empty list
+// that says nothing about what is running, and it ended in silence. Each kind
+// is said once in the log, with the OS reason; the connect page shows the
+// latest reason where it says "searching…" for as long as sweeps keep failing.
+const _discoverySaid = {};
+let _discoveryNote = '';
+function discoveryFailed(what, why) {
+  const reason = String((why && (why.code || why.message)) || why);
+  _discoveryNote = 'search unavailable (' + reason + ') — type the address above';
+  if (_discoverySaid[what]) return;
+  _discoverySaid[what] = true;
+  console.error('[aio-client] discovery: ' + what + ' (' + reason + ') — ' +
+    (what === 'the probe could not be sent' ? 'nothing was asked' : 'no answer can be heard') +
+    ', so an empty result says nothing about what is running. Type the address instead.' +
     (process.platform === 'darwin'
       ? ' On macOS this is the Local Network permission: allow this app ' +
         'under System Settings > Privacy & Security > Local Network.'
       : ''));
 }
+function discoveryUnsent(why) { discoveryFailed('the probe could not be sent', why); }
+
+// Where a sweep sends its probe — the twin of the server's broadcastTargets
+// (src/server/discovery.ts; tests/discovery-broadcast-targets.test.ts runs
+// both on the same lists). The limited broadcast leaves by ONE interface, and
+// with a VPN up that is the VPN: the LAN was never asked. So each non-loopback
+// IPv4 interface's own broadcast address is probed too (not a /31 or /32: a
+// point-to-point link or a single host has none). [0-9], never the backslash
+// class — see DISCOVERY_PORT.
+function broadcastTargets(ifaces) {
+  const quad = (s) => {
+    const m = /^([0-9]{1,3})[.]([0-9]{1,3})[.]([0-9]{1,3})[.]([0-9]{1,3})$/.exec(String(s));
+    if (!m) return null;
+    const q = m.slice(1).map(Number);
+    return q.every((n) => n <= 255) ? q : null;
+  };
+  const out = ['255.255.255.255'];
+  for (const i of ifaces) {
+    if (i.family !== 'IPv4' && i.family !== 4) continue;
+    const a = quad(i.address), m = quad(i.netmask);
+    if (!a || !m || a[0] === 127) continue;
+    if (m[0] === 255 && m[1] === 255 && m[2] === 255 && m[3] >= 254) continue;
+    const b = a.map((x, k) => x | (~m[k] & 255)).join('.');
+    if (!out.includes(b)) out.push(b);
+  }
+  return out;
+}
 
 function discoverApps(timeoutMs, cb) {
   let sock;
   const found = new Map();
+  const own = new Set(); // this machine's addresses
+  _discoveryNote = '';
+  // A sweep answers ONCE. A socket that failed used to answer [] at the error
+  // and again when its timeout fired — and one that failed twice, twice more —
+  // so the connect page was redrawn by a sweep that had already ended.
+  let ended = false, timer;
+  const end = (apps) => {
+    if (ended) return;
+    ended = true;
+    clearTimeout(timer);
+    try { sock.close(); } catch {}
+    cb(apps);
+  };
   try { sock = dgram.createSocket({ type: 'udp4', reuseAddr: true }); }
-  catch (e) { return cb([]); }
+  catch (e) { discoveryFailed('the search socket could not be opened', e); return end([]); }
   sock.on('message', (msg, rinfo) => {
     const text = msg.toString('utf8');
     if (!text.startsWith('AIO1 ')) return;
     let ad; try { ad = JSON.parse(text.slice(5)); } catch { return; }
     if (typeof ad.name !== 'string' || typeof ad.port !== 'number') return;
     const host = rinfo.address;
-    const key = host + ':' + ad.port;
-    if (found.has(key)) return;
+    // This machine answers each target from the address of the interface the
+    // probe left by: one app, several hosts. They are one host.
+    const at = (own.has(host) ? '' : host) + ':' + ad.port;
+    if (found.has(at)) return;
     ad.host = host;
     ad.url = (ad.tls ? 'https': 'http') + '://' + host + ':' + ad.port;
-    found.set(key, ad);
+    found.set(at, ad);
   });
-  sock.on('error', () => { try { sock.close(); } catch {} cb([]); });
+  sock.on('error', (why) => {
+    if (ended) return;
+    discoveryFailed('the search socket failed', why);
+    end([]);
+  });
   sock.bind(() => {
+    if (ended) return;
     try { sock.setBroadcast(true); } catch {}
     const probe = Buffer.from('AIO_DISCOVER? v1');
-    try {
-      sock.send(probe, DISCOVERY_PORT, '255.255.255.255', (why) => {
-        if (why) discoveryUnsent(why);
-      });
-    } catch (why) { discoveryUnsent(why); }
-    setTimeout(() => {
-      try { sock.close(); } catch {}
-      cb([...found.values()].sort((a, b) => a.name.localeCompare(b.name)));
-    }, timeoutMs);
+    let ifaces = [];
+    try { ifaces = Object.values(require('os').networkInterfaces()).flat(); } catch {}
+    const targets = broadcastTargets(ifaces);
+    for (const i of ifaces) own.add(i.address);
+    // Unsent only when NO target took the probe — one refused (the limited
+    // broadcast routed into a VPN) beside one sent is a sweep that asked.
+    let failed = 0;
+    const unsent = (why) => { if (++failed === targets.length) discoveryUnsent(why); };
+    for (const to of targets) {
+      try {
+        sock.send(probe, DISCOVERY_PORT, to, (why) => { if (why) unsent(why); });
+      } catch (why) { unsent(why); }
+    }
+    timer = setTimeout(
+      () => end([...found.values()].sort((a, b) => a.name.localeCompare(b.name))),
+      timeoutMs,
+    );
   });
+}
+
+// What the connect page is handed: each entry with the address it SHOWS,
+// through the redactor — a paired recent's url carries '?token=<key>', and
+// the page printed it under the app's name. The url itself is untouched (it
+// is what a click opens, and what "forget" names).
+function forPage(list) {
+  return list.map((a) => Object.assign({}, a, { shown: __aioRedact(a.url || '') }));
 }
 
 // ── Recents (persisted in userData — data: URLs can't keep localStorage) ──
@@ -281,9 +577,11 @@ function pinMismatch(host, cert) {
 // 'err').
 function warnPinChanged(pinnedHost) {
   const pinNote = 'The certificate pinned for ' + pinnedHost + ' has CHANGED. ' +
-    'If the server of this app was reinstalled or regenerated its certificate, pair again (or import a fresh .aioapp) to pin the new one. ' +
+    (__AIO_STRICT_PIN ? 'REFUSED (strict pin): nothing was sent to it. ' : '') +
+    'If the server of this app was reinstalled or regenerated its certificate, pair again (or import a fresh .aioapp) to pin the new one' +
+    (__AIO_STRICT_PIN ? ' — the connect page (start the client with --connect) pairs by PIN. ' : '. ') +
     'If it was not, something between this client and the app is answering in its place — do not enter anything you would not hand to a stranger.';
-  console.error('[aio-client] WARNING: ' + pinNote);
+  console.error('[aio-client] ' + (__AIO_STRICT_PIN ? 'REFUSED: ' : 'WARNING: ') + pinNote);
   try {
     for (const w of BrowserWindow.getAllWindows()) {
       if (!String(w.webContents.getURL()).startsWith('data:text/html')) continue;
@@ -292,6 +590,7 @@ function warnPinChanged(pinnedHost) {
       ).catch(() => {});
     }
   } catch {}
+  return pinNote;
 }
 
 // Turn a .aioapp profile into a connectable recent entry.
@@ -365,15 +664,23 @@ function looksLikeAio(html) {
     html.includes('id="root"') || /aio:(width|height|title)/.test(html);
 }
 
-async function connectTo(win, url) {
+async function connectTo(win, url, withheld) {
   try {
     let html;
     try {
       html = await fetchPage(url);
     } catch (fe) {
+      // A changed certificate, not strict: nothing was sent. Decide (see
+      // decidePin), then ask again — once: the decision lets it through.
+      if (fe && fe.pinUndecided && !withheld) {
+        const d = await decidePin(url, fe.pinUndecided);
+        return connectTo(win, d.url, d.withheld ? d.note : 'decided');
+      }
       // Auth-required aio app (--expose with a token) returns 401/403. Guide
       // the user to append the token from the server's "share:" line.
       const m = /Server returned (401|403)/.exec(fe.message || '');
+      // …unless the key was withheld on purpose: say that instead.
+      if (m && withheld && withheld !== 'decided') throw pinRefusal(new Error(withheld));
       if (m && !/[?&]token=/.test(url)) {
         throw new Error('This app requires a token. Add it to the address:  ' + url + (url.includes('?') ? '&': '?') + 'token=YOUR_TOKEN   (copy it from the server\\'s "share:" line)');
       }
@@ -383,11 +690,13 @@ async function connectTo(win, url) {
       throw new Error("This doesn't look like an aio app (no aio markers on the page). Check the address, or that the server is running with --expose.");
     }
     const meta = parseMeta(html);
-    try {
+    // A connect made WITHOUT the saved key is not a place that was been to.
+    if (!withheld || withheld === 'decided') try {
       // Preserve a pinned cert/key from a prior profile import for this URL.
       const prev = loadRecents().find((r) => r.url === url) || {};
-      saveRecent({ url, name: meta.title || new URL(url).host, title: meta.title, host: new URL(url).hostname, port: Number(new URL(url).port) || (url.startsWith('https') ? 443: 80), tls: url.startsWith('https'), needsAuth: /[?&]token=/.test(url), cert: prev.cert || null, key: prev.key || null });
+      saveRecent({ url, name: meta.title || new URL(url).host, title: meta.title, host: new URL(url).hostname, port: Number(new URL(url).port) || (url.startsWith('https') ? 443: 80), tls: url.startsWith('https'), needsAuth: /[?&]token=/.test(url), cert: prev.cert || null, key: prev.key || null, proves: prev.proves || undefined, changed: prev.changed || undefined });
     } catch {}
+    if (!withheld) learnProof(url);
 
     // The app's icon ROUTE, with the connect URL's query kept: appending
     // '/icon.png' to a URL carrying '?token=K' put the path inside the query
@@ -417,14 +726,39 @@ async function connectTo(win, url) {
     // site a redirect lands it on, or any other window, holds no permission
     // (tmplPermissionGuard). Re-bound per connect: the app may be another one.
     __aioIpcBind(win, __aioOrigin(url));
+    // A changed certificate that did not prove, opened without the key: the
+    // window must not send it either (dropKeyCookies).
+    if (withheld && !hasToken(url)) await dropKeyCookies(win, url);
     win.loadURL(url);
   } catch (e) {
     const msg = e.message || String(e);
+    // A pin refusal (strict; or the key withheld and the app then asking for
+    // it), on a launch that went straight to an address (--server-url, a
+    // profile, the baked one): the window has no page to say it on, and the
+    // way back — pairing again — is on the connect page. Open it, saying why.
+    // (Measured in a real Electron: the refusal reached the log and the
+    // window stayed blank.)
+    if (e && e.pinRefused && _openPicker) {
+      const open = _openPicker; _openPicker = null;
+      open(msg);
+      return;
+    }
+    // In the log first (a line there is token-redacted, tmplCrashGuard): a
+    // launch that went straight to an address has loaded no page, and a
+    // script for a page that is not there never runs — measured in a real
+    // Electron, the promise stays pending: a blank window (left blank on
+    // purpose, a kiosk is not handed an address box) and not one line
+    // anywhere saying why. On a page without an 'err' element it rejected.
+    // aio-ok(token-log): through __aioRedact — this script's redactUrlToken
+    console.error('[aio-client] cannot open ' + __aioRedact(url + ': ' + msg));
     win.webContents.executeJavaScript(
-      "document.getElementById('err').textContent = " + JSON.stringify(msg)
-    );
+      "document.getElementById('err') && (document.getElementById('err').textContent = " + JSON.stringify(msg) + ")"
+    ).catch(() => {});
   }
 }
+// Set by 'ready' for a launch that skips the connect page; null once the
+// page is (or is about to be) on screen.
+let _openPicker = null;
 
 // ── Connect page HTML ──
 
@@ -445,9 +779,25 @@ app.on('certificate-error', (event, _webContents, url, _error, cert, callback) =
     if (pinned && cert && pinMatches(pinned, cert.data)) {
       event.preventDefault(); callback(true); return;
     }
-    // A pin that did NOT match falls through to the looser list below (see
-    // warnPinChanged for why it is not refused) — loudly.
-    if (pinned) warnPinChanged(host);
+    // A pin that did NOT match: only the certificate that was DECIDED for
+    // this run goes on to the looser list below (the page fetch met it
+    // first, see decidePin) — another one here is not the one that was asked
+    // about, and the page URL carries the key. Strict decides nothing, so
+    // there it is every certificate the pin does not cover.
+    if (pinned) {
+      const got = pemBodies(cert && cert.data)[0];
+      const keyless = !!got && _pinKeyless.get(host) === got && !hasToken(url);
+      if (!got || (_pinDecided.get(host) !== got && !keyless)) {
+        // Not strict: it may be the app's own server with a new certificate.
+        // Ask it to prove (provePin) — the verdict follows the answer.
+        if (!__AIO_STRICT_PIN && got) {
+          event.preventDefault();
+          provePin(host, got).then((ok) => { if (!ok) warnPinChanged(host); callback(ok); });
+          return;
+        }
+        warnPinChanged(host); callback(false); return;
+      }
+    }
     // Fallback: a host we fetched + validated as an aio app (manual connects
     // without a profile). Looser than pinning, but the user chose the address.
     if (_trustedHosts.has(host)) { event.preventDefault(); callback(true); return; }
@@ -456,6 +806,30 @@ app.on('certificate-error', (event, _webContents, url, _error, cert, callback) =
 });
 
 app.on('ready', () => {
+  // Strict: 'certificate-error' above fires only for a certificate Chromium
+  // itself refuses. One the machine's trust store accepts (a public CA, a
+  // corporate proxy root) would load with no question asked — so every
+  // certificate for a host name that HAS a pin is held to it here.
+  // (hostname carries no port: any pin of that name may answer; the
+  // per-port verdict stays with 'certificate-error'.) -3 = Chromium's own
+  // result, -2 = refused.
+  if (__AIO_STRICT_PIN) {
+    require('electron').session.defaultSession.setCertificateVerifyProc((request, cb) => {
+      try {
+        const pins = [];
+        for (const [h, pin] of _pinnedCerts) {
+          let name = h;
+          try { name = new URL('https://' + h).hostname; } catch {}
+          if (name === request.hostname || name === '[' + request.hostname + ']') pins.push(pin);
+        }
+        if (pins.length && !pins.some((pin) => pinMatches(pin, request.certificate.data))) {
+          warnPinChanged(request.hostname);
+          cb(-2); return;
+        }
+      } catch { cb(-2); return; }
+      cb(-3);
+    });
+  }
   // Pre-pin certs from stored recents/profiles so click-to-reconnect trusts
   // them without a fresh fetch.
   try {
@@ -510,6 +884,8 @@ app.on('ready', () => {
     return { action: 'deny' };
   });
 
+  _openPicker = (why) => { bootErr = why; openPicker(); };
+
   // Imported profile → pin its cert, remember it, connect straight in.
   if (profileFile) {
     const pr = loadProfileFile(profileFile);
@@ -547,6 +923,11 @@ app.on('ready', () => {
     return;
   }
 
+  _openPicker = null;
+  openPicker();
+  // The connect page — a hoisted function (not re-indented): a strict-pin
+  // refusal of a direct launch opens it later, through _openPicker.
+  function openPicker() {
   win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(CONNECT_HTML));
 
   let scanTimer = null;
@@ -555,12 +936,16 @@ app.on('ready', () => {
   }
   function scan() {
     discoverApps(1400, (apps) => {
-      inject('window.__aioSetDiscovered && window.__aioSetDiscovered(' + JSON.stringify(apps) + ')');
+      inject('window.__aioSetDiscovered && window.__aioSetDiscovered(' + JSON.stringify(forPage(apps)) + ')');
+      // A sweep that failed is not "searching…": say why, where that is shown.
+      if (!apps.length && _discoveryNote) {
+        inject('(function(e){ if (e) e.textContent = ' + JSON.stringify(_discoveryNote) + '; })(document.querySelector("#discovered .empty"))');
+      }
       inject('window.__aioScanDone && window.__aioScanDone()');
     });
   }
   win.webContents.once('did-finish-load', () => {
-    inject('window.__aioSetRecents && window.__aioSetRecents(' + JSON.stringify(loadRecents()) + ')');
+    inject('window.__aioSetRecents && window.__aioSetRecents(' + JSON.stringify(forPage(loadRecents())) + ')');
     inject('window.__aioSetDiscovered && window.__aioSetDiscovered([])');
     if (bootErr) inject("document.getElementById('err') && (document.getElementById('err').textContent = " + JSON.stringify(bootErr) + ")");
     scan();
@@ -573,7 +958,7 @@ app.on('ready', () => {
     if (url.startsWith('aio-forget:')) {
       const gone = decodeURIComponent(url.slice('aio-forget:'.length));
       const list = forgetRecent(gone);
-      inject('window.__aioSetRecents && window.__aioSetRecents(' + JSON.stringify(list) + ')');
+      inject('window.__aioSetRecents && window.__aioSetRecents(' + JSON.stringify(forPage(list)) + ')');
       return;
     }
     // PIN pairing request from the connect page (auth app clicked → code entered)
@@ -589,6 +974,7 @@ app.on('ready', () => {
     if (scanTimer) { clearInterval(scanTimer); scanTimer = null; }
     connectTo(win, url);
   });
+  }
 });
 
 app.on('window-all-closed', () => process.exit(0));

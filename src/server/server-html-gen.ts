@@ -209,6 +209,9 @@ function headContent(
    *  header-only, which is why this is an ADDITION to the header and not a
    *  replacement for it. */
   csp?: string,
+  /** `wire` — see `CellsConfig.wire`. In the shell as well as the `cfg`
+   *  frame: a call made before the socket opens is encoded by this page. */
+  wire?: { omitTrailingUndefined?: boolean },
 ): string {
   // THE baseline, on every target, always — before the app's stylesheet so
   // any of it can be overridden by a single rule.
@@ -322,6 +325,7 @@ function headContent(
   const clientConfig = {
     ...(appId ? { appId } : {}),
     ...(renderBudget ? { renderBudget } : {}),
+    ...(wire ? { wire } : {}),
     ...(syncCells && syncCells.length ? { syncCells } : {}),
     ...(callTimeouts ? { callTimeouts } : {}),
   };
@@ -388,6 +392,9 @@ export interface HtmlShellOptions {
   width?: number;
   height?: number;
   renderBudget?: RenderBudget;
+  /** `wire` — the client encodes a call, so the page must know before its
+   *  first module runs. */
+  wire?: { omitTrailingUndefined?: boolean };
   /** ui.entry — the component this page mounts (default: App.tsx). */
   uiEntry?: string;
   /** ui.viewport — override the meta tag, or `false` to omit it. */
@@ -421,6 +428,27 @@ export interface HtmlShellOptions {
   csp?: string;
 }
 
+/** A shell's answer to an engine too old for the bundle: a line on the page
+ *  instead of a blank one. Measured on an API 24 emulator image (its WebView
+ *  is Chrome 69): the bundle is a SyntaxError there, nothing mounts, and the
+ *  user saw white — as a phone on Safari < 15.4 does on a server-served page.
+ *  The two functions tested arrived last of what the runtime needs (Chrome
+ *  98 / Safari 15.4), so an engine that has them parses the bundle too.
+ *  A classic script written in ES5 — it has to run where the bundle cannot. */
+export function oldEngineNotice(shell: "apk" | "web" = "web"): string {
+  const fix = shell === "apk"
+    ? "Update Android System WebView (or Chrome) from the Play Store."
+    : "It needs Safari / iOS 15.4, Chrome 98 or Firefox 94, or newer.";
+  return `<script>if(typeof structuredClone!=="function"||typeof Object.hasOwn!=="function")` +
+    `document.addEventListener("DOMContentLoaded",function(){` +
+    `document.getElementById("root").textContent=` +
+    `${
+      JSON.stringify(
+        `This app cannot run here: the browser engine is too old. ${fix}`,
+      )
+    }})</script>`;
+}
+
 export function generateHTML(o: HtmlShellOptions): string {
   const head = headContent(
     o.title,
@@ -442,7 +470,8 @@ export function generateHTML(o: HtmlShellOptions): string {
     o.appId,
     o.layout,
     o.csp,
-  );
+    o.wire,
+  ) + "\n  " + oldEngineNotice();
 
   // `o.dir` was DECLARED on this options type, PASSED by `server-static.ts`,
   // and then dropped right here — both generators were called with `lang`

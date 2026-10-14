@@ -5,6 +5,7 @@
 // or not; the program side and a profile's instance are unaffected.
 //
 // Every case runs with HOME / AIO_APPS_DIR / AIO_INSTALL_ROOT in a temp dir.
+import "./store-sandbox.ts";
 import { sleeper } from "./proc-helper.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";

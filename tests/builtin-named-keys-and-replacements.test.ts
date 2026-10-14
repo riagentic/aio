@@ -5,6 +5,7 @@
 // - writeDenoJsonPin passed the user's pin ref inside a replacement STRING:
 //   `$&` / `$'` in a ref (a local path) spliced the match or the rest of
 //   deno.json into it.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { planMulti } from "../src/server/skv-sqlite.ts";

@@ -14,6 +14,7 @@
 // path `surface/NaN`). They now share ONE parser — three hand-written
 // validations would drift, and the one that lagged would be the one nobody
 // tested.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { parseNumArg } from "../src/am/am-utils.ts";
 
@@ -87,4 +88,39 @@ Deno.test("parseGlobalFlags: a numeric global flag that does not parse is an ERR
   const fwd = parseGlobalFlags(["ui", "--client=browser"]);
   assertEquals(fwd.flags.error, undefined);
   assertEquals(fwd.args, ["--client=browser"]);
+});
+
+Deno.test("am surface --depth / am shot <index>: an EMPTY value is refused, not read as 0", async () => {
+  // `Number("")` is 0, and 0 is a legal value for both: `--depth=$D` with an
+  // unset variable printed the roots only (a surface with every child cut
+  // reads as "this app has one component"), and `am shot "$N"` captured the
+  // FIRST window. Both validated with `Number.isInteger`, which 0 passes.
+  const { surfaceDepth } = await import("../src/am/am-cmd-inspect.ts");
+  const { shotWindowIndex } = await import("../src/am/am-cmd-shot.ts");
+  assertEquals(surfaceDepth(["--full"]), { ok: true, value: undefined });
+  assertEquals(surfaceDepth(["--depth=0"]), { ok: true, value: 0 });
+  assertEquals(surfaceDepth(["--depth=2"]), { ok: true, value: 2 });
+  for (
+    const bad of [
+      "--depth=",
+      "--depth= ",
+      "--depth=x",
+      "--depth=-1",
+      "--depth=1.5",
+    ]
+  ) {
+    const r = surfaceDepth([bad]);
+    assert(!r.ok, `must refuse ${bad}`);
+    assert(r.error.includes("--depth"), r.error);
+  }
+  assertEquals(shotWindowIndex(undefined), 0);
+  assertEquals(shotWindowIndex("0"), 0);
+  assertEquals(shotWindowIndex("2"), 2);
+  for (const bad of ["", " ", "x", "-1", "1.5"]) {
+    assertEquals(
+      shotWindowIndex(bad),
+      null,
+      `must refuse ${JSON.stringify(bad)}`,
+    );
+  }
 });

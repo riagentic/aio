@@ -15,6 +15,11 @@ Windows (PowerShell):
 irm https://raw.githubusercontent.com/riagentic/aio/main/install.ps1 | iex
 ```
 
+Windows needs Git first (`winget install Git.Git`); stock PowerShell 5.1 is
+enough. These docs show POSIX shell lines —
+[aio on Windows and macOS](windows-macos.md) has their PowerShell spellings and
+everything else that differs there (paths, firewall, startup, stopping).
+
 Then scaffold and run — a full app in two commands:
 
 ```sh
@@ -38,6 +43,7 @@ want one anyway. An Electron window is a child process aio owns, so
 ```
 deno.json                        <- config + tasks + the aio pin
 .gitignore
+.gitattributes                   <- LF line endings in every checkout
 src/app.ts                       <- aio.run() -- boot only
 src/cell.ts                      <- cell() -- state + methods
 src/App.tsx                      <- root UI (convention; override with ui.entry)
@@ -46,7 +52,7 @@ tests/cell.test.ts               <- a passing starter test
 README.md
 AGENTS.md                        <- the aio brief for a coding agent
 CLAUDE.md                        <- one line: read AGENTS.md
-dep/aio                          <- symlink to the pinned framework (gitignored)
+dep/aio                          <- link to the pinned framework (gitignored; a junction on Windows)
 ```
 
 Your import map already carries every aio entry — including
@@ -64,7 +70,8 @@ It is also **pinned to an exact aio version**, recorded in its own `deno.json`
 push is the app your colleague builds:
 
 ```sh
-git clone <your-app> && cd <your-app>
+git clone <your-app>
+cd <your-app>
 am fix            # provisions exactly that aio version and links it
 deno task dev
 ```
@@ -111,6 +118,9 @@ git clone https://github.com/riagentic/aio ~/.local/lib/aio
 deno install -gAf --config ~/.local/lib/aio/deno.json -n am ~/.local/lib/aio/src/am.ts
 ```
 
+In PowerShell write `$HOME\.local\lib\aio` for `~/.local/lib/aio` — a native
+program is not handed an expanded `~` there.
+
 Do **not** install from a `jsr:@riagentic/aio@^1.0.0-alpha` range.
 `1.0.0-alphaN` prereleases sort lexically, so that range resolves to `alpha9`
 (`'9' > '2'`) and Deno caches the mis-resolution — the reason JSR stopped being
@@ -132,7 +142,11 @@ This is the file it writes for `am create my-app` (browser target):
   "build": {
     "targets": ["browser"],
     "platforms": ["host"],
-    "out": "dist"
+    "out": "dist",
+    "strictPin": true
+  },
+  "android": {
+    "colorScheme": "system"
   },
   "fmt": {
     "exclude": [".katana/", "feedback/", "dist/", "node_modules/"]
@@ -175,7 +189,7 @@ This is the file it writes for `am create my-app` (browser target):
     "compile": "deno run -A ./dep/aio/src/build-all.ts --build-spec=./dep/aio/src/build.ts --targets=browser",
     "publish": "deno run -A ./dep/aio/src/am.ts publish",
     "ship": "deno run -A ./dep/aio/src/build/ship.ts",
-    "test": "deno test -A",
+    "test": "AIO_TEST_WIRE=strict deno test -A",
     "check": "deno check src/ tests/ && deno run -A ./dep/aio/src/am.ts check",
     "fmt": "deno fmt",
     "lint": "deno lint src/ && deno run -A ./dep/aio/aiol/mod.ts",
@@ -207,7 +221,7 @@ This is the file it writes for `am create my-app` (browser target):
 Wiring by hand? Clone aio into `dep/aio/` and the map above works as written:
 
 ```sh
-mkdir -p dep && git clone https://github.com/riagentic/aio dep/aio
+git clone https://github.com/riagentic/aio dep/aio
 ```
 
 #### JSR variant (`am create --jsr`)
@@ -279,7 +293,7 @@ export default function App() {
 import "./cell.ts"; // defines + registers the cell
 import { aio } from "aio";
 
-await aio.run({ ui: { theme: "auto" } }); // the scaffold's one opt-in — see below
+await aio.run({ ui: { theme: "auto" } }); // the scaffold's opt-in look — see below
 ```
 
 Everything else is inferred: `appId`/`title` from `deno.json` (or the entry's
@@ -301,6 +315,18 @@ The scaffold opts into `ui: { theme: "auto" }`
 which steps aside the moment you write your own `src/style.css`. Drop the option
 (`await aio.run()`) and the app renders with the browser's own defaults — aio
 styles nothing you did not ask it to.
+
+The generated `src/app.ts` also writes three **safe values**, each with a
+comment saying what it closes: `electron: { ignoreDebugEnv, strictPin }` and
+`wire: { refuseShortCalls }` (plus `"strictPin": true` under `build` in
+`deno.json`). Two more in `deno.json` are not about security but follow the same
+rule: `"android": { "colorScheme": "system" }` (an Android build follows the
+phone's light/dark setting) and `AIO_TEST_WIRE=strict` in the `test` task
+([UI tests cross the wire](../testing/ui-testing.md#calls-cross-the-wire)).
+aio's own defaults for them stay as they were, so an older app upgrades with no
+change in behaviour; a new app starts with the door closed. See
+[the Electron client](../clients/electron.md) and
+[methods](../state/methods.md).
 
 ### Window size
 

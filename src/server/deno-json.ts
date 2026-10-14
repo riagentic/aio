@@ -27,6 +27,7 @@
  * Reported from the field (R-12). The literal counts are held by
  * `tests/one-fact-one-spelling.test.ts`.
  */
+import { existsSync } from "node:fs";
 import { parse as parseJsonc } from "@std/jsonc";
 import { join, resolve, toFileUrl } from "@std/path";
 import { log } from "../diagnostics/logger-api.ts";
@@ -209,6 +210,13 @@ export function locateDenoJsonAbove(
   for (const up of APP_CONFIG_WALK) {
     for (const name of DENO_JSON_NAMES) {
       const url = new URL(`${up}${name}`, from);
+      // Ask before reading: a miss answered by a thrown NotFound costs ~30 µs
+      // (the error and its stack), and a boot asks ~170 times — the walk runs
+      // once per asker, ten candidates each. `existsSync` answers a miss
+      // without throwing, on disk and in a compiled binary's VFS alike. The
+      // read below still decides: a file that vanishes or cannot be read
+      // between the two is "nothing at this level", as before.
+      if (!existsSync(url)) continue;
       let text: string;
       try {
         text = Deno.readTextFileSync(url);
@@ -246,6 +254,7 @@ export function readDenoJsonSync(
 ): { config: Record<string, unknown>; path: string } | null {
   for (const name of DENO_JSON_NAMES) {
     const path = join(dir, name);
+    if (!existsSync(path)) continue; // a cheap miss — see locateDenoJsonAbove
     let text: string;
     try {
       text = Deno.readTextFileSync(path);

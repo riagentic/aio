@@ -25,11 +25,12 @@
 // there, with a named reason. So the contract worth pinning is the JSON one,
 // and the refusal is asserted here rather than pretended around (last test).
 
-import { assert, assertEquals } from "@std/assert";
+import { assert, assertEquals, equal } from "@std/assert";
 import { produce } from "immer";
 import { type DiffEntry, diffState } from "../src/server/timeline.ts";
 import { stringifyWithIssues } from "../src/server/persist-guard.ts";
 import { fuzzEnvInt } from "./fuzz-seed.ts";
+import { mulberry32 } from "./sync/properties/_prop.ts";
 
 // The seed is FIXED by default so CI explores the same states every run; a
 // sweep widens it without making the default nondeterministic:
@@ -41,11 +42,6 @@ const ROUNDS = fuzzEnvInt("FUZZ_ROUNDS", 300, 1);
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
-
-function rng(seed: number) {
-  let s = seed || 1;
-  return () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
-}
 
 const MAX_DEPTH = 4; // below the walker's MAX_DEPTH of 12 — truncation is its
 // own contract and is covered by tests/timeline.test.ts
@@ -137,8 +133,12 @@ function mutate(
   }) as Record<string, unknown>;
 }
 
-const deepEq = (a: unknown, b: unknown) =>
-  JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+// By value, whatever order an object's keys are in: a diff names paths, so
+// it cannot say (and nothing reads) where in its object a new key sits —
+// replaying `{ "k0.k1": [] }` → `{ k0, k1, "k0.k1" }` puts the same keys in
+// another order. (Compared as JSON text, that was "did not reconstruct next";
+// the generator this file had before never drew such a pair.)
+const deepEq = (a: unknown, b: unknown) => equal(a ?? null, b ?? null);
 
 /** Apply the diff's leaves to a deep clone of `prev`. If the diff described the
  *  change, the result IS `next`. */
@@ -170,7 +170,7 @@ function applyDiff(
 }
 
 Deno.test("diff round-trip: the diff is complete, sufficient and sound", () => {
-  const rnd = rng(SEED);
+  const rnd = mulberry32(SEED);
   let checked = 0;
   for (let round = 0; round < ROUNDS; round++) {
     const prev = produce(genState(rnd), () => {}) as Record<string, unknown>;
@@ -216,7 +216,7 @@ Deno.test("diff round-trip: the diff is complete, sufficient and sound", () => {
 });
 
 Deno.test("diff round-trip: an unchanged state is reference-equal and diffs to nothing", () => {
-  const rnd = rng(SEED ^ 0x5eed);
+  const rnd = mulberry32(SEED ^ 0x5eed);
   for (let round = 0; round < Math.min(ROUNDS, 60); round++) {
     const s = produce(genState(rnd), () => {}) as Record<string, unknown>;
     // Immer returns the identical object for a producer that writes nothing.

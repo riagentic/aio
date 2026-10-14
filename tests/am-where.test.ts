@@ -10,6 +10,7 @@
 // — which is exactly how it distinguishes a blocking import from a deferred
 // one. This is a presentation layer over data aio had already built, so the
 // verdict is derived and never guessed.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { importChain, whereRules } from "../src/am/am-cmd-where.ts";
 import type { GraphResult, ModuleNode } from "../src/server/graph-validator.ts";

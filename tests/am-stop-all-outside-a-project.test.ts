@@ -10,6 +10,7 @@
 //
 // The victim is a real process (`sleep`) holding a real lock whose cwd sits
 // under the non-project directory. Without the fix `am` SIGTERMs it.
+import "./store-sandbox.ts";
 import { SLEEP_ARGS } from "./proc-helper.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";

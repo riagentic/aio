@@ -5,6 +5,7 @@
 //
 // Requires Electron + a display; opt in with ELECTRON_E2E=1 (same gate as
 // tests/electron-ipc.test.ts).
+import { childEnv } from "./e2e-app-harness.ts";
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { electronMainScriptUDS } from "../src/electron/electron.ts";
@@ -130,13 +131,13 @@ Deno.test({
       ],
       stdout: "null",
       stderr: "null",
-      env: {
+      env: childEnv({
         ...Deno.env.toObject(),
         ELECTRON_DISABLE_SECURITY_WARNINGS: "1",
         // Nested display — this test maps a REAL window, and it must not be
         // on the desktop the person is working on.
         ...testDisplayEnv(),
-      },
+      }),
     }).spawn();
     let session: Awaited<ReturnType<typeof cdp>> | null = null;
     try {

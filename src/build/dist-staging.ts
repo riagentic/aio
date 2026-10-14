@@ -4,11 +4,13 @@
 // anything on it is public surface and frozen forever; this is an internal
 // rule about one directory, and a rule does not become an API by needing a
 // test.
+import { join } from "@std/path";
 import {
   APP_ICON,
   APP_STYLE,
   BUNDLE_JS,
   BUNDLE_MAP,
+  isWorkerBundle,
 } from "../server/app-files.ts";
 import { ELECTRON_VERSION_FILE } from "../electron/electron-runtime-fetch.ts";
 import { moveArtifact } from "./build-helpers.ts";
@@ -26,7 +28,27 @@ import { moveArtifact } from "./build-helpers.ts";
  *  tested predicate is the fix: adding a staged file means adding it here, and
  *  a test can ask the question directly. */
 export function keepInDistStaging(name: string): boolean {
-  return DIST_STAGED.includes(name);
+  // …and the browser workers' bundles, which are named by the app's own
+  // files: a pattern, not a list.
+  return DIST_STAGED.includes(name) || isWorkerBundle(name);
+}
+
+/** Copy the browser workers' bundles (`isWorkerBundle`) from `dist` to
+ *  `to` — beside the bundle that starts them, wherever a target puts that.
+ *  Returns their names. A copy that fails throws: a page whose worker did not
+ *  travel with it loads and then does nothing. */
+export async function copyWorkerBundles(
+  dist: string,
+  to: string,
+): Promise<string[]> {
+  const names: string[] = [];
+  for await (const e of Deno.readDir(dist)) {
+    if (e.isFile && isWorkerBundle(e.name)) names.push(e.name);
+  }
+  for (const name of names.sort()) {
+    await Deno.copyFile(join(dist, name), join(to, name));
+  }
+  return names;
 }
 
 /** The files every build stages in dist/ — see {@linkcode keepInDistStaging}. */

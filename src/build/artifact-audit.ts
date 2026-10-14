@@ -432,6 +432,148 @@ export async function embeddedFilesOf(path: string): Promise<string[]> {
   return out.sort();
 }
 
+/** Where the minify stage puts the staged copy of every module: the binary
+ *  embeds the copy, and the report names the file the author wrote. */
+const MINIFY_STAGE = ".aio/minify-stage/";
+
+/** What each embedded file costs the artifact, by path: its source bytes plus
+ *  what deno stores beside them (`m` the compiled form, `s` its source map,
+ *  `c` the CommonJS export list). Two records naming the same stored bytes
+ *  (deno keeps identical content once) are charged once, to the first path.
+ *  A symlink costs nothing. Pure over the tree. */
+function embeddedBytesIn(tree: unknown[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  const seen = new Set<number>();
+  const walk = (nodes: unknown, at: string) => {
+    for (const node of Array.isArray(nodes) ? nodes : []) {
+      const rec = (node ?? {}) as {
+        Dir?: { n?: unknown; e?: unknown };
+        File?: Record<string, unknown>;
+      };
+      if (rec.Dir) walk(rec.Dir.e, `${at}${rec.Dir.n}/`);
+      if (!rec.File) continue;
+      let bytes = 0;
+      for (const part of ["o", "m", "s", "c"]) {
+        const at = rec.File[part];
+        if (
+          !Array.isArray(at) || typeof at[0] !== "number" ||
+          typeof at[1] !== "number" || seen.has(at[0])
+        ) continue;
+        // A zero-length record shares its offset with the next file's bytes.
+        if (at[1] > 0) seen.add(at[0]);
+        bytes += at[1];
+      }
+      const path = `${at}${rec.File.n}`;
+      out[
+        path.startsWith(MINIFY_STAGE) ? path.slice(MINIFY_STAGE.length) : path
+      ] = bytes;
+    }
+  };
+  walk(tree, "");
+  return out;
+}
+
+/** {@link embeddedBytesIn} of the tree in `bytes` — the in-memory form, for
+ *  tests. */
+// aio-ok: a test-only seam — the in-memory form of reportEmbedded's read.
+export function embeddedBytesOf(bytes: Uint8Array): Record<string, number> {
+  return embeddedBytesIn(treeIn(bytes).tree);
+}
+
+/** The npm package an embedded path is inside (`node_modules/<name>/`), or
+ *  null for the app's own files and a linked framework. */
+function embeddedPackage(path: string): string | null {
+  // aio-ok: path-split — a VFS path this module joined with `/` (embeddedBytesIn)
+  const pkg = packageOfPath(path.split("/"));
+  return pkg && `node_modules/${pkg}/`;
+}
+
+const mb = (n: number) => `${(n / 1024 / 1024).toFixed(1)} MB`;
+
+/** `--analyze` for a compiled binary, as lines: how much of it is embedded
+ *  files, which packages are most of that, and the largest single files — a
+ *  package is the unit that is removed or kept (`build.keepPackages`), a file
+ *  is what an app's own `compile.include` adds. `limit` rows each; the tail
+ *  is summed, so the package rows add up to the embedded total. Pure. */
+export function formatEmbedded(
+  name: string,
+  size: number,
+  files: Readonly<Record<string, number>>,
+  limit = 10,
+): string[] {
+  const all = Object.entries(files);
+  const total = all.reduce((n, [, b]) => n + b, 0);
+  const groups = new Map<string, { bytes: number; files: number }>();
+  for (const [path, bytes] of all) {
+    const key = embeddedPackage(path) ?? "(the app and what it links)";
+    const g = groups.get(key) ?? { bytes: 0, files: 0 };
+    groups.set(key, { bytes: g.bytes + bytes, files: g.files + 1 });
+  }
+  // Bytes descending, then name: two equal rows keep their order across runs.
+  const order = (
+    a: readonly [string, number],
+    b: readonly [string, number],
+  ) => b[1] - a[1] || a[0].localeCompare(b[0]);
+  const ranked = [...groups].sort(([a, x], [b, y]) =>
+    order([a, x.bytes], [b, y.bytes])
+  );
+  const largest = all.sort(order).slice(0, limit);
+  const w = Math.min(
+    72,
+    Math.max(
+      20,
+      ...ranked.slice(0, limit).map(([k]) => k.length),
+      ...largest.map(([p]) => p.length),
+    ),
+  );
+  const row = (label: string, bytes: number, note = "") =>
+    `  ${label.length > w ? `…${label.slice(1 - w)}` : label.padEnd(w)} ` +
+    `${mb(bytes).padStart(9)} ${
+      (total ? (bytes / total) * 100 : 0).toFixed(1).padStart(5)
+    }%${note}`;
+  const rest = ranked.slice(limit);
+  return [
+    `binary: ${name} is ${mb(size)} — ${mb(total)} of it is ${all.length} ` +
+    `embedded file(s) (source, compiled form and source map); the rest is ` +
+    `the Deno runtime and what the app imports by URL (jsr:, https:)`,
+    ` by package`,
+    ...ranked.slice(0, limit).map(([k, g]) =>
+      row(k, g.bytes, `  (${g.files} file${g.files === 1 ? "" : "s"})`)
+    ),
+    ...(rest.length
+      ? [
+        row(
+          "…every other package",
+          rest.reduce((n, [, g]) => n + g.bytes, 0),
+          `  (${rest.reduce((n, [, g]) => n + g.files, 0)} files)`,
+        ),
+      ]
+      : []),
+    ` largest files`,
+    ...largest.map(([p, b]) => row(p, b)),
+  ];
+}
+
+/** Print {@link formatEmbedded} for the binary a compile just wrote
+ *  (`--analyze`). A binary whose tree cannot be read is said, never an empty
+ *  report. */
+export async function reportEmbedded(bin: string): Promise<void> {
+  try {
+    const path = await compiledPath(bin);
+    const { tree } = await treeOfFile(path, 8 * 1024 * 1024);
+    const { size } = await Deno.stat(path);
+    for (
+      const line of formatEmbedded(basename(path), size, embeddedBytesIn(tree))
+    ) console.log(line);
+  } catch (e) {
+    console.warn(
+      `${HEY} --analyze: what ${basename(bin)} embeds could not be read (${
+        e instanceof Error ? e.message : e
+      }) — no binary report`,
+    );
+  }
+}
+
 /** The file tree of an artifact on disk and where its file data begins. */
 async function treeOfFile(
   path: string,

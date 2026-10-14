@@ -183,8 +183,10 @@ Deno.test("artifactPath: answers an absolute path that exists", () => {
 // binary called itself an `appimage`, aimed an update at the host's file, and
 // its `fromExe` named the host — so the old build was never recognised. Only a
 // process whose executable is under `$APPDIR` runs from `$APPIMAGE`.
-Deno.test("appimage: $APPIMAGE counts only for a process running inside $APPDIR", async () => {
-  if (Deno.build.os === "windows") return; // an AppImage is Linux-only
+Deno.test({
+  name: "appimage: $APPIMAGE counts only for a process running inside $APPDIR",
+  ignore: Deno.build.os === "windows", // an AppImage is Linux-only
+}, async () => {
   const root = await tempDir("aio-own-appimage-");
   const mount = join(root, ".mount_notes");
   const inside = join(mount, "usr", "bin", "notes");

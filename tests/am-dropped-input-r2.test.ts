@@ -10,6 +10,7 @@
 //   - `am dispatch t:m --body=` (an unset $VAR) called the method bare.
 //   - `am create x --template counter`: "unknown flag --template".
 //   - `am top 2s --json`: the interval was validated only at a terminal.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import {

@@ -139,13 +139,89 @@ function _report(status: VitalStatus, gauges: RenderGauges): void {
   }
 }
 
+// ── The silent-socket watchdog ───────────────────────────────────────────────
+// A socket can die without a close event: the network under it goes away and
+// the browser hears nothing until TCP gives up (measured on an Android 15
+// WebView: nothing for 25–90 s, taps written into the void, the page looking
+// connected). The heartbeat already asks the server once a second and the
+// server answers every ping, so silence is observable — but silence alone is
+// not death (a server busy for seconds is silent too). The evidence, in order:
+//   1. this connection has answered a ping before (a server with vitals off,
+//      or a peer that never pongs, is never judged);
+//   2. beats are COUNTED, not timed: only a beat that ran and WROTE its ping
+//      counts (one the pacer holds has asked the server nothing yet), and any
+//      inbound frame resets the count — a throttled, frozen or suspended page
+//      runs no beats, so it accrues no silence;
+//   3. after `SILENT_BEATS_ASK` silent beats the page asks over HTTP. A
+//      network error is the network saying so: dead now. An answer means the
+//      server's loop turns and this socket still hears nothing: dead at the
+//      next silent beat. A request that hangs is a busy server (or a black
+//      hole) and decides nothing;
+//   4. `SILENT_BEATS_DEAD` silent beats — past the 15 s after which every call
+//      in flight has been rejected anyway — is dead whatever HTTP said.
+
+/** Silent beats before the page asks over HTTP whether the server is there. */
+export const SILENT_BEATS_ASK = 4;
+/** Silent beats after which the socket is dead without further evidence. */
+export const SILENT_BEATS_DEAD = 20;
+
+/** What the transport lends the watchdog: `reach` asks the server over HTTP
+ *  (true = answered, false = network error; it may never settle), `onDead`
+ *  runs the connection's close path. */
+export type SilenceWatch = {
+  reach: () => Promise<boolean>;
+  onDead: (why: string) => void;
+};
+
+let _ponged = false; // this connection has answered a ping
+let _silent = 0; // pings written since the last inbound frame
+let _reached = false; // HTTP answered while the socket stayed silent
+let _silence = 0; // bumped whenever the silence ends — a late answer is void
+let _asked = -1; // the silence HTTP was asked about (once each)
+
+function _heard(): void {
+  _silent = 0;
+  _reached = false;
+  _silence++;
+}
+
+/** Any frame arrived on the socket — it is alive. */
+export function _noteClientFrame(): void {
+  if (_silent > 0) _heard();
+}
+
+/** A `vitals-pong` arrived: this connection answers pings. */
+export function _noteClientPong(): void {
+  _ponged = true;
+}
+
+/** Before a beat's ping: is the socket dead? Says why, or null. */
+function _judgeSilence(watch: SilenceWatch): string | null {
+  if (!_ponged) return null;
+  if (_silent >= SILENT_BEATS_DEAD) {
+    return `no frame for ${SILENT_BEATS_DEAD} heartbeats`;
+  }
+  if (_reached) return "the server answers HTTP, this socket hears nothing";
+  if (_silent >= SILENT_BEATS_ASK && _asked !== _silence) {
+    const asked = _asked = _silence;
+    watch.reach().then((answered) => {
+      if (asked !== _silence) return; // a frame arrived, or the socket closed
+      if (answered) _reached = true;
+      else watch.onDead("the network is unreachable");
+    });
+  }
+  return null;
+}
+
 /** Start (or resume) client vitals for a WS connection. Idempotent: the meter
  *  and probe live for the page, the heartbeat for the connection. `sendRaw`
- *  writes a frame and answers whether it left; `isOpen` says whether the WS
- *  is the live transport (pings are WS-only). */
+ *  writes a frame and answers whether it LEFT (not merely queued); `isOpen` says whether the WS
+ *  is the live transport (pings are WS-only). `watch` arms the silent-socket
+ *  watchdog for this connection. */
 export function _startClientVitals(
   sendRaw: (raw: string) => boolean,
   isOpen: () => boolean,
+  watch?: SilenceWatch,
 ): void {
   if (!_vitalsRenderMeter) {
     const rb = _renderBudget();
@@ -167,24 +243,30 @@ export function _startClientVitals(
     }));
   }
   if (_vitalsPingTimer) return;
-  _setVitalsPingTimer(setInterval(_beat(sendRaw, isOpen), _heartbeatMs));
+  _setVitalsPingTimer(
+    setInterval(_beat(sendRaw, isOpen, watch), _heartbeatMs),
+  );
 }
 
 /** One heartbeat: tick a rAF-less meter, then ping with the staleness. */
 function _beat(
   sendRaw: (raw: string) => boolean,
   isOpen: () => boolean,
+  watch?: SilenceWatch,
 ): () => void {
   return () => {
     const meter = _vitalsRenderMeter;
     const probe = _vitalsTransportProbe;
     if (!meter || !probe || !isOpen()) return;
     if (!_hasRaf()) meter.tick(Date.now());
+    const dead = watch ? _judgeSilence(watch) : null;
+    if (dead) return watch!.onDead(dead);
     const ping = probe.createPing();
-    sendRaw(enc("vitals-ping", {
+    const left = sendRaw(enc("vitals-ping", {
       t1: ping.t1,
       ms: Math.round(meter.getStaleness()),
     }));
+    if (left) _silent++;
   };
 }
 
@@ -196,6 +278,8 @@ export function _noteClientPatch(): void {
 /** The connection closed: stop the heartbeat, keep the meter (it measures the
  *  page, not the socket; a reconnect re-arms the timer). */
 export function _pauseClientVitals(): void {
+  _ponged = false;
+  _heard();
   if (_vitalsPingTimer) {
     clearInterval(_vitalsPingTimer);
     _setVitalsPingTimer(null);

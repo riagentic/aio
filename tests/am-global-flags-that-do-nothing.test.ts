@@ -11,6 +11,7 @@
 // it means on timeline/logs/errors); the rest are WARNED about on stderr where
 // they do nothing, naming the verbs that read them. Warned, not refused: they
 // were accepted by every earlier release, and the CLI surface is frozen.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
   GLOBAL_FLAGS,

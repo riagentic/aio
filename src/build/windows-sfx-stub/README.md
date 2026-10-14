@@ -23,31 +23,72 @@ unchanged, so an `.exe` built with either stub opens an install the other made.
    exe — just before the certificate table (PE security directory, up to 7 pad
    bytes).
 2. Hashes the payload and compares it with the header.
-3. Takes the install's named mutex (waits up to 10 minutes), so a second
-   double-click during the first extraction waits, then only launches. A Windows
-   mutex belongs to the thread that waited for it; the stub takes and releases
-   it on its main thread (the payload is decoded on a second one).
+3. Takes the install's named mutex (waits up to 10 minutes; one abandoned by a
+   stub that was killed is taken like a free one), so a second double-click
+   during the first extraction waits, then only launches. A Windows mutex
+   belongs to the thread that waited for it; the stub takes and releases it on
+   its main thread (the payload is decoded on a second one).
 4. Stamp (`.aio-sfx-stamp`) equal to the payload hash: removes a leftover
    `win-<arch>.replaced` / `win-<arch>.incoming` (a stub that was killed) and
    launches. Otherwise it moves the existing install aside
    (`win-<arch>.replaced` — this is the step that fails while the app is
-   running, and then nothing is changed and the message says to close the app),
-   extracts beside it (`win-<arch>.incoming`), stamps, renames the new tree in
-   and deletes the old one. Any failure puts the old install back. An install of
-   a NEWER version than the payload's is kept as it is: the stub writes the
-   payload's version to `.aio-sfx-version` when it extracts, the app rewrites it
-   with its own version at every start, and an `.exe` whose version is older
-   only opens the install. An old download therefore never puts its version over
-   an app that has updated itself.
+   running, and then nothing is changed and the message says to close the app;
+   it is tried for 3 seconds first, because a virus scanner or an app on its way
+   out holds a file of the install for a moment and refuses the move the same
+   way), extracts beside it (`win-<arch>.incoming`), stamps, renames the new
+   tree in and deletes the old one. Any failure puts the old install back. An
+   install of a NEWER version than the payload's is kept as it is: the stub
+   writes the payload's version to `.aio-sfx-version` when it extracts, the app
+   rewrites it with its own version at every start, and an `.exe` whose version
+   is older only opens the install. An old download therefore never puts its
+   version over an app that has updated itself.
 5. When it extracted, and the header asks for it (`shortcut`), adds a Start-menu
    shortcut to `<name>.exe` named after the app (`title`), so the download can
-   be deleted. A shortcut the user removed is not put back by a later open. An
-   install made by an `.exe` that added none (aio 1.0.17 or older) gets it from
-   the app itself, once, at a start after it updated
+   be deleted, and records it beside the install (`win-<arch>.shortcut`, the
+   shortcut's path). A shortcut the user removed is not put back by a later
+   open, nor by an upgrade: an extraction that REPLACES an install whose
+   shortcut is on record adds none (one into an empty folder does). A shortcut
+   that could not be added fails nothing: it is said on stderr under
+   `--aio-sfx-install` and in a message box by a plain open, and nothing is
+   recorded. An install made by an `.exe` that added none (aio 1.0.17 or older)
+   gets it from the app itself, once, at a start after it updated
    (`../../server/sfx-shortcut.ts`) — under the same file name
    (`shortcut-names.json`).
 6. Starts `<name>.exe` with the user's arguments and exits (it does not wait for
    the app, so its exit code is the stub's own).
+
+While it extracts it shows the shell's progress window (`IProgressDialog`),
+titled after the app, with no Cancel button.
+
+A failure is said in a message box — and on stderr, with exit code 1. Where
+nobody could press OK (the process is not on an interactive window station: a
+service, an ssh session, a task that runs whether or not the user is logged on)
+there is no box and no progress window: the stderr line and the exit code are
+the answer.
+
+The FIRST argument may be the stub's own (it is then not passed to the app; an
+older stub passes it on):
+
+- `--aio-sfx-install` — steps 1–5 only: install this version, start nothing,
+  show nothing (no progress window, no message box). It replaces a NEWER install
+  too, and says so on stderr: a program asked for this version (`am upgrade`
+  going back to an older build). Exit 0 when this version is installed, 3 when
+  the app is running (nothing changed), 1 for any other failure, with the reason
+  on stderr. `run.ps1 -NoRun` (what `am upgrade <name>` runs) uses it, after
+  finding the switch's text in the stub bytes of the `.exe` it built.
+- `--aio-sfx-wait` — as a plain open, then waits for the app and exits with its
+  exit code.
+
+Two environment variables are the stub's own (neither reaches the app; an older
+stub ignores both):
+
+- `AIO_SFX_REASON_FILE` — a file path. A stub that fails writes its reason
+  there, as well as to stderr and the message box. For a program that starts the
+  stub without reading its stderr: `run.ps1` opens the `.exe` with no redirect —
+  the app would inherit the pipe and hold whoever reads it — so with no desktop
+  it had only the exit code to show.
+- `AIO_SFX_LOCK_WAIT_MS` — how long to wait for the install's mutex, in place of
+  the 10 minutes.
 
 The app's updater replaces the extracted tree in place and carries the stamp
 into the new tree (`carrySfxStamp`, `../../server/updates-apply.ts`), so the
@@ -126,8 +167,8 @@ committed file. A new toolchain or dependency changes the bytes: update the
 pins, this README and `THIRD_PARTY_NOTICES` together.
 
 Current build: `rustc 1.98.0`, SHA-256
-`f685aac7226c59da6500f184899fcdcc95c5399745f28ebe41a62792a31c9d65`; sources
-`2928a44f50f85ba9fde382595e415ca34b3f15a2a4b83efb476fc5f8b90862b9`.
+`91fb1d0b7368cb70f5e3b9172678f38d1e540ab3bb5f33803517e07d4bc4a2e2`; sources
+`2f06ef0ead5c18074f2feb24aa8e097c62827d64838faf440f00be634a34afcd`.
 
 The trailer format is shared with `build-windows-exe.ts`:
 `[stub][payload][JSON header][u32 hdrLen][u64 payloadLen][AIOSFX02]`.

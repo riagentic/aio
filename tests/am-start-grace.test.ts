@@ -6,6 +6,7 @@
 // 127.0.0.1:0, failed by definition, and a second `am start` during the boot
 // window SIGTERMed the first app with "stuck-starting". Two deciders: the
 // runtime gives a starting owner STARTUP_GRACE_MS; `am` gave none.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { ensureSingleton } from "../src/am/am-cmd-process.ts";
 import { readPid, writePid } from "../src/am/am-utils.ts";

@@ -12,6 +12,7 @@
 // worst available behaviour". `am lab` and `am log` have refused unknown flags
 // for releases; this is the same rule in the verb people run first.
 // Found by the randomized audit's "be a user" round.
+import "./store-sandbox.ts";
 import {
   assert,
   assertEquals,

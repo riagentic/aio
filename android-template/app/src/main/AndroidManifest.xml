@@ -7,12 +7,12 @@
     {{CLEARTEXT_ATTR}}
     android:label="{{APP_NAME}}"
     {{ICON_ATTR}}
-    android:theme="@style/Theme.AppCompat.NoActionBar"
+    android:theme="@style/{{APP_THEME}}"
   >
     <activity
       android:name="aio.app.MainActivity"
       android:exported="true"
-      android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden"
+      android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|uiMode"
     >
       <!-- configChanges: a rotation (or a keyboard) must not recreate the
            activity — that destroyed the WebView and RELOADED the app, losing

@@ -79,6 +79,15 @@ function nodeMembers(
  * await ui.App.SubmitButton.click(); // autocompleted, compile-checked
  * await ui.App.Button2.start.click(); // the 2nd <Button>, its own elements
  * ```
+ *
+ * `TypedTestUI` adds names; it refuses none — every handle keeps its
+ * `[name: string]: any` door, so a typo still type-checks. The module also
+ * exports `StrictTestUI`, the same client without that door:
+ *
+ * ```ts
+ * const ui = await testUI(App) as StrictTestUI;
+ * ui.App.SubmitButon.click(); // compile error
+ * ```
  */
 export function generateUITypes(
   root: UISurfaceNode,
@@ -134,6 +143,24 @@ export function generateUITypes(
     `export type TypedTestUI = TestUI & {`,
     `  readonly ${key(root.component)}: ${rootIface};`,
     `};`,
+    "",
+    `/** \`T\` without the \`[name: string]: any\` door, all the way down. */`,
+    `type Listed<T> = string extends keyof T ? {`,
+    `    [`,
+    `      K in keyof T as string extends K ? never`,
+    `        : number extends K ? never`,
+    `        : K`,
+    `    ]: Listed<T[K]>;`,
+    `  }`,
+    `  : T;`,
+    "",
+    `/** The STRICT client: only the names this file lists exist, so a renamed`,
+    ` *  or misspelled one is a compile error (with \`TypedTestUI\` it is not —`,
+    ` *  every handle also answers to any name). Opt in per test:`,
+    ` *  \`const ui = await testUI(App, opts) as StrictTestUI;\``,
+    ` *  A name the surface did not have when this file was generated: re-run`,
+    ` *  \`am testgen\`, or reach it through \`find()\`, which stays loose. */`,
+    `export type StrictTestUI = Listed<TypedTestUI>;`,
     "",
   ].join("\n");
 }

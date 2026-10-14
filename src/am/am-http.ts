@@ -12,7 +12,13 @@
  */
 
 import type { Result } from "./am-types.ts";
-import { _discoveredAppTarget, liveLock, resolveAmAppId } from "./am-utils.ts";
+import {
+  _discoveredAppTarget,
+  liveLock,
+  otherRootRefusal,
+  resolveAmAppId,
+  sayOtherRoot,
+} from "./am-utils.ts";
 import {
   instances,
   isLockOwnerAlive,
@@ -845,6 +851,9 @@ export async function trojanGet(
   // The app's own wire first. An app on UDS may bind no TCP port at all, and
   // the identity gate below is a PORT concern — a socket is named by the app's
   // own lock, so there is no "who answers on this number" question to ask.
+  // A read of another apps root's app that shares this lock folder is
+  // answered (a write is refused, below in `trojanPost`) — and said.
+  sayOtherRoot(lockForPort(appId, port, pid));
   const { ep, home } = controlTarget(appId, port, pid);
   if (ep.kind === "uds") {
     const r = await trojanOverUds(
@@ -914,6 +923,10 @@ export async function trojanPost(
         `like that; a write may not. Name it: --app=${guessed}`,
     };
   }
+  // …and never to another apps root's app that shares this lock folder.
+  const addressed = lockForPort(appId, port, pid);
+  const other = addressed && otherRootRefusal("change", addressed);
+  if (other) return { ok: false, error: other };
   const { ep, home } = controlTarget(appId, port, pid);
   if (ep.kind === "uds") {
     const r = await trojanOverUds(

@@ -55,7 +55,11 @@ async function run(
   return { log, boot: pick("BOOT"), live: pick("LIVE") };
 }
 
-const first = { J: "1", W: "3", TAG: "a", STOP: "kill" };
+// DEBOUNCE: the killed run must die with writes the store never got — that
+// is the journal tail every test here is about. At the fixture's 50 ms a
+// loaded machine (seen on Windows) saved all three writes before the kill:
+// the tail was empty, and the off run — rightly — had nothing to move aside.
+const first = { J: "1", W: "3", TAG: "a", STOP: "kill", DEBOUNCE: "60000" };
 const offRun = {
   J: "0",
   W: "2",

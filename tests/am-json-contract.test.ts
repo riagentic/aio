@@ -14,6 +14,7 @@
 //
 // Driven through a REAL process: an in-process test cannot observe which
 // stream a line went to, and the stream is the whole finding.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { outError } from "../src/am/am-output.ts";

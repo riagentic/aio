@@ -38,6 +38,10 @@ export interface AioWindow {
      *  catch-up flushed the other's unsent mutations into its server. */
     appId?: string;
     renderBudget?: { staleness?: number; pendingPatches?: number };
+    /** `aio.run({ wire })` — how THIS client encodes a call's arguments. Read
+     *  by `protocol/wire-value.ts`'s `wireArgs`, the one function every door
+     *  that puts arguments on a wire goes through. */
+    wire?: { omitTrailingUndefined?: boolean };
     /** Cells whose methods run locally and propagate as CRDT ops — the
      *  server's `localFirst` decision, which the browser cannot derive from
      *  the cell definitions alone. */

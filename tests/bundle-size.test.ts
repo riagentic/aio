@@ -248,7 +248,21 @@ const CEILING_GZ = {
   //     and a packaged app stored changed values with no line anywhere);
   //   · the rest — the same rule for a changed hook count and for lifecycle
   //     hooks called outside a render, and esbuild 0.25's output (+9 B).
-  air: 84,
+  //
+  // LOWERED 84 → 81 in the same release (measured 82,401 B = 80 KB, brotli
+  // 71,461 B; the 81 line is 83,455 B). The move the two paragraphs above
+  // ask for: every diagnostic a production page never runs — the a11y lint,
+  // the controlled-input drift check, the known-event list and its typo
+  // lint, the key-shape lint and its tree walk, the child-alignment
+  // tripwire, the render-burst prose — is `air/dev-air.ts`, which the
+  // browser BUNDLE answers with an empty object (build/esbuild-plugin.ts)
+  // and every source runtime (the dev page, the test harness, SSR) imports
+  // for real. −3.5 KB gz. tests/bundle-dev-chunk.test.ts keeps it out;
+  // tests/air-dev-layer-installed.test.ts keeps it IN wherever it must fire.
+  // Since then, in the same number: the state layer's production lines,
+  // `wire.omitTrailingUndefined` (+~120 B), a text line that names a page
+  // translator.
+  air: 81,
   /** The same, plus one cell — measured 2 KB, which is what a cell costs.
    *  84 → 85 for the round after 1.0.12-beta: measured 85.3 (AIR 82.4). Every
    *  byte is a fix with a red-without-it test — SSR/createDom tag-name
@@ -256,8 +270,17 @@ const CEILING_GZ = {
    *  hydrate boundary/text-position fixes, the sync engine's frame ownership
    *  and skipped-frame catch-up, Link relative active state.
    *  85 → 86 for 1.0.14-beta: measured 86 (AIR 83) — the same +1 KB as `air`
-   *  above, and the same way back to 85 (todo.md). */
-  app: 86,
+   *  above, and the same way back to 85 (todo.md).
+   *  LOWERED 86 → 83 with `air` (measured 85,129 B = 83 KB): the dev layer
+   *  left the bundle.
+   *  83 → 84 on 2026-10-12 (measured 85,9xx B; the ceiling of 83 ends at
+   *  85,503): +0.8 KB gz, nearly all of it the silent-socket watchdog
+   *  (`browser-vitals.ts`, `browser-air-transport.ts`) — a connection that
+   *  died without a close event (airplane mode, a sleeping device) said
+   *  nothing for 25–90 s while taps went nowhere; it is announced in ~5 s. A
+   *  failure that was silent, on every production page. Shortening its
+   *  message text was tried first: 84 bytes. `air` did not move (81). */
+  app: 84,
 };
 
 const RUN = Deno.env.get("AIO_BUNDLE_SIZE") === "1";

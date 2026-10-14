@@ -48,12 +48,19 @@ async function untraceableWorkers(): Promise<string[]> {
         // the same one check-vacuous.ts learned: a scanner over source has to
         // know what is code. `mask` blanks comments and string literals in
         // place, so offsets and every real match survive.
-        const src = mask(await Deno.readTextFile(full), { keepStrings: true });
+        const text = await Deno.readTextFile(full);
+        const src = mask(text, { keepStrings: true });
+        // …and so do string literals: `blocking.ts` QUOTES the call an app
+        // should write (`new URL("./job.ts", import.meta.url)`) in an error
+        // message, and that read as a worker at src/state/job.ts. A match
+        // counts only where its `new URL(` is code, not text in a string.
+        const code = mask(text);
         // Only files that actually construct a Worker. `new URL(…,
         // import.meta.url)` is also how assets are located, and those are
         // `assetIncludes`' problem, not this one.
         if (!/new Worker\(/.test(src)) continue;
         for (const m of src.matchAll(MODULE_URL)) {
+          if (!code.startsWith("new URL(", m.index)) continue;
           found.add(fromFileUrl(new URL(m[1]!, new URL(`file://${full}`))));
         }
       }

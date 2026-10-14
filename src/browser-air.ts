@@ -81,7 +81,7 @@ export { useCallback, useEffect, useMemo, useState } from "./air/compat.ts";
 // using them type-checked and then failed the browser build's resolve.
 export { on, watch } from "./state/watch.ts";
 export type { WatchOptions } from "./state/watch.ts";
-export { useFieldArray, useForm } from "./air/form.ts";
+export { bindInput, useFieldArray, useForm } from "./air/form.ts";
 export { useVirtualList } from "./air/virtual-list.ts";
 export { onBackButton } from "./air/back-button.ts";
 export { renderToString } from "./air/vdom.ts";

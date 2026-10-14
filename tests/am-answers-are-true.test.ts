@@ -2,6 +2,7 @@
 // human reading it. Every finding here was an answer that was wrong while
 // looking right — `{"ok":true}` for something that did nothing, `healthy:true`
 // for a stranger's web server, a flag the table lists and the command refuses.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { dirname } from "@std/path";
 import {

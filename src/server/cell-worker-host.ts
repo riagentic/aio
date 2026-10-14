@@ -58,6 +58,7 @@ import {
 import type { AioUser } from "./aio-types.ts";
 import { _setCallTimeouts, registerCall } from "../state/cell-impl.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { _setHostedCell } from "../state/cell-catalog.ts";
 
 /** The cell name this worker hosts, or null when this isn't a cell worker. */
 export function hostedCellName(): string | null {
@@ -169,6 +170,7 @@ function bindOwnStateReads(
  *  Never resolves — the worker stays alive as long as its owner does. */
 export function startCellWorkerHost(cell: CellDef): Promise<never> {
   const name = cell.__aio.id;
+  _setHostedCell(name);
   // aio-ok(persist-decider): a worker replica — its slice streams home and the MAIN isolate's host persists it through the filter.
   const composed = composeCells([cell], {
     perfCheck: false,
@@ -211,6 +213,19 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
     },
   };
   let pending: Patch[] = [];
+  // ── Whose write is this? ────────────────────────────────────────────────
+  // A batch's failed save is answered to the calls that wrote it, as the
+  // owner does for its own cells (aio.ts `_callScope`/`_callBorn`): the call's
+  // own action is its by identity; an async body (its `__exec`) is handed a
+  // door of its OWN, and every action it dispatches — its write-sets — is
+  // marked there. The door, not the async context: a write a userland queue
+  // runs from another call's continuation is still its author's. (A body
+  // cannot start another call: a cell handle is not bound in a worker.)
+  /** Action → the owner call (`call.id`) it belongs to. */
+  const callOf = new WeakMap<object, number>();
+  /** The calls behind `pending`; `null` once an op no call can be named for
+   *  is in it (the batch is then every running call's). */
+  let pendingCalls: Set<number> | null = new Set();
   /** The owner's slice generation, as the last `init` reported it — stamped
    *  on every `patches` batch (see FromWorker["patches"]). */
   let gen = 0;
@@ -273,6 +288,8 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
   /** Ship whatever this commit produced. Streamed (not batched to the end of a
    *  call) so `s.status = "working"` before an await reaches clients now. */
   const flush = (): void => {
+    const calls = pendingCalls;
+    pendingCalls = new Set();
     if (closing || disabledLocally || !seeded) {
       pending = [];
       return;
@@ -280,7 +297,12 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
     if (pending.length === 0) return;
     // Stamped with the slice generation it was committed against, so the
     // owner can tell a batch from before a re-seed it has already applied.
-    post({ t: "patches", ops: pending, gen });
+    post({
+      t: "patches",
+      ops: pending,
+      gen,
+      ...(calls === null ? {} : { calls: [...calls] }),
+    });
     pending = [];
   };
 
@@ -306,7 +328,13 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
         for (const entry of Array.isArray(p) ? p : [p]) {
           // Only this cell's patches exist here, but stay strict: a stray
           // foreign patch must never be attributed to us on the main side.
-          if (entry.cell === name) pending.push(...entry.ops);
+          if (entry.cell !== name || entry.ops.length === 0) continue;
+          pending.push(...entry.ops);
+          const by = action !== null && typeof action === "object"
+            ? callOf.get(action)
+            : undefined;
+          if (by === undefined) pendingCalls = null;
+          else pendingCalls?.add(by);
         }
       }
       return r;
@@ -336,8 +364,24 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
             // it to learn whether its write-set was accepted. `void`ed, a
             // write-set whose reduce threw resolved the call as success here
             // and rejected it on the main isolate.
+            //
+            // An async body (`__exec`) dispatches through its call's own
+            // door; anything else through the plain one (no call is named
+            // for a follow-up: its batch is every running call's).
+            const cid = type.endsWith(":__exec")
+              ? (e.payload as { _callId?: unknown } | undefined)?._callId
+              : undefined;
+            const by = typeof cid === "string" ? callIds.get(cid) : undefined;
             composed.execute(
-              { dispatch: (a: Msg) => dispatch(a), getState: () => state },
+              {
+                dispatch: by === undefined
+                  ? (a: Msg) => dispatch(a)
+                  : (a: Msg) => {
+                    if (a !== null && typeof a === "object") callOf.set(a, by);
+                    return dispatch(a);
+                  },
+                getState: () => state,
+              },
               e,
             );
             return;
@@ -525,6 +569,7 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
     const callId = (action as { payload?: { _callId?: string } }).payload
       ?._callId;
     if (callId) callIds.set(callId, id);
+    if (action !== null && typeof action === "object") callOf.set(action, id);
     try {
       const settled = callId ? registerCall(callId) : null;
       if (settled) settled.catch(() => {}); // observed via await below; never unhandled

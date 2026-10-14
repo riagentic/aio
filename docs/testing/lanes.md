@@ -38,6 +38,8 @@ worktree points into a test sandbox.
 runs it again after the heavy gates. A test that runs `run.sh` or `install.sh`
 gives it a HOME of its own (`ownHome()` in `tests/deno-dir-helper.ts`);
 `AIO_APPS_DIR` moves an app's data, never where it is installed.
+`deno task check:home-clean --list` prints every stray path it found, one per
+line and nothing else — for the person who removes them.
 
 - **Real-window tests run one at a time**, all in shard 0, beside the others. A
   test is one when its own source names `testDisplayEnv`, `Xephyr`,
@@ -65,6 +67,14 @@ gives it a HOME of its own (`ownHome()` in `tests/deno-dir-helper.ts`);
 
 Demotions are how we keep confidence without stuffing a 30s fuzzer into every
 edit. Example: `tests/db-state-differential.test.ts` stays in full, not fast.
+
+## The mutation ledger on each OS
+
+`deno task check:mutations` breaks each ledger row's line and requires its test
+to go red. A row whose test runs on one OS only carries that OS (`os:`), and a
+host that is not named leaves it out and says how many it left. On a Windows or
+macOS machine, `deno task check:mutations --os-only` runs just the rows no other
+host ever checks; `--only=<text>` runs the rows whose `what` matches.
 
 ## Hunter seeds
 

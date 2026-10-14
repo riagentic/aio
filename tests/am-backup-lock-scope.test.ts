@@ -12,6 +12,7 @@
 // The holder is a REAL second process (an flock is per open file description
 // — an in-process claim would not prove the cross-process refusal), under its
 // own AIO_APPS_DIR, on the very home this `am` resolves.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { cmdBackup, cmdRestore } from "../src/am/am-cmd-data.ts";

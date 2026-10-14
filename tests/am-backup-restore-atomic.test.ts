@@ -10,6 +10,7 @@
 //
 // The failure is a real one — a mode-000 file the copy cannot read — so these
 // cannot run as root (root reads it anyway).
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { cmdBackup, cmdRestore } from "../src/am/am-cmd-data.ts";

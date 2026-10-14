@@ -6,6 +6,7 @@
 //
 // The fixture prints the banner's two lines through the framework's own
 // console printer (the masking decider) instead of really binding 0.0.0.0.
+import "./store-sandbox.ts";
 import { assert, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import {

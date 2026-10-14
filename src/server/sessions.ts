@@ -86,6 +86,11 @@ export interface SessionStoreOptions {
    *  Returns null when there is no users row: `sessions: true` without
    *  `auth: true` has no user table, and the role handed to `issue()` stands. */
   roleOf?: (userId: string) => string | null | undefined;
+  /** `auth: { maxSessions }` — the most live sessions one user id may hold.
+   *  `issue` past it revokes that user's OLDEST sessions (a warning names the
+   *  user and the count; live sockets are disarmed as for any revocation).
+   *  Unset: no ceiling, as always. */
+  maxPerUser?: number;
 }
 
 /** Open (or create) a session store at `path` (":memory:" for tests). */
@@ -167,6 +172,15 @@ export function openSessionStore(
   // opened perfectly and then threw on EVERY `issue` and `refresh` for the
   // life of the process — a config validated only when it fires.
   expiryFor(defaultTtlMs, "open", Date.now());
+  const maxPerUser = opts?.maxPerUser;
+  if (
+    maxPerUser !== undefined &&
+    !(Number.isInteger(maxPerUser) && maxPerUser >= 1)
+  ) {
+    throw new Error(
+      `sessions: maxPerUser is ${maxPerUser} — use a whole number, at least 1`,
+    );
+  }
   const db = new DatabaseSync(path);
   guardDeletedDbFile(db, path, "auth.db (sessions)");
   // auth.db has TWO writer processes by design — the app and `am auth …`.
@@ -198,6 +212,13 @@ export function openSessionStore(
   const del = db.prepare("DELETE FROM sessions WHERE token_hash = ?");
   const delUser = db.prepare("DELETE FROM sessions WHERE user_id = ?");
   const sweep = db.prepare("DELETE FROM sessions WHERE expires_at <= ?");
+  // One user's live rows but the newest N (rowid = issue order).
+  const delOldest = db.prepare(
+    "DELETE FROM sessions WHERE user_id = ?1 AND expires_at > ?2 " +
+      "AND token_hash NOT IN (" +
+      "SELECT token_hash FROM sessions WHERE user_id = ?1 AND expires_at > ?2 " +
+      "ORDER BY rowid DESC LIMIT ?3)",
+  );
   const cnt = db.prepare("SELECT COUNT(*) AS n FROM sessions");
   // Hygiene: expired sessions that are never read again would otherwise
   // accumulate forever — one sweep per open keeps auth.db lean.
@@ -235,6 +256,16 @@ export function openSessionStore(
         now,
         expiryFor(opts?.ttlMs ?? defaultTtlMs, "issue", now),
       );
+      if (maxPerUser !== undefined) {
+        const gone = Number(delOldest.run(user.id, now, maxPerUser).changes);
+        if (gone > 0) {
+          log.warn(
+            `auth: user=${user.id} is over auth.maxSessions ` +
+              `(${maxPerUser}) — ${gone} oldest session(s) revoked`,
+          );
+          emitRevoked();
+        }
+      }
       return token;
     },
     get(token) {

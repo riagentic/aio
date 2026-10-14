@@ -12,6 +12,7 @@ import {
 } from "../air/dev-hooks.ts";
 import { _vitalsTransportProbe, _w } from "./browser-protocol.ts";
 import { _rejectAck, _resolveAck } from "./browser-ack.ts";
+import { _noteClientPong } from "./browser-vitals.ts";
 import { _deliverDiag } from "../protocol/protocol-diagnostics.ts";
 import { subsRefusedByServer } from "../state/state-subs.ts";
 import {
@@ -194,6 +195,7 @@ export function routeCommand(
     // never sees these frames).
     case "vitals-pong":
       try {
+        _noteClientPong();
         if (_vitalsTransportProbe) {
           _vitalsTransportProbe.processPong(f.d as VitalsPong);
         }

@@ -18,21 +18,18 @@ import { createServer } from "../src/server/server.ts";
 import { processStartToken } from "../src/server/single-instance-lock.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { isPipePath } from "../src/server/local-listen.ts";
+import {
+  connectRW,
+  localBound as waitBound,
+  localEndpoint,
+  localIdle,
+} from "./local-endpoint-helper.ts";
 
 // Opened before any case — the sanitizer counts an FFI library per test.
 requireLocalPeer();
 
 const enc = new TextEncoder();
-
-async function waitBound(p: string): Promise<void> {
-  for (let i = 0; i < 500; i++) {
-    try {
-      if (Deno.lstatSync(p).isSocket) return;
-    } catch { /* not yet */ }
-    await new Promise((r) => setTimeout(r, 10));
-  }
-  throw new Error(`listener never bound ${p}`);
-}
 
 /** One raw exchange: everything the server wrote until it closed (or `ms`
  *  passed), and whether the client's own writes failed. */
@@ -41,16 +38,20 @@ async function exchange(
   parts: (string | Uint8Array)[],
   ms = 5000,
 ): Promise<{ got: string; closed: boolean; writeError: string | null }> {
-  const c = await Deno.connect({ transport: "unix", path });
+  const c = await connectRW(path);
   let got = "", closed = false, writeError: string | null = null;
-  const timer = setTimeout(() => c.close(), ms);
+  // A pipe's read ENDS when this side closes it (a unix socket's throws):
+  // the deadline's own close is not the server's.
+  let gaveUp = false;
+  const timer = setTimeout(() => {
+    gaveUp = true;
+    c.close();
+  }, ms);
   const writing = (async () => {
     try {
       for (const p of parts) {
         const b = typeof p === "string" ? enc.encode(p) : p;
-        for (let off = 0; off < b.length;) {
-          off += await c.write(b.subarray(off));
-        }
+        await c.write(b);
       }
     } catch (e) {
       writeError = (e as Error).name;
@@ -60,6 +61,7 @@ async function exchange(
     const b = new Uint8Array(1 << 16);
     while (true) {
       const n = await c.read(b);
+      if (gaveUp) break;
       if (n === null) {
         closed = true;
         break;
@@ -74,6 +76,12 @@ async function exchange(
   } catch { /* already closed */ }
   return { got, closed, writeError };
 }
+
+/** What a route is handed as `req.url` on this door: on a unix socket what
+ *  `Deno.serve({ path })` built there; on a named pipe, which `Deno.serve`
+ *  never served, `http://app/…` as it always was (`requestUrl`). */
+const urlOf = (sock: string) =>
+  isPipePath(sock) ? "http://app" : "http+unix://localhost";
 
 /** What `/api/once` saw, and what it does the moment its request is over —
  *  after the answer is written, before the connection takes another. */
@@ -90,7 +98,7 @@ async function withDoor(
   const dir = await tempDir("peer-door-");
   await Deno.mkdir(join(dir, "dist"));
   await Deno.writeTextFile(join(dir, "dist", "app.js"), "export {};");
-  const sock = join(dir, "app.http.sock");
+  const sock = localEndpoint(join(dir, "app.http.sock"));
   const gate = gated
     ? createLocalPeerGate({
       selfUid: Deno.uid(),
@@ -126,6 +134,7 @@ async function withDoor(
     await f(sock, gate, () => server.shutdown());
   } finally {
     await server.shutdown();
+    await localIdle();
     await dropTempDir(dir);
   }
 }
@@ -135,7 +144,6 @@ for (const gated of [false, true]) {
   Deno.test({
     name:
       `http socket, ${mode}: a route sees the URL it always saw, and an unread upload does not cost it its answer`,
-    ignore: Deno.build.os === "windows",
     async fn() {
       await withDoor(gated, async (sock, gate) => {
         gate?.arm(Deno.pid); // this process stands in for the window
@@ -146,7 +154,7 @@ for (const gated of [false, true]) {
         assertStringIncludes(url.got, "HTTP/1.1 200");
         assertEquals(
           url.got.split("\r\n\r\n")[1]?.replace(/^[0-9a-f]+\r\n|\r\n0$/g, ""),
-          "http+unix://localhost/api/url?q=1",
+          `${urlOf(sock)}/api/url?q=1`,
         );
         assert(url.closed);
         // The same server in both modes: a WebSocket upgrade on this door is
@@ -176,7 +184,6 @@ for (const gated of [false, true]) {
 Deno.test({
   name:
     "http socket, production: a foreign process is refused, and the window's connections end when it exits",
-  ignore: Deno.build.os === "windows",
   async fn() {
     await withDoor(true, async (sock, gate) => {
       gate!.arm(1); // the window is some other process
@@ -184,7 +191,7 @@ Deno.test({
         "GET /api/url HTTP/1.1\r\nHost: localhost\r\n\r\n",
       ]);
       assertStringIncludes(foreign.got, "HTTP/1.1 403");
-      assertEquals(foreign.got.includes("http+unix://"), false);
+      assertEquals(foreign.got.includes(urlOf(sock)), false);
 
       // The window holds a connection it has not used yet, then exits.
       gate!.arm(Deno.pid);
@@ -197,7 +204,7 @@ Deno.test({
         r.closed && performance.now() - t0 < 3000,
         "a connection the window opened outlived the window",
       );
-      assertEquals(r.got.includes("http+unix://"), false);
+      assertEquals(r.got.includes(urlOf(sock)), false);
     });
   },
 });
@@ -218,7 +225,6 @@ for (
     name: `http socket, ${
       gated ? "production (gated)" : "dev (ungated)"
     }: after ${how} no request is started — not even one already pipelined behind the request just answered`,
-    ignore: Deno.build.os === "windows",
     async fn() {
       await withDoor(gated, async (sock, gate, shutdown) => {
         gate?.arm(Deno.pid);

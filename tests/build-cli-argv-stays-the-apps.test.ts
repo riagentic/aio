@@ -12,10 +12,15 @@
 // its own only when the app imports it, so a hand-written `"client": "cli"`
 // app compiled without `--include deno.json` found no rung and booted as
 // Electron. The skip is keyed on the argv's own include list.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { join, resolve } from "@std/path";
 import { cliCompileArgs } from "../src/build/build-cli.ts";
-import { assetIncludes, bakedClientArgs } from "../src/build/build-compile.ts";
+import {
+  assetIncludes,
+  bakedClientArgs,
+  withDevExcluded,
+} from "../src/build/build-compile.ts";
 import { BUILD_STAMP_FILE } from "../src/build/build-version.ts";
 import { scaffold } from "../src/am/am-cmd-create.ts";
 import { freePort } from "../src/testing/server-test.ts";
@@ -110,22 +115,45 @@ async function scaffoldCli(root: string): Promise<void> {
 
 async function compileCli(root: string): Promise<string> {
   const out = join(root, "bin-out");
-  const [cmd, ...rest] = cliCompileArgs({
-    doRemote: false,
-    out,
-    entry: "src/app.ts",
-    assets: await assetIncludes(root, "src/app.ts"),
-    excludes: [],
-    v8Flags: [],
-    declaredClient: "cli",
-  });
-  const built = await new Deno.Command(Deno.execPath(), {
-    args: [cmd!, "--no-check", ...rest],
+  // The builder's own package set (`buildCli`): installed first, then the
+  // dev-only packages held out for the compile. This compiled with
+  // `excludes: []`, so the binary carried `esbuild.exe` — another program,
+  // whole, in its data — and Windows Defender's cloud verdict refused to
+  // start it in 15 of 20 builds ("contains a virus", Trojan:Win32/Cloxer;
+  // signatures of 2026-10-12). What the build ships has no such program in
+  // it and was never flagged (cli 0 of 5, server 0 of 3, this shape 0 of 8).
+  const inst = await new Deno.Command(Deno.execPath(), {
+    args: ["install", "--entrypoint", "src/app.ts"],
     cwd: root,
     stdout: "null",
     stderr: "piped",
   }).output();
-  assert(built.success, dec.decode(built.stderr));
+  assert(inst.success, dec.decode(inst.stderr));
+  const assets = await assetIncludes(root, "src/app.ts");
+  let err = "";
+  const ok = await withDevExcluded(
+    join(root, "node_modules"),
+    async (excludes) => {
+      const [cmd, ...rest] = cliCompileArgs({
+        doRemote: false,
+        out,
+        entry: "src/app.ts",
+        assets,
+        excludes,
+        v8Flags: [],
+        declaredClient: "cli",
+      });
+      const built = await new Deno.Command(Deno.execPath(), {
+        args: [cmd!, "--no-check", ...rest],
+        cwd: root,
+        stdout: "null",
+        stderr: "piped",
+      }).output();
+      err = dec.decode(built.stderr);
+      return built.success;
+    },
+  );
+  assert(ok, err);
   return out;
 }
 

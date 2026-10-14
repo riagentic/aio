@@ -13,6 +13,7 @@
 // The fix is additive — `total` and `shown` keep their meaning for every
 // script already reading them, and `matched`/`unclassified` are what a health
 // probe wants. They add up.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { logEventMatches } from "../src/am/am-cmd-inspect.ts";
 

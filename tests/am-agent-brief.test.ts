@@ -9,6 +9,7 @@
 // shipping), that the rules protecting the user come first, and the budget.
 // tests/am-agent-truth.test.ts pins the FACTS: flags per verb, snippets that
 // compile and run, API names, config keys, docs paths.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import {
   agentBrief,

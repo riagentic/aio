@@ -352,6 +352,20 @@ export function frameTooLargeMessage(
     `client (visible) — see ${LARGE_STATE_DOC}. Retrying in ${retryMs}ms.`;
 }
 
+/** Does this call end in an `undefined` argument — the one shape
+ *  `wire.omitTrailingUndefined` changes on the wire? Pure. */
+function endsUndefined(action: { payload?: unknown }): boolean {
+  const args = (action.payload as { args?: unknown } | undefined)?.args;
+  return Array.isArray(args) && args.length > 0 &&
+    args[args.length - 1] === undefined;
+}
+
+/** `wire` as a `cfg` frame carries it. Pure. */
+function cfgOmits(d: unknown): boolean {
+  return (d as { wire?: { omitTrailingUndefined?: unknown } } | undefined)
+    ?.wire?.omitTrailingUndefined === true;
+}
+
 /** Connect a CLI process to a running aio app as a real client: live state,
  *  method calls, and reconnect with the offline queue — the terminal twin of a
  *  browser client. */
@@ -447,6 +461,62 @@ export function connectCli<S>(
 
   /** The pacer for the socket that is open now; null while there is none. */
   let pacer: SendPacer<CliOutFrame> | null = null;
+  // `aio.run({ wire })` — the server's decision, used HERE: this client
+  // encodes the call. It arrives in the `cfg` frame. Until the answer is in
+  // for this connection, a call it would change (one that ends in
+  // `undefined`) waits in the queue, with everything behind it. Any other
+  // call goes out exactly as it always has: same bytes, same order, no wait.
+  //
+  // WHEN the answer is in, from what a server sends on connect — `proto`,
+  // the state, `tt-state` (dev), `boot`, and then `cfg` only if it has
+  // something to say, as the LAST frame of that burst:
+  //   · `cfg` is read — that is the answer; or
+  //   · any other frame is read after `boot` — `cfg` would have been the
+  //     very next one, so none is coming and the default stands.
+  // A quiet server sends nothing after `boot`, so a call that is waiting when
+  // `boot` has been read asks for a `resync`: its reply is that frame, and it
+  // was asked after the server had already sent its `cfg`, if it had one.
+  // A socket that closes first leaves the calls in the queue, where the
+  // offline path (the next connection, or `close()`'s rejection) has them.
+  //
+  // A server since 1.0.20 says in its hello whether a `cfg` follows
+  // (`ProtoHello.cfg`), and the hello is its first frame: `false` is the
+  // answer there and then — nothing waits, nothing is asked; `true` means the
+  // frame is on its way, so the wait is for it alone and no `resync` is
+  // spent. The proof above is for a server that does not say.
+  // `undefined` = not asked by this server: the process default stands.
+  let wireOmit: true | undefined;
+  let wireKnown = false;
+  let wireHeld = false;
+  let wireBootRead = false;
+  let wireAsked = false;
+  let wireComing = false;
+  const _wireWaits = (a: { payload?: unknown }): boolean => {
+    if (wireKnown || !(wireHeld || endsUndefined(a))) return false;
+    wireHeld = true;
+    _wireAsk();
+    return true;
+  };
+  /** The one frame that makes a quiet server prove no `cfg` is coming. */
+  function _wireAsk(): void {
+    if (!wireHeld || !wireBootRead || wireKnown || wireAsked) return;
+    if (wireComing) return;
+    if (!pacer || ws?.readyState !== WebSocket.OPEN) return;
+    wireAsked = true;
+    try {
+      pacer.push({ frame: enc("resync"), seq: _seq++ });
+    } catch {
+      /* aio-ok: closing — the queue keeps the calls for the next open */
+    }
+  }
+  /** The answer is in for this connection. Send what waited for it. */
+  function _wireSettled(): void {
+    if (wireKnown) return;
+    wireKnown = true;
+    if (!wireHeld) return;
+    wireHeld = false;
+    _drainQueue();
+  }
   /** The `rate` this client's server last advertised. Per client, not the
    *  module-level `peerHello()`: one process may hold clients to two servers
    *  with different budgets. */
@@ -593,8 +663,9 @@ export function connectCli<S>(
     //
     // "written" means handed to the open socket's pacer: it leaves on THIS
     // socket at the advertised pace, and its call's clock starts when it does.
-    const frame = encodeAction(action);
-    if (pacer && ws && ws.readyState === WebSocket.OPEN) {
+    const frame = encodeAction(action, wireOmit);
+    const open = !!pacer && !!ws && ws.readyState === WebSocket.OPEN;
+    if (open && !_wireWaits(action) && pacer) {
       try {
         pacer.push({ frame, action, seq: _seq++ });
         return { written: true, queued: false };
@@ -604,7 +675,8 @@ export function connectCli<S>(
       }
     }
     _pushDroppingOldest(queue, _pending, "offline", action, _accepted);
-    _noteQueued();
+    // Waiting for `cfg` on an open socket is not "offline".
+    if (!(open && wireHeld)) _noteQueued();
     return { written: false, queued: true };
   }
 
@@ -622,6 +694,64 @@ export function connectCli<S>(
         `and sent on reconnect; awaited calls stay pending until then, and ` +
         `close() rejects whatever is still queued`,
     );
+  }
+
+  /** Flush the queue into the open socket's pacer, in order. */
+  function _drainQueue(): void {
+    const sink = pacer;
+    if (!sink || !ws || ws.readyState !== WebSocket.OPEN) return;
+    // Drain queued actions into the pacer, in order. Each frame's ack clock
+    // starts when the pacer actually writes it — not at dispatch time, or an
+    // action queued for longer than the ceiling times out while still
+    // sitting in the queue and is then delivered anyway.
+    const q = [...queue];
+    queue.length = 0;
+    _queueNoted = false;
+    for (let i = 0; i < q.length; i++) {
+      const a = q[i]!;
+      // The first call the unknown answer would change stops the flush: it
+      // and everything behind it stay queued, in order, until `_wireSettled`.
+      if (_wireWaits(a)) {
+        queue.unshift(...q.slice(i));
+        return;
+      }
+      const cid = (a as { cid?: string }).cid;
+      // Two failures, two answers. A frame that cannot be BUILT can never be
+      // sent, so it is dropped alone and its caller told; a transport that
+      // refuses the WRITE is offline, so the remainder goes back in the
+      // queue at its place in line. The bare loop had neither: one throw
+      // abandoned every action behind it and left their callers pending.
+      let frame: string;
+      try {
+        frame = encodeAction(a, wireOmit);
+      } catch (err) {
+        if (cid) {
+          _pending.reject(
+            cid,
+            err instanceof Error ? err : new Error(String(err)),
+          );
+        }
+        continue;
+      }
+      try {
+        const tries = _triesOf.get(a);
+        sink.push({
+          frame,
+          action: a,
+          seq: _seq++,
+          ...(tries ? { tries } : {}),
+        });
+      } catch (err) {
+        queue.unshift(...q.slice(i));
+        log.warn(
+          "cli",
+          `the queue flush stopped after ${i} of ${q.length} action(s) — ` +
+            `the socket refused the write (${err}); the rest are back in ` +
+            `the queue, in order, and go out on the next connection`,
+        );
+        return;
+      }
+    }
   }
 
   let _readyResolve: ((s: S) => void) | null = null;
@@ -828,52 +958,18 @@ export function connectCli<S>(
       // A heartbeat must never be the reason a CLI process refuses to exit.
       if (heartbeat !== undefined) Deno.unrefTimer?.(heartbeat);
 
-      // Drain queued actions into the pacer, in order. Each frame's ack clock
-      // starts when the pacer actually writes it — not at dispatch time, or an
-      // action queued for longer than the ceiling times out while still
-      // sitting in the queue and is then delivered anyway.
-      const q = [...queue];
-      queue.length = 0;
-      _queueNoted = false;
-      for (let i = 0; i < q.length; i++) {
-        const a = q[i]!;
-        const cid = (a as { cid?: string }).cid;
-        // Two failures, two answers. A frame that cannot be BUILT can never be
-        // sent, so it is dropped alone and its caller told; a transport that
-        // refuses the WRITE is offline, so the remainder goes back in the
-        // queue at its place in line. The bare loop had neither: one throw
-        // abandoned every action behind it and left their callers pending.
-        let frame: string;
-        try {
-          frame = encodeAction(a);
-        } catch (err) {
-          if (cid) {
-            _pending.reject(
-              cid,
-              err instanceof Error ? err : new Error(String(err)),
-            );
-          }
-          continue;
-        }
-        try {
-          const tries = _triesOf.get(a);
-          paced.push({
-            frame,
-            action: a,
-            seq: _seq++,
-            ...(tries ? { tries } : {}),
-          });
-        } catch (err) {
-          queue.unshift(...q.slice(i));
-          log.warn(
-            "cli",
-            `the queue flush stopped after ${i} of ${q.length} action(s) — ` +
-              `the socket refused the write (${err}); the rest are back in ` +
-              `the queue, in order, and go out on the next connection`,
-          );
-          return;
-        }
-      }
+      // A new connection is a new answer: the server may have restarted
+      // with another config.
+      // …and its `cfg` is the only word on `wire`: a server that came back
+      // without the option sends none (and, before 1.0.20, says nothing in
+      // its hello), so the last connection's answer must not outlive it.
+      wireOmit = undefined;
+      wireKnown = false;
+      wireHeld = false;
+      wireBootRead = false;
+      wireAsked = false;
+      wireComing = false;
+      _drainQueue();
     };
 
     socket.onmessage = (e: MessageEvent) => {
@@ -891,12 +987,24 @@ export function connectCli<S>(
         }
         return;
       }
+      // A frame after `boot` that is not `cfg`: no `cfg` is coming — unless
+      // the server said one is (a frame of another client's broadcast can
+      // land between the two).
+      if (wireBootRead && !wireComing && frame.t !== "cfg") _wireSettled();
       switch (frame.t) {
         // Browser-only signals — irrelevant in a terminal.
         case "reload":
         case "css":
-        case "boot":
         case "tt-state":
+          return;
+        // "How do I encode a call" — see `wireOmit` for the rule.
+        case "cfg":
+          wireOmit = cfgOmits(frame.d) || undefined;
+          _wireSettled();
+          return;
+        case "boot":
+          wireBootRead = true;
+          _wireAsk();
           return;
         // A server-side refusal aimed at THIS client (an oversized frame it
         // will never receive, a rejected subscription): the browser paints it
@@ -985,6 +1093,12 @@ export function connectCli<S>(
             rememberPeerHello(theirs);
             // The budget this socket's writes are paced to.
             peerRate = theirs.rate;
+            // The server's own word on `cfg` — see `wireOmit`.
+            wireComing = theirs.cfg === true;
+            if (theirs.cfg === false) {
+              wireOmit = undefined;
+              _wireSettled();
+            }
           }
           // Unreadable is not "no check" — the gate would fail open; it stops
           // loudly, as a mismatch does (the browser client's rule).
@@ -1354,12 +1468,31 @@ export function connectCliUDS<S>(
    *  It also has to REPORT the over-cap discard: swallowing it left the caller
    *  to wait out the full ack ceiling and hear "the server never confirmed the
    *  call" about a frame this client threw away instantly and knowably. */
+  // `aio.run({ wire })` on this transport — the rule `connectCli` states.
+  // The socket's server speaks first: `proto`, `cfg` when there is one, then
+  // the state; so the first state frame is the proof that no `cfg` is coming.
+  // `undefined` = not asked by this server: the process default stands.
+  let wireOmit: true | undefined;
+  let wireKnown = false;
+  let wireHeld = false;
+  const _wireWaits = (a: { payload?: unknown }): boolean => {
+    if (wireKnown || !(wireHeld || endsUndefined(a))) return false;
+    return wireHeld = true;
+  };
+  function _wireSettled(): void {
+    if (wireKnown) return;
+    wireKnown = true;
+    if (!wireHeld) return;
+    wireHeld = false;
+    _udsDrainQueue();
+  }
+
   function _udsTrySend(
     action: { type: string; payload?: unknown },
   ): { written: boolean; queued: boolean } {
     // Encoded before the branch, for the reason `_trySend` gives.
-    const frame = encodeAction(action);
-    if (writer) {
+    const frame = encodeAction(action, wireOmit);
+    if (writer && !_wireWaits(action)) {
       writer.write(encoder.encode(frame + "\n")).catch((e) => {
         // A refused write is not a delivered action. The caller's ack clock is
         // already running, so it heard "the server never confirmed the call"
@@ -1374,7 +1507,8 @@ export function connectCliUDS<S>(
       return { written: true, queued: false };
     }
     _pushDroppingOldest(queue, _udsPending, "UDS offline", action);
-    if (!_udsQueueNoted) {
+    // Waiting for `cfg` on an open socket is not "offline".
+    if (!_udsQueueNoted && !(writer && wireHeld)) {
       _udsQueueNoted = true;
       log.warn(
         "cli",
@@ -1384,6 +1518,49 @@ export function connectCliUDS<S>(
       );
     }
     return { written: false, queued: true };
+  }
+
+  /** Flush the queue into the open connection, in order. */
+  function _udsDrainQueue(): void {
+    const w = writer;
+    if (!w) return;
+    // Drain queued actions. The ack clock starts HERE — at the write —
+    // not at dispatch time (see connectCli's drain).
+    const q = [...queue];
+    queue.length = 0;
+    _udsQueueNoted = false;
+    for (let i = 0; i < q.length; i++) {
+      const a = q[i]!;
+      // See `connectCli`'s drain: the first call the unknown answer would
+      // change stops the flush, and the rest wait behind it, in order.
+      if (_wireWaits(a)) {
+        queue.unshift(...q.slice(i));
+        return;
+      }
+      const cid = (a as { cid?: string }).cid;
+      let frame: string;
+      try {
+        frame = encodeAction(a, wireOmit);
+      } catch (err) {
+        // Cannot be built, so it can never be sent: drop this one, tell
+        // its caller, keep flushing the rest (see connectCli's drain).
+        if (cid) {
+          _udsPending.reject(
+            cid,
+            err instanceof Error ? err : new Error(String(err)),
+          );
+        }
+        continue;
+      }
+      w.write(encoder.encode(frame + "\n")).catch((e) => {
+        log.warn(
+          "cli",
+          `the UDS write for "${a.type}" failed during the queue flush ` +
+            `(${e}) — the action was NOT delivered`,
+        );
+      });
+      if (cid) _udsPending.armTimer(cid);
+    }
   }
 
   function connect(): void {
@@ -1408,36 +1585,10 @@ export function connectCliUDS<S>(
           encoder.encode(enc("proto", protoHello(VERSION)) + "\n"),
         ).catch(() => {});
 
-        // Drain queued actions. The ack clock starts HERE — at the write —
-        // not at dispatch time (see connectCli's drain).
-        const q = [...queue];
-        queue.length = 0;
-        _udsQueueNoted = false;
-        for (const a of q) {
-          const cid = (a as { cid?: string }).cid;
-          let frame: string;
-          try {
-            frame = encodeAction(a);
-          } catch (err) {
-            // Cannot be built, so it can never be sent: drop this one, tell
-            // its caller, keep flushing the rest (see connectCli's drain).
-            if (cid) {
-              _udsPending.reject(
-                cid,
-                err instanceof Error ? err : new Error(String(err)),
-              );
-            }
-            continue;
-          }
-          writer!.write(encoder.encode(frame + "\n")).catch((e) => {
-            log.warn(
-              "cli",
-              `the UDS write for "${a.type}" failed during the queue flush ` +
-                `(${e}) — the action was NOT delivered`,
-            );
-          });
-          if (cid) _udsPending.armTimer(cid);
-        }
+        wireOmit = undefined; // a new connection is a new answer
+        wireKnown = false;
+        wireHeld = false;
+        _udsDrainQueue();
 
         // Read NDJSON
         const lineBuf = createLineReader(); // linear on a multi-MB frame
@@ -1529,8 +1680,13 @@ export function connectCliUDS<S>(
                     );
                     closed = true;
                     continue;
+                  case "cfg":
+                    wireOmit = cfgOmits(frame.d) || undefined;
+                    _wireSettled();
+                    continue;
                   case "state":
                   case "patches": {
+                    _wireSettled(); // no `cfg` came before it: none will
                     // onResync is NOT optional: without it a patch that fails
                     // to apply left this client frozen at its last good state
                     // — no error, no log, permanent divergence from a server

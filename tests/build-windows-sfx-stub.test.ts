@@ -27,6 +27,7 @@ import {
   compareVersions,
   isComparableVersion,
 } from "../src/server/updates-core.ts";
+import { SFX_SHORTCUT_RECORD } from "../src/server/sfx-shortcut.ts";
 import { sha256Hex } from "../src/build/ship.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { toolCacheDir } from "../src/electron/electron-runtime-fetch.ts";
@@ -44,8 +45,19 @@ const LINK_FLAGS = [
 
 const STUB_DIR = windowsSfxStubDir();
 /** Cargo's build folder: a cache outside the checkout, so a test run leaves
- *  nothing in the source tree and the next one does not compile from zero. */
-const TARGET_DIR = join(toolCacheDir(), "windows-sfx-stub-target");
+ *  nothing in the source tree and the next one does not compile from zero.
+ *
+ *  One per CHECKOUT (named after its path). Cargo tells one build of a crate
+ *  from another by the sources' relative paths and times, not by where the
+ *  crate is: in one shared folder, a second copy of this tree (a worktree, a
+ *  mutation sandbox) that built LATER had its test binary run for this one —
+ *  measured: a mutant's `cargo test` failure, reported here in 148 ms. */
+const TARGET_DIR = join(
+  toolCacheDir(),
+  `windows-sfx-stub-target-${
+    (await sha256Hex(new TextEncoder().encode(STUB_DIR))).slice(0, 8)
+  }`,
+);
 
 function tryRun(cmd: string, args: string[]): string | null {
   try {
@@ -232,6 +244,12 @@ Deno.test("the stub source, the committed PE and the Deno packer share one forma
     SFX_VERSION_FILE,
   );
   assert(text.includes(SFX_VERSION_FILE), "the PE writes a different file");
+  // The record of the Start-menu shortcut: the stub reads the one the app
+  // wrote before it adds a shortcut on an upgrade, and the app reads the stub's.
+  assertEquals(
+    await rustConst("install.rs", "SHORTCUT_RECORD"),
+    SFX_SHORTCUT_RECORD,
+  );
 });
 
 // The stub keeps an install that is NEWER than the payload it carries, so it

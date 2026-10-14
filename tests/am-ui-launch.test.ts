@@ -3,6 +3,7 @@
 // UI-STATE PROJECTION, which now lives at `am state --ui` (pinned in
 // am.test.ts against a live trojan server). Everything here is spawn-FREE:
 // the argv/spec construction is pure, so CI never launches Electron.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join, resolve } from "@std/path";
 import {

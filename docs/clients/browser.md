@@ -40,6 +40,13 @@ export default function App() {
 - `send(action)` — sends action to server via WebSocket. Actions sent before the
   initial connect are queued and flushed. Actions sent while disconnected are
   **dropped** — a "Reconnecting..." indicator tells the user why
+- **A connection that dies without a close event** (airplane mode, a sleeping
+  device, a changed network) is noticed by the heartbeat: when pings this
+  connection used to answer go unanswered for about 5 s and a plain HTTP request
+  confirms it — the network refuses, or the server answers while the socket
+  stays silent — the page treats the socket as closed: "Reconnecting…", queued
+  actions kept, calls already sent rejected with `connection lost`. A server
+  that is merely busy (HTTP hangs too) is given 20 heartbeats.
 - **Singleton** — all `useAio()` calls share a single WebSocket connection per
   page. Call it from any component — no prop drilling, no duplicate connections
 - Generic `<S>` types the state — use your `AppState` type

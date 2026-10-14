@@ -13,3 +13,25 @@
 // Running one such file by hand on Windows: `deno test -A
 // --preload=tests/preload-ffi.ts tests/x.test.ts`.
 import "../src/server/win-pipe.ts";
+
+// …and the per-user stores are this run's from its first line. The harness
+// pins them on first use (`_armTestStrict`, `tempDir()`), which a test that
+// calls an `am` command or spawns one before any of that never reaches:
+// MEASURED 2026-10-10, two such files run on their own each put a checkout of
+// the tree under test into `~/.local/lib/aio-versions/` — what every pinned
+// app on the machine runs. Under the suite runner the variables are already
+// set and this changes nothing.
+import "./store-sandbox.ts";
+
+// …and aio's own UI tests cross the wire: `testUI`'s `wire.strict` is opt-in
+// (an app's tests written against 1.0.19 keep the harness they passed on),
+// and this suite opts in for every file. A value already set wins.
+if (!Deno.env.get("AIO_TEST_WIRE")) Deno.env.set("AIO_TEST_WIRE", "strict");
+
+// …and a browser a test starts gets a HOME of its own: by default (what an
+// app's tests get) a Chromium rewrites `~/.config/chromium/Crash Reports`
+// and opens `~/.pki/nssdb` of whoever runs the suite. A value already set
+// wins.
+if (!Deno.env.get("AIO_TEST_BROWSER_HOME")) {
+  Deno.env.set("AIO_TEST_BROWSER_HOME", "own");
+}

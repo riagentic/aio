@@ -13,9 +13,10 @@
 //
 // So these assert the ARTIFACT, not the source string: generate a real root into
 // a temp home and read it back with openssl.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { aioRootPaths, loadOrCreateAioRoot } from "../src/server/tls.ts";
-import { cmdTrust } from "../src/am/am-cmd-trust.ts";
+import { _installHint, cmdTrust } from "../src/am/am-cmd-trust.ts";
 import type { GlobalFlags } from "../src/am/am-types.ts";
 
 class ExitSignal extends Error {
@@ -228,6 +229,30 @@ Deno.test("am trust: it explains, and never installs anything itself", async () 
   } finally {
     await Deno.remove(home, { recursive: true });
   }
+});
+
+// A step that ends in `\` is a POSIX line continuation. PowerShell continues
+// with a backtick: the two-line Windows command pasted as printed ran
+// `Import-Certificate … \` and then failed on `-CertStoreLocation` alone.
+Deno.test("am trust: every Windows command is one complete PowerShell line", () => {
+  const cert = "C:\\Users\\me\\.aio-ca\\aio-root.pem";
+  const { os, steps } = _installHint(cert, "windows");
+  assertEquals(os, "Windows");
+  const cmds = steps.filter((s) => s.includes("Import-Certificate"));
+  assertEquals(cmds.length, 2);
+  assert(steps.length >= cmds.length, "no steps");
+  for (const s of steps) {
+    assert(!/[\\`]\s*$/.test(s), `a step continues onto the next line: ${s}`);
+  }
+  for (const c of cmds) {
+    assertStringIncludes(c, `-FilePath "${cert}"`);
+    assert(
+      /-CertStoreLocation Cert:\\(CurrentUser|LocalMachine)\\Root$/.test(c),
+      c,
+    );
+  }
+  // The store that needs no elevation is the first one offered.
+  assertStringIncludes(cmds[0]!, "Cert:\\CurrentUser\\Root");
 });
 
 // ── the plumbing ─────────────────────────────────────────────

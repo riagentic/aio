@@ -52,7 +52,7 @@ async function inFreshHome(fn: () => void | Promise<void>): Promise<void> {
 
 Deno.test({
   name: "app key: the key is 0600 and its home is 0700",
-  ignore: !POSIX,
+  ignore: !POSIX, // the subject is POSIX mode bits under a umask: Windows has neither
   fn: () =>
     inFreshHome(() => {
       // `key: true` — generated and persisted.
@@ -67,7 +67,7 @@ Deno.test({
 
 Deno.test({
   name: "app key: a FIXED key is mirrored with the same care",
-  ignore: !POSIX,
+  ignore: !POSIX, // the subject is POSIX mode bits under a umask: Windows has neither
   fn: () =>
     inFreshHome(() => {
       resolveAppKey("permapp2", "a-fixed-shared-key");
@@ -79,7 +79,7 @@ Deno.test({
 
 Deno.test({
   name: "app key: a file an older version left at 0644 is narrowed, not kept",
-  ignore: !POSIX,
+  ignore: !POSIX, // the subject is POSIX mode bits under a umask: Windows has neither
   fn: () =>
     inFreshHome(() => {
       const p = appKeyPath("permapp3");
@@ -94,7 +94,7 @@ Deno.test({
 
 Deno.test({
   name: "control key: same guarantee, and it always had it",
-  ignore: !POSIX,
+  ignore: !POSIX, // the subject is POSIX mode bits under a umask: Windows has neither
   fn: () =>
     inFreshHome(() => {
       const r = mintControlKey("permapp4");

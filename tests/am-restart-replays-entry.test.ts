@@ -90,13 +90,15 @@ Deno.test({
         "start",
         "--entry=main.ts",
         "--client=server-only",
+        // A cold start under a loaded suite outlives the default 10 s.
+        "--wait=60",
         "--json",
       );
       assertEquals(s.code, 0, s.out + s.err);
       const a = JSON.parse(s.out.trim().split("\n").at(-1)!);
       pids.push(a.pid);
 
-      const r = await am("restart", "--json");
+      const r = await am("restart", "--wait=60", "--json");
       assertEquals(r.code, 0, `restart left the app down:\n${r.out}${r.err}`);
       const b = JSON.parse(r.out.trim().split("\n").at(-1)!);
       pids.push(b.pid);

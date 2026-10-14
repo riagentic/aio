@@ -103,6 +103,14 @@ Deno.test("stop exit code: 0 everywhere except under a service manager, where it
   assert(!isServiceSupervised(() => undefined));
 });
 
+/** Until the scheduled end has run — bounded. Not a fixed 20–30 ms: on a
+ *  loaded machine the timers had not fired yet (a full Windows run: `[]`). */
+async function exited(order: string[]): Promise<void> {
+  for (let i = 0; i < 500 && !order.some((o) => o.startsWith("exit")); i++) {
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+
 Deno.test("aio.restart() on the dev path: the shutdown contract runs FIRST, then exit 75 — deferred, so a cell method can ask", async () => {
   const order: string[] = [];
   const unregister = registerRuntime(async () => {
@@ -119,7 +127,7 @@ Deno.test("aio.restart() on the dev path: the shutdown contract runs FIRST, then
     assertEquals(plan.kind, "exit");
     // Scheduled, not done: the caller's dispatch gets to return first.
     assertEquals(order, []);
-    await new Promise((r) => setTimeout(r, 30));
+    await exited(order);
     assertEquals(order, ["shutdown", `exit ${RESTART_EXIT_CODE}`]);
   } finally {
     unregister();
@@ -141,7 +149,7 @@ Deno.test("aio.restart() on the re-exec path: the successor is launched with the
         void order.push(`relaunch ${artifact} ${args.join(" ")}`),
       log: quiet,
     });
-    await new Promise((r) => setTimeout(r, 20));
+    await exited(order);
     assertEquals(order, ["shutdown", "relaunch /opt/x/app --port=0", "exit 0"]);
   } finally {
     unregister();
@@ -175,7 +183,7 @@ Deno.test("aio.stop(): shutdown contract, then the launcher's stop code; library
       exit: (code) => void order.push(`exit ${code}`),
       log: quiet,
     });
-    await new Promise((r) => setTimeout(r, 20));
+    await exited(order);
     assertEquals(order, ["shutdown", `exit ${STOP_EXIT_CODE}`]);
 
     order.length = 0;

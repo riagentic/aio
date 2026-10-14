@@ -7,6 +7,7 @@
 // never refused, it killed the healthy running instance every single time,
 // while `am status` (which has always carried the socket fallback) reported
 // the app as up.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { ensureSingleton } from "../src/am/am-cmd-process.ts";

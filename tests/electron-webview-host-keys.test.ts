@@ -13,6 +13,7 @@
 // main, and that the delivery script the host evaluates actually dispatches.
 // The real-Electron proof (an iframe, a real key) is the ELECTRON_E2E case at
 // the bottom.
+import { childEnv } from "./e2e-app-harness.ts";
 import {
   assert,
   assertEquals,
@@ -365,7 +366,7 @@ ${tmplWillNavigate("_appOrigin")}
       await Deno.writeTextFile(file, main);
       const { stdout, stderr } = await new Deno.Command(ELECTRON_BIN, {
         args: [file, "--no-sandbox"],
-        env: { ...testDisplayEnv(), ELECTRON_ENABLE_LOGGING: "0" },
+        env: childEnv({ ...testDisplayEnv(), ELECTRON_ENABLE_LOGGING: "0" }),
         stdout: "piped",
         stderr: "piped",
       }).output();

@@ -15,26 +15,12 @@ import { childCoverageDir } from "../src/testing/temp-dir.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { fromFileUrl } from "@std/path";
 import { spec } from "./module-spec-helper.ts";
+// THE browser lookup (every OS), never a copy of its path list.
+import { browserOsFlags, findBrowser } from "./e2e-harness.ts";
+import { browserHomeEnv } from "../src/testing/chromium.ts";
 const _childCovDir = childCoverageDir();
 const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
-function findBrowser(): string | null {
-  if (Deno.env.get("AIO_E2E") === "0") return null;
-  for (
-    const c of [
-      "/usr/bin/chromium",
-      "/usr/bin/chromium-browser",
-      "/usr/bin/google-chrome",
-      "/usr/bin/google-chrome-stable",
-    ]
-  ) {
-    try {
-      Deno.statSync(c);
-      return c;
-    } catch { /* next */ }
-  }
-  return null;
-}
 const BROWSER = findBrowser();
 
 async function waitFor<T>(
@@ -142,6 +128,7 @@ await aio.run({ persist: false, schedules: [{ id: "tick", every: 600, action: da
 
       browser = new Deno.Command(BROWSER!, {
         args: [
+          ...browserOsFlags,
           "--headless=new",
           "--no-sandbox",
           "--disable-gpu",
@@ -151,6 +138,7 @@ await aio.run({ persist: false, schedules: [{ id: "tick", every: 600, action: da
           `--user-data-dir=${profile}`,
           `${base}/`,
         ],
+        env: browserHomeEnv(profile),
         stdin: "null",
         stdout: "null",
         stderr: "null",

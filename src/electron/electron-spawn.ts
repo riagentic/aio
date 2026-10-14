@@ -15,7 +15,7 @@ import {
 import { electronMainScriptUDS } from "./electron-uds.ts";
 import { log } from "../diagnostics/logger-api.ts";
 import { classifyElectronLine } from "./electron-renderer-log.ts";
-import { appImageOwner, isCompiled } from "../server/paths.ts";
+import { appImageOwner, isCompiled, isPipePath } from "../server/paths.ts";
 import { isProcessAlive } from "../server/single-instance-lock.ts";
 import { DENO_JSON_NAMES, parseDenoJson } from "../server/deno-json.ts";
 import { HEY } from "../diagnostics/fmt.ts";
@@ -683,7 +683,7 @@ export async function autoInstallElectron(
     // platform binary. It is CommonJS; `--unstable-detect-cjs` is what lets
     // deno load it. This is the step that makes `--target=electron` work on a
     // machine that has never seen Electron.
-    for (const pkg of await electronPkgDirs()) {
+    for (const pkg of await electronPkgDirs(root)) {
       if (signal?.aborted) return false;
       try {
         await Deno.stat(`${pkg}/install.js`);
@@ -1408,6 +1408,29 @@ export async function sandboxSwitches(
 export const MAIN_SCRIPT_SELF_REMOVE =
   "try { require('fs').unlinkSync(__filename); } catch {}\n";
 
+/** Windows: the line that gives the window's process an AppUserModelID —
+ *  the app's title — or `""` when there is no title to give.
+ *
+ *  Without one Windows files every notification under the id it derives from
+ *  the program, and the program is Electron's: measured on Windows 11 with
+ *  Electron 44, a toast from an aio app is recorded under
+ *  `electron.app.Electron` — the same source for every aio app on the
+ *  machine, in the notification itself, in Settings › Notifications and in
+ *  Focus rules. With the id set, the toast is filed under it, and with no
+ *  shortcut registered for an id Windows shows the id's own text as the name:
+ *  so the id IS the title. Other platforms take no notice of the call; it is
+ *  not emitted for them. Pure.
+ *  @internal exported for its test */
+export function mainScriptAumid(title: string | undefined): string {
+  const id = (title ?? "")
+    // deno-lint-ignore no-control-regex
+    .replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, 128);
+  return id
+    ? `if (process.platform === 'win32') require('electron').app.` +
+      `setAppUserModelId(${JSON.stringify(id)});\n`
+    : "";
+}
+
 /** The working directory of an installed app's window: `neutral`
  *  (`neutralCwd()`), and the inherited one for a run from source.
  *
@@ -1511,6 +1534,8 @@ async function spawnElectron(
     requireSandbox?: boolean;
     /** The window's `app.name` — where its main script is written. */
     profile?: string;
+    /** The app's display title — its AppUserModelID on Windows. */
+    title?: string;
   } = {},
 ): Promise<Deno.ChildProcess> {
   // Spawn ELECTRON, not the thing that spawns it. `node_modules/.bin/electron`
@@ -1528,7 +1553,7 @@ async function spawnElectron(
   const sandboxArgs = sandbox.args;
   const tmpFile = await writeMainScript(
     opts.profile,
-    MAIN_SCRIPT_SELF_REMOVE + script,
+    MAIN_SCRIPT_SELF_REMOVE + mainScriptAumid(opts.title) + script,
   );
   // The caller's switches go LAST: Chromium takes the last occurrence of a
   // repeated switch, so an operator who has to override one of aio's own can.
@@ -1703,7 +1728,9 @@ export async function launchElectron(
     : await bakedEmbeddedRuntime(distDir).catch(() => null)
     ? "runtime carried by this app"
     : "fetched runtime";
-  const transport = uds ? "UDS" : "WS";
+  const transport = uds
+    ? (isPipePath(uds.socketPath) ? "named pipe" : "UDS")
+    : "WS";
   log.info(
     `launching Electron (${mode}, ${transport}${
       cdpPort ? `, cdp 127.0.0.1:${cdpPort}` : ""
@@ -1736,6 +1763,7 @@ export async function launchElectron(
   return spawnElectron(bin, script, cdpSwitches(cdpPort), {
     requireSandbox: meta?.requireSandbox,
     profile: shellProfileName(meta, uds?.title),
+    title: meta?.title ?? uds?.title,
   });
 }
 
@@ -1743,10 +1771,13 @@ export async function launchElectron(
 export async function launchElectronClient(
   log: Log,
   url?: string,
+  opts?: { strictPin?: boolean },
 ): Promise<Deno.ChildProcess | null> {
   const bin = await findElectronBin(log);
   if (!bin) return null;
   const args = url ? [`--server-url=${url}`] : [];
+  // `electron: { strictPin }` — see `__AIO_STRICT_PIN` in the client script.
+  if (opts?.strictPin) args.push("--strict-pin");
   // argv carries the URL as given (it is the user's own input, and the client
   // needs it); the LOG line does not carry its token.
   log.info(`launching aio client${url ? ` → ${redactUrlToken(url)}` : ""}`);

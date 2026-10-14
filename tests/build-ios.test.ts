@@ -7,6 +7,8 @@ import { join } from "@std/path";
 import {
   buildIos,
   iosBundleId,
+  iosDerivedDataDir,
+  iosMarketingVersion,
   iosProjectDir,
   isValidBundleId,
   plistText,
@@ -57,6 +59,47 @@ Deno.test("ios: every placeholder is rendered and the plist is XML-safe", () => 
   assertStringIncludes(pbx, 'PRODUCT_BUNDLE_IDENTIFIER = "com.example.tj"');
   assertStringIncludes(pbx, "CURRENT_PROJECT_VERSION = 10203");
   assertEquals(plistText("ab\x01c"), "abc");
+});
+
+Deno.test("ios: the marketing version is the numbers Apple takes — a suffix stays out of it", () => {
+  assertEquals(iosMarketingVersion("1.2.3"), "1.2.3");
+  assertEquals(iosMarketingVersion("1.2.3-beta"), "1.2.3");
+  assertEquals(iosMarketingVersion("0.1.0-nogit.9f3ac2b1"), "0.1.0");
+  assertEquals(iosMarketingVersion("1.0.19-beta.4"), "1.0.19");
+  assertEquals(iosMarketingVersion("2.5"), "2.5");
+  assertEquals(iosMarketingVersion("1.2.3.4"), "1.2.3");
+  assertEquals(iosMarketingVersion("beta"), "0");
+  const pbx = renderIosTemplate({
+    appName: "x",
+    bundleId: "a.b",
+    versionName: "1.2.3-beta",
+    versionCode: 10203,
+    allowArbitraryLoads: false,
+  })["App.xcodeproj/project.pbxproj"]!;
+  assertEquals(
+    [...pbx.matchAll(/MARKETING_VERSION = "([^"]*)"/g)].map((m) => m[1]),
+    ["1.2.3", "1.2.3"],
+  );
+});
+
+Deno.test("ios: derived data is build scratch — never inside the project the fleet ships", () => {
+  const cfg = { root: "/work/app", binaryName: "app" };
+  const derived = iosDerivedDataDir(cfg);
+  assertEquals(derived, join("/work/app", ".aio", "build", "ios-derived"));
+  assert(!derived.startsWith(iosProjectDir(cfg)), derived);
+  assert(!derived.startsWith(join("/work/app", "dist")), derived);
+});
+
+Deno.test("ios: the project's floor is the engine the bundle needs (iOS 15.4)", () => {
+  // The page the client opens is an aio bundle: Safari 15.4 is the first
+  // engine that parses it. A 15.0–15.3 install would open a blank page.
+  const pbx = IOS_TEMPLATE["App.xcodeproj/project.pbxproj"]!;
+  assertEquals(
+    [...pbx.matchAll(/IPHONEOS_DEPLOYMENT_TARGET = ([\d.]+);/g)].map((m) =>
+      m[1]
+    ),
+    ["15.4", "15.4"],
+  );
 });
 
 Deno.test("ios: the project references only files the template ships", () => {
@@ -141,6 +184,9 @@ Deno.test("ios: the build writes a complete project on this host", async () => {
     assertStringIncludes(pbx, 'MARKETING_VERSION = "0.3.17"');
     const www = await Deno.readTextFile(join(dir, "App/www/index.html"));
     assertStringIncludes(www, "aio_server");
+    // The iOS shell's own page: it pairs by share link only.
+    assert(!www.includes('id="pin"'), "the iOS page offers a pairing code");
+    assert(!www.includes("Android System WebView"));
   } finally {
     await Deno.remove(root, { recursive: true }).catch(() => {});
   }
@@ -202,7 +248,11 @@ Deno.test("ios: a version string containing $ survives too", () => {
     versionCode: 1,
     allowArbitraryLoads: false,
   });
-  // MARKETING_VERSION lives in the Xcode project file, not the plist.
+  // MARKETING_VERSION lives in the Xcode project file, not the plist — and
+  // takes only the numbers (`iosMarketingVersion`): the suffix this test used
+  // to look for is exactly what App Store validation refuses. What must still
+  // hold is that `$&` substitutes nothing.
   const all = Object.values(files).join("\n");
-  assertStringIncludes(all, "1.0.0-$&");
+  assertStringIncludes(all, 'MARKETING_VERSION = "1.0.0";');
+  assert(!all.includes("{{VERSION_NAME}}") && !all.includes("$&"));
 });

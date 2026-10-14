@@ -10,6 +10,11 @@
 //
 // One source, checked. `deno task update:examples` regenerates them.
 
+// `tempDir`, not `Deno.makeTempDir`: it arms the store sandbox. `am create`
+// provisions the pinned framework version, and run on its own this file put
+// one into the REAL `~/.local/lib/aio-versions/`.
+import "./store-sandbox.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { assertEquals } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 
@@ -28,7 +33,7 @@ Deno.test({
   // Spawns `am create` twice — real scaffolds, not a re-read of the constants,
   // so a bug anywhere between the template and the file on disk is caught too.
   async fn() {
-    const tmp = await Deno.makeTempDir({ prefix: "aio-scaffold-check-" });
+    const tmp = await tempDir("aio-scaffold-check-");
     try {
       for (const { dir, template } of CASES) {
         const out = await new Deno.Command(Deno.execPath(), {
@@ -69,7 +74,7 @@ Deno.test({
         }
       }
     } finally {
-      await Deno.remove(tmp, { recursive: true }).catch(() => {});
+      await dropTempDir(tmp);
     }
   },
 });

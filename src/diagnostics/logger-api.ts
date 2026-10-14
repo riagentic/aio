@@ -121,9 +121,14 @@ export function setFallbackLogDir(dir: string | null): void {
 
 /** Resolved log directory — the active logger's dir, the app's own log dir, or
  *  the default dot-dir. Single source of truth for the diagnostics +
- *  client-log sinks. */
+ *  client-log sinks.
+ *
+ *  A sink with no directory of its own says `logDir: ""`, and that is "none",
+ *  not "the root": `""` joined with a file name is `/client.log` — refused on
+ *  Linux and macOS, and written to the drive root (`C:\client.log`) on
+ *  Windows. */
 export function getLogDir(): string {
-  return getLogger()?.logDir ?? _fallbackLogDir ?? DEFAULT_LOG_DIR;
+  return getLogger()?.logDir || _fallbackLogDir || DEFAULT_LOG_DIR;
 }
 
 /** Public log API — falls back to console when AioLogger is not active.

@@ -9,6 +9,7 @@
 // data", the same boundary that makes the same-machine rule mean anything.
 //
 // Every test here fails against the pre-fix code.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
   _controlDirRefusal,
@@ -133,8 +134,10 @@ Deno.test("control key: refuses a data dir other users can read", () => {
   }
 });
 
-Deno.test("control key: a leaked or foreign file is refused, loudly", async () => {
-  if (WINDOWS) return;
+Deno.test({
+  name: "control key: a leaked or foreign file is refused, loudly",
+  ignore: WINDOWS, // POSIX mode bits do not exist on Windows
+}, async () => {
   await withAppsDir(async () => {
     const appId = "ctl-perms";
     const r = mintControlKey(appId);

@@ -7,6 +7,8 @@
 // was intended rather than what is true is worse than no report at all.
 //
 // Nothing here has side effects, so the whole report is testable as data.
+import { fromFileUrl as posixFromFileUrl } from "@std/path/posix";
+import { fromFileUrl as winFromFileUrl } from "@std/path/windows";
 import {
   detectTarget,
   type InstalledTarget,
@@ -255,4 +257,18 @@ export function bootLines(
     ]);
   }
   return lines;
+}
+
+/** `Deno.mainModule` as the PATH a person can open. Stripping `file://` left
+ *  `/C:/Users/…/app.js` on Windows (no such path) and `%20` for a space
+ *  everywhere. Anything that is not a `file:` URL is returned as it came.
+ *  Pure — `os` is a parameter so both shapes are tested on any machine. */
+export function entryPathOf(
+  mainModule: string,
+  os: string = Deno.build.os,
+): string {
+  if (!mainModule.startsWith("file:")) return mainModule;
+  return os === "windows"
+    ? winFromFileUrl(mainModule)
+    : posixFromFileUrl(mainModule);
 }

@@ -46,6 +46,7 @@ import {
 } from "./ssr-render.ts";
 import { attrNameOf, escapeAttr, escapeHtml } from "./ssr-utils.ts";
 import { isDevMode } from "../state/dev-flag.ts";
+import { firstTime } from "../protocol/said-once.ts";
 
 /** One `<meta>` or `<link>` as attributes: `{ name: "description", content }`,
  *  `{ property: "og:title", content }`, `{ rel: "canonical", href }`. A
@@ -404,12 +405,20 @@ export function collectHead(key?: object): string {
   // page with no title, no description and no canonical — in silence, which is
   // the one thing this module may not do. Observe-only: prod returns the same
   // empty head it always did.
-  if (key !== undefined && render === null && isDevMode()) {
+  // …and a production server says it once: every page it serves has no
+  // title, which no dev session will ever see.
+  const dev = isDevMode();
+  if (
+    key !== undefined && render === null && (dev || firstTime("collectHead"))
+  ) {
     console.warn(
-      "[aio-dev] collectHead(key) was given an object that names no server " +
-        "render, so the head came back EMPTY. Pass the SAME object to both " +
-        "calls — `renderToStream(<App/>, req)` … `collectHead(req)` — or call " +
-        "collectHead() with no argument.",
+      `[aio${dev ? "-dev" : ""}] collectHead(key) was given an object that ` +
+        "names no server render, so the head came back EMPTY." +
+        (dev
+          ? " Pass the SAME object to both " +
+            "calls — `renderToStream(<App/>, req)` … `collectHead(req)` — or " +
+            "call collectHead() with no argument."
+          : ""),
     );
   }
   // Asked for and answered: this render's caller is no longer one that might

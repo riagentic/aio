@@ -11,6 +11,7 @@
 // Sandbox: two throwaway repos in a temp dir; the probe runs in a child with
 // a cleared environment, HOME in the temp dir, GIT_CEILING_DIRECTORIES at the
 // temp root. The real HOME and this repo's .git are never touched.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { GIT_REPO_ENV_VARS } from "../src/am/am-versions.ts";

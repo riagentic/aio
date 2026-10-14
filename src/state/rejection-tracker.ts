@@ -78,3 +78,12 @@ export function takeRejectionFor(
   if (list.length === 0) _byAction.delete(action as object);
   return hit ?? null;
 }
+
+/** Was THIS action refused by `cell`? Reads, and clears nothing: for a
+ *  reader that runs before the one that takes it (the journal's commit mark
+ *  of a sync op, written inside the reduce — aio.ts `_markSyncApplied`). */
+export function hasRejectionFor(action: unknown, cell: string): boolean {
+  if (!action || typeof action !== "object") return false;
+  return _byAction.get(action as object)?.some((r) => r.cell === cell) ??
+    false;
+}

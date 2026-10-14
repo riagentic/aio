@@ -48,11 +48,14 @@ import {
   pickNestedDisplay,
 } from "../src/server/nested-display.ts";
 import {
+  homeStrays,
+  isTestGitdir,
   realStoreDirs,
   snapshotStores,
   storeChanges,
 } from "./check-home-clean.ts";
 import {
+  ownerIdentity,
   pruneDeadLockDir,
   pruneDeadLockDirAt,
   rootRegistryEntry,
@@ -480,6 +483,13 @@ export function shardEnv(
     // spawned apps sum to more than the machine, freezing it (2026-10-01).
     // Sharding does not help: the demand is per-app. See `envHeapCapMB`.
     AIO_MAX_HEAP_MB: String(HEAP_FLOOR_MB),
+    // aio's own UI tests cross the wire (`testUI`'s `wire.strict`): the
+    // default is the harness of 1.0.19, kept for apps' existing tests.
+    AIO_TEST_WIRE: "strict",
+    // …and its browsers write nothing under the developer's HOME (the crash
+    // database, the NSS store): `launchChromium`'s opt-in, see
+    // src/testing/chromium.ts.
+    AIO_TEST_BROWSER_HOME: "own",
     ...(opts.realWindow ? {} : { XDG_RUNTIME_DIR: runtimeDir! }),
   };
 }
@@ -878,6 +888,104 @@ export function shardPassed(
   return r.code === 0 && !r.left && !r.unrun;
 }
 
+/** Forget the worktrees of `root` that a TEST registered and that are gone:
+ *  the registration (`<root>/.git/worktrees/<name>/`) of a checkout whose
+ *  directory was inside a test sandbox and no longer exists. Answers the
+ *  directories forgotten.
+ *
+ *  A test that provisions a framework version does it into its own store —
+ *  and `git worktree add` writes the registration into the CHECKOUT's `.git`,
+ *  which no sandbox moves. The store is removed with the test; the
+ *  registration stayed, one per test process: MEASURED 2026-10-10, 79 entries
+ *  and 22 MB in this checkout's `.git/worktrees`, 34 of them a test's. aio's
+ *  own prune (`pruneStoreRegistrations`) only looks under the store of the
+ *  moment, which a test's is never again.
+ *
+ *  Each by its exact path, as that prune does and for its reason: never
+ *  `git worktree prune`, which also forgets the developer's own worktree on an
+ *  unmounted drive. One being added right now (`locked`) is left. */
+export function pruneTestWorktrees(
+  root: string,
+  env: Record<string, string | undefined>,
+): string[] {
+  const reg = join(root, ".git", "worktrees");
+  const gone: string[] = [];
+  let names: string[];
+  try {
+    names = [...Deno.readDirSync(reg)].map((e) => e.name);
+  } catch {
+    return gone; // aio-ok: no registry (a copy without .git, a linked checkout)
+  }
+  for (const n of names.sort()) {
+    try {
+      const dotGit = Deno.readTextFileSync(join(reg, n, "gitdir")).trim();
+      if (!isTestGitdir(dotGit, env) || exists(dotGit)) continue;
+      if (exists(join(reg, n, "locked"))) continue;
+      Deno.removeSync(join(reg, n), { recursive: true });
+      gone.push(dirname(dotGit));
+    } catch { /* aio-ok: not a registration, or removed meanwhile */ }
+  }
+  return gone;
+}
+
+/** Tracked files a test run has been seen to rewrite: the root lock (a child
+ *  `deno` resolving under the repo's config adds what it asked for) and the
+ *  proof matrix (a gated test recording a row). A run must leave the tree as
+ *  it found it — and nothing said when one did not. */
+export const GENERATED_TRACKED = ["deno.lock", "proof-matrix.json"] as const;
+
+/** The names whose content differs between two readings (`null`: absent).
+ *  Pure. */
+export function rewrittenTracked(
+  names: readonly string[],
+  before: readonly (string | null)[],
+  after: readonly (string | null)[],
+): string[] {
+  return names.filter((_, i) => before[i] !== after[i]);
+}
+
+/** The run's first line: what ran, where, of which commit, when. A proof row
+ *  is written from this log (`deno task update:proof`), and a log that does
+ *  not say it was the WHOLE suite, on that OS, of that commit, is no proof.
+ *  The commit is `AIO_TEST_COMMIT` (a copy with no `.git` — the one who made
+ *  the copy says it, in the run), else git's HEAD, `+dirty` when the tree
+ *  differs from it, else `unknown`. */
+export const suiteHeader = (
+  full: boolean,
+  os: string,
+  commit: string,
+  date: string,
+): string =>
+  `suite: ${full ? "full" : "partial"} · os=${os} · commit=${commit} · ` +
+  `date=${date}`;
+
+function runCommit(): string {
+  const said = Deno.env.get("AIO_TEST_COMMIT");
+  if (said) return said;
+  const git = (args: string[]) => {
+    try {
+      const r = new Deno.Command("git", { args, cwd: ROOT, stderr: "null" })
+        .outputSync();
+      return r.success ? new TextDecoder().decode(r.stdout).trim() : null;
+    } catch {
+      return null; // aio-ok: no git here — the header says `unknown`
+    }
+  };
+  const head = git(["rev-parse", "HEAD"]);
+  if (!head) return "unknown";
+  return head + (git(["status", "--porcelain"]) === "" ? "" : "+dirty");
+}
+
+function readTracked(): (string | null)[] {
+  return GENERATED_TRACKED.map((f) => {
+    try {
+      return Deno.readTextFileSync(join(ROOT, f));
+    } catch {
+      return null; // aio-ok: absent is a reading too — compared as such
+    }
+  });
+}
+
 /** Remove the sockets in `dir` that refuse a connection — nobody is bound. */
 async function dropRefusedSockets(dir: string): Promise<void> {
   for (const e of Deno.readDirSync(dir)) {
@@ -949,16 +1057,43 @@ function dropAllRuntimesSync(): void {
 /** The shard processes still running — an interrupt stops them first. */
 const _children = new Set<Deno.ChildProcess>();
 
+/** Homes of running shards whose lock dirs sit in the session's base (home →
+ *  base): the real-window shard, and every shard on Windows. An interrupt
+ *  judges these too — no runtime dir of theirs holds them. */
+const _homes = new Map<string, string>();
+
+/** The file that says whose a shard's runtime dir is, written by the runner
+ *  into each one it makes: this process (pid and start identity) and when the
+ *  RUN began. `check:orphans` reads it — a dir whose owner lives is a live
+ *  run's and is never swept, on every OS, and neither is a scratch dir touched
+ *  since that run began. A shard's children carry the dir in their
+ *  environment only, which Windows shows nobody. */
+export const RUN_OWNER = ".run-owner";
+export function markShardRuntime(runtime: string, runStarted: number): void {
+  Deno.writeTextFileSync(
+    join(runtime, RUN_OWNER),
+    JSON.stringify({
+      pid: Deno.pid,
+      ...ownerIdentity(Deno.pid),
+      startedAt: runStarted,
+    }),
+  );
+}
+
 /** Interrupted: stop every shard and AWAIT its exit before any runtime dir is
  *  judged. Pruning first (the old signal handler did) found every lock still
  *  held by a shard that had not died yet, and left all the dirs behind.
  *  SIGTERM, up to `graceMs` for them to go, then SIGKILL; then each runtime
- *  dir by the one rule. Returns what is still held — a process outlived its
- *  shard — for the caller to NAME. Never throws. */
+ *  dir by the one rule — and, for each of `homes` (home → runtime base), the
+ *  lock dirs of that home in a base the run did not make: Windows keeps every
+ *  shard's there (`shardLockBase`), so an interrupt pruned and judged none of
+ *  them. Returns what is still held — a process outlived its shard — for the
+ *  caller to NAME. Never throws. */
 export async function interruptShards(
   children: ReadonlySet<Deno.ChildProcess>,
   runtimes: ReadonlySet<string>,
   graceMs = 5000,
+  homes: ReadonlyMap<string, string> = new Map(),
 ): Promise<string[]> {
   const kill = (sig: Deno.Signal) => {
     for (const c of children) {
@@ -975,6 +1110,10 @@ export async function interruptShards(
   }
   const left: string[] = [];
   for (const r of [...runtimes]) left.push(...await dropShardRuntime(r));
+  for (const [home, base] of homes) {
+    const held = await heldLockEntries(base, home);
+    left.push(...new Set([...held.keys()].map((p) => dirname(p))));
+  }
   return left;
 }
 
@@ -1002,7 +1141,12 @@ if (import.meta.main) {
         const code = sig === "SIGINT" ? 130 : 143;
         if (stopping) Deno.exit(code);
         stopping = true;
-        const left = await interruptShards(_children, _runtimes);
+        const left = await interruptShards(
+          _children,
+          _runtimes,
+          undefined,
+          _homes,
+        );
         if (left.length) {
           console.error(
             `\ninterrupted — still held by a live process (check:orphans ` +
@@ -1032,6 +1176,23 @@ if (import.meta.main) {
     Math.max(1, Math.min(16, fence.usable >> 1)),
   ));
   const quietMs = said(quietMsOf(Deno.args));
+  // The module cache is THIS process's, for every child of every shard. A
+  // test that gives a child a throwaway HOME also moves deno's cache there —
+  // to an empty folder — unless DENO_DIR says otherwise, and that child then
+  // downloads every module again: the test passes or fails with the network
+  // (2026-10-13: one stalled download, 1 min 3 s, one red shard). Twenty test
+  // files spawn deno with a HOME of their own; this covers them all.
+  if (!Deno.env.get("DENO_DIR")) {
+    const info = new Deno.Command(Deno.execPath(), {
+      args: ["info", "--json"],
+      stdout: "piped",
+      stderr: "null",
+    }).outputSync();
+    const dir = info.success
+      ? JSON.parse(new TextDecoder().decode(info.stdout)).denoDir
+      : undefined;
+    if (typeof dir === "string" && dir) Deno.env.set("DENO_DIR", dir);
+  }
   const named = Deno.args.filter((a) => !a.startsWith("--"));
   const files = named.length
     ? await expandDirs(named)
@@ -1082,11 +1243,31 @@ if (import.meta.main) {
   }
   await Deno.remove(OUT, { recursive: true }).catch(() => {});
   await Deno.mkdir(OUT, { recursive: true });
+  const forgotten = pruneTestWorktrees(ROOT, Deno.env.toObject());
+  if (forgotten.length > 0) {
+    console.log(
+      `${forgotten.length} stale worktree registration(s) of earlier test ` +
+        `runs dropped from .git/worktrees`,
+    );
+  }
   // The real stores, as they were before any shard ran — compared at the end,
   // so a write that got past the sandbox fails the run, naming the entry.
   const storeDirs = realStoreDirs(Deno.env.toObject());
   const storesBefore = snapshotStores(storeDirs);
+  // …and what was test-shaped in the home already: an earlier run's is the
+  // standalone gate's to name (`check:home-clean`), a NEW one is this run's.
+  const straysBefore = new Set(homeStrays(Deno.env.toObject()));
+  const trackedBefore = readTracked();
   const started = performance.now();
+  const runStarted = Date.now();
+  console.log(
+    suiteHeader(
+      named.length === 0,
+      Deno.build.os,
+      runCommit(),
+      new Date().toISOString().slice(0, 10),
+    ),
+  );
   console.log(
     `${files.length} test files → ${shards.length} parallel shards${
       shards.length > n ? ` (${n} at a time)` : ""
@@ -1122,7 +1303,10 @@ if (import.meta.main) {
           dir: Deno.build.os === "windows" ? undefined : "/tmp",
           prefix: "xdg-shard-",
         });
-      if (runtime) _runtimes.add(runtime);
+      if (runtime) {
+        _runtimes.add(runtime);
+        markShardRuntime(runtime, runStarted);
+      }
       const where = shardLockBase(runtime, Deno.build.os);
       // Its lock dirs sit in the session's base, among other roots' — judged
       // by its own home there, never by the whole dir.
@@ -1130,6 +1314,7 @@ if (import.meta.main) {
       // Registration is best effort: the dir this home maps to is pruned even
       // when the registry never heard of it.
       if (shared) pruneDeadLockDir(home);
+      if (shared) _homes.set(home, where);
       // Held before the shard starts: an earlier run's leftover, named now and
       // not charged to this shard later.
       const before = shared
@@ -1192,6 +1377,7 @@ if (import.meta.main) {
       const settled = shared
         ? await settleHomeLockDirs(where, home, before)
         : await settleShardRuntime(runtime!);
+      _homes.delete(home);
       // A private runtime dir the platform's locks never used goes with the
       // shard all the same — and whatever IS held in it counts, as ever.
       if (shared && runtime) {
@@ -1290,7 +1476,39 @@ if (import.meta.main) {
         `the test that resolved the store without the sandbox.`,
     );
   }
-  if (bad.length === 0 && storeWrites.length === 0) {
+  const strays = homeStrays(Deno.env.toObject()).filter((p) =>
+    !straysBefore.has(p)
+  );
+  if (strays.length > 0) {
+    console.error(
+      `\n✗ the run left ${strays.length} test artefact(s) in the REAL home ` +
+        `(a test started an app, a window or an installer without a home of ` +
+        `its own):\n  ${strays.join("\n  ")}\n  \`childEnv()\` ` +
+        `(tests/e2e-app-harness.ts) gives a spawned app its home and its ` +
+        `window's profile; \`ownHome()\` (tests/deno-dir-helper.ts) gives ` +
+        `an installer its HOME. These are yours to remove.`,
+    );
+  }
+  // Said, not fatal: which test wrote cannot be told from here (the shards
+  // ran side by side), and someone editing the tree during the run is not a
+  // failed suite. But a silent rewrite is how a lock drifts.
+  // A recording run (`AIO_PROOF_RECORD=1`, the release check) is ASKED to
+  // write proof rows: that one is not a stray rewrite.
+  const recording = Deno.env.get("AIO_PROOF_RECORD") === "1";
+  const rewritten = rewrittenTracked(
+    GENERATED_TRACKED,
+    trackedBefore,
+    readTracked(),
+  ).filter((f) => !(recording && f === "proof-matrix.json"));
+  if (rewritten.length > 0) {
+    console.error(
+      `\n! tracked file(s) changed during this run: ${rewritten.join(", ")} ` +
+        `— a test run must leave the tree as it found it. \`git diff ` +
+        `${rewritten[0]}\` shows what was written; a test that spawns ` +
+        `\`deno\` under the repo's config needs \`--no-lock\`.`,
+    );
+  }
+  if (bad.length === 0 && storeWrites.length === 0 && strays.length === 0) {
     console.log(`\n✓ all ${shards.length} shards passed in ${wall}s`);
     Deno.exit(0);
   }

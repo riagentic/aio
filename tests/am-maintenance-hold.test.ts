@@ -9,6 +9,7 @@
 // union is frozen surface), and status (exit 2, transitional), stop (refuses, sends nothing), start
 // (refuses) and every HTTP verb say "am backup is running". Additive on disk:
 // an older reader validates appId/pid/port only, so it still sees a held lock.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import {
@@ -65,7 +66,11 @@ Deno.test({
   fn: async () => {
     const base = await tempDir("am-maint-");
     const cwd = join(base, "cwd");
-    for (const d of [cwd, join(base, "home"), join(base, "run")]) {
+    // `data/`: a backup holds the lock of an app that HAS data. Without it
+    // the Windows `am kill` reports — truthfully — a kill that landed between
+    // the two renames of a restore's swap ("data/ is MISSING"), and exits 1.
+    const data = join(base, "apps", APP, "data");
+    for (const d of [cwd, join(base, "home"), join(base, "run"), data]) {
       await Deno.mkdir(d, { recursive: true, mode: 0o700 });
     }
     await Deno.writeTextFile(join(cwd, "main.ts"), "console.log(1);\n");
@@ -208,6 +213,9 @@ Deno.test({
       const kd = JSON.parse(k.out);
       assertEquals(kd.op, "am backup", k.out);
       assertEquals(kd.killed, true, k.out);
+      if (Deno.build.os === "windows") {
+        assertEquals(kd.dataPresent, true, k.out);
+      }
       if (Deno.build.os !== "windows") {
         const after = await am("status", "--json");
         assertEquals(

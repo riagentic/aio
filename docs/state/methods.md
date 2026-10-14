@@ -1154,6 +1154,14 @@ protects `am dispatch`, a hand-written `{ type, payload: { args } }`, a form, a
 URL, or an agent — the boundary is untyped at runtime, which is why aio warns
 when the arity is wrong.
 
+A frame that states no argument list at all (`{ type }`, `payload: {}`, named
+arguments) for a method that declares arguments is refused by `am dispatch`.
+Over the WebSocket and the local socket it runs with `undefined`, and the ack
+carries a `short` note. `aio.run({ wire: { refuseShortCalls: true } })` makes
+those two doors refuse it as well (`ACTION_REFUSED`, nothing runs); an
+`args: []` is still the caller stating their arguments. aio's own clients always
+send `args`, so this matters only for hand-written ones.
+
 ```ts
 import { z } from "zod";
 

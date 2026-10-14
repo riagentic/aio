@@ -12,6 +12,7 @@ import { join } from "@std/path";
 import {
   SLOW_START_WAIT_MS,
   slowStartReason,
+  startWaitMs,
 } from "../src/am/am-cmd-process.ts";
 import { childEnv, makeApp } from "./e2e-app-harness.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
@@ -45,6 +46,63 @@ Deno.test("slowStartReason: the download line means wait; cached or failed means
   assert(SLOW_START_WAIT_MS > 60_000, "minutes, not seconds — a slow line");
 });
 
+// The long wait lasts as long as its reason. It used to be latched at the
+// first look: a new app's first start shows Deno's `Initialize <package>`
+// lines for a moment, and an app that then took 15 s to boot was waited for
+// 180 s under "Deno is downloading the app's modules".
+Deno.test("startWaitMs: the long wait holds while the reason does; after it, the default wait from then", () => {
+  const why = "first run: …";
+  assertEquals(startWaitMs(null, null, 500, 10_000, 10_000), 10_000);
+  assertEquals(startWaitMs(null, why, 500, 10_000, 10_000), SLOW_START_WAIT_MS);
+  assertEquals(
+    startWaitMs(why, why, 47_000, SLOW_START_WAIT_MS, 10_000),
+    SLOW_START_WAIT_MS,
+  );
+  assertEquals(
+    startWaitMs(why, null, 46_300, SLOW_START_WAIT_MS, 10_000),
+    57_000,
+  );
+  // …and that wait is not moved again by later looks.
+  assertEquals(startWaitMs(null, null, 50_000, 57_000, 10_000), 57_000);
+});
+
+// Deno's own first-run fetch: the app has not run a line yet. The lines are
+// Deno's, as it prints them into a log file (colours and all).
+Deno.test("slowStartReason: Deno still downloading the app's modules means wait; the app's first line ends it", () => {
+  const dl = (u: string) => `\x1b[0m\x1b[32mDownload\x1b[0m ${u}`;
+  const fetching = [
+    'Warning "exports" field should be specified when specifying a "name".',
+    dl("https://jsr.io/@std/path/meta.json"),
+    dl("https://jsr.io/@std/path/1.1.3_meta.json"),
+  ].join("\n") + "\n";
+  const r = slowStartReason(fetching);
+  assert(r && r.includes("downloading the app's modules"), String(r));
+  assert(slowStartReason("Initialize express@4.21.2\n"));
+  // The same lines as Windows writes them (CRLF), and with a bare CR.
+  for (const eol of ["\r\n", "\r"]) {
+    const text = fetching.replaceAll("\n", eol);
+    assert(slowStartReason(text), JSON.stringify(eol));
+    assertEquals(slowStartReason(`${text}aio  starting my-app${eol}`), null);
+  }
+  // The app has spoken since: whatever takes the time now, it is not that.
+  assertEquals(slowStartReason(`${fetching}aio  starting my-app\n`), null);
+  assertEquals(slowStartReason(`${fetching}error: Module not found\n`), null);
+  // A line that merely mentions a download is not Deno's.
+  assertEquals(slowStartReason("my-app: Download finished\n"), null);
+  // Windows: stderr is a file of its own, so Deno's lines are never followed
+  // by the app's. Fetching while the app's file is empty; over once it is not
+  // — and the Electron line is then read from wherever it is.
+  const errFile = fetching.replaceAll("\n", "\r\n");
+  assert(slowStartReason("", errFile));
+  assertEquals(slowStartReason("booting\r\n", errFile), null);
+  const el = slowStartReason(`${DOWNLOADING}\r\n`, errFile);
+  assert(el && el.includes("Electron runtime"), String(el));
+  assertEquals(
+    slowStartReason(`${DOWNLOADING}\r\n`, `${errFile}Error: 404\r\n`),
+    null,
+  );
+});
+
 Deno.test({
   name:
     "am start: a child whose log says it is downloading Electron gets more than 10 s, and starts",
@@ -57,13 +115,20 @@ Deno.test({
       // The scaffold's own entry, with a first-run download STANDING IN: the
       // marker line the runtime fetch prints, then 13 s of nothing — past the
       // default wait, well inside the extended one — then the real boot.
+      //
+      // The app itself is imported AFTER the wait, from a file of its own:
+      // static imports are hoisted, so with the marker written above them the
+      // line was printed only once the whole framework graph had loaded — on
+      // a loaded machine (measured: a busy Windows VM) later than the 10 s in
+      // which `am start` must read it, and the run said "still starting after
+      // 10s" about an app whose log had not said anything yet.
       const entry = join(dir, "src", "app.ts");
-      const app = await Deno.readTextFile(entry);
+      await Deno.rename(entry, join(dir, "src", "app-real.ts"));
       await Deno.writeTextFile(
         entry,
         `console.log(${JSON.stringify(DOWNLOADING)});\n` +
           `await new Promise((r) => setTimeout(r, 13_000));\n` +
-          app,
+          `await import("./app-real.ts");\n`,
       );
       const t0 = Date.now();
       const r = await new Deno.Command(Deno.execPath(), {

@@ -27,6 +27,7 @@ import { mergeField } from "../../../src/sync/merge.ts";
 import { compareHLC } from "../../../src/sync/hlc.ts";
 import type { HLC, MergeStrategy } from "../../../src/sync/types.ts";
 import { fuzzEnvInt } from "../../fuzz-seed.ts";
+import { mulberry32 } from "./_prop.ts";
 
 /** A replica: a value and the clock it carries. Merging two replicas carries
  *  the LATER clock forward, which is what a real peer does — the merged state
@@ -37,22 +38,31 @@ const laterOf = (a: HLC, b: HLC): HLC => (compareHLC(a, b) >= 0 ? a : b);
 const SEED = fuzzEnvInt("FUZZ_SEED", 0x5e7ab1e) & 0x7fffffff;
 const ROUNDS = fuzzEnvInt("FUZZ_ROUNDS", 400, 1);
 
-function rng(seed: number) {
-  let s = seed;
-  return () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
-}
-
 type Row = { id: string; v: number };
 const ids = ["a", "b", "c", "d", "e"];
+
+/** Which of `sets` hold `id`, as one bit each ("101"): the situations a
+ *  merge can meet an id in — kept by all, dropped by one, added by one… */
+const presence = (id: string, sets: unknown[]): string =>
+  sets.map((v) =>
+    (Array.isArray(v) ? v.some((r: Row) => r.id === id) : id in (v as object))
+      ? "1"
+      : "0"
+  ).join("");
+const allBits = (n: number): string[] =>
+  Array.from({ length: 2 ** n }, (_, i) => i.toString(2).padStart(n, "0"));
 
 /** Every distinct id in a merged array, as a sorted list — the MEMBERSHIP. */
 const members = (v: unknown): string[] =>
   [...new Set((v as Row[]).map((r) => r.id))].sort();
 
 Deno.test("set-add/set-remove: membership converges however peers fold", () => {
-  const rnd = rng(SEED);
+  const rnd = mulberry32(SEED);
   const pick = (n: number) => Math.floor(rnd() * n);
   for (const strategy of ["set-add", "set-remove"] as MergeStrategy[]) {
+    // What a round drew: the peers' clock order (ties on time included),
+    // and where each id was (base, A, B, C).
+    const seen = new Set<string>();
     for (let round = 0; round < ROUNDS; round++) {
       const rows = (): Row[] =>
         ids.filter(() => rnd() < 0.5).map((id) => ({ id, v: pick(3) }));
@@ -62,6 +72,14 @@ Deno.test("set-add/set-remove: membership converges however peers fold", () => {
         h: [1000 + pick(5), pick(3), n] as HLC,
       }));
       const [A, B, C] = peers as [Rep, Rep, Rep];
+      seen.add(
+        [...peers].sort((x, y) => compareHLC(x.h, y.h)).map((p) => p.h[2])
+          .join("<"),
+      );
+      if (new Set(peers.map((p) => `${p.h[0]}.${p.h[1]}`)).size < 3) {
+        seen.add("same time");
+      }
+      for (const id of ids) seen.add(presence(id, [base, A.v, B.v, C.v]));
       const m = (x: Rep, y: Rep): Rep => ({
         v: mergeField(strategy, x.v, x.h, y.v, y.h, base).value,
         h: laterOf(x.h, y.h),
@@ -78,6 +96,19 @@ Deno.test("set-add/set-remove: membership converges however peers fold", () => {
       assertEquals(members(routes[0]), members(routes[1]), repro);
       assertEquals(members(routes[1]), members(routes[2]), repro);
     }
+    // A generator that stopped drawing a case compares nothing about it.
+    if (ROUNDS >= 400) {
+      const kinds = [
+        ...["A<B<C", "A<C<B", "B<A<C", "B<C<A", "C<A<B", "C<B<A"],
+        "same time",
+        ...allBits(4),
+      ];
+      assertEquals(
+        kinds.filter((k) => !seen.has(k)),
+        [],
+        `${strategy}: cases never drawn`,
+      );
+    }
   }
 });
 
@@ -85,7 +116,7 @@ Deno.test("set-add/set-remove/lww-per-key: one merge is symmetric", () => {
   // This is the property the canonical ordering exists to give, and it is the
   // one the engine actually relies on: two peers merging the SAME pair must
   // reach the identical value, layout included, or they disagree on screen.
-  const rnd = rng(SEED ^ 0x9e3779b9);
+  const rnd = mulberry32(SEED ^ 0x9e3779b9);
   const pick = (n: number) => Math.floor(rnd() * n);
   for (
     const strategy of [
@@ -94,6 +125,7 @@ Deno.test("set-add/set-remove/lww-per-key: one merge is symmetric", () => {
       "lww-per-key",
     ] as MergeStrategy[]
   ) {
+    const seen = new Set<string>();
     for (let round = 0; round < ROUNDS; round++) {
       const rows = (): Row[] =>
         ids.filter(() => rnd() < 0.5).map((id) => ({ id, v: pick(3) }));
@@ -106,6 +138,9 @@ Deno.test("set-add/set-remove/lww-per-key: one merge is symmetric", () => {
       const lv = mk(), rv = mk();
       const lh: HLC = [1000 + pick(5), pick(3), "A"];
       const rh: HLC = [1000 + pick(5), pick(3), "B"];
+      seen.add(compareHLC(lh, rh) < 0 ? "A<B" : "B<A");
+      if (lh[0] === rh[0] && lh[1] === rh[1]) seen.add("same time");
+      for (const id of ids) seen.add(presence(id, [base, lv, rv]));
       const ab = mergeField(strategy, lv, lh, rv, rh, base).value;
       const ba = mergeField(strategy, rv, rh, lv, lh, base).value;
       assertEquals(
@@ -113,6 +148,13 @@ Deno.test("set-add/set-remove/lww-per-key: one merge is symmetric", () => {
         JSON.stringify(ba),
         `FUZZ_SEED=${SEED} ${strategy} round ${round}: one merge, two peers, ` +
           `two answers — ${JSON.stringify({ base, lv, lh, rv, rh })}`,
+      );
+    }
+    if (ROUNDS >= 400) {
+      assertEquals(
+        ["A<B", "B<A", "same time", ...allBits(3)].filter((k) => !seen.has(k)),
+        [],
+        `${strategy}: cases never drawn`,
       );
     }
   }

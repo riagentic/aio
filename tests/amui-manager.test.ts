@@ -7,6 +7,7 @@
 // method surface (`t.send.*` == what any connected client, `am dispatch`, or
 // the trojan can call) against a fake app whose lock entry + HTTP control plane
 // are real enough for `src/am/am-http.ts` to talk to.
+import "./store-sandbox.ts";
 import { SLEEP_ARGS } from "./proc-helper.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { testCell } from "../src/testing/cell-test.ts";
@@ -408,6 +409,63 @@ await new Promise((r) => setTimeout(r, 60_000));
     }
   },
 );
+
+// ── a start that is still FETCHING has not failed ────────────────────────────
+//
+// The bound on "registered as running" is `am start --wait`'s default. A child
+// whose first run downloads its modules has not begun to boot when it runs
+// out — on a loaded machine "start reports success…" above read as "failed to
+// start" for exactly that, with the app coming up behind the message. The log
+// says what the child is doing; `am start`'s own rule reads it.
+Deno.test("amui awaitBoot: a child whose log says Deno is still downloading gets the longer bound; a silent one keeps the default", async () => {
+  const { awaitBoot, startLogPath } = await import(
+    "../amui/src/server/proc.server.ts"
+  );
+  const appId = "amui-fixture-slow-fetch";
+  const dir = await makeProject();
+  const child = new Deno.Command(Deno.execPath(), {
+    args: SLEEP_ARGS,
+    stdin: "null",
+    stdout: "null",
+    stderr: "null",
+  }).spawn();
+  let registered: ReturnType<typeof setTimeout> | undefined;
+  try {
+    // Silent: the default bound, and the message says which.
+    const t0 = Date.now();
+    const silent = await awaitBoot(dir, child.pid, 400, [], 20_000);
+    assertEquals(silent.up, false);
+    assert(Date.now() - t0 < 5_000, "the default bound was kept");
+    // Fetching: the app registers well past the default bound, and is seen.
+    await Deno.writeTextFile(
+      startLogPath(dir),
+      "\x1b[0m\x1b[32mDownload\x1b[0m https://jsr.io/@std/path/meta.json\n",
+    );
+    registered = setTimeout(() => {
+      writeLock({
+        appId,
+        pid: child.pid,
+        port: 0,
+        startedAt: Date.now(),
+        status: "started",
+        cwd: dir,
+      });
+      _resetInstanceVerify();
+    }, 1_500);
+    assertEquals(await awaitBoot(dir, child.pid, 400, [], 20_000), {
+      up: true,
+    });
+  } finally {
+    clearTimeout(registered);
+    removeLock(appId);
+    _resetInstanceVerify();
+    try {
+      child.kill("SIGKILL");
+    } catch { /* already gone */ }
+    await child.status;
+    await Deno.remove(dir, { recursive: true });
+  }
+});
 
 // ── "stopped" must mean STOPPED ──────────────────────────────────────────────
 //

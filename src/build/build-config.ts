@@ -204,12 +204,18 @@ export interface BuildConfig {
    *  `_cameraPermission` in build-android.ts for the other half (the WebView
    *  says which key to add when a page asks for a camera it cannot have). */
   androidCamera: boolean;
+  /** deno.json `android.colorScheme` — which of light/dark the APK's page
+   *  sees (`prefers-color-scheme`). See `_androidColorScheme`. */
+  androidColorScheme: "system" | "dark" | "light";
   /** True when `configEntry` came from `--entry=` rather than deno.json — so an
    *  error can blame the place the value ACTUALLY came from. */
   entryFromFlag: boolean;
   /** deno.json `build.server` as a URL — the address a shipped CLIENT defaults
    *  to. Null when the app declares none (see `bakedServerUrl`). */
   bakedServer: string | null;
+  /** deno.json `build.strictPin` — the packaged Electron client refuses a
+   *  paired host whose certificate changed (see `electronClientScript`). */
+  strictPin: boolean;
 
   // App identity
   binaryName: string;
@@ -328,6 +334,23 @@ function assertKnownFlags(args: readonly string[]): void {
 export function _androidCamera(raw: unknown): boolean | null {
   if (raw === undefined) return false;
   return typeof raw === "boolean" ? raw : null;
+}
+
+/** deno.json `android.colorScheme`, validated — `null` for a value that is
+ *  none of the three (refused by name, like `android.camera`).
+ *
+ *  Absent → `"dark"`: every APK through 1.0.19 was built on a dark activity
+ *  theme, so its page saw `prefers-color-scheme: dark` on a light phone too
+ *  (measured on an API 35 emulator), and an app that is only rebuilt must
+ *  look as it did. `"system"` follows the phone's light/dark setting, as the
+ *  page does on every other target — `am create` writes it into a new app,
+ *  and `am doctor` names it for one that has not chosen; `"light"` is the
+ *  mirror of `"dark"`. Pure. */
+export function _androidColorScheme(
+  raw: unknown,
+): "system" | "dark" | "light" | null {
+  if (raw === undefined) return "dark";
+  return raw === "system" || raw === "dark" || raw === "light" ? raw : null;
 }
 
 export function refuseBadBuildArgs(args: readonly string[]): void {
@@ -538,7 +561,7 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
   // moment it was compiled.
 
   const androidCfg = mainConfig.android as
-    | { applicationId?: string; camera?: unknown }
+    | { applicationId?: string; camera?: unknown; colorScheme?: unknown }
     | undefined;
   const androidApplicationId = androidCfg?.applicationId;
   // `android.camera` — opt-in, and CHECKED ON EVERY BUILD, not only an android
@@ -555,6 +578,34 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
       } — it decides whether the APK declares android.permission.CAMERA`,
     );
     Deno.exit(1);
+  }
+  const androidColorScheme = _androidColorScheme(androidCfg?.colorScheme);
+  if (androidColorScheme === null) {
+    console.error(
+      `${NO} deno.json android.colorScheme must be "system", "dark" or ` +
+        `"light", not ${JSON.stringify(androidCfg?.colorScheme)}`,
+    );
+    Deno.exit(1);
+  }
+  // `build.android.strict` — the same rule: its type is checked on EVERY
+  // build, by THE decider (`_androidStrict`, loaded only for an app that
+  // sets the key). It was read inside the android build alone, so `"true"`
+  // waited for the one target that reads it — and a release key that is
+  // wrong on the desktop build is wrong on the day the APK is cut.
+  const androidStrictRaw = (mainConfig.build as
+    | { android?: { strict?: unknown } }
+    | undefined)?.android?.strict;
+  if (androidStrictRaw !== undefined) {
+    const { _androidStrict } = await import("./build-android.ts");
+    if (_androidStrict(mainConfig) === null) {
+      console.error(
+        `${NO} deno.json build.android.strict must be true or false, not ${
+          JSON.stringify(androidStrictRaw)
+        } — it decides whether an android/ overlay that drops part of the ` +
+          `template's MainActivity.kt fails the build`,
+      );
+      Deno.exit(1);
+    }
   }
   const androidDevUrl = Deno.args.find((a) =>
     a.startsWith("--android-dev-url=")
@@ -626,11 +677,15 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
     androidDevUrl,
     androidApplicationId,
     androidCamera,
+    androidColorScheme,
     allowServerOnly: Deno.args.includes("--allow-server-only"),
     entryFromFlag: entryArg !== undefined,
     bakedServer: bakedServerUrl(
       (mainConfig.build as { server?: string } | undefined)?.server,
     ),
+    strictPin:
+      (mainConfig.build as { strictPin?: unknown } | undefined)?.strictPin ===
+        true,
     binaryName,
     appTitle,
     macosHost,

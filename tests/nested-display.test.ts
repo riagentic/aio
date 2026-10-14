@@ -86,7 +86,12 @@ Deno.test("pickNestedDisplay: a candidate is one of the range, and an up display
 Deno.test("nestedDisplayEnv: DISPLAY alone without a cookie on file, DISPLAY + XAUTHORITY with one", () => {
   assertEquals(nestedDisplayEnv(":4242"), { DISPLAY: ":4242" });
   const file = nestedDisplayCookieFile(":4243");
-  if (!file) return; // no private runtime dir here (Windows)
+  if (!file) {
+    // No private runtime dir, so no cookie can be kept: Windows, and only
+    // there — elsewhere this is the half of the case that must run.
+    assertEquals(Deno.build.os, "windows");
+    return;
+  }
   assertEquals(nestedDisplayCookie(":4243"), null);
   try {
     Deno.writeFileSync(file, xauthorityEntry(":4243", new Uint8Array(16)), {

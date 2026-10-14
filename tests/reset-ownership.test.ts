@@ -300,7 +300,10 @@ const OWNERS: Record<string, [Owner, string]> = {
   _resetInstanceVerify: ["MANUAL", "instance verification"],
   _resetSecurityWarnings: ["MANUAL", "boot security warn dedup"],
   _resetImportMapWarnings: ["MANUAL", "import-map warn dedup"],
-  _resetEventWarnings: ["MANUAL", "event warn dedup"],
+  _resetEventWarnings: [
+    "MANUAL",
+    "event warn dedup (also re-armed by setDevMode)",
+  ],
   _resetBrowserSync: ["MANUAL", "browser sync client"],
   _resetVendorCache: ["MANUAL", "build vendor cache"],
 };

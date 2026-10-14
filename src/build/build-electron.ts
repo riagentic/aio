@@ -23,7 +23,12 @@ import { checkedGuestPreloads, stageGuestPreloads } from "./guest-preloads.ts";
 import { readDenoJson } from "../server/deno-json.ts";
 import { isHostPlatform } from "./platforms.ts";
 import { appIconLabel } from "./app-icon.ts";
-import { assembleMacApp, icnsFromName, icnsFromPng } from "./macos-app.ts";
+import {
+  assembleMacApp,
+  icnsFromName,
+  icnsFromPng,
+  setPlistValue,
+} from "./macos-app.ts";
 import { trimLocalePaks } from "./electron-locales.ts";
 import {
   applyChromiumExtrasStrip,
@@ -51,6 +56,7 @@ import {
   DIST_DIR,
 } from "../server/app-files.ts";
 import { HEY, NO, OK } from "../diagnostics/fmt.ts";
+import { copyWorkerBundles } from "./dist-staging.ts";
 import {
   electronFuseBinary,
   fuseElectronFile,
@@ -242,6 +248,8 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
     }
     if (exists) await Deno.copyFile(join(dist, name), join(appDirDist, name));
   }
+  // The browser workers' bundles: the window reads them from here too.
+  await copyWorkerBundles(dist, appDirDist);
   // The declared <webview> guest preloads (deno.json build.guestPreloads):
   // the only app files besides the bundle a window can load from the package.
   // Staged for every OS here; a macOS bundle moves them to its Resources/
@@ -534,6 +542,25 @@ async function _packageWindows(
   );
 }
 
+/** The bundle's `Info.plist` with `NSLocalNetworkUsageDescription`.
+ *
+ *  macOS 15 and later ask, per app, before it may reach another device on
+ *  the local network — and an app whose plist has no usage description is not
+ *  asked: the connection is refused as if the server were down (while the
+ *  internet still works). An aio window can always be pointed at a server on
+ *  the LAN (`--server-url`, `am discover`, a baked `build.server`), so every
+ *  bundle states it. A description the app's own plist already carries is
+ *  kept. Pure. */
+export function withLocalNetworkUsage(plist: string, name: string): string {
+  const KEY = "NSLocalNetworkUsageDescription";
+  if (plist.includes(`<key>${KEY}</key>`)) return plist;
+  return setPlistValue(
+    plist,
+    KEY,
+    `${name} connects to servers and devices on your local network.`,
+  );
+}
+
 /** macOS: assemble a real `.app`, then deliver it as a `.dmg` (a Mac was
  *  reachable) or a `.zip` of the bundle (none was).
  *
@@ -610,6 +637,13 @@ async function _packageMacos(
     version: bundleVersion,
     iconIcns: icns,
   });
+  // Before anything signs or packs the bundle: the one privacy sentence the
+  // window needs and Electron's own plist does not carry.
+  const infoPlist = join(app, "Contents", "Info.plist");
+  await Deno.writeTextFile(
+    infoPlist,
+    withLocalNetworkUsage(await Deno.readTextFile(infoPlist), displayName),
+  );
   const appSize = await dirSize(app);
   console.log(`${OK} ${displayName}.app (${formatMb(appSize)} MB)`);
 

@@ -7,6 +7,10 @@ every lab, and for Linux and Android put into the guest more directly — so you
 can install and run what you actually ship, on the OS you actually ship it to,
 and look at it.
 
+**The host is Linux.** Every lab is a Docker container, and the Windows, macOS
+and Android ones need `/dev/kvm` in it — so `am lab` does not run on a Windows
+or macOS machine.
+
 This is the **manual** tier. Nothing here is a gate, nothing here runs in
 `deno task test`, and nothing here has an assertion in it. It exists for the
 question the automated tiers cannot answer: _does the thing we ship look and

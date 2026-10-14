@@ -42,6 +42,7 @@ import {
 } from "./cell-methods-internals.ts";
 import { declaredArgCount } from "./arg-arity.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { firstTime } from "../protocol/said-once.ts";
 import { resolveSelfAction } from "./self.ts";
 import { refuseRetired, removalOf } from "./removals-core.ts";
 
@@ -829,7 +830,7 @@ const FRAMEWORK_PHANTOM_READS: ReadonlySet<string> = new Set([]);
  *
  *  Prod: the same Proxy answers exactly like the plain object (unknown →
  *  `undefined`), so the only difference is that dev/test throws where prod
- *  stays quiet — category (b), dev stricter, never the reverse. Writes pass
+ *  says it once and goes on — category (b), dev stricter, never the reverse. Writes pass
  *  through untouched (`bound = true`, the browser stub's `enableSync`, …); the
  *  decision is made at READ time because cells are defined at module load,
  *  before any harness has armed `__aioDev`. */
@@ -840,12 +841,15 @@ function guardAioInternals<T extends object>(aio: T): T {
         typeof key === "symbol" || key in target || CELL_AIO_KEYS.has(key) ||
         PLATFORM_PROBES.has(key) || FRAMEWORK_PHANTOM_READS.has(key)
       ) return Reflect.get(target, key, receiver);
+      const id = String((target as { id?: unknown }).id ?? "?");
+      const msg = `[cell:${id}] __aio.${key} does not exist — drive methods ` +
+        `with testCell/testUI (docs/testing/ui-testing.md)`;
       if ((globalThis as Record<string, unknown>).__aioDev === true) {
-        const id = String((target as { id?: unknown }).id ?? "?");
-        throw new Error(
-          `[cell:${id}] __aio.${key} does not exist — drive methods with ` +
-            `testCell/testUI (docs/testing/ui-testing.md)`,
-        );
+        throw new Error(msg);
+      }
+      // Prod answers `undefined` — and says which read it was, once.
+      if (firstTime(`__aio ${id}.${key}`)) {
+        log.warn("cell", `${msg} (undefined was returned)`);
       }
       return undefined;
     },

@@ -169,7 +169,11 @@ Deno.test("WYSIDIWYSIP: android local shell head matches the prod shell head", (
       .replace(
         /\n\s*<style media="not all" data-aio-theme-deferred(?:-nolayout)?>[\s\S]*?<\/style>/g,
         "",
-      );
+      )
+      // The too-old-engine line: the server shell writes it itself; a
+      // packaged shell is given it by its build, in that target's own words
+      // (tests/android-bake-run-options.test.ts) — one function, both.
+      .replace(/\n\s*<script>if\(typeof structuredClone[\s\S]*?<\/script>/, "");
   assertEquals(
     norm(headOf(android)),
     norm(headOf(server)),

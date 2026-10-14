@@ -14,6 +14,7 @@
 import { assert, assertEquals } from "@std/assert";
 import {
   isUnpinned,
+  lockLineWriter,
   unpinnedImports,
   unpinnedSpecifiers,
 } from "../scripts/check-lock.ts";
@@ -52,6 +53,20 @@ Deno.test("lock: only real import positions count", () => {
   // …and a version makes it fine.
   assertEquals(unpinnedImports(imp("jsr:@std/assert@1")), []);
   assertEquals(unpinnedImports(imp("npm:esbuild@^0.24")), []);
+});
+
+// An open-ended line with no import behind it had no known writer: nothing
+// tracked asks for it. Measured — `deno eval` of an unversioned import, run
+// anywhere under the checkout, writes it. The gate says which of the two.
+Deno.test("lock: an open-ended line names the file that asked for it, or says a hand-run command did", () => {
+  const hits = ["  tests/a.test.ts  imports jsr:@std/path"];
+  assertEquals(
+    lockLineWriter("jsr:@std/path@*", hits),
+    "written by tests/a.test.ts",
+  );
+  const byHand = lockLineWriter("npm:happy-dom@*", hits);
+  assert(/no tracked file imports `npm:happy-dom`/.test(byHand), byHand);
+  assert(/deno eval/.test(byHand), byHand);
 });
 
 Deno.test("lock: this repo's own deno.lock has no open-ended request", async () => {

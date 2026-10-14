@@ -2,6 +2,7 @@
 // port) printed `started sockapp (pid …, port 0)` — a door that does not
 // exist. It names the socket now, as `am status` does. A TCP app also names
 // the URL to click: the port alone left the reader typing it by hand.
+import "./store-sandbox.ts";
 import { assertEquals } from "@std/assert";
 import {
   localAppUrl,

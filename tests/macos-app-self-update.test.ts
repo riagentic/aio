@@ -7,6 +7,7 @@
 // a real translocated launch runs from `/private/var/folders/…/AppTranslocation
 // /<uuid>/d/X.app`, and the codesign seal does not cover the folder NAME, so a
 // bundle verified as `X.app.staged-2` stays valid once renamed to `X.app`.)
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import {

@@ -64,9 +64,9 @@ task fanning out over `build.targets`.
 - Per-user visibility: `access` gates who may **call**, `visible: { forUser }`
   gates who may **see** — a multi-user app needs both ([auth](../auth/auth.md)).
 - TLS under `--expose`: browsers accept the generated self-signed cert with a
-  click-through; non-browser clients need the real cert
-  (`--tls-cert`/`--tls-key`) or the app's generated CA — the boot warning names
-  the limitation.
+  click-through (or with no warning once the machine's aio root is trusted —
+  `am trust`); non-browser clients need the real cert (`--tls-cert`/`--tls-key`)
+  or the app's generated CA — the boot warning names the limitation.
 - Testing: `testUI({ user })` for role-dependent screens, `testServer` for real
   auth round-trips, `am surface`/`trigger` against the live app. The off-box
   remote pass is the [validation runbook](../build/validation-runbook.md).

@@ -8,7 +8,8 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { findChromium } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
-import { fromFileUrl } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
+import { spec } from "./module-spec-helper.ts";
 
 function stripAnsi(s: string): string {
   return s.replace(/\x1b\[[0-9;]*m/g, "");
@@ -34,7 +35,7 @@ const FFPROBE = await hasFfprobe();
 const fixture = (tests: string) =>
   `import { testUI } from "aio/testing";
 import { assertEquals } from "@std/assert";
-import App from ${JSON.stringify(TODO + "src/App.tsx")};
+import App from ${JSON.stringify(spec(TODO) + "src/App.tsx")};
 ${tests}
 `;
 
@@ -127,7 +128,8 @@ testUI(App, "checks an item", async (ui) => {
         "the look is printed once per run",
       );
       for (const name of ["adds-an-item", "checks-an-item"]) {
-        assertStringIncludes(r.text, `${dir}/videos/${name}.mp4`);
+        // The product prints the path it wrote, in the OS's own spelling.
+        assertStringIncludes(r.text, join(dir, "videos", `${name}.mp4`));
         await probe(`${dir}/videos/${name}.mp4`, "h264");
       }
     } finally {

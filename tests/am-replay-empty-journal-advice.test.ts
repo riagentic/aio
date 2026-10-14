@@ -5,6 +5,7 @@
 // replay from). The advice now names what does keep a journal: a long
 // `persistDebounceMs`, copied before a clean stop. Both halves are checked
 // here against a real boot, not against the wording.
+import "./store-sandbox.ts";
 import { assert, assertRejects, assertStringIncludes } from "@std/assert";
 import { aio } from "../src/server/aio.ts";
 import { cell } from "../src/state/cell-create.ts";

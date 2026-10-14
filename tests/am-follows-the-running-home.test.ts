@@ -19,6 +19,7 @@
 // already the one seam that makes every `appDirs()` reader follow it. So the
 // fix applies an existing rule without being asked, and these tests pin the
 // four cases where it must NOT.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import {

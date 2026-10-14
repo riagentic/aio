@@ -29,6 +29,7 @@
 //
 // The pure half runs everywhere. The live half needs Electron and a display
 // (ELECTRON_E2E=1).
+import { childEnv } from "./e2e-app-harness.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { udsProdHTML } from "../src/electron/electron-shared.ts";
 import {
@@ -190,7 +191,7 @@ Deno.test({
       );
       const cmd = new Deno.Command(ELECTRON_BIN, {
         args: [dir, `${dir}/shell.html`],
-        env: { ...testDisplayEnv() },
+        env: childEnv({ ...testDisplayEnv() }),
         stdout: "piped",
         stderr: "piped",
       });

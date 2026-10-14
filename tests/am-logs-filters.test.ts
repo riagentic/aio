@@ -5,6 +5,7 @@
 // dozens of times (report 7 §6, §8.8; report 4 §9.8). A substring filter cannot
 // express "warnings and worse", cannot express "from this cell", and cannot
 // express "since the restart" at all.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import {
   groupLogEvents,

@@ -216,6 +216,12 @@ export type FromWorker =
      *  discarded it: two replicas, permanently apart. Tagged, the owner drops
      *  it exactly as the worker does. */
     gen: number;
+    /** The owner call ids (`call.id`) whose actions committed these ops —
+     *  the calls a failed save of this batch is answered to (`unsaved`).
+     *  Absent when any op in the batch came from an action no call can be
+     *  named for (an `onInit` dispatch, an effect's follow-up): the batch is
+     *  then every running call's, as it was before batches carried this. */
+    calls?: number[];
   }
   /** Effects the method returned — executed on the main isolate (schedules and
    *  cross-cell dispatches live there). */

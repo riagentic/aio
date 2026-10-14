@@ -33,6 +33,29 @@ const nonBrowserEntry = (spec: string) =>
  *  wherever `app.js` happens to be mounted. */
 export const DEV_CHUNK_URL = "/__aio/browser/dev-diagnostics.ts";
 
+/** `src/air/dev-air.ts`, on either path separator — the renderer's dev layer,
+ *  which a production bundle gets as an empty record (see the plugin). Only a
+ *  FILTER: the name alone would also cut an app's own `…/air/dev-air.ts`, so
+ *  {@linkcode isFrameworkDevAir} decides. */
+export const DEV_AIR_RE = /[\\/]air[\\/]dev-air\.ts$/;
+
+/** THIS framework's `air/dev-air.ts` — beside this file, wherever that is: a
+ *  path on disk, or a URL when the framework is imported from a registry. */
+const DEV_AIR_URL = new URL("../air/dev-air.ts", import.meta.url);
+
+/** Is `path` (a module esbuild is about to load) the framework's dev layer,
+ *  and not an app file that happens to share its name? Symlinks resolved on
+ *  both sides: an app may reach the framework through one. */
+export function isFrameworkDevAir(path: string): boolean {
+  if (path === DEV_AIR_URL.href) return true;
+  if (DEV_AIR_URL.protocol !== "file:") return false;
+  try {
+    return Deno.realPathSync(path) === Deno.realPathSync(DEV_AIR_URL);
+  } catch {
+    return false; // aio-ok(silent-catch): not a file on disk, so not ours
+  }
+}
+
 /** Static server-only imports seen in the last client build:
  *  `specifier → the modules that statically import it`.
  *
@@ -238,6 +261,22 @@ export function aioBrowserPlugin(): {
           if (args.kind !== "dynamic-import") return undefined;
           return { path: DEV_CHUNK_URL, external: true };
         },
+      );
+
+      // …AND THE RENDERER'S OWN DEV LAYER, `air/dev-air.ts`: the a11y lint,
+      // the controlled-input drift check, the known-event list, the key
+      // checks, the alignment walk, the render-burst tripwire. Same argument,
+      // different mechanism: `air/dev-hooks.ts` imports it STATICALLY, so every
+      // runtime that runs source (a dev page, a test, a server render) has the
+      // checks from its first line with nothing to load — and this build
+      // answers the import with an empty record, so the bundle has none of it
+      // and each `devHooks.x?.(…)` call site stays a null check.
+      build.onLoad(
+        { filter: DEV_AIR_RE },
+        (args: { path: string }) =>
+          isFrameworkDevAir(args.path)
+            ? { contents: "export const airDevHooks = {};", loader: "js" }
+            : undefined,
       );
 
       // AIO-55: Return CJS stub module for server-only imports.

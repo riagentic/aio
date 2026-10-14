@@ -1,5 +1,6 @@
 // The rest of the static-audit LOW tier that survived verification (L6, L11, L13, L23,
 // L26) — every one a quiet wrong outcome rather than a crash.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 
 // ── L6: close() abandoned in-flight queries without settling them ───────────

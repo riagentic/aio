@@ -272,7 +272,50 @@ async function run(mode: "mount" | "hydrate") {
   const mutate = (root: Spec) => {
     const cs = all(root).filter((s) => "kids" in s) as Container[];
     const c = cs[pick(cs.length)]!;
-    switch (pick(8)) {
+    /** Is `t` inside `s` (or `s` itself)? Nothing moves into itself. */
+    const has = (s: Spec, t: Spec): boolean =>
+      s === t || ("kids" in s && s.kids.some((k) => has(k, t)));
+    switch (pick(12)) {
+      case 8: { // REPARENT: a child leaves one container for another
+        const to = cs[pick(cs.length)]!;
+        if (!c.kids.length) break;
+        const i = pick(c.kids.length);
+        if (has(c.kids[i]!, to)) break;
+        to.kids.splice(pick(to.kids.length + 1), 0, ...c.kids.splice(i, 1));
+        break;
+      }
+      case 9: { // one position, same id and children, ANOTHER KIND of node
+        const at = c.kids.findIndex((k) => "kids" in k);
+        if (at < 0) break;
+        const old = c.kids[at] as Container;
+        const kinds = (["e", "c", "f", "b", "p"] as const).filter((k) =>
+          k !== old.k
+        );
+        const k = kinds[pick(kinds.length)]!;
+        const { id, kids } = old;
+        const km = "km" in old ? old.km : false;
+        c.kids[at] = k === "e"
+          ? { k, id, tag: ["section", "i"][pick(2)]!, km, kids }
+          : k === "p"
+          ? { k, id, kids }
+          : { k, id, km, kids };
+        break;
+      }
+      case 10: { // UNWRAP: a container goes, its children take its place
+        const at = c.kids.findIndex((k) => "kids" in k);
+        if (at >= 0) c.kids.splice(at, 1, ...(c.kids[at] as Container).kids);
+        break;
+      }
+      case 11: { // two children of DIFFERENT containers trade places
+        const d = cs[pick(cs.length)]!;
+        if (c === d || !c.kids.length || !d.kids.length) break;
+        const i = pick(c.kids.length), j = pick(d.kids.length);
+        const x = c.kids[i]!, y = d.kids[j]!;
+        if (has(x, d) || has(y, c)) break;
+        c.kids[i] = y;
+        d.kids[j] = x;
+        break;
+      }
       case 0: // swap two siblings
         if (c.kids.length > 1) {
           const i = pick(c.kids.length), j = pick(c.kids.length);
@@ -393,7 +436,25 @@ async function run(mode: "mount" | "hydrate") {
       try {
         for (let step = 0; step < STEPS; step++) {
           const roll = rand();
-          if (roll < 0.5) {
+          // One step in five is TWO causes in one flush: a component's own
+          // signal first, then the model around it — a self re-render queued
+          // for an instance the top-down diff is about to move, re-kind or
+          // remove.
+          if (roll >= 0.8) {
+            const cs = all(spec).filter((s) => s.k === "c");
+            if (cs.length) {
+              const s = sig(cs[pick(cs.length)]!.id);
+              s.set(s.value + 1 + pick(4));
+              selfRenders++;
+            }
+            spec = clone(spec);
+            mutate(spec);
+            history.push(
+              `sigs=${[...SIG].map(([k, v]) => k + ":" + v.value)}`,
+              clone(spec),
+            );
+            MODEL.set(clone(spec));
+          } else if (roll < 0.5) {
             spec = clone(spec);
             mutate(spec);
             history.push(clone(spec));

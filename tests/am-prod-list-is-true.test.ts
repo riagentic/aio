@@ -10,6 +10,7 @@
 // docs and CLI output. A list of what works in production has to be a list of
 // what works in production, so it is checked against the implementations
 // rather than maintained by hand.
+import "./store-sandbox.ts";
 import { assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import { codeText } from "../src/diagnostics/code-mask.ts";

@@ -131,8 +131,11 @@ const alive = (pid: number) => {
 };
 const err = (o: Deno.CommandOutput) => new TextDecoder().decode(o.stderr);
 
-Deno.test("first-boot rollback: a new version that never starts is put back and the old one relaunched", async () => {
-  if (Deno.build.os === "windows") return; // the PowerShell twin: measured on the Windows VM
+Deno.test({
+  name:
+    "first-boot rollback: a new version that never starts is put back and the old one relaunched",
+  ignore: Deno.build.os === "windows", // the POSIX sh swap helper — its PowerShell twin: tests/updates-swap-windows.test.ts
+}, async () => {
   const dir = await tempDir("aio-fbr-dead-");
   try {
     const { current, data, ran, out } = await swapWith(dir, () => "exit 1", 2);
@@ -154,8 +157,11 @@ Deno.test("first-boot rollback: a new version that never starts is put back and 
   }
 });
 
-Deno.test("first-boot rollback: a first boot that takes the token keeps the new version, without the wait", async () => {
-  if (Deno.build.os === "windows") return;
+Deno.test({
+  name:
+    "first-boot rollback: a first boot that takes the token keeps the new version, without the wait",
+  ignore: Deno.build.os === "windows", // the POSIX sh swap helper — its PowerShell twin: tests/updates-swap-windows.test.ts
+}, async () => {
   const dir = await tempDir("aio-fbr-live-");
   try {
     // A long wait: the hand-back must not wait it out.
@@ -179,8 +185,11 @@ Deno.test("first-boot rollback: a first boot that takes the token keeps the new 
 // Race, order 1: the helper claims first. The new version is still running
 // (hung before its first boot) — it is stopped, and waited for, BEFORE any
 // directory moves; its boot, arriving late, loses and touches nothing.
-Deno.test("first-boot rollback: helper claims first — the running new version is stopped before the swap back, and its boot then loses", async () => {
-  if (Deno.build.os === "windows") return;
+Deno.test({
+  name:
+    "first-boot rollback: helper claims first — the running new version is stopped before the swap back, and its boot then loses",
+  ignore: Deno.build.os === "windows", // the POSIX sh swap helper — its PowerShell twin: tests/updates-swap-windows.test.ts
+}, async () => {
   const dir = await tempDir("aio-fbr-race1-");
   try {
     const pidFile = join(dir, "v2.pid");
@@ -209,8 +218,11 @@ Deno.test("first-boot rollback: helper claims first — the running new version 
 // Race, order 2: the new version claims at the very instant the wait runs
 // out (a seam holds the helper between its last look and its claim). The
 // helper's rename fails, and it steps aside: v2 keeps running, nothing moves.
-Deno.test("first-boot rollback: new version claims first, even at the timeout instant — the helper steps aside", async () => {
-  if (Deno.build.os === "windows") return;
+Deno.test({
+  name:
+    "first-boot rollback: new version claims first, even at the timeout instant — the helper steps aside",
+  ignore: Deno.build.os === "windows", // the POSIX sh swap helper — its PowerShell twin: tests/updates-swap-windows.test.ts
+}, async () => {
   const dir = await tempDir("aio-fbr-race2-");
   let pid = 0;
   try {
@@ -255,8 +267,11 @@ for (
     ["removes", (m: string) => `rm '${m}'`],
   ] as const
 ) {
-  Deno.test(`first-boot rollback: a new version that ${how} the marker (aio <= 1.0.12) keeps running, without the wait`, async () => {
-    if (Deno.build.os === "windows") return;
+  Deno.test({
+    name:
+      `first-boot rollback: a new version that ${how} the marker (aio <= 1.0.12) keeps running, without the wait`,
+    ignore: Deno.build.os === "windows", // the POSIX sh swap helper — its PowerShell twin: tests/updates-swap-windows.test.ts
+  }, async () => {
     const dir = await tempDir("aio-fbr-legacy-");
     let pid = 0;
     try {
@@ -287,8 +302,11 @@ for (
 // ...and at the very instant of the claim: the helper took the token, but the
 // marker changed under it. It hands the claim back rather than stop a build
 // that booted.
-Deno.test("first-boot rollback: an aio <= 1.0.12 boot at the claim instant keeps the new version", async () => {
-  if (Deno.build.os === "windows") return;
+Deno.test({
+  name:
+    "first-boot rollback: an aio <= 1.0.12 boot at the claim instant keeps the new version",
+  ignore: Deno.build.os === "windows", // the POSIX sh swap helper — its PowerShell twin: tests/updates-swap-windows.test.ts
+}, async () => {
   const dir = await tempDir("aio-fbr-legacy-race-");
   let pid = 0;
   try {
@@ -319,8 +337,10 @@ Deno.test("first-boot rollback: an aio <= 1.0.12 boot at the claim instant keeps
   }
 });
 
-Deno.test("first-boot rollback: a missing token still launches the new version", async () => {
-  if (Deno.build.os === "windows") return;
+Deno.test({
+  name: "first-boot rollback: a missing token still launches the new version",
+  ignore: Deno.build.os === "windows", // the POSIX sh swap helper — its PowerShell twin: tests/updates-swap-windows.test.ts
+}, async () => {
   const dir = await tempDir("aio-fbr-notoken-");
   try {
     const { current, data, ran, out } = await swapWith(
@@ -363,8 +383,11 @@ const refuseMv = (cond: string, say = ":") => (s: string) => {
   ));
 };
 
-Deno.test("swap failure: the new version cannot be moved into place — the old one is started, and the record says why", async () => {
-  if (Deno.build.os === "windows") return;
+Deno.test({
+  name:
+    "swap failure: the new version cannot be moved into place — the old one is started, and the record says why",
+  ignore: Deno.build.os === "windows", // the POSIX sh swap helper — its PowerShell twin: tests/updates-swap-windows.test.ts
+}, async () => {
   const dir = await tempDir("aio-swapfail-new-");
   try {
     const staged = join(dir, "My App.staged-2.0.0");
@@ -396,8 +419,11 @@ Deno.test("swap failure: the new version cannot be moved into place — the old 
   }
 });
 
-Deno.test("swap failure: an earlier copy that cannot be removed — nothing moves, the old one is started", async () => {
-  if (Deno.build.os === "windows" || Deno.uid() === 0) return; // root ignores the mode
+Deno.test({
+  name:
+    "swap failure: an earlier copy that cannot be removed — nothing moves, the old one is started",
+  ignore: Deno.build.os === "windows" || Deno.uid() === 0, // the POSIX sh swap helper — its PowerShell twin: tests/updates-swap-windows.test.ts; root ignores the mode
+}, async () => {
   const dir = await tempDir("aio-swapfail-prev-");
   const locked = join(dir, "My App.old-1.0.0", "locked");
   try {
@@ -443,8 +469,11 @@ Deno.test("swap failure: an earlier copy that cannot be removed — nothing move
 // A swap given up used to record a fixed sentence: which move, never why.
 // What the failing command printed now rides along — as ONE line of bounded
 // length that cannot end the JSON string it is written into.
-Deno.test("swap failure: the record carries what the failing move said — one line, bounded, still JSON", async () => {
-  if (Deno.build.os === "windows") return;
+Deno.test({
+  name:
+    "swap failure: the record carries what the failing move said — one line, bounded, still JSON",
+  ignore: Deno.build.os === "windows", // the POSIX sh swap helper — its PowerShell twin: tests/updates-swap-windows.test.ts
+}, async () => {
   const dir = await tempDir("aio-swapfail-why-");
   try {
     const said = String.raw`printf 'mv: "%s" is\held
@@ -494,8 +523,11 @@ const exchanging = (log: string) => (s: string) => {
   );
 };
 
-Deno.test("swap failure: after an exchange, a copy that cannot be set aside is exchanged back ONCE — the record names that move and why", async () => {
-  if (Deno.build.os === "windows") return;
+Deno.test({
+  name:
+    "swap failure: after an exchange, a copy that cannot be set aside is exchanged back ONCE — the record names that move and why",
+  ignore: Deno.build.os === "windows", // the POSIX sh swap helper — its PowerShell twin: tests/updates-swap-windows.test.ts
+}, async () => {
   const dir = await tempDir("aio-swapfail-xchg-");
   try {
     const log = join(dir, "exchanges");
@@ -551,8 +583,11 @@ for (
     ],
   ] as const
 ) {
-  Deno.test(`first-boot rollback: ${step} — the version in place is started, and the record says the rollback failed`, async () => {
-    if (Deno.build.os === "windows") return;
+  Deno.test({
+    name:
+      `first-boot rollback: ${step} — the version in place is started, and the record says the rollback failed`,
+    ignore: Deno.build.os === "windows", // the POSIX sh swap helper — its PowerShell twin: tests/updates-swap-windows.test.ts
+  }, async () => {
     const dir = await tempDir("aio-fbr-unrolled-");
     try {
       const { current, data, ran, out } = await swapWith(
@@ -593,8 +628,11 @@ for (
 // claim, so on a box without diffutils (or with an unreadable marker) the
 // rollback watchdog was silently off and a build that never started stayed.
 for (const how of ["cmp fails to run", "the marker cannot be read"] as const) {
-  Deno.test(`first-boot rollback: ${how} — still no claim, the dead version is put back`, async () => {
-    if (Deno.build.os === "windows" || Deno.uid() === 0) return; // root reads any mode
+  Deno.test({
+    name:
+      `first-boot rollback: ${how} — still no claim, the dead version is put back`,
+    ignore: Deno.build.os === "windows" || Deno.uid() === 0, // the POSIX sh swap helper — its PowerShell twin: tests/updates-swap-windows.test.ts; root ignores the mode
+  }, async () => {
     const dir = await tempDir("aio-fbr-nocmp-");
     const bin = join(dir, "bin");
     try {
@@ -627,8 +665,11 @@ const stuckAtCur = (phase: "swap" | "rollback") =>
     `[ "$dst" = "$cur" ]${phase === "rollback" ? ' && [ -e "$failed" ]' : ""}`,
   );
 
-Deno.test("first-boot rollback: neither version can be moved back — the record says so, and the old one is started where it is", async () => {
-  if (Deno.build.os === "windows") return;
+Deno.test({
+  name:
+    "first-boot rollback: neither version can be moved back — the record says so, and the old one is started where it is",
+  ignore: Deno.build.os === "windows", // the POSIX sh swap helper — its PowerShell twin: tests/updates-swap-windows.test.ts
+}, async () => {
   const dir = await tempDir("aio-fbr-stuck-");
   try {
     const { current, data, ran } = await swapWith(dir, () => "exit 1", 1, {
@@ -650,8 +691,11 @@ Deno.test("first-boot rollback: neither version can be moved back — the record
   }
 });
 
-Deno.test("swap failure: neither version can be moved into place — the record says why, and the old one is started where it is", async () => {
-  if (Deno.build.os === "windows") return;
+Deno.test({
+  name:
+    "swap failure: neither version can be moved into place — the record says why, and the old one is started where it is",
+  ignore: Deno.build.os === "windows", // the POSIX sh swap helper — its PowerShell twin: tests/updates-swap-windows.test.ts
+}, async () => {
   const dir = await tempDir("aio-swapfail-stuck-");
   try {
     const { current, data, ran, out } = await swapWith(
@@ -676,8 +720,11 @@ Deno.test("swap failure: neither version can be moved into place — the record 
 
 // A launcher OUTSIDE the install (macOS: `/usr/bin/open -n <app> --args …`)
 // names the install as an argument: that argument is re-aimed too.
-Deno.test("swap failure: a launcher outside the install is handed the copy that is left", async () => {
-  if (Deno.build.os === "windows") return;
+Deno.test({
+  name:
+    "swap failure: a launcher outside the install is handed the copy that is left",
+  ignore: Deno.build.os === "windows", // the POSIX sh swap helper — its PowerShell twin: tests/updates-swap-windows.test.ts
+}, async () => {
   const dir = await tempDir("aio-swapfail-open-");
   try {
     const { ran, out } = await swapWith(dir, () => "exit 0", 60, {
@@ -697,8 +744,11 @@ Deno.test("swap failure: a launcher outside the install is handed the copy that 
 // LaunchServices opens a bundle only under a `.app` name, so `open -n` on the
 // set-aside `X.app.old-1.0.0` fails (measured, macOS 14): that copy is
 // started by its own executable, with the app's arguments.
-Deno.test("swap failure (macOS): a set-aside .app copy is started by its executable", async () => {
-  if (Deno.build.os !== "darwin") return; // PlistBuddy and LaunchServices
+Deno.test({
+  name:
+    "swap failure (macOS): a set-aside .app copy is started by its executable",
+  ignore: Deno.build.os !== "darwin", // PlistBuddy and LaunchServices
+}, async () => {
   const dir = await tempDir("aio-swapfail-app-");
   try {
     const { ran, out } = await swapWith(dir, () => "exit 0", 60, {
@@ -934,8 +984,11 @@ Deno.test(
 // the install can start to repair it. A `mv` in front of the real one fails
 // the move INTO the install once (the flag), then freezes the next move OUT
 // of it; the helper is killed there. The install must be in place.
-Deno.test("swap: a SIGKILL while a move into place is retried leaves the running version at the install's name", async () => {
-  if (Deno.build.os === "windows") return;
+Deno.test({
+  name:
+    "swap: a SIGKILL while a move into place is retried leaves the running version at the install's name",
+  ignore: Deno.build.os === "windows", // the POSIX sh swap helper — its PowerShell twin: tests/updates-swap-windows.test.ts
+}, async () => {
   const dir = await tempDir("aio-swap-kill-");
   const bin = join(dir, "bin");
   const flag = join(dir, "flag");
@@ -1004,8 +1057,11 @@ async function realMv(): Promise<string> {
 // of the real one notes each time the name is empty around a move; the same
 // swap through a `mv` that cannot exchange is the instrument's positive
 // control: it must see the name empty.
-Deno.test("swap: an mv that can exchange keeps an install at the install's name through the swap and the rollback", async () => {
-  if (Deno.build.os !== "linux") return; // renameat2 is Linux's
+Deno.test({
+  name:
+    "swap: an mv that can exchange keeps an install at the install's name through the swap and the rollback",
+  ignore: Deno.build.os !== "linux", // renameat2 is Linux's
+}, async () => {
   if (!(await exists("/usr/bin/python3"))) return; // the exchanging mv's syscall
   for (const exchange of [true, false]) {
     const dir = await tempDir("aio-swap-exchange-");

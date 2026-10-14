@@ -20,7 +20,10 @@ function extractFn(src: string, header: string): string {
 
 Deno.test("aio-client: the window-icon fetch of a ?token= URL keeps the token intact and asks for the icon route", async () => {
   const src = electronClientScript(null);
-  const connectToSrc = extractFn(src, "async function connectTo(win, url) {") +
+  const connectToSrc = extractFn(
+    src,
+    "async function connectTo(win, url, withheld) {",
+  ) +
     extractFn(src, "function looksLikeAio(html) {") +
     extractFn(src, "function parseMeta(html) {");
   const fetched: string[] = [];
@@ -36,6 +39,7 @@ Deno.test("aio-client: the window-icon fetch of a ?token= URL keeps the token in
     "_trustedHosts",
     "__aioIpcBind", // the app-window bind (electron-web-isolation.test.ts)
     "__aioOrigin",
+    "learnProof", // the pin proof, after a connect (pin-proof.test.ts)
     `${connectToSrc}\nreturn connectTo;`,
   );
   const connectTo = make(
@@ -52,6 +56,7 @@ Deno.test("aio-client: the window-icon fetch of a ?token= URL keeps the token in
     new Set(),
     () => {},
     (u: string) => new URL(u).origin,
+    () => {},
   ) as (win: unknown, url: string) => Promise<void>;
   const win = {
     setIcon() {},

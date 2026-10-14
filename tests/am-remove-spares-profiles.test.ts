@@ -8,6 +8,7 @@
 // unseen. Run as a real subprocess in a sandbox (HOME, AIO_APPS_DIR,
 // AIO_INSTALL_ROOT, … in one temp dir, environment cleared) — nothing here can
 // reach a real home.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";

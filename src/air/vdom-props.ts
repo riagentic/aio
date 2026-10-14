@@ -13,14 +13,13 @@ import {
   _clearDomProp,
   _controlDrifted,
   _defaultSelected,
+  _recordControlled,
   _RESERVED_PROPS,
   _selectValues,
   _writeProp,
 } from "./prop-write.ts";
 import { attrNameOf as _attrName } from "./ssr-utils.ts";
 import { _DOM_PROPS } from "./vdom-types.ts";
-import { isDevMode } from "../state/dev-flag.ts";
-import { _recordControlled } from "./control-drift.ts";
 import {
   _CHANGE_TARGETS,
   _DELEGATED_EVENTS,
@@ -135,8 +134,8 @@ export function applyProps(
   const prevChangeEvt = typeof prev.onChange === "function"
     ? _mapEventName("change", el, _hadOnInput)
     : null;
-  // Two props, one attribute — the write below is last-wins; dev says so.
-  if (isDevMode()) _classProp(next);
+  // Two props, one attribute — the write below is last-wins, and said.
+  if ("class" in next && "className" in next) _classProp(next);
 
   // Remove old props not in next
   for (const k of Object.keys(prev)) {

@@ -7,6 +7,10 @@ agents alike.
 deno task am <command> [args] [--flags]
 ```
 
+`am` is typed the same in every shell. Where an example here uses a POSIX-only
+form (`&&`, `VAR=1 cmd`, `~/…`), see
+[aio on Windows and macOS](../basics/windows-macos.md).
+
 > Prefer a GUI? **amui** (Aio Manager UI) is the visual app manager — discover,
 > inspect (cells, merged state with persist/UI flags, metrics, files), and
 > start/stop every aio app on your machine. Launch it with `am ui`
@@ -110,6 +114,33 @@ old-scaffold tasks are **deleted** (the new matrix covers them — dev flags pas
 through, `deno task build` builds the fleet) or rewritten; `*:service` names
 rename to `*:server`; anything whose command you customized is **kept** and
 reported as "review manually" — it never deletes a user-edited task.
+
+### `--harden`: the opt-in security switches
+
+Some doors are closed only by a key the app sets, because closing them by
+default would change an app that already ships: `build.strictPin` /
+`electron.strictPin` (a paired Electron client refuses a server whose
+certificate changed, instead of sending it the saved key) and
+`electron.ignoreDebugEnv` (a desktop app ignores an ambient `AIO_CDP` /
+`AIO_PORT`). `am create` writes them into a new app. For an existing one,
+`am doctor` names each that applies and is undecided — a hint, never an error —
+and plain `am fix` leaves them alone.
+
+```sh
+am fix --harden --dry-run   # what it would write
+am fix --harden
+```
+
+`--harden` writes `"build": { "strictPin": true }` into `deno.json` when the app
+builds an `electron-client`, and prints the exact `aio.run()` line for the keys
+that live in your entry (it does not edit app source). A key you have set — to
+`true` or to `false` — is your decision and is never touched.
+
+An app that replaces the Android template's activity
+(`android/…/MainActivity.kt`) is told `build.android.strict` the same way, and
+`--harden` writes `"build": { "android": { "strict": true } }`: an overlay that
+drops part of the template's activity then
+[fails the build](../build/targets.md) instead of warning.
 
 ### The seal: an unpinned app gets pinned
 
@@ -369,7 +400,12 @@ deno task am stop --all           # every app OF THIS PROJECT (refused outside o
                                   # no deno.json above the cwd means no project; an
                                   # app launched inside a NESTED project is that
                                   # project's, and is named and left running)
-deno task am kill                 # end it now, no asking (SIGTERM + drop the lock)
+deno task am kill                 # end it now, no asking (SIGTERM + drop the lock;
+                                  # on Windows it is asked to stop first, 3 s, and
+                                  # the answer is one of three: "stopped cleanly",
+                                  # "ended hard: onStop and the last flush did not
+                                  # run", or "was not running any more" — with
+                                  # --json, how: "clean" | "hard" | "gone")
 deno task am kill --stale         # reap ORPHANS — processes still serving with no
                                   # lock: the ones that answer `am state` with old
                                   # numbers while `am status` says stopped.
@@ -397,7 +433,9 @@ refuse while it lasts, naming it. `am instances` lists the hold the same way
 command about any OTHER app: it is not offered as "the one app that is running",
 not listed under "N apps are running", and `--port=0` does not name it.
 `am kill` is the one verb that acts on it: it interrupts the op (SIGTERM), which
-removes its partial copy and exits 143 with `data/` as it was. A holder that is
+removes its partial copy and exits 143 with `data/` as it was. (Windows has no
+SIGTERM: `am kill` ends the copy at once and removes the incomplete copy itself;
+Ctrl-C in the copy's own terminal is the clean abort there.) A holder that is
 wedged and ignores even that (a hung disk, a stopped process) is ended with
 `kill -9 <pid>`: the lock names a dead pid from then on, and whatever finds it
 next — `am start`, `am status`, `am instances`, or the app's own boot — reclaims
@@ -449,7 +487,10 @@ with a `note:` on stderr that its own child stood down.
 `stop`, which used to return while the process was still alive). `restart`
 always waits for stop internally, then spawns and returns immediately. `stop`
 tries graceful shutdown via trojan API, falls back to SIGTERM, escalates to
-SIGKILL after timeout. Kill sequence: SIGTERM -> wait 2s -> SIGKILL.
+SIGKILL after timeout. Kill sequence: SIGTERM -> wait 2s -> SIGKILL. On Windows
+the fallback is not graceful — there is no SIGTERM, the process is ended — so
+only the first step is a clean stop there
+([which stops are clean](../basics/windows-macos.md#stopping-an-app)).
 
 ### A project that is more than one app (components)
 
@@ -521,10 +562,11 @@ Controlled by `singleton` in `aio.run()`:
 | `'takeover'`     | Kill existing instance, start new one |
 | `false`          | Allow multiple instances              |
 
-Lock files at `/tmp/aio/` (or `$XDG_RUNTIME_DIR/aio/`) as `{appId}.lock`. Stale
-locks (dead PID) are auto-cleaned. Zombies (alive and listening, but not
-answering) are killed automatically on `start`; an instance that is still
-booting is waited for, never killed (see Process management).
+Lock files at `$XDG_RUNTIME_DIR/aio/` — `/tmp/aio/` where that is unset, which
+includes macOS; `%TEMP%\aio\` on Windows — as `{appId}.lock`. Stale locks (dead
+PID) are auto-cleaned. Zombies (alive and listening, but not answering) are
+killed automatically on `start`; an instance that is still booting is waited
+for, never killed (see Process management).
 
 **Identity is appId AND data home.** An app booted again from a different
 `appDir` (an isolated smoke-test or screenshot boot beside the user's own) is a
@@ -537,6 +579,13 @@ duplicate, whose port and pid are your own instance's. `am --home=<dir>` (or
 `AIO_APPS_DIR=<root>`) targets the instance you mean; `am instances` shows each
 instance's `home`. A named profile's key is `{appId}@{name}` rather than a hash
 — see [Profiles](#profiles-several-copies-of-one-app).
+
+Two `AIO_APPS_DIR` roots whose lock folder gets one name (it is named after the
+last 48 ASCII letters and digits of the path) see each other's apps. `am` under
+one refuses to stop, kill, restart or write to the other's app; a verb that only
+reads (`status`, `state`, `logs`, `surface`, `timeline`) answers, and says on
+stderr that the answer is about the other root's app — `am status --json` and
+`am instances --json` carry that root as `otherAppsDir`.
 
 **Filters.** A substring cannot ask "warnings and worse", "from this cell", or
 "since the restart":
@@ -859,19 +908,24 @@ am pin --latest           # newest release in this app's major (`am pin latest` 
 am pin /path/to/aio       # LOCAL-DEV pin: follow a framework checkout on this machine
 ```
 
-The framework CLI itself, and apps `run.sh` installed into `~/app/`:
+The framework CLI itself, and apps `run.sh` installed into `~/app/` (`run.ps1`:
+`%LOCALAPPDATA%\Programs\`):
 
 ```sh
 am upgrade                # update am itself to the latest release
 am uninstall              # remove am (your aio apps are untouched)
 am installed              # list installed apps, with version + where each came from
 am upgrade <app>          # rebuild and reinstall an installed APP from its recorded source
-am remove <app> [--data]  # uninstall one — the PROGRAM; --data also deletes ~/.<app>/
+                          # (a Windows one-click install: the new .exe installs itself
+                          #  without opening the app — close the app first, or exit 1)
+am remove <app> [--data]  # uninstall one — the PROGRAM (Windows: also a Start-menu
+                          # shortcut, only when it opens this app); --data also deletes ~/.<app>/
                           # (only when it is an aio data dir — data/state.db, data/meta.json,
                           #  launch.json… — never another program's ~/.<name>, --force or not;
                           #  never while the app runs from it: am stop first)
 am theme adopt            # take aio's stylesheet INTO this app (src/aio-theme.css) — yours from then on
 am publish [--key=K]      # build, sign and lay out the channel directory an update client fetches
+                          # --patch-from=<dir>: also a patch from the release published in <dir>
 ```
 
 A **path pin** is **per-machine**: `am pin /abs/checkout` writes the path to the
@@ -1055,7 +1109,8 @@ says which renderer answered: `"render": "server" | "client"` on each top-level
 node, and at the top level of `--names --json` (`{names, render}`) and
 `--rects --json` (`{roots, measured, render}`). If no client is connected,
 `am trigger` refuses and names a launch that keeps off your screen:
-`am start --client=electron` (on the nested display) or `--client=browser`.
+`am start --client=electron` (on the nested display — Linux with X11 only; on
+Windows and macOS the window opens on the desktop) or `--client=browser`.
 
 `type` APPENDS to the field's current value (a user typing into a field that
 already has one); `setValue` clears first, then types — use it to drive a form,

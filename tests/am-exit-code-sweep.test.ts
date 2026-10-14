@@ -28,6 +28,7 @@
 // no DISPLAY is passed — nothing here can reach the real home, a real app's
 // lock, or a real desktop. `uninstall` runs against a fake `deno` on PATH that
 // fails, so the real `deno uninstall -g am` never runs from a test.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { DELIMITER, fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";

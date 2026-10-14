@@ -11,6 +11,7 @@
 // every `Deno.Command("git", …)` in src/ must carry `GIT_NO_PROMPT_ENV`
 // (git fails loudly instead of asking) and `stdin: "null"` (nothing to read
 // even if something still tries).
+import "./store-sandbox.ts";
 import { assertEquals } from "@std/assert";
 import { codeMask } from "../src/diagnostics/code-mask.ts";
 

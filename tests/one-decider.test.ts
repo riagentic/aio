@@ -6,6 +6,7 @@
 // chain and one drifted. The precedence now lives in src/server/config-sources.ts
 // as ordered candidate lists; this file refuses a raw merge anywhere else, and
 // pins that the source label and the value come from the same list.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import {

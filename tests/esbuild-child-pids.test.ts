@@ -51,8 +51,11 @@ Deno.test("child pids: a thread that exited mid-scan does not hide the other thr
   );
 });
 
-Deno.test("child pids: the real /proc answers the same way with a vanished task in the listing", () => {
-  if (Deno.build.os !== "linux") return;
+Deno.test({
+  name:
+    "child pids: the real /proc answers the same way with a vanished task in the listing",
+  ignore: Deno.build.os !== "linux", // reads the real /proc, which only Linux has
+}, () => {
   const tasks = [...Deno.readDirSync("/proc/self/task")].map((t) => t.name);
   const real = (tid: string) =>
     Deno.readTextFileSync(`/proc/self/task/${tid}/children`);
@@ -79,8 +82,7 @@ Deno.test("still there: Linux waits for each service named; Windows, told none, 
 Deno.test({
   name:
     "esbuild stop: the service is a listed child while it runs, and gone when the stop returns",
-  // macOS has no listing (see `stopEsbuildService`): nothing to ask.
-  ignore: Deno.build.os === "darwin",
+  ignore: Deno.build.os === "darwin", // macOS has no child listing (see `stopEsbuildService`): nothing to ask
   sanitizeOps: true,
   sanitizeResources: true,
   fn: async () => {
@@ -105,7 +107,7 @@ Deno.test({
   // The rule exists only where the services cannot be told apart; Linux can
   // (esbuild-stop-in-flight.test.ts: "a service another esbuild instance
   // owns is neither waited for nor named").
-  ignore: Deno.build.os !== "windows",
+  ignore: Deno.build.os !== "windows", // the rule exists only where services cannot be told apart
   sanitizeOps: true,
   sanitizeResources: true,
   fn: async () => {

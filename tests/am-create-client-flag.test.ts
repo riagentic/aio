@@ -6,6 +6,7 @@
 // the old spelling. Driven through `parseGlobalFlags` first, because that is
 // the path a typed flag takes (the `--force` lesson: a parser-only test stayed
 // green while the global parser swallowed the flag).
+import "./store-sandbox.ts";
 import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { parseCreateArgs } from "../src/am/am-cmd-create.ts";
 import { parseGlobalFlags } from "../src/am/am-utils.ts";

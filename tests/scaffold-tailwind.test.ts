@@ -14,6 +14,7 @@
 // as a node package and fails with "Can't resolve 'tailwindcss'"), or
 // `nodeModulesDir` off — each produces a project that scaffolds cleanly and
 // fails on first run, at a distance from the cause.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { scaffold } from "../src/am/am-cmd-create.ts";
 

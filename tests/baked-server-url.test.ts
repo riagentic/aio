@@ -7,6 +7,7 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { bakedServerUrl } from "../src/server/paths.ts";
 import { electronClientScript } from "../src/electron/electron.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { _writeConnectPage } from "../src/build/build-android.ts";
 import { join } from "@std/path";
 
@@ -66,28 +67,165 @@ function launch(
   html: string,
   local: Map<string, string>,
   hash = "",
-  err = { textContent: "" },
-): { went: string | null; field: string } {
+  err: { textContent: string; onsubmit?: (e: unknown) => void } = {
+    textContent: "",
+  },
+  /** The shell's pairing bridge (`AioConnect` in MainActivity.kt) — absent
+   *  on a WebView without one. It answers in a later microtask, as a
+   *  message does. */
+  shell?: (q: Record<string, unknown>) => Record<string, unknown>,
+): {
+  went: string | null;
+  field: string;
+  /** The shell sends the page to `hash` while it is the page showing. */
+  rehash: (hash: string) => void;
+  /** Type `url` into the form and tap Connect. */
+  connect: (url: string) => void;
+  /** Every address the page opened, in order. */
+  visited: string[];
+} {
   const script = html.match(/<script>([\s\S]*?)<\/script>/)![1]!;
   const field = { value: "" };
   const start =
     `https://appassets.androidplatform.net/assets/index.html${hash}`;
-  const location = { href: start, hash };
-  new Function("localStorage", "location", "document", script)(
+  const visited: string[] = [];
+  const location = {
+    get href() {
+      return visited.at(-1) ?? start;
+    },
+    set href(v: string) {
+      visited.push(v);
+    },
+    hash,
+    pathname: "/assets/index.html",
+  };
+  const window: { onhashchange?: () => void } = {};
+  // Every other element the page touches (the pairing field, the warning).
+  const other = { value: "", textContent: "" };
+  const bridge: {
+    onmessage?: (e: { data: string }) => void;
+    postMessage: (m: string) => void;
+  } = {
+    postMessage: (m) => {
+      const q = JSON.parse(m);
+      const r = JSON.stringify({ id: q.id, ...shell!(q) });
+      queueMicrotask(() => bridge.onmessage?.({ data: r }));
+    },
+  };
+  new Function(
+    "localStorage",
+    "location",
+    "document",
+    "window",
+    "history",
+    "AioConnect",
+    script,
+  )(
     {
       getItem: (k: string) => local.get(k) ?? null,
       setItem: (k: string, v: string) => void local.set(k, v),
     },
     location,
     {
-      getElementById: (id: string) => id === "addr" ? field : err,
+      getElementById: (id: string) =>
+        id === "addr" ? field : id === "err" || id === "f" ? err : other,
     },
+    window,
+    { replaceState: () => location.hash = "" },
+    shell ? bridge : undefined,
   );
   return {
-    went: location.href === start ? null : location.href,
-    field: field.value,
+    get went() {
+      return location.href === start ? null : location.href;
+    },
+    get field() {
+      return field.value;
+    },
+    rehash: (h) => {
+      location.hash = h;
+      window.onhashchange?.();
+    },
+    connect: (url) => {
+      field.value = url;
+      err.onsubmit!({ preventDefault: () => {} });
+    },
+    visited,
   };
 }
+
+/** Let the bridge's answers (microtasks) land. */
+const answered = () => new Promise((r) => setTimeout(r, 0));
+
+// The form kept the address in localStorage alone, and a WebView writes that
+// to disk when it gets to it. Measured on an API 35 emulator: a kill within a
+// second of pairing brought the client back to "needs its key" — and a
+// pairing code works once. The shell keeps the address too, durably.
+Deno.test("client connect page: the shell holds the address before the server is opened, and what it holds wins at the next launch", async () => {
+  const dir = await tempDir("aio-connect-");
+  try {
+    await _writeConnectPage(dir, "Wallet", "http://10.0.0.5:8000");
+    const html = await Deno.readTextFile(join(dir, "index.html"));
+    const prefs = new Map<string, string>();
+    const asked: string[] = [];
+    let page: ReturnType<typeof launch>;
+    const shell = (q: Record<string, unknown>) => {
+      if ("remember" in q) {
+        // Asked BEFORE the page left: a kill from here on loses nothing.
+        asked.push(`remember, page at ${page.went}`);
+        prefs.set("server", String(q.remember));
+        return { remembered: true };
+      }
+      if ("recall" in q) return { server: prefs.get("server") ?? "" };
+      return { error: "not asked in this test" };
+    };
+    const local = new Map<string, string>();
+    // A fresh install: the shell holds nothing — the baked address.
+    page = launch(html, local, "", undefined, shell);
+    assertEquals(page.went, null, "the shell is asked first");
+    await answered();
+    assertEquals(page.went, "http://10.0.0.5:8000");
+    // The keyed server refused it; the user pastes the share link.
+    const link = "http://10.0.0.5:8000/?token=k";
+    page = launch(html, local, "#keyed", undefined, shell);
+    await answered();
+    page.connect(link);
+    assertEquals(page.went, null, "not opened before the shell answered");
+    await answered();
+    assertEquals(asked, ["remember, page at null"]);
+    assertEquals(page.went, link);
+    // The kill came before the WebView wrote localStorage: the next launch
+    // finds the OLD address there. The shell's copy wins — and heals it.
+    local.set("aio_server", "http://10.0.0.5:8000");
+    page = launch(html, local, "", undefined, shell);
+    await answered();
+    assertEquals(page.went, link);
+    assertEquals(local.get("aio_server"), link);
+    assertEquals(page.field, link);
+    // Connect tapped before the shell answered the load's question: the
+    // late answer opens nothing — only the address just typed is opened.
+    const typed = "http://10.0.0.6:8000";
+    page = launch(html, local, "#change", undefined, shell);
+    page.connect(typed);
+    await answered();
+    assertEquals(page.visited, [typed]);
+    assertEquals(prefs.get("server"), typed);
+    // A shell that knows neither question (an app's own, older
+    // MainActivity.kt): the stored address, and Connect still opens.
+    const old = () => ({ error: "org.json.JSONException: No value for base" });
+    local.set("aio_server", "http://192.168.1.9:8000");
+    page = launch(html, local, "", undefined, old);
+    await answered();
+    assertEquals(page.went, "http://192.168.1.9:8000");
+    page = launch(html, local, "#change", undefined, old);
+    await answered();
+    assertEquals(page.went, null);
+    page.connect("http://192.168.1.7:8000");
+    await answered();
+    assertEquals(page.went, "http://192.168.1.7:8000");
+  } finally {
+    await dropTempDir(dir);
+  }
+});
 
 Deno.test("client connect page: every launch goes straight in; #change (Back) stays on the form", async () => {
   const dir = await Deno.makeTempDir({ prefix: "aio-connect-" });
@@ -108,6 +246,21 @@ Deno.test("client connect page: every launch goes straight in; #change (Back) st
       err.textContent,
       "Could not reach http://10.0.0.5:8000",
     );
+    // The form already showing (Back opened it), then a Connect that fails:
+    // the shell can only change the HASH of the page it is on — no reload,
+    // so the page has to say it then. It said nothing: a tap on Connect to
+    // a dead server changed nothing on screen. A certificate the device
+    // does not trust (a server run with --expose signs its own) likewise.
+    const shown = { textContent: "" };
+    const form = launch(html, local, "#change", shown);
+    assertEquals(shown.textContent, "");
+    form.rehash("#unreachable");
+    assertStringIncludes(shown.textContent, "Could not reach http://10.0.0.5");
+    form.rehash("#untrusted");
+    assertStringIncludes(shown.textContent, "does not trust the certificate");
+    // What it advises is pairing — the code or the share link pins that
+    // certificate (it used to say "--no-tls": the only way there was).
+    assertStringIncludes(shown.textContent, "pairing code");
     // A later launch: straight in again — it used to stop on the form on
     // every launch after the first.
     assertEquals(launch(html, local).went, "http://10.0.0.5:8000");

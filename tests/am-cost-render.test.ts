@@ -4,6 +4,7 @@
 // tests/cost-wire-accuracy.test.ts; this is about the reader's experience of
 // them — because a correct number nobody can read is not much better than a
 // wrong one.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { fmtBytes, parseWindow, renderCost } from "../src/am/am-cmd-cost.ts";
 

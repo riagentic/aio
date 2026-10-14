@@ -16,6 +16,7 @@
 // For an app's scaffolded tasks the qualifier is narrower still: it is a TARGET
 // name, so the suffix vocabulary is one closed set (`dev:electron`,
 // `compile:android`, `install:electron`, `install:android`).
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { standardTasks } from "../src/am/am-cmd-create.ts";
 import { fromFileUrl } from "@std/path";

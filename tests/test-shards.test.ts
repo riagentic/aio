@@ -8,6 +8,7 @@ import {
   failures,
   followShard,
   freeCores,
+  GENERATED_TRACKED,
   headerTracker,
   junitTimes,
   lastHeader,
@@ -16,6 +17,7 @@ import {
   quietMsOf,
   quietWatch,
   REAL_WINDOW,
+  rewrittenTracked,
   shardsOf,
   unrunFiles,
   wholeNumber,
@@ -750,4 +752,23 @@ Deno.test("planWithin: every shard's file list fits one command line, at no extr
   );
   assertEquals(peak, 2);
   assertEquals(out, win.map((_, i) => i)); // results in shard order
+});
+
+// A test run must leave the tree as it found it. The root `deno.lock` and
+// `proof-matrix.json` were both rewritten by suite runs, and the run said
+// nothing: the first anyone knew was `git status` an hour later, with no way
+// to tell which run had done it.
+Deno.test("test-shards: a tracked file the run rewrote is named — changed, created or removed", () => {
+  assertEquals([...GENERATED_TRACKED], ["deno.lock", "proof-matrix.json"]);
+  const names = ["deno.lock", "proof-matrix.json"];
+  assertEquals(rewrittenTracked(names, ["a", "b"], ["a", "b"]), []);
+  assertEquals(rewrittenTracked(names, ["a", "b"], ["a2", "b"]), [
+    "deno.lock",
+  ]);
+  assertEquals(rewrittenTracked(names, ["a", null], ["a", "[]"]), [
+    "proof-matrix.json",
+  ]);
+  assertEquals(rewrittenTracked(names, ["a", "b"], [null, "c"]), names);
+  // Absent before and after is not a change.
+  assertEquals(rewrittenTracked(names, [null, null], [null, null]), []);
 });

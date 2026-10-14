@@ -11,6 +11,7 @@
 // Every one of those is a property with a test here. The one that matters most
 // is the first in the file: whatever the age, whatever the flags, the Electron
 // this aio ships is never on the list.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";

@@ -145,14 +145,23 @@ Deno.test({
       const cell = join(dir, "src", "cell.ts");
       await Deno.writeTextFile(
         cell,
-        `await new Promise((r) => setTimeout(r, ${BOOT_MS}));\n` +
+        // It SAYS it is booting: a new app's first start has Deno's own
+        // `Initialize <package>` lines in its log, and a log that ends in
+        // one reads as "still fetching" — a longer wait, by design.
+        `console.log("booting");\n` +
+          `await new Promise((r) => setTimeout(r, ${BOOT_MS}));\n` +
           await Deno.readTextFile(cell),
       );
       const port = freePort();
       const first = await amStart(dir, apps, `--port=${port}`);
       pidsIn(first.out + first.err).forEach((p) => seen.add(p));
       assertEquals(first.code, 1, `${first.out}\n${first.err}`);
-      assertStringIncludes(first.out + first.err, "still starting after 10s");
+      // 10 s, counted from the app's first line when Deno's package setup
+      // came before it (a new app dir) — so a second or two more.
+      assert(
+        /still starting after 1\ds /.test(first.out + first.err),
+        `${first.out}\n${first.err}`,
+      );
       assert(
         !/not responding/.test(first.out + first.err),
         `a booting app is not "not responding":\n${first.out}\n${first.err}`,

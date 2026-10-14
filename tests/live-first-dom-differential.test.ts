@@ -22,6 +22,7 @@
 // one-line repro:
 //
 //     for s in 1 7 31 99 12345; do FUZZ_SEED=$s deno test -A //       tests/live-first-dom-differential.test.ts; done
+import { assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
 import { closeWindow } from "../src/testing/close-window.ts";
 import {
@@ -39,6 +40,9 @@ import {
   setDevMode,
 } from "../src/air/aio-renderer.ts";
 import { signal } from "../src/state/signal.ts";
+import { _flushPending, _setFlushBudget } from "../src/air/renderer-flush.ts";
+import { _rootStateMap } from "../src/air/renderer-state.ts";
+import type { MountHandle } from "../src/air/renderer-types.ts";
 import { fuzzEnvInt } from "./fuzz-seed.ts";
 
 // The seed is FIXED by default — CI must explore the same programs on every
@@ -146,13 +150,20 @@ function norm(s: string): string {
   return s.replace(/ data-component="[^"]*"/g, "");
 }
 
-Deno.test("differential: a nested root swap leaves the parent diff aligned", async () => {
+/** The journey. `flush` renders what is pending in a mount: the handle's own
+ *  `_flush()` (everything, at once), or — `cutShort` — one budgeted flush that
+ *  stops after a single component, then the microtask it left behind. */
+async function journey(
+  rounds: number,
+  flush: (h: MountHandle) => void | Promise<void>,
+): Promise<number> {
+  let compared = 0;
   const rand = rng(SEED);
   console.warn = (...a: unknown[]) => WARNS.push(a.map(String).join(" "));
   console.error = (...a: unknown[]) => WARNS.push(a.map(String).join(" "));
   try {
     setDevMode(true);
-    for (let round = 0; round < ROUNDS; round++) {
+    for (let round = 0; round < rounds; round++) {
       const win = new Window({ url: "http://localhost/" });
       // deno-lint-ignore no-explicit-any
       _setDocument(win.document as any);
@@ -177,7 +188,7 @@ Deno.test("differential: a nested root swap leaves the parent diff aligned", asy
 
       MODEL.set(model);
       const hA = mount(doc.getElementById("a")!, App);
-      hA._flush();
+      await flush(hA);
       const warnBase = WARNS.length;
 
       for (let step = 0; step < STEPS; step++) {
@@ -218,14 +229,15 @@ Deno.test("differential: a nested root swap leaves the parent diff aligned", asy
         }
         // 3. re-render the parent with the new model
         MODEL.set({ ...model, rows: [...model.rows] });
-        hA._flush();
+        await flush(hA);
 
         // 4. oracle — a fresh mount of the SAME model + signal state
         const bEl = doc.getElementById("b")!;
         const hB = mount(bEl, App);
-        hB._flush();
+        await flush(hB);
         const got = norm(doc.getElementById("a")!.innerHTML);
         const want = norm(bEl.innerHTML);
+        compared++;
         if (got !== want) {
           throw new Error(
             `SEED=${SEED} round=${round} step=${step} keyed=${model.keyed}\n` +
@@ -254,5 +266,32 @@ Deno.test("differential: a nested root swap leaves the parent diff aligned", asy
     console.warn = origWarn;
     console.error = origErr;
     setDevMode("auto");
+  }
+  return compared;
+}
+
+Deno.test("differential: a nested root swap leaves the parent diff aligned", async () => {
+  assertEquals(await journey(ROUNDS, (h) => h._flush()), ROUNDS * STEPS);
+});
+
+// The same journey with the flush budget at ZERO: every flush stops after one
+// component and hands the rest to a microtask — the path a slow machine takes
+// (a render over 12 ms) and a fast test never does. The DOM that continuation
+// ends on must be the fresh mount's.
+//
+// Found by a red that was not the renderer's: `_flush()` itself stopped at the
+// budget on a loaded Windows VM, and the first test read a half-rendered DOM.
+// `_flush()` now renders everything; this is the path it used to fall into.
+Deno.test("differential: a nested root swap leaves the parent diff aligned when every flush is cut short and continued", async () => {
+  _setFlushBudget(0);
+  try {
+    const rounds = Math.min(ROUNDS, 40);
+    const compared = await journey(rounds, async (h) => {
+      _flushPending(_rootStateMap.get(h)!);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    assertEquals(compared, rounds * STEPS);
+  } finally {
+    _setFlushBudget();
   }
 });

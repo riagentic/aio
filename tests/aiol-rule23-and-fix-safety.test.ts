@@ -4,6 +4,7 @@
 // that takes away something the user relies on, does not merely annoy — it
 // teaches people to stop reading its output, and the rest of that output is
 // load-bearing.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { checkOldWayPerfBudget } from "../aiol/checks.ts";
 import { legacyReplacement, migrateTasks } from "../src/am/am-cmd-fix.ts";

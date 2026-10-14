@@ -761,3 +761,30 @@ Deno.test("checkCells: the documented call form returns findings", async () => {
     `it saw the state it was given: ${JSON.stringify(findings.ok)}`,
   );
 });
+
+// The form the NAME promises. A cell list used to be read as a state with
+// keys "0", "1", … and then failed on `config.reduce must be a function`.
+Deno.test("checkCells: a list of cells where the state goes is composed, and its findings are the composed app's", async () => {
+  const { checkCells } = await import("../src/extras/mod.ts");
+  const { cell } = await import("../mod.ts");
+  const a = cell("cc_a", {
+    state: { n: 0 },
+    methods: { inc: (s) => void s.n++ },
+  });
+  const b = cell("cc_b", { state: { on: true } });
+  const local = cell("cc_local", { state: { open: false }, scope: "client" });
+  const got = await checkCells([a, { cell: b }, local], {}, Deno.cwd(), true);
+  assertEquals(got.fail, [], "a composed app has a reduce and an execute");
+  for (const want of ["cells (2)", "state (2 keys)", "reduce", "execute"]) {
+    assert(got.ok.includes(want), `${want} missing from ${got.ok}`);
+  }
+  // ONE argument is the whole call: no config is an empty one, no directory
+  // is the process's. Same findings as the three-argument form.
+  const one = await checkCells([a, { cell: b }, local]);
+  const three = await checkCells([a, { cell: b }, local], {}, Deno.cwd());
+  assertEquals(one, three);
+  assert(one.ok.includes("cells (2)"), `${one.ok}`);
+  // An array that is not a cell list is still a (bad) state, as before.
+  const old = await checkCells([{ n: 0 }], {}, Deno.cwd(), true);
+  assert(old.fail.some((f: string) => f.includes("config.reduce")));
+});

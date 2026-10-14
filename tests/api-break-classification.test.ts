@@ -218,13 +218,20 @@ Deno.test("api: optional↔required both BREAK — a reader relies on presence",
   }
 });
 
-Deno.test("api: an appended optional param is additive; a shifted one is not", () => {
-  const appended = memberDiff(
-    { param0: "req:1", return: "req:9" },
-    { param0: "req:1", param1: "opt:2", return: "req:9" },
-  );
+Deno.test("api: an appended optional param needs a reviewed entry; a shifted one is never additive", () => {
+  // On a FUNCTION the new position is refused until a person names it
+  // (tests/api-gate-additive-params.test.ts has the real `deno doc` shapes).
+  const fnSide = (sig: string, members: Record<string, string>) =>
+    snap({ f: { kind: "function", sig, members } } as never);
+  const before = { param0: "req:1", return: "req:9" };
+  const after = { param0: "req:1", param1: "opt:2", return: "req:9" };
+  const appended = diffSnapshots(fnSide("a", before), fnSide("b", after));
   assertEquals(appended.length, 1, JSON.stringify(appended));
-  assertEquals(appended[0]!.breaking, false, appended[0]!.line);
+  assertEquals(appended[0]!.breaking, true, appended[0]!.line);
+  const reviewed = diffSnapshots(fnSide("a", before), fnSide("b", after), [], [
+    { entry: ".", symbol: "f", param: "param1", reason: "not a callback" },
+  ]);
+  assertEquals(reviewed.map((c) => c.breaking), [false]);
 
   // Positional keys handle insertion for free: put a parameter in the middle
   // and every position after it changes type. Here param0 changes type AND
@@ -360,6 +367,17 @@ Deno.test("api: a widened PARAMETER is additive, and names what it gained", () =
   assertEquals(d.length, 1, JSON.stringify(d));
   assertEquals(d[0]!.breaking, false, d[0]!.line);
   assertStringIncludes(d[0]!.line, 'widened — it now also accepts "auto"');
+});
+
+Deno.test("api: a union written in another order is additive, and is not called a widening", () => {
+  const d = memberDiff(
+    { param0: `req:d1|${PART_BOOL}+${PART_AUTO}` },
+    { param0: `req:d2|${PART_AUTO}+${PART_BOOL}` },
+  );
+  assertEquals(d.length, 1, JSON.stringify(d));
+  assertEquals(d[0]!.breaking, false, d[0]!.line);
+  assertStringIncludes(d[0]!.line, "reordered — it accepts the same");
+  assert(!d[0]!.line.includes("widened"), d[0]!.line);
 });
 
 Deno.test("api: the same change NARROWED is still BREAKING", () => {

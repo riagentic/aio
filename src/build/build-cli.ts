@@ -3,7 +3,7 @@
  * Build CLI — compiles a headless Deno CLI binary (no browser bundle, no Electron).
  */
 import { minifyDeclared, runCompile } from "./minify-server.ts";
-import { warnBuildToolsIn } from "./artifact-audit.ts";
+import { reportEmbedded, warnBuildToolsIn } from "./artifact-audit.ts";
 import { artifactName } from "./platforms.ts";
 import { join } from "@std/path";
 import {
@@ -214,6 +214,7 @@ export async function buildCli(cfg: BuildConfig): Promise<void> {
         }
       }
       await warnBuildToolsIn(cliTarget, keepPackages, cfg.platform);
+      if (Deno.args.includes("--analyze")) await reportEmbedded(cliTarget);
       compiled(cliTarget, root);
       return true;
     },

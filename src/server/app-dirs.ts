@@ -382,6 +382,62 @@ export function installedAppPaths(name: string): {
   };
 }
 
+/** What an install of `name` may have left on this OS — every path, what it
+ *  is, and the directory that OWNS it (the containment `am remove` checks
+ *  before it deletes anything). THE decider for "what did installing this app
+ *  put on the machine": `am remove` deletes exactly these, and nothing else.
+ *
+ *  - every OS: the install directory, and the two POSIX launchers (`run.sh`
+ *    writes them on Linux; a `run.sh` before 1.0.20 wrote the `.desktop` file
+ *    on macOS too, so it stays in the list there to be cleaned up);
+ *  - Windows, additionally: the directory a one-click `.exe` installs itself
+ *    into (`%LOCALAPPDATA%\aio-sfx\<name>\`). NO Start-menu shortcut is here:
+ *    `run.ps1` writes `<name>.lnk` and the one-click install one named after
+ *    the app's title, and neither name proves anything (`am remove firefox`
+ *    is not to find the browser's `Firefox.lnk`) — `am remove` finds both by
+ *    what they OPEN (`shortcutsInto`), which needs the file and is not pure.
+ *
+ *  `os` and `env` are parameters so each OS's list is a test on any host.
+ *  Pure — nothing here touches the filesystem.
+ *
+ *  @decider */
+export function installFootprint(
+  name: string,
+  os: string = Deno.build.os,
+  env: (name: string) => string | undefined = (n) => Deno.env.get(n),
+): { path: string; kind: string; parent: string }[] {
+  const p = installedAppPaths(name);
+  const parents = installedAppParents();
+  const out = [
+    { path: p.dir, kind: "the app and its versions", parent: parents.dir },
+    { path: p.desktop, kind: "menu entry", parent: parents.desktop },
+    { path: p.binLink, kind: "PATH symlink", parent: parents.binLink },
+  ];
+  if (os !== "windows") return out;
+  const local = env("LOCALAPPDATA");
+  if (local) {
+    const sfx = join(local, "aio-sfx");
+    out.push({
+      path: join(sfx, name),
+      kind: "the one-click install",
+      parent: sfx,
+    });
+  }
+  return out;
+}
+
+/** Windows: the per-user Start-menu folder shortcuts are written to, or null
+ *  without `%APPDATA%`. Where `run.ps1` and the one-click `.exe` both put
+ *  theirs. */
+export function startMenuPrograms(
+  env: (name: string) => string | undefined = (n) => Deno.env.get(n),
+): string | null {
+  const appData = env("APPDATA");
+  return appData
+    ? join(appData, "Microsoft", "Windows", "Start Menu", "Programs")
+    : null;
+}
+
 /** Compute (do not create) every path for `appId`.
  *
  *  With no explicit `configured`, a booted app's REGISTERED dirs win — so every

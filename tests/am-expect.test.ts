@@ -1,6 +1,7 @@
 // a field report #5 (e2e slice) — `am expect <path> <op> [value]`: assert on live server
 // state over the real socket; the building block for a scripted test:e2e. The
 // comparator is pure, so the assertion semantics are unit-tested here.
+import "./store-sandbox.ts";
 import { assertEquals } from "@std/assert";
 import { compareValue } from "../src/am/am-cmd-state.ts";
 

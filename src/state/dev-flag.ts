@@ -17,6 +17,8 @@
 // but a lazy read does not have to care about ordering), with an explicit
 // override for the app that wants to force it either way.
 
+import { firstTime } from "../protocol/said-once.ts";
+
 /** `true`/`false` force it; `null` means "follow `__aioDev`". */
 let _override: boolean | null = null;
 
@@ -45,8 +47,6 @@ export function setDevModeOverride(v: boolean | null): void {
   _override = v;
 }
 
-const _said = new Set<string>();
-
 /** @internal The prefix for a line that reports the app DOING THE WRONG THING
  *  (state on another hook's slot, a call dropped) — or `null` when it must
  *  not be said again.
@@ -56,7 +56,7 @@ const _said = new Set<string>();
  *  per `id`, because a list of 500 rows is one fact — and dev every time. */
 export function _wrongPrefix(id: string): string | null {
   if (isDevMode()) return "[aio-dev] ";
-  if (_said.has(id)) return null;
-  _said.add(id);
-  return "[aio] ";
+  // The one memory of what production has said (protocol/said-once.ts), so
+  // `_resetAioRuntime` forgets this too.
+  return firstTime("wrong " + id) ? "[aio] " : null;
 }

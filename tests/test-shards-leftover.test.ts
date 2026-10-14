@@ -22,10 +22,12 @@
 // `Deno.exit(0)` at top level, or registers no test, passed with 0 tests.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { basename, fromFileUrl, join } from "@std/path";
+import { linkDir, linkFile } from "./symlink-helper.ts";
 import {
   heldLockEntries,
   leftoverFailure,
   lockDirsOf,
+  pruneTestWorktrees,
   settleHomeLockDirs,
   settleShardRuntime,
   shardLockBase,
@@ -218,22 +220,34 @@ Deno.test("settleHomeLockDirs: only what holds a lock under the shard's OWN home
 
 // ── The runner itself, on a planted leak ─────────────────────────────
 
+/** `name` in tests/ and every `./x.ts` it imports, transitively. */
+async function withSiblings(name: string, seen = new Set<string>()) {
+  if (seen.has(name)) return seen;
+  seen.add(name);
+  const src = await Deno.readTextFile(join(ROOT, "tests", name));
+  for (const m of src.matchAll(/^import\s[^;]*?["']\.\/([\w.-]+)["']/gm)) {
+    await withSiblings(m[1]!, seen);
+  }
+  return seen;
+}
+
 /** A throwaway repo root whose `scripts/` and `src/` are THIS checkout's:
  *  the runner derives its root from its own path, so it runs the planted
  *  tests and writes its logs there — never into the real `.aio/`. */
 async function plantedRoot(tests: Record<string, string>): Promise<string> {
   const root = await tempDir("aio-shards-e2e-");
-  for (const name of ["scripts", "src", "node_modules", "deno.json"]) {
-    await Deno.symlink(join(ROOT, name), join(root, name));
+  for (const name of ["scripts", "src", "node_modules"]) {
+    await linkDir(join(ROOT, name), join(root, name));
   }
+  await linkFile(join(ROOT, "deno.json"), join(root, "deno.json"));
   // A COPY: a lock file the nested deno may rewrite must not be the real one.
   await Deno.copyFile(join(ROOT, "deno.lock"), join(root, "deno.lock"));
   await Deno.mkdir(join(root, "tests"));
-  // The module the runner preloads into every shard (`--preload`).
-  await Deno.copyFile(
-    join(ROOT, "tests", "preload-ffi.ts"),
-    join(root, "tests", "preload-ffi.ts"),
-  );
+  // The module the runner preloads into every shard (`--preload`), and every
+  // sibling it imports — read from its text, so a new one cannot be missed.
+  for (const name of await withSiblings("preload-ffi.ts")) {
+    await Deno.copyFile(join(ROOT, "tests", name), join(root, "tests", name));
+  }
   for (const [name, src] of Object.entries(tests)) {
     await Deno.writeTextFile(join(root, "tests", name), src);
   }
@@ -264,9 +278,10 @@ const CLEAN = `Deno.test("zz clean", () => {});\n`;
 /** What a process that outlived its test leaves: a lock dir in the shard's
  *  runtime dir that nothing can judge dead. */
 const LEAK = `Deno.test("zz plant: leaves a held lock dir behind", () => {
-  const dir = Deno.env.get("XDG_RUNTIME_DIR") + "/aio-leak";
+  const sep = Deno.build.os === "windows" ? "\\\\" : "/";
+  const dir = Deno.env.get("XDG_RUNTIME_DIR") + sep + "aio-leak";
   Deno.mkdirSync(dir, { recursive: true });
-  Deno.writeTextFileSync(dir + "/held", "x");
+  Deno.writeTextFileSync(dir + sep + "held", "x");
   console.log("PLANTED_IN " + dir);
 });
 `;
@@ -274,7 +289,6 @@ const LEAK = `Deno.test("zz plant: leaves a held lock dir behind", () => {
 Deno.test({
   name:
     "test-shards: a green suite that leaves a held lock dir FAILS the shard, on the console",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     const root = await plantedRoot({ "zz-leak-plant.test.ts": LEAK });
     let planted: string | undefined;
@@ -311,7 +325,6 @@ Deno.test({
 Deno.test({
   name:
     "test-shards: a clean shard prints ✓ and the run ends ✓; AIO_TEST_FREE_CORES=abc is refused",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     const root = await plantedRoot({ "zz-clean.test.ts": CLEAN });
     try {
@@ -361,21 +374,44 @@ Deno.test({
 const WINDOW = `// Needs the nested ${"Xe" + "phyr"} display.\n`;
 const DISPLAY_VAR = "DIS" + "PLAY";
 
-/** A real-window test that leaves a live app behind: a detached process
- *  holding an app lock. */
-const WINDOW_LEAK =
-  `${WINDOW}Deno.test("zz window plant: leaves a live app behind", async () => {
-  const code = \`import { writeLock } from ${JSON.stringify(LOCK)};
-writeLock({ appId: "zzleak", pid: Deno.pid, port: 1,
-  startedAt: Date.now(), status: "started", cwd: "/" });
-setTimeout(() => Deno.exit(0), 120_000);\`;
-  await new Deno.Command("sh", {
-    args: ["-c", '"$0" eval "$1" >/dev/null 2>&1 &', Deno.execPath(), code],
+/** What a planted real-window test needs: the base the lock module puts lock
+ *  dirs under (`$XDG_RUNTIME_DIR`; `%TEMP%` on Windows, whatever that says),
+ *  and a process that is NOT the test's child — started by a helper that
+ *  exits, the portable `sh -c '… &'`. */
+const PLANT = `const lockBase = () =>
+  Deno.env.get(Deno.build.os === "windows" ? "TEMP" : "XDG_RUNTIME_DIR")!;
+async function detach(code: string): Promise<void> {
+  await new Deno.Command(Deno.execPath(), {
+    args: [
+      "eval",
+      'new Deno.Command(Deno.execPath(), { args: ["eval", Deno.env.get("ZZ_PLANT")], stdin: "null", stdout: "null", stderr: "null", detached: true }).spawn().unref();',
+    ],
+    env: { ZZ_PLANT: code },
     stdin: "null",
     stdout: "null",
     stderr: "null",
   }).output();
-  const runtime = Deno.env.get("XDG_RUNTIME_DIR")!;
+}
+`;
+
+/** The session a real-window shard inherits, as a scratch dir: the runtime
+ *  dir, and on Windows the temp dir — the lock module's base there. */
+const sessionEnv = (runtime: string): Record<string, string> => ({
+  XDG_RUNTIME_DIR: runtime,
+  ...(Deno.build.os === "windows" ? { TEMP: runtime, TMP: runtime } : {}),
+  [DISPLAY_VAR]: "",
+});
+
+/** A real-window test that leaves a live app behind: a detached process
+ *  holding an app lock. */
+const WINDOW_LEAK =
+  `${WINDOW}${PLANT}Deno.test("zz window plant: leaves a live app behind", async () => {
+  const code = \`import { writeLock } from ${JSON.stringify(LOCK)};
+writeLock({ appId: "zzleak", pid: Deno.pid, port: 1,
+  startedAt: Date.now(), status: "started", cwd: "/" });
+setTimeout(() => Deno.exit(0), 120_000);\`;
+  await detach(code);
+  const runtime = lockBase();
   for (let i = 0; i < 200; i++) {
     for (const d of Deno.readDirSync(runtime)) {
       try {
@@ -393,7 +429,6 @@ const WINDOW_CLEAN = `${WINDOW}Deno.test("zz window clean", () => {});\n`;
 Deno.test({
   name:
     "test-shards: the real-window shard is judged too — a live app it left FAILS it, another app in the same runtime dir does not",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     const root = await plantedRoot({
       "zz-window-leak.test.ts": WINDOW_LEAK,
@@ -403,7 +438,7 @@ Deno.test({
     // with "the developer's app" already running in it. No display: the
     // runner must not start a nested one for a planted test.
     const runtime = await runtimeDir();
-    const env = { XDG_RUNTIME_DIR: runtime, [DISPLAY_VAR]: "" };
+    const env = sessionEnv(runtime);
     const theirs = await holder(runtime);
     const lockOf = async (name: string) => {
       for await (const d of Deno.readDir(runtime)) {
@@ -451,24 +486,25 @@ Deno.test({
  *  exits: a detached process that keeps its lock until the test process is
  *  gone, and for \`ms\` after. */
 const windowSlow = (ms: number) =>
-  `${WINDOW}Deno.test("zz window slow: its app is still stopping at exit", async () => {
+  `${WINDOW}${PLANT}Deno.test("zz window slow: its app is still stopping at exit", async () => {
   const code = \`import { writeLock } from ${JSON.stringify(LOCK)};
 writeLock({ appId: "zzslow", pid: Deno.pid, port: 1,
   startedAt: Date.now(), status: "started", cwd: "/" });
-const alive = () => new Deno.Command("kill", { args: ["-0", "\${Deno.pid}"],
-  stdout: "null", stderr: "null" }).outputSync().success;
+const alive = () => {
+  try {
+    Deno.kill(\${Deno.pid}, 0);
+    return true;
+  } catch (e) {
+    return e instanceof Deno.errors.PermissionDenied;
+  }
+};
 const t = setInterval(() => {
   if (alive()) return;
   clearInterval(t);
   setTimeout(() => Deno.exit(0), ${ms});
 }, 50);\`;
-  await new Deno.Command("sh", {
-    args: ["-c", '"$0" eval "$1" >/dev/null 2>&1 &', Deno.execPath(), code],
-    stdin: "null",
-    stdout: "null",
-    stderr: "null",
-  }).output();
-  const runtime = Deno.env.get("XDG_RUNTIME_DIR")!;
+  await detach(code);
+  const runtime = lockBase();
   for (let i = 0; i < 200; i++) {
     for (const d of Deno.readDirSync(runtime)) {
       try {
@@ -485,14 +521,13 @@ const t = setInterval(() => {
 Deno.test({
   name:
     "test-shards: the real-window shard waits for an app still shutting down (✓, and a NOTE), and does not charge it with what an earlier run left",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     const root = await plantedRoot({
       "zz-window-slow.test.ts": windowSlow(2500),
       "zz-window-clean.test.ts": WINDOW_CLEAN,
     });
     const runtime = await runtimeDir();
-    const env = { XDG_RUNTIME_DIR: runtime, [DISPLAY_VAR]: "" };
+    const env = sessionEnv(runtime);
     const logOf = () =>
       Deno.readTextFile(join(root, ".aio", "test-shards", "0.log"));
     let earlier: Deno.ChildProcess | undefined;
@@ -533,7 +568,6 @@ Deno.test({
 Deno.test({
   name:
     "test-shards: a file that exits 0 at top level, or registers no test, FAILS a green shard; an empty file and an all-ignored one do not",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     const root = await plantedRoot({
       "zz-clean.test.ts": CLEAN,
@@ -580,7 +614,6 @@ Deno.test({
 Deno.test({
   name:
     "test-shards: a DIRECTORY argument is judged file by file — a file with no test under it fails a green shard",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     const root = await plantedRoot({ "zz-clean.test.ts": CLEAN });
     try {
@@ -673,7 +706,6 @@ Deno.test({
 Deno.test({
   name:
     "test-shards: a running shard's log already names the file it is in, and a silent one is named on the runner's output — again each interval, never stopped",
-  ignore: Deno.build.os === "windows",
   fn: async () => {
     // It ends when this test says so: nothing here depends on how long
     // anything takes.
@@ -738,8 +770,10 @@ Deno.test({
       // On disk — and the shard has not finished: its test is still waiting.
       assert(!(await Deno.readTextFile(log)).includes("ok | 1 passed"));
       assert(!out.includes("shard 0  1 files"), out);
+      // (`\` → `/`: the runner prints the log's path as the OS spells it.)
       const said = (): string[] =>
-        out.match(/^… shard 0: no output for .*$/gm) ?? [];
+        out.replaceAll("\\", "/").match(/^… shard 0: no output for .*$/gm) ??
+          [];
       const where = `${HEADER} (still running; its output so far: ` +
         `.aio/test-shards/0.log)`;
       const line = (secs: number) =>
@@ -828,5 +862,94 @@ Deno.test("shardLockBase: a shard's lock dirs are settled where the lock module 
     await Deno.remove(runtime, { recursive: true });
     await Deno.remove(session, { recursive: true });
     await dropTempDir(home);
+  }
+});
+
+// The run's own verdict on the developer's home. `check:home-clean` names what
+// is there AFTER a run, when someone runs it; 178 Electron profiles and 6
+// installs piled up between such looks. The runner compares the home around
+// the run, so the suite that made a leftover is the suite that goes red.
+Deno.test({
+  name:
+    "test-shards: a green suite that leaves a test app's profile in the REAL home FAILS the run, named; one that was there before is not charged to it",
+  fn: async () => {
+    // What a window started without `childEnv()` leaves: its profile.
+    const plant = (name: string) =>
+      `Deno.test("zz plant: a window's profile in $HOME", () => {
+  Deno.mkdirSync(Deno.env.get("HOME") + "/.config/${name}/aio-main", { recursive: true });
+});
+`;
+    const root = await plantedRoot({
+      "zz-profile.test.ts": plant("app-1a2b3c4d@0f9e8d7c"),
+      "zz-clean.test.ts": CLEAN,
+    });
+    const home = await tempDir("aio-shards-home-");
+    // The runner's own view of the home, on every OS.
+    const env = { HOME: home, USERPROFILE: home, XDG_CONFIG_HOME: "" };
+    try {
+      const r = await runShards(root, ["tests/zz-profile.test.ts"], env);
+      assertStringIncludes(r.out, "✓ shard 0"); // the suite itself was green
+      assertEquals(r.code, 1, r.out + r.err);
+      assert(!r.out.includes("✓ all"), r.out);
+      assertStringIncludes(r.err, "left 1 test artefact(s) in the REAL home");
+      assertStringIncludes(
+        r.err,
+        join(home, ".config", "app-1a2b3c4d@0f9e8d7c"),
+      );
+      // It is there now: the next run did not make it, and is green.
+      const next = await runShards(root, ["tests/zz-clean.test.ts"], env);
+      assertEquals(next.code, 0, next.out + next.err);
+      assertStringIncludes(next.out, "✓ all 1 shards passed");
+    } finally {
+      await dropTempDir(root);
+      await dropTempDir(home);
+    }
+  },
+});
+
+// `git worktree add` writes its registration into the CHECKOUT's `.git` — the
+// one write of a version-provisioning test no sandbox moves. MEASURED
+// 2026-10-10: 79 entries, 22 MB, in this checkout's `.git/worktrees`.
+Deno.test("pruneTestWorktrees: a test's registration whose checkout is gone is forgotten — a live one, one being added, and the developer's own missing worktree are not", async () => {
+  const root = await tempDir("aio-prune-wt-");
+  try {
+    const git = async (...args: string[]) => {
+      const r = await new Deno.Command("git", {
+        args: ["-c", "user.name=t", "-c", "user.email=t@t", ...args],
+        cwd: root,
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      assert(r.success, new TextDecoder().decode(r.stderr));
+    };
+    await git("init", "-q");
+    await git("commit", "-q", "--allow-empty", "-m", "c");
+    const sandbox = join(root, ".aio-test-shards", "0", "stores", "versions");
+    const wt = {
+      gone: join(sandbox, "v1"),
+      live: join(sandbox, "v2"),
+      adding: join(sandbox, "v3"),
+      theirs: join(root, "elsewhere", "feature"),
+    };
+    for (const p of Object.values(wt)) {
+      await git("worktree", "add", "-q", "--detach", p);
+    }
+    const reg = (name: string) => join(root, ".git", "worktrees", name);
+    for (const p of [wt.gone, wt.adding, wt.theirs]) {
+      await Deno.remove(p, { recursive: true });
+    }
+    await Deno.writeTextFile(join(reg("v3"), "locked"), "initializing");
+
+    // (By name: git spells the path its own way — `/` on Windows.)
+    assertEquals(pruneTestWorktrees(root, {}).map((p) => basename(p)), ["v1"]);
+    assertEquals(
+      [...Deno.readDirSync(join(root, ".git", "worktrees"))].map((e) => e.name)
+        .sort(),
+      ["feature", "v2", "v3"],
+    );
+    // No registry at all (a copy of the tree with no `.git`): nothing, no throw.
+    assertEquals(pruneTestWorktrees(join(root, "elsewhere"), {}), []);
+  } finally {
+    await dropTempDir(root);
   }
 });

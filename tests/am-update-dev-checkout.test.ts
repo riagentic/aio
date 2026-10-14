@@ -19,6 +19,7 @@
 //
 // One fact, two deciders, one of them fixed. This file pins the rule AND that
 // the two deciders still say the same thing.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirtyLines, gitMutationRefusal } from "../src/am/am-cmd-meta.ts";
 import { fromFileUrl } from "@std/path";

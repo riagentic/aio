@@ -9,6 +9,7 @@
 // And one thing no retry cures: a file that was PUBLISHED BY HARD LINK refuses
 // a rename over it (measured on Windows: 1.4–4.1 % of the tries, for seconds).
 // So a module that publishes by link renames nothing — the last case here.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { join, relative } from "@std/path";
 import { codeText } from "../src/diagnostics/code-mask.ts";
@@ -36,8 +37,9 @@ const ALLOWED: Record<string, number | true> = {
   // The data folder set aside for an update that retires it, and back.
   "src/server/updates-retire.ts": 2,
   // A leftover (a file or a tree) moved out of its name to a free one; one
-  // that will not move stays for the next boot.
-  "src/server/updates-owned.ts": 1,
+  // that will not move stays for the next boot. And a kept download whose
+  // bytes changed, moved to a free name beside it: nothing is replaced.
+  "src/server/updates-owned.ts": 2,
 };
 /** Build-time code: it fails loud at the terminal, on the developer's machine. */
 const SKIP_DIRS = ["src/build/"];

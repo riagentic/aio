@@ -64,7 +64,6 @@ async function withDirs(
 }
 
 Deno.test("tmp sweep: the journal clears its own crash leftovers — nothing else", async () => {
-  if (Deno.build.os === "windows") return;
   await withDirs(async (dir, victim) => {
     for (
       const n of [
@@ -88,7 +87,11 @@ Deno.test("tmp sweep: the journal clears its own crash leftovers — nothing els
     ) {
       plant(dir, n, OLD); // not ours
     }
-    Deno.symlinkSync(victim, join(dir, `journal.${U.replace("0f", "2b")}.tmp`));
+    Deno.symlinkSync(
+      victim,
+      join(dir, `journal.${U.replace("0f", "2b")}.tmp`),
+      { type: "file" },
+    );
     await openInChild(`createJournal(dir + "/journal", {}).close();`, dir);
     assertEquals(
       names(dir),
@@ -105,7 +108,6 @@ Deno.test("tmp sweep: the journal clears its own crash leftovers — nothing els
 });
 
 Deno.test("tmp sweep: the checkpoint clears its own crash leftovers, and a disabled checkpoint's purge takes them too", async () => {
-  if (Deno.build.os === "windows") return;
   await withDirs(async (dir, victim) => {
     plant(dir, `checkpoint.json.tmp.${U}`, OLD);
     plant(dir, "checkpoint.json.tmp", OLD);
@@ -114,6 +116,7 @@ Deno.test("tmp sweep: the checkpoint clears its own crash leftovers, and a disab
     Deno.symlinkSync(
       victim,
       join(dir, `checkpoint.json.tmp.${U.replace("0f", "2b")}`),
+      { type: "file" },
     );
     await openInChild(`createCheckpoint(dir, 0);`, dir);
     assertEquals(

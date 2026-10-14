@@ -90,6 +90,9 @@ export interface AuthFlows {
   totp?: boolean;
   /** OIDC provider — enables /oidc/start + /oidc/callback. */
   oidc?: OidcConfig;
+  /** `auth: { publicDir }` — read by the server's anonymous file gate
+   *  (`isShellAsset`), not by the flows. */
+  publicDir?: string;
   /** The session cookie's name — `sessionCookieNameFor(appId)`, filled in by
    *  the server. Absent → the legacy shared `aio_session`. */
   cookieName?: string;

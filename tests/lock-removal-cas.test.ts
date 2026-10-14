@@ -6,6 +6,7 @@
 // the re-booted instance's LIVE lock, and a second instance acquired it and
 // opened the same state.db. Each case runs in a child with its own
 // XDG_RUNTIME_DIR / AIO_APPS_DIR, so nothing here touches the real runtime dir.
+import "./store-sandbox.ts";
 import { exits0, SLEEP_ARGS, sleeper } from "./proc-helper.ts";
 import { assert, assertEquals } from "@std/assert";
 import { join, toFileUrl } from "@std/path";
@@ -293,7 +294,7 @@ Deno.test("boundUnixSockets: /proc/net/unix paths; unreadable is unknown", () =>
 // The path is the raw remainder after the fixed columns: a split-and-rejoin
 // folded `a  b` / `a\tb` into `a b` — a socket that does not exist, so the
 // dir holding the LIVE one read as dead.
-Deno.test("boundUnixSockets: a path keeps its double spaces and tabs", async () => {
+Deno.test("boundUnixSockets: a path keeps its double spaces and tabs", () => {
   const odd = "/run/a  b\tc .sock";
   assertEquals([
     ...boundUnixSockets(
@@ -309,8 +310,14 @@ Deno.test("boundUnixSockets: a path keeps its double spaces and tabs", async () 
       "darwin",
     )!,
   ], [odd]);
-  if (!["linux", "darwin"].includes(Deno.build.os)) return;
-  // …and LIVE, from the real table (/proc/net/unix, or netstat on macOS).
+});
+
+Deno.test({
+  name:
+    "boundUnixSockets: LIVE, a path with double spaces and a tab is read whole from the real table",
+  ignore: !["linux", "darwin"].includes(Deno.build.os), // the table is /proc/net/unix or macOS netstat: no other OS has one
+}, async () => {
+  // (/proc/net/unix, or netstat on macOS)
   // aio-ok: a socket is bound under it — /tmp keeps the path under the limit
   const dir = await Deno.makeTempDir({ dir: "/tmp", prefix: "bus-" });
   const path = `${dir}/a  b\tc.sock`;

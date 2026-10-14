@@ -13,6 +13,7 @@
 // is a single source: when a message means THE CONTEXT it takes the name from
 // `src/diagnostics/contexts.ts`, and these tests are what stop a seventh
 // spelling from appearing the next time someone writes an error.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { join } from "@std/path";
 import {

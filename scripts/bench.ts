@@ -3,11 +3,14 @@
 // "Correct but slower" fails the gate (scripts/check-bench.ts) like a broken
 // test. Each timing metric: warmup + N iterations → median + p95.
 // Run: deno task bench   (writes bench-results.json, gitignored)
+//      deno task bench -- --only=boot,patch-10k   (those metrics alone,
+//      merged into the existing results — the gate's retry of a red metric)
 // Gate: deno task check:bench  (compares against scripts/bench-baselines.json)
 import { aio, cell, composeCells } from "../mod.ts";
 import { compactPatches } from "../src/state/patch-compact.ts";
 import { SKV_SCHEMA, sqliteKv } from "../src/server/skv-sqlite.ts";
 import { _resetAioRuntime } from "../src/state/runtime-reset.ts";
+import { freePort } from "../src/testing/server-test.ts";
 import type { ReduceResult } from "../src/state/cell-compose-reduce.ts";
 import type { DB, QueryResult, Tx } from "../src/db/types.ts";
 // @ts-ignore node:sqlite types unavailable when an old @types/node shadows them
@@ -55,6 +58,13 @@ function record(name: string, unit: string, samples: number[]): void {
   };
 }
 
+/** `--only=a,b`: the metrics to measure; every one when absent. A section
+ *  that records several runs when any of its names is asked for. */
+const ONLY = Deno.args.find((a) => a.startsWith("--only="))?.slice(7)
+  .split(",") ?? null;
+const want = (...names: string[]) =>
+  !ONLY || names.some((n) => ONLY.includes(n));
+
 const gc: (() => void) | undefined = (globalThis as { gc?: () => void }).gc
   ?.bind(globalThis);
 const settle = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -68,7 +78,7 @@ const bootOpts = {
 } as const;
 
 // ── 1. boot: aio.run() resolve time (libraryMode, clean close) ────────
-{
+if (want("boot")) {
   const BOOT_N = 5;
   const samples: number[] = [];
   for (let i = 0; i <= BOOT_N; i++) { // i=0 is warmup
@@ -91,7 +101,7 @@ const bootOpts = {
 }
 
 // ── 2. dispatch: sync method throughput + async round-trips ───────────
-{
+if (want("dispatch-sync", "dispatch-async")) {
   const d = cell("bench-dispatch", {
     // Explicit, not inherited: alpha52 made this the async default, so the
     // numbers below silently changed meaning when it landed. A benchmark that
@@ -143,7 +153,7 @@ const bootOpts = {
 }
 
 // ── 3. persistence: sqliteKv write path (in-memory DB, real payloads) ─
-{
+if (want("persist-write")) {
   // Same harness pattern as tests/skv-sqlite.test.ts — the framework's
   // SkvInstance on SQLite, minus disk variance.
   // deno-lint-ignore no-explicit-any
@@ -206,7 +216,7 @@ const bootOpts = {
 }
 
 // ── 4. patch compute: reduce + produceWithPatches + compaction ────────
-{
+if (want("patch-10k")) {
   // The pure compute half of the broadcast path (server-broadcast.ts):
   // Immer patch production for a mutation touching 1k of 10k keys, then
   // compactPatches — no sockets.
@@ -247,7 +257,7 @@ const bootOpts = {
 }
 
 // ── 5. memory: heap delta after boot + 1k dispatches ──────────────────
-{
+if (want("memory-boot-1k")) {
   gc?.();
   await settle(50);
   const h0 = Deno.memoryUsage().heapUsed;
@@ -280,7 +290,7 @@ const bootOpts = {
 // ── 6. live-proxy over a 10k-item array (async method) ────────────────
 // The proxy's cost center: array read-method snapshots + per-element access.
 // A regression here means every fetch-then-render list app pays it.
-{
+if (want("proxy-array-10k")) {
   const N = 10_000;
   const big = cell("bench-proxy-arr", {
     transaction: true, // explicit — see bench-dispatch
@@ -322,7 +332,7 @@ const bootOpts = {
 // write, which made this shape quadratic — a field report measured one sweep
 // over ~11k keys at 70.7 s of structuredClone with the event loop stalled for
 // 54 s. The overlay is incremental now; this metric is what keeps it so.
-{
+if (want("overlay-write-loop-10k")) {
   const N = 10_000;
   const seed: Record<string, number> = {};
   for (let i = 0; i < N; i++) seed[`k${i}`] = i;
@@ -363,7 +373,13 @@ const bootOpts = {
 // (measured ~18 ms on this page, vs ~1 ms for an element root). Fragments
 // stream now; `ssr-provider-ttfb` keeps them streaming, and
 // `ssr-provider-stream-10k` keeps the streaming cheap.
-{
+if (
+  want(
+    "ssr-provider-stream-10k",
+    "ssr-provider-ttfb",
+    "ssr-fragment-nest-ratio",
+  )
+) {
   const { createContext, Fragment, h, renderToStream } = await import(
     "../src/air.ts"
   );
@@ -434,6 +450,200 @@ const bootOpts = {
   record("ssr-fragment-nest-ratio", "x", ratio);
 }
 
+// ── 9. the op door: one sync op over a real WebSocket, to its ack ─────
+// What a local-first client waits for on every write: the frame in, the op
+// persisted to the op-log (the ack is a durability promise — it follows the
+// commit), the `sync-ack` out. One op at a time, each awaited, so the number
+// is the round trip a single writer sees, not a batch's amortized share. Both
+// durability settings an app can ask for: the default `synchronous = NORMAL`
+// and `FULL` (an fsync per commit — the disk's number as much as ours, which
+// is why it has its own floor).
+for (const mode of ["NORMAL", "FULL"] as const) {
+  const name = `op-door-${mode.toLowerCase()}`;
+  if (!want(name)) continue;
+  const notes = cell(`bench-${name}`, {
+    sync: true,
+    version: 1,
+    state: { n: 0 },
+    methods: {
+      add(s, by: number) {
+        s.n += by;
+      },
+    },
+  });
+  const port = freePort();
+  const app = await aio.run({
+    cells: [notes],
+    appId: `bench-${name}`,
+    client: "server-only",
+    libraryMode: true,
+    baseDir,
+    appDir: `${baseDir}/${name}`,
+    dbPragmas: [`PRAGMA synchronous = ${mode}`],
+    // The per-client throttle (100 messages/s by default) drops the 101st op
+    // of a second: the door is what is measured here, not the throttle.
+    wsLimits: { messagesPerSec: 1_000_000 },
+    port,
+  });
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+  const waiting = new Map<string, () => void>();
+  ws.onmessage = (e) => {
+    if (typeof e.data !== "string" || !e.data.includes('"sync-ack"')) return;
+    const f = JSON.parse(e.data) as { t: string; d: { opId: string } };
+    if (f.t === "sync-ack") waiting.get(f.d.opId)?.();
+  };
+  await new Promise<void>((ok, fail) => {
+    ws.onopen = () => ok();
+    ws.onerror = () => fail(new Error(`op-door: no WebSocket on :${port}`));
+  });
+  const OPS = 300;
+  const samples: number[] = [];
+  for (let i = 0; i < OPS + 30; i++) { // first 30 are warmup
+    const id = `op-${mode}-${i}`;
+    const acked = new Promise<void>((r) => waiting.set(id, r));
+    const t0 = performance.now();
+    ws.send(JSON.stringify({
+      v: 2,
+      t: "op",
+      d: {
+        id,
+        hlc: [Date.now(), i, "bench"],
+        cell: `bench-${name}`,
+        action: "add",
+        payload: { args: [1] },
+      },
+    }));
+    // An ack that never comes is a failure with a name, not a gate that
+    // hangs until its ceiling.
+    let late: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      acked,
+      new Promise<never>((_, fail) => {
+        late = setTimeout(
+          () => fail(new Error(`${name}: no sync-ack for ${id} within 10 s`)),
+          10_000,
+        );
+      }),
+    ]);
+    clearTimeout(late);
+    waiting.delete(id);
+    if (i >= 30) samples.push(performance.now() - t0);
+  }
+  const closed = new Promise((r) => ws.onclose = r);
+  ws.close();
+  await closed;
+  // Every op must have LANDED: an ack for an op the server refused would make
+  // this a benchmark of the refusal path.
+  const landed =
+    (app.getState() as Record<string, { n: number }>)[`bench-${name}`]?.n;
+  await app.close();
+  _resetAioRuntime();
+  if (landed !== OPS + 30) {
+    throw new Error(
+      `${name}: ${landed} of ${OPS + 30} ops applied — the bench is ` +
+        `not measuring an accepted op`,
+    );
+  }
+  record(name, "ms/op", samples);
+}
+
+// ── 10. one row of 10k: a dispatch that changes ONE flag in a big array ──
+// The cost of a change must follow the change, not the state beside it. With
+// the dev defaults on (state diffs, time travel, checkpoint — what a
+// developer runs), toggling one row of a 10 000-row array cost 4.1 ms here:
+// the state-diff line serialized the whole array twice to print 80
+// characters of it. What is left is the state core's own share — Immer
+// copies and finalizes the array the row is in (0.4 ms at 10k).
+if (want("row-toggle-10k")) {
+  const ROWS = 10_000;
+  const rows = cell("bench-rows", {
+    state: {
+      items: Array.from(
+        { length: ROWS },
+        (_, i) => ({ id: i, done: false, title: `row ${i}` }),
+      ),
+    },
+    methods: {
+      toggle(s, i: number) {
+        s.items[i]!.done = !s.items[i]!.done;
+      },
+    },
+  });
+  const app = await aio.run({
+    cells: [rows],
+    appId: "bench-rows",
+    ...bootOpts,
+  });
+  const samples: number[] = [];
+  for (let i = 0; i < 140; i++) { // first 20 are warmup
+    const t0 = performance.now();
+    await rows.toggle((i * 7) % ROWS);
+    if (i >= 20) samples.push(performance.now() - t0);
+  }
+  await app.close();
+  _resetAioRuntime();
+  record("row-toggle-10k", "ms/op", samples);
+}
+
+// ── 11. an update patch applied to a 64 MiB install ────────────────────
+// What a single-file install does instead of downloading the release: read
+// the installed file and decode a zstd patch against it (updates-patch.ts).
+// The cost is the copy — install and output share one buffer — so the time
+// follows the artifact's size, and the memory is install + release.
+if (want("update-patch-64m", "update-patch-64m-rss")) {
+  const { applyPatch } = await import("../src/server/updates-patch.ts");
+  const { patchOf } = await import("../tests/zstd-patch-helper.ts");
+  const SIZE = 64 << 20;
+  const from = new Uint8Array(SIZE);
+  for (let at = 0; at < SIZE; at += 65536) {
+    crypto.getRandomValues(from.subarray(at, at + 65536));
+  }
+  // A rebuild: the same file with a few kilobytes in the middle replaced.
+  const to = from.slice();
+  crypto.getRandomValues(to.subarray(SIZE / 2, SIZE / 2 + 20_000));
+  const installed = `${baseDir}/installed`;
+  await Deno.writeFile(installed, from);
+  const patch = patchOf(from, to);
+  const ms: number[] = [];
+  for (let i = 0; i < 8; i++) { // first 2 are warmup
+    const t0 = performance.now();
+    const made = await applyPatch(installed, patch, SIZE);
+    const took = performance.now() - t0;
+    if (made[SIZE / 2 + 5] !== to[SIZE / 2 + 5] || made.length !== SIZE) {
+      throw new Error("update-patch-64m: the patch made other bytes");
+    }
+    if (i >= 2) ms.push(took);
+  }
+  record("update-patch-64m", "ms/op", ms);
+  // Memory, each time in a process of its own: in this one the buffer of
+  // the run before is reused and the growth reads as zero.
+  await Deno.writeFile(`${baseDir}/patch`, patch);
+  const rss: number[] = [];
+  for (let i = 0; i < 3; i++) {
+    const run = await new Deno.Command(Deno.execPath(), {
+      args: [
+        "eval",
+        `import { applyPatch } from ${
+          JSON.stringify(import.meta.resolve("../src/server/updates-patch.ts"))
+        };
+        const patch = Deno.readFileSync(${JSON.stringify(`${baseDir}/patch`)});
+        const before = Deno.memoryUsage().rss;
+        const made = await applyPatch(${
+          JSON.stringify(installed)
+        }, patch, ${SIZE});
+        console.log((Deno.memoryUsage().rss - before) / 2 ** 20, made.length);`,
+      ],
+      stderr: "inherit",
+    }).output();
+    const [grew, size] = new TextDecoder().decode(run.stdout).split(" ").map(
+      Number,
+    );
+    if (size !== SIZE) throw new Error("update-patch-64m-rss: no result");
+    rss.push(grew!);
+  }
+  record("update-patch-64m-rss", "MiB", rss);
+}
+
 // ── report ────────────────────────────────────────────────────────────
 const fmt = (v: number) => v >= 100 ? v.toFixed(1) : v.toFixed(3);
 console.log(
@@ -448,6 +658,13 @@ for (const [name, m] of Object.entries(metrics)) {
   );
 }
 
+const resultsPath = new URL("../bench-results.json", import.meta.url);
+// `--only` replaces the metrics it measured and keeps the rest of the file.
+const kept: Record<string, Metric> = ONLY
+  ? (JSON.parse(await Deno.readTextFile(resultsPath)) as {
+    metrics: Record<string, Metric>;
+  }).metrics
+  : {};
 const out = {
   meta: {
     date: new Date().toISOString(),
@@ -455,9 +672,8 @@ const out = {
     os: Deno.build.os,
     arch: Deno.build.arch,
   },
-  metrics,
+  metrics: { ...kept, ...metrics },
 };
-const resultsPath = new URL("../bench-results.json", import.meta.url);
 await Deno.writeTextFile(resultsPath, JSON.stringify(out, null, 2) + "\n");
 console.log(`\nresults → bench-results.json`);
 await Deno.remove(baseDir, { recursive: true }).catch(() => {});

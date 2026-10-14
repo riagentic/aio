@@ -6,6 +6,7 @@
 // wrong in practice, and both fail the same way — silently, permanently, on the
 // users' machines ("no updates available"). A layout that is knowledge is a
 // layout that is sometimes wrong; this makes it a command.
+import "./store-sandbox.ts";
 import {
   assert,
   assertEquals,
@@ -25,6 +26,9 @@ import {
 import { hostPlatform } from "../src/build/platforms.ts";
 import { appendSfxPayload } from "../src/build/build-windows-exe.ts";
 import { buildVersionFor } from "../src/server/app-version.ts";
+import { generateSigningKey, usablePatches } from "../src/build/ship.ts";
+import { unknownFlags } from "../src/am/am-flags.ts";
+import { hasZstd } from "./zstd-patch-helper.ts";
 
 /** The artifact this machine can run and ask its data contract. Windows runs
  *  a file by its extension, and `notes.exe` is the cross-built one here. */
@@ -473,6 +477,39 @@ Deno.test("am publish: signs with the keygen default key when it exists, and say
         `says which key: ${errs.join("|")}`,
       );
       assert(!errs.some((l) => l.includes("UNSIGNED")));
+      // No entry configures `updates`: nothing is said about first use.
+      assert(!errs.some((l) => l.includes("FIRST signed release")));
+
+      // An entry that updates with no key in its config: the public half of
+      // the key that just signed is printed, ready to paste — and once the
+      // entry carries a key, the line is gone.
+      const pub = JSON.stringify(
+        JSON.parse(await Deno.readTextFile(keyPath)).publicKey,
+      );
+      await Deno.mkdir(join(dir, "src"), { recursive: true });
+      for (
+        const [entry, told] of [
+          [`aio.run({ updates: "https://releases.example.com/notes" });`, true],
+          [
+            `aio.run({ updates: { source: "https://releases.example.com/notes", key: ${pub} } });`,
+            false,
+          ],
+        ] as const
+      ) {
+        await Deno.writeTextFile(join(dir, "src", "app.ts"), entry);
+        await capture(async () => {
+          errs = await captureErr(() =>
+            cmdPublish(["--no-build", "--dir=release"], { json: true })
+          );
+        });
+        assertEquals(
+          errs.some((l) =>
+            l.includes("FIRST signed release") && l.includes(`key: ${pub}`)
+          ),
+          told,
+          `${entry}: ${errs.join("|")}`,
+        );
+      }
     });
   } finally {
     Deno.chdir(orig);
@@ -1466,4 +1503,110 @@ Deno.test("am publish: a one-click Windows exe without its zip is refused; --no-
     Deno.chdir(orig);
     await dropTempDir(dir);
   }
+});
+
+Deno.test({
+  name:
+    "am publish --patch-from: the release published before — even into the same directory — becomes a signed patch in the new manifest",
+  ignore: !hasZstd(), // `--patch-from` runs the zstd tool
+  fn: async () => {
+    const orig = Deno.cwd();
+    const dir = await project([{ target: "browser", file: "notes" }]);
+    const body = (v: string) =>
+      `#!/bin/sh\n# ${"padding ".repeat(900)}\necho ${v}\nexit 0\n`;
+    const publish = (...args: string[]) =>
+      withHome(() =>
+        capture(async () => {
+          await captureErr(() =>
+            cmdPublish(
+              ["--no-build", "--dir=release", "--key=key.json", ...args],
+              { json: true },
+            )
+          );
+        })
+      );
+    const realExit = Deno.exit;
+    try {
+      // A refusal ends in `Deno.exit(1)` after its JSON line.
+      // deno-lint-ignore no-explicit-any
+      (Deno as any).exit = () => {
+        throw new Error("exited");
+      };
+      Deno.chdir(dir);
+      await Deno.writeTextFile(
+        "key.json",
+        JSON.stringify(await generateSigningKey()),
+      );
+      await Deno.writeTextFile(join("dist", "notes"), body("one"));
+      await publish("--version=2.1.0");
+      const manifestPath = join("release", "prod", "linux-x86_64.json");
+      const first = JSON.parse(await Deno.readTextFile(manifestPath));
+      assertEquals(first.patches, undefined, "nothing to patch from yet");
+
+      await Deno.writeTextFile(join("dist", "notes"), body("two"));
+      const lines = await publish("--version=2.2.0", "--patch-from=release");
+      const m = JSON.parse(await Deno.readTextFile(manifestPath));
+      assertEquals(m.version, "2.2.0");
+      assertEquals(m.patches.length, 1);
+      // From the build the FIRST publish put there — read before this
+      // publish wrote over its manifest and its artifact.
+      assertEquals(m.patches[0].from, first.sha256);
+      const patch = await Deno.readFile(
+        join("release", "prod", m.patches[0].url),
+      );
+      assertEquals(patch.length, m.patches[0].size);
+      assert(patch.length * 2 < m.size, `${patch.length} of ${m.size} bytes`);
+      // Signed with the release, and listed in the report.
+      assertEquals(await usablePatches(m), { patches: m.patches });
+      assertEquals(
+        (JSON.parse(lines.at(-1)!) as { patches: string[] }).patches,
+        [join("prod", m.patches[0].url)],
+      );
+      // A directory that holds no release of this app is refused, and
+      // nothing is published over the release that is there.
+      await Deno.writeTextFile(join("dist", "notes"), body("three"));
+      let refused: string[] = [];
+      await withHome(() =>
+        capture(async () => {
+          refused = await capture(() =>
+            cmdPublish([
+              "--no-build",
+              "--dir=release",
+              "--key=key.json",
+              "--version=2.3.0",
+              "--patch-from=dist",
+            ], { json: true }).catch(() => {/* the stubbed exit */})
+          );
+        })
+      );
+      assertStringIncludes(
+        (JSON.parse(refused.at(-1)!) as { error: string }).error,
+        "--patch-from=",
+      );
+      assertEquals(
+        JSON.parse(await Deno.readTextFile(manifestPath)).version,
+        "2.2.0",
+      );
+    } finally {
+      // deno-lint-ignore no-explicit-any
+      (Deno as any).exit = realExit;
+      Deno.chdir(orig);
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+});
+
+Deno.test("am publish: every flag it reads passes am's own flag gate", async () => {
+  const src = await Deno.readTextFile(
+    new URL("../src/am/am-cmd-publish.ts", import.meta.url),
+  );
+  // What the command reads: `flag("x")`, `args.includes("--x")`, and
+  // `startsWith("--x=")`. `--no-zip` was read and refused by the gate.
+  const read = new Set([
+    ...[...src.matchAll(/\bflag\("([a-z-]+)"\)/g)].map((m) => `--${m[1]}`),
+    ...[...src.matchAll(/args\.includes\("(--[a-z-]+)"\)/g)].map((m) => m[1]!),
+    ...[...src.matchAll(/startsWith\("(--[a-z-]+)="\)/g)].map((m) => m[1]!),
+  ]);
+  assert(read.has("--no-zip") && read.has("--patch-from"), [...read].join());
+  assertEquals(unknownFlags("publish", [...read]), []);
 });

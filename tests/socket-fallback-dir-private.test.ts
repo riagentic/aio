@@ -26,7 +26,7 @@ const LONG = "s".repeat(120);
 
 Deno.test({
   name: "socket fallback: the directory is created 0700",
-  ignore: !POSIX,
+  ignore: !POSIX, // the subject is POSIX mode bits under a umask: Windows has neither
   fn: () =>
     permissiveUmask(async () => {
       const base = await tempDir("aio-sockfb-ok-");
@@ -42,7 +42,7 @@ Deno.test({
 
 Deno.test({
   name: "socket fallback: a directory that is not ours is never used",
-  ignore: !POSIX || selfUid() === null,
+  ignore: !POSIX || selfUid() === null, // the per-uid fallback dir and its 0700 mode: Windows has no uid and no mode bits
   fn: () =>
     permissiveUmask(async () => {
       const base = await tempDir("aio-sockfb-theirs-");
@@ -69,7 +69,7 @@ Deno.test({
 
 Deno.test({
   name: "socket fallback: with no private directory available it REFUSES",
-  ignore: !POSIX || selfUid() === null,
+  ignore: !POSIX || selfUid() === null, // the per-uid fallback dir and its 0700 mode: Windows has no uid and no mode bits
   fn: async () => {
     const base = await tempDir("aio-sockfb-refuse-");
     try {
@@ -116,7 +116,7 @@ Deno.test("socket fallback name: hashes the whole intended path, fits the limit"
 
 Deno.test({
   name: "socket fallback: two AIO_APPS_DIR scopes of one appId get two sockets",
-  ignore: !POSIX,
+  ignore: !POSIX, // the subject is POSIX mode bits under a umask: Windows has neither
   fn: async () => {
     const base = await tempDir("aio-sockfb-2-");
     const prev = Deno.env.get("AIO_APPS_DIR");

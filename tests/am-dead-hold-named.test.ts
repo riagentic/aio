@@ -9,6 +9,7 @@
 //
 // Real holds, really killed: `cmdBackup` / `cmdRestore` in a child, parked
 // inside their copy, then SIGKILLed.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";

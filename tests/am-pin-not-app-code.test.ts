@@ -14,6 +14,7 @@
 //
 // And (c): the refusal leads with the count per top-level directory, so
 // "64 of these are under examples/" is a decision, not a wall.
+import "./store-sandbox.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";

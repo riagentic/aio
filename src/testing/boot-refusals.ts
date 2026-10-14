@@ -33,7 +33,10 @@ import type { CellDef, CellEntry, Msg } from "../state/cell-types.ts";
 import { _cloneAcrossWorkerBoundary } from "../state/cell-impl.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { BootScope } from "../standalone-air.ts";
-import { attachMeta, makeUnboundGuard } from "../state/cell-catalog.ts";
+import {
+  attachMeta,
+  methodCallInWorkerMessage,
+} from "../state/cell-catalog.ts";
 import { getRegisteredCells } from "../state/cell-reactive.ts";
 import { _openScopeDepth } from "../state/signal.ts";
 import { peerReadInWorkerMessage } from "../server/cell-worker-host.ts";
@@ -471,16 +474,20 @@ export function _isolateWorkerCellsInProcess(
   }
 
   // 3. Any cell's method — its own included, booted or not: nothing is bound
-  //    in a worker, so the call meets the unbound guard, and so it does here.
+  //    in a worker, so the call is refused there, and so it is here.
   for (const def of new Set([...defs, ...getRegisteredCells().values()])) {
     const holder = def as unknown as Record<string, unknown>;
     for (const key of def.__aio.actionKeys ?? []) {
       const prev = holder[key];
       const raw = (def.__aio.actions as Record<string, unknown>)[key];
       if (typeof prev !== "function" || typeof raw !== "function") continue;
-      const guarded = makeUnboundGuard(def.__aio.id, key, raw);
       const call = function (this: unknown, ...args: unknown[]) {
-        if (insideWorker() !== undefined) return guarded(...args);
+        const hosted = insideWorker();
+        if (hosted !== undefined) {
+          throw new Error(
+            methodCallInWorkerMessage(hosted, def.__aio.id, key),
+          );
+        }
         return (prev as (...x: unknown[]) => unknown).apply(this, args);
       };
       attachMeta(call, raw);

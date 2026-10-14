@@ -1,5 +1,6 @@
 // run.sh — fast, always-on checks (no network, no build). The full
 // build-and-run path lives in tests/run-sh-e2e.test.ts behind the onboard gate.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { ownHome } from "./deno-dir-helper.ts";

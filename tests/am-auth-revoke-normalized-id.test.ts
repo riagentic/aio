@@ -5,6 +5,7 @@
 // "alice "` (a stray space from a paste) found alice, revoked nothing, and
 // reported `sessionsRevoked: 0` — the breach-response command saying "done"
 // while every stolen session kept working.
+import "./store-sandbox.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { assertEquals } from "@std/assert";
 import { cmdAuth } from "../src/am/am-cmd-auth.ts";

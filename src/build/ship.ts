@@ -19,6 +19,7 @@ import { basename, dirname, join, resolve as resolvePath } from "@std/path";
 // the session and user stores already use.
 import { createHash } from "node:crypto";
 import { resolveAppDir, resolveEntry } from "./config-rules.ts";
+import { homedir } from "../server/paths.ts";
 import { buildVersionFor, unpublishableReason } from "./build-version.ts";
 import {
   flagVocabulary,
@@ -131,8 +132,31 @@ export type ShipManifest = {
   data?: DataContract;
   /** Ed25519 signature over `manifestCore()`, base64 (when signed). */
   signature?: string;
+  /** Ways to make this artifact out of one already installed (1.0.20-beta)
+   *  — see {@linkcode ReleasePatch}. Outside `manifestCore()`, which a client
+   *  up to 1.0.19 verifies and which therefore never grows; they have a
+   *  signature of their own. A client that does not know the key ignores it. */
+  patches?: ReleasePatch[];
+  /** Ed25519 signature over `patchesCore()`, base64 (when signed). */
+  patchesSignature?: string;
   /** The verifying public key (JWK), so a consumer can check the signature. */
   publicKey?: JsonWebKey;
+};
+
+/** A patch: the bytes that turn ONE earlier artifact into this release's.
+ *
+ *  A zstd frame made with `zstd --patch-from=<the earlier artifact>`. What it
+ *  produces is only ever installed when its SHA-256 is the manifest's own
+ *  `sha256` — a patch is a shorter way to the same signed bytes, never a
+ *  second thing to trust. */
+export type ReleasePatch = {
+  /** SHA-256 (hex) of the installed artifact this patch starts from. */
+  from: string;
+  /** Where the patch is: absolute, or relative to the manifest's own URL. */
+  url: string;
+  size: number;
+  /** SHA-256 (hex) of the patch file. */
+  sha256: string;
 };
 
 /** One cell's persisted-schema promise in a published build. */
@@ -223,6 +247,16 @@ export function manifestCore(m: ShipManifest): string {
     // the core no longer verifies (alpha70 is the last breaking release).
     buildNumber: m.buildNumber ?? null,
     commit: m.commit ?? "",
+  });
+}
+
+/** What `patchesSignature` covers: the patches AND the release they belong
+ *  to (its whole signed core), so a list cannot be moved to another release
+ *  or edited in transit. */
+export function patchesCore(m: ShipManifest): string {
+  return JSON.stringify({
+    core: manifestCore(m),
+    patches: (m.patches ?? []).map((p) => [p.from, p.url, p.size, p.sha256]),
   });
 }
 
@@ -446,6 +480,54 @@ export async function buildReleaseManifest(
     manifest.publicKey = opts.sign.publicKey;
   }
   return manifest;
+}
+
+/** `manifest` carrying `patches` — and, given the private key that signed
+ *  it, their signature ({@linkcode patchesCore}). No patches: `manifest` as
+ *  it is. An unsigned manifest's patches are unsigned too. */
+export async function withPatches(
+  manifest: ShipManifest,
+  patches: ReleasePatch[],
+  privateKey?: JsonWebKey,
+): Promise<ShipManifest> {
+  if (patches.length === 0) return manifest;
+  const m: ShipManifest = { ...manifest, patches };
+  return privateKey
+    ? { ...m, patchesSignature: await signText(patchesCore(m), privateKey) }
+    : m;
+}
+
+/** The patches of a manifest whose claims ALREADY verified
+ *  ({@linkcode verifyManifestClaims}) that may be used: well-formed, and —
+ *  for a signed manifest — under a signature of the same key over
+ *  {@linkcode patchesCore}. Otherwise none, with the reason: a release whose
+ *  patches cannot be used is installed whole, never refused. */
+export async function usablePatches(
+  m: ShipManifest,
+): Promise<{ patches: ReleasePatch[]; reason?: string }> {
+  const none = (reason: string) => ({ patches: [], reason });
+  const list: unknown = m.patches;
+  if (list === undefined) return { patches: [] };
+  const hex = (v: unknown) =>
+    typeof v === "string" && /^[0-9a-f]{64}$/i.test(v);
+  if (
+    !Array.isArray(list) ||
+    !list.every((p) =>
+      typeof p === "object" && p !== null && hex(p.from) && hex(p.sha256) &&
+      typeof p.url === "string" && p.url.length > 0 &&
+      Number.isInteger(p.size) && p.size > 0
+    )
+  ) {
+    return none("the manifest's patch list is malformed");
+  }
+  if (m.signature && m.publicKey) {
+    const good = typeof m.patchesSignature === "string" &&
+      await verifyText(patchesCore(m), m.patchesSignature, m.publicKey);
+    if (!good) {
+      return none("the manifest's patch list is not signed by its key");
+    }
+  }
+  return { patches: list as ReleasePatch[] };
 }
 
 /** What a client demands of a manifest before it will install it. Every field
@@ -1226,6 +1308,9 @@ export async function shipRelease(
     /** The id the artifact runs as, when the caller probed it itself
      *  ({@linkcode probeArtifact}) and passes `data`. */
     runsAs?: string;
+    /** Patches from earlier artifacts to this one (`am publish
+     *  --patch-from=`), signed with it. */
+    patches?: ReleasePatch[];
   },
 ): Promise<ShipManifest> {
   const binary = await Deno.readFile(opts.binaryPath);
@@ -1408,25 +1493,29 @@ export async function shipRelease(
   const bad = runsAs &&
     identityMismatch(name, runsAs, opts.name !== undefined);
   if (bad) throw new Error(`${NO} ${bad}`);
-  const manifest = await buildReleaseManifest({
-    platform: opts.platform,
-    name,
-    version,
-    buildNumber,
-    commit,
-    binary,
-    sources,
-    sign,
-    channel,
-    target: opts.target ?? inferTarget(fileName, buildCfg),
-    // Default the URL to the artifact's own file name: a manifest published
-    // beside its artifact then resolves with nothing to configure, which is
-    // the layout the docs recommend and the one CI produces by accident.
-    url: opts.url ?? fileName,
-    notes: opts.notes,
-    minFrom: opts.minFrom,
-    data,
-  });
+  const manifest = await withPatches(
+    await buildReleaseManifest({
+      platform: opts.platform,
+      name,
+      version,
+      buildNumber,
+      commit,
+      binary,
+      sources,
+      sign,
+      channel,
+      target: opts.target ?? inferTarget(fileName, buildCfg),
+      // Default the URL to the artifact's own file name: a manifest published
+      // beside its artifact then resolves with nothing to configure, which is
+      // the layout the docs recommend and the one CI produces by accident.
+      url: opts.url ?? fileName,
+      notes: opts.notes,
+      minFrom: opts.minFrom,
+      data,
+    }),
+    opts.patches ?? [],
+    sign?.privateKey,
+  );
   const json = JSON.stringify(manifest, null, 2);
   // Write BOTH names, always. `<binary>.ship.json` is the one a human
   // recognises next to the artifact; `<os>-<arch>.json` is the one the client
@@ -1664,6 +1753,31 @@ export function defaultKeyPath(project: string): string {
   return join(home, ".aio", "keys", `${project}-release-key.json`);
 }
 
+/** `--key=~/keys/app.json` as the person meant it. A shell expands `~` only
+ *  at the START of a word, so in `--key=~/…` it arrives literally — and was
+ *  read as a directory named `~` under the cwd ("cannot read the signing
+ *  key"). A leading `~/` (and `~\` on Windows) is the home `homedir()` names;
+ *  any other leading `~` (`~alice/…`) is refused by name rather than guessed.
+ *  @internal exported for its test */
+export function expandHome(
+  path: string,
+  os: string = Deno.build.os,
+  home: () => string = homedir,
+): string {
+  if (!path.startsWith("~")) return path;
+  const rest = path.slice(1);
+  if (rest === "") return home();
+  if (rest[0] === "/" || (os === "windows" && rest[0] === "\\")) {
+    return join(home(), rest.slice(1));
+  }
+  throw new Error(
+    `${NO} --key=${path}: only a leading "~/" is expanded (to your home ` +
+      `directory) — "${
+        path.split(/[\\/]/)[0]
+      }" is not a path this can resolve. Pass the full path.`,
+  );
+}
+
 /** Which key signs a release: `--key`, else the file `ship keygen` wrote for
  *  THIS app (`defaultKeyPath(name)`) when it exists, else none. One decider for
  *  the `ship` CLI and `am publish` — a key that keygen wrote to the documented
@@ -1679,7 +1793,7 @@ export async function resolveSigningKey(
   | { path: string; source: "flag" | "default" }
   | { path: undefined; source: "none" }
 > {
-  if (explicit) return { path: explicit, source: "flag" };
+  if (explicit) return { path: expandHome(explicit), source: "flag" };
   const dflt = defaultKeyPath(appName);
   try {
     if ((await Deno.stat(dflt)).isFile) {

@@ -268,3 +268,50 @@ export function artifactName(binaryName: string, platform: string): string {
     ? `${binaryName}${spec.exeExt}`
     : `${binaryName}-${platform}${spec.exeExt}`;
 }
+
+/** The proof-matrix target a built artifact answers to, or null for what
+ *  every release gate builds AND boots (Linux: server, browser, desktop). */
+function proofTarget(kind: string, os: string | undefined): string | null {
+  return os === "windows"
+    ? "windows"
+    : os === "darwin"
+    ? "macos"
+    : kind.startsWith("android")
+    ? "android"
+    : kind === "ios-client"
+    ? "ios route"
+    : null;
+}
+
+/** One line per target OUTSIDE the release gates that this build produced:
+ *  the runs of it this aio has on record (`rows` — the shipped
+ *  proof-matrix.json), or that there is none. A build that went green for
+ *  Windows or macOS on a Linux box read exactly like the Linux one, and what
+ *  had been run where was in the repo only. `[text, recorded]`. Pure. */
+export function proofLines(
+  built: readonly { kind: string; os?: string }[],
+  rows: readonly { target: string; env: string; date: string }[],
+): [text: string, recorded: boolean][] {
+  const targets = [
+    ...new Set(
+      built.flatMap((b) => proofTarget(b.kind, b.os) ?? []),
+    ),
+  ];
+  return targets.map((t) => {
+    const runs = rows.filter((r) => r.target === t);
+    return runs.length
+      ? [
+        `${t}: recorded runs — ${
+          runs.map((r) => `${r.env} ${r.date}`).join(", ")
+        }. Nothing else about this target is on record; aio's release ` +
+        `gates build and boot on Linux`,
+        true,
+      ]
+      : [
+        `${t}: no recorded run — this aio's release gates build and boot ` +
+        `on Linux, and nothing on record ran this target where it runs. ` +
+        `Try the artifact there before you ship it`,
+        false,
+      ];
+  });
+}

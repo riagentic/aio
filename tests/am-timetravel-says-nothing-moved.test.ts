@@ -7,6 +7,7 @@
 //
 // Also here, because it needs the same live history: `am actions --lines=N`,
 // which was accepted and ignored (the whole window printed).
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { cell } from "../src/state/cell-create.ts";
 import { testServer } from "../src/testing/server-test.ts";

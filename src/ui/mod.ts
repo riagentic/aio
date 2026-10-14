@@ -36,6 +36,7 @@ import {
 } from "../air/aio-renderer.ts";
 import type { VChild, VNode } from "../air/vdom.ts";
 import { el } from "./h-spread.ts";
+import { firstTime } from "../protocol/said-once.ts";
 import { RadioGroup, Switch } from "./controls.ts";
 
 // ── Shared prop helpers ──────────────────────────────────────────────
@@ -141,16 +142,20 @@ export function Textarea(props: TextareaProps): VNode {
   // the DOM as-is and receives the Event. The kit's docs promised the value,
   // so `onChange={form.setBio}` handed a cell method an Event object. Kept as
   // it shipped (an app reading `e.target.value` must not break) — and said
-  // once in dev, which is the only place the mismatch is visible.
+  // once, in a package too: the handler there gets the same Event.
+  const dev = (globalThis as Record<string, unknown>).__aioDev === true;
   if (
-    typeof props.onChange === "function" && !_textareaChangeWarned &&
-    (globalThis as Record<string, unknown>).__aioDev === true
+    typeof props.onChange === "function" &&
+    (dev ? !_textareaChangeWarned : firstTime("Textarea.onChange"))
   ) {
-    _textareaChangeWarned = true;
+    _textareaChangeWarned ||= dev;
     console.warn(
-      "[aio-dev] <Textarea onChange> receives the DOM Event, not the value " +
-        "(unlike <Input onChange>) — read `e.target.value`, or use `onInput`, " +
-        "which receives the value.",
+      `[aio${dev ? "-dev" : ""}] <Textarea onChange> receives the DOM Event, ` +
+        "not the value" +
+        (dev
+          ? " (unlike <Input onChange>) — read `e.target.value`, or use " +
+            "`onInput`, which receives the value."
+          : "."),
     );
   }
   return h("textarea", {

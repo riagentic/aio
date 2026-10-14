@@ -12,6 +12,7 @@
 // spawn site in the runtime folders either passes it as `cwd`, or is listed
 // below with the reason it must not. A new spawn site that does neither turns
 // this red — so the choice is made on purpose, not inherited by accident.
+import { ownAccount } from "./e2e-app-harness.ts";
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { resolve as winResolve } from "@std/path/windows";
@@ -369,6 +370,7 @@ Deno.test({
     "the window: it is told the app's working directory, and a source run starts it there",
   fn: async () => {
     const dir = await tempDir("el-window-cwd-");
+    using _home = ownAccount(); // the window's profile: this run's, not yours
     const had = Deno.env.get("ELECTRON_PATH");
     try {
       const report = join(dir, "report");

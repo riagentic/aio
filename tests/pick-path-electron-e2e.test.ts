@@ -5,10 +5,12 @@
 // method body. The Electron main process is a stand-in speaking the same wire
 // (tests/fixtures/uds-dialog-standin.ts); the real Electron is covered by the
 // stub harness in electron-main-relay and on real OSes by hand.
+import { childEnv } from "./e2e-app-harness.ts";
 import { assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import { tempDir } from "../src/testing/temp-dir.ts";
 import { spec } from "./module-spec-helper.ts";
+import { EXE, writeProgram } from "./fake-program-helper.ts";
 
 const REPO = dirname(dirname(fromFileUrl(import.meta.url)));
 const DENO_JSON = join(REPO, "deno.json");
@@ -16,9 +18,6 @@ const DENO_JSON = join(REPO, "deno.json");
 Deno.test({
   name:
     "e2e: an async method's pickFile opens in the Electron window that called it",
-  // A local app listens on a named pipe on Windows; the stand-in dials a
-  // unix socket (same limit as tests/am-uds-only-app.test.ts).
-  ignore: Deno.build.os === "windows",
   // The app child is stopped in finally; its streams are drained there.
   fn: async () => {
     const dir = await tempDir("pick-e2e-");
@@ -46,13 +45,12 @@ await new Promise(() => {});
       join(dir, "App.tsx"),
       `export default function App() { return <div>Hello</div>; }\n`,
     );
-    const electron = join(dir, "electron");
-    await Deno.writeTextFile(
+    const electron = join(dir, "electron" + EXE);
+    await writeProgram(
       electron,
       `#!/bin/sh\nexec "${Deno.execPath()}" run -A --config "${DENO_JSON}" ` +
         `"${join(REPO, "tests/fixtures/uds-dialog-standin.ts")}"\n`,
     );
-    await Deno.chmod(electron, 0o755);
 
     const child = new Deno.Command(Deno.execPath(), {
       args: [
@@ -64,7 +62,7 @@ await new Promise(() => {});
         "--client=electron",
       ],
       cwd: dir,
-      env: {
+      env: childEnv({
         ...Deno.env.toObject(),
         AIO_APPS_DIR: apps,
         ELECTRON_PATH: electron,
@@ -72,7 +70,7 @@ await new Promise(() => {});
         // No zenity/kdialog either way: the spawned-tool path would THROW
         // ("no file dialog available") rather than pass by accident.
         PATH: "/usr/bin/false-path-for-pick-e2e",
-      },
+      }),
       stdout: "piped",
       stderr: "piped",
     }).spawn();

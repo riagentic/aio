@@ -23,6 +23,7 @@ import {
 } from "./build-helpers.ts";
 import { HEY, NO, NOTE, OK } from "../diagnostics/fmt.ts";
 import { emptyDir, foreignArtifactRefusal } from "./dist-staging.ts";
+import { BUILD_SCRATCH_DIR } from "../server/app-files.ts";
 
 /** The reverse-DNS bundle id: `ios.bundleId` from deno.json when declared,
  *  else `app.aio.<label>` — one decider, like `androidApplicationId`. */
@@ -62,6 +63,23 @@ export function plistText(s: string): string {
   return out.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+/** `MARKETING_VERSION` (CFBundleShortVersionString) for a build version:
+ *  Apple takes one to three dot-separated integers and nothing else, and a
+ *  build version can carry a suffix (`1.2.3-beta`, `0.1.0-nogit.9f3ac2b1`) —
+ *  App Store validation refuses that string. The leading numbers are kept;
+ *  the build's full identity stays in `CURRENT_PROJECT_VERSION`. Pure. */
+export function iosMarketingVersion(versionName: string): string {
+  return /^\d+(?:\.\d+){0,2}/.exec(versionName)?.[0] ?? "0";
+}
+
+/** Where xcodebuild's derived data goes: the build's scratch, NEVER inside
+ *  the project — the project directory is the artifact the fleet stages into
+ *  `dist/`, and derived data (intermediates, a module cache, an index) is
+ *  hundreds of megabytes of this machine's own. */
+export function iosDerivedDataDir(cfg: Pick<BuildConfig, "root">): string {
+  return join(cfg.root, BUILD_SCRATCH_DIR, "ios-derived");
+}
+
 /** Render the template with this build's facts. Pure — the file set is a
  *  unit test, not a claim. */
 export function renderIosTemplate(facts: {
@@ -87,7 +105,10 @@ export function renderIosTemplate(facts: {
     out[rel] = content
       .replaceAll("{{APP_NAME}}", lit(plistText(facts.appName)))
       .replaceAll("{{BUNDLE_ID}}", lit(facts.bundleId))
-      .replaceAll("{{VERSION_NAME}}", lit(facts.versionName))
+      .replaceAll(
+        "{{VERSION_NAME}}",
+        lit(iosMarketingVersion(facts.versionName)),
+      )
       .replaceAll("{{VERSION_CODE}}", lit(String(facts.versionCode)))
       .replaceAll(
         "{{ATS_ARBITRARY}}",
@@ -184,7 +205,7 @@ export async function buildIos(cfg: BuildConfig): Promise<void> {
   // The connect page — the same one the Android client opens.
   const www = join(dir, "App", "www");
   await Deno.mkdir(www, { recursive: true });
-  await _writeConnectPage(www, plistText(appName), cfg.bakedServer);
+  await _writeConnectPage(www, plistText(appName), cfg.bakedServer, "ios");
 
   // Icon: the app's own `icon.png` when it has one (Xcode validates the
   // 1024×1024 requirement at archive time and says so), else the generated
@@ -230,7 +251,7 @@ export async function buildIos(cfg: BuildConfig): Promise<void> {
     );
     return;
   }
-  const derived = join(dir, "build");
+  const derived = iosDerivedDataDir(cfg);
   const p = await new Deno.Command(xcodebuild, {
     args: [
       "-project",

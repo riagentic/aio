@@ -20,7 +20,7 @@
 // the exact failure they were written to prevent. The claims here are about the
 // MESSAGE, not about when a desync happens, so the message is what is driven.
 import { assert, assertEquals } from "@std/assert";
-import { _assertRegionAlignment } from "../src/air/vdom-diff.ts";
+import { _assertRegionAlignment } from "../src/air/dev-align.ts";
 import { h } from "../src/air/vdom.ts";
 import { _instanceStack } from "../src/air/renderer-state.ts";
 import type { ComponentInstance } from "../src/air/renderer-types.ts";

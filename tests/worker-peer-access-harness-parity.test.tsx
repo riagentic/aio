@@ -68,11 +68,17 @@ Deno.test("worker parity: what a REAL worker answers", async () => {
     `real peer read: ${real.readPeer}`,
   );
   assert(
-    real.callPeer.startsWith("[wpPeer] bump() called before"),
+    real.callPeer.startsWith(
+      '[wpPeer] bump() called inside the worker cell "wpHeavy" — no cell\'s ' +
+        "methods are bound in a worker thread, a peer's or its own",
+    ),
     `real peer call: ${real.callPeer}`,
   );
   assert(
-    real.callSelf.startsWith("[wpHeavy] readOwn() called before"),
+    real.callSelf.startsWith(
+      '[wpHeavy] readOwn() called inside the worker cell "wpHeavy" — no ' +
+        "cell's methods are bound in a worker thread, its own included",
+    ) && !real.callSelf.includes("add this cell to aio.run"),
     `real own call: ${real.callSelf}`,
   );
   assertEquals(real.pending, 1, "the main isolate sees the call in flight");

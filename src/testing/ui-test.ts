@@ -92,9 +92,25 @@ import {
 } from "../state/call-origin.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createAioError } from "../diagnostics/error.ts";
-import { actionWireTrip, wireLossCounts } from "../state/action-encode.ts";
+import {
+  actionWireTrip,
+  encodeAction,
+  wireLossCounts,
+} from "../state/action-encode.ts";
 import { serializeReturn } from "../protocol/return-value.ts";
-import type { LossyConversion } from "../protocol/wire-value.ts";
+import {
+  findLossy,
+  type LossyConversion,
+  wireArgs,
+} from "../protocol/wire-value.ts";
+import { errorFields, wireError } from "../protocol/envelope.ts";
+import { setSyncHandler } from "../state/state-transport.ts";
+import { sfnArgsDropped, sfnError } from "../browser/server-fns-client.ts";
+import {
+  _useServerFnClientDoor,
+  invokeServerFn,
+} from "../server/server-fns.ts";
+import { runWithUser } from "../server/auth-context.ts";
 import { isDomEvent } from "../state/event-arg.ts";
 import { _eventArgHint } from "../state/cell-methods-internals.ts";
 import {
@@ -140,6 +156,23 @@ export interface TestUIOptions {
   cellDefaults?: HarnessBootOptions["cellDefaults"];
   /** The app's `aio.run({ localFirst })` — same reason. */
   localFirst?: boolean;
+  /** The app's `aio.run({ wire })` — same reason: with
+   *  `omitTrailingUndefined` a UI call's trailing `undefined` is not sent, so
+   *  it is not a wire loss here either and the method gets its default.
+   *  Unset, a trailing `undefined` fails the test (it arrives as `null`).
+   *
+   *  `strict: true` — the rest of a client call crosses the wire too, as it
+   *  does in the app (docs/testing/ui-testing.md, "Calls cross the wire"):
+   *  a rejected call reaches its caller as a plain `Error` with the server's
+   *  message and `code`; a component's `serverFn` call goes through the
+   *  server's route (its access rule, JSON arguments, the `[server] ` prefix
+   *  on a failure); `useAio().send(action)` runs the method, and an unknown
+   *  type fails the test. Off by default — a test written against an older
+   *  aio keeps the harness it passed on, and is told once per run what a
+   *  real client would have seen instead. `am create` turns it on for a new
+   *  app's whole run (`AIO_TEST_WIRE=strict` in its `test` task); this key
+   *  decides for one mount, either way. */
+  wire?: { omitTrailingUndefined?: boolean; strict?: boolean };
   /** Let a CONTAINED failure stay contained, instead of failing the test.
    *
    *  A hook that throws (`onMount`, a returned cleanup, a rAF callback) and an
@@ -175,6 +208,26 @@ export interface TestUIOptions {
    *  Omit for today's behaviour (identity stays unresolved). Reset on
    *  dispose, so the next mount cannot inherit this test's user. */
   user?: AioUser | null;
+  /** The network for this test: every `fetch` the component makes — from the
+   *  FIRST mount on — is answered by this function instead of the real one.
+   *  Restored on dispose.
+   *
+   *  The component is mounted before the test body runs, so a stub the body
+   *  installs is too late for an `onMount` fetch: that request has already
+   *  gone to the real network (a field report's blocklist refresh did, and
+   *  the test failed 2 of 6 runs with the download's speed). A module-level
+   *  `globalThis.fetch = …` is in time but leaks into every other test in the
+   *  file.
+   *
+   *  ```ts
+   *  await testUI(Gate, { fetch: () => Response.json({ blocked: [] }) });
+   *  ```
+   *
+   *  Omit for today's behaviour (the `fetch` that is installed at the mount). */
+  fetch?: (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => Response | Promise<Response>;
   /** Enforce each cell's declarative `access` rule on interactions, as the
    *  server does for a real client. Default `true` since alpha76.
    *
@@ -1044,6 +1097,57 @@ const _WIRE_FIX: Record<string, string> = {
   symbol: "send a string",
 };
 
+/** Does this mount put rejections, `serverFn` and `useAio().send` across the
+ *  wire (`TestUIOptions.wire.strict`)? The option decides; unset, the run's
+ *  `AIO_TEST_WIRE=strict` does; neither, no — what 1.0.19's harness did. */
+function _wireStrict(opts: Pick<TestUIOptions, "wire">): boolean {
+  return opts.wire?.strict ?? Deno.env.get("AIO_TEST_WIRE") === "strict";
+}
+
+/** The current mount's {@linkcode _wireStrict} — per mount, as `_reshaped`. */
+let _strict = false;
+
+/** What a non-strict run has been told, by kind: one line each, per process.
+ *  Observe-only — nothing here fails a test. */
+const _wireSaid = new Set<string>();
+function _sayWireOnce(
+  kind: string,
+  what: string,
+  then = `pass testUI(App, { wire: { strict: true } }), or run with ` +
+    `AIO_TEST_WIRE=strict, to test what a client gets`,
+): void {
+  if (_wireSaid.has(kind)) return;
+  _wireSaid.add(kind);
+  // Straight to stderr, not `console.warn`: a test that counts console
+  // calls must not go red over a note about the harness.
+  Deno.stderr.writeSync(new TextEncoder().encode(
+    `[aio] testUI: ${what} — ${then} ` +
+      `(docs/testing/ui-testing.md, "Calls cross the wire"). Said once per ` +
+      `run.\n`,
+  ));
+}
+
+/** Is the current mount the handle form (`await using ui = await
+ *  testUI(App)`)? Its body's failure never passes through the harness, so
+ *  {@linkcode _reshapedNote} has no error to ride on: what a rejection lost
+ *  on the wire is said when it is lost. Per mount, as `_strict`. */
+let _handleForm = false;
+
+/** Give this mount the page's `__aioConfig.wire` — the SAME global a real
+ *  page reads (`protocol/wire-value.ts`), so the harness has no second copy
+ *  of the decision. Returns the undo. */
+function _useWireConfig(
+  { strict: _harnessOnly, ...wire }: NonNullable<TestUIOptions["wire"]>,
+): () => void {
+  const g = globalThis as { __aioConfig?: Record<string, unknown> };
+  const had = g.__aioConfig;
+  g.__aioConfig = { ...had, wire };
+  return () => {
+    if (had === undefined) delete g.__aioConfig;
+    else g.__aioConfig = had;
+  };
+}
+
 /** A client call's arguments as the server decodes them — or the test's
  *  failure, when they do not arrive intact. `actionWireTrip` is the decider:
  *  production's encode, production's decode, and the walk behind the
@@ -1079,8 +1183,17 @@ function _argsOverWire(
     lost.push({ ...l, path: l.path.slice(type.length + 1) });
   }
   if (lost.length === 0) return (trip.payload as { args: unknown[] }).args;
-  throw new Error(
-    `testUI: ${cellId}.${key}() was called from the UI with arguments JSON ` +
+  throw _wireLossError(`${cellId}.${key}()`, lost, hint);
+}
+
+/** The test's failure for a client call whose arguments JSON changes. */
+function _wireLossError(
+  what: string,
+  lost: LossyConversion[],
+  hint?: string | null,
+): Error {
+  return new Error(
+    `testUI: ${what} was called from the UI with arguments JSON ` +
       `cannot carry intact — over the real socket the server receives ` +
       `DIFFERENT values than the caller passed:\n` +
       lost.map((l) =>
@@ -1135,10 +1248,197 @@ function _overClientWire(
   }
   const out = run(sent);
   return out !== null && typeof (out as { then?: unknown })?.then === "function"
-    ? (out as Promise<unknown>).then((v) =>
-      serializeReturn(v, `${cellId}:${key}`).value
+    ? (out as Promise<unknown>).then(
+      (v) => serializeReturn(v, `${cellId}:${key}`).value,
+      (e) => {
+        throw _rejectionOverWire(`${cellId}.${key}()`, e);
+      },
     )
     : out;
+}
+
+/** What the wire dropped from the rejections of this mount's client calls
+ *  (newest last, capped) — said when the test body fails (`testUI`'s wrapper
+ *  form): a check on what did not cross is why. Reset per mount. */
+let _reshaped: string[] = [];
+
+/** A failed call as its CLIENT is rejected with it: the two fields a failed
+ *  ack carries (`errorFields`, every door's writer), read back by the
+ *  browser's reader (`wireError`). In process the caller got the server's own
+ *  object — its class, its `cause`, its properties, its stack — and a test
+ *  checking any of those was green over a call the app answers with a plain
+ *  `Error` (tests/wire-harness-differential.test.tsx compares the two over a
+ *  real socket). */
+function _rejectionOverWire(what: string, e: unknown): unknown {
+  const fields = errorFields(e);
+  const lost = e instanceof Error
+    ? [
+      e.constructor !== Error ? `class ${e.constructor?.name || "?"}` : "",
+      e.cause !== undefined ? ".cause" : "",
+      ...Object.keys(e).filter((k) =>
+        !(k === "code" && fields.code !== undefined) && k !== "name"
+      ).map((k) => `.${k}`),
+    ].filter(Boolean)
+    : [`a thrown ${e === null ? "null" : typeof e} (it arrives as an Error)`];
+  if (!_strict) {
+    // What 1.0.19's harness did: the caller gets the server's own object.
+    if (lost.length > 0) {
+      _sayWireOnce(
+        "rejection",
+        `${what} rejected, and this test's caller got the server's own ` +
+          `error object. Over a real connection the rejection is a plain ` +
+          `Error with the server's message and its \`code\` (not carried ` +
+          `here: ${lost.join(", ")})`,
+      );
+    }
+    return e;
+  }
+  if (lost.length > 0) {
+    _reshaped.push(`${what} — ${lost.join(", ")}`);
+    if (_reshaped.length > 8) _reshaped.shift();
+    if (_handleForm) {
+      _sayWireOnce(
+        "reshaped",
+        `${what} rejected, and its caller received what a real client ` +
+          `receives: a plain Error with the server's message and its ` +
+          `\`code\` (not carried: ${lost.join(", ")})`,
+        `a check on the error's class (instanceof), \`cause\`, a property ` +
+          `or its stack fails in the app the same way: branch on ` +
+          `errorCode(e) or the message, or test the method on the server's ` +
+          `side with testCell / bootCells, where no wire is crossed`,
+      );
+    }
+  }
+  return wireError(
+    JSON.parse(JSON.stringify(fields)) as typeof fields,
+    "server rejected action",
+  );
+}
+
+/** The line a failing test body gets when a rejection lost something on the
+ *  way to it; "" when none did. */
+function _reshapedNote(): string {
+  if (_reshaped.length === 0) return "";
+  return `\n  testUI: ${
+    _reshaped.length === 1 ? "a call" : "calls"
+  } from the ` +
+    `UI rejected in this test, and what the caller received is what a real ` +
+    `client receives — a plain Error with the server's message and its ` +
+    `\`code\`. Not carried:\n` +
+    _reshaped.map((l) => `    ${l}`).join("\n") +
+    `\n  If the failure above checks the error's class (instanceof), ` +
+    `\`cause\`, a property or its stack, it fails in the app the same way: ` +
+    `branch on errorCode(e) or the message — or test the method on the ` +
+    `server's side with testCell / bootCells, where no wire is crossed ` +
+    `(docs/testing/ui-testing.md, "Calls cross the wire").`;
+}
+
+/** Put every CLIENT `serverFn` call of this mount across the wire: the
+ *  browser's own argument vetting, the server's own route (`invokeServerFn` —
+ *  the access rule, the registry, the result's JSON), the browser's own
+ *  reader of a failed reply. In process the component's call reached the
+ *  function itself: its arguments by reference, no access rule, its thrown
+ *  error by identity. Server code calling one crosses no wire (as `access`
+ *  decides it: `isServerOrigin`). Returns the undo. */
+function _serverFnsOverWire(
+  user: AioUser | undefined,
+  enforceAccess: boolean,
+): () => void {
+  const strict = _strict;
+  return _useServerFnClientDoor((ns, name, args, direct) => {
+    if (isServerOrigin()) return direct();
+    const what = `serverFn("${ns}").${name}`;
+    if (!strict) {
+      // What 1.0.19's harness did: the component reaches the function itself.
+      _sayWireOnce(
+        "serverFn",
+        `${what}() was called from the UI and reached the function itself. ` +
+          `Over a real connection it goes through the server's route: the ` +
+          `namespace's access rule (anonymous unless the test gives a ` +
+          `user), arguments as JSON, and a failure whose message starts ` +
+          `with "[server] "`,
+      );
+      return direct();
+    }
+    const kept = wireArgs(args) as unknown[];
+    let sent: unknown[];
+    try {
+      sent = JSON.parse(JSON.stringify(kept));
+    } catch {
+      return Promise.reject(sfnArgsDropped(what));
+    }
+    const lossy: LossyConversion[] = [];
+    findLossy(kept, sent, "args", lossy, { n: 0 });
+    const lost = lossy.filter((l) => wireLossCounts(l, "harness"));
+    if (lost.length > 0) {
+      return Promise.reject(_wireLossError(`${what}()`, lost));
+    }
+    return runWithUser(
+      user,
+      () => invokeServerFn(ns, name, sent, user, !enforceAccess),
+    ).then((r) => {
+      if (r.ok) return r.value;
+      throw sfnError(JSON.parse(JSON.stringify(r)));
+    });
+  });
+}
+
+/** Deliver `useAio().send(action)` — the raw door a component can send any
+ *  action through — as the server receives it: decoded from the frame a tab
+ *  builds, through the method's own client door (the wire, `access`, the
+ *  ledger). There is no transport under `testUI`, so the action used to be
+ *  queued as "offline" and never ran: the test saw nothing happen. No ack
+ *  comes back for it in the app either, so a failure is the ledger's to
+ *  report, at the next observation. Returns the undo. */
+function _sendOverWire(
+  cells: CellDef[],
+  ledger: Pick<CallFailureLedger, "adopt">,
+): () => void {
+  const byId = new Map(cells.map((c) => [c.__aio.id, c]));
+  const strict = _strict;
+  const prev = setSyncHandler((action) => {
+    if (prev?.(action)) return true;
+    const type = String(action.type);
+    if (!strict) {
+      // What 1.0.19's harness did: not claimed — queued as offline, never run.
+      _sayWireOnce(
+        "send",
+        `useAio().send({ type: "${type}" }) did NOT run — there is no ` +
+          `transport under testUI, so the action was queued as offline. ` +
+          `Over a real connection the server runs it (and refuses a type ` +
+          `no cell has)`,
+      );
+      return false;
+    }
+    const at = type.indexOf(":");
+    const def = byId.get(type.slice(0, at));
+    const key = type.slice(at + 1);
+    // A value JSON cannot carry at all throws HERE, at the call, as in a tab.
+    encodeAction(action);
+    const method = def && !key.startsWith("__") &&
+        (def.__aio.actionKeys ?? []).includes(key)
+      ? (def as unknown as Record<string, unknown>)[key]
+      : undefined;
+    if (typeof method !== "function") {
+      ledger.adopt([{
+        cell: type,
+        err: new Error(
+          `testUI: useAio().send({ type: "${type}" }) — no method of a ` +
+            `cell booted in this test has that type. The app's server ` +
+            `refuses such an action: nothing runs, and nothing tells the ` +
+            `client. Send "<cell>:<method>" with payload { args: [...] }, ` +
+            `or call the method (cell.method(...)), which is typed.`,
+        ),
+      }]);
+      return true;
+    }
+    const args = (action.payload as { args?: unknown } | undefined)?.args;
+    (method as (...a: unknown[]) => unknown)(
+      ...(Array.isArray(args) ? args : []),
+    );
+    return true;
+  });
+  return () => void setSyncHandler(prev);
 }
 
 /** Put every client call to these cells across the wire (see
@@ -1551,6 +1851,7 @@ export function testUI(
         if (e instanceof Error && isFrozenWriteError(raw)) {
           e.message = frozenWriteMessage(raw);
         }
+        if (e instanceof Error) e.message += _reshapedNote();
         bodyErr = { e };
       }
       // Always dispose. dispose drains the action queue — un-awaited action
@@ -2081,6 +2382,8 @@ async function _buildTestUI(
     }
   }
   const maxIter = opts.settleIterations ?? 20;
+  /** The `fetch` calls made through this mount's guard and not answered yet. */
+  const fetching = new Set<{ url: string; stubbed: boolean }>();
 
   // Components using media queries must boot under testUI:
   // forward the owned window's real matchMedia when it has one, else a minimal
@@ -2117,14 +2420,32 @@ async function _buildTestUI(
   // Absolute URLs, `URL` objects and `Request`s pass through untouched.
   {
     const origFetch = globalThis.fetch;
+    // `opts.fetch` is this test's network; without it, the one that was there.
+    const stub = opts.fetch;
+    const answer = stub
+      ? (input: string | URL | Request, init?: RequestInit) =>
+        new Promise<Response>((res) => res(stub(input, init)))
+      : origFetch;
     const guarded = function (
       input: string | URL | Request,
       init?: RequestInit,
     ): Promise<Response> {
+      // What `settle()` names when it gives up: a call that waits on the
+      // network reads as a slow METHOD otherwise, and the reader must work
+      // out that the mount, not the test body, made the request.
+      const url = typeof input === "string"
+        ? input
+        : input instanceof URL
+        ? input.href
+        : input.url;
+      const waiting = { url, stubbed: stub !== undefined };
+      fetching.add(waiting);
       // Call through FIRST: a test that stubbed fetch before the mount may
       // answer relative URLs on purpose, and it must keep doing so. Only a
       // failure on a relative URL gets the better message.
-      return Promise.resolve(origFetch(input, init)).catch((e: unknown) => {
+      return Promise.resolve(answer(input, init)).finally(() => {
+        fetching.delete(waiting);
+      }).catch((e: unknown) => {
         if (
           typeof input === "string" && !URL.canParse(input) &&
           e instanceof TypeError
@@ -2146,6 +2467,43 @@ async function _buildTestUI(
       // Only undo OUR wrapper — a test that replaced fetch keeps its own.
       if (globalThis.fetch === guarded) globalThis.fetch = origFetch;
     });
+  }
+
+  // `new FormData(form)` is how a submit handler reads its form, and Deno's
+  // `FormData` refuses an element that is not its own ("Illegal constructor"):
+  // a form whose handler does that — `<SignIn/>` for one — could not be
+  // submitted under testUI at all. The global becomes one that reads the
+  // mounted DOM's form with the DOM's own `FormData` and is otherwise the
+  // native one (what `fetch` takes as a body, what `instanceof` knows).
+  {
+    const Native = globalThis.FormData;
+    const DomFormData = (doc.defaultView as AnyDoc)?.FormData;
+    if (Native && DomFormData) {
+      class TestFormData extends Native {
+        constructor(form?: unknown, submitter?: unknown) {
+          super();
+          if (form === undefined || form === null) return;
+          for (const [name, value] of new DomFormData(form, submitter)) {
+            if (typeof value !== "string") {
+              throw new TypeError(
+                `testUI: new FormData(form) met the file field "${name}" — ` +
+                  `a file of the test DOM is not one this process's fetch ` +
+                  `can send. Read the input's files in the handler instead.`,
+              );
+            }
+            this.append(name, value);
+          }
+        }
+        static override [Symbol.hasInstance](v: unknown): boolean {
+          return Function.prototype[Symbol.hasInstance].call(Native, v);
+        }
+      }
+      globalThis.FormData = TestFormData;
+      _restoreGlobals.push(() => {
+        // Only undo OUR class — a test that replaced it keeps its own.
+        if (globalThis.FormData === TestFormData) globalThis.FormData = Native;
+      });
+    }
   }
 
   // A native dialog has no one to answer it under testUI. happy-dom has none,
@@ -2516,7 +2874,14 @@ async function _buildTestUI(
     // The wire, around the gate: the server decodes a frame first and asks
     // `access` about what it decoded. Undone first (restores run in push
     // order), so the gate's undo is the one that puts the bound method back.
+    _strict = _wireStrict(opts);
+    _handleForm = name === undefined;
     partial.restore.push(_crossClientWire(cells));
+    _reshaped = [];
+    partial.restore.push(
+      _serverFnsOverWire(opts.user ?? undefined, opts.enforceAccess !== false),
+    );
+    if (opts.wire) partial.restore.push(_useWireConfig(opts.wire));
     if (ungate) partial.restore.push(ungate);
     // What this user's SOCKET would carry, not the server's whole state: a
     // real client only ever holds the `visible.forUser` view, so a component
@@ -2535,6 +2900,7 @@ async function _buildTestUI(
     ledger = _watchUnobservedCalls(cells, _workerCallOverWire);
     inits.pipe(ledger);
     partial.restore.push(() => ledger?.restore());
+    partial.restore.push(_sendOverWire(cells, ledger));
     partial.restore.push(unisolate);
     // The call ring a failure trace reads. Installed beside the ledger and
     // torn down with it, so the two cannot disagree about which methods are
@@ -2717,8 +3083,10 @@ async function _buildTestUI(
       }`
       : "the rendered HTML never stopped changing (a render that re-renders " +
         "itself \u2014 e.g. a signal written during render)";
+    const net = fetchWaitNote([...fetching]);
     _gaveUp =
       `testUI: settle() gave up after ${maxIter} iterations. ${why}.\n` +
+      net +
       `  Nothing after this point is guarded: the app has NOT quiesced.\n` +
       `  fix: await the call itself; drive time with \`await ui.advance(ms)\` ` +
       `if it waits on a schedule; raise the budget with ` +
@@ -4191,4 +4559,24 @@ function _delayCalls(
     }
   }
   return () => undo.splice(0).reverse().forEach((u) => u());
+}
+
+/** The line `settle()` adds when it gives up while a `fetch` the component
+ *  made is unanswered: which URL, and — when the test gave `testUI` no
+ *  `fetch` — that it went to whatever was installed at the mount. `""` when
+ *  nothing waits. */
+export function fetchWaitNote(
+  waiting: readonly { url: string; stubbed: boolean }[],
+): string {
+  if (waiting.length === 0) return "";
+  const urls = [...new Set(waiting.map((w) => w.url))];
+  const shown = urls.slice(0, 3).map((u) => `fetch(${u})`).join(", ") +
+    (urls.length > 3 ? ` and ${urls.length - 3} more` : "");
+  const how = waiting.every((w) => w.stubbed)
+    ? "the `fetch:` given to testUI has not answered"
+    : "testUI was given no `fetch:`, so it went to the fetch installed at " +
+      "the mount (the real network, unless the file replaced it). A stub " +
+      "set in the test body is too late for a request the mount makes: " +
+      "pass `testUI(App, { fetch: () => new Response(…) })`";
+  return `  waiting on ${shown} \u2014 ${how}.\n`;
 }

@@ -121,6 +121,9 @@ function _removeRegion(
   ctx: RenderCtx,
   first: Node | null,
   end: Node | null = null,
+  /** The caller sweeps the region's bounds after this walk (`_retireRegion`
+   *  with a known position). */
+  swept = false,
 ): void {
   let cursor: Node | null = first;
   for (const child of children) {
@@ -130,12 +133,37 @@ function _removeRegion(
     // occupies no node here any more: it is still unmounted, but stepping the
     // cursor from its detached node ran the walk off the region, and every
     // bare-text child after it stayed on the page beside the fallback.
+    //
+    // With nothing of it left under the parent and a sweep to follow, there
+    // is nothing to FIND, only to release. Walked as a removal, the bare text
+    // of a keyed fragment the attempt had removed was reported as text that
+    // "will stay on the page forever" — on a correct document, whenever a
+    // boundary was inserted before another and its child threw.
     if (own && !isChildOf(own, parent)) {
-      removeDom(parent, child, ctx);
+      if (
+        swept && typeof child === "object" &&
+        !isChildOf(_liveFirstDom(child), parent)
+      ) _removeDomCleanup(child, ctx);
+      else removeDom(parent, child, ctx);
       continue;
     }
     const at = own ?? cursor;
-    if (at && at === end) break; // the region ran out before the model did
+    // `at === end` — or no node at all where a sweep follows: a boundary
+    // that is its parent's LAST child ends at "none", so its shortfall reads
+    // as a lost cursor. A bare text the attempt had already retired was then
+    // "removed without its DOM position … will stay on the page forever" on
+    // a correct document. (No sweep: the position was never known, and that
+    // report stands.)
+    if (at ? at === end : swept) {
+      // The region ran out before the model did: no node of this child is
+      // here. It is still UNMOUNTED — the walk used to stop instead, and a
+      // `<Portal>` behind the point where it stopped kept its content in its
+      // target for good (a second copy beside the next mount, and one left
+      // on the page after the app was gone); a component there kept its
+      // effects.
+      if (typeof child === "object") _removeDomCleanup(child, ctx);
+      continue;
+    }
     cursor = _advance(at, _domNodeCount(child));
     removeDom(parent, child, ctx, at);
   }
@@ -177,6 +205,7 @@ function _retireRegion(
     ctx,
     first && !isChildOf(first, parent) && known ? regionStart() : first,
     end,
+    known,
   );
   if (!known) return;
   let n: Node | null = regionStart();

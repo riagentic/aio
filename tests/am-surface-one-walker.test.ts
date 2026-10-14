@@ -1,6 +1,7 @@
 // `am surface --names` and `ui.names()` must list the SAME paths, in the same
 // order — so they share the one walker (`collectElementPaths`). 1.0.2's
 // changelog said so; `am` still carried a hand-kept copy.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { _surfaceNames, NO_UI_CLIENT_HINT } from "../src/am/am-cmd-inspect.ts";
 import {

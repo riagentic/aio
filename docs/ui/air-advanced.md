@@ -523,13 +523,15 @@ with no `href`, a positive `tabIndex`, `aria-hidden` on something focusable,
 `aria-disabled` used as if it disabled -- plus missing and duplicate keys, hooks
 called in a different order than last render, a component re-rendering in a
 loop, `onMount` outside a render, and server/client markup divergence during
-hydration. Zero overhead in production.
+hydration. Zero overhead in production: the accessibility, key, unknown-event,
+controlled-input and re-render-loop checks are not in a production bundle at all
+-- they run under `deno task dev` and in tests.
 
 Override it when you need to:
 
 ```tsx
 import { setDevMode } from "aio/air";
-setDevMode(true); // force on, e.g. in a production debugging session
+setDevMode(true); // force on (a production bundle says which checks it lacks)
 setDevMode(false); // force off
 setDevMode("auto"); // back to following __aioDev (the default)
 ```

@@ -382,9 +382,10 @@ Deno.test("blobs over HTTP: auth flows make the SHELL public — blob bytes stay
 // `null`, and `delete()` answered `false` — "you have no blobs", "no such
 // blob", "there was nothing to delete" — for a store whose blobs were all
 // still sitting in it.
-Deno.test("blobs: an unreadable store throws — it does not read as empty", async () => {
-  if (Deno.build.os === "windows") return; // chmod is not the gate there
-  if ((Deno.uid?.() ?? -1) === 0) return; // root reads through 0o000
+Deno.test({
+  name: "blobs: an unreadable store throws — it does not read as empty",
+  ignore: Deno.build.os === "windows" || Deno.uid() === 0, // the seam is chmod, which does not deny access on Windows; root passes through a mode
+}, async () => {
   await withStore(async (store) => {
     const a = await store.put(enc_.encode("alpha"), { name: "report.pdf" });
     await store.put(enc_.encode("beta"), { name: "invoice.pdf" });
@@ -434,9 +435,10 @@ Deno.test("blobs: absent is still absent — an empty store is empty, not broken
   });
 });
 
-Deno.test("blobs: put does not claim a name it could not record", async () => {
-  if (Deno.build.os === "windows") return;
-  if ((Deno.uid?.() ?? -1) === 0) return;
+Deno.test({
+  name: "blobs: put does not claim a name it could not record",
+  ignore: Deno.build.os === "windows" || Deno.uid() === 0, // the seam is chmod, which does not deny access on Windows; root passes through a mode
+}, async () => {
   await withStore(async (store) => {
     // The bytes path needs a writable directory (tmp file + rename), so the
     // metadata write is blocked at the FILE: a read-only `{}` records no name

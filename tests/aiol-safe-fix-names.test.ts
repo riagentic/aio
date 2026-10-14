@@ -455,3 +455,67 @@ Deno.test("aiol: an identifier written with a \\u escape, or an element the read
     ["aio"],
   );
 });
+
+Deno.test("aiol: a `.ts` file read as the language's own lexer reads it is proven whatever it spells — a `</p>` in a string is a string", () => {
+  const kindsOf = (file: string) =>
+    specKinds({ aio: "jsr:@riagentic/aio" }, {
+      root: resolve("/app"),
+      from: resolve(file),
+      source: () => undefined,
+    });
+  const src = `import { call } from "aio";\n` +
+    `export const html = "<p>call it</p>";\n` +
+    `export const re = /<\\/p>|<br\\/>/;\n` +
+    `// ends in </p>, and the name: call\n` +
+    `export const r = call({ timeout: 5 }, f);\n`;
+  const who = (file?: string) =>
+    whose(src, file === undefined ? specKinds() : kindsOf(file))(
+      src.lastIndexOf("call("),
+      "call",
+    );
+  assertEquals(who("/app/src/a.ts").who, "aio");
+  assertEquals(who("/app/src/a.mjs").who, "aio");
+  // A file that may hold JSX, or one nobody named: as before — the `</` that
+  // closes no element is a stop.
+  for (const file of ["/app/src/a.tsx", "/app/src/a.jsx", undefined]) {
+    const got = who(file);
+    assertEquals(got.who, "shadowed", String(file));
+    assert(got.why.includes("writes `</` where it closes no element"), got.why);
+  }
+  // A `.ts` file in which the element reader DID take something (an
+  // old-style cast shaped like a tag, closed further down) is not the
+  // lexer's mask: the careful reading stays.
+  const cast = `import { call } from "aio";\n` +
+    `const n = <T>x; const s = "</T>";\n// call\n` +
+    `export const r = call({ timeout: 5 }, f);\n`;
+  const plain = whose(cast, kindsOf("/app/src/b.ts"))(
+    cast.lastIndexOf("call("),
+    "call",
+  );
+  const careful = whose(cast, kindsOf("/app/src/b.tsx"))(
+    cast.lastIndexOf("call("),
+    "call",
+  );
+  assertEquals(plain.who, careful.who, `${plain.why} / ${careful.why}`);
+});
+
+Deno.test("aiol: a nested function that shadows the imported `call` is not rewritten, and JSX prose beside a `{…}` child is no use", () => {
+  const I = `import { call } from "aio";\n`;
+  for (
+    const body of [
+      // declared before the use, after it (hoisted), and as a parameter
+      `function call(o: unknown) { return o; }\n  return call({ timeout: 5 }, ${P1});`,
+      `const r = call({ timeout: 5 }, ${P1});\n  function call(o: unknown) { return o; }\n  return r;`,
+      `return ((call: (o: unknown) => unknown) => call({ timeout: 5 }))(f);`,
+    ]
+  ) {
+    const src = I + `export function outer() {\n  ${body}\n}\n`;
+    const { fix } = callTimeoutScan(src);
+    assertEquals(fix.length, 0, src);
+    assertEquals(whose(src)(src.indexOf("call({"), "call").who, "shadowed");
+  }
+  const shown =
+    `import { useCell } from "aio";\nimport { c } from "./c.ts";\n` +
+    `export const A = () => { const n = 1; return <p>{n} useCell(c).state.x is the old way</p>; };\n`;
+  assertEquals(useCellCalls("/app/src/A.tsx", shown), []);
+});

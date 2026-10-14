@@ -14,6 +14,7 @@
 // It watches now. These pin the two decisions that are pure (which directory,
 // and that a missing one is refused); the FS loop itself is exercised by
 // running the real command below.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { watchTargetDir } from "../src/am/am-cmd-process.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";

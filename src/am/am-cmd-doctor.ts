@@ -37,8 +37,115 @@ import {
   stopCommandFor,
 } from "./am-cmd-process.ts";
 import { appHome, profileOfHome } from "../server/app-dirs.ts";
+import { homeMismatchNote } from "../server/paths.ts";
 import type { InstanceInfo } from "../server/single-instance-lock.ts";
 import { electronBehindHintFor } from "./am-electron.ts";
+import { allowScriptsDrift } from "./am-versions.ts";
+import { readDenoJson } from "../server/deno-json.ts";
+import { resolveEntryPath } from "../server/paths.ts";
+import { declaredTargets } from "./am-cmd-fix.ts";
+import {
+  androidColorSchemeHint,
+  type HardenFinding,
+  hardenFindings,
+  ownsActivity,
+  shippedHelpHints,
+} from "./am-harden.ts";
+
+/** The opt-in security switches the app in `dir` has not decided on (see
+ *  am-harden.ts). Hints: an existing app is never failed for a default it
+ *  never chose, and nothing is written. */
+export async function hardenFindingsFor(dir: string): Promise<HardenFinding[]> {
+  let config: Record<string, unknown> | undefined;
+  try {
+    config = (await readDenoJson(dir))?.config;
+  } catch {
+    return []; // aio-ok: an unreadable deno.json is `am fix`'s to report
+  }
+  if (!config) return [];
+  const entry = await Deno.readTextFile(join(dir, resolveEntryPath(config)))
+    .catch(() => null); // no readable entry: nothing is claimed about it
+  return hardenFindings(
+    config,
+    declaredTargets(config),
+    entry,
+    await ownsActivity(dir),
+  );
+}
+
+/** The app's own source files under `src/` — at most 2,000, none over
+ *  512 KB, no dependency or build folder. What {@linkcode shippedHelpHints}
+ *  reads. A folder that cannot be read contributes nothing. */
+async function ownSources(
+  dir: string,
+): Promise<{ path: string; code: string }[]> {
+  const out: { path: string; code: string }[] = [];
+  const walk = async (at: string, rel: string): Promise<void> => {
+    let entries: Deno.DirEntry[];
+    try {
+      entries = await Array.fromAsync(Deno.readDir(at));
+    } catch {
+      return; // aio-ok: no src/, or one that cannot be listed — no hint
+    }
+    for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (out.length >= 2000) return;
+      const path = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory) {
+        if (e.name === "node_modules" || e.name.startsWith(".")) continue;
+        await walk(join(at, e.name), path);
+      } else if (e.isFile && /\.(?:ts|tsx|mts|js|jsx|mjs)$/.test(e.name)) {
+        const file = join(at, e.name);
+        const size = await Deno.stat(file).then((s) => s.size, () => Infinity);
+        if (size > 512 * 1024) continue;
+        const code = await Deno.readTextFile(file).catch(() => null);
+        if (code !== null) out.push({ path: `src/${path}`, code });
+      }
+    }
+  };
+  await walk(join(dir, "src"), "");
+  return out;
+}
+
+/** {@linkcode shippedHelpHints} for the app in `dir`. */
+export async function shippedHelpHintsFor(dir: string): Promise<string[]> {
+  const config = await readDenoJson(dir).then((d) => d?.config).catch(() =>
+    undefined
+  ); // an unreadable deno.json is `am fix`'s to report
+  return config
+    ? shippedHelpHints(config, declaredTargets(config), await ownSources(dir))
+    : [];
+}
+
+/** {@linkcode androidColorSchemeHint} for the app in `dir`. */
+export async function colorSchemeHintFor(dir: string): Promise<string | null> {
+  const config = await readDenoJson(dir).then((d) => d?.config).catch(() =>
+    undefined
+  ); // an unreadable deno.json is `am fix`'s to report
+  return config
+    ? androidColorSchemeHint(config, declaredTargets(config))
+    : null;
+}
+
+/** `am doctor`'s hint for `allowScripts` entries that name a version the app
+ *  no longer imports — Deno then skips that package's install script without
+ *  a word (see `allowScriptsDrift`) — or null. `am fix` rewrites them. */
+export async function allowScriptsHintFor(
+  appDir: string,
+): Promise<string | null> {
+  let config: Record<string, unknown> | undefined;
+  try {
+    config = (await readDenoJson(appDir))?.config;
+  } catch {
+    return null; // aio-ok: an unreadable deno.json is `am fix`'s to report
+  }
+  const drift = allowScriptsDrift(config ?? {});
+  return drift.length === 0
+    ? null
+    : `allowScripts: ${
+      drift.map((d) => `"${d.from}" is imported as "${d.to}"`).join(", ")
+    } — Deno matches by exact version, so that install script is skipped. ` +
+      `\`am fix\` rewrites the entry`;
+}
 
 /** The newest file under a tree, by mtime. `null` for an empty/missing tree.
  *  Skips `node_modules` and `.git` — vendored and history, not the code the
@@ -225,8 +332,40 @@ export async function cmdDoctor(
   // or not anything runs — and never changes the exit code: a build ships the
   // tested Electron regardless.
   const electron = await electronBehindHintFor(root);
-  const hints = electron ? [electron] : [];
-  const hintBlocks = hints.map((h) => block("warn", h, undefined, "am fix"));
+  // Windows only: `%HOME%` and `%USERPROFILE%` name different folders, so the
+  // installers' shell and a double-clicked app may disagree about "home".
+  const home = homeMismatchNote();
+  const scripts = await allowScriptsHintFor(root);
+  // The switches whose safe value is opt-in, for an app that has not said
+  // either way. Each names the open door and its key; `am fix --harden`
+  // writes the deno.json one and spells out the `aio.run()` ones.
+  const harden = (await hardenFindingsFor(root)).map((f) =>
+    f.hint + (f.file === "deno.json" ? " — `am fix --harden` writes it" : "")
+  );
+  // A look whose default cannot move (see `androidColorSchemeHint`).
+  const scheme = await colorSchemeHintFor(root);
+  // Help that shipped as an opt-in and this app does not use yet.
+  const shipped = await shippedHelpHintsFor(root);
+  const hints = [
+    ...(electron ? [electron] : []),
+    ...(scripts ? [scripts] : []),
+    ...(home ? [home] : []),
+    ...harden,
+    ...(scheme ? [scheme] : []),
+    ...shipped,
+  ];
+  const hintBlocks = hints.map((h) =>
+    block(
+      "warn",
+      h,
+      undefined,
+      h === home || h === scheme || shipped.includes(h)
+        ? undefined
+        : harden.includes(h)
+        ? "am fix --harden"
+        : "am fix",
+    )
+  );
   if (running.length === 0) {
     out(
       {

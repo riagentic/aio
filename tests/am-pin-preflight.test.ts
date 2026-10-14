@@ -9,6 +9,7 @@
 // The mirror case matters as much: moving BACKWARD to a version that still runs
 // the old spelling must stay silent. A check that fires when the answer is "yes
 // this works" trains people to pass --force by reflex.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { preflight } from "../src/am/am-cmd-pin.ts";

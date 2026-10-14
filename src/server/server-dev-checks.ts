@@ -132,12 +132,33 @@ export function startGraphValidation(
     debug,
     signal: stopper.signal,
   });
+  // Said when it APPEARS — at boot, and on the hot-reload revalidation that
+  // first finds it (`setResult`): a Worker added while dev runs was otherwise
+  // silent until the next restart. Once per finding, and again if it comes
+  // back after being fixed; never on every save.
+  let saidWorkers = new Set<string>();
+  const sayWorkers = (errors: GraphResult["errors"]) => {
+    const now = new Set<string>();
+    for (const err of errors) {
+      if (err.category !== "unmanaged-worker") continue;
+      const key = `${err.file}:${err.line ?? ""}:${err.message}`;
+      now.add(key);
+      if (saidWorkers.has(key)) continue;
+      log.warn(
+        "graph",
+        `⚠ ${err.file}${err.line ? `:${err.line}` : ""} — ${err.message}`,
+      );
+      log.warn("graph", `FIX: ${err.fix}`);
+    }
+    saidWorkers = now;
+  };
   const done = esbuildWork(validateGraph(
     entrypoint,
     importMapObj,
     graphTranspile,
     undefined,
     prodGraph,
+    { appDir: absBaseDir },
   ))
     .then((result) => {
       // Landed after the close: a verdict on a walk the close cut short is
@@ -230,6 +251,10 @@ export function startGraphValidation(
           { detail: String() },
         );
       }
+      // A Worker that runs here and not in a build (`unmanagedWorkers`). It
+      // used to be one of "(N warnings)" on a debug line — and "it works in
+      // dev" was then the whole story until the artifact ran.
+      sayWorkers(warnings);
       if (deferredCount > 0) {
         debug(
           `graph: ${deferredCount} server-only symbol(s) behind dynamic ` +
@@ -247,6 +272,7 @@ export function startGraphValidation(
 
   const setResult = (r: GraphResult) => {
     graphResult = r;
+    sayWorkers(r.errors);
   };
   let settled = false;
   done.then(() => {

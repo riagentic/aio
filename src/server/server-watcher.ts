@@ -27,7 +27,7 @@ import {
   _lockDeps,
   createInLockDir,
   lockDir,
-  ownPidTag,
+  sentinelName,
   sweepDeadSentinels,
 } from "./single-instance-lock.ts";
 import { log } from "../diagnostics/logger-api.ts";
@@ -64,6 +64,11 @@ export interface WatcherDeps {
    *  process and cannot hot-reload, so dev restarts the process; without a
    *  handler the watcher falls back to warning once per file. */
   onCellChange?: (path: string) => void;
+  /** The source files under the watched roots that were saved before this
+   *  watcher existed and after the process loaded them — asked once, at
+   *  start. Each is judged as a save is: a server-side one restarts. Absent
+   *  where nothing restarts (a library host, a test). */
+  savedBeforeWatch?: (roots: readonly string[]) => readonly string[];
   /** The file that runs `aio.run()` (default: `Deno.mainModule`). It holds
    *  the routes, schedules, auth and every other boot option, and it runs in
    *  THIS process — so an edit to it is handled exactly like a cell edit
@@ -206,6 +211,11 @@ function describeChanged(paths: string[]): string {
     : `${rel.slice(0, 3).join(", ")} +${rel.length - 3} more`;
 }
 
+/** The sentinel numbers this process's running watchers hold: each one's
+ *  sentinel is its own, and the lowest free number is taken — so a process
+ *  with one watcher at a time names its file as every build has. */
+const _sentinels = new Set<number>();
+
 /** Factory — creates a self-contained file watcher with debouncing and health monitoring */
 export function createFileWatcher(deps: WatcherDeps): FileWatcher {
   // Paths the CSS step wrote on its last run. A burst consisting only of these
@@ -334,6 +344,33 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
     }
   };
 
+  /** Does `path` run in the server process? Then a browser reload cannot
+   *  apply it — see `serverSideChanged`. */
+  const judgeServerSide = (path: string): void => {
+    try {
+      const src = Deno.readTextFileSync(path);
+      // The server ENTRY runs in this process too, and a browser reload
+      // cannot apply it: an edited route, schedule or auth option used to
+      // print "reloaded src/app.ts" while the server kept serving the old
+      // one — a new route answered with the SPA shell.
+      if (isServerEntry(path)) serverSideChanged(path, "server entry");
+      else if (/\bcell\s*\(\s*["'`]/.test(src)) {
+        serverSideChanged(path, "cell file");
+      } else if (!isServerOnlyFile(path)) {
+        // A plain module the server itself imports (a pricing helper a
+        // method calls) used to print "reloaded" while every server call
+        // kept running the old copy. `*.server.ts` keeps its own warning
+        // in `scheduleReload`.
+        void inServerGraph(path).then((hit) => {
+          // Shut down while the walk ran: a closed server restarts nothing.
+          if (hit && !_shutDown) {
+            serverSideChanged(path, "server module");
+          }
+        });
+      }
+    } catch { /* unreadable — skip */ }
+  };
+
   // Teach the browser-error classifier how to tell "App.tsx itself is gone"
   // from "a module App.tsx imports is broken". Without it the overlay guesses,
   // and the guess is wrong for exactly the case a beginner hits: they deleted
@@ -385,7 +422,12 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
   // it tests. A port is only known after the listener binds — which is after
   // this watcher starts — and `port: 0` (the documented "pick a free port")
   // gave every such app the same name, `watch-0.tmp`.
-  const SENTINEL = join(lockDir(), `watch-${ownPidTag()}.tmp`);
+  // …and by WATCHER: two in one process shared the one name — the second
+  // replaced the first's file, and the first's shutdown removed the file the
+  // second still touched ("watcher unresponsive" 60 s later).
+  // Named when the watcher starts, the number given back when it stops.
+  let SENTINEL = "";
+  let sentinelNo = -1;
   let lastWatcherEvent = Date.now();
   let watcherRestarts = 0;
   const MAX_WATCHER_RESTARTS = 3;
@@ -485,31 +527,7 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
           `runs on.`,
       );
     }
-    if (!path.endsWith(".css")) {
-      try {
-        const src = Deno.readTextFileSync(path);
-        // The server ENTRY runs in this process too, and a browser reload
-        // cannot apply it: an edited route, schedule or auth option used to
-        // print "reloaded src/app.ts" while the server kept serving the old
-        // one — a new route answered with the SPA shell.
-        if (isServerEntry(path)) serverSideChanged(path, "server entry");
-        else if (/\bcell\s*\(\s*["'`]/.test(src)) {
-          serverSideChanged(path, "cell file");
-        } else if (!isServerOnlyFile(path)) {
-          // A plain module the server itself imports (a pricing helper a
-          // method calls) used to print "reloaded" while every server call
-          // kept running the old copy. `*.server.ts` keeps its own warning
-          // above.
-          const changedPath = path;
-          void inServerGraph(changedPath).then((hit) => {
-            // Shut down while the walk ran: a closed server restarts nothing.
-            if (hit && !_shutDown) {
-              serverSideChanged(changedPath, "server module");
-            }
-          });
-        }
-      } catch { /* unreadable — skip */ }
-    }
+    if (!path.endsWith(".css")) judgeServerSide(path);
     // Normalize to match cache keys — resolve symlinks (e.g. /var → /private/var on macOS)
     // Clear both the transpile entry and the memoized realpath for this path.
     clearTranspileCaches(path);
@@ -582,6 +600,7 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
             liveTranspile,
             undefined,
             deps.prodGraph,
+            { appDir: absBaseDir },
           ));
           const result = await whileLive(
             Promise.race([validation, timeout]).finally(
@@ -912,6 +931,7 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
       createInLockDir(
         SENTINEL,
         () => _lockDeps.create(SENTINEL, { createNew: true, write: true }),
+        (f) => f.close(),
       ).close();
       return true;
     } catch (e) {
@@ -934,11 +954,39 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
     } catch { /* aio-ok: already gone, or never made */ }
   };
 
+  /** The sentinel file removed and its number given back. */
+  function releaseSentinel(): void {
+    // Once: the number may be another watcher's by now, and its file with it.
+    if (sentinelNo < 0) return;
+    removeEventListener("unload", dropSentinel);
+    dropSentinel();
+    _sentinelOk = false;
+    _sentinels.delete(sentinelNo);
+    sentinelNo = -1;
+  }
+
   function start(): boolean {
+    if (sentinelNo < 0) {
+      for (sentinelNo = 0; _sentinels.has(sentinelNo);) sentinelNo++;
+      _sentinels.add(sentinelNo);
+      SENTINEL = join(lockDir(), sentinelName(sentinelNo));
+    }
     _sentinelOk = ensureSentinel();
     if (_sentinelOk) addEventListener("unload", dropSentinel);
-    if (!startWatcher()) return false;
+    if (!startWatcher()) {
+      // No watcher: nothing touches the sentinel and `shutdown` may never be
+      // called for a watcher that did not start — the number stayed taken
+      // and the file stayed in the lock dir, which then could not be pruned.
+      releaseSentinel();
+      return false;
+    }
     log.info(`[aio] live reload watching ${absBaseDir}`);
+    // A save made before this watcher existed has no event. Only what runs
+    // in THIS process is looked at: the page fetches its modules after this,
+    // so it has the saved ones already.
+    for (const path of deps.savedBeforeWatch?.(watchRoots()) ?? []) {
+      if (/\.(tsx?|jsx?|mjs)$/.test(path)) judgeServerSide(path);
+    }
     // Health check — touch sentinel every 30s, restart watcher if no events for 60s.
     // lstatSync+open(write+truncate) instead of writeTextFileSync so we never
     // follow a symlink if one gets swapped in mid-run (F-2 defense).
@@ -1000,8 +1048,7 @@ export function createFileWatcher(deps: WatcherDeps): FileWatcher {
       clearInterval(healthTimer);
       healthTimer = null;
     }
-    removeEventListener("unload", dropSentinel);
-    dropSentinel();
+    releaseSentinel();
   }
 
   async function cssSettled(): Promise<void> {

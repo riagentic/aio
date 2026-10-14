@@ -11,6 +11,7 @@
 // `--args='["192.168.1.9"]'` is that spelling. These tests pin it end-to-end
 // against a real app over the real trojan, and pin every pre-existing form
 // unchanged beside it (compat is not a claim, it is a row in this table).
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { cell } from "../src/state/cell-create.ts";
 import { testServer } from "../src/testing/server-test.ts";

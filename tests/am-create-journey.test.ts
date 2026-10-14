@@ -1,5 +1,6 @@
 // `am create` as a first-hour user meets it — the scaffold's own commands
 // must be commands that work, and its report must say what it did.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, isAbsolute, join } from "@std/path";
 import { spec } from "./module-spec-helper.ts";
@@ -283,6 +284,7 @@ Deno.test({
     assertEquals(
       Object.keys(cli).sort(),
       [
+        ".gitattributes",
         ".gitignore",
         "AGENTS.md",
         "CLAUDE.md",

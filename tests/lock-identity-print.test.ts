@@ -8,6 +8,7 @@
 // the macOS 14 VM: writer Pacific/Auckland+de_DE, readers UTC+C,
 // America/New_York+fr_FR and Asia/Kolkata+ja_JP all read 1790150137 and
 // refused a second instance.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import {
   deadOwnerWarning,

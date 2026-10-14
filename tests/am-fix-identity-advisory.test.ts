@@ -12,6 +12,7 @@
 //
 // Driven through the real `am fix --dry-run --json`, because the thing under
 // test is what a user is told, not a predicate.
+import "./store-sandbox.ts";
 import { assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 

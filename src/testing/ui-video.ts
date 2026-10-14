@@ -24,6 +24,7 @@
 import {
   basename,
   dirname,
+  fromFileUrl,
   isAbsolute,
   join,
   relative,
@@ -571,7 +572,10 @@ export function callerTestFile(): string | null {
     const url = m[1]!;
     if (/\/src\/testing\/|\/src\/cell-test\.ts/.test(url)) continue;
     try {
-      return new URL(url).pathname;
+      // A PATH, not the URL's `pathname`: that is `/C:/proj/x.test.tsx` on
+      // Windows (no directory above it holds a deno.json — the look fell back
+      // to the cwd's) and `%20` for a space everywhere.
+      return fromFileUrl(url);
     } catch {
       return null;
     }

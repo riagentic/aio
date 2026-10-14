@@ -8,6 +8,7 @@
 // It SCANS rather than lists. "Everything removed since alpha76" is a
 // changelog, and the changelog exists; the useful answer is the intersection
 // with your code, which is usually much shorter and always actionable.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import {

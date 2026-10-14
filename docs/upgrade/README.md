@@ -26,6 +26,15 @@ app, that is a bug in aio, not a step you missed.
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [1.0.19-beta → **1.0.20-beta**](from-1.0.19-beta-to-1.0.20-beta.md) — nothing
+  is removed or renamed and no default moves; nothing to change by hand. The
+  safer values are opt-ins (`electron.strictPin`, `electron.ignoreDebugEnv`,
+  `auth.maxSessions`, `auth.publicDir`, `wire.refuseShortCalls`,
+  `android.colorScheme`) that `am doctor` hints at and `am fix --harden` writes;
+  `.ts` browser workers are bundled on every target; single-file installs update
+  from a patch (`am publish --patch-from`); Android builds are signed through
+  `AIO_ANDROID_KEYSTORE`; `am upgrade` works for a Windows one-click install;
+  Electron is bumped
 - [1.0.18-beta → **1.0.19-beta**](from-1.0.18-beta-to-1.0.19-beta.md) — nothing
   is removed or renamed. A `<webview>` preload ships in a package
   (`build.guestPreloads`, `guestPreload()`); embedded and child pages get their

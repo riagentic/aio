@@ -21,6 +21,7 @@
 // with ELECTRON_E2E=1, needs node_modules/.bin/electron and a display (the
 // nested Xephyr — no window lands on your desktop; the session bus is never
 // the real one, so no tray icon lands in your panel either).
+import { accountEnv } from "./e2e-app-harness.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { electronMainScriptUDS } from "../src/electron/electron.ts";
@@ -177,7 +178,8 @@ async function withWindow(
     PATH: `${bin}:${Deno.env.get("PATH")}`,
     DBUS_SESSION_BUS_ADDRESS: `unix:path=${join(dir, "no-bus")}`,
     ELECTRON_DISABLE_SECURITY_WARNINGS: "1",
-    XDG_CONFIG_HOME: join(dir, "config"),
+    // The window's profile, wherever this OS keeps it.
+    ...accountEnv(join(dir, "config")),
   };
   delete env.WAYLAND_DISPLAY;
   const proc = new Deno.Command(ELECTRON_BIN, {

@@ -88,8 +88,9 @@ it.
   single root, filterable; files open with basic syntax highlighting (TS/JS,
   JSON); oversized (>2 MB) and binary files show a notice instead.
 
-**Controls** — start / stop / restart (graceful trojan shutdown → SIGTERM), with
-confirm guards; the list refreshes itself after each action.
+**Controls** — start / stop / restart (graceful trojan shutdown → SIGTERM; on
+Windows that fallback ends the process without its clean shutdown), with confirm
+guards; the list refreshes itself after each action.
 
 ## How it works
 

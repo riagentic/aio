@@ -11,6 +11,7 @@
 // collapsed UI, which is precisely the bug someone reaching for `--rects` is
 // hunting. So the counts travel with the rects, the CLI exits 1 rather than
 // let them read as data, and the server-side render refuses outright.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { aio, cell } from "../mod.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";

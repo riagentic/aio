@@ -16,6 +16,7 @@
 // A warning that fires when nothing is wrong is how the ones that matter come
 // to be ignored, and this one lives in the durability path: the SAME message,
 // on a journal that really cannot be compacted, is the one that must be read.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { createJournal } from "../src/server/journal.ts";

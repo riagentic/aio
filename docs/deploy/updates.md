@@ -170,7 +170,7 @@ name — so `setChannel("../prod")` throws instead of being pinned.
 ```sh
 deno task ship keygen                      # once, ever
 # → wrote ~/.aio/keys/<app>-release-key.json   (private; never commit it)
-deno task publish --key=~/.aio/keys/myapp-release-key.json
+deno task publish                          # signs with that key (--key=<full path> for another; ~ is not expanded)
 # → ./release/prod/ — upload that directory to <source>/
 ```
 
@@ -231,10 +231,58 @@ marker is read as before: from stdout. A `--data=` file may hold either form.
 
 Useful flags: `--dir=/srv/releases` (where to stage), `--channel=test`,
 `--notes="fixes the sync bug"`, `--no-build` (publish what `dist/` already
-holds), `--no-zip` (publish a one-click Windows `.exe` without its `.zip`, on
-purpose — no install updates from it). Unsigned is allowed for a local or
-air-gapped channel, and every step says so out loud — but a client only installs
-unsigned releases if the app opted in.
+holds), `--patch-from=<dir>` (also publish a patch from the release in `<dir>` —
+see [Patches](#patches-an-update-the-size-of-the-change)), `--no-zip` (publish a
+one-click Windows `.exe` without its `.zip`, on purpose — no install updates
+from it). Unsigned is allowed for a local or air-gapped channel, and every step
+says so out loud — but a client only installs unsigned releases if the app opted
+in.
+
+### Patches: an update the size of the change
+
+A compiled app is a hundred megabytes; two builds a commit apart differ by a few
+kilobytes. `--patch-from` publishes that difference beside the release:
+
+```sh
+deno task publish --patch-from=release     # the release directory published before
+# → release/prod/<artifact>.<from>-<to>.zst   (24.7 KB instead of 112.0 MB, from 1.4.2)
+```
+
+`--patch-from=<dir>` names a directory an earlier release was published into
+(`<dir>/<os>-<arch>.json` or `<dir>/<channel>/<os>-<arch>.json`, with its
+artifact beside it) — the same `--dir` you publish into works, because the patch
+is made before anything there is overwritten. Give it more than once, with a
+kept copy of each older release, to cover installs that are several releases
+behind.
+
+An install whose own file is the build a patch starts from downloads the patch,
+makes the new artifact from it and the file it already has, and installs that —
+**only if its SHA-256 is the manifest's own `sha256`**, the same check a
+download gets, before anything is swapped. A patch is a shorter way to the same
+signed bytes, never a second thing to trust: a wrong patch, a damaged one, or
+one made from another file ends in the whole release being downloaded. So does
+every other miss — no patch from the installed build, the patch file missing
+(404), a patch over half the release's size, too little free memory (install +
+release + a quarter) — each said in one log line, never as an error:
+
+```
+updates  made notes 1.4.3 from the installed build and a 24.7 KB patch — the whole release (112.0 MB) was not downloaded
+updates  1.4.3 is not installed from a patch (none of its 1 starts from the build installed here (3fa9c1d2e07b…)) — downloading the whole release
+```
+
+Everything after the artifact exists is the same update: smoke test, backup,
+swap, confirm, rollback.
+
+|                     |                                                                                                                                                                                                                                                                                                                                    |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| What can be patched | An install that IS one file: a compiled binary or CLI (`binary`), an AppImage (`appimage`, `electron-appimage`).                                                                                                                                                                                                                   |
+| What cannot         | An install unpacked into a folder: `electron-zip` (a Windows `.zip` or one-click `.exe` install), a macOS `.app` (`electron-app`), Android. The archive its manifest hashes is gone once it is unpacked, and no re-packing gives it back byte for byte — these **download every release whole**, and publish says so per artifact. |
+| Format              | One zstd frame made with `zstd -19 --patch-from=<the earlier artifact>`.                                                                                                                                                                                                                                                           |
+| Publishing needs    | The `zstd` command line tool, 1.4.5 or newer, on `PATH` (it is refused, by name, without it). About half a minute and 500 MB of memory per 100 MB artifact.                                                                                                                                                                        |
+| Updating needs      | Nothing: the decoder is part of aio. About 0.1–0.5 s and install + release of memory for a 100 MB artifact.                                                                                                                                                                                                                        |
+| In the manifest     | `patches: [{ from, url, size, sha256 }]` (`from` = SHA-256 of the artifact it starts from) and `patchesSignature`, an Ed25519 signature by the release key over the list AND the release's own signed core. A list that was edited, moved from another release, or lost its signature is not used.                                 |
+| Older clients       | An app built with aio up to 1.0.19 ignores both keys and downloads the whole release, exactly as before — the signed core it verifies is unchanged. A client with patches reading a channel without them does the same.                                                                                                            |
+| Not published       | A patch over half the size of the release (nothing in common with the earlier build); the same build published twice.                                                                                                                                                                                                              |
 
 `--dir` inside the project must be a directory of its own — the rule the build's
 `--out` follows: not the project root, `src/`, an app dir, `.git`, `.aio`, nor
@@ -306,6 +354,20 @@ The first release an install verifies **pins its signing key** (trust on first
 use, with a loud one-time line). Every release afterwards must be signed by that
 key — a manifest signed by anyone else is refused, and so is an unsigned one.
 
+First use is the one moment that trust is taken on faith: an install whose first
+check is answered by someone who took over the release host pins _their_ key.
+Ship the key inside the app and there is no such moment:
+
+```ts
+updates: { source: "https://releases.example.com/wallet", key: { kty: "OKP", crv: "Ed25519", x: "…" } }
+```
+
+`am publish` prints that line with your public key whenever it signs a release
+for an app that has none in its entry; `deno task build` and `am doctor` say the
+same without the key. An install that already pinned this key notices nothing.
+The configured key replaces a pinned one, so it must be the key your releases
+are signed with — changing it later is a rotation (`keys: [old, new]` first).
+
 Unsigned releases are refused unless you opt in with `allowUnsigned: true`,
 which says so at every step. Use it on a private LAN, not on the internet.
 
@@ -362,6 +424,23 @@ there, and with a confirmed update: after `undismiss()` Y has its three tries
 again. An old copy that had to be started from where it was set aside, and a
 count that cannot be written, are dismissed at once.
 
+A second try does not download the release again. The archive of a `.zip` or
+`.app` release (`<install>.zip-<version>`) stays on the updater's record until
+the update is confirmed or given up, and the next try uses it — as does the next
+try of a single-file release whose swap could not be made
+(`<install>.new-<version>`: kept across restarts for its first three failed
+swaps, then removed by the next start like any leftover) — only when the record
+proves it is the file the updater made and its bytes verify again against the
+signed manifest
+(`… is not downloaded again: … was kept from the
+last try, and verifies`).
+Otherwise it is removed and downloaded. A kept download that is still the file
+the updater made and no longer holds the bytes it was made with (damaged on
+disk, or changed by something else) is neither used nor removed: it is moved to
+`<its name>~damaged` beside it, a warning says so
+(`… no longer holds the bytes it was made with … moved to …`), and the release
+is downloaded again. That file is never removed for you — delete it by hand.
+
 ### What the updater may remove
 
 The folder an app is installed in is the user's — `~/Apps`, `Downloads`, a
@@ -393,13 +472,16 @@ So the updater removes a path only when it can prove it made what is there:
   working on (their process is gone; the same pid in an earlier run counts as
   gone), each renamed aside first (to `<install>.swept-<pid>-<n>`, a free name
   that goes on the record before the rename), and logs their names:
-  `removed what an unfinished update left beside …`.
+  `removed what an unfinished update left beside …`. The one exception is the
+  archive of a release whose swap is still to be tried again (above).
 - Anything beside the install that only LOOKS like a leftover is left where it
-  is and named once per boot:
+  is and named once — again only when the names change:
   `left alone beside …: not made by this app's
-  updater — …`. A second copy of
-  the app running from the same folder with another data directory has its own
-  record, so it leaves the first one's download and staged tree alone.
+  updater — … (said once: delete by hand what is a leftover)`.
+  Nothing can prove such a thing the updater's (a tree an updater older than the
+  record left half-made is one), so it is never removed for you. A second copy
+  of the app running from the same folder with another data directory has its
+  own record, so it leaves the first one's download and staged tree alone.
 - When a name the update needs is taken by something that is not the updater's,
   the update is refused before anything is downloaded —
   `… is in the way of the update, and it was not made by this app's updater` —
@@ -530,6 +612,11 @@ silent no-op:
 | `deno run -A app.ts`, unsupervised             | re-executes `deno run …` with the real command line            | exits 0                                          |
 | running from source without `-A`               | **refused** — restart by hand                                  | exits 0                                          |
 | `libraryMode` (a test, a host process)         | **refused** — `await app.close()` and run again                | closes the apps, keeps the process               |
+
+`am stop` is not `aio.stop()` under a service: it exits 0, so `Restart=always`
+starts the app again after `RestartSec` — stop a service with `systemctl stop`.
+To make `am stop` stay down too, add `Environment=AIO_STOP_STAYS_DOWN=1` to the
+unit (it is there as a commented line): `am stop` then exits 143.
 
 `am restart` and the update handover use the same plan. A refusal is an ordinary
 thrown error, so a method can show it.
@@ -679,6 +766,7 @@ and a surprise on a desktop, so an Electron install with `auto: true` and no
 | `lastChecked`         | ISO timestamp                                                                                                                           |
 | `dismissed`           | the version the user said no to (persisted)                                                                                             |
 | `backupPath`          | the pre-migration backup this install took, or null — set before the swap                                                               |
+| `shortcutAdded`       | Windows one-click install: the path of the Start-menu shortcut THIS start added, else null — say "the downloaded .exe can be deleted"   |
 | `error`               | last failure, verbatim                                                                                                                  |
 
 `available` is
@@ -896,7 +984,9 @@ test that only cares how the banner renders.
 - The trusted key is pinned on first use; a different key is refused
 - Unsigned is refused by default; stripping a signature never downgrades a
   pinned install
-- Artifacts are verified by digest after download, before anything is swapped
+- Artifacts are verified by digest after download, before anything is swapped —
+  and so is one made from a patch: its digest must be the manifest's signed one
+- The patch list has a signature of its own, over the list and the release
 - Versions only move forward within a channel
 - On an exposed app, driving an update requires an authenticated user; on a
   loopback-bound app every client is already on the machine

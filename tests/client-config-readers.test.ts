@@ -17,6 +17,8 @@ const READERS: Record<string, string> = {
   renderBudget: "src/browser/browser-vitals.ts",
   syncCells: "src/browser/sync-cells.ts",
   callTimeouts: "src/browser/browser-ack.ts",
+  // Isomorphic: the one decision every door shares, so it lives in protocol.
+  wire: "src/protocol/wire-value.ts",
 };
 
 async function clientConfigKeys(): Promise<string[]> {

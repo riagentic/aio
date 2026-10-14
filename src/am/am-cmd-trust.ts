@@ -27,8 +27,13 @@ import { aioRootPaths, loadOrCreateAioRoot } from "../server/tls.ts";
 /** Where each platform keeps the trust store, and the one command that adds to
  *  it. Printed rather than guessed at: these commands need elevation, and a
  *  tool that silently sudo's on your behalf is not being helpful. */
-function installHint(certPath: string): { os: string; steps: string[] } {
-  switch (Deno.build.os) {
+/** @internal exported for its test; `os` is a parameter so every platform's
+ *  text is checked on whichever one runs the suite. */
+export function _installHint(
+  certPath: string,
+  os: string = Deno.build.os,
+): { os: string; steps: string[] } {
+  switch (os) {
     case "linux":
       return {
         os: "Linux",
@@ -56,17 +61,24 @@ function installHint(certPath: string): { os: string; steps: string[] } {
       return {
         os: "Windows",
         steps: [
-          `Run in an ADMIN PowerShell:`,
-          `  Import-Certificate -FilePath "${certPath}" \\`,
-          `    -CertStoreLocation Cert:\\LocalMachine\\Root`,
+          // Each command is ONE line: PowerShell continues a line with a
+          // backtick, so the `\` a POSIX shell wants made this a broken paste.
+          // The per-user store first — it needs no elevation, Windows asks
+          // once to confirm, and Chrome and Edge read it.
+          `In PowerShell (no admin needed — Windows asks once to confirm):`,
+          `  Import-Certificate -FilePath "${certPath}" -CertStoreLocation Cert:\\CurrentUser\\Root`,
           ``,
+          `For every account on this PC instead, in an ADMIN PowerShell:`,
+          `  Import-Certificate -FilePath "${certPath}" -CertStoreLocation Cert:\\LocalMachine\\Root`,
+          ``,
+          `Chrome and Edge read both stores.`,
           `Firefox keeps its own store — import via`,
           `  Settings › Privacy & Security › Certificates › View Certificates › Import`,
         ],
       };
     default:
       return {
-        os: Deno.build.os,
+        os,
         steps: [`Import ${certPath} into your system's trust store.`],
       };
   }
@@ -111,7 +123,7 @@ export async function cmdTrust(
     return;
   }
 
-  const hint = installHint(root.certPath);
+  const hint = _installHint(root.certPath);
 
   if (mode === "json") {
     out({

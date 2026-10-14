@@ -10,6 +10,7 @@
 // document — `JSON.parse` cannot tell them apart — which is what makes this
 // a presentation choice and not a behaviour fork. It is the same call colour
 // output makes, on the same fact.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { tempDir } from "../src/testing/temp-dir.ts";
 import { fromFileUrl } from "@std/path";

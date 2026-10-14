@@ -16,6 +16,7 @@
 // provenance, and replay sends inputs only. Proven end to end: a real run
 // writes the journal, a fresh app receives the replay, and the two states
 // must be equal.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { aio } from "../src/server/aio.ts";
 import { cell } from "../src/state/cell-create.ts";

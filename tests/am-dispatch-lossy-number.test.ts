@@ -9,6 +9,7 @@
 // A different id under `ok` is silent data loss, so it is refused at the
 // keystroke, naming the literal and both spellings that ARE exact: a JSON
 // string, or a number that fits.
+import "./store-sandbox.ts";
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { cell } from "../src/state/cell-create.ts";
 import { testServer } from "../src/testing/server-test.ts";
@@ -101,8 +102,10 @@ Deno.test("lossyNumberLiteral: agrees with the exactness reference — no false 
   ];
   let seed = 0x5eed;
   const rnd = (n: number) => {
-    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
-    return seed % n;
+    // Math.imul, and the HIGH bits: the plain product passes 2^53, its low
+    // bits are then always 0, and `% 4` never drew anything but 0.
+    seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff;
+    return (seed >>> 12) % n;
   };
   const drawn: string[] = [];
   for (let i = 0; i < 20000; i++) {

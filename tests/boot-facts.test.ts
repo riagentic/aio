@@ -218,3 +218,20 @@ Deno.test("boot: the operational lines a support thread starts with", () => {
   assertEquals(l.routes, "3");
   assertEquals(l.serverfns, "billing, admin");
 });
+
+Deno.test("entryPathOf: the banner's entry is a path a person can open — a drive letter on Windows, a space as a space", async () => {
+  const { entryPathOf } = await import("../src/server/boot-facts.ts");
+  const { assertEquals } = await import("@std/assert");
+  assertEquals(
+    entryPathOf("file:///C:/Users/a%20b/app.js", "windows"),
+    "C:\\Users\\a b\\app.js",
+  );
+  assertEquals(
+    entryPathOf("file:///home/a%20b/app.js", "linux"),
+    "/home/a b/app.js",
+  );
+  assertEquals(
+    entryPathOf("https://x.test/app.js", "linux"),
+    "https://x.test/app.js",
+  );
+});

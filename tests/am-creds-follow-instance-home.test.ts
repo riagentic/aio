@@ -27,6 +27,13 @@ import { appHome, profileHome } from "../src/server/app-dirs.ts";
 import { dec, enc } from "../src/protocol/envelope.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import type { LocalConn } from "../src/server/local-listen.ts";
+import {
+  listenBound,
+  localEndpoint,
+  localIdle,
+} from "./local-endpoint-helper.ts";
+import { sleeper } from "./proc-helper.ts";
 
 function writeSecret(home: string, file: string, value: string): void {
   const data = join(home, "data");
@@ -80,15 +87,16 @@ function fakeTcp(
 }
 
 /** A fake UDS instance speaking the control frames (`ctl` in, `ctlr` out). */
-function fakeUds(
+async function fakeUds(
   appId: string,
   want: { control: string; key: string },
   path: string,
 ) {
   const seen: Seen = [];
-  const listener = Deno.listen({ transport: "unix", path });
-  const serve = async (conn: Deno.UnixConn) => {
+  const listener = await listenBound(path);
+  const serve = async (conn: LocalConn) => {
     const reader = conn.readable.getReader();
+    const writer = conn.writable.getWriter();
     const td = new TextDecoder();
     let buf = "";
     try {
@@ -110,7 +118,7 @@ function fakeUds(
           const auth = d.headers["Authorization"] ?? null;
           seen.push({ control, auth });
           const a = answer(appId, want, d.path, control, auth);
-          await conn.write(
+          await writer.write(
             new TextEncoder().encode(enc("ctlr", { id: d.id, ...a }) + "\n"),
           );
         }
@@ -121,7 +129,7 @@ function fakeUds(
   };
   const loop = (async () => {
     try {
-      for await (const c of listener) serve(c as Deno.UnixConn);
+      for await (const c of listener) serve(c);
     } catch { /* aio-ok: listener closed at teardown */ }
   })();
   return {
@@ -129,6 +137,7 @@ function fakeUds(
     close: async () => {
       listener.close();
       await loop;
+      await localIdle();
     },
   };
 }
@@ -197,19 +206,14 @@ Deno.test("am --port: a profile instance is shown ITS OWN control key and app ke
 });
 
 Deno.test("amui by pid: a zero-port profile instance is shown ITS OWN keys over its socket", async () => {
-  if (Deno.build.os === "windows") return; // UDS server needs a POSIX socket
   await sandbox(async ({ appId, dflt, dev, dir }) => {
-    const sock = join(dir, "dev.sock");
-    const inst = fakeUds(appId, {
+    // A unix socket; on Windows the named pipe the product listens on there.
+    const sock = localEndpoint(join(dir, "dev.sock"));
+    const inst = await fakeUds(appId, {
       control: "dev-control",
       key: "dev-key",
     }, sock);
-    const child = new Deno.Command("sleep", {
-      args: ["120"],
-      stdin: "null",
-      stdout: "null",
-      stderr: "null",
-    }).spawn();
+    const child = sleeper({ stdin: "null", stdout: "null", stderr: "null" });
     const base = {
       appId,
       port: 0,

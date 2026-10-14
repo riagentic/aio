@@ -11,6 +11,7 @@
 import { assert, assertEquals, assertMatch } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import {
+  _adopt,
   _collect,
   _collector,
   _verdictOf,
@@ -52,6 +53,52 @@ Deno.test("worker ack: a collector keeps settled verdicts and lets go of every b
   release(undefined);
   assertEquals(await verdict, "persist failed: disk says no");
   assertEquals(c!.pending.size, 0);
+});
+
+Deno.test("worker ack: a batch that names its calls is theirs alone — and an adopter's, which wrote nothing of its own", async () => {
+  const [writer, idle, adopter] = [_collector(), _collector(), _collector()];
+  adopter.all = true;
+  const running = new Set([writer, idle, adopter]);
+  _collect(running, Promise.resolve("persist failed: the writer's"), [writer]);
+  // Named, and its call already answered: nobody's but an adopter's.
+  _collect(running, Promise.resolve("persist failed: a late one"), []);
+  // Not named (the worker could not say): everyone's, as before.
+  _collect(running, Promise.resolve("persist failed: unnamed"));
+  assertEquals(
+    await _verdictOf(running, writer),
+    "persist failed: the writer's; persist failed: unnamed",
+  );
+  assertEquals(await _verdictOf(running, idle), "persist failed: unnamed");
+  assertEquals(
+    await _verdictOf(running, adopter),
+    "persist failed: the writer's; persist failed: a late one; persist failed: unnamed",
+  );
+});
+
+// The owner hears that a call was adopted a message AFTER it routed it; the
+// run it is answered with may have shipped a batch in between.
+Deno.test("worker ack: a call adopted late owns the batches that went by since it was routed — saving or already failed", async () => {
+  const [writer, late, never] = [_collector(), _collector(), _collector()];
+  const running = new Set([writer, late, never]);
+  _collect(running, Promise.resolve("persist failed: settled first"), [writer]);
+  await Promise.resolve();
+  let release!: (v: string | undefined) => void;
+  _collect(
+    running,
+    new Promise<string | undefined>((r) => release = r),
+    [writer],
+  );
+  _adopt(late);
+  assertEquals(late.pending.size, 1, "the batch still saving is waited for");
+  const verdict = _verdictOf(running, late);
+  release("persist failed: settled after");
+  assertEquals(
+    await verdict,
+    "persist failed: settled first; persist failed: settled after",
+  );
+  assertEquals(late.pending.size, 0);
+  // A call that ran by itself is told neither.
+  assertEquals(await _verdictOf(running, never), undefined);
 });
 
 Deno.test("worker ack: a burst of other notes does not push out one its ack has not read", () => {

@@ -14,6 +14,7 @@
 // contributor) or in what `am create` scaffolds (a message aimed at an app
 // author). Comments are exempt — they are for the reader of the code, and
 // several deliberately name a retired spelling to explain why it is gone.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { standardTasks } from "../src/am/am-cmd-create.ts";
 import { fromFileUrl } from "@std/path";

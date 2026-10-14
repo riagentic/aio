@@ -18,6 +18,7 @@
 // rule is the hand it cannot see: a `rm -rf dist`, a `git clean`, a build from
 // an older aio. The answer there is to SAY it, not to print the command.
 
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
   guestShareArgv,

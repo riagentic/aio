@@ -7,6 +7,7 @@
 // (the module graph grows per edit, and a busted child can load fresh copies
 // of cells instead of the live ones), so the render keeps its import — and
 // says, on the answer itself, when a source file is newer than that import.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join, toFileUrl } from "@std/path";
 import { renderHeadlessSurface } from "../src/server/server-surface.ts";

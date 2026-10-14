@@ -4,6 +4,7 @@
 // pin`, `am fix` and the dev launcher keep in line. Before this, an app
 // scaffolded by an older aio kept that aio's Electron under every later
 // framework — a combination no release had ever run.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { DEFAULT_ELECTRON_VERSION } from "../src/electron/electron-runtime-fetch.ts";

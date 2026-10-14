@@ -2,6 +2,7 @@
 // the lock under its own pid with `waiting` set. A fresh start of the app takes
 // the slot — the session steps aside on its own — and never SIGTERMs it; the
 // `am` side names the wait (`waitingOf` / `waitingMessage`).
+import "./store-sandbox.ts";
 import { exits0, sleeper } from "./proc-helper.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";

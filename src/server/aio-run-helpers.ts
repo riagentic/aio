@@ -28,6 +28,7 @@ import {
   lockDir,
   type LockMeta,
   lockPath,
+  otherAppsRootOf,
   printable,
   readLock,
   showRequestPath,
@@ -36,7 +37,12 @@ import {
 import { isPipePath } from "./local-listen.ts";
 import { fromFileUrl, join, resolve } from "@std/path";
 import { buildJournalsIn } from "../build/build-journals.ts";
-import { appDirs, homeOwnerError, homeRequested } from "./app-dirs.ts";
+import {
+  appDirs,
+  appsDirEnv,
+  homeOwnerError,
+  homeRequested,
+} from "./app-dirs.ts";
 import { runtimeCount } from "./shutdown.ts";
 import { launchElectronClient } from "../electron/electron.ts";
 import { electronExitIsCrash } from "./aio-lifecycle.ts";
@@ -546,6 +552,18 @@ function urlHost(host: string | undefined): string {
   return h.includes(":") ? `[${h}]` : h;
 }
 
+/** What two `AIO_APPS_DIR` roots whose lock folder has ONE name are told —
+ *  by the start that loses ({@linkcode _alreadyRunningMessage}) and by an
+ *  `am` verb asked to act on the other root's app (am-utils.ts
+ *  `otherRootRefusal`). Pure but for `lockDir()`. */
+export function sameLockFolderNote(otherRoot: string, appsDir: string): string {
+  return `This is NOT the same app: another AIO_APPS_DIR, ${otherRoot}, maps ` +
+    `to the same lock folder name as this one (${appsDir}) — ` +
+    `${lockDir()}, named after the last 48 ASCII letters and digits of ` +
+    `the path. The two roots keep their own data, but only one app of an ` +
+    `appId runs across them at a time.`;
+}
+
 /** The refusal when the single-instance lock is already held.
  *
  *  It used to state the fact and stop — true, and a dead end for the person
@@ -574,6 +592,8 @@ export function _alreadyRunningMessage(o: {
   gone?: boolean;
   /** The address its port is bound on (`LockData.host`), when recorded. */
   host?: string;
+  /** This boot's `AIO_APPS_DIR`, when it set one. */
+  appsDir?: string;
 }): string {
   if (o.maintenanceOp !== undefined) {
     return `[AIO] ${o.maintenanceOp} is running on ${o.appId}${
@@ -612,6 +632,22 @@ export function _alreadyRunningMessage(o: {
     o.takeover ? "Failed to take over" : "Already running"
   }: ${o.appId}${where}${who} (home ${o.otherHome ?? o.home})`;
   if (o.takeover) return head; // --takeover already tried; the rest is noise
+  // ONE decider with `am`, which refuses to act on that app from here.
+  const otherRoot = otherAppsRootOf({ home: o.otherHome }, o.appsDir);
+  if (elsewhere && o.appsDir && otherRoot) {
+    // Both starts SET `AIO_APPS_DIR`, and are refused by each other anyway:
+    // the lock folder is named after the last 48 ASCII letters and digits of
+    // the root (a name older builds share, so it cannot change), and two
+    // roots that differ only in what that drops — letters of another script,
+    // a long common tail — are one folder. The `$HOME` advice below told
+    // this start to set the variable it had set.
+    return head + `\n  ${sameLockFolderNote(otherRoot, o.appsDir)}\n` +
+      `  To run both: give one root a path whose ASCII letters and digits ` +
+      `differ (rename it, or point AIO_APPS_DIR at a symlink with another ` +
+      `name).\n` +
+      `  Or stop that one: \`am stop --app=${o.appId}\` with ITS ` +
+      `AIO_APPS_DIR${o.pid > 0 ? ` (or \`kill ${o.pid}\`)` : ""}.`;
+  }
   if (elsewhere) {
     return head + `\n` +
       // The DIRECTORY, not the env var that usually names it: `lockDir()` is
@@ -866,6 +902,7 @@ export async function acquireSingletonLock(
         pid: ex.pid,
         home: appLock.home,
         otherHome: ex.home,
+        appsDir: appsDirEnv(),
         takeover,
         status: ex.status,
         host: ex.host,
@@ -1012,11 +1049,14 @@ export async function acquireSingletonLock(
 export async function handleThinClient(
   serverUrl: string | undefined,
   setRunning: (v: boolean) => void,
+  strictPin?: boolean,
 ): Promise<boolean> {
   if (serverUrl === undefined) return false;
   if (serverUrl) log.info(`connecting to ${redactUrlToken(serverUrl)}`);
   else log.info("launching connect page");
-  const proc = await launchElectronClient(log, serverUrl || undefined);
+  const proc = await launchElectronClient(log, serverUrl || undefined, {
+    strictPin,
+  });
   if (proc) {
     const status = await proc.status;
     const how = status.signal

@@ -6,6 +6,7 @@
 // resolves to nothing, `git.exe` still does) — the failure was folded into the
 // answer: "<root> is not a git clone … Reinstall with install.sh", for an
 // install that was a perfectly good clone. The verdict now says what failed.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";

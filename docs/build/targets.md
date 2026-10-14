@@ -16,6 +16,10 @@ differ; a test on a real scaffold pins that (`tests/am-build-unified.test.ts`).
 `am start` is the other way to run: the supervised background form (lock, health
 wait, `am stop`/`status`) — `dev` is your terminal and your Ctrl-C.
 
+What each OS adds around a built app — first-launch warnings, the firewall,
+running at startup, uninstalling — is on
+[aio on Windows and macOS](../basics/windows-macos.md).
+
 **One vocabulary**: every buildable artifact is a **target name**, and
 `deno task build` (the fleet build) is the one way to build them — locally
 runnable apps and remote/thin-client artifacts alike. Two axes, expressed in the
@@ -33,7 +37,7 @@ names themselves:
 ```
 ┌──────────────────┬─────────────────────────────────────────────┐
 │ browser          │ binary + system browser (127.0.0.1)         │
-│ electron         │ desktop AppImage/zip, server inside         │
+│ electron         │ desktop app, server inside (package per OS) │
 │ android          │ APK, standalone (no server)                 │
 │ web              │ static PWA directory, offline (no server)   │
 │ cli              │ headless binary + WS client API             │
@@ -117,6 +121,34 @@ file-name grammar.
 On a name collision (e.g. both `browser` and `server`, which each emit the bare
 binary) the second is suffixed with its target (`myapp-1.2.345-server`) —
 nothing is silently overwritten.
+
+### Every `build` key
+
+The whole deno.json `build` block. A key that is not in this table is named in a
+build warning (`deno.json build block: aio never reads …`) and does nothing.
+
+| Key              | Value                                               | Default          | What it decides                                                                                                                                  |
+| ---------------- | --------------------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `targets`        | list of target names, or `{ label: { … } }` (below) | —                | what `deno task build` builds                                                                                                                    |
+| `platforms`      | list of platform names                              | `["host"]`       | which OS/CPU each target is built for — [platforms](#build-for-other-operating-systems----platforms)                                             |
+| `out`            | directory                                           | `"dist"`         | where the artifacts land                                                                                                                         |
+| `server`         | `host:port` or a URL                                | none             | the address baked into client artifacts — [build.server](#buildserver--the-address-a-shipped-client-starts-with)                                 |
+| `strictPin`      | `true`                                              | `false`          | the packaged Electron client refuses a paired host whose certificate changed — [Electron client](../clients/electron.md)                         |
+| `ui`             | path, relative to the app dir                       | `App.tsx`        | the component every target bundles                                                                                                               |
+| `css`            | command string, or an argv list                     | none             | the app's own CSS step — [CSS toolchain](../ui/css-toolchain.md)                                                                                 |
+| `channel`        | a channel name: `"dev"`, `"test"`, `"prod"`, …      | `"prod"`         | the release channel a build is stamped with — [updates](../deploy/updates.md#channels)                                                           |
+| `v8Flags`        | list of `--…` flags                                 | none             | V8 flags of a compiled binary — [memory](#memory-buildv8flags)                                                                                   |
+| `keepPackages`   | list of npm package names                           | none             | packages the dev-only exclusion must leave in — [keepPackages](#keep-a-build-only-package-buildkeeppackages)                                     |
+| `minify`         | `true` \| `false`                                   | `true`           | minify the embedded server modules — [minify](#hide-the-server-source-buildminify-on-by-default)                                                 |
+| `chromiumExtras` | `"keep"` \| `"strip"`                               | `"keep"`         | drop Chromium's optional graphics libraries — [extras](#optional-chromium-extras-buildchromiumextras)                                            |
+| `guestPreloads`  | list of file paths, relative to deno.json           | none             | `<webview>` preloads an Electron package ships — [guest preloads](#webview-guest-preloads-buildguestpreloads)                                    |
+| `smoke`          | `true` \| `"desktop"` \| `"strict"`                 | off              | start each built artifact and fail the build when it does not come up — [smoke](#start-what-you-built---smoke)                                   |
+| `windows`        | `{ "shortcut": true \| false }`                     | `shortcut: true` | whether the one-click `.exe` adds a Start-menu shortcut — [electron](#electron-desktop-app)                                                      |
+| `macos`          | `{ "bundleId": "…", "host": "[user@]mac" }`         | `app.aio.<name>` | the bundle identifier, and the Mac that packs the `.dmg` — [macOS](#macos-the-app-and-the-dmg)                                                   |
+| `android`        | `{ "strict": true }`                                | `strict: false`  | an `android/` overlay that drops part of the template's activity fails the build — [native code](#adding-native-android-code-the-android-folder) |
+
+A target in the object form of `targets` takes `kind`, `entry`, `ui`, `name`,
+`title` and `platforms`.
 
 ### One repo, two apps — per-target `entry`
 
@@ -298,7 +330,9 @@ labelled (`myapp-windows.exe`, `myapp-macos-arm64`), so one `dist/` can hold
 them all. `manifest.json` records `builtOn`, the `platforms` list, and per
 artifact its `platform`, `triple`, and whether it is the `host` one. A server
 target's systemd unit is written for Linux platforms only, named like its binary
-(`myapp.service`, `myapp-linux-arm64.service`).
+(`myapp.service`, `myapp-linux-arm64.service`); a macOS or Windows platform gets
+[its own supervisor file](../basics/windows-macos.md#run-at-startup-or-as-a-service)
+instead (`<artifact>.plist`, `<artifact>.ps1`).
 
 **What cross-compiles**
 
@@ -317,10 +351,12 @@ Linux `.AppImage`, the Windows `.zip` and both macOS `.dmg`s, and skips
 `linux-arm64` with its reason.
 
 What still needs the target OS is **notarization**, not packaging: Apple
-notarization, and a Windows Authenticode certificate. The artifacts we emit are
-ad-hoc signed (macOS) or unsigned (Windows) on every host — a _downloaded_
-unsigned app meets Gatekeeper/SmartScreen, which is a distribution decision, not
-a build one.
+notarization, and a Windows Authenticode certificate. The Windows artifacts are
+unsigned on every host. The macOS `.app` is ad-hoc signed only where `codesign`
+exists — on a Mac, or on the Mac named by `AIO_MACOS_SSH`; with neither it is an
+unsigned `.zip` (see below). A _downloaded_ app without a Developer ID or
+Authenticode signature meets Gatekeeper/SmartScreen, which is a distribution
+decision, not a build one.
 
 ### macOS: the `.app` and the `.dmg`
 
@@ -385,9 +421,10 @@ Four details are load-bearing and were measured on a real macOS 14 guest:
 Unused Chromium translations are trimmed (~218 `.lproj` bundles, ≈46 MB), the
 app's `icon.png` becomes `AppIcon.icns`, Electron's `LICENSE` and
 `LICENSES.chromium.html` ride in `Contents/Resources/` (redistribution requires
-them, and they are the same files the Linux/Windows packages carry), and the
-whole bundle is signed inside-out (ad-hoc) so macOS will actually launch the
-nested runtime — an unsealed one is killed with exit status 1 and no message.
+them, and they are the same files the Linux/Windows packages carry). Where a Mac
+packs the image (the first two cases below), the whole bundle is signed
+inside-out (ad-hoc) there, so macOS will actually launch the nested runtime — an
+unsealed one is killed with exit status 1 and no message.
 
 **The `.dmg` needs `hdiutil`, which exists only on macOS.** It is a disk image,
 not an archive, so there is no Linux equivalent. `aio` handles this without
@@ -411,12 +448,19 @@ Electron's shipped signature (arm64 binaries carry one; the kernel requires it).
 So on a host with no Mac, treat the arm64 zip as a build artifact to be signed
 on a Mac before it can ship.
 
-**What your users see on first open.** The bundle is signed ad-hoc, not with an
-Apple Developer ID, and it is not notarized. So a `.dmg` downloaded through a
-browser carries macOS's quarantine mark, and Gatekeeper holds the first launch
-with a warning that Apple cannot check the app. Measured on macOS 14: the
-process is held before any app code runs, and nothing opens until the user
-approves it. The way through:
+### First open of a downloaded app
+
+aio does nothing here on either OS: the package carries no signature the OS
+recognises, and each OS holds the first launch of a copy that was
+**downloaded**. A copy that never carried the download mark (built locally, or
+copied with `scp`) opens directly.
+
+**macOS — Gatekeeper.** The bundle is signed ad-hoc, not with an Apple Developer
+ID, and it is not notarized. So a `.dmg` downloaded through a browser carries
+macOS's quarantine mark, and Gatekeeper holds the first launch with a warning
+that Apple cannot check the app. Measured on macOS 14: the process is held
+before any app code runs, and nothing opens until the user approves it. The way
+through:
 
 - **macOS 14 and earlier** — Control-click the app → **Open** → **Open**.
 - **macOS 15 and later** — try to open it once, then **System Settings → Privacy
@@ -426,16 +470,31 @@ approves it. The way through:
 
 Only a Developer ID signature plus notarization removes the warning. That needs
 an Apple Developer account, which is a distribution decision, not a build step.
-A copy that never carried the mark (built locally, or copied with `scp`) opens
-directly.
 
-**Opened without being dragged to Applications.** A user who double-clicks the
-app inside the mounted `.dmg`, or in Downloads, gets an app that works and can
-never update: it runs from a read-only image, or from the temporary read-only
-copy macOS makes of a quarantined app (App Translocation). So a desktop app that
-finds itself outside `/Applications` and `~/Applications` asks once, after its
-window is up: **Move _App_ to your Applications folder?** — **Move to
-Applications** / **Not Now**.
+**Windows — SmartScreen.** The `.exe` and the `.zip` are unsigned unless you
+[sign them](#electron-desktop-app). A browser marks what it downloads, and
+Windows holds the first start of a marked, unrecognised program with a blue
+**Windows protected your PC** panel whose only button is **Don't run**:
+
+- **In the panel** — **More info** → **Run anyway**.
+- **Before opening** — right-click the file → **Properties** → tick **Unblock**
+  → **OK**, or in PowerShell `Unblock-File .\<name>-win-x64.exe`.
+- **The `.zip`** — unblock the zip before extracting it; Explorer copies the
+  mark onto every file it extracts.
+
+An Authenticode signature names you as the publisher in that panel; whether it
+still appears is Microsoft's reputation decision. This is how Windows treats any
+downloaded program — the panel itself has not been recorded in an aio run, whose
+Windows machines received the files by copy.
+
+### Opened outside Applications (macOS)
+
+A user who double-clicks the app inside the mounted `.dmg`, or in Downloads,
+gets an app that works and can never update: it runs from a read-only image, or
+from the temporary read-only copy macOS makes of a quarantined app (App
+Translocation). So a desktop app that finds itself outside `/Applications` and
+`~/Applications` asks once, after its window is up: **Move _App_ to your
+Applications folder?** — **Move to Applications** / **Not Now**.
 
 - **Move** copies the bundle into `/Applications` (`~/Applications` when that
   folder cannot be written), clears the quarantine mark from that copy, closes
@@ -444,8 +503,10 @@ Applications** / **Not Now**.
 - **Not Now** is remembered in the app's data directory (`macos-move-declined`);
   delete that file to be asked again. A dialog nobody answers is not an answer.
 - **No question at all** when an app of the same name is already in Applications
-  (nothing is replaced), for a server-only or browser client, and when running
-  from source.
+  (nothing is replaced), for a server-only or browser client, when running from
+  source, and for the copy `run.sh` / `am` installed
+  (`~/app/<name>/versions/<version>/<App>.app`): that one is installed where it
+  is — it updates there, and `am upgrade` / `am remove` know it there.
 - `AIO_MOVE_TO_APPLICATIONS=never` switches the question off; `=move` moves
   without asking (an unattended install).
 
@@ -478,29 +539,26 @@ host binary under a foreign name.
 
 ### Target names
 
-| Name              | Role   | Produces                                      |
-| ----------------- | ------ | --------------------------------------------- |
-| `server`          | server | headless binary + systemd unit (`--expose`)   |
-| `browser`         | app    | self-contained binary serving the browser app |
-| `electron`        | app    | Electron desktop app (AppImage / zip)         |
-| `android`         | app    | Android APK (bundled assets)                  |
-| `web`             | app    | static PWA directory (no server, offline)     |
-| `cli`             | app    | headless CLI binary                           |
-| `electron-client` | client | standalone Electron connect-page AppImage     |
-| `android-client`  | client | Android client APK (connects to a server)     |
-| `ios-client`      | client | iOS client Xcode project; `.app` on macOS     |
-| `cli-client`      | client | CLI client binary (connects to a server)      |
+| Name              | Role   | Produces                                       |
+| ----------------- | ------ | ---------------------------------------------- |
+| `server`          | server | headless binary + systemd unit (`--expose`)    |
+| `browser`         | app    | self-contained binary serving the browser app  |
+| `electron`        | app    | desktop app: AppImage / `.dmg` / `.exe`+`.zip` |
+| `android`         | app    | Android APK (bundled assets)                   |
+| `web`             | app    | static PWA directory (no server, offline)      |
+| `cli`             | app    | headless CLI binary                            |
+| `electron-client` | client | standalone Electron connect-page AppImage      |
+| `android-client`  | client | Android client APK (connects to a server)      |
+| `ios-client`      | client | iOS client Xcode project; `.app` on macOS      |
+| `cli-client`      | client | CLI client binary (connects to a server)       |
 
-> Known limitation (android with bundled assets): the packaged shell HTML is
-> written at **build** time, before your `aio.run()` config exists — so
-> `ui.head`, a custom `ui.viewport`, and `ui.showStatus` cannot reach the
-> android-local shell. It carries the app title, stylesheet, icon, the standard
-> viewport, and — applied by the runtime at boot, because they travel with the
-> bundle rather than the HTML — `ui.theme` and `ui.lang`. The build prints this
-> list, so a dropped key is never a surprise. The other targets (browser,
-> electron) render the full `ui` shell config. If your app depends on `ui.head`
-> on android, use `android-client` (the WebView then loads the live server's
-> shell).
+> android and web with bundled assets: your entry module never runs on the
+> phone, so the **build** reads what it passes to `aio.run()` and bakes in the
+> options that are plain data — `ui.theme`, `ui.layout`, `ui.lang`, `ui.dir`,
+> `ui.head`, `ui.viewport`, and `persist`, `cellDefaults`, `perfBudget` and
+> their kin. The build prints what it baked and names what cannot travel (the
+> hooks, `ui.showStatus`, server-only options) —
+> [Runtime differences](runtime-differences.md#a-packaged-apk-never-runs-appts).
 
 Each target maps to a set of single-target `build.ts` flags (the table below),
 run as a subprocess. A failed target is reported in the summary and marked
@@ -557,7 +615,7 @@ where no exec bit exists, "executable" is what Windows runs by its name: `.exe`,
 | Flag                                      | Effect                                                                                                                                               |
 | ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--compile`                               | Compile standalone Deno binary                                                                                                                       |
-| `--electron`                              | Build Electron package: AppImage (Linux), zip (macOS/Windows) — implies `--compile`                                                                  |
+| `--electron`                              | Build the desktop package: AppImage (Linux), `.dmg` (macOS; a `.zip` with no Mac), one-click `.exe` + `.zip` (Windows) — implies `--compile`         |
 | `--client`                                | Build client-only AppImage — no Deno runtime, Linux only (target `electron-client`)                                                                  |
 | `--cli`                                   | Build CLI binary — no browser bundle, headless server (target `cli`)                                                                                 |
 | `--cli --remote`                          | Build client-only CLI binary — no server (target `cli-client`)                                                                                       |
@@ -567,13 +625,13 @@ where no exec bit exists, "executable" is what Windows runs by its name: `.exe`,
 | `--web`                                   | Write the standalone web app / PWA directory `<bin>-web/` (target `web`)                                                                             |
 | `--compile --service`                     | Compile binary + generate systemd unit file                                                                                                          |
 | `--compile --service --remote`            | Same, with `--expose` in systemd ExecStart                                                                                                           |
-| `--compile --service --headless`          | Same, with `--headless` in systemd ExecStart                                                                                                         |
-| `--compile --service --headless --remote` | Same, with `--expose --headless` (target `server`)                                                                                                   |
+| `--compile --service --headless`          | Same, with `--client=server-only` in ExecStart                                                                                                       |
+| `--compile --service --headless --remote` | Same, with `--expose --client=server-only` (`server`)                                                                                                |
 | `--name=X`                                | Override binary name (default: from deno.json `"title"`)                                                                                             |
 | `--force`                                 | Skip bundle cache — always rebuild `dist/app.js`                                                                                                     |
-| `--analyze`                               | Print where the bundle's bytes went (per dependency, per framework area) — same artifact, one extra report                                           |
-| `--smoke` / `--smoke=strict`              | After building, start each artifact and fail the build when it does not come up clean — see [Start what you built](#start-what-you-built---smoke)    |
-| `--release`                               | Android release build (default: debug) — emits `myapp-unsigned.apk`; sign it yourself                                                                |
+| `--analyze`                               | Print where the bundle's bytes went (per dependency, per framework area), and what a compiled binary embeds — same artifact, one extra report        |
+| `--smoke` / `--smoke=desktop` / `=strict` | After building, start each artifact and fail the build when it does not come up clean — see [Start what you built](#start-what-you-built---smoke)    |
+| `--release`                               | Android release build (default: debug) — unsigned, or a signed APK + AAB with `AIO_ANDROID_KEYSTORE` ([signing](#signing-a-release-apk--aab))        |
 | `--display-name=X`                        | Display name for this build (a target's `"title"`; default: deno.json `"title"`)                                                                     |
 | `--entry=PATH`                            | Entry point for this build (default: `deno.json` `entry` › `src/app.ts`)                                                                             |
 | `--ui=PATH`                               | UI component this build bundles, overriding the `App.tsx` convention (recorded in the bundle; dev==prod checked)                                     |
@@ -648,6 +706,28 @@ Same artifact, one extra report. Three things it deliberately does:
 - **Summarises the tail rather than dropping it**, so the rows plus "everything
   else" always add up to the bundle.
 
+A target that compiles a binary (`browser`, `electron`, `server`, `server-app`,
+`cli`) then answers the same question for the binary itself:
+
+```
+binary: myapp is 131.2 MB — 24.3 MB of it is 1204 embedded file(s) (source, compiled form and source map); the rest is the Deno runtime and what the app imports by URL (jsr:, https:)
+ by package
+  node_modules/pdf-lib/            11.8 MB  48.6%  (212 files)
+  (the app and what it links)       9.9 MB  40.7%  (431 files)
+  node_modules/immer/               0.2 MB   0.8%  (28 files)
+ largest files
+  assets/model.bin                  6.0 MB  24.7%
+  node_modules/.deno/pdf-lib@1.17.1/node_modules/pdf-lib/dist/pdf-lib.js   2.1 MB   8.6%
+```
+
+It is read out of the finished binary, not estimated from the sources: a package
+row is what [`build.keepPackages`](#keep-a-build-only-package-buildkeeppackages)
+keeps or the build leaves out, a file row is usually something `compile.include`
+or an `assets` mount put there. A file is charged with what the runtime stores
+beside it (its compiled form and source map), and content stored once is charged
+once. The Deno runtime itself is 75–100 MB of every binary, by platform, and is
+not in the list.
+
 ### Start what you built (`--smoke`)
 
 ```
@@ -666,27 +746,38 @@ built and placed, each artifact that can run on this machine is started from a
 foreign working directory with a throwaway home (its own data, config and temp
 dir — never yours) on a free port, checked, stopped, and the build exits
 non-zero when any of them did not come up clean. In deno.json:
-`"build": { "smoke": true }` (or `"strict"`); the flag wins.
+`"build": { "smoke": true }` (or `"desktop"`, `"strict"`); the flag wins.
 
-| Target                      | What is checked                                                                                                                                                                                                             |
-| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `browser`, `server-app`     | answers `/__aio/health`; `/`, the bundle, the stylesheet and icon the page names, and every asset URL the bundle names all answer 200                                                                                       |
-| `server`                    | answers `/__aio/health` (it is headless — no page)                                                                                                                                                                          |
-| `cli`                       | `--help` exits 0                                                                                                                                                                                                            |
-| `electron` (Linux AppImage) | the window opens and its page finishes loading; every file the page names answers 200; every `build.guestPreloads` file is one the packaged shell says it can attach                                                        |
-| all of the above            | nothing at ERROR level, no uncaught error and no `REFUSED` line in its console output or `logs/app.log`; it stops when asked (the request `am stop` sends; a desktop app by closing its window); no process is left running |
+| Target                  | What is checked                                                                                                                                                                                                             |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `browser`, `server-app` | answers `/__aio/health`; `/`, the bundle, the stylesheet and icon the page names, and every asset URL the bundle names all answer 200                                                                                       |
+| `server`                | answers `/__aio/health` (it is headless — no page)                                                                                                                                                                          |
+| `cli`                   | `--help` exits 0                                                                                                                                                                                                            |
+| `electron`              | the window opens and its page finishes loading; every file the page names answers 200; every `build.guestPreloads` file is one the packaged shell says it can attach                                                        |
+| all of the above        | nothing at ERROR level, no uncaught error and no `REFUSED` line in its console output or `logs/app.log`; it stops when asked (the request `am stop` sends; a desktop app by closing its window); no process is left running |
 
 Everything else is listed with its reason and never skipped in silence: an
 artifact built for another OS or architecture
 (`not smoke-tested here: built
 for windows-x64`), a client that needs its
-server, an APK, a web directory, a desktop package on a Windows or macOS build
-host. `--smoke=strict` turns a "not smoke-tested" row into a failure — use it on
-the machine whose job is to prove the release.
+server, an APK, a web directory. `--smoke=strict` turns a "not smoke-tested" row
+into a failure — use it on the machine whose job is to prove the release.
 
-The desktop window opens on a nested X display (Xephyr, the one `am start` uses
-for agents), never on your desktop. With no Xephyr installed the row reads
-`not smoke-tested: no display` and names the package to install.
+Which desktop package is started depends on the build host: on Linux the
+AppImage; on Windows the `.zip`, unpacked into the throwaway directory; on macOS
+the `.app.tar.gz`, unpacked there and started by the program in its
+`Contents/MacOS`. The one-click `.exe` and the `.dmg` are not started — one
+installs itself and exits, the other would have to be mounted.
+
+On Linux the desktop window opens on a nested X display (Xephyr, the one
+`am start` uses for agents), never on your desktop; with no Xephyr installed the
+row reads `not smoke-tested: no display` and names the package to install.
+Windows and macOS have no nested display: there the window would open on your
+desktop, so plain `--smoke` / `"smoke": true` lists the desktop artifact as
+`not smoke-tested` and starts nothing (what it did through 1.0.19 — a build that
+passed there keeps passing). Ask for it by name — `--smoke=desktop` or
+`"build": { "smoke": "desktop" }`: the window opens on the desktop for the
+seconds the check takes, and the build says so. `--smoke=strict` includes it.
 
 An asset URL that 404s from the artifact and has no file in the source tree
 either is reported and not counted — it is a 404 in `deno task dev` too, and a
@@ -1044,7 +1135,7 @@ wins: a macOS build (the files are Windows and Linux ones; a macOS bundle keeps
 its runtime whole, and the build says so) and a build run with
 `AIO_STRIP_CHROMIUM=1` (the env form decides: the extras are stripped).
 
-### `<webview>` guest preloads: `build.guestPreloads`
+### Webview guest preloads: `build.guestPreloads`
 
 A `<webview>` guest's preload is a file Electron opens from disk, so an Electron
 package has to carry it:
@@ -1144,16 +1235,26 @@ Does everything `compile` does, plus packages the binary with Electron:
 | Windows  | `<name>-win-x64.zip`                                       | extract, run `run.bat` or `<name>.exe` |
 
 Build steps: bundle dist/app.js -> compile deno binary (which embeds it) -> copy
-Electron -> generate launcher + icon -> package (AppImage on Linux, a signed
-`.app` + `.dmg` on macOS — see below, a zip on Windows). On Windows the
-one-click `<name>-win-x64.exe` is then built as a **thin SFX**: the staged
-package is packed into a **zstd-compressed tar** and appended to a small stub
-(~0.7 MB), so the download is smaller than the zip (zstd beats deflate by ~15%
-and decompresses faster), and it is not a second `deno compile` with
+Electron -> generate launcher + icon -> package (AppImage on Linux; a `.app` in
+a `.dmg` on macOS, or in a `.zip` when no Mac is reachable —
+[above](#macos-the-app-and-the-dmg); a zip on Windows). On Windows the one-click
+`<name>-win-x64.exe` is then built as a **thin SFX**: the staged package is
+packed into a **zstd-compressed tar** and appended to a small stub (~0.7 MB), so
+the download is smaller than the zip (zstd beats deflate by ~15% and
+decompresses faster), and it is not a second `deno compile` with
 `electron-runtime.zip` inside the PE. First double-click extracts to
 `%LOCALAPPDATA%\aio-sfx\<name>\win-<arch>\`; later launches skip extract when
 the payload stamp matches. The `.zip` stays a plain zip (Windows Explorer can
 open it).
+
+**The Windows icon.** Both exes — the one-click download and the app's
+`<name>.exe` inside it — wear the app's `icon.png`. A Windows icon holds images
+of at most 256 px, so a larger square `icon.png` (the 512 or 1024 px one the
+other platforms use) is scaled down by the build to 256, 48, 32 and 16 px; one
+of at most 256 px is used as it is. An `icon.ico` beside `icon.png` wins and is
+used byte for byte — draw your own small sizes that way. An `icon.png` the build
+cannot use (not square; 16-bit or interlaced) gets the generated monogram, and
+the build's closing summary says so and names the `icon.ico` to add.
 
 What the `.exe` does when it is opened:
 
@@ -1171,20 +1272,42 @@ What the `.exe` does when it is opened:
   opens what is installed and changes nothing. An old download can no longer put
   its version over a newer app, whose data it may not be able to read. (An
   `.exe` built with aio 1.0.17-beta or older still installs what it carries.)
+- **Its first argument is `--aio-sfx-install`** (how `am upgrade <name>` runs
+  it): it installs its version over whatever is installed — a newer one too,
+  said on stderr — starts nothing and shows nothing. Exit 0: installed; 3: the
+  app is running and nothing was changed; 1: any other failure, the reason on
+  stderr.
+- **Its first argument is `--aio-sfx-wait`**: it waits for the app and exits
+  with the app's exit code (opened any other way it exits 0 as soon as the app
+  is started). Both arguments are the `.exe`'s own and are not passed on; an
+  `.exe` built with aio 1.0.19-beta or older passes them to the app.
+- **It extracts** (a first open, another version): a progress window named after
+  the app is shown until the files are in place.
+- **It fails** (a damaged download, a full disk): a message box says why, and so
+  does a line on stderr, with exit code 1. Opened where nobody could press OK —
+  over ssh, from a service or a task that runs without a logged-on user — it
+  shows no box and no progress window: the stderr line and the exit code are the
+  answer, and it never waits.
 - **It installed the app**: it adds a Start-menu shortcut named after the app
   (`title`), pointing at the installed `<name>.exe` — so the download can be
   deleted. Opening the `.exe` again without installing anything does not put
-  back a shortcut the user removed. An install made by an older `.exe` (aio
+  back a shortcut the user removed, and neither does a newer `.exe` (or
+  `am upgrade`) that replaces the install: the `.exe` records the shortcut it
+  added and adds none over an install that has the record. One it could not add
+  is said (a message box on a plain open, stderr under `--aio-sfx-install`) and
+  the app opens all the same. An install made by an older `.exe` (aio
   1.0.17-beta or older, which added none) gets the same shortcut from the app
   itself, once, at its first start on a version that has this — so an app that
   updated itself needs no new download — and the log says the old `.exe` can be
-  deleted. What was decided is kept beside the install
-  (`…\aio-sfx\<name>\win-x64.shortcut`), so a shortcut removed after that is not
-  put back by a later start or update. (One exception: an install made by a
-  1.0.18-beta `.exe` whose shortcut was removed gets it back once.)
-  `"build": { "windows": { "shortcut": false } }` in `deno.json` builds an
-  `.exe` that adds none, and an app that adds none either. Nothing removes the
-  shortcut when the app's folder is deleted by hand: aio has no uninstaller.
+  deleted (an app with `updates` reads the same fact as `updates.shortcutAdded`,
+  on that one start, and can tell its user). What was decided is kept beside the
+  install (`…\aio-sfx\<name>\win-x64.shortcut`), so a shortcut removed after
+  that is not put back by a later start or update. (One exception: an install
+  whose shortcut nothing recorded — made by a 1.0.18-beta `.exe`, or by a
+  1.0.19-beta one for an app without `updates` — gets a removed shortcut back
+  once.) `"build": { "windows": { "shortcut": false } }` in `deno.json` builds
+  an `.exe` that adds none, and an app that adds none either. Nothing removes
+  the shortcut when the app's folder is deleted by hand: aio has no uninstaller.
 
 **Signing the `.exe` (Authenticode).** Sign the finished `<name>-win-x64.exe`
 with your own tool —
@@ -1193,10 +1316,11 @@ with your own tool —
 `osslsigncode` on Linux — after the build and **before** `deno task ship`, whose
 manifest hashes the file as it will be downloaded. A signature appends a
 certificate table after the SFX trailer; the stub finds its payload through the
-PE security directory, so a signed `.exe` runs like an unsigned one. The
-signature covers the whole download, payload included; the `<name>.exe` and
-Electron that it extracts are not signed individually. aio does not sign for
-you.
+PE security directory, so a signed `.exe` runs like an unsigned one — and
+`run.ps1` and `am publish` recognise it as the one-click `.exe` by the same
+rule. The signature covers the whole download, payload included; the
+`<name>.exe` and Electron that it extracts are not signed individually. aio does
+not sign for you.
 
 Building that one-click `.exe` needs **no compiler**: the extractor stub is a
 committed **prebuilt PE** (`src/build/windows-sfx-stub/prebuilt/`, a ~0.7 MB
@@ -1208,18 +1332,22 @@ so the bytes at the start of your `.exe` are checkable against the stub's
 source; the licenses of what it links are in `THIRD_PARTY_NOTICES` beside it.
 The payload is deterministic too: the same staged package packs to the same
 bytes. If packing ever fails, the payload falls back to the same zip
-(`format: "zip"`) — larger, still one-click. A symlink in the staged package
-ships as a copy of its target (the build says so, with the size); one that
-points outside the package, at nothing, or at a folder it is inside stops the
-build, naming the path. `AIO_WINDOWS_FAT_EXE=1` restores the legacy
-`deno compile` PE instead, and the build falls back to it by itself, with a
-warning, when the stub cannot be read, fetched or verified. The intermediate
-`dist/app.js` does not survive into the finished `dist/`.
+(`format: "zip"`) — larger, still one-click — and the build says so with the
+size it ships instead. The pack is also declined, the same way, on a build
+machine that is out of memory headroom: under 5% of RAM available, or under 20%
+with the swap over 80% full (full swap beside plenty of free RAM is not
+pressure, and does not decline it). A symlink in the staged package ships as a
+copy of its target (the build says so, with the size); one that points outside
+the package, at nothing, or at a folder it is inside stops the build, naming the
+path. `AIO_WINDOWS_FAT_EXE=1` restores the legacy `deno compile` PE instead, and
+the build falls back to it by itself, with a warning, when the stub cannot be
+read, fetched or verified. The intermediate `dist/app.js` does not survive into
+the finished `dist/`.
 
 On Linux and Windows the launcher sets `$ELECTRON_PATH` before starting the Deno
 binary; on macOS the `.app` bundles the runtime where the binary looks for it
-directly, so there is no launcher to run by hand. State is persisted to the OS
-user data directory.
+directly, so there is no launcher to run by hand. State is persisted to
+`~/.<appId>/data/` on every OS (on Windows `%USERPROFILE%\.<appId>\data\`).
 
 **Fuses.** The Electron inside every desktop package (and the tree a Windows SFX
 extracts on first launch) has three of Electron's fuses turned off, so it cannot
@@ -1233,11 +1361,10 @@ The build says `Electron fuses off: …`, and fails if the runtime has no fuse
 wire, so a package never ships without them. Dev (`node_modules/electron`) is
 not changed; aio already refuses those three when it starts Electron itself.
 
-**Cross-platform builds via CI:**
-
-```sh
-git tag vX.Y.Z && git push origin vX.Y.Z   # triggers build on all 3 platforms
-```
+**Building on each OS in CI.** Nothing builds on a pushed tag until the project
+has a workflow that does. `deno task ship github --channel=prod` writes one
+(`.github/workflows/release.yml`: Linux, macOS and Windows runners, on a `v*`
+tag) — see [signing](../deploy/signing.md); [CI](ci.md) has the plain matrix.
 
 ## electron-client (thin client AppImage)
 
@@ -1246,8 +1373,9 @@ deno run -A dep/aio/src/build.ts --client
 ```
 
 Standalone Electron app with a connect page — no Deno runtime, no app code.
-Users type a server address and connect. Linux only. Output:
-`aio-client-x86_64.AppImage` (~80MB).
+Users type a server address and connect. **Linux only** (an AppImage; built on a
+Linux host): for Windows or macOS build the `electron` target or `cli-client`
+instead. Output: `aio-client-x86_64.AppImage` (~80MB).
 
 ## AppImage and TMPDIR
 
@@ -1418,10 +1546,30 @@ sw.js                  the offline cache
   relative to the directory `app.js` is served from, so `<Route path="/">`
   matches `/repo/` and `<Link to="/about">` is `/repo/about`. `am publish` names
   it and sets it aside: the updater's manifests are for programs.
-- **What does not reach it** is what the APK loses too: `aio.run({...})` options
-  (the build names each one the app sets), `*.server.ts` modules (refused), and
-  anything that needs a server. An app whose UI needs its server builds the
-  `browser` target, or gives `web` its own `ui`.
+- **What does not reach it** is what the APK loses too: the `aio.run({...})`
+  hooks and server-only options (the plain-data ones are baked in, and the build
+  names each one that is not), `*.server.ts` modules (refused), and anything
+  that needs a server. An app whose UI needs its server builds the `browser`
+  target, or gives `web` its own `ui`.
+- **Browser workers travel with it:** each
+  `new Worker(new URL("./w.ts",
+  import.meta.url))` is bundled into its own
+  file beside `app.js` — in the web folder and in an APK's assets alike — and a
+  worker file in a deno.json `assets` mount is packaged at its path.
+- **What it needs to run:** Safari / iOS / iPadOS **15.4**, Chrome or Android
+  System WebView **98**, Firefox **94**, or newer. An older engine cannot parse
+  or run the bundle; the page says so instead of staying blank — the web build,
+  the APK and a server-served page alike. (The `ios-client` project's deployment
+  target is iOS 15.4 for the same reason.)
+- **How the iPhone route is tested:** `deno task test:webkit` drives the web
+  build and a server-served page in WebKit — the engine of every iOS browser —
+  as an iPhone and an iPad: render, taps, state across a reload, the service
+  worker, offline with the server gone, a deep route, no horizontal overflow,
+  16px form controls, the dark scheme, and a WebSocket that drops and returns
+  with a call made meanwhile. It does **not** prove Home Screen (standalone)
+  mode, real backgrounding or the safe area: those need an iPhone. The engine is
+  Playwright's WebKit, named by `AIO_PLAYWRIGHT_DIR`
+  ([environment](environment.md)); without it the lane is skipped.
 
 ## Standalone runtime (`initStandalone`)
 
@@ -1489,6 +1637,40 @@ version that cannot be encoded (major > 20, minor > 99, build > 999 999) is
 refused rather than wrapped — a truncated `versionCode` is an APK that installs
 over a newer one. No `"version"` in deno.json means `0.1.<build>`, and the build
 says so.
+
+### Signing a release (APK + AAB)
+
+The default build is a **debug** build: signed with Android's debug key and
+debuggable. It installs on your own devices; no store takes it, and the build
+says so. `--release` without a key writes `<name>-unsigned.apk`, which Android
+refuses to install until you sign it.
+
+A release the build signs for you needs **your** keystore, named by the
+environment — aio never creates, stores or prints a release key:
+
+```sh
+AIO_ANDROID_KEYSTORE=keys/release.jks \
+AIO_ANDROID_KEYSTORE_PASSWORD=… \
+AIO_ANDROID_KEY_ALIAS=upload \
+deno task build --targets=android --release
+```
+
+| Variable                        | Meaning                                                   |
+| ------------------------------- | --------------------------------------------------------- |
+| `AIO_ANDROID_KEYSTORE`          | the keystore file (relative to the app root, or absolute) |
+| `AIO_ANDROID_KEYSTORE_PASSWORD` | its password                                              |
+| `AIO_ANDROID_KEY_ALIAS`         | the key inside it                                         |
+| `AIO_ANDROID_KEY_PASSWORD`      | the key's own password, when it differs                   |
+
+That build writes two files, both signed with your key and **not debuggable**:
+`<name>.apk` (install it, or publish it yourself) and `<name>.aab` — the bundle
+a store upload takes. Gradle reads the passwords from the environment; they are
+not written into the generated project. A keystore that is named but missing, or
+named without its password or alias, stops the build before Gradle starts. Make
+a keystore once with
+`keytool -genkeypair -keystore keys/release.jks -alias upload -keyalg RSA -keysize 2048 -validity 10000`,
+keep it out of the repository, and back it up: an app can only ever be updated
+by the key that first signed it.
 
 ### State survives a kill
 
@@ -1626,19 +1808,56 @@ It takes the same arguments as `fetch` and returns a real `Response`.
 
 ### The system bars
 
-The template targets **API 35** (`compileSdk`/`targetSdk` 35, `minSdk` 24) —
-Play's floor. Android 15 makes every activity of a targetSdk-35 app
-**edge-to-edge**: the page would otherwise draw underneath the status bar and
-the navigation bar, and measured on API 35 it did exactly that — the app's own
-title and the system clock on the same pixels. So the WebView sits in a frame
-that carries the system-bar and display-cutout insets as padding, which gives
-back the same layout the app had before the bump on every API level. The
-emulator test asserts it (`screen.height - innerHeight` must be at least a
-status bar).
+The template targets **API 35** (`compileSdk`/`targetSdk` 35 — Play's floor) and
+installs on **Android 10** or newer (`minSdk` 29). Android 15 makes every
+activity of a targetSdk-35 app **edge-to-edge**: the page would otherwise draw
+underneath the status bar and the navigation bar, and measured on API 35 it did
+exactly that — the app's own title and the system clock on the same pixels. So
+the WebView sits in a frame that carries the system-bar and display-cutout
+insets as padding, which gives back the same layout the app had before the bump
+on every API level. The emulator test asserts it (`screen.height - innerHeight`
+must be at least a status bar).
 
 Full-bleed is a per-app decision, not a default: take it by overlaying your own
 `MainActivity` under `<app>/android/`
-([below](#adding-native-android-code-android)).
+([below](#adding-native-android-code-the-android-folder)).
+
+### Light and dark
+
+Which of light and dark the page's `prefers-color-scheme` sees is deno.json
+`android.colorScheme`:
+
+```json
+{ "android": { "colorScheme": "system" } }
+```
+
+- `"system"` — the activity follows the phone's light/dark setting, and so does
+  the page, as in every browser. `am create` writes it into a new app.
+- `"dark"` — **the default when the key is absent**: the page sees "dark"
+  whatever the phone says. Every APK up to 1.0.19 was built this way, so an app
+  that is only rebuilt looks as it did. `am doctor` names the key for an app
+  with an Android target that has not chosen.
+- `"light"` — the mirror of `"dark"`.
+
+Any other value is refused by the build. A stylesheet that never mentions
+`prefers-color-scheme` looks the same under all three.
+
+Switching the system setting while the app is open restyles the page in place,
+without a reload (up to 1.0.19 it recreated the activity and reloaded the app).
+
+### The WebView has to be current
+
+The floor is **Android 10** (`minSdk` 29, since 1.0.20-beta; it was Android 7):
+the oldest Android whose WebView still gets updates — Chrome, which the WebView
+ships with, left Android 8 and 9 in 2025 — and the first with a system dark
+mode. An app built by 1.0.19 or older keeps installing on Android 7–9; one
+rebuilt with 1.0.20 does not, and the stores keep serving those phones the last
+build that did.
+
+What runs the app is the phone's **Android System WebView**, and the bundle
+needs version **98** or newer. A phone updates it from the Play Store by itself;
+an image that never has (a bare emulator image) shows one line saying the
+WebView is too old, where it used to show a blank page.
 
 ### Content: deno.json `assets` travel into the APK
 
@@ -1667,6 +1886,30 @@ global runs the app's
 last registered first. When none returns `true`, Android does the default:
 WebView history, then (a client APK) the connect form, then leave the app. This
 holds for a standalone APK and for one that talks to a server.
+
+### File inputs, downloads, a lost renderer
+
+Three things a browser does by itself and a WebView leaves to its app. The
+template does them, for a standalone APK and for one that talks to a server:
+
+- **`<input type="file">`** opens the system's picker (`multiple` and `accept`
+  are passed on). It needs no permission: the page gets exactly the files the
+  user picked. Backing out answers the page with nothing (its `cancel` event).
+- **A download** from the network (`<a download>`, a response sent as an
+  attachment) goes to Android's `DownloadManager`: into `Downloads`, with the
+  system's notification, carrying the page's cookies. `DownloadManager` knows
+  nothing of the certificate a client APK pinned, so a server on the certificate
+  `--expose` signs itself needs a real one (`tls: { cert, key }`) for its
+  downloads. A `blob:` or `data:` link — a file the page made — is **not
+  saved**: nothing outside the page can read it. The tap is logged
+  (`adb logcat -s aio`: `download NOT saved`), and saving one takes native code
+  in [the android/ folder](#adding-native-android-code-the-android-folder).
+- **The renderer process**: a WebView's page runs in a process of its own, and
+  Android takes it back when memory is short. The app stays; the page is loaded
+  again and reads its state from the store (a client: from its server). Text
+  typed and not yet sent to a method is lost, as on a kill. A second loss within
+  10 seconds stops the app instead of reloading in a loop. Both are logged under
+  the tag `aio`.
 
 ### The camera is opt-in
 
@@ -1706,8 +1949,8 @@ A value that is neither `true` nor `false` is refused by name at build time, on
 
 Anything beyond the camera (microphone, location, a foreground service) is a
 native concern: overlay your own manifest under `<app>/android/`
-([below](#adding-native-android-code-android)). The WebView logs and denies any
-other permission a page asks it for.
+([below](#adding-native-android-code-the-android-folder)). The WebView logs and
+denies any other permission a page asks it for.
 
 ### Onto a real phone
 
@@ -1763,7 +2006,7 @@ methods: {
 },
 ```
 
-### Adding native Android code (`<app>/android/`)
+### Adding native Android code (the android/ folder)
 
 The generated APK is a WebView around the JS bundle, which is the whole app for
 anything that only needs a screen. It is not the whole app for anything that
@@ -1838,6 +2081,21 @@ activity does, and the build **warns** when an overlay drops any of them:
   `defaultBack`. Without them no `onBackButton` handler ever runs (see
   [The Back button](#the-back-button)).
 
+A warning scrolls past. To make each of the four an **error** — no APK is built
+until the overlay carries it — opt in:
+
+```json
+{ "build": { "android": { "strict": true } } }
+```
+
+Off when absent: a build that warned and produced an APK still does. It reads
+the overlay's source, as the warnings do, and changes nothing for an app with no
+`android/…/MainActivity.kt` of its own.
+
+Its type is checked by every build, not only an Android one (`"true"` is refused
+by name). `am doctor` names the key for an app that has its own
+`MainActivity.kt` and has not chosen, and `am fix --harden` writes it.
+
 ### The page is a secure origin, so `ws://` is blocked
 
 The WebView serves packaged assets from `https://appassets.androidplatform.net`
@@ -1877,8 +2135,41 @@ Thin client APK — no local state, no reducer, no Deno runtime. Shows a connect
 page where the user enters the server URL. The remote server must run with
 `--expose`.
 
-That server serves plain `http://` unless you set `tls`, and Android blocks
-cleartext by default from targetSdk 28 — so this target's manifest permits it
+A server run with `--expose` asks for its key. Reached by a bare address, the
+connect form says so and takes either of two things:
+
+- the **pairing code** the server prints at boot (`pair code: 123456`; `am pair`
+  mints a new one — a code works once, for a few minutes), typed beside the
+  address; or
+- the **share link** the server prints (`share: https://…?token=…`), pasted as
+  the address.
+
+The client remembers the result and goes straight in from then on — the shell
+writes the address to disk before the server is opened, so a kill right after
+pairing does not lose it. A share link typed without a scheme is opened over
+`https://`. One that says `http://` and names another machine is opened too,
+with a warning on the form: its key crosses the network in clear text.
+
+`--expose` serves a certificate the server **signed itself** unless told
+otherwise, and Android trusts no such certificate. Pairing is what makes this
+client trust it: the pairing reply carries the server's certificate, and a share
+link's key lets the server prove — on the certificate it is presenting — that it
+holds that key. Either way the certificate is **pinned** for that address: the
+client then accepts exactly it (or one signed by the same aio root, so a server
+whose addresses changed still connects) and nothing else. What the form says
+when it refuses:
+
+- no code and no link: the device does not trust the certificate;
+- a wrong or used code: invalid or expired — nothing is remembered;
+- a paired address presenting **another** certificate: not the one this device
+  paired with. A server that was reinstalled is paired again; anything else is
+  something answering in its place, and it cannot pass — it does not hold the
+  key.
+
+Pairing by code trusts the certificate it first sees (the code is the only
+secret, as on the desktop client); a share link is verified against its key.
+With `--no-tls` the server speaks plain `http://` — Android blocks cleartext by
+default from targetSdk 28, so this target's manifest permits it
 (`android:usesCleartextTraffic="true"`). A standalone APK does not get it: it
 dials nothing.
 

@@ -16,6 +16,7 @@ import {
   type LockData,
   lockKey,
   noteDeadHolder,
+  otherAppsRootOf,
   printable,
   projectAppId,
   readLock,
@@ -23,9 +24,11 @@ import {
   resolveAppId,
   writeLock,
 } from "../server/single-instance-lock.ts";
+import { sameLockFolderNote } from "../server/aio-run-helpers.ts";
 import { basename, join, resolve } from "@std/path";
 import {
   appDirs,
+  appsDirEnv,
   expandProfilePath,
   isProfilePath,
   profileHome,
@@ -44,10 +47,17 @@ import { cwdIsProject, projectRoot } from "./am-project.ts";
 
 // ── Entry config cache ──────────────────────────────────────
 
-/** Cached config extracted from entry file — appId + port from aio.run() call */
-let _entryConfig: { appId?: string; port?: number } | null = null;
+/** Cached config extracted from entry file — appId + port from aio.run() call
+ *  (and the two keys that decide whether the environment's port is read). */
+type EntryConfig = {
+  appId?: string;
+  port?: number;
+  client?: string;
+  ignoreDebugEnv?: boolean;
+};
+let _entryConfig: EntryConfig | null = null;
 
-export function readEntryConfig(): { appId?: string; port?: number } {
+export function readEntryConfig(): EntryConfig {
   if (_entryConfig) return _entryConfig;
   _entryConfig = {};
   const entry = resolveEntry();
@@ -62,6 +72,11 @@ export function readEntryConfig(): { appId?: string; port?: number } {
       if (appId?.[1]) _entryConfig.appId = appId[1];
       const port = b.match(/port\s*:\s*(\d+)/);
       if (port?.[1]) _entryConfig.port = parseInt(port[1], 10);
+      const client = b.match(/\bclient\s*:\s*['"]([^'"]+)['"]/);
+      if (client?.[1]) _entryConfig.client = client[1];
+      // Anything but a literal `false` ignores — as the runtime reads it.
+      const ignore = b.match(/\bignoreDebugEnv\s*:\s*([A-Za-z0-9_$"']+)/);
+      if (ignore?.[1]) _entryConfig.ignoreDebugEnv = ignore[1] !== "false";
     }
   } catch { /* unreadable entry */ }
   return _entryConfig;
@@ -252,13 +267,44 @@ export function resolveAmAppId(flag?: string): string {
  *  runtime never read it — `_warnMisplacedDenoJson` WARNS that aio config at
  *  deno.json's top level "is silently doing nothing", port included — so `am`
  *  was aiming at a number the app had already been told it was ignoring. */
-export function declaredPort(flag?: number): number | undefined {
+export function declaredPort(
+  flag?: number,
+  clientFlag?: string,
+): number | undefined {
   if (flag !== undefined) return flag; // AIO-212: don't ignore --port=0
+  // `electron: { ignoreDebugEnv }` takes both env rungs out of an Electron
+  // client's boot (`ignoredDebugEnv` in aio-cli.ts) — `am` counting them
+  // aimed at a port the app had just said it would not open.
+  if (_ignoresEnvPort(clientFlag)) {
+    _warnDenoJsonPort();
+    return readEntryConfig().port;
+  }
   const env = envPort(); // throws on a malformed AIO_PORT — see resolvePort
   if (env !== undefined) return env;
   _warnDenoJsonPort();
   // `AIO_DEFAULT_PORT=0` means "pick a free one" — no rung, as in `aio.ts`.
   return readEntryConfig().port ?? (envDefaultPort() || undefined);
+}
+
+/** The runtime's rule, read statically: the key is set AND the client this
+ *  launch runs (`--client` > `aio.run({ client })` > deno.json `client` >
+ *  electron — `clientOf` in aio.ts) is electron. */
+function _ignoresEnvPort(clientFlag?: string): boolean {
+  const ec = readEntryConfig();
+  if (!ec.ignoreDebugEnv) return false;
+  let client = clientFlag ?? ec.client;
+  if (client === undefined) {
+    try {
+      const dj = readDenoJsonSync(projectRoot())?.config as
+        | { client?: unknown }
+        | undefined;
+      // deno.json names TARGETS: only `electron` is the Electron client.
+      if (typeof dj?.client === "string") client = dj.client;
+    } catch {
+      // aio-ok: no readable deno.json — the framework default, electron
+    }
+  }
+  return (client ?? "electron") === "electron";
 }
 
 /** Dropping a rung silently is the failure this codebase keeps fixing, so the
@@ -521,6 +567,52 @@ export function liveLock(appId?: string): LockData | null {
         running.map((i) => `--home=${i.home} (pid ${i.pid})`).join(", ")
       }`,
   );
+}
+
+/** Why `am` here does not `verb` the app `pf` names — it was started under
+ *  ANOTHER `AIO_APPS_DIR` whose lock folder has this one's name
+ *  (`otherAppsRootOf`) — or null. Every verb that ACTS asks first: `stop`,
+ *  `restart`, `kill`, and every write to the app (am-http `trojanPost`:
+ *  `dispatch`, `trigger`, …). The sentence is the start refusal's
+ *  (`sameLockFolderNote`), so both sides of one collision read the same. */
+export function otherRootRefusal(
+  verb: string,
+  pf: Pick<LockData, "appId" | "pid" | "home">,
+): string | null {
+  const appsDir = appsDirEnv();
+  const other = otherAppsRootOf(pf, appsDir);
+  if (!other || !appsDir) return null;
+  return `refusing to ${verb} "${printable(pf.appId)}" (pid ${pf.pid}, home ` +
+    `${printable(pf.home ?? "")}): it runs under another apps dir. ` +
+    `${sameLockFolderNote(other, appsDir)}\n` +
+    `  fix: run am with that root — AIO_APPS_DIR=${other}`;
+}
+
+const _otherRootSaid = new Set<string>();
+
+/** A verb that only READS (`status`, `state`, `logs`, `surface`, `timeline`,
+ *  every trojan GET) still answers about such an app — 1.0.19 did, and a look
+ *  changes nothing — but says WHOSE answer it is: one stderr line, once per
+ *  run and app, never on stdout (a `--json` answer still parses). Returns the
+ *  other root — `otherAppsDir` in an answer that is `am`'s own document — or
+ *  null when `pf` is this root's (or nobody's). */
+export function sayOtherRoot(
+  pf: Pick<LockData, "appId" | "pid" | "home"> | null | undefined,
+): string | null {
+  const appsDir = appsDirEnv();
+  const other = pf ? otherAppsRootOf(pf, appsDir) : null;
+  if (!pf || !other || !appsDir) return null;
+  const key = `${pf.appId}\0${other}`;
+  if (!_otherRootSaid.has(key)) {
+    _otherRootSaid.add(key);
+    sayErr(
+      `am: note: this answer is about "${pf.appId}" (pid ${pf.pid}, home ` +
+        `${pf.home}), which runs under ANOTHER apps dir, ${other} — not ` +
+        `under this one (${appsDir}); the two share a lock folder name. am ` +
+        `changes it only with that root: AIO_APPS_DIR=${other}`,
+    );
+  }
+  return other;
 }
 
 /** Write lock data — replaces old writePid() */

@@ -148,9 +148,10 @@ function exists(path: string): boolean {
   }
 }
 
-/** The file: what was made, and when the one look at older builds' things
- *  was taken (absent: not yet). */
-type Rec = { adopted?: string; made: Owned[] };
+/** The file: what was made, when the one look at older builds' things was
+ *  taken (absent: not yet), and the names beside the install that were said
+ *  to be nobody's on record ({@linkcode unsaidLeft}). */
+type Rec = { adopted?: string; made: Owned[]; said?: string[] };
 
 /** The record. A missing file is an empty record; one that cannot be read or
  *  parsed THROWS — with no record nothing is provably ours, and saying so is
@@ -167,6 +168,9 @@ function read(dataDir: string): Rec {
   if (!Array.isArray(rec?.made)) throw new Error("not a record");
   return {
     ...(typeof rec.adopted === "string" ? { adopted: rec.adopted } : {}),
+    ...(Array.isArray(rec.said)
+      ? { said: rec.said.filter((n: unknown) => typeof n === "string") }
+      : {}),
     made: rec.made.filter((e: Owned): e is Owned =>
       typeof e?.path === "string" && (e.kind === "file" || e.kind === "dir")
     ),
@@ -254,6 +258,30 @@ export function assertNotInTheWay(dataDir: string, path: string): void {
   );
 }
 
+/** Move aside a download of ours whose bytes have changed since it was made
+ *  (a kept archive damaged on disk): the record names `path` as a leftover
+ *  file, what is there is still that very object, and its bytes are no longer
+ *  the recorded ones. Left where it was, it is "not the updater's" by its
+ *  bytes and refuses its release for good. MOVED, never removed: identity
+ *  alone is only a hint for a file (see {@linkcode Owned.sum}), so what is
+ *  there may be somebody's — under a free name beside it no bytes are lost.
+ *  Returns where it went and takes `path` off the record; null when that is
+ *  not what is at `path`. */
+export function setAsideChanged(dataDir: string, path: string): string | null {
+  const e = readOwned(dataDir).find((e) =>
+    e.path === path && e.kind === "file" && e.role === "temp" &&
+    e.is !== undefined && e.sum !== undefined
+  );
+  if (!e || identity(path) !== e.is || sumOf(path) === e.sum) return null;
+  // `~` is in no name an updater gives or ever gave what it makes
+  // (`adoptOlder`): nothing takes this over later and removes it.
+  let at = `${path}~damaged`;
+  for (let n = 2; exists(at); n++) at = `${path}~damaged-${n}`;
+  Deno.renameSync(path, at);
+  forget(dataDir, path);
+  return at;
+}
+
 /** Write down that `path` is about to be made — BEFORE making it. `is` when
  *  the thing already exists under another name and is about to be renamed
  *  here. Refuses (`assertNotInTheWay`) when something foreign is there. */
@@ -329,6 +357,26 @@ export function made(
       };
     }),
   );
+}
+
+/** The file recorded for `path` has just been renamed there: when it now
+ *  has another identity, write that one down. NTFS gives a file renamed to a
+ *  name that was removed in the last seconds that name's OLD creation time
+ *  (tunnelling — measured on Windows 11: a renamed file's, not a renamed
+ *  folder's), so the identity taken before the move is no longer the file's:
+ *  a download made again right after its damaged or outdated copy was
+ *  removed was "not made by this app's updater", and in the way of its own
+ *  release from then on. Only while the bytes there are the recorded ones —
+ *  anything else at `path` stays unproven. */
+export function moved(dataDir: string, path: string): void {
+  const is = identity(path);
+  const all = readOwned(dataDir);
+  const e = all.find((e) => e.path === path);
+  if (
+    !e || is === null || e.is === undefined || e.is === is ||
+    e.sum === undefined || sumOf(path) !== e.sum
+  ) return;
+  writeOwned(dataDir, all.map((o) => o === e ? { ...o, is } : o));
 }
 
 /** Is `name`, in the folder of the install `base`, a name an update gives
@@ -420,9 +468,27 @@ export function adoptOlder(
   }
   write(dataDir, {
     ...(waiting ? {} : { adopted: at }),
+    ...(rec.said ? { said: rec.said } : {}),
     made: [...rec.made, ...taken],
   });
   return taken.map((e) => basename(e.path));
+}
+
+/** Of `left` — the names {@linkcode sweepOwned} left alone as not provably
+ *  the updater's — those not said yet. Nothing can prove such a name ours
+ *  (a tree an older updater left half-made has no record and no content to
+ *  judge), so it stays for good; said at every start it was one more line
+ *  nobody could act on twice. The record keeps exactly the names that are
+ *  there now: one that went and came back is said again. */
+export function unsaidLeft(dataDir: string, left: string[]): string[] {
+  const rec = read(dataDir);
+  const said = rec.said ?? [];
+  const now = [...left].sort();
+  if (now.join("\0") !== said.join("\0")) {
+    const { said: _, ...rest } = rec;
+    write(dataDir, { ...rest, ...(now.length > 0 ? { said: now } : {}) });
+  }
+  return left.filter((n) => !said.includes(n));
 }
 
 /** Remove the leftovers of unfinished updates beside `install` — a boot's
@@ -441,7 +507,12 @@ export function adoptOlder(
 export function sweepOwned(
   dataDir: string,
   install: string,
-  o: { alive?: (pid: number) => boolean } = {},
+  o: {
+    alive?: (pid: number) => boolean;
+    /** A recorded leftover that is still wanted (the archive of a release
+     *  whose swap is tried again): left where it is, on the record. */
+    keep?: string;
+  } = {},
 ): Promise<{
   removed: string[];
   left: string[];
@@ -482,7 +553,7 @@ export function sweepOwned(
     }
   };
   for (const e of ledger) {
-    if (busy(e)) continue;
+    if (busy(e) || e.path === o.keep) continue;
     const denied = cannotLook(e.path);
     if (denied !== null) {
       unreadable.set(basename(e.path), denied);

@@ -38,6 +38,20 @@ export const codeText = (src: string): string => base.codeText(src, true);
 /** The mask, and the span of every element the reader took. Pure. */
 export const jsxRead = base.jsxRead;
 
+/** Is the file at `path` one whose mask is the language's OWN lexer's? A
+ *  file that cannot hold JSX (anything but `.tsx`/`.jsx`), in which reading
+ *  for elements changed nothing: there the mask is exact — a `</` in it is
+ *  a string's, a regex's or a comment's, never the end of an element the
+ *  reader lost. (A `.ts` file where the reader DID take something — an
+ *  old-style cast read as a tag — is not: the mask everything here reads is
+ *  then not the lexer's.) Pure. */
+export function plainlyRead(path: string, src: string): boolean {
+  if (/\.[jt]sx$/.test(path)) return false;
+  const read = codeMask(src);
+  const plain = base.codeMask(src, false);
+  return read.every((v, i) => v === plain[i]);
+}
+
 /** Keep only the regex matches whose start offset is real code. Pure. */
 export function codeMatches(
   src: string,

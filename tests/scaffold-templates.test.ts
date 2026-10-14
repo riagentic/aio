@@ -5,6 +5,7 @@
 // encode the knowledge two OTHER reports produced: the shape that makes a
 // canvas app testable (report 6 §6), and the pair of declarations an `assets`
 // mount needs (report 6 §7).
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { scaffold, TEMPLATES } from "../src/am/am-cmd-create.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";

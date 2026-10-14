@@ -3,6 +3,7 @@
 // --json lines were inserted between it and the sentence it finishes. The
 // example read as `am logs error` with no stated effect, and the orphan as a
 // description of `.total`.
+import "./store-sandbox.ts";
 import { assert } from "@std/assert";
 import { HELP_TEXT, helpBlock } from "../src/am/am-cmd-meta.ts";
 

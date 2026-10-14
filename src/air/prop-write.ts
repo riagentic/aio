@@ -24,7 +24,7 @@ import {
   resolveClassName as _resolveClassName,
   styleValue as _styleValue,
 } from "./ssr-utils.ts";
-import { _devWarn, _DOM_PROPS } from "./vdom-types.ts";
+import { _DOM_PROPS, _wrong } from "./vdom-types.ts";
 
 // SVG namespaced attribute prefixes — require setAttributeNS/removeAttributeNS
 // so the attr lands in the correct namespace. Plain setAttribute puts it in the
@@ -58,7 +58,7 @@ export const _RESERVED_PROPS: ReadonlySet<string> = new Set([
  *  keeps the FIRST. So `<div {...rest} className={cx}>` with a `class` in
  *  `rest` shipped one class from SSR and the opposite one from mount, for the
  *  same vnode, with nothing said about it. Two props owning one fact is
- *  exactly what rule #1 (fail loud) exists for: dev now names it. */
+ *  exactly what rule #1 (fail loud) exists for: both modes name it. */
 export function _classProp(
   props: Record<string, unknown>,
 ): "class" | "className" | null {
@@ -71,11 +71,12 @@ export function _classProp(
     }
   }
   if (both > 1) {
-    _devWarn(
+    _wrong(
       "dual-class-prop",
       `A component passes BOTH \`class\` and \`className\` — they are the same ` +
         `DOM attribute, so \`${winner}\` (the later one) wins and the other is ` +
-        `dropped. Pass one.`,
+        `dropped.`,
+      " Pass one.",
     );
   }
   return winner;
@@ -630,4 +631,21 @@ function _echoArrived(el: EchoEl, want: string): void {
   if (!r) return;
   const i = r.vals.indexOf(_echoKey("value", want));
   if (i >= 0) r.vals.splice(0, i + 1);
+}
+
+/** Where a form control keeps the props it last rendered with — read by the
+ *  dev drift check (air/control-drift.ts), which is not in a production
+ *  bundle; the record itself is one property write. */
+export const _CTRL = Symbol.for("aio.air.controlProps");
+type CtrlEl = HTMLElement & { [_CTRL]?: Record<string, unknown> };
+
+/** Remember the props a form control last rendered with (mount, diff, hydrate). */
+export function _recordControlled(
+  el: HTMLElement,
+  props: Record<string, unknown>,
+): void {
+  const tag = el.tagName;
+  if (tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "SELECT") return;
+  if ("value" in props || "checked" in props) (el as CtrlEl)[_CTRL] = props;
+  else delete (el as CtrlEl)[_CTRL];
 }

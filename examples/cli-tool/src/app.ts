@@ -31,7 +31,15 @@ const APP_ID = resolveAppId(config.title);
 if (Deno.args[0] === "serve") {
   // aio parses its own flags (--port, --expose, …) from Deno.args; the bare
   // `serve` word is not a flag, so it passes through.
-  await aio.run({ appId: APP_ID, client: "server-only" });
+  await aio.run({
+    appId: APP_ID,
+    client: "server-only",
+    // The safe value, written out (aio's own default stays what it was, so an
+    // older app upgrades unchanged): a hand-written client that states no
+    // argument list for a method that takes arguments is refused, not run
+    // with undefined. The commands below always send theirs.
+    wire: { refuseShortCalls: true },
+  });
 } else {
   const a = args({
     name: "todo",

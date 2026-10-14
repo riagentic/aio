@@ -33,7 +33,7 @@ async function withApps(fn: (apps: string) => void): Promise<void> {
 
 Deno.test({
   name: "writeLaunchInfo: the home keeps its mode, and the record is written",
-  ignore: !POSIX,
+  ignore: !POSIX, // the subject is POSIX mode bits under a umask: Windows has neither
   fn: () =>
     withApps(() => {
       const home = appDirs("lh").home;

@@ -4,9 +4,19 @@
 #   irm https://raw.githubusercontent.com/riagentic/aio/main/install.ps1 | iex
 #
 # Re-running updates aio + am in place. Uninstall with `am uninstall`. Override
-# with $env:AIO_HOME / $env:AIO_REPO / $env:AIO_BRANCH / $env:AIO_REF.
+# with $env:AIO_HOME / $env:AIO_REPO / $env:AIO_BRANCH / $env:AIO_REF;
+# $env:AIO_NO_PATH_WRITE=1 leaves your PATH alone (it names the folder instead).
 #
-# NOT TESTED ON WINDOWS — see the note in run.ps1. This is the twin of
+# Needs: git on PATH (winget install Git.Git) — checked first, nothing is
+# installed without it. Stock Windows PowerShell 5.1 is enough. Deno is
+# installed into %USERPROFILE%\.deno when missing or too old; aio is cloned to
+# <home>\.local\lib\aio, where <home> is %HOME% when that is set and
+# %USERPROFILE% otherwise - the folder aio itself calls home when it runs. The
+# two differ under Git Bash or a login script that sets HOME; a checkout an
+# earlier install left under %USERPROFILE% stays the one used; the folder used
+# is printed.
+#
+# NOT EXECUTED BY A GATE — see the note in run.ps1. This is the twin of
 # install.sh and carries the same fixes, which were found by
 # running the POSIX side on a machine that had nothing:
 #   • the deno version is COMPARED against the framework's MIN_DENO, not merely
@@ -18,11 +28,13 @@
 #     last tag, so a newer spelling would fail against the release it just
 #     installed).
 #
-# Windows CANNOT be tested in our container lab (Docker cannot boot it), so the
-# logic below is exercised by parsing and unit-testing these functions under
-# PowerShell — see tests/windows-scripts.test.ts. An end-to-end Windows run
-# still needs a Windows runner, and until there is one this file is
-# best-effort by construction, not by claim.
+# The container lab cannot boot Windows (Docker), so the logic below is
+# exercised by parsing and unit-testing these functions under PowerShell 7 on
+# Linux — docker/windows-scripts.ps1, the lab's `windows-scripts` scenario.
+# Since 1.0.20 tests/install-ps1-e2e-windows.test.ts runs this file for real
+# on Windows (clone, tag checkout, am install, a second run that updates) in a
+# throwaway home, with a local repository and AIO_NO_PATH_WRITE. NOT run by it:
+# the deno download/upgrade branches and the PATH write itself.
 
 $ErrorActionPreference = 'Stop'
 
@@ -45,6 +57,15 @@ function Info($m) { Say '·' DarkGray $m }
 function Ok($m)   { Say '✓' Green    $m }
 function Warn($m) { Say '!' Yellow   $m $true }
 function Fail($m) { Say '✗' Red      $m $true; exit 1 }
+
+# Windows PowerShell 5.1: once a native program's stderr is REDIRECTED
+# (`2>$null` and `2>&1` alike) every line it writes there is an error record,
+# and under $ErrorActionPreference = 'Stop' the first one ENDS THE SCRIPT -
+# measured: `git clone ... 2>&1` throws on "Cloning into ...", and
+# `git rev-parse HEAD 2>$null` outside a repository throws on git's "fatal:".
+# So every redirected native call runs through here, where a stderr line is
+# only a line; its exit code is still read by the caller.
+function Quiet([scriptblock]$run) { $ErrorActionPreference = 'Continue'; & $run }
 
 function Have($cmd) { [bool](Get-Command $cmd -ErrorAction SilentlyContinue) }
 
@@ -91,8 +112,49 @@ function Add-UserPath([string]$dir) {
   return $true
 }
 
+# "Home", by the RUNTIME's rule (src/server/paths.ts `homedir`): %HOME% when it
+# is set, else %USERPROFILE%. aio itself looks for its checkout, its versions
+# and every app's data under that folder, so installing under %USERPROFILE%
+# while a custom HOME is set (Git Bash, a login script) put aio where `am`
+# then did not look.
+function Get-AioUserHome() {
+  if ($env:HOME) { return $env:HOME }
+  return $env:USERPROFILE
+}
+
+# Where aio's own checkout lives when AIO_HOME does not say. An installer
+# before 1.0.20 cloned under %USERPROFILE% whatever HOME said, and "am" was
+# installed from that checkout: when it is there it stays THE checkout - used
+# and updated - or a user with HOME set would get a second clone and an "am"
+# that no longer follows the first. Only a machine with none gets the rule
+# above.
+function Get-AioDefaultHome() {
+  if ($env:USERPROFILE) {
+    $old = Join-Path $env:USERPROFILE '.local\lib\aio'
+    if (Test-Path -LiteralPath (Join-Path $old '.git')) { return $old }
+  }
+  return Join-Path (Get-AioUserHome) '.local\lib\aio'
+}
+
+# One line saying where things will live - and a second when the two "home"
+# variables name different folders, because then Explorer's idea of home is
+# not the one aio uses.
+function Show-AioHome([string]$aioHome) {
+  $h = Get-AioUserHome
+  Info "aio: $aioHome - app data: $h\.<appId>"
+  if ($env:HOME -and $env:USERPROFILE -and
+      ($env:HOME.TrimEnd('\', '/') -replace '/', '\') -ne ($env:USERPROFILE.TrimEnd('\', '/') -replace '/', '\')) {
+    Info "note: %HOME% ($($env:HOME)) differs from %USERPROFILE% ($($env:USERPROFILE)) - aio uses %HOME%, here and when an app runs. A program started without that HOME looks under %USERPROFILE% instead."
+    # The checkout an installer before 1.0.20 made (Get-AioDefaultHome).
+    if (-not $env:AIO_HOME -and $aioHome -eq (Join-Path $env:USERPROFILE '.local\lib\aio')) {
+      Info "note: the aio checkout stays at $aioHome, where an earlier install put it - it is the one used and updated."
+    }
+  }
+}
+
 function Invoke-AioInstall {
-  $AioHome = if ($env:AIO_HOME) { $env:AIO_HOME } else { Join-Path $env:USERPROFILE '.local\lib\aio' }
+  $AioHome = if ($env:AIO_HOME) { $env:AIO_HOME } else { Get-AioDefaultHome }
+  Show-AioHome $AioHome
   $AioRepo = if ($env:AIO_REPO) { $env:AIO_REPO } else { 'https://github.com/riagentic/aio' }
   $AioBranch = if ($env:AIO_BRANCH) { $env:AIO_BRANCH } else { 'main' }
 
@@ -110,16 +172,16 @@ function Invoke-AioInstall {
     git -C $AioHome fetch --tags --force origin $AioBranch | Out-Null
   } else {
     Info "cloning aio -> $AioHome"
-    $err = (git clone $AioRepo $AioHome 2>&1)
+    $err = (Quiet { git clone $AioRepo $AioHome 2>&1 })
     if ($LASTEXITCODE -ne 0) { throw "git clone failed for ${AioRepo}:`n$err" }
   }
   if ($env:AIO_REF) {
-    git -C $AioHome fetch --tags --force origin $env:AIO_REF 2>$null | Out-Null
-    git -C $AioHome checkout -q --force $env:AIO_REF 2>$null
+    Quiet { git -C $AioHome fetch --tags --force origin $env:AIO_REF 2>$null | Out-Null }
+    Quiet { git -C $AioHome checkout -q --force $env:AIO_REF 2>$null }
     if ($LASTEXITCODE -ne 0) { throw "AIO_REF=$($env:AIO_REF) is not a ref in $AioRepo" }
     Ok "aio $($env:AIO_REF) (pinned via AIO_REF)"
   } else {
-    $AioTag = (git -C $AioHome describe --tags --abbrev=0 "origin/$AioBranch" 2>$null)
+    $AioTag = (Quiet { git -C $AioHome describe --tags --abbrev=0 "origin/$AioBranch" 2>$null })
     if (-not $AioTag) { $AioTag = (git -C $AioHome tag -l 'v*' --sort=-creatordate | Select-Object -First 1) }
     if ($AioTag) { git -C $AioHome checkout -q --force $AioTag; Ok "aio $AioTag" }
     else { git -C $AioHome checkout -q --force $AioBranch; Ok "aio $AioBranch (no tags yet)" }
@@ -143,7 +205,7 @@ function Invoke-AioInstall {
     Ok "deno $have"
   } else {
     Info "deno $have is older than the $minDeno aio requires - upgrading"
-    deno upgrade 2>$null | Out-Null
+    Quiet { deno upgrade 2>$null | Out-Null }
     $have = Get-DenoVersion
     if (-not (Test-VersionAtLeast $have $minDeno)) {
       # A deno from winget/choco/scoop cannot rewrite itself; install a private
@@ -173,7 +235,12 @@ aio needs deno $minDeno+ and this machine has $have, which could not be upgraded
   if ($LASTEXITCODE -ne 0) { throw 'installing am failed - the output above says why' }
   $env:PATH = "$denoBin;$env:PATH"
 
-  if (Add-UserPath $denoBin) {
+  # AIO_NO_PATH_WRITE: for whoever manages PATH themselves, and for the test
+  # that runs this file for real - the one step here that reaches outside the
+  # folders the other variables name. Unset (the default), PATH is written.
+  if ($env:AIO_NO_PATH_WRITE) {
+    Info "PATH not changed (AIO_NO_PATH_WRITE is set) - add $denoBin to it yourself"
+  } elseif (Add-UserPath $denoBin) {
     Ok "added $denoBin to your PATH (new terminals will have it)"
   }
 
@@ -183,8 +250,8 @@ aio needs deno $minDeno+ and this machine has $have, which could not be upgraded
   # release it just installed.
   $amBin = Join-Path $denoBin 'am.cmd'
   $ver = ''
-  if (Have 'am') { $ver = (am version 2>$null | Select-Object -First 1) }
-  if (-not $ver -and (Test-Path $amBin)) { $ver = (& $amBin version 2>$null | Select-Object -First 1) }
+  if (Have 'am') { $ver = (Quiet { am version 2>$null | Select-Object -First 1 }) }
+  if (-not $ver -and (Test-Path $amBin)) { $ver = (Quiet { & $amBin version 2>$null | Select-Object -First 1 }) }
   if ($ver) { Ok "am installed: $ver" }
   elseif (Test-Path $amBin) { throw "am is installed at $amBin but does not run" }
   else { throw "am did not install - expected $amBin" }

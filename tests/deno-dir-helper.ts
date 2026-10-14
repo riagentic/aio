@@ -35,5 +35,20 @@ export const DENO_DIR: string = Deno.env.get("DENO_DIR") ??
 export async function ownHome(root: string): Promise<Record<string, string>> {
   const home = join(root, "home");
   await Deno.mkdir(home, { recursive: true });
-  return { HOME: home, AIO_INSTALL_ROOT: join(home, "app"), DENO_DIR };
+  return {
+    HOME: home,
+    AIO_INSTALL_ROOT: join(home, "app"),
+    DENO_DIR,
+    // Every name the same places go by. A developer who exports an XDG
+    // variable would otherwise send the installed app's profile, menu entry
+    // or unpack dir to THEIR directory, throwaway HOME or not; macOS's
+    // Foundation and the Windows shell do not read HOME at all.
+    XDG_CONFIG_HOME: join(home, ".config"),
+    XDG_DATA_HOME: join(home, ".local", "share"),
+    XDG_CACHE_HOME: join(home, ".cache"),
+    CFFIXED_USER_HOME: home,
+    USERPROFILE: home,
+    APPDATA: join(home, "AppData", "Roaming"),
+    LOCALAPPDATA: join(home, "AppData", "Local"),
+  };
 }

@@ -4,7 +4,7 @@
 import type { Signal } from "../state/signal.ts";
 import { isSignal } from "./signal-binding.ts";
 import type { ComponentFn, RenderCtx, VChild, VNode } from "./vdom-types.ts";
-import { _devWarn, _hasRawHtml, _Null, _SignalText } from "./vdom-types.ts";
+import { _hasRawHtml, _Null, _SignalText, _wrong } from "./vdom-types.ts";
 // Symbols imported as types — used only in typeof expressions for h() tag union.
 import type {
   ErrorBoundary,
@@ -94,13 +94,14 @@ export function h(
   // children after the html, SSR dropped them). `_hasRawHtml` is the rule —
   // raw html wins everywhere — and this is the one place to say so.
   if (children.length > 0 && _hasRawHtml(p)) {
-    _devWarn(
+    _wrong(
       `dih-children-${String(tag)}`,
       `<${
         String(tag)
       }> has both dangerouslySetInnerHTML and children — the raw html wins ` +
-        `and the children are ignored (on the server and the client alike). ` +
-        `Use one or the other.`,
+        `and the children are ignored (on the server and the client alike).`,
+      " Use one or the other.",
+      "dih-children",
     );
   }
 
@@ -117,11 +118,16 @@ export function h(
   }
 
   // Detect fully-static VNodes for diff short-circuit
+  //
+  // Never a form control with a `value`/`checked` prop: whether what a person
+  // typed into it survives a render is `_keepsTyped`'s to say, below, not a
+  // side effect of this optimisation.
   if (
     typeof tag === "string" &&
     key === undefined &&
     !p.ref &&
     !p.use &&
+    !_isControlVNode(tag, p) &&
     _isStaticProps(p) &&
     _isStaticChildren(children)
   ) {
@@ -288,6 +294,55 @@ export function _notANode(v: unknown): string | null {
 }
 
 // ── Static optimization helpers ───────────────────────────────────────
+
+/** A form control that carries a `value`/`checked` prop. */
+function _isControlVNode(tag: unknown, p: Record<string, unknown>): boolean {
+  return (tag === "input" || tag === "textarea" || tag === "select") &&
+    ("value" in p || "checked" in p);
+}
+
+/** Is `v` a control the renderer leaves showing what a person typed, for as
+ *  long as its props do not change?
+ *
+ *  Yes for a `value`/`checked` control with no handler, key, `ref` or `use`,
+ *  only primitive props (a `style` object of primitives counts) and no text
+ *  under it: `<input name="q" value={initial}>` in a form read on submit. Two
+ *  equal renders of one keep the typed text (`_diff`); any other control is
+ *  put back on its prop by every render (`_controlDrifted`, prop-write.ts).
+ *
+ *  That is what every 1.0 release did — there as an accident of the static
+ *  short-circuit, which skipped the prop pass for exactly this shape — and
+ *  apps were written on it, so it is a rule now and this is its one decider.
+ *  The hint beside it names `defaultValue`, which says the same thing on
+ *  purpose. */
+export function _keepsTyped(v: VNode): boolean {
+  const p = v.props;
+  return _isControlVNode(v.tag, p) && v.key === undefined && !p.ref &&
+    !p.use && _isStaticProps(p) && _isStaticChildren(v.children);
+}
+
+/** Say, once, that a `_keepsTyped` control shows something its prop does not
+ *  — the moment the rule above is doing something a reader of the JSX would
+ *  not guess. Observe-only. */
+export function _saysTypedKept(v: VNode): void {
+  const el = v._dom as unknown as Record<string, unknown> | undefined;
+  const p = v.props;
+  if (!el) return;
+  const k = p.value != null && String(el.value ?? "") !== String(p.value)
+    ? "value"
+    : p.checked != null && Boolean(el.checked) !== Boolean(p.checked)
+    ? "checked"
+    : "";
+  if (!k) return;
+  const D = k === "value" ? "defaultValue" : "defaultChecked";
+  _wrong(
+    "typed-kept",
+    `<${String(v.tag)} ${k}=…> has no handler, so it shows what was typed ` +
+      `into it and not its \`${k}\` until that prop changes. Use \`${D}\` ` +
+      `for a starting value, or store the input (\`onInput\`/\`onChange\`) ` +
+      `to control it.`,
+  );
+}
 
 /** Returns true if all prop values are primitives (or style objects with only primitive values).
  *  Object props (dangerouslySetInnerHTML, className arrays/objects) are rejected — only style allowed. */

@@ -11,6 +11,7 @@
 // fix is to name the gesture, not to add a synthetic action.
 //
 // The usage path calls Deno.exit, so this drives the real CLI.
+import "./store-sandbox.ts";
 import { assert } from "@std/assert";
 import { childCoverageDir } from "../src/testing/temp-dir.ts";
 import { fromFileUrl } from "@std/path";

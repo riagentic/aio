@@ -7,6 +7,7 @@
 // pass the `--app=` that had already resolved: the one thing that tells the
 // two apart (the profile / home) was never named. A miss on an id that has
 // live instances now names each instance's home, the way to target it.
+import "./store-sandbox.ts";
 import { assert, assertStringIncludes } from "@std/assert";
 import { noLockMessage } from "../src/am/am-cmd-process.ts";
 import {

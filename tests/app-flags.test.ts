@@ -24,7 +24,8 @@ import {
   declareAppFlags,
   parseCli,
 } from "../src/server/aio-cli.ts";
-import { fromFileUrl } from "@std/path";
+import { fromFileUrl, toFileUrl } from "@std/path";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 function reset() {
   _resetParsedCli();
@@ -104,11 +105,15 @@ const ROOT = fromFileUrl(new URL("..", import.meta.url));
 async function bootWithArgs(
   args: string[],
 ): Promise<{ out: string; code: number }> {
-  const probe = `${ROOT}tests/.app-flags-probe.tmp.ts`;
+  // Outside tests/: a file that appears and vanishes there races every test
+  // that reads the whole folder. The imports are absolute, so it runs the same.
+  const dir = await tempDir("aio-app-flags-probe-");
+  const probe = `${dir}/probe.ts`;
+  const at = (rel: string) => toFileUrl(`${ROOT}${rel}`).href;
   await Deno.writeTextFile(
     probe,
-    `import { aio } from "../mod.ts";\n` +
-      `import { cell } from "../src/state/cell.ts";\n` +
+    `import { aio } from "${at("mod.ts")}";\n` +
+      `import { cell } from "${at("src/state/cell.ts")}";\n` +
       `const c = cell("appflagprobe", { state: { n: 0 }, methods: {} });\n` +
       `const app = await aio.run({\n` +
       `  cells: [c], appId: "appflagprobe", client: "server-only",\n` +
@@ -121,7 +126,7 @@ async function bootWithArgs(
   );
   try {
     const r = await new Deno.Command(Deno.execPath(), {
-      args: ["run", "-A", probe, ...args],
+      args: ["run", "-A", `--config=${ROOT}deno.json`, probe, ...args],
       cwd: ROOT,
       stdout: "piped",
       stderr: "piped",
@@ -132,7 +137,7 @@ async function bootWithArgs(
       code: r.code,
     };
   } finally {
-    await Deno.remove(probe).catch(() => {});
+    await dropTempDir(dir);
   }
 }
 
@@ -166,11 +171,13 @@ Deno.test("appFlags: an UNDECLARED flag is still refused — the strictness is t
 // `libraryMode` keeps the throw, because an embedding host (and `bootWithArgs`
 // above) wants the exception rather than an exit.
 async function bootRealApp(args: string[]) {
-  const probe = `${ROOT}tests/.app-flags-real.tmp.ts`;
+  const dir = await tempDir("aio-app-flags-real-");
+  const probe = `${dir}/probe.ts`;
+  const at = (rel: string) => toFileUrl(`${ROOT}${rel}`).href;
   await Deno.writeTextFile(
     probe,
-    `import { aio } from "../mod.ts";\n` +
-      `import { cell } from "../src/state/cell.ts";\n` +
+    `import { aio } from "${at("mod.ts")}";\n` +
+      `import { cell } from "${at("src/state/cell.ts")}";\n` +
       `const c = cell("appflagreal", { state: { n: 0 }, methods: {} });\n` +
       `await aio.run({ cells: [c], appId: "appflagreal", ` +
       `client: "server-only", persist: false, singleton: false, port: 0, ` +
@@ -179,7 +186,7 @@ async function bootRealApp(args: string[]) {
   );
   try {
     const r = await new Deno.Command(Deno.execPath(), {
-      args: ["run", "-A", probe, ...args],
+      args: ["run", "-A", `--config=${ROOT}deno.json`, probe, ...args],
       cwd: ROOT,
       stdout: "piped",
       stderr: "piped",
@@ -190,7 +197,7 @@ async function bootRealApp(args: string[]) {
       code: r.code,
     };
   } finally {
-    await Deno.remove(probe).catch(() => {});
+    await dropTempDir(dir);
   }
 }
 

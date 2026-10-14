@@ -14,6 +14,7 @@
 //
 // One path per call. Two is a question am cannot answer, and the refusal shows
 // the dotted spelling, which is what was meant every time we have seen it.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import {
   _braceHint,

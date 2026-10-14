@@ -6,11 +6,17 @@ import { type Contact, contacts } from "./cell.ts";
 
 const row: Record<string, string> = {
   display: "grid",
-  gridTemplateColumns: "1fr 1fr 2fr auto",
+  // `minmax(0, …)`, and `field` below: a bare `1fr` cannot shrink under its
+  // content, and an <input> is ~190 px wide by default — on a phone the three
+  // of them made the page 639 px wide on a 411 px screen (it scrolled
+  // sideways; an Android WebView showed it zoomed out to 64%).
+  gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr) minmax(0, 2fr) auto",
   gap: "0.5rem",
   alignItems: "center",
   padding: "0.35rem 0",
 };
+
+const field: Record<string, string> = { minWidth: "0", width: "100%" };
 
 function Editor() {
   const { local: name, set: setName } = useLocal("");
@@ -31,18 +37,21 @@ function Editor() {
   return (
     <form t="NewContact" onSubmit={submit} style={row}>
       <input
+        style={field}
         placeholder="Name"
         aria-label="Name"
         value={name}
         onInput={(e) => setName((e.target as HTMLInputElement).value)}
       />
       <input
+        style={field}
         placeholder="Email"
         aria-label="Email"
         value={email}
         onInput={(e) => setEmail((e.target as HTMLInputElement).value)}
       />
       <input
+        style={field}
         placeholder="Note"
         aria-label="Note"
         value={note}
@@ -86,6 +95,7 @@ function Row({ c }: { c: Contact }) {
       {editing
         ? (
           <input
+            style={field}
             t="email-edit"
             value={draft}
             onInput={(e) => setDraft((e.target as HTMLInputElement).value)}

@@ -7,6 +7,7 @@
 // having skipped the download. On the one-liner that read: "fixed · installed
 // npm:electron", then the build: "electron is not installed", then every later
 // `am fix`: "ok". Two of those three lines were false.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 

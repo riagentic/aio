@@ -3,6 +3,7 @@
 // `--profile`, so run as written they stopped (or backed up) the DEFAULT
 // instance while p1 kept running. Measured as a user with both instances up.
 // Every "stop it first" hint names the instance the verb was aimed at.
+import "./store-sandbox.ts";
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { cmdBackup, cmdRestore } from "../src/am/am-cmd-data.ts";
 import { _resetHomePin, targetHome } from "../src/am/am-utils.ts";

@@ -177,6 +177,53 @@ export function makeReplyBudget(
   };
 }
 
+/** The limited broadcast: every sender's first target, and the only one an
+ *  aio older than 1.0.20 probed. */
+const LIMITED_BROADCAST = "255.255.255.255";
+
+/** Where a sweep sends its probe: the limited broadcast, then the directed
+ *  broadcast address of every non-loopback IPv4 interface, each once. Pure.
+ *
+ *  The limited broadcast leaves by ONE interface — the one the routing table
+ *  gives 255.255.255.255, which with a VPN up is the VPN (measured: the LAN
+ *  never saw the probe, and the sweep said "no apps found"). A directed
+ *  broadcast (192.168.88.255 for 192.168.88.7/24) is routed like any address
+ *  of its subnet, so it leaves by the interface that is ON that subnet.
+ *
+ *  Skipped: an interface with no netmask (nothing to derive), and a /31 or
+ *  /32 — a point-to-point link or a single host has no broadcast address, and
+ *  the "address" this arithmetic gives is its peer or itself.
+ *
+ *  The Electron client's script carries a twin (`broadcastTargets` in
+ *  `electron-client-script.ts`); `tests/discovery-broadcast-targets.test.ts`
+ *  runs both on the same random interface lists.
+ *
+ *  @decider */
+export function broadcastTargets(
+  ifaces: readonly {
+    family: string | number;
+    address: string;
+    netmask?: string | null;
+  }[],
+): string[] {
+  const quad = (s: unknown): number[] | null => {
+    const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(String(s));
+    if (!m) return null;
+    const q = m.slice(1).map(Number);
+    return q.every((n) => n <= 255) ? q : null;
+  };
+  const out = [LIMITED_BROADCAST];
+  for (const i of ifaces) {
+    if (i.family !== "IPv4" && i.family !== 4) continue;
+    const a = quad(i.address), m = quad(i.netmask);
+    if (!a || !m || a[0] === 127) continue;
+    if (m[0] === 255 && m[1] === 255 && m[2] === 255 && m[3]! >= 254) continue;
+    const b = a.map((x, k) => x | (~m[k]! & 255)).join(".");
+    if (!out.includes(b)) out.push(b);
+  }
+  return out;
+}
+
 /** True when this runtime can do UDP discovery. `node:dgram` is stable, so
  *  this is always true in Deno — kept for API stability / call-site clarity. */
 export function discoverySupported(): boolean {
@@ -253,8 +300,10 @@ export function startDiscoveryResponder(
 }
 
 /**
- * Broadcast one discovery probe and collect replies for `timeoutMs`.
- * Returns every distinct app found (deduped by host:port). Empty array when
+ * Broadcast one discovery probe — to every address {@link broadcastTargets}
+ * names — and collect replies for `timeoutMs`.
+ * Returns every distinct app found (deduped by host:port, this machine's
+ * addresses being one host). Empty array when
  * UDP is unavailable or nothing answered — callers should always keep a
  * manual "type an address" path (UDP is blocked on many networks).
  *
@@ -262,7 +311,7 @@ export function startDiscoveryResponder(
  * kept (the echo is stripped from the result). Without one, every responder
  * counts. See the module doc: a test-time filter, never a production gate.
  *
- * `onNote` — told when the probe could NOT BE SENT. The result is `[]` either
+ * `onNote` — told when the probe could NOT BE SENT to any target. The result is `[]` either
  * way, and without this "nobody answered" and "nobody was asked" are the same
  * empty list. Measured on macOS 26: a process with no Local Network
  * permission (one that outlived the login session that started it, or an app
@@ -281,6 +330,7 @@ export function discoverAioApps(
   const port = opts.port ?? AIO_DISCOVERY_PORT;
   const probe = encodeProbe(opts.nonce); // throws on a malformed nonce — loud
   const found = new Map<string, DiscoveredApp>();
+  const own = new Set<string>(); // this machine's addresses
 
   return new Promise<DiscoveredApp[]>((resolve) => {
     let socket: dgram.Socket;
@@ -319,7 +369,9 @@ export function discoverAioApps(
       if (opts.nonce !== undefined && ad.nonce !== opts.nonce) return;
       const { nonce: _echo, ...bare } = ad;
       const host = rinfo.address;
-      const key = `${host}:${ad.port}`;
+      // This machine answers each target from the address of the interface
+      // the probe left by: one app, several hosts. They are one host.
+      const key = `${own.has(host) ? "" : host}:${ad.port}`;
       if (found.has(key)) return;
       found.set(key, {
         ...bare,
@@ -327,11 +379,27 @@ export function discoverAioApps(
         url: `${ad.tls ? "https" : "http"}://${host}:${ad.port}`,
       });
     });
-    const unsent = (e: unknown) =>
+    // Without the interface list (no `--allow-sys`) the sweep is the limited
+    // broadcast alone — what it was before 1.0.20.
+    let ifaces: Deno.NetworkInterfaceInfo[] = [];
+    try {
+      ifaces = Deno.networkInterfaces();
+    } catch {
+      // aio-ok: not permitted to list them — the limited broadcast is asked
+    }
+    const targets = broadcastTargets(ifaces);
+    for (const i of ifaces) own.add(i.address);
+    // Said only when NO target took the probe: one refused target (the limited
+    // broadcast routed into a VPN that drops it) with another sent is a sweep
+    // that asked.
+    const failed: unknown[] = [];
+    const unsent = (e: unknown) => {
+      if (failed.push(e) < targets.length) return;
       opts.onNote?.(
-        `discovery: the probe could not be sent to 255.255.255.255:${port} ` +
-          `— ${e}. Nothing was asked, so an empty result says nothing about ` +
-          `what is running.` +
+        `discovery: the probe could not be sent to ${LIMITED_BROADCAST}:${port}` +
+          (targets.length > 1 ? ` or to ${targets.slice(1).join(", ")}` : "") +
+          ` — ${failed[0]}. Nothing was asked, so an empty result says ` +
+          `nothing about what is running.` +
           (Deno.build.os === "darwin"
             ? ` On macOS this is the Local Network permission (System ` +
               `Settings → Privacy & Security → Local Network): the app this ` +
@@ -339,21 +407,19 @@ export function discoverAioApps(
               `session that started it has none.`
             : ""),
       );
+    };
     socket.bind(0, () => {
       try {
         socket.setBroadcast(true);
       } catch { /* broadcast not permitted on this iface */ }
-      try {
-        socket.send(
-          Buffer.from(probe),
-          port,
-          "255.255.255.255",
-          (e: unknown) => {
+      for (const to of targets) {
+        try {
+          socket.send(Buffer.from(probe), port, to, (e: unknown) => {
             if (e) unsent(e);
-          },
-        );
-      } catch (e) {
-        unsent(e);
+          });
+        } catch (e) {
+          unsent(e);
+        }
       }
     });
     timer.id = setTimeout(done, timeoutMs);

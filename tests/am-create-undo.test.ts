@@ -8,6 +8,7 @@
 //
 // The failure here is a real filesystem one — a scaffold entry nested under
 // another entry that is a FILE (ENOTDIR) — not an injected fault.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import { writeScaffold } from "../src/am/am-cmd-create.ts";

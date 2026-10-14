@@ -202,6 +202,7 @@ Options — only when you need control (all optional):
 | `settleIterations` | `20`                           | very slow cascades             |
 | `seed`             | —                              | pin machine-dependent state    |
 | `user`             | — (identity unresolved)        | mount an authenticated app     |
+| `fetch`            | the `fetch` that is installed  | answer the component's network |
 | `perfBudget`       | the defaults                   | the app's budgets and ceilings |
 | `authFeatures`     | all `false`                    | `<SignIn/>` feature adaptation |
 
@@ -220,6 +221,10 @@ own timeout message.
 
 A legitimately long cascade takes `settleIterations`; a legitimately long call
 should be awaited, or driven with `ui.advance(ms)` if it waits on a schedule.
+
+When the call that is still running waits on a `fetch`, the message names the
+URL too (`waiting on fetch(https://…)`), and says whether the test gave `testUI`
+a `fetch` to answer it.
 
 ### A failing call nobody awaited fails the test
 
@@ -278,12 +283,65 @@ in the test, and the method reads `due` as `undefined` either way. An
 `undefined` **argument** is different: `todo.add(text, undefined)` arrives as
 `null`, so a default parameter does not apply — leave the argument out.
 
+Or let the client leave it out: `wire: { omitTrailingUndefined: true }`.
+
+```ts
+// add(s, text: string, due: string = "today")
+await aio.run({ cells: [todo], wire: { omitTrailingUndefined: true } });
+todo.add("x", undefined); // sent as add("x") — `due` is "today", as in process
+```
+
+It is opt-in; without it nothing changes (`undefined` arrives as `null`). Only
+TRAILING `undefined` arguments are dropped: `m(undefined, 1)` still arrives as
+`m(null, 1)` and is still reported. A test mounts with the same setting —
+`testUI(App, "name", { wire: { omitTrailingUndefined: true } }, fn)` — so the
+call above is not a wire loss there either.
+
 The call is not dispatched: in the app it IS sent, changed, and the only thing
 that says so is a console warning
 (`… was dispatched with arguments JSON cannot
 carry intact`, in dev and in a
 production build), so a test that handed the method the original would be green
 over it. The fix is in the **caller**.
+
+#### The rest of the call: `wire: { strict: true }`
+
+Three more things differ between the harness and a real connection. They are
+**opt-in**, because a test written before 1.0.20 passed on a harness that did
+none of them:
+
+```ts
+testUI(App, "name", { wire: { strict: true } }, async (ui) => {/* … */});
+```
+
+or, for a whole run, `AIO_TEST_WIRE=strict deno test -A` — what `am create`
+writes into a new app's `test` task. The option decides for one mount, over the
+variable.
+
+|                                   | default (as up to 1.0.19)                           | `strict` — what a client gets                                                                    |
+| --------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| a call that **fails**             | the caller gets the object the method threw         | a plain `Error` with the server's message and its `code` (`errorCode(e)`)                        |
+| `serverFn("ns").f(x)` from the UI | reaches the function itself: `x` by reference       | the server's route: `x` vetted as above, the `access` rule, a JSON result, `Error("[server] …")` |
+| `useAio().send(action)`           | nothing runs (there is no transport under `testUI`) | the method runs; an action no booted cell has a method for fails the test                        |
+
+Without `strict`, the first time a run meets one of the three it says so, once
+per kind, in one `[aio] testUI: …` line on stderr — it never fails a test. A
+test that checks the class of a rejection (`instanceof`), its `cause`, an own
+property or its stack is green by default and wrong about the app: branch on
+`errorCode(e)` or the message, or test the error where it is thrown (`testCell`
+/ `bootCells`).
+
+Under `strict`:
+
+- When a test body fails after a rejection, the failure says what did not cross
+  (the `testUI(App, "name", fn)` form). The handle form never sees its body
+  fail, so it says the same once per run, on stderr, when a rejection loses
+  something.
+- A serverFn's `access` rule is asked about the mount's `user`
+  (`enforceAccess: false` skips it) — anonymous when the test gives none.
+- A sent action has no ack in the app, so a failure surfaces at the next
+  `settle()`; the app's server refuses an unknown action and tells nobody, which
+  is why the test fails instead.
 
 What does not cross, because it does not in the app either:
 
@@ -357,6 +415,39 @@ with no `user` (or `null`) it renders the anonymous view, exactly what an
 unsigned connection receives. A filter that throws or returns a non-object fails
 closed, as the broadcast does: the cell reads its declared state, and the error
 is logged naming it.
+
+### Testing the login itself (`testPageFetch`)
+
+`user` skips the login. To test the login — your own screen around `<SignIn/>`,
+or a form of your own on `authClient` — the form needs a server to sign in to.
+`testPageFetch(srv)` makes this process's `fetch` one browser page's on a
+`testServer`: a relative URL reaches that server, and the cookies it sets are
+kept and sent back to it (to no other origin).
+
+```tsx
+import { testPageFetch, testServer, testUI } from "aio/testing";
+
+await using srv = await testServer({ cells: [shop], auth: true });
+using page = testPageFetch(srv); // before the mount
+{
+  await using ui = await testUI(App);
+  await ui.waitFor(() => ui.present("SignIn"));
+  ui.SignIn.NewHereCreateAnAccountButton.click();
+  ui.SignIn.UserIdInput.type("alice");
+  ui.SignIn.PasswordInput.type("password123");
+  ui.SignIn.CreateAccountButton.click();
+  await ui.waitFor(() => ui.html().includes("Signed in as alice"));
+}
+// the server made the account and the page holds its session cookie
+page.reload(); // …and a reload is signed in by the cookie alone
+await using ui = await testUI(App);
+await ui.waitFor(() => ui.html().includes("Signed in as alice"));
+```
+
+`page.cookies` is what the page holds; `page.reload()` forgets the identity the
+page resolved (the next mount asks `/me` again). Disposing restores `fetch`. The
+app's cells still run in-process under `testUI` — this joins the HTTP side of a
+page (login, your own routes), not its socket.
 
 ### Presence: `onConnect` → an access-gated method
 
@@ -485,8 +576,20 @@ in is used as-is.
 There is no HTTP server under `testUI`, so a component's relative
 `fetch("/media/x.txt")` fails — with an error that says so and points to
 `testServer()` (below), instead of Deno's bare `Invalid URL`. To test the
-component alone, replace `globalThis.fetch` before the mount; a stub you install
-is called first and keeps answering relative URLs.
+component alone, give the test its network:
+
+```tsx
+await using ui = await testUI(Gate, {
+  fetch: (input) => Response.json({ blocked: [] }),
+});
+```
+
+`fetch` answers every request the component makes **from the first mount on**,
+relative URLs included, and is gone when the test ends. That is the point of it:
+the component is mounted before the test body runs, so a stub the body installs
+is too late for a request `onMount` makes — that one has already gone to the
+real network. (Replacing `globalThis.fetch` at module level, above `testUI`, is
+in time as well, but it stays for every other test in the file.)
 
 For the binding every app needs, there is a primitive:
 
@@ -691,6 +794,24 @@ const ui = await testUI(App, { document, cells: [todo] }) as TypedTestUI;
 await ui.App.SubmitButton.click(); // autocompleted, compile-checked
 ```
 
+`TypedTestUI` adds names and refuses none: every handle still answers to any
+name, so `ui.App.SubmitButon` type-checks. The generated file also exports
+`StrictTestUI` — the same client without that door. Cast to it and a renamed or
+misspelled name is a compile error at every depth; `find()` stays loose for a
+name the file does not list.
+
+```ts
+import { testUI } from "aio/testing";
+import type { StrictTestUI } from "./ui.gen.ts";
+import { todo } from "../src/cell/todo.ts";
+import App from "../src/App.tsx";
+import { Window } from "happy-dom";
+
+const document = new Window().document;
+const ui = await testUI(App, { document, cells: [todo] }) as StrictTestUI;
+ui.App.SubmitButon.click(); // compile error
+```
+
 ### In a script, when you need the parts
 
 `testGen(App, opts)` renders and generates in one call, and
@@ -845,10 +966,13 @@ same `<head>` the app's own page gets, from its
 })` and `style.css`) and encodes them with its
 built-in encoder. No ffmpeg.
 
-**Needs** a headless Chromium or Chrome (`$CHROMIUM_BIN` to point at one). With
-`--video` and none installed — or `$CHROMIUM_BIN` naming a file that is not
-there, or an output directory that cannot be written — the test fails at mount
-and says so, before its body runs. Without `--video`, nothing is looked for.
+**Needs** a headless Chromium-family browser. It is found by itself in the usual
+install paths on Linux, macOS (`/Applications`) and Windows — Chromium, Chrome,
+Edge (on every Windows 11) and Brave; for any other install, set `CHROMIUM_BIN`
+to its path. With `--video` and none installed — or `$CHROMIUM_BIN` naming a
+file that is not there, or an output directory that cannot be written — the test
+fails at mount and says so, before its body runs. Without `--video`, nothing is
+looked for.
 
 **Not in the picture:** hover styles, the text caret, `<canvas>` content, and
 theme or layout options that are not literals in `aio.run` (the look line names
@@ -1087,7 +1211,8 @@ Deno.test("both windows see the same order", async () => {
   does**, over that client's socket: JSON arguments, a JSON-vetted return value,
   `_source: "UI"` at the server, and a rejection on refusal. A server-side call
   (`orders.add("widget")` under `bootCells`) skips all four, and `testUI`
-  reproduces the first two ([Calls cross the wire](#calls-cross-the-wire)); see
+  reproduces the first two and the refusal by an access rule
+  ([Calls cross the wire](#calls-cross-the-wire)); see
   [prod-parity.md](prod-parity.md#a-client-calling-a-method--clientcall)
 - `m.dispatchAll(action)` — the same action from every client at once, which is
   the concurrency case you cannot reason about from the outside:
@@ -1110,9 +1235,10 @@ period after the last send and a stable server before it answers; raise
 `testUI` runs in-process; some bugs only surface at the transport boundary or in
 a real renderer (the `_static` vnode freeze class). `deno task test:e2e` is the
 blessed "test the real thing" path: it boots a real server and drives it over
-the real wire — a headless **Chromium** client (auto-detected; the suite skips
-where no browser is present) plus transport-faithful subscription/dispatch
-checks — asserting on the client DOM and the authoritative server state.
+the real wire — a headless **Chromium** client (auto-detected on Linux, macOS
+and Windows, where it is usually Edge; the suite skips where no browser is
+found) plus transport-faithful subscription/dispatch checks — asserting on the
+client DOM and the authoritative server state.
 
 - Headless UI + DOM: `tests/e2e-ui-chromium.test.ts` (real Chromium surface +
   clicks), `tests/e2e-blank-screen.test.ts`, `tests/e2e-sync-browser.test.ts`.
@@ -1151,7 +1277,16 @@ Deno.test("checkout over the wire", async () => {
 `testServer` boots in libraryMode on a free port with a throwaway data dir and
 `persist: false` (all overridable). `testBrowser` throws a clear error when no
 browser is found (set `$CHROMIUM_BIN` or pass `{ browserPath }`);
-`findChromium()` is exported if you want to gate a test on availability.
+`findChromium()` is exported if you want to gate a test on availability. On
+Windows it finds Edge.
+
+**Windows: every test browser is a guest window.** `testBrowser` and
+`testUI --video` launch the browser with `--guest` there. On a fresh profile a
+Chromium on Windows otherwise tries one sign-in as the Windows user per launch;
+it fails, and each failure counts as a failed logon against the account — ten of
+them lock it. If you launch a browser yourself in a test, pass `--guest` too. A
+guest window prints nothing for `--dump-dom`: read the DOM over CDP
+(`--remote-debugging-port`) instead.
 
 Booting a server yourself instead? Take the port from `freePort()`, never from a
 constant or a pid formula — two test files that derive ports arithmetically

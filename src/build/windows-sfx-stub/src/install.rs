@@ -5,6 +5,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::version::compare_versions;
 use std::cmp::Ordering;
@@ -23,6 +24,13 @@ pub const STAMP_NAME: &str = ".aio-sfx-stamp";
 /// OLDER than it opens the install instead of extracting over it: the app's
 /// data may already be in the newer version's shape.
 pub const VERSION_NAME: &str = ".aio-sfx-version";
+
+/// What the record of an install's Start-menu shortcut is named: the install
+/// directory's path plus this (`win-x64.shortcut`) — beside the install, so an
+/// update or a reinstall leaves it. The stub writes it when it adds the
+/// shortcut; the app writes it for an install whose `.exe` added none
+/// (`SFX_SHORTCUT_RECORD`, src/server/sfx-shortcut.ts). One line: the path.
+pub const SHORTCUT_RECORD: &str = ".shortcut";
 
 #[derive(Debug)]
 pub enum InstallError {
@@ -50,19 +58,21 @@ fn complete(install_dir: &Path, binary: &str) -> bool {
         && file_exists(&install_dir.join("electron").join("electron.exe"))
 }
 
-/// Whether `install_dir` holds a complete install of a version NEWER than
-/// `version`. False whenever that cannot be said for certain: no version on
+/// The version of the complete install at `install_dir` when it is NEWER than
+/// `version`. None whenever that cannot be said for certain: no version on
 /// either side, or one that cannot be ordered.
-fn newer_installed(install_dir: &Path, binary: &str, version: &str) -> bool {
-    fs::read_to_string(install_dir.join(VERSION_NAME))
-        .is_ok_and(|theirs| compare_versions(theirs.trim(), version) == Some(Ordering::Greater))
-        && complete(install_dir, binary)
+pub fn newer_installed(install_dir: &Path, binary: &str, version: &str) -> Option<String> {
+    let theirs = fs::read_to_string(install_dir.join(VERSION_NAME)).ok()?;
+    let theirs = theirs.trim();
+    (compare_versions(theirs, version) == Some(Ordering::Greater) && complete(install_dir, binary))
+        .then(|| theirs.to_owned())
 }
 
 /// Leaves a complete, stamped tree of this payload at `install_dir`, calling
 /// `extract(stage)` only when one is not there already — and not when the
 /// install is a NEWER version than this payload's (`version`; empty when the
-/// payload names none). `Ok(true)` when it extracted.
+/// payload names none), unless `replace_newer` asks for this payload whatever
+/// is there. `Ok(true)` when it extracted.
 ///
 /// An existing install is moved ASIDE first — the one step that fails while
 /// the app runs from it, before a byte is written — then the new tree is
@@ -74,6 +84,7 @@ pub fn ensure_installed(
     sha: &str,
     binary: &str,
     version: &str,
+    replace_newer: bool,
     extract: impl FnOnce(&Path) -> Result<(), String>,
 ) -> Result<bool, InstallError> {
     let stage = beside(install_dir, ".incoming");
@@ -84,7 +95,17 @@ pub fn ensure_installed(
         rename(&old, install_dir)
             .map_err(|e| InstallError::Other(format!("restore {}: {e}", install_dir.display())))?;
     }
-    if installed(install_dir, sha, binary) || newer_installed(install_dir, binary, version) {
+    // The stamp says which payload was EXTRACTED here, and the app's updater
+    // carries it into every tree it swaps in: an install that has since
+    // updated itself holds this stamp and a newer version.
+    let newer = newer_installed(install_dir, binary, version).is_some();
+    let present = installed(install_dir, sha, binary);
+    let keep = if replace_newer {
+        present && !newer
+    } else {
+        present || newer
+    };
+    if keep {
         // A stub killed after renaming the new tree in left the old one (a full
         // copy of the app) or half an extraction beside it. Best effort: the
         // install is good either way.
@@ -99,7 +120,7 @@ pub fn ensure_installed(
     }
     let had = exists(install_dir);
     if had {
-        rename(install_dir, &old).map_err(InstallError::InUse)?;
+        move_aside(install_dir, &old).map_err(InstallError::InUse)?;
     }
     let restore = |why: String| {
         let _ = remove_all(&stage);
@@ -127,8 +148,27 @@ pub fn ensure_installed(
     Ok(true)
 }
 
+/// How long the move aside is tried for. A file in the install held for a
+/// moment — by a virus scanner reading what was just extracted, by an app that
+/// is on its way out — refuses the move exactly as a running app does. The
+/// app that really runs is still refused, this much later.
+const ASIDE_WAIT: Duration = Duration::from_secs(3);
+
+/// `rename(install, old)`, tried again every 100 ms for [`ASIDE_WAIT`].
+fn move_aside(install_dir: &Path, old: &Path) -> io::Result<()> {
+    let started = Instant::now();
+    loop {
+        match rename(install_dir, old) {
+            Err(_) if started.elapsed() < ASIDE_WAIT => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            done => return done,
+        }
+    }
+}
+
 /// `<path><suffix>` — a sibling of the install, on the same volume.
-fn beside(path: &Path, suffix: &str) -> PathBuf {
+pub fn beside(path: &Path, suffix: &str) -> PathBuf {
     let mut s = OsString::from(path);
     s.push(suffix);
     s.into()
@@ -240,7 +280,7 @@ mod tests {
     fn fresh_then_skip() {
         let t = Tmp::new("fresh");
         let dir = t.install();
-        ensure_installed(&dir, "sha1", "myapp", "", tree("v1")).unwrap();
+        ensure_installed(&dir, "sha1", "myapp", "", false, tree("v1")).unwrap();
         assert_eq!(read(dir.join(STAMP_NAME)), "sha1\n");
         // Second launch: the stamp matches, nothing is extracted.
         ensure_installed(
@@ -248,6 +288,7 @@ mod tests {
             "sha1",
             "myapp",
             "",
+            false,
             never("a stamped install was extracted again"),
         )
         .unwrap();
@@ -258,8 +299,8 @@ mod tests {
     fn replaces_different_payload() {
         let t = Tmp::new("replace");
         let dir = t.install();
-        ensure_installed(&dir, "sha1", "myapp", "", tree("v1")).unwrap();
-        ensure_installed(&dir, "sha2", "myapp", "", tree("v2")).unwrap();
+        ensure_installed(&dir, "sha1", "myapp", "", false, tree("v1")).unwrap();
+        ensure_installed(&dir, "sha2", "myapp", "", false, tree("v2")).unwrap();
         assert_eq!(read(dir.join("version.txt")), "v2");
         assert_eq!(read(dir.join(STAMP_NAME)), "sha2\n");
         only_install(&dir);
@@ -271,8 +312,8 @@ mod tests {
     fn restores_on_failed_extract() {
         let t = Tmp::new("restore");
         let dir = t.install();
-        ensure_installed(&dir, "sha1", "myapp", "", tree("v1")).unwrap();
-        let err = ensure_installed(&dir, "sha2", "myapp", "", |stage| {
+        ensure_installed(&dir, "sha1", "myapp", "", false, tree("v1")).unwrap();
+        let err = ensure_installed(&dir, "sha2", "myapp", "", false, |stage| {
             tree("v2")(stage)?;
             Err("disk full".into())
         });
@@ -296,14 +337,21 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let t = Tmp::new("inuse");
         let dir = t.install();
-        ensure_installed(&dir, "sha1", "myapp", "", tree("v1")).unwrap();
+        ensure_installed(&dir, "sha1", "myapp", "", false, tree("v1")).unwrap();
         let chmod = |mode| fs::set_permissions(&t.0, fs::Permissions::from_mode(mode)).unwrap();
         chmod(0o555); // rename inside it now fails
         if fs::write(t.0.join("probe"), "").is_ok() {
             chmod(0o755);
             return; // root ignores directory permissions
         }
-        let err = ensure_installed(&dir, "sha2", "myapp", "", never("extracted while in use"));
+        let err = ensure_installed(
+            &dir,
+            "sha2",
+            "myapp",
+            "",
+            false,
+            never("extracted while in use"),
+        );
         chmod(0o755);
         assert!(matches!(err, Err(InstallError::InUse(_))), "{err:?}");
         assert_eq!(read(dir.join("version.txt")), "v1");
@@ -319,7 +367,7 @@ mod tests {
     fn recovers_set_aside_install() {
         let t = Tmp::new("aside");
         let dir = t.install();
-        ensure_installed(&dir, "sha1", "myapp", "", tree("v1")).unwrap();
+        ensure_installed(&dir, "sha1", "myapp", "", false, tree("v1")).unwrap();
         fs::rename(&dir, beside(&dir, ".replaced")).unwrap();
         fs::create_dir_all(beside(&dir, ".incoming")).unwrap(); // half an extraction
         ensure_installed(
@@ -327,6 +375,7 @@ mod tests {
             "sha1",
             "myapp",
             "",
+            false,
             never("the set-aside install matches"),
         )
         .unwrap();
@@ -340,34 +389,53 @@ mod tests {
     fn keeps_a_newer_install() {
         let t = Tmp::new("newer");
         let dir = t.install();
-        assert!(ensure_installed(&dir, "sha-a", "myapp", "1.0.0", tree("v1")).unwrap());
+        assert!(ensure_installed(&dir, "sha-a", "myapp", "1.0.0", false, tree("v1")).unwrap());
         assert_eq!(read(dir.join(VERSION_NAME)), "1.0.0\n");
         // The app updated itself and rewrote the version at its next start.
         fs::write(dir.join(VERSION_NAME), "1.2.0-beta\n").unwrap();
         let old = never("an older exe extracted over a newer install");
-        assert!(!ensure_installed(&dir, "sha-b", "myapp", "1.1.9", old).unwrap());
+        assert!(!ensure_installed(&dir, "sha-b", "myapp", "1.1.9", false, old).unwrap());
         assert_eq!(
             read(dir.join(STAMP_NAME)),
             "sha-a\n",
             "the install is untouched"
         );
         only_install(&dir);
+        // Asked for by a program (`--aio-sfx-install`), the older one goes in…
+        assert_eq!(
+            newer_installed(&dir, "myapp", "1.1.9").as_deref(),
+            Some("1.2.0-beta")
+        );
+        assert!(ensure_installed(&dir, "sha-b", "myapp", "1.1.9", true, tree("v0")).unwrap());
+        assert_eq!(read(dir.join(VERSION_NAME)), "1.1.9\n");
+        assert_eq!(newer_installed(&dir, "myapp", "1.1.9"), None);
+        // …also when the newer version came from the app updating itself,
+        // which keeps the stamp of the payload it was first extracted from.
+        fs::write(dir.join(VERSION_NAME), "1.2.0-beta\n").unwrap();
+        let kept = never("the same payload was extracted again");
+        assert!(!ensure_installed(&dir, "sha-b", "myapp", "1.1.9", false, kept).unwrap());
+        assert!(ensure_installed(&dir, "sha-b", "myapp", "1.1.9", true, tree("v0")).unwrap());
+        assert_eq!(read(dir.join(VERSION_NAME)), "1.1.9\n");
+        let same = never("the same payload and version was extracted again");
+        assert!(!ensure_installed(&dir, "sha-b", "myapp", "1.1.9", true, same).unwrap());
+        // …and the app, updated again, is as it was.
+        fs::write(dir.join(VERSION_NAME), "1.2.0-beta\n").unwrap();
         // Same version, another build: the exe that is opened wins, as before.
-        assert!(ensure_installed(&dir, "sha-c", "myapp", "1.2.0-beta", tree("v2")).unwrap());
+        assert!(ensure_installed(&dir, "sha-c", "myapp", "1.2.0-beta", false, tree("v2")).unwrap());
         assert_eq!(read(dir.join("version.txt")), "v2");
         // A version that cannot be ordered, or none at all, proves nothing.
         for (n, theirs) in ["unknown", ""].iter().enumerate() {
             fs::write(dir.join(VERSION_NAME), theirs).unwrap();
             let sha = format!("sha-u{n}");
-            assert!(ensure_installed(&dir, &sha, "myapp", "0.0.1", tree("v3")).unwrap());
+            assert!(ensure_installed(&dir, &sha, "myapp", "0.0.1", false, tree("v3")).unwrap());
         }
         fs::remove_file(dir.join(VERSION_NAME)).unwrap();
-        assert!(ensure_installed(&dir, "sha-d", "myapp", "", tree("v4")).unwrap());
+        assert!(ensure_installed(&dir, "sha-d", "myapp", "", false, tree("v4")).unwrap());
         assert!(!dir.join(VERSION_NAME).exists(), "no version to record");
         // Newer by version but incomplete: not an install to keep.
         fs::write(dir.join(VERSION_NAME), "9.0.0").unwrap();
         fs::remove_file(dir.join("myapp.exe")).unwrap();
-        assert!(ensure_installed(&dir, "sha-e", "myapp", "1.0.0", tree("v5")).unwrap());
+        assert!(ensure_installed(&dir, "sha-e", "myapp", "1.0.0", false, tree("v5")).unwrap());
         only_install(&dir);
     }
 
@@ -377,11 +445,19 @@ mod tests {
     fn clears_leftovers_beside_good_install() {
         let t = Tmp::new("leftover");
         let dir = t.install();
-        ensure_installed(&dir, "sha2", "myapp", "", tree("v2")).unwrap();
+        ensure_installed(&dir, "sha2", "myapp", "", false, tree("v2")).unwrap();
         for left in [".replaced", ".incoming"] {
             tree("v1")(&beside(&dir, left)).unwrap();
         }
-        ensure_installed(&dir, "sha2", "myapp", "", never("the install matches")).unwrap();
+        ensure_installed(
+            &dir,
+            "sha2",
+            "myapp",
+            "",
+            false,
+            never("the install matches"),
+        )
+        .unwrap();
         assert_eq!(read(dir.join("version.txt")), "v2");
         only_install(&dir);
     }

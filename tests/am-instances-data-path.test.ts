@@ -12,6 +12,7 @@
 // database exactly where it was. The lock recorded `home` and not the data
 // directory, so nothing could show the difference, and the answer was only
 // reachable by reading the app's source.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { instances, writeLock } from "../src/server/single-instance-lock.ts";

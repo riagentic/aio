@@ -5,6 +5,7 @@
 // assertion a script writes to prove a list is non-empty. `eq` with no value
 // compared `undefined` with a missing path and passed too, and a fourth word
 // was dropped without a sound. Measured by a hunter running `am` as a user.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { compareValue, expectUsageError } from "../src/am/am-cmd-state.ts";
 

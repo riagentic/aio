@@ -121,6 +121,7 @@ import {
   reportHeapCeiling,
 } from "./heap-policy.ts";
 import type { Provenance, Sourced } from "./boot-facts.ts";
+import { entryPathOf } from "./boot-facts.ts";
 import {
   dbPathOf,
   exposeFlagOf,
@@ -152,6 +153,7 @@ import {
 import { openBlobStore } from "./blobs.ts";
 import { adoptHiddenConsole } from "./no-console.ts";
 import { resolveDataDirLegacy } from "./paths.ts";
+import { carriedPort } from "./dev-restart.ts";
 import { describeMigration, migrateLegacyLayout } from "./app-dirs-migrate.ts";
 import { DEV_FRAME_BUDGET_MS } from "../state/dispatch.ts";
 import { setupTransport } from "./aio-server.ts";
@@ -200,7 +202,10 @@ import {
   _verdictLost,
 } from "./action-ack.ts";
 import { PERSIST_REFUSED } from "./server-trojan.ts";
-import { _moveRejections } from "../state/rejection-tracker.ts";
+import {
+  _moveRejections,
+  hasRejectionFor,
+} from "../state/rejection-tracker.ts";
 import {
   buildLegacyConfig,
   filterCellsByIsolate,
@@ -227,9 +232,11 @@ import { DEFAULT_HEARTBEAT_INTERVAL } from "../vitals/types.ts";
 import {
   cdpPort,
   declareAppFlags,
+  DEFAULT_PORT_ENV,
   electronOnlyFlagRefusal,
   envDefaultPort,
   homeRequest,
+  ignoredDebugEnv,
   parseCli,
   portWasRequested,
   printHelp,
@@ -1935,9 +1942,40 @@ async function _runPhases<S, A, E>(
   // (see `_warnMisplacedDenoJson`, which WARNS that a top-level `port` there is
   // inert). `am` used to read it anyway, so a key the runtime told you it was
   // ignoring silently decided where `am` aimed.
-  const _envPort = envPort();
+  // `electron: { ignoreDebugEnv }` takes both env rungs (and `AIO_CDP`, at
+  // the lock below) out of a desktop app's boot: said once, naming them.
+  const _debugEnv = ignoredDebugEnv(
+    config.electron?.ignoreDebugEnv,
+    clientOf(cli, config).value,
+    (name) => {
+      try {
+        return Deno.env.get(name);
+      } catch {
+        return undefined; // no --allow-env here: nothing ambient to ignore
+      }
+    },
+  );
+  if (_debugEnv?.mistyped) {
+    log.warn(
+      `electron.ignoreDebugEnv is ${
+        JSON.stringify(config.electron?.ignoreDebugEnv)
+      }, not true or false — read as true: AIO_CDP, AIO_PORT and ` +
+        `${DEFAULT_PORT_ENV} are ignored.`,
+    );
+  }
+  if (_debugEnv?.ignored.length) {
+    log.warn(
+      `${_debugEnv.ignored.join(", ")} ${
+        _debugEnv.ignored.length > 1 ? "are" : "is"
+      } set and ignored (electron: { ignoreDebugEnv: true }) — no port is ` +
+        `opened from the environment. For this launch, type --port / --cdp.`,
+    );
+  }
+  // A dev restart's carried port (dev-restart.ts) is the supervisor's word,
+  // not the environment's: `ignoreDebugEnv` does not take it out.
+  const _envPort = carriedPort() ?? (_debugEnv ? undefined : envPort());
   // `AIO_DEFAULT_PORT=0` is "pick a free one" — saying nothing, so no rung.
-  const _defaultPort = envDefaultPort() || undefined;
+  const _defaultPort = _debugEnv ? undefined : envDefaultPort() || undefined;
   // Value and source from ONE candidate list (config-sources.ts): the source
   // used to be re-derived with truthiness checks, so `--port=0` was labelled
   // "default" while it was the flag that decided.
@@ -1999,7 +2037,7 @@ async function _runPhases<S, A, E>(
     {
       aioVersion: VERSION,
       profile: registeredProfile(appId),
-      cdpPort: cdpPort(clientOf(cli, config).value),
+      cdpPort: cdpPort(clientOf(cli, config).value, !!_debugEnv),
       // What `am doctor` shows: each multi-home setting and who decided it.
       settings: Object.fromEntries(_settings),
       // The CLIENT, so `am` can answer "is there a window here at all?"
@@ -2071,7 +2109,7 @@ async function _runPhases<S, A, E>(
   if (
     await handleThinClient(serverUrlOf(cli, config)?.value, (_v) => {
       /* multi-instance (D2): no process-wide running flag */
-    })
+    }, config.electron?.strictPin === true)
   ) return null!;
 
   // A build killed mid-compile left this project's node_modules trimmed and
@@ -2587,10 +2625,16 @@ async function _runPhases<S, A, E>(
       }
       for (const c of syncCellIds) {
         const { rows } = await asyncDb.query<
-          { id: string; action: string; payload: string; server_ts: number }
+          {
+            id: string;
+            action: string;
+            payload: string;
+            server_ts: number;
+            settled: number | null;
+          }
         >(
-          "SELECT id, action, payload, server_ts FROM sync_ops WHERE cell = ? " +
-            "ORDER BY server_ts",
+          "SELECT id, action, payload, server_ts, settled FROM sync_ops " +
+            "WHERE cell = ? ORDER BY server_ts",
           [c],
         );
         const placed = placeOps(
@@ -2606,7 +2650,13 @@ async function _runPhases<S, A, E>(
         for (const r of rows) {
           const p = placed.get(r.id);
           if (p === undefined || p === "covered") continue;
-          if (p === "in-flight") {
+          // A row MARKED settled (server-store.ts `settleOp`) was accepted
+          // and acknowledged, whatever the journal now holds: its commit
+          // line is one the journal lost (a power cut, a restored or cut
+          // file). Never in flight — so never removed by a refusal below:
+          // it folds with its cell (`replaySyncOps` refuses or quarantines
+          // on it, as on any settled row) and its listeners are named.
+          if (p === "in-flight" && r.settled !== 1) {
             _deferred.push({
               cell: c,
               id: r.id,
@@ -3852,7 +3902,16 @@ async function _runPhases<S, A, E>(
     action !== null && typeof action === "object"
       ? _callBorn.get(action as object)
       : undefined;
-  const _inCallScope = <T>(effect: unknown, fn: () => T): T => {
+  // …and the async body's own writes go through a door of its OWN call: a
+  // write-set a shared userland queue (the p-queue shape) runs from ANOTHER
+  // call's continuation carries that other call's scope, so its failed save
+  // was owed to the wrong call and its author was acked as saved. Marked
+  // here by identity first; the main door keeps a mark it finds. Same idea
+  // as the worker host's per-`__exec` door (cell-worker-host.ts `callOf`).
+  const _inCallScope = <T>(
+    effect: unknown,
+    fn: (call: string | undefined, sure?: boolean) => T,
+  ): T => {
     const ef = effect as
       | { type?: unknown; payload?: { _callId?: unknown } }
       | null
@@ -3860,11 +3919,50 @@ async function _runPhases<S, A, E>(
     const id = typeof ef?.type === "string" && ef.type.endsWith(":__exec")
       ? ef.payload?._callId
       : undefined;
-    if (typeof id !== "string") return _outsideCall(fn);
-    const root = _nestedCall.get(id) ?? id;
+    if (typeof id !== "string") return _outsideCall(() => fn(undefined));
+    const outer = _nestedCall.get(id);
     _nestedCall.delete(id);
-    return _callScope.run(root, fn);
+    const root = outer ?? id;
+    // A top-level call is OPEN from here to its settlement (`_durableForCall`).
+    if (outer === undefined) {
+      if (_openCalls.size >= 1024) {
+        _openCalls.delete(_openCalls.values().next().value!);
+      }
+      _openCalls.add(id);
+    }
+    // A nested call's root was read from the scope it was made in — a guess
+    // (see `_sureOf`), so its body's door does not vouch for it either.
+    return _callScope.run(root, () => fn(root, outer === undefined));
   };
+  // …but a NESTED call (`await peer.m()`) is made through a cell handle, which
+  // passes no call's door: it is named by the scope of whoever's continuation
+  // runs it — the queue's drainer again. Nothing at that dispatch says which
+  // call the job belongs to, so such an action's author is a guess, and a
+  // failed save of it (or of the nested body's writes) is owed to the guess
+  // AND to every call open right then (`_owe`): the author, if it can still
+  // be told, is one of them. One-sided on purpose — an extra `unsaved`, never
+  // a missing one.
+  /** Actions whose author a call's own door named — known, not guessed. */
+  const _sureOf = new WeakSet<object>();
+  /** Top-level async calls whose body has started and not settled. */
+  const _openCalls = new Set<string>();
+  /** `app`, with a dispatch that names `call` as the action's author. */
+  const _callDoor = <T extends { dispatch: (a: A) => unknown }>(
+    app: T,
+    call: string | undefined,
+    sure = true,
+  ): T =>
+    call === undefined ? app : Object.create(app, {
+      dispatch: {
+        value: (a: A) => {
+          if (a !== null && typeof a === "object") {
+            _callBorn.set(a as object, call);
+            if (sure) _sureOf.add(a as object);
+          }
+          return app.dispatch(a);
+        },
+      },
+    });
   const afterActionHook = (prev: S, next: S, action: A): void => {
     if (action !== null && typeof action === "object") {
       _afterSeen.add(action as object);
@@ -3915,7 +4013,8 @@ async function _runPhases<S, A, E>(
         ?._callId;
       if (typeof callId === "string") timeline.markThrew(callId);
     }
-    // Before anything can return: a reduced sync op, even a no-op one.
+    // Before anything can return: a reduced sync op, even a no-op one —
+    // unless its cell refused it.
     _markSyncApplied(action);
     if (prev === next) return; // no-op action — nothing to record
     const t = (action as { type?: string }).type ?? "";
@@ -4215,8 +4314,8 @@ async function _runPhases<S, A, E>(
     Deno.unrefTimer(timer);
   }
 
-  /** COMMIT(X) — a sync op on a listened action was REDUCED (journal.ts
-   *  J1–J7). Written inside the op's `_atomically` block, so it and every
+  /** COMMIT(X) — a sync op on a listened action was REDUCED and not refused
+   *  (journal.ts J1–J7). Written inside the op's `_atomically` block, so it and every
    *  reaction line of the op reach a reader together or not at all. */
   function _markSyncApplied(action: A): void {
     if (!_syncJournal) return;
@@ -4234,6 +4333,12 @@ async function _runPhases<S, A, E>(
     if (!_listenedTypes.has(type)) return;
     const c = type.slice(0, type.indexOf(":"));
     if (!_syncCellSet.has(c) || _quarantinedSkip(c)) return;
+    // Reduced, and REFUSED by its own cell without a throw (a `validate`, a
+    // guard): no commit. The commit is what the next boot takes as proof the
+    // op was accepted — a kill before the refused row's delete then kept the
+    // row, and its author's resend was acknowledged for an op in no state.
+    // Uncommitted, the row is in flight (J4): that boot decides it again.
+    if (hasRejectionFor(action, c)) return;
     _journalAppend(
       {
         type: SYNC_APPLIED_TYPE,
@@ -4504,16 +4609,20 @@ async function _runPhases<S, A, E>(
       const owed = _owedByAction.get(a) ?? new Set();
       _owedByAction.set(a, owed.add(p));
       const call = _callOf(a as A);
-      if (call !== undefined) {
-        if (_owedByCall.size >= 1024 && !_owedByCall.has(call)) {
+      // Its author's call — and, when the author is a guess (`_sureOf`),
+      // every call open now.
+      const calls = _sureOf.has(a) ? [call] : new Set([call, ..._openCalls]);
+      for (const c of calls) {
+        if (c === undefined) continue;
+        if (_owedByCall.size >= 1024 && !_owedByCall.has(c)) {
           // Never silently: a call still waiting to be answered is told
           // its verdict is lost (action-ack.ts `_verdictLost`).
           const lost = _owedByCall.keys().next().value!;
           _owedByCall.delete(lost);
           _verdictLost(lost);
         }
-        const byCall = _owedByCall.get(call) ?? new Set();
-        _owedByCall.set(call, byCall.add(p));
+        const byCall = _owedByCall.get(c) ?? new Set();
+        _owedByCall.set(c, byCall.add(p));
       }
     }
     return p;
@@ -4527,6 +4636,7 @@ async function _runPhases<S, A, E>(
   }
   /** The same for an async call's settlement — its write-sets' saves. */
   function _durableForCall(callId: string): Promise<unknown> | undefined {
+    _openCalls.delete(callId);
     const owed = _owedByCall.get(callId);
     _owedByCall.delete(callId);
     if (owed === undefined) return undefined;
@@ -4611,7 +4721,14 @@ async function _runPhases<S, A, E>(
     // or later from a timer, a promise or an async body they started — is
     // recorded as `cause: "effect"` (see `_effectScope`).
     execute: (app, e) =>
-      _effectScope.run(true, () => _inCallScope(e, () => execute(app, e))),
+      _effectScope.run(
+        true,
+        () =>
+          _inCallScope(
+            e,
+            (call, sure) => execute(_callDoor(app, call, sure), e),
+          ),
+      ),
     beforeReduce: config.beforeReduce,
     onAction,
     onEffect,
@@ -4681,7 +4798,12 @@ async function _runPhases<S, A, E>(
     ) {
       _effectBorn.add(action as object);
     }
-    const call = _callScope.getStore();
+    // A call's own door (`_callDoor`) has named the author already; else the
+    // scope the dispatch was made in.
+    const named = action !== null && typeof action === "object"
+      ? _callBorn.get(action as object)
+      : undefined;
+    const call = named ?? _callScope.getStore();
     if (call !== undefined && action !== null && typeof action === "object") {
       _callBorn.set(action as object, call);
       const inner = (action as { payload?: { _callId?: unknown } }).payload
@@ -4821,7 +4943,10 @@ async function _runPhases<S, A, E>(
       typeof config.sessions === "object"
         ? config.sessions.ttlMs
         : authOpts.ttlMs,
-      { roleOf: (id) => userStore?.get(id)?.role ?? null },
+      {
+        roleOf: (id) => userStore?.get(id)?.role ?? null,
+        maxPerUser: authOpts.maxSessions,
+      },
     )
     : null;
   bootUndo.push("sessions", () => sessionStore?.close());
@@ -5503,6 +5628,7 @@ async function _runPhases<S, A, E>(
         requireVerified: authOpts.requireVerified,
         totp: authOpts.totp,
         oidc: authOpts.oidc,
+        publicDir: authOpts.publicDir,
       }
       : undefined,
     // TLS: ONE decider for the flag/config pair. The flags are per-launch and
@@ -5538,7 +5664,16 @@ async function _runPhases<S, A, E>(
     // reach its worker, not be reduced here. The raw dispatcher would have run
     // the method on the main isolate — no isolation at all, and the worker's
     // copy of the slice would drift out of sync with ours.
-    dispatch: (action) => appDispatch(action as A),
+    //
+    // …and an action that came in through a network door has no call for an
+    // author — no call's continuation made it. Known, not guessed (`_sureOf`):
+    // its failed save is its own ack's, not every open call's.
+    dispatch: (action) => {
+      if (action !== null && typeof action === "object") {
+        _sureOf.add(action as object);
+      }
+      return appDispatch(action as A);
+    },
     closing: () => dispatch.phase() !== "open",
     app: {
       snapshot: () => app.snapshot!(),
@@ -5778,7 +5913,7 @@ async function _runPhases<S, A, E>(
       entry: {
         // What is RUNNING, read from the process — not what a config said
         // should run. Those differ exactly when someone is confused.
-        value: Deno.mainModule.replace(/^file:\/\//, ""),
+        value: entryPathOf(Deno.mainModule),
         from: "default",
       },
       heap: _heapLine,
@@ -5918,6 +6053,7 @@ async function _runPhases<S, A, E>(
       tray: ui.tray,
     },
     security: config.security,
+    wire: config.wire,
     keepServer: config.keepServer,
     setElectronProc: (proc) => {
       _electronProc = proc;

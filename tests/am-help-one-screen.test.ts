@@ -10,6 +10,7 @@
 // proves the FULL list still names every command. A short default is only
 // safe while the long one is one flag away, so neither test stands alone.
 
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { EVERYDAY } from "../src/am/am-help-text.ts";
 import {

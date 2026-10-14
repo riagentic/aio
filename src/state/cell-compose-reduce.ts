@@ -226,7 +226,8 @@ function _warnSwallowedRefusal(actionType: string, reason: string): void {
 
 /** Said once per action+listener: a refused CALL still ran a `listensTo`
  *  listener. Kept (frozen since 1.0.9, docs/state/composition.md) — but a
- *  tally counting refused adds should be found in dev, not in the data. */
+ *  tally counting refused adds should be FOUND, so a production server says
+ *  it too (it was dev-only: the packaged app counted them in silence). */
 function _warnRefusedListenerRan(
   actionType: string,
   listener: CellDef,
@@ -981,7 +982,9 @@ export function buildRootReducer(
           type: action.type,
           at: Date.now(),
         });
-        if (ownerRefusal !== undefined && reacted && isDevMode()) {
+        // Dev and production alike, once per action and listener: a tally that
+        // counted refused adds is in the DATA of a packaged app.
+        if (ownerRefusal !== undefined && reacted) {
           _warnRefusedListenerRan(action.type, listener, ownerRefusal);
         }
       }

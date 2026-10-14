@@ -70,6 +70,34 @@ export const BUNDLE_JS = "app.js";
  *  name ships beside the bundle and is unreachable over HTTP. */
 export const BUNDLE_MAP = `.${BUNDLE_JS}.map`;
 
+/** A browser worker's bundle, beside {@link BUNDLE_JS} in every place that
+ *  one is staged, served or packaged: `worker-<name>-<hash8>.js`. `name` is
+ *  the script's own (for a reader of the network tab), the hash is of its
+ *  path in the project and its format — two `worker.ts` in two folders are
+ *  two files, and a rebuild keeps the name. */
+export function workerBundleName(name: string, hash8: string): string {
+  return `worker-${name.replace(/[^A-Za-z0-9_]+/g, "-")}-${hash8}.js`;
+}
+
+/** Is `name` a file {@link workerBundleName} names? THE question every
+ *  staging site asks (the dist/ clean, the prod server, each packager). */
+export function isWorkerBundle(name: string): boolean {
+  return /^worker-[A-Za-z0-9_-]+-[0-9a-f]{8}\.js$/.test(name);
+}
+
+/** The worker bundles a built bundle's text starts, by file name — each is
+ *  named there as `"./<name>"` (the build's own rewrite). For a check that
+ *  must ask an artifact for every one of them. Pure. */
+export function workerBundlesIn(code: string): string[] {
+  return [
+    ...new Set(
+      [...code.matchAll(
+        /(["'`])\.\/(worker-[A-Za-z0-9_-]+-[0-9a-f]{8}\.js)\1/g,
+      )].map((m) => m[2]!),
+    ),
+  ];
+}
+
 /** Bundle STAGING — embedded into the binary wholesale and wiped by every
  *  build, which is why it is never where artifacts land (`--out=` is). */
 export const DIST_DIR = "dist";

@@ -10,6 +10,7 @@
 //
 // The rule is per FLAG now, and it is pure, so it is pinned here rather than by
 // launching processes.
+import "./store-sandbox.ts";
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { mergeLaunchFlags } from "../src/am/am-cmd-process.ts";
 import { argsShapeHint as argsShapeHintFor } from "../src/am/am-cmd-state.ts";

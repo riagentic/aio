@@ -9,6 +9,7 @@
 // wrong `npm:` advice in dev. Now: an exact alias works in dev as in the
 // build, and a prefix alias gets ONE aio sentence from both.
 
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join, resolve, toFileUrl } from "@std/path";
 import * as esbuild from "esbuild";

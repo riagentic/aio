@@ -9,6 +9,7 @@
 // This is the gate: every template × target the scaffolder can emit, linted.
 // Only `build`-area findings are tolerated, because those are about the
 // developer's machine (esbuild/Electron not installed yet), not the code.
+import "./store-sandbox.ts";
 import { assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import {

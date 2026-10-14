@@ -30,6 +30,7 @@ import {
   resolveAmAppId,
   resolvePort,
   runTrojanGet,
+  sayOtherRoot,
 } from "./am-utils.ts";
 import {
   clientTimeout,
@@ -532,6 +533,12 @@ export async function cmdLog(
   // invention. Two tails meant two answers to "what does `am log` print"; the
   // flag now only picks the file.
   const LOG_FILE = logPathFor(flags);
+  // The file may be another apps root's app's (`adoptRunningHome`): said.
+  try {
+    sayOtherRoot(liveLock(resolveAmAppId(flags.app)));
+  } catch {
+    // aio-ok: this id runs from two homes — none was adopted, the file is this root's
+  }
 
   // An unknown `--flag` reaches here as a POSITIONAL (parseGlobalFlags keeps
   // what it does not know), so `am logs --level=error` was silently the text
@@ -1308,6 +1315,19 @@ export function headlessSurfaceNote(roots: unknown): string | null {
   return null;
 }
 
+/** Pure: what `--depth=<n>` asks for — undefined when the flag is absent, a
+ *  refusal when it cannot be read. `Number("")` is 0, so `--depth=` (an empty
+ *  variable) cut every child and printed the roots as though that were the
+ *  app. @internal exported for tests. */
+export function surfaceDepth(
+  args: readonly string[],
+): { ok: true; value: number | undefined } | { ok: false; error: string } {
+  const raw = args.find((a) => a.startsWith("--depth="))?.slice(8);
+  return raw === undefined
+    ? { ok: true, value: undefined }
+    : parseNumArg(raw, "--depth", { min: 0, integer: true });
+}
+
 export async function cmdSurface(
   args: string[],
   flags: GlobalFlags,
@@ -1365,15 +1385,12 @@ export async function cmdSurface(
     12,
   );
   const wantPath = args.find((a) => a.startsWith("--path="))?.slice(7);
-  const depthArg = args.find((a) => a.startsWith("--depth="))?.slice(8);
-  const maxDepth = depthArg === undefined ? undefined : Number(depthArg);
-  if (maxDepth !== undefined && (!Number.isInteger(maxDepth) || maxDepth < 0)) {
-    outError(
-      `--depth must be a non-negative integer (got "${depthArg}")`,
-      mode,
-    );
+  const depth = surfaceDepth(args);
+  if (!depth.ok) {
+    outError(depth.error, mode);
     Deno.exit(1);
   }
+  const maxDepth = depth.value;
   let result = noUiClient
     // Nothing to ask: go straight to the headless render below instead of
     // spending the client timeout on a client the roster already said is not

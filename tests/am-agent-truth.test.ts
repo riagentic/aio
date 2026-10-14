@@ -20,6 +20,7 @@
 //
 // A brief that names something aio does not have sends the reader to a dead
 // end with full confidence; this file is what keeps that from shipping.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import {
   agentBrief,

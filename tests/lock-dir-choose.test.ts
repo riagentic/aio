@@ -19,7 +19,7 @@ const POSIX = Deno.build.os !== "windows";
 Deno.test({
   name:
     "_chooseLockDir: the shared dir when private, the uid sibling when not, a refusal when neither",
-  ignore: !POSIX || selfUid() === null,
+  ignore: !POSIX || selfUid() === null, // the three outcomes are told apart by mode bits and a uid: Windows has neither
   fn: () =>
     permissiveUmask(async () => {
       const base = await tempDir("aio-choose-lockdir-");

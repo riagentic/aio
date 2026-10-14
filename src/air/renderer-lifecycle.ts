@@ -2,7 +2,9 @@
 // Provides: onMount, onCleanup, useRef, useSignal, useId, _resetSsrIdCounter, useOptimistic.
 
 import { type Signal, signal } from "../state/signal.ts";
-import { _wrongPrefix, isDevMode } from "../state/dev-flag.ts";
+import { isDevMode } from "../state/dev-flag.ts";
+import { firstTime } from "../protocol/said-once.ts";
+import { _tag } from "./vdom-types.ts";
 import type { ComponentInstance } from "./renderer-types.ts";
 import { _nameHookSignal } from "./untracked-read.ts";
 import {
@@ -48,15 +50,22 @@ export function _inRender(): boolean {
 /** @internal Shared with `useHead`, whose call is dropped the same way.
  *
  *  Prod says it too, once per hook: a dropped subscription is the app doing
- *  the wrong thing, and a packaged build must not be the quiet one. */
-export function _warnOutsideRender(hook: string): void {
-  const prefix = _inServerRender() ? null : _wrongPrefix(hook + "()");
-  if (prefix === null) return;
+ *  the wrong thing, and a packaged build must not be the quiet one. Not on
+ *  the server, where there is no second render to keep anything for.
+ *
+ *  `kept` is for `useRef` / `useSignal`, which are not dropped: they hand
+ *  back a fresh value on every call, so the state the caller believes it
+ *  kept is gone on the next one. That half was dev-only until 1.0.20. */
+export function _warnOutsideRender(hook: string, kept?: string): void {
+  if (_inServerRender() || !(isDevMode() || firstTime(hook + "()"))) return;
   console.warn(
-    `${prefix}${hook}() called outside a component render — there is no ` +
-      `component to attach it to, so it was DROPPED. Call it in a component ` +
-      `body (onCleanup: or inside an onMount callback), not from a timer, a ` +
-      `promise or an event handler.`,
+    `${_tag()}${hook}() called outside a component render` +
+      (kept
+        ? `. The ${kept} will not persist across re-renders.`
+        : ` — there is no ` +
+          `component to attach it to, so it was DROPPED. Call it in a component ` +
+          `body (onCleanup: or inside an onMount callback), not from a timer, a ` +
+          `promise or an event handler.`),
   );
 }
 
@@ -462,11 +471,7 @@ export function onWindowEvent(
  *  @tier Core */
 export function useRef<T>(initial: T): { current: T } {
   if (!_currentCollector) {
-    if (isDevMode() && !_inServerRender()) {
-      console.warn(
-        "[aio-dev] useRef() called outside a component render. The ref will not persist across re-renders.",
-      );
-    }
+    _warnOutsideRender("useRef", "ref");
     return { current: initial };
   }
   const collector = _currentCollector;
@@ -500,11 +505,7 @@ export function useRef<T>(initial: T): { current: T } {
  *  @tier Core */
 export function useSignal<T>(initial: T): Signal<T> {
   if (!_currentCollector) {
-    if (isDevMode() && !_inServerRender()) {
-      console.warn(
-        "[aio-dev] useSignal() called outside a component render. The signal will not persist across re-renders.",
-      );
-    }
+    _warnOutsideRender("useSignal", "signal");
     return signal(initial);
   }
   const collector = _currentCollector;

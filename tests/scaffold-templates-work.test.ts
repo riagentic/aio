@@ -20,6 +20,7 @@
 //
 // Every gate said both apps were fine: `check`, `lint`, `doctor` (15/15) and
 // `am fix` all passed. Only the runtime differed from the promise.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 
 Deno.test("scaffold: the assets template MOUNTS what the build embeds", async () => {

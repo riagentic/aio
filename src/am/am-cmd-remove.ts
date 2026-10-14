@@ -21,10 +21,11 @@ import {
   appHome,
   appsRoot,
   homeOwnerError,
-  installedAppParents,
   installedAppPaths,
+  installFootprint,
   installRoot,
   profileOfHome,
+  startMenuPrograms,
 } from "../server/app-dirs.ts";
 import type { GlobalFlags } from "./am-types.ts";
 import {
@@ -41,11 +42,11 @@ import {
   style,
   table,
 } from "./am-output.ts";
-import { instances } from "../server/single-instance-lock.ts";
+import { instances, otherAppsRootOf } from "../server/single-instance-lock.ts";
 import { readRecord } from "../server/install-record.ts";
 import { clearPending, readPending } from "../server/updates-apply.ts";
 import type { PendingUpdate } from "../server/updates-apply.ts";
-import { cmdUpdate } from "./am-cmd-meta.ts";
+import { aioHome, cmdUpdate } from "./am-cmd-meta.ts";
 import { appNameError, reservedAppNameError } from "./am-utils.ts";
 
 /** Deleting an app's DATA is the one step with no way back — `~/.<appId>/`
@@ -146,30 +147,130 @@ export async function isAioDataDir(home: string): Promise<boolean> {
   return false;
 }
 
+/** The path a Windows shortcut OPENS — its target, and nothing else in the
+ *  file — or null when the file does not say one this can read with
+ *  certainty. No COM, so it is a test on any host.
+ *
+ *  A `.lnk` (MS-SHLLINK) holds many paths: the target, the working
+ *  directory, the arguments, the icon. Only the first says what the shortcut
+ *  starts, and it is in the LinkInfo block: `LocalBasePath` +
+ *  `CommonPathSuffix`, as UTF-16 when the header carries the Unicode offsets
+ *  and in the system's ANSI code page otherwise. Which code page that was is
+ *  not in the file, so an ANSI path is answered only when it is plain ASCII:
+ *  a path this cannot read for certain is "unknown", never a guess. A
+ *  shortcut to a network share, or with no LinkInfo at all, is unknown too.
+ *  Pure. */
+export function lnkTarget(lnk: Uint8Array): string | null {
+  const v = new DataView(lnk.buffer, lnk.byteOffset, lnk.byteLength);
+  try {
+    if (v.getUint32(0, true) !== 0x4c) return null; // not a shell link
+    const flags = v.getUint32(20, true);
+    let at = 76;
+    if (flags & 0x1) at += 2 + v.getUint16(at, true); // LinkTargetIDList
+    if (!(flags & 0x2)) return null; // no LinkInfo
+    const end = at + v.getUint32(at, true);
+    const head = v.getUint32(at + 4, true);
+    // VolumeIDAndLocalBasePath: a local path. Otherwise it is a share.
+    if (!(v.getUint32(at + 8, true) & 0x1) || end > lnk.length) return null;
+    const text = (off: number, wide: boolean): string | null => {
+      if (off === 0) return "";
+      const units: number[] = [];
+      for (let i = at + off;; i += wide ? 2 : 1) {
+        if (i + (wide ? 2 : 1) > end) return null; // no terminator
+        const u = wide ? v.getUint16(i, true) : v.getUint8(i);
+        if (u === 0) break;
+        units.push(u);
+      }
+      return String.fromCharCode(...units);
+    };
+    if (head >= 0x24 && v.getUint32(at + 28, true) !== 0) {
+      const base = text(v.getUint32(at + 28, true), true);
+      const rest = text(v.getUint32(at + 32, true), true);
+      return base === null || rest === null ? null : base + rest;
+    }
+    const base = text(v.getUint32(at + 16, true), false);
+    const rest = text(v.getUint32(at + 24, true), false);
+    if (base === null || rest === null) return null;
+    return /^[\x20-\x7e]+$/.test(base + rest) ? base + rest : null;
+  } catch {
+    return null; // aio-ok: truncated or not a shortcut — its target is unknown
+  }
+}
+
+/** Does the Windows shortcut whose bytes are `lnk` open something inside
+ *  `dir`? Asked of its TARGET only ({@linkcode lnkTarget}): a shortcut that
+ *  merely mentions `dir` — in its arguments, its icon, its working directory
+ *  — opens something else, and is somebody else's. Case-insensitive, as
+ *  Windows paths are; `dir` is matched with a trailing separator so
+ *  `…\aio-sfx\app` never matches `…\aio-sfx\app2`. Pure. */
+export function lnkOpensInside(lnk: Uint8Array, dir: string): boolean {
+  // Either separator, on both sides: Windows takes both.
+  const norm = (s: string) => s.toLowerCase().replaceAll("/", "\\");
+  const target = lnkTarget(lnk);
+  return target !== null &&
+    norm(target).startsWith(norm(dir.replace(/[\\/]+$/, "") + "\\"));
+}
+
+/** The shortcuts directly in `menu` that open something inside `dir` — how
+ *  an install's Start-menu entry is found, whoever wrote it: the one-click
+ *  install names its own after the app's TITLE, and `run.ps1`'s `<name>.lnk`
+ *  has a name anything else may have too (`firefox.lnk`). Only the TARGET
+ *  says whose a shortcut is. Never by name, never recursive, and a file that
+ *  cannot be read is not a match. */
+export async function shortcutsInto(
+  menu: string,
+  dir: string,
+): Promise<string[]> {
+  const out: string[] = [];
+  try {
+    for await (const e of Deno.readDir(menu)) {
+      if (!e.isFile || !e.name.toLowerCase().endsWith(".lnk")) continue;
+      const path = join(menu, e.name);
+      try {
+        // A shortcut is a few KB; anything large is not one worth reading.
+        if ((await Deno.stat(path)).size > 1 << 20) continue;
+        if (lnkOpensInside(await Deno.readFile(path), dir)) out.push(path);
+      } catch {
+        // aio-ok: unreadable — not provably this app's, so it is left alone
+      }
+    }
+  } catch {
+    // aio-ok: no Start-menu folder to look in — no shortcut to find
+  }
+  return out.sort();
+}
+
 /** Every path an install created, and whether it is there. Pure enough to
- *  print before anything is deleted. */
-export async function installedFootprint(name: string): Promise<
+ *  print before anything is deleted. `os`/`env` are test seams: the list is
+ *  {@linkcode installFootprint}'s, plus — on Windows — the Start-menu
+ *  shortcut(s) that open something inside one of this app's two install
+ *  directories. A shortcut is never in the list for its NAME: one aio cannot
+ *  prove is this app's is not deleted, and does not make an app "installed". */
+export async function installedFootprint(
+  name: string,
+  os: string = Deno.build.os,
+  env: (name: string) => string | undefined = (n) => Deno.env.get(n),
+): Promise<
   { path: string; kind: string; present: boolean; parent: string }[]
 > {
-  const p = installedAppPaths(name);
-  const parents = installedAppParents();
-  const out: {
-    path: string;
-    kind: string;
-    present: boolean;
-    parent: string;
-  }[] = [];
   // Each path travels with the directory that owns it, so the removal loop can
   // check containment without re-deriving where anything is supposed to live.
-  for (
-    const [path, kind, parent] of [
-      [p.dir, "the app and its versions", parents.dir],
-      [p.desktop, "menu entry", parents.desktop],
-      [p.binLink, "PATH symlink", parents.binLink],
-    ] as const
-  ) {
-    out.push({ path, kind, parent, present: await exists(path) });
+  const list = installFootprint(name, os, env);
+  const menu = os === "windows" ? startMenuPrograms(env) : null;
+  if (menu) {
+    const homes = list.filter((f) =>
+      f.kind === "the one-click install" ||
+      f.kind === "the app and its versions"
+    );
+    for (const home of homes) {
+      for (const path of await shortcutsInto(menu, home.path)) {
+        if (list.some((f) => f.path === path)) continue;
+        list.push({ path, kind: "Start-menu shortcut", parent: menu });
+      }
+    }
   }
+  const out = [];
+  for (const f of list) out.push({ ...f, present: await exists(f.path) });
   return out;
 }
 
@@ -322,9 +423,15 @@ export async function cmdRemove(
   // inode and dies confusingly at the next restart, so this refuses instead.
   const running = (await instances()).find((i) => i.appId === name);
   if (running && !flags.force) {
+    // Under ANOTHER apps root (one lock folder name for two roots): the
+    // `am stop` this would name is refused here — say where it works.
+    const otherRoot = otherAppsRootOf(running);
     outError(
       `"${name}" is running (pid ${running.pid}) — stop it first:\n` +
-        `      am stop --app=${name}\n` +
+        (otherRoot
+          ? `      it runs under another apps dir, ${otherRoot}: am stop ` +
+            `--app=${name} with that AIO_APPS_DIR\n`
+          : `      am stop --app=${name}\n`) +
         `  or re-run with --force to remove it anyway`,
       mode,
     );
@@ -596,6 +703,54 @@ export function updateInFlight(dataDir: string): PendingUpdate | null {
   return null;
 }
 
+/** How `am upgrade <app>` re-runs the one-liner on `os`: `run.sh` under `sh`,
+ *  and on Windows — which has neither — `run.ps1` under Windows PowerShell,
+ *  with the same two facts in its spelling (`-NoRun`, `-Git <source>`). It
+ *  used to spawn `sh run.sh` everywhere, so an app installed by `run.ps1`
+ *  could not be upgraded at all. Pure. */
+export function upgradeCommand(
+  script: string,
+  source: string,
+  local: boolean,
+  os: string = Deno.build.os,
+): { script: string; cmd: string; args: string[] } {
+  if (os === "windows") {
+    return {
+      script: "run.ps1",
+      cmd: "powershell",
+      args: [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        script,
+        "-NoRun",
+        ...(local ? [] : ["-Git", source]),
+      ],
+    };
+  }
+  return {
+    script: "run.sh",
+    cmd: "sh",
+    args: local ? [script, "--no-run"] : [script, source, "--no-run"],
+  };
+}
+
+/** The folder of `name`'s one-click install, when there is one — the install
+ *  that cannot be replaced while the app runs from it: Windows holds a
+ *  running program's folder, and the new `.exe` then changes nothing. Null on
+ *  every other OS, and when there is no such folder. `os`/`env`: test seams. */
+export async function oneClickInstall(
+  name: string,
+  os: string = Deno.build.os,
+  env: (name: string) => string | undefined = (n) => Deno.env.get(n),
+): Promise<string | null> {
+  const dir = installFootprint(name, os, env).find((f) =>
+    f.kind === "the one-click install"
+  )?.path;
+  return dir !== undefined && await exists(dir) ? dir : null;
+}
+
 export async function cmdUpgrade(
   args: string[],
   flags: GlobalFlags,
@@ -659,6 +814,18 @@ export async function cmdUpgrade(
   }
 
   const running = (await instances()).find((i) => i.appId === name);
+  const oneClick = running ? await oneClickInstall(name) : null;
+  if (running && oneClick) {
+    // Said BEFORE the build, not after it: the new `.exe` would refuse to
+    // install over the running app (exit 3) once minutes of building are done.
+    outError(
+      `"${name}" is running (pid ${running.pid}) from its one-click install ` +
+        `${oneClick} — Windows does not let it be replaced while it runs.\n` +
+        `  Close it, then run am upgrade ${name} again. Nothing was changed.`,
+      mode,
+    );
+    Deno.exit(1);
+  }
   if (running) {
     // Not a refusal: the swap is a symlink move, so it is safe. But the
     // process keeps running the OLD artifact until it restarts, and someone
@@ -672,15 +839,14 @@ export async function cmdUpgrade(
     );
   }
 
-  const runSh = join(
-    Deno.env.get("AIO_HOME") ??
-      join(Deno.env.get("HOME") ?? "", ".local/lib/aio"),
-    "run.sh",
-  );
+  const runSh = join(aioHome(), upgradeCommand("", "", false).script);
   try {
     await Deno.stat(runSh);
   } catch {
-    outError(`cannot find run.sh at ${runSh} (set AIO_HOME)`, mode);
+    outError(
+      `cannot find ${basename(runSh)} at ${runSh} (set AIO_HOME)`,
+      mode,
+    );
     Deno.exit(1);
   }
 
@@ -696,8 +862,9 @@ export async function cmdUpgrade(
   const work = local ? rec.source : await Deno.makeTempDir({
     prefix: `aio-upgrade-${name}-`,
   });
-  const p = await new Deno.Command("sh", {
-    args: local ? [runSh, "--no-run"] : [runSh, rec.source, "--no-run"],
+  const up = upgradeCommand(runSh, rec.source, local);
+  const p = await new Deno.Command(up.cmd, {
+    args: up.args,
     cwd: work,
     stdout: "inherit",
     stderr: "inherit",

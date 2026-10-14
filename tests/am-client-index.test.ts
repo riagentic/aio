@@ -11,6 +11,7 @@
 //
 // The rule now: no index = the newest UI client, for both commands, and an
 // index that is given is checked against the roster BEFORE anything is sent.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { chooseUiClient } from "../src/am/am-cmd-inspect.ts";
 

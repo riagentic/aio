@@ -22,16 +22,16 @@ Create a new directory and `deno.json`:
   "title": "Task Queue",
   "nodeModulesDir": "auto",
   "imports": {
-    "aio": "jsr:@riagentic/aio@^1.0.0-alpha"
+    "aio": "jsr:@riagentic/aio@1.0.0-beta"
   },
   "client": "server",
   "build": { "targets": ["server"], "out": "dist" },
   "tasks": {
     "dev": "deno run -A src/app.ts --client=server-only",
-    "am": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha/am",
+    "am": "deno run -A jsr:@riagentic/aio@1.0.0-beta/am",
     "test": "deno test -A tests/",
-    "build": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha/build-all --build-spec=jsr:@riagentic/aio@^1.0.0-alpha/build",
-    "compile": "deno run -A jsr:@riagentic/aio@^1.0.0-alpha/build-all --build-spec=jsr:@riagentic/aio@^1.0.0-alpha/build --targets=server"
+    "build": "deno run -A jsr:@riagentic/aio@1.0.0-beta/build-all --build-spec=jsr:@riagentic/aio@1.0.0-beta/build",
+    "compile": "deno run -A jsr:@riagentic/aio@1.0.0-beta/build-all --build-spec=jsr:@riagentic/aio@1.0.0-beta/build --targets=server"
   }
 }
 ```
@@ -294,7 +294,10 @@ deno run -A dep/aio/src/build.ts --compile --service --headless
 ```
 
 This produces `task-queue` (binary) and `task-queue.service` (systemd unit) with
-`ExecStart` set to `--headless --port=3000`. Install:
+`ExecStart` set to `--client=server-only` (no `--port`: the app's own port wins,
+else 3000). The unit is written only for a Linux binary — on Windows or macOS
+see [run at startup](../basics/windows-macos.md#run-at-startup-or-as-a-service).
+Install, on a Linux host:
 
 ```sh
 sudo cp task-queue /usr/local/bin/

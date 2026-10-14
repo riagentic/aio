@@ -29,6 +29,12 @@ import {
 import { createUDSListener } from "../src/server/uds.ts";
 import { getLogger, setLogger } from "../src/diagnostics/logger-api.ts";
 import { dropTempDir, tempDirSync } from "../src/testing/temp-dir.ts";
+import {
+  connectRW,
+  localBound,
+  localEndpoint,
+  localIdle,
+} from "./local-endpoint-helper.ts";
 
 // Opened before any case — the sanitizer counts an FFI library per test.
 requireLocalPeer();
@@ -185,7 +191,7 @@ async function withDoor(
   ) => Promise<void>,
 ): Promise<void> {
   const dir = tempDirSync("peer-probe-");
-  const sock = `${dir}/app.sock`;
+  const sock = localEndpoint(`${dir}/app.sock`);
   const lines: string[] = [];
   const prev = getLogger();
   setLogger(
@@ -226,16 +232,11 @@ async function withDoor(
   };
   try {
     handle.armPeerPid?.(1);
-    await until("the listener to bind", () => {
-      try {
-        return Deno.lstatSync(sock).isSocket === true;
-      } catch {
-        return false; // aio-ok: not bound yet
-      }
-    });
+    await localBound(sock);
     await f(sock, lines, until, () => dispatched);
   } finally {
     await handle.shutdown();
+    await localIdle();
     setLogger(prev);
     await dropTempDir(dir);
   }
@@ -247,10 +248,9 @@ const loud = (l: string) => l.startsWith("warn ") || l.startsWith("error ");
 
 Deno.test({
   name: "probe: on the real state socket, connect-and-close logs no warning",
-  ignore: Deno.build.os === "windows",
   async fn() {
     await withDoor(async (sock, lines, until) => {
-      (await Deno.connect({ transport: "unix", path: sock })).close();
+      (await connectRW(sock)).close();
       await until(
         "the probe's debug note",
         () => lines.some((l) => l.includes("hung up without sending anything")),
@@ -270,10 +270,9 @@ Deno.test({
 Deno.test({
   name:
     "probe: a foreign peer that sends a frame is refused loudly, and the frame goes nowhere",
-  ignore: Deno.build.os === "windows",
   async fn() {
     await withDoor(async (sock, lines, until, dispatched) => {
-      const c = await Deno.connect({ transport: "unix", path: sock });
+      const c = await connectRW(sock);
       try {
         const t0 = performance.now();
         await c.write(
@@ -300,13 +299,12 @@ Deno.test({
 Deno.test({
   name:
     "probe: a foreign peer that connects and WAITS — sending nothing — is refused loudly too",
-  ignore: Deno.build.os === "windows",
   async fn() {
     // The server speaks first on this socket: the app's own window, started
     // through a wrapper, connects and waits for the hello; so would a process
     // hoping to be handed state. Neither is a probe.
     await withDoor(async (sock, lines, until) => {
-      const c = await Deno.connect({ transport: "unix", path: sock });
+      const c = await connectRW(sock);
       try {
         await until("the refusal line", () => lines.some(loud));
         assertStringIncludes(

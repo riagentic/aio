@@ -111,7 +111,7 @@ Deno.test("artifact modes: a directory and an executable are 0755, any other fil
 Deno.test({
   name:
     "artifact modes: a tree staged under umask 077 — or wide open — comes out the same",
-  ignore: !POSIX,
+  ignore: !POSIX, // the subject is POSIX mode bits under a umask: Windows has neither
   async fn() {
     const tmp = await tempDir("artifact-modes-tree-");
     try {
@@ -185,7 +185,7 @@ async function stagedMac(dir: string): Promise<string> {
 Deno.test({
   name:
     "artifact modes: a macOS bundle assembled under umask 077 can be opened by another account",
-  ignore: !POSIX,
+  ignore: !POSIX, // the subject is POSIX mode bits under a umask: Windows has neither
   async fn() {
     const dir = await tempDir("artifact-modes-mac-");
     try {
@@ -220,7 +220,7 @@ Deno.test({
 Deno.test({
   name:
     "artifact modes: the disk-image scripts state their umask before they stage anything",
-  ignore: !POSIX,
+  ignore: !POSIX, // the subject is POSIX mode bits under a umask: Windows has neither
   async fn() {
     const of = { binaryName: "counter", volumeName: "Counter", sign: false };
     const local = localDmgScript({
@@ -321,7 +321,7 @@ const APPDIR_MODES = {
 Deno.test({
   name:
     "artifact modes: appimagetool is handed a tree with stated modes, whatever the builder's umask",
-  ignore: !POSIX,
+  ignore: !POSIX, // the subject is POSIX mode bits under a umask: Windows has neither
   async fn() {
     const dir = await tempDir("artifact-modes-appimage-");
     try {
@@ -355,7 +355,7 @@ Deno.test({
 Deno.test({
   name:
     "artifact modes: the Windows zip stores stated modes, and leaves the staging tree with them for the exe payload",
-  ignore: !POSIX,
+  ignore: !POSIX, // the subject is POSIX mode bits under a umask: Windows has neither
   async fn() {
     const dir = await tempDir("artifact-modes-zip-");
     try {
@@ -393,7 +393,7 @@ Deno.test({
 Deno.test({
   name:
     "artifact modes: the web folder and the iOS project are readable by the account that serves or opens them",
-  ignore: !POSIX,
+  ignore: !POSIX, // the subject is POSIX mode bits under a umask: Windows has neither
   async fn() {
     const root = await tempDir("artifact-modes-dirs-");
     const log = console.log;
@@ -443,7 +443,7 @@ Deno.test({
 Deno.test({
   name:
     "artifact modes: an artifact moved across filesystems is what a rename would have left — modes, exec bits, links",
-  ignore: !POSIX,
+  ignore: !POSIX, // the subject is POSIX mode bits under a umask: Windows has neither
   async fn() {
     const dir = await tempDir("artifact-modes-move-");
     try {

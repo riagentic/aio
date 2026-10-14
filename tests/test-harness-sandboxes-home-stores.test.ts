@@ -13,6 +13,7 @@
 // written. The harness sandboxed `AIO_APPS_DIR` for exactly this reason and not
 // the stores beside it. Now the harness (and every `tempDir`) pins each such
 // store into the test root, and the shard runner pins them per shard.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertNotEquals } from "@std/assert";
 import { join, resolve, SEPARATOR } from "@std/path";
 import {

@@ -12,6 +12,7 @@
 //     but its project directory never looked at that copy: every file 404'd.
 //
 // Real `deno compile`, real server, foreign cwd, sandboxed HOME — no mocks.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { join, resolve } from "@std/path";
 import { assetIncludes } from "../src/build/build-compile.ts";

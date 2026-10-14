@@ -3,6 +3,7 @@
 // lists as `pr@dev` with a `--profile=dev` stopWith; a bare `am stop` never
 // stops it (it is not "the app" — adoptRunningHome skips profiles); and
 // `am stop pr@dev` / `--app=pr@dev` / `--profile dev` all reach it.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";

@@ -3,6 +3,7 @@
 // real user action whose own payload says `jump: true` — a platformer's
 // `player:move {jump: true}` — was skipped as time travel, and `am replay`
 // silently did not reproduce it.
+import "./store-sandbox.ts";
 import { assertEquals } from "@std/assert";
 import { planReplay } from "../src/am/am-cmd-timeline.ts";
 import { SYNC_REACTION_TYPE } from "../src/server/journal.ts";

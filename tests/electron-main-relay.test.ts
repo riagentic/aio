@@ -24,6 +24,7 @@ import { localEndpoint, localIdle } from "./local-endpoint-helper.ts";
 import { requireLocalPeer } from "../src/server/local-peer.ts";
 import { join } from "@std/path";
 import { fuzzEnvInt } from "./fuzz-seed.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 // Opened before any case — the sanitizer counts an FFI library per test.
 requireLocalPeer();
@@ -66,9 +67,11 @@ ctrl.on('data', (d) => {
       // Sent by the app window's top frame, on the page it loaded —
       // the one sender aio's IPC admits (tmplIpcGuard).
       else if (m.cmd === 'ipc') {
-        const evt = { sender: webContents, senderFrame: { url: _loadedUrl, parent: null },
-          reply: (channel, ...args) => ev({ ev: 'ipcReply', channel, args }) };
-        for (const f of (ipcH[m.channel] || [])) f(evt, m.arg);
+        const evt = _ipcEvt();
+        // A message no listener takes went nowhere: the harness sent it before
+        // main registered that channel, or main does not serve it. Said, not lost.
+        if (!ipcH[m.channel]) throw new Error("no ipcMain listener for '" + m.channel + "'");
+        for (const f of ipcH[m.channel]) f(evt, m.arg);
       }
       // ipcRenderer.invoke: settles a promise in the renderer. Report which
       // way it settled and with what — a rejection's message is the payload.
@@ -109,6 +112,8 @@ ctrl.on('data', (d) => {
     } catch (e) { ev({ ev: 'done', id: m.id, error: String(e) }); }
   }
 });
+const _ipcEvt = () => ({ sender: webContents, senderFrame: { url: _loadedUrl, parent: null },
+  reply: (channel, ...args) => ev({ ev: 'ipcReply', channel, args }) });
 let _curUrl = '';
 // The app page the (first) window loaded — the IPC sender's frame url. Some cases
 // below move _curUrl to aio://app/ on the http shell; the relay is what they
@@ -135,7 +140,13 @@ class BrowserWindow {
   // the only way to see what SANDBOX a child window actually got.
   constructor(o) { this.opts = o; this.webContents = webContents; ev({ ev: 'newWindow', opts: o }); }
   on() {} center() {} setIcon() {} setMenuBarVisibility() {}
-  loadURL(u) { _curUrl = u; _loadedUrl = _loadedUrl || u; ev({ ev: 'loadURL', url: u }); }
+  loadURL(u) {
+    _curUrl = u; _loadedUrl = _loadedUrl || u; ev({ ev: 'loadURL', url: u });
+    // AIO_STUB_SEND_AT_LOAD: the page sends in the very tick main dialled its
+    // server — the one moment a connect attempt is certainly still in flight.
+    const early = process.env.AIO_STUB_SEND_AT_LOAD;
+    if (early) for (const f of ipcH['__aio:send']) f(_ipcEvt(), early);
+  }
   isDestroyed() { return false; }
   isVisible() { return process.env.AIO_STUB_HIDDEN !== '1'; }
   isMinimized() { return false; }
@@ -291,6 +302,8 @@ async function startMain(
     /** deno.json `build.guestPreloads`, as the server resolved it. */
     guestPreloads?: { dir: string; files: string[] };
     hidden?: boolean;
+    /** One `__aio:send` made while main's FIRST connect attempt is in flight. */
+    sendAtLoad?: string;
   } = {},
 ) {
   const dir = await Deno.makeTempDir({ prefix: "aio-emain-" });
@@ -309,7 +322,7 @@ async function startMain(
     join(dir, "deno.json"),
     JSON.stringify({ nodeModulesDir: "manual" }),
   );
-  const script = electronMainScriptUDS("http://127.0.0.1:1/", sockPath, {
+  const generated = electronMainScriptUDS("http://127.0.0.1:1/", sockPath, {
     title: opts.title ?? "harness",
     httpSocketPath: opts.httpSocketPath,
     baseDir: opts.baseDir,
@@ -323,6 +336,15 @@ async function startMain(
       }
       : {}),
   });
+  // The scripted server writes only what a case dictates, so most cases never
+  // greet — and a connection left ungreeted for 5 s is what the handshake
+  // watch reports and DROPS (tests/electron-handshake-watch.test.ts owns that
+  // behaviour). A case stretched past 5 s by a loaded machine then saw a
+  // reconnect it did not script. The relay is the subject here: the watch
+  // gets a window no case reaches. A constant that moved is said, not missed.
+  const HS = "const HANDSHAKE_MS = 5000;";
+  assert(generated.includes(HS), "the handshake watch's window moved");
+  const script = generated.replace(HS, "const HANDSHAKE_MS = 3600000;");
   // FAIL LOUD, NEVER HANG. The generated program is a template literal
   // assembled from a dozen fragments, and one stray backslash or backtick in
   // any of them is a SyntaxError in main.cjs — which made the child exit
@@ -347,6 +369,7 @@ async function startMain(
       AIO_CTRL: ctrlPath,
       AIO_STUB_DIR: dir,
       ...(opts.hidden ? { AIO_STUB_HIDDEN: "1" } : {}),
+      ...(opts.sendAtLoad ? { AIO_STUB_SEND_AT_LOAD: opts.sendAtLoad } : {}),
     },
     stdout: "piped",
     stderr: "piped",
@@ -412,6 +435,13 @@ async function startMain(
       await new Promise((r) => setTimeout(r, 10));
     }
   }
+  // The stub dials the control socket the moment it is required — before
+  // `app.whenReady`, so before main has a window or one ipcMain listener. A
+  // command sent in that gap went to no listener (measured on macOS: the first
+  // `send` of a case was never seen by main). `win.loadURL` is the last thing
+  // main does after registering every listener, and the first moment a real
+  // page could exist: a case starts there, as a renderer would.
+  await waitFor(() => events.some((e) => e.ev === "loadURL"));
   /** Frames relayed to the renderer, in order. */
   const msgs = () =>
     events.filter((e) => e.ev === "send" && e.channel === "__aio:msg")
@@ -893,6 +923,63 @@ Deno.test("electron main: renderer-ready with no backend reports the outage", as
   } finally {
     await main.close();
     await Deno.remove(dir, { recursive: true }).catch(() => {});
+  }
+});
+
+// The offline queue holds 100 sends; the 101st was discarded without a word —
+// a click that did nothing, and no line anywhere to say why. Said once when
+// the first one is dropped, and counted when the backend is back.
+Deno.test("electron main: sends dropped by the full offline queue are said once, and counted on reconnect", async () => {
+  const dir = await tempDir("aio-esock-");
+  const sockPath = localEndpoint(join(dir, "s.sock")); // nothing listening yet
+  const main = await startMain(sockPath);
+  let srv: ReturnType<typeof rawServer> | null = null;
+  try {
+    for (let i = 0; i < 105; i++) await main.send(`{"n":${i}}`);
+    const said = () => main.stderr.join("") + main.stdout.join("");
+    await main.waitFor(() => said().includes("offline queue is full"));
+    assertEquals(said().split("offline queue is full").length - 1, 1);
+    srv = rawServer(sockPath);
+    await main.waitFor(
+      () => said().includes("5 message(s) the page sent"),
+      20000,
+    );
+    // The first 100, in order, and none of the dropped five.
+    await main.waitFor(() => srv!.inbound.length >= 101);
+    assertEquals(
+      srv.inbound.filter((l) => l.startsWith('{"n":')),
+      Array.from({ length: 100 }, (_, i) => `{"n":${i}}`),
+    );
+  } finally {
+    await main.close();
+    srv?.close();
+    await localIdle();
+    await dropTempDir(dir);
+  }
+});
+
+// A send made while a connect attempt was still in flight was written into
+// THAT socket: the attempt failed, the write died with it
+// (ERR_SOCKET_CLOSED_BEFORE_CONNECTION) — not queued, not counted, no line. With
+// the backend away there is one such window per reconnect attempt.
+Deno.test("electron main: a send made while a connect attempt is in flight is queued, not lost", async () => {
+  const dir = await tempDir("aio-esock-");
+  const sockPath = localEndpoint(join(dir, "s.sock")); // nothing listening yet
+  const main = await startMain(sockPath, { sendAtLoad: '{"n":"early"}' });
+  let srv: ReturnType<typeof rawServer> | null = null;
+  try {
+    await main.send('{"n":"late"}');
+    srv = rawServer(sockPath);
+    await main.waitFor(() => srv!.inbound.includes('{"n":"late"}'), 20000);
+    assertEquals(
+      srv.inbound.filter((l) => l.startsWith('{"n":')),
+      ['{"n":"early"}', '{"n":"late"}'],
+    );
+  } finally {
+    await main.close();
+    srv?.close();
+    await localIdle();
+    await dropTempDir(dir);
   }
 });
 
@@ -1772,6 +1859,32 @@ Deno.test({
         !srv.inbound.some((l) => l.includes('"cdiag"')),
         "no heal either — nothing was ever down",
       );
+    });
+  },
+});
+
+// The harness's own claim, checked where it can go red: `withHarness` gives
+// the handshake watch a window no case reaches, because most cases never
+// greet and one stretched past the watch's real 5 s by a loaded machine saw
+// its connection dropped and redialled — a reconnect it did not script, and a
+// failure only load could show. Here the silence is the script: the first
+// bytes arrive after the 5 s, on the SAME connection.
+Deno.test({
+  name:
+    "electron main: under the relay harness an ungreeted connection is never dropped by the handshake watch",
+  sanitizeOps: false, // aio-ok: the watch's window is a real 5s; outlasting it IS the test
+  sanitizeResources: false, // aio-ok: see above
+  fn: async () => {
+    await withHarness(async (srv, main) => {
+      await main.rendererReady();
+      await main.finishLoad();
+      await new Promise((r) => setTimeout(r, 5500));
+      assertEquals(srv.conns(), 1, "the silent connection was redialled");
+      const said = main.stderr.join("") + main.stdout.join("");
+      assert(!said.includes("no answer from the server"), said);
+      await srv.writeLine('{"v":2,"t":"state","d":{"n":1}}');
+      await main.waitFor(() => main.msgs().length >= 1);
+      assertEquals(srv.conns(), 1);
     });
   },
 });

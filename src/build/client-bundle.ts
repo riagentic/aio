@@ -10,8 +10,21 @@
 // import map and the same entry — `write: false` is the only difference —
 // and refuses exactly what the build refuses, with the same words.
 
-import { basename, dirname, join, relative, resolve } from "@std/path";
-import { BUNDLE_JS, UI_ENTRY } from "../server/app-files.ts";
+import {
+  basename,
+  dirname,
+  extname,
+  join,
+  relative,
+  resolve,
+  SEPARATOR,
+} from "@std/path";
+import { BUNDLE_JS, UI_ENTRY, workerBundleName } from "../server/app-files.ts";
+import {
+  rewriteWorkers,
+  workerEntries,
+  type WorkerEntry,
+} from "../server/graph-validator.ts";
 import type { ShareRoot } from "../server/app-dirs.ts";
 import { matchShare } from "../server/app-dirs.ts";
 import { bundleFrameworkEntries, ESBUILD_JSX } from "./esbuild-shared.ts";
@@ -27,6 +40,7 @@ import {
 } from "./graph-audit.ts";
 import { EVAL_USER_AGENT, evaluateBundle } from "./graph-eval.ts";
 import { explainServerOnlyImport } from "../server/server-only-specs.ts";
+import { readDenoJsonSync } from "../server/deno-json.ts";
 import {
   localPrefixAlias,
   prefixAliasMessage,
@@ -152,6 +166,87 @@ export function prefixAliasPlugin(imports: Record<string, string>): {
   };
 }
 
+/** The file a worker's bundle is written to — see `workerBundleName`. The
+ *  hash is of the script's path in the project and its format, so the name
+ *  is the same on every machine and in every rebuild. */
+export async function workerFileName(
+  root: string,
+  entry: Pick<WorkerEntry, "abs" | "format">,
+): Promise<string> {
+  const rel = relative(root, entry.abs).replaceAll("\\", "/");
+  const digest = new Uint8Array(
+    await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(`${rel}\0${entry.format}`),
+    ),
+  );
+  const hash8 = [...digest.slice(0, 4)]
+    .map((b) => b.toString(16).padStart(2, "0")).join("");
+  return workerBundleName(
+    basename(entry.abs, extname(entry.abs)),
+    hash8,
+  );
+}
+
+const WORKER_LOADER: Record<string, string> = {
+  ".tsx": "tsx",
+  ".jsx": "jsx",
+  ".ts": "ts",
+  ".mts": "ts",
+  ".cts": "ts",
+};
+
+/** Follow the one thing no import names: a browser worker's script.
+ *
+ *  `new Worker(new URL("./w.ts", import.meta.url))` is a URL to esbuild, so
+ *  the bundle named a source file no build serves. Each such literal in the
+ *  app's own modules (`workerEntries` decides which) is rewritten to
+ *  `to(entry)` — the built file beside the bundle, or the dev server's URL
+ *  for it — and the caller bundles the script it was told about. A module
+ *  that starts no worker is left to esbuild's own loader, byte for byte. */
+export function workerPlugin(
+  to: (entry: WorkerEntry) => string | Promise<string>,
+): {
+  name: string;
+  // deno-lint-ignore no-explicit-any
+  setup(build: any): void;
+} {
+  return {
+    name: "aio-worker",
+    setup(build) {
+      build.onLoad(
+        { filter: /\.[mc]?[jt]sx?$/, namespace: "file" },
+        async (args: { path: string }) => {
+          // A package's worker is its own build's business, as before.
+          if (args.path.includes(`${SEPARATOR}node_modules${SEPARATOR}`)) {
+            return undefined;
+          }
+          let code: string;
+          try {
+            code = await Deno.readTextFile(args.path);
+          } catch {
+            return undefined; // aio-ok: esbuild reports the unreadable file itself
+          }
+          const entries = workerEntries(code, args.path);
+          if (entries.length === 0) return undefined;
+          const specs = new Map<string, string>();
+          for (const e of entries) {
+            specs.set(`${e.abs}\0${e.format}`, await to(e));
+          }
+          return {
+            contents: rewriteWorkers(
+              code,
+              args.path,
+              (e) => specs.get(`${e.abs}\0${e.format}`) ?? e.spec,
+            ),
+            loader: WORKER_LOADER[extname(args.path).toLowerCase()] ?? "js",
+          };
+        },
+      );
+    },
+  };
+}
+
 /** The esbuild module — passed in, never imported here: the build path keeps
  *  a LITERAL `npm:esbuild@…` import (deno prefetches it), the dev path a
  *  computed one (so `am`/compile never pull the native binary). */
@@ -204,7 +299,45 @@ export type ClientBundle = {
   /** What each input contributed to the emitted bundle, in bytes after
    *  tree-shaking and minification — see `bundle-analyze.ts`. */
   bytesInOutput?: Record<string, number>;
+  /** The browser workers the graph starts (`workerPlugin`), each bundled the
+   *  way the app is — a worker's own workers included. Written beside the
+   *  bundle by the build; empty for an app that starts none. */
+  workers: WorkerBundle[];
+  /** The workers that could NOT be bundled: each one's `new Worker(new
+   *  URL(…))` is left exactly as written and no file is emitted for it — the
+   *  bundle is `ok` all the same. Empty when every worker bundled. */
+  workersSkipped: SkippedWorker[];
   ms: number;
+};
+
+/** A browser worker aio could not bundle — see `ClientBundle.workersSkipped`. */
+export type SkippedWorker = {
+  /** The worker's script, relative to the project root. */
+  entryKey: string;
+  /** Why: esbuild's first error, or the server-only module it reaches. */
+  reason: string;
+  /** What the verdict was read from (absolute): the files esbuild loaded and
+   *  the paths it looked for and did not find. Unchanged → the same verdict. */
+  watch: string[];
+};
+
+/** THE sentence for a worker that was not bundled — the build prints it and
+ *  the dev server prints it. */
+export function skippedWorkerMessage(s: SkippedWorker): string {
+  return `the worker ${s.entryKey} cannot be bundled — ${s.reason} — so ` +
+    `its \`new Worker(new URL(…))\` is left as written: the app builds, ` +
+    `and this worker does not run in the built app (it names a source ` +
+    `file no build serves).`;
+}
+
+/** One browser worker's bundle. */
+export type WorkerBundle = {
+  /** Its file name beside `app.js` (`workerFileName`). */
+  name: string;
+  code: string;
+  /** Its entry's key in `inputs`, and the graph esbuild read for it. */
+  entryKey: string;
+  inputs: MetaInputs;
 };
 
 /** A classic-script (iife) bundle has no `import.meta`: esbuild turns it into
@@ -223,11 +356,154 @@ const IIFE_META_DEFINE = {
   "import.meta.main": "false",
 };
 
-/** Build the browser bundle. One esbuild invocation, one option set. */
-export async function bundleClient(
+/** A classic worker has no `import.meta` either, and no `document`: its own
+ *  URL is `self.location`. */
+const WORKER_IIFE_DEFINE = {
+  "import.meta.url": "self.location.href",
+  "import.meta.main": "false",
+};
+
+/** Bundle ONE browser worker's script — the app's alias, plugins and module
+ *  resolution, the worker's own format. `to` names where each worker THIS
+ *  one starts will be found (see `workerPlugin`). Used by `bundleClient` for
+ *  every worker of a build, and by the dev server for the one a page asks
+ *  for. */
+export async function bundleWorker(
   opts: ClientBundleOpts,
-): Promise<ClientBundle> {
-  const t0 = performance.now();
+  entry: Pick<WorkerEntry, "abs" | "format">,
+  to: (entry: WorkerEntry) => string | Promise<string>,
+): Promise<Omit<WorkerBundle, "name"> & { errors: string[]; watch: string[] }> {
+  const { alias, plugins } = bundleResolution(opts, to);
+  const key = relative(opts.root, entry.abs).replaceAll("\\", "/");
+  // What esbuild read: a build that fails names no inputs.
+  const loaded = new Set<string>();
+  plugins.unshift({
+    name: "aio-worker-inputs",
+    // deno-lint-ignore no-explicit-any
+    setup(build: any) {
+      build.onLoad(
+        { filter: /.*/, namespace: "file" },
+        (a: { path: string }) => {
+          loaded.add(a.path);
+          return undefined;
+        },
+      );
+    },
+  });
+  try {
+    const r = await opts.esbuild.build({
+      entryPoints: [entry.abs],
+      absWorkingDir: opts.root,
+      bundle: true,
+      format: entry.format,
+      platform: "browser",
+      target: "esnext",
+      minify: true,
+      write: false,
+      ...ESBUILD_JSX,
+      ...(entry.format === "iife" ? { define: WORKER_IIFE_DEFINE } : {}),
+      alias,
+      plugins,
+      nodePaths: bundleNodePaths(opts.root),
+      // Silent: a worker that cannot be bundled is a warning the caller
+      // words (`skippedWorkerMessage`), not esbuild's red ERROR in a build
+      // that goes on.
+      logLevel: "silent",
+      metafile: true,
+    });
+    return {
+      code: r.outputFiles?.[0]?.text ?? "",
+      entryKey: key,
+      inputs: r.metafile?.inputs ?? {},
+      errors: [],
+      watch: [...loaded],
+    };
+  } catch (e) {
+    const list = (e as {
+      errors?: { text?: string; location?: { file?: string; line?: number } }[];
+    }).errors ?? [];
+    // A path esbuild looked for and did not find is read too: created, the
+    // verdict changes though no loaded file did.
+    const sought = list.flatMap((m) => {
+      const spec = /^Could not resolve "([^"]+)"/.exec(m.text ?? "")?.[1];
+      if (!spec) return [];
+      if (/^\.\.?\//.test(spec)) {
+        return m.location?.file
+          ? [resolve(opts.root, dirname(m.location.file), spec)]
+          : [];
+      }
+      return bundleNodePaths(opts.root).map((nm) => join(nm, spec));
+    });
+    return {
+      code: "",
+      entryKey: key,
+      inputs: {},
+      errors: list.length
+        ? list.map((m) =>
+          `${m.location?.file ?? key}${
+            m.location?.line ? `:${m.location.line}` : ""
+          }: ${m.text}`
+        )
+        : [String(e)],
+      watch: [...new Set([...loaded, ...sought])],
+    };
+  }
+}
+
+/** Why a worker was built as "iife", for the author who wrote no such word. */
+const CLASSIC_WORKER_HINT =
+  `aio builds this worker as a classic script ("iife"): it read no ` +
+  `\`{ type: "module" }\` in the \`new Worker(…)\` call. Write the options ` +
+  `there as a literal — a variable, a spread or a computed \`type\` is not ` +
+  `read`;
+
+/** Can this worker be bundled, and may its bundle ship? A worker's own
+ *  question — its imports and what they reach, never the workers IT starts
+ *  (those are left as written here, and named in `nested`). Asked by the
+ *  build of every worker and by the dev server of the one a page starts, so
+ *  both leave the same workers alone. */
+export async function probeWorker(
+  opts: ClientBundleOpts,
+  entry: Pick<WorkerEntry, "abs" | "format">,
+): Promise<
+  & Omit<WorkerBundle, "name">
+  & { nested: WorkerEntry[]; watch: string[]; skipped?: SkippedWorker }
+> {
+  const nested: WorkerEntry[] = [];
+  const w = await bundleWorker(opts, entry, (e) => {
+    nested.push(e);
+    return e.spec;
+  });
+  // A server-only module in a worker's bundle would ship as the page's would.
+  const failed = w.errors[0];
+  // A package only the worker imports is installed from the WORKER: the UI
+  // entry never reaches it.
+  const install = failed &&
+    explainMissingPackage(failed, opts.root, w.entryKey);
+  // A classic worker cannot `await` at its top level, and esbuild's sentence
+  // names a format the author never chose: it is what aio builds when the
+  // `new Worker(…)` call carries no `{ type: "module" }` it can READ.
+  const classic = failed && entry.format === "iife" &&
+    /"iife" output format/.test(failed);
+  const reason = failed
+    ? failed + (install ? ` (${install})` : "") +
+      (classic ? ` (${CLASSIC_WORKER_HINT})` : "")
+    : workerLeaks(w, opts.root).join(" ");
+  return {
+    ...w,
+    nested,
+    ...(reason
+      ? { skipped: { entryKey: w.entryKey, reason, watch: w.watch } }
+      : {}),
+  };
+}
+
+/** What every bundle of one app resolves with: the alias table and the
+ *  plugins. */
+function bundleResolution(
+  opts: ClientBundleOpts,
+  worker: (entry: WorkerEntry) => string | Promise<string>,
+) {
   const o = { ...opts, standalone: opts.standalone ?? opts.doAndroid ?? false };
   const isRemote = !o.frameworkSrcDir;
   // THE `aio*` table (bundleFrameworkEntries) is package-root relative;
@@ -253,11 +529,6 @@ export async function bundleClient(
     if (k.endsWith("/")) continue;
     if (!v.startsWith("npm:") && !v.startsWith("jsr:")) alias[k] = v;
   }
-  const format = o.standalone ? "iife" : "esm";
-  // The stamps (when written) and, for a classic script, the import.meta shim.
-  const banner = [o.write?.banner, format === "iife" ? IIFE_META_BANNER : ""]
-    .filter(Boolean).join("\n");
-  _resetServerOnlyStatic();
   const plugins = [
     aioBrowserPlugin(),
     ...(isRemote && o.frameworkBase
@@ -271,7 +542,48 @@ export async function bundleClient(
       : []),
     sharePlugin(o.shares),
     prefixAliasPlugin({ ...o.imports, ...aioImports }),
+    workerPlugin(worker),
   ];
+  return { alias, plugins };
+}
+
+/** Build the browser bundle. One esbuild invocation, one option set — and
+ *  one more per browser worker the graph starts (`workerPlugin`). */
+export async function bundleClient(
+  opts: ClientBundleOpts,
+): Promise<ClientBundle> {
+  const t0 = performance.now();
+  const o = { ...opts, standalone: opts.standalone ?? opts.doAndroid ?? false };
+  // Each worker a module starts, by the file it will be written to — probed
+  // BEFORE the module that starts it is rewritten: one that cannot be
+  // bundled keeps its literal (what a build emitted before workers were, where
+  // the build was green and that worker did not run), and the build goes on.
+  type Probed = Awaited<ReturnType<typeof probeWorker>> & {
+    entry: WorkerEntry;
+  };
+  const found = new Map<string, Promise<Probed>>();
+  const probed = (name: string, entry: WorkerEntry) => {
+    let p = found.get(name);
+    if (!p) {
+      p = probeWorker(o, entry).then(async (r) => {
+        // The workers it starts are this build's too.
+        for (const n of r.nested) probed(await workerFileName(o.root, n), n);
+        return { ...r, entry };
+      });
+      found.set(name, p);
+    }
+    return p;
+  };
+  const worker = async (e: WorkerEntry) => {
+    const name = await workerFileName(o.root, e);
+    return (await probed(name, e)).skipped ? e.spec : `./${name}`;
+  };
+  const { alias, plugins } = bundleResolution(o, worker);
+  const format = o.standalone ? "iife" : "esm";
+  // The stamps (when written) and, for a classic script, the import.meta shim.
+  const banner = [o.write?.banner, format === "iife" ? IIFE_META_BANNER : ""]
+    .filter(Boolean).join("\n");
+  _resetServerOnlyStatic();
   let result: {
     errors?: unknown[];
     warnings?: { text: string }[];
@@ -347,6 +659,8 @@ export async function bundleClient(
       entryKey: BUNDLE_ENTRY_KEY,
       format,
       code: "",
+      workers: [],
+      workersSkipped: [],
       ms: performance.now() - t0,
     };
   }
@@ -386,6 +700,26 @@ export async function bundleClient(
       ),
     )
     : undefined;
+  // The workers, and theirs: `found` grows while a worker's own graph is read.
+  const workers: WorkerBundle[] = [];
+  const workersSkipped: SkippedWorker[] = [];
+  for (let i = 0; i < found.size; i++) {
+    const [name, pending] = [...found][i]!;
+    const p = await pending;
+    if (p.skipped) {
+      workersSkipped.push(p.skipped);
+      continue;
+    }
+    // The probe left the workers it starts as written: bundled once more,
+    // pointing at the ones that bundled.
+    const w = p.nested.length ? await bundleWorker(o, p.entry, worker) : p;
+    workers.push({
+      name,
+      code: w.code,
+      entryKey: w.entryKey,
+      inputs: w.inputs,
+    });
+  }
   return {
     ok: errors.length === 0,
     errors,
@@ -396,6 +730,8 @@ export async function bundleClient(
     format,
     code,
     ...(map ? { map } : {}),
+    workers,
+    workersSkipped,
     ms: performance.now() - t0,
   };
 }
@@ -530,6 +866,29 @@ export async function judgeClientBundle(
   return refuse([finding], ev.ms);
 }
 
+/** The server-only modules ONE worker's bundle carries, in the audit's words
+ *  — empty when it carries none. Such a worker is not shipped
+ *  (`probeWorker`). */
+function workerLeaks(
+  w: Pick<WorkerBundle, "entryKey" | "inputs">,
+  root: string,
+): string[] {
+  const findings = auditClientGraph({
+    entry: w.entryKey,
+    inputs: w.inputs,
+    source: (p) => {
+      try {
+        return Deno.readTextFileSync(resolve(root, p));
+      } catch {
+        return undefined; // stub / virtual / remote input — nothing to scan
+      }
+    },
+  }).findings.filter((f) => f.rule === "server-only-leak");
+  return findings.length
+    ? formatAudit({ ok: false, findings, reached: [] }, (p) => p)
+    : [];
+}
+
 /** Where esbuild may look for an npm package that a file OUTSIDE the app
  *  imports — the framework's own files, when aio is path-pinned: the app's
  *  `node_modules`, then that of the nearest enclosing PROJECT (a directory with a
@@ -586,12 +945,21 @@ export function bundleNodePaths(
  *  checkout whose packages were never installed (amui before its first run)
  *  failed with the bundler's bare line, which names no fix. `--entrypoint`
  *  installs what the UI reaches and adds nothing to the project's lock.
- *  Null for any other error. `exists` is a seam for the test. */
+ *
+ *  That command only helps a project that HAS a `node_modules`: with no
+ *  `nodeModulesDir` in its deno.json (and no package.json) Deno installs into
+ *  its global cache, exits 0 and creates no folder — the advice was followed
+ *  and the build failed with the same line (measured, Deno 2.9.7). So the
+ *  setting is named first when no deno.json from `root` up to the repository
+ *  declares it; in a workspace it belongs in the workspace root's file.
+ *  Null for any other error. `exists` and `config` are seams for the test. */
 export function explainMissingPackage(
   text: string,
   root: string,
   uiEntry: string,
   exists?: (path: string) => boolean,
+  config: (dir: string) => Record<string, unknown> | null = (dir) =>
+    readDenoJsonSync(dir)?.config ?? null,
 ): string | null {
   const pkg = /Could not resolve "((?:@[\w.-]+\/)?[\w][\w.-]*)(?:\/[^"]*)?"/
     .exec(text)?.[1];
@@ -605,7 +973,25 @@ export function explainMissingPackage(
     }
   });
   if (bundleNodePaths(root, has).some((nm) => has(join(nm, pkg)))) return null;
+  // Does `deno install` create a node_modules here, and if not, which file
+  // takes the setting: the same upward walk `bundleNodePaths` does.
+  let installs = has(join(root, "package.json"));
+  let owner = resolve(root);
+  for (let dir = owner; !installs; dir = dirname(dir)) {
+    const c = config(dir);
+    const mode = c?.nodeModulesDir;
+    if (mode !== undefined && mode !== "none" && mode !== false) {
+      installs = true;
+    } else if (c?.workspace !== undefined) owner = dir;
+    if (has(join(dir, ".git")) || dirname(dir) === dir) break;
+  }
+  const first = installs
+    ? "run"
+    : `add \`"nodeModulesDir": "auto"\` to ${
+      join(owner, "deno.json")
+    } (without it \`deno install\` exits 0 and creates no node_modules), ` +
+      `then run`;
   return `the package "${pkg}" is not installed in ${
     join(root, "node_modules")
-  } — run \`deno install --entrypoint ${uiEntry}\` in ${root}, then build again`;
+  } — ${first} \`deno install --entrypoint ${uiEntry}\` in ${root}, then build again`;
 }

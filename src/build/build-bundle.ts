@@ -24,10 +24,16 @@ import {
   bundleClient,
   explainMissingPackage,
   judgeClientBundle,
+  skippedWorkerMessage,
 } from "./client-bundle.ts";
 import { appIconLabel, appIconPng, appIconSvg } from "./app-icon.ts";
 import { misplacedIconHint, resolveAppIcon } from "./build-helpers.ts";
 import { explainServerOnlyImport } from "../server/server-only-specs.ts";
+import {
+  checkPlatformSafety,
+  type ServedWorker,
+  servedWorkers,
+} from "../server/graph-validator.ts";
 import { bytes } from "../diagnostics/fmt.ts";
 import { bad, ok, staged, step, warn } from "./build-say.ts";
 import { minifyDeclared } from "./minify-server.ts";
@@ -64,6 +70,16 @@ interface BundleInputs {
    *  `fresh: true` and embedded the wrong app's bundle verbatim. */
   app: string;
   inputs: string[];
+  /** The browser workers' bundles written beside `out`, by file name. Absent
+   *  in a record written before workers were bundled: none. */
+  workers?: string[];
+  /** Paths that did not exist when a worker could not be bundled (the file
+   *  or package its import names). One of them appearing is a change. */
+  absent?: string[];
+  /** One sentence per worker that could not be bundled
+   *  (`skippedWorkerMessage`) — only esbuild can produce it, so a build that
+   *  reuses the bundle says it again from here. */
+  skipped?: string[];
 }
 
 /** The record version. Bumped when the record's KEY changes: an older record
@@ -89,8 +105,19 @@ async function writeBundleInputs(
   out: string,
   app: string,
   metafileInputs: Record<string, unknown> | undefined,
+  workers: readonly string[] = [],
+  watch: readonly string[] = [],
+  skipped: readonly string[] = [],
 ): Promise<void> {
   const inputs: string[] = [];
+  const absent: string[] = [];
+  for (const abs of watch) {
+    try {
+      if ((await Deno.stat(abs)).isFile) inputs.push(abs);
+    } catch {
+      absent.push(abs); // aio-ok: not there — recorded as exactly that
+    }
+  }
   for (const key of Object.keys(metafileInputs ?? {})) {
     // esbuild reports paths relative to the cwd it ran in (this process's).
     const abs = resolve(root, key);
@@ -103,6 +130,9 @@ async function writeBundleInputs(
     out,
     app,
     inputs: [...new Set(inputs)].sort(),
+    ...(workers.length ? { workers: [...workers].sort() } : {}),
+    ...(absent.length ? { absent: absent.sort() } : {}),
+    ...(skipped.length ? { skipped: [...skipped] } : {}),
   };
   const path = inputsManifestPath(root);
   try {
@@ -117,6 +147,98 @@ async function writeBundleInputs(
         `every build will re-run esbuild until this is writable`,
     );
   }
+}
+
+/** What this artifact does NOT carry of the worker scripts the app SERVES
+ *  (`servedWorkers`) — one `[headline, fix]` per worker, none for a script
+ *  the artifact carries or one whose server this build cannot see.
+ *
+ *  Nothing bundles such a script, and nothing said that a file of the app's
+ *  folder is in no compiled binary (unless `compile.include` names it), web
+ *  build or APK — dev and `--prod` serve it from the source tree, so the
+ *  first word was the Worker's `error` event in the artifact. A deno.json
+ *  `assets` mount travels with every target; under a sub-path a web build
+ *  finds it by a RELATIVE url only. A path no file of the app's folder and
+ *  no mount answers (a route, an `aio.run({ assets })` mount) is not this
+ *  build's to judge. Pure but for `isFile`. */
+export function servedWorkerNotes(i: {
+  workers: readonly ServedWorker[];
+  /** The module that starts them, relative to `root`. */
+  module: string;
+  root: string;
+  appDir: string;
+  /** deno.json `assets` prefixes. */
+  mounts: readonly string[];
+  /** deno.json `compile.include`, as written. */
+  include: readonly string[];
+  compile: boolean;
+  /** A web build or an APK: the bundle and the mounts, no server. */
+  standalone: boolean;
+  web: boolean;
+  isFile: (abs: string) => boolean;
+}): [headline: string, fix: string][] {
+  const slash = (p: string) => p.replaceAll("\\", "/");
+  const BUNDLED = `Or name its source — \`new Worker(new URL("./worker.ts", ` +
+    `import.meta.url))\` is bundled into every target.`;
+  const MOUNT = `a mount every target carries — deno.json "assets": ` +
+    `{ "/workers": "./workers" }`;
+  const notes: [string, string][] = [];
+  for (const w of i.workers) {
+    // From a module in another folder `import.meta.url` already differs
+    // either side of a build, and `unmanagedWorkers` says that.
+    if (w.meta && resolve(i.root, dirname(i.module)) !== resolve(i.appDir)) {
+      continue;
+    }
+    let path: string;
+    try {
+      path = decodeURIComponent(new URL(w.spec, "http://app/").pathname);
+    } catch {
+      continue; // aio-ok: not a URL the page could ask for either
+    }
+    const at = `${slash(i.module)}:${w.line} — the worker "${w.spec}"`;
+    if (i.web && !w.meta && w.spec.startsWith("/")) {
+      notes.push([
+        `${at} is named from the host's root: this web build finds it at ` +
+        `the root of its origin and not under a sub-path (a project site ` +
+        `at /repo/)`,
+        `Name it relative to the page: \`new Worker("${
+          w.spec.slice(1)
+        }")\`. ${BUNDLED}`,
+      ]);
+    }
+    if (
+      i.mounts.some((m) => path.startsWith(m.endsWith("/") ? m : m + "/"))
+    ) continue;
+    const file = join(i.appDir, path);
+    if (!i.isFile(file)) continue;
+    const rel = slash(relative(i.root, file));
+    if (i.standalone) {
+      notes.push([
+        `${at} is ${rel}, a file of the app's folder: the dev server ` +
+        `serves it, and this artifact carries the bundle and the mounts ` +
+        `only — there the Worker's \`error\` event is all the page is told`,
+        `Move it into ${MOUNT} — and start it by a relative path ` +
+        `(\`new Worker("workers/…")\`). ${BUNDLED}`,
+      ]);
+    } else if (
+      i.compile &&
+      !i.include.some((e) => {
+        const inc = slash(relative(i.root, join(i.root, e)));
+        // aio-ok: path-split — both sides went through `slash`
+        return rel === inc || rel.startsWith(inc + "/");
+      })
+    ) {
+      notes.push([
+        `${at} is ${rel}, served from the app's folder in dev and with ` +
+        `--prod. The compiled binary embeds no such file: started outside ` +
+        `this project it answers 404, and the Worker's \`error\` event is ` +
+        `all the page is told`,
+        `Add "${rel}" to deno.json "compile": { "include": [...] }, or ` +
+        `move it into ${MOUNT}. ${BUNDLED}`,
+      ]);
+    }
+  }
+  return notes;
 }
 
 /** Throw away the bundle this build produced (or inherited), then refuse.
@@ -170,7 +292,9 @@ async function readBundleInputs(
   root: string,
   out: string,
   app: string,
-): Promise<string[] | null> {
+): Promise<
+  Pick<BundleInputs, "inputs" | "workers" | "absent" | "skipped"> | null
+> {
   try {
     const rec = JSON.parse(
       await Deno.readTextFile(inputsManifestPath(root)),
@@ -181,7 +305,7 @@ async function readBundleInputs(
     ) {
       return null;
     }
-    return rec.inputs;
+    return rec;
   } catch {
     return null;
   }
@@ -227,9 +351,16 @@ export async function isBundleFresh(cfg: BuildConfig): Promise<boolean> {
       break; // deno reads the FIRST match — so do we
     }
 
-    const inputs = await readBundleInputs(root, out, appDir);
-    if (!inputs || inputs.length === 0) return false;
-    for (const path of inputs) {
+    const rec = await readBundleInputs(root, out, appDir);
+    if (!rec || rec.inputs.length === 0) return false;
+    // A worker's bundle is half of the artifact: gone from dist/, the page
+    // that starts it would be embedded without it (stat throws → not fresh).
+    for (const w of rec.workers ?? []) await Deno.stat(join(dirname(out), w));
+    // …and what a worker that could not be bundled was missing, now there.
+    for (const p of rec.absent ?? []) {
+      if (await Deno.stat(p).then(() => true, () => false)) return false;
+    }
+    for (const path of rec.inputs) {
       // A DELETED input is a change too — stat throws, the catch below turns
       // it into "not fresh".
       const s = await Deno.stat(path);
@@ -490,11 +621,69 @@ export async function runBundle(
     Deno.exit(1);
   }
 
+  // The warnings about the app's browser workers, over the bundle's inputs
+  // (paths relative to `root`). They are about the SOURCE, not about what
+  // esbuild did — so a build that reuses the bundle says them again: a
+  // warning printed once and then hidden behind "cached" is one nobody who
+  // builds twice ever reads.
+  const workerWarnings = async (inputs: readonly string[]) => {
+    // A Worker the dev server runs and this build does not carry: the dev
+    // server's finding, in its words (`unmanagedWorkers`), over the app's own
+    // modules in the graph just bundled.
+    // …and a script the app serves that this artifact does not carry
+    // (`servedWorkerNotes`).
+    const declared = mainConfig as {
+      assets?: unknown;
+      compile?: { include?: unknown };
+    };
+    const strings = (v: unknown): string[] =>
+      Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
+    for (const input of inputs) {
+      if (input.startsWith("..") || input.includes("node_modules/")) continue;
+      const code = await Deno.readTextFile(join(root, input)).catch(() => {
+        // aio-ok: a plugin's virtual input has no file here to read
+        return "";
+      });
+      for (const w of checkPlatformSafety(code, join(root, input), appDir)) {
+        if (w.category !== "unmanaged-worker") continue;
+        warn(`${input}:${w.line} — ${w.message}`, undefined, w.fix);
+      }
+      const notes = servedWorkerNotes({
+        workers: servedWorkers(code, join(root, input)),
+        module: input,
+        root,
+        appDir,
+        mounts: Object.keys(
+          declared.assets && typeof declared.assets === "object"
+            ? declared.assets
+            : {},
+        ),
+        include: strings(declared.compile?.include),
+        compile: cfg.doCompile,
+        standalone,
+        web: !!cfg.doWeb,
+        isFile: (abs) => {
+          try {
+            return Deno.statSync(abs).isFile;
+          } catch {
+            return false; // aio-ok: absent is "not a file"
+          }
+        },
+      });
+      for (const [headline, fix] of notes) warn(headline, undefined, fix);
+    }
+  };
+
   const bundleFresh = await isBundleFresh(cfg);
 
   if (bundleFresh) {
     const s = await Deno.stat(out);
     staged("dist/app.js", `cached, ${bytes(s.size)} — --force rebuilds it`);
+    const rec = await readBundleInputs(root, out, appDir);
+    await workerWarnings(
+      (rec?.inputs ?? []).map((p) => relative(root, p).replaceAll("\\", "/")),
+    );
+    for (const msg of rec?.skipped ?? []) warn(msg);
   } else {
     // Clean dist/ and rebuild — EMPTIED, never replaced: a bind mount, a
     // watcher or an open shell holds the directory's inode, and swapping it
@@ -604,7 +793,13 @@ export async function runBundle(
       // which the bundle write beside it would already have refused.
     });
 
-    const metaInputs = bundle.inputs as Record<string, unknown>;
+    // A worker's sources are inputs like any other: the staleness record,
+    // and the warnings below, read them too.
+    const metaInputs: Record<string, unknown> = Object.assign(
+      {},
+      ...bundle.workers.map((w) => w.inputs),
+      bundle.inputs,
+    );
     if (!bundle.ok) {
       for (const e of bundle.errors) {
         // The most likely build error a new author hits — a server API
@@ -638,6 +833,20 @@ export async function runBundle(
     for (const note of verdict.notes) {
       step(note);
     }
+    // …and the sources of a worker that was not bundled: the record below
+    // holds them, so a cached build reads them too — the same list, both ways.
+    const slash = (p: string) => relative(root, p).replaceAll("\\", "/");
+    await workerWarnings([
+      ...new Set([
+        ...Object.keys(metaInputs),
+        ...bundle.workersSkipped.flatMap((w) => w.watch).map(slash),
+      ]),
+    ]);
+    // A worker that cannot be bundled does not fail the build: before
+    // workers were bundled the build was green and that worker did not run,
+    // and both are still true. Said once, loudly.
+    const skipped = bundle.workersSkipped.map(skippedWorkerMessage);
+    for (const msg of skipped) warn(msg);
     ok(
       "bundle audited + evaluated",
       `${verdict.auditMs.toFixed(0)}ms audit + ${
@@ -698,9 +907,27 @@ export async function runBundle(
       }
     }
 
+    // The browser workers the graph starts, beside the bundle that names
+    // them — every target stages `isWorkerBundle` files from here.
+    for (const w of bundle.workers) {
+      await Deno.writeTextFile(join(dist, w.name), w.code);
+      staged(
+        `dist/${w.name}`,
+        `${bytes(w.code.length)} — the worker ${w.entryKey}`,
+      );
+    }
+
     // Record the REAL inputs (after the temp entry/config are gone, so they
     // cannot enter the list and make every later build look stale).
-    await writeBundleInputs(root, out, appDir, metaInputs);
+    await writeBundleInputs(
+      root,
+      out,
+      appDir,
+      metaInputs,
+      bundle.workers.map((w) => w.name),
+      bundle.workersSkipped.flatMap((w) => w.watch),
+      skipped,
+    );
 
     const stat = await Deno.stat(out);
     staged("dist/app.js", bytes(stat.size));

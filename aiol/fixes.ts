@@ -19,6 +19,7 @@ import {
   type ListEntry,
   type ModuleStatement,
   moduleStatements,
+  plainlyRead,
   topLevelKeyOffsets,
 } from "./scan.ts";
 import { SERVER_ONLY_AIO_SYMBOLS } from "../src/entries.ts";
@@ -947,6 +948,9 @@ export type SpecKinds =
      *  ANOTHER name, `name` (`export { schedule as sched } from "aio"` →
      *  `schedule` for `sched`); undefined when it does no such thing. */
     origin?: (spec: string, name: string) => string | undefined;
+    /** The importing file's path, when a run names it ({@linkcode Run}):
+     *  what says whether the file can hold JSX at all. */
+    file?: string;
   };
 
 /** The files one lint run holds, seen from the file that imports. */
@@ -1171,6 +1175,7 @@ function _kinds(
     }
     return undefined;
   };
+  if (run) kinds.file = run.from;
   return kinds;
 }
 
@@ -1497,7 +1502,12 @@ function _read(src: string, kinds: SpecKinds) {
   // or `=`, so nothing in it can declare a name. And the one declaration
   // whose NAME stays in sight while the mask hides its keyword — `function`
   // closing a `//` line, the name opening the next — is a stop as well.
-  const flat = /<\/|\/>/.test(src) ? codeMaskDeep(src) : null;
+  //
+  // …and a file that CANNOT hold JSX, read exactly as the language's own
+  // lexer reads it ({@linkcode plainlyRead}), is the first kind whatever it
+  // spells: a `"</p>"` there is a string.
+  const plain = kinds.file !== undefined && plainlyRead(kinds.file, src);
+  const flat = !plain && /<\/|\/>/.test(src) ? codeMaskDeep(src) : null;
   const hiddens = new Map<string, number[]>();
   const hidden = (name: string): number[] => {
     if (!flat) return [];
@@ -1541,7 +1551,7 @@ function _read(src: string, kinds: SpecKinds) {
   //    ends in a `</` the reader did not account for, whatever its own text
   //    blanked and however its tag is written.
   const escaped = bare.search(/\\u/);
-  const stray = _strayClose(src);
+  const stray = plain ? -1 : _strayClose(src);
   const lost = escaped !== -1 ? escaped : stray;
   const lostWhy = lost === -1 ? "" : `line ${lineOf(lost)} ` +
     (escaped !== -1

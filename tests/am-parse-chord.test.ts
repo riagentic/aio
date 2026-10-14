@@ -4,6 +4,7 @@
 // `press "+"` (zoom in — a real user gesture) silently became the caller's
 // default key. A parser that turns one key into a different key is the
 // harness lying about what it did.
+import "./store-sandbox.ts";
 import { assertEquals, assertThrows } from "@std/assert";
 import { parseChord } from "../src/am/am-cmd-inspect.ts";
 import { isMacPlatform, pressChord } from "../src/air/key-chord.ts";

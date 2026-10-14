@@ -6,6 +6,7 @@
 // under a running writer, and a restore of another app's archive over live data,
 // are the two ways a "safe" command destroys data. Both are tested here, plus
 // the fact that a restore keeps the data it replaced.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { lockPath } from "../src/server/single-instance-lock.ts";

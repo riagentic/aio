@@ -1,6 +1,9 @@
 // Startup linter — validates config and src/ before running
 // Extracted from aio.ts. Checks state, config, App.tsx, imports, dependencies.
+import { composeCells } from "../state/cell-compose.ts";
+import type { CellDef, CellEntry } from "../state/cell-types.ts";
 import { UI_ENTRY } from "./app-files.ts";
+import { stringifyWithIssues } from "./persist-guard.ts";
 import { isCompiled } from "./paths.ts";
 import {
   aioOwnSpecAdvice,
@@ -72,8 +75,10 @@ export type Lint = {
  *  @internal */
 export async function lint(
   state: unknown,
-  config: { reduce?: unknown; execute?: unknown },
-  baseDir: string,
+  // Optional since 1.0.20: `checkCells(cells)` is the whole call. No config
+  // is an empty one; no directory is the one the process runs in.
+  config?: { reduce?: unknown; execute?: unknown },
+  baseDir?: string,
   prod = false,
   headless = false,
   useElectron = true,
@@ -91,6 +96,29 @@ export async function lint(
   headlessClient?: string,
 ): Promise<Lint> {
   const r: Lint = { ok: [], warn: [], hint: [], fail: [] };
+  config ??= {};
+  baseDir ??= Deno.cwd();
+
+  // `checkCells(cells)` — the form the name promises. A list of
+  // cells where the state goes is composed here, exactly as `aio.run({ cells
+  // })` composes it (client-scoped cells never reach the server), and the
+  // findings are those of the composed app. It used to be read as a state
+  // with keys "0", "1", … and failed on `config.reduce`.
+  const defOf = (e: unknown) => (e as { cell?: CellDef })?.cell ?? e;
+  if (
+    Array.isArray(state) && state.length > 0 &&
+    state.every((e) => !!(defOf(e) as CellDef | undefined)?.__aio?.id)
+  ) {
+    // aio-ok(persist-decider): composed only to be checked — never reduced, never stored.
+    const composed = composeCells(
+      (state as CellEntry[]).filter((e) =>
+        (defOf(e) as CellDef).__aio?.scope !== "client"
+      ),
+    );
+    r.ok.push(`cells (${composed.cells.length})`);
+    state = composed.initialState;
+    config = { ...config, reduce: composed.reduce, execute: composed.execute };
+  }
 
   if (state == null) r.fail.push("initial state is null/undefined");
   else if (typeof state !== "object") {
@@ -107,12 +135,16 @@ export async function lint(
       );
     }
     // Check JSON-serializability — Date, Map, Set, functions etc. break persistence/broadcast
+    // Judged by the walk persistence itself uses: comparing two stringify
+    // passes never saw a Date (both give the same string), a Map or a Set
+    // (both give {}), so the warning below could not fire for what it names.
     try {
-      const json = JSON.stringify(state);
-      const after = JSON.stringify(JSON.parse(json));
-      if (json !== after) {
+      const { issues } = stringifyWithIssues(state);
+      if (issues.length) {
         r.warn.push(
-          "state loses data on JSON round-trip — use primitives + plain objects/arrays only (no Date, Map, Set, functions, BigInt)",
+          "state loses data on JSON round-trip — use primitives + plain objects/arrays only (no Date, Map, Set, functions, BigInt): " +
+            issues.slice(0, 5).map((i) => `${i.path} (${i.kind})`).join(", ") +
+            (issues.length > 5 ? `, … ${issues.length - 5} more` : ""),
         );
       }
     } catch (e) {

@@ -21,25 +21,13 @@
 
 import { pendingStarted } from "../protocol/pending-calls.ts";
 import { isDevMode } from "../state/dev-flag.ts";
-import { _controlDrifted } from "./prop-write.ts";
+import { _controlDrifted, _CTRL } from "./prop-write.ts";
 import { resolveSignalProp } from "./signal-binding.ts";
 
-const _CTRL = Symbol.for("aio.air.controlProps");
 type CtrlEl = HTMLElement & { [_CTRL]?: Record<string, unknown> };
 
 /** How long a drifted control may stay drifted before dev says so. */
 const DRIFT_WARN_MS = 1000;
-
-/** Remember the props a form control last rendered with (mount, diff, hydrate). */
-export function _recordControlled(
-  el: HTMLElement,
-  props: Record<string, unknown>,
-): void {
-  const tag = el.tagName;
-  if (tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "SELECT") return;
-  if ("value" in props || "checked" in props) (el as CtrlEl)[_CTRL] = props;
-  else delete (el as CtrlEl)[_CTRL];
-}
 
 const _EVENTS = new Set(["input", "change", "click"]);
 /** Elements with a pending re-check → its timer. A Map, not a WeakMap: an

@@ -42,6 +42,7 @@ import {
   ToastHost,
 } from "../src/ui/mod.ts";
 import { fuzzEnvInt } from "./fuzz-seed.ts";
+import { mulberry32 } from "./sync/properties/_prop.ts";
 
 // ── 1. Field names its control ───────────────────────────────────────
 
@@ -432,9 +433,7 @@ const SEED = fuzzEnvInt("UIKIT_FUZZ_SEED", 20260805, 1);
 const TREES = fuzzEnvInt("UIKIT_FUZZ_TREES", 24, 1);
 
 Deno.test("fuzz: every interactive element is reachable and drivable by name", async () => {
-  let seed = SEED;
-  const rnd = () =>
-    (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const rnd = mulberry32(SEED);
   const pick = <T,>(xs: T[]): T => xs[Math.floor(rnd() * xs.length)]!;
   const WORDS = [
     "Save",
@@ -447,11 +446,15 @@ Deno.test("fuzz: every interactive element is reachable and drivable by name", a
   ];
 
   let elements = 0;
+  const shapes = new Set<number>();
+  const gestures = new Set<string>();
   for (let tree = 0; tree < TREES; tree++) {
     const label = () => pick(WORDS);
     // A leaf renders one interactive thing, in one of the kit's shapes.
     const leaf = (): VNode => {
-      switch (Math.floor(rnd() * 8)) {
+      const shape = Math.floor(rnd() * 8);
+      shapes.add(shape);
+      switch (shape) {
         case 0:
           return h("button", { onClick: () => {} }, label());
         case 1:
@@ -532,16 +535,33 @@ Deno.test("fuzz: every interactive element is reachable and drivable by name", a
         assertEquals(handle.info.tag, el.tag, `${where}: ${el.name}.info`);
         // Drivable: the gesture its kind of control actually accepts.
         const tag = el.tag;
-        if (tag === "select") await handle.select("a");
-        else if (
+        if (tag === "select") {
+          gestures.add("select");
+          await handle.select("a");
+        } else if (
           handle.checked === true || handle.info.events.includes("change")
         ) {
+          gestures.add("toggle");
           await handle.click();
         } else if (tag === "input" || tag === "textarea") {
+          gestures.add(`type ${tag}`);
           await handle.type("a");
-        } else await handle.click();
+        } else {
+          gestures.add("click");
+          await handle.click();
+        }
       }
     }
   }
   assert(elements >= TREES, `fuzz produced too few elements: ${elements}`);
+  // A generator that stopped drawing a shape, or a surface that stopped
+  // offering a gesture, proves nothing about it.
+  if (TREES >= 24) {
+    assertEquals([...shapes].sort(), [0, 1, 2, 3, 4, 5, 6, 7], "leaf shapes");
+    assertEquals(
+      [...gestures].sort(),
+      ["click", "select", "toggle", "type input", "type textarea"],
+      "gestures driven",
+    );
+  }
 });

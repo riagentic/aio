@@ -54,9 +54,14 @@ export async function buildClient(cfg: BuildConfig): Promise<void> {
   const { electronClientScript } = await import("../electron/electron.ts");
   // The address the build already knows, handed to the artifact instead of
   // being printed and forgotten.
-  const clientScript = electronClientScript(cfg.bakedServer);
+  const clientScript = electronClientScript(cfg.bakedServer, {
+    strictPin: cfg.strictPin,
+  });
   if (cfg.bakedServer) {
     console.log(`[client] \u2713 default server ${cfg.bakedServer}`);
+  }
+  if (cfg.strictPin) {
+    console.log("[client] \u2713 strict certificate pin (build.strictPin)");
   }
   await Deno.writeTextFile(join(appDir, "main.cjs"), clientScript);
   console.log("[client] \u2713 main.cjs");

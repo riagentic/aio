@@ -22,6 +22,7 @@
 // holds that window open until the `am restart` that launched it is gone
 // (or, with the fix, for a bounded time): a verdict given inside it must
 // not name it.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";

@@ -1,6 +1,7 @@
 // `--cdp` / AIO_CDP: opt-in DevTools Protocol for the Electron window.
 // (a) flag + env parsing, one decider; (b) the launch passes the Chromium
 // switch ONLY when asked — a bound debugging port is a port.
+import { ownAccount } from "./e2e-app-harness.ts";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { join } from "@std/path";
 import { EXE, writeProgram } from "./fake-program-helper.ts";
@@ -80,6 +81,7 @@ Deno.test({
           "exit 0\n"
         : `#!/bin/sh\nprintf '%s\\n' "$@" > ${argv}\nexit 0\n`,
     );
+    using _home = ownAccount(); // the window's profile: this run's, not yours
     const prev = Deno.env.get("ELECTRON_PATH");
     Deno.env.set("ELECTRON_PATH", bin);
     const log = { info() {}, error() {}, warn() {}, debug() {} };

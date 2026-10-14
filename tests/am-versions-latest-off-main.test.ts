@@ -8,6 +8,7 @@
 //
 // Throwaway git repos (a local "origin" and a clone of it) and a throwaway
 // versions store — no network, no real HOME, never the aio repo.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { latestRelease, offMainNote } from "../src/am/am-versions.ts";

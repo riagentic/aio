@@ -18,6 +18,7 @@
 //     overwrites in place.
 //   • an UNINSTALL did not exist at all, so the only way back was to remember
 //     three locations and delete them by hand.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { basename, join, SEPARATOR } from "@std/path";
 import {
@@ -233,7 +234,14 @@ Deno.test("am remove: the footprint is the three things an install creates", asy
   try {
     await install(root, "footprint-app", "0.1.0");
     const fp = await installedFootprint("footprint-app");
-    assertEquals(fp.length, 3, "app dir, menu entry, PATH symlink");
+    // Windows adds the one place only it has by NAME: the one-click install.
+    // A Start-menu shortcut is listed only when one is found that opens this
+    // app (tests/am-remove-footprint-os.test.ts).
+    assertEquals(
+      fp.length,
+      Deno.build.os === "windows" ? 4 : 3,
+      "app dir, menu entry, PATH symlink",
+    );
     const dirEntry = fp.find((f) => f.path === join(root, "footprint-app"));
     assert(dirEntry?.present, "the installed directory must be seen");
     // The menu entry and bin link were never created here — reported absent,

@@ -3,6 +3,7 @@
 // `foo--bar` / `foo-` kept a `-`, and `export` / `import` / `cell` /
 // `serverFns` were bound verbatim — a syntax or type error, and `am add
 // server` imports the module from src/app.ts, so the app stopped booting.
+import "./store-sandbox.ts";
 import { assertEquals } from "@std/assert";
 import { scaffoldSymbol } from "../src/am/am-cmd-meta.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";

@@ -387,7 +387,32 @@ methods: {
 
 The function is serialized to source, so it must be **self-contained** (no
 closures — pass data as `arg`), and `arg`/result must be structured-cloneable.
-Full contract and the "which tool for which work" table:
+
+**A job that needs an import, a constant or a helper** goes in its own module:
+pass its URL instead of a function and the worker imports it and calls its
+default export. Nothing is rebuilt from text, so `build.minify` or a bundler
+cannot change what it means.
+
+```ts
+// job.ts
+import { parse } from "@std/csv";
+export default (text: string) => parse(text).length;
+
+// in a method
+s.count = await blocking(
+  "csv:count",
+  new URL("./job.ts", import.meta.url),
+  raw,
+);
+```
+
+In a compiled binary the job module must be part of the build, and
+`deno
+compile` cannot follow a URL: import it once from the app
+(`import "./job.ts";`), or pass `--include job.ts` if you run `deno compile`
+yourself. A module that is missing is refused with that hint.
+`blocking.cancel(id)`, the pool and the result contract are the same for both
+forms. Full contract and the "which tool for which work" table:
 [performance → move it off-thread](../debugging/performance.md#move-it-off-thread).
 
 ---

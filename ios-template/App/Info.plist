@@ -44,7 +44,7 @@
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Connects to the aio server you name, which may be on your local network.</string>
 	<!-- A thin client connects to the server its user names. A LAN server is
-	     usually plain http (`aio --expose` serves https with a self-signed
+	     usually plain http (an exposed aio serves https with a self-signed
 	     cert, which iOS refuses anyway until trusted), so App Transport
 	     Security must not veto the address the user typed. {{ATS_COMMENT}} -->
 	<key>NSAppTransportSecurity</key>

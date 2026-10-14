@@ -201,11 +201,8 @@ if (PHASE === "clean") {
   stopClean();
   await sleep(20000);
 }
-let seed = Number(E("SEED", "1"));
-const rnd = () => {
-  seed = (seed * 1103515245 + 12345) & 0x7fffffff;
-  return seed / 0x7fffffff;
-};
+const { mulberry32 } = await import("../../sync/properties/_prop.ts");
+const rnd = mulberry32(Number(E("SEED", "1")));
 let tokens = 0;
 setInterval(() => {
   tokens = 60;

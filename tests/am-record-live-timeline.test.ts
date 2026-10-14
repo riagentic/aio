@@ -7,6 +7,7 @@
 // as "a bug you reproduced becomes a test". The live timeline holds the same
 // actions with their payloads, under the same redaction rule; with no
 // `--from`, a running app is recorded from it.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";

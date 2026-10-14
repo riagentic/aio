@@ -16,7 +16,7 @@ import { lockDir, readLock } from "../../src/server/single-instance-lock.ts";
 import { dec, enc } from "../../src/protocol/envelope.ts";
 import { protoHello } from "../../src/protocol/protocol-version.ts";
 import { VERSION } from "../../src/server/aio-cli.ts";
-import { join } from "@std/path";
+import { connectRW } from "../local-endpoint-helper.ts";
 
 const OUT = Deno.env.get("AIO_DIALOG_STANDIN_OUT") ?? "";
 if (!OUT) throw new Error("AIO_DIALOG_STANDIN_OUT is not set");
@@ -37,10 +37,8 @@ async function findSocket(): Promise<string> {
   throw new Error(`no app socket appeared in ${dir}`);
 }
 
-const conn = await Deno.connect({
-  transport: "unix",
-  path: await findSocket(),
-});
+// A unix socket, or on Windows the named pipe the record names.
+const conn = await connectRW(await findSocket());
 const send = (line: string) =>
   conn.write(new TextEncoder().encode(line + "\n")).then(() => {});
 await send(enc("type", { kind: "electron", caps: ["dialog"] }));

@@ -6,6 +6,7 @@
 // `am` as a user.
 //
 // And `--instance` itself did nothing, silently, when AIO_APPS_DIR was set.
+import "./store-sandbox.ts";
 import { SLEEP_ARGS } from "./proc-helper.ts";
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";

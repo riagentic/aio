@@ -6,7 +6,12 @@ import {
   cleanupSignalBindings,
   isSignal,
 } from "./signal-binding.ts";
-import { _propAttr, _RESERVED_PROPS, _writeProp } from "./prop-write.ts";
+import {
+  _propAttr,
+  _recordControlled,
+  _RESERVED_PROPS,
+  _writeProp,
+} from "./prop-write.ts";
 import { attrNameOf as _attrName, TEXT_CONTENT_ELEMENTS } from "./ssr-utils.ts";
 import { _DOM_PROPS } from "./vdom-types.ts";
 import type { ComponentFn, RenderCtx, VNode } from "./vdom.ts";
@@ -44,8 +49,7 @@ import { _fallbackSlot } from "./vdom-render.ts";
 import { _cleanupChildren, _removeDomCleanup } from "./vdom-remove.ts";
 import { _cleanupActions } from "./vdom-helpers.ts";
 import { applyChildDependentProps } from "./vdom-props.ts";
-import { _recordControlled } from "./control-drift.ts";
-import { _devWarn, _hasRawHtml } from "./vdom-types.ts";
+import { _hasRawHtml, _wrong } from "./vdom-types.ts";
 import { isDevMode } from "../state/dev-flag.ts";
 import type { Signal } from "../state/signal.ts";
 import { _getExitHandler } from "./transition-component.ts";
@@ -60,7 +64,7 @@ import {
 } from "./renderer-state.ts";
 import {
   _flushAfterRender,
-  _flushPending,
+  _flushAll,
   _rerenderRoot,
 } from "./renderer-flush.ts";
 import { _createHooks } from "./renderer-rerender.ts";
@@ -192,7 +196,7 @@ export function hydrate(root: any, App: ComponentFn): MountHandle {
   const handle: MountHandle = {
     _flush() {
       if (state.disposed) return;
-      _flushPending(state);
+      _flushAll(state);
     },
   };
 
@@ -223,11 +227,11 @@ export function hydrate(root: any, App: ComponentFn): MountHandle {
       // server markup, the paint that was already on screen, and any DOM state
       // in it. Silently degrading a documented feature to nothing is the worst
       // outcome — say so in dev, where it can still be fixed.
-      _devWarn(
+      _wrong(
         "hydrate-mismatch",
         `hydrate() found DOM that does not match the component tree and fell ` +
-          `back to a full client render — the server HTML was discarded. The ` +
-          `usual cause is markup that differs between server and client ` +
+          `back to a full client render — the server HTML was discarded.`,
+        ` The usual cause is markup that differs between server and client ` +
           `(Date/random/window in render), or two ADJACENT text children: ` +
           `HTML parsing merges them into one text node, which cannot be ` +
           `hydrated as two.`,
@@ -721,12 +725,14 @@ function _dropSurplus(
   });
   // Said once the claim commits: an attempt that falls back undoes it.
   _write(() =>
-    _devWarn(
+    _wrong(
       `hydrate-surplus-${el.tagName}`,
       `hydrate() found ${surplus.length} server node(s) in <${el.tagName.toLowerCase()}> ` +
-        `past the component's last child — removed. Server and client rendered ` +
+        `past the component's last child — removed.`,
+      ` Server and client rendered ` +
         `different children (Date/random/window in render, or state that ` +
         `changed between the server render and hydrate).`,
+      "hydrate-surplus",
     )
   );
 }
@@ -948,22 +954,33 @@ function _hydrateProps(el: HTMLElement, props: Record<string, unknown>): void {
   // A permanently disabled button, or an invisible one, from markup the
   // component never asked for. Now it converges on what mount produces.
   const _implied = _impliedAttrs(el, props);
+  // The first attribute removed — what a production page can name for free.
+  let stray = "";
   for (const name of el.getAttributeNames?.() ?? []) {
-    if (!_implied.has(name.toLowerCase())) el.removeAttribute(name);
-  }
-  if (_before) {
-    const diverged = _attrDiff(_before, _attrSnapshot(el));
-    if (diverged.length > 0) {
-      _devWarn(
-        `hydrate-attr-${el.tagName}-${diverged.join(",")}`,
-        `hydrate() found <${el.tagName.toLowerCase()}> with server markup ` +
-          `that disagrees with the component on ${
-            diverged.join(", ")
-          } — repaired to what the component says. Server and client rendered ` +
-          `different props (Date/random/window in render, or an environment ` +
-          `difference).`,
-      );
+    if (!_implied.has(name.toLowerCase())) {
+      el.removeAttribute(name);
+      stray ||= name;
     }
+  }
+  // Dev compares every attribute before and after; a production page knows
+  // the stray one for free, and says that.
+  const diverged = _before
+    ? _attrDiff(_before, _attrSnapshot(el))
+    : stray
+    ? [stray]
+    : [];
+  if (diverged.length > 0) {
+    _wrong(
+      `hydrate-attr-${el.tagName}-${diverged.join(",")}`,
+      `hydrate() found <${el.tagName.toLowerCase()}> with server markup ` +
+        `that disagrees with the component on ${
+          diverged.join(", ")
+        } — repaired to what the component says.`,
+      ` Server and client rendered ` +
+        `different props (Date/random/window in render, or an environment ` +
+        `difference).`,
+      "hydrate-attr",
+    );
   }
   bindSignalProps(el, props);
   _recordControlled(el, props);

@@ -8,6 +8,7 @@
 // telling a user their correct command does not exist. A verb you can type is
 // a verb the help must name.
 
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import {
   HELP_TEXT,

@@ -26,6 +26,7 @@ import {
   resolveAioRoot,
 } from "./am-cmd-link.ts";
 import {
+  allowScriptsDrift,
   compareVersions,
   ensureVersion,
   gitEnvFor,
@@ -36,6 +37,7 @@ import {
   parseVersion,
   pinnedFrameworkPath,
   readPin,
+  rewriteAllowScripts,
   sortVersions,
   writePin,
 } from "./am-versions.ts";
@@ -43,6 +45,7 @@ import { meetsMinDeno, MIN_DENO } from "../server/deno-version.ts";
 import { parseDeclaredVersion } from "../server/app-version.ts";
 import { removalMessage, removalsInSource } from "../state/removals.ts";
 import { count } from "../diagnostics/fmt.ts";
+import { hardenFindings, ownsActivity } from "./am-harden.ts";
 import {
   machineBoundImports,
   machineBoundWarning,
@@ -410,6 +413,22 @@ export async function cacheTargets(
   return [entry, ...tools];
 }
 
+/** What the cache repair did to `deno.lock`, for its report line — "" when
+ *  nothing. Caching aio's tool entry points ADDS their dependencies to the
+ *  lock, on purpose (two clones of one commit must resolve them alike), so a
+ *  fresh clone's `am fix` leaves the lock modified — and said nothing about
+ *  it: a field report found the drift in `git status`. Pure. */
+export function lockChangeNote(
+  before: string | null,
+  after: string | null,
+): string {
+  if (after === null || after === before) return "";
+  return before === null
+    ? " — deno.lock was created: commit it"
+    : " — deno.lock gained entries (the dependencies of aio's own tools): " +
+      "commit it, so every clone resolves them the same";
+}
+
 async function resolveEntry(dir: string): Promise<string | null> {
   // THE rule, not a probe list. `src/main.ts` / `main.ts` used to count here
   // and nowhere else, so `am fix` could pronounce a project fine on the
@@ -514,6 +533,11 @@ export async function cmdFix(
   // `--migrate-tasks`: convert a pre-alpha52 task matrix to the one vocabulary
   // (see migrateTasks). Opt-in because it DELETES pristine old-scaffold tasks.
   const migrate = args.includes("--migrate-tasks");
+  // `--harden`: set the opt-in security switches this app has not decided on
+  // (am-harden.ts). Opt-in because each one CHANGES what the app does — a
+  // paired client must pair again after the server's certificate changes —
+  // and a repair never changes behaviour nobody asked it to.
+  const harden = args.includes("--harden");
   const dir = Deno.cwd();
   const res: Res[] = [];
   const add = (name: string, outcome: Outcome, note = "") =>
@@ -910,6 +934,29 @@ export async function cmdFix(
       `"${imports["electron"]}" → "${want}"`,
     );
   }
+  // `allowScripts` names exact versions, and Deno skips — silently — the
+  // install script of a package whose import moved past its entry. Against
+  // the imports as the repair above leaves them (a dry run included).
+  {
+    const drift = allowScriptsDrift({
+      imports: typeof imports["electron"] === "string"
+        ? { ...imports, electron: electronSpec(testedElectron) }
+        : imports,
+      allowScripts: cfg.allowScripts,
+    });
+    await repair(
+      "allowScripts = the imported versions",
+      drift.length > 0,
+      async () => {
+        const text = await Deno.readTextFile(jsonPath);
+        const next = rewriteAllowScripts(text, drift);
+        if (next === text) throw new Error("no allowScripts entry to rewrite");
+        await Deno.writeTextFile(jsonPath, next);
+      },
+      drift.map((d) => `"${d.from}" → "${d.to}"`).join(", ") +
+        " — Deno matches by exact version, so the old entry runs no install script",
+    );
+  }
   if (usesElectron && noDownload) {
     add(
       "electron runtime installed",
@@ -1121,6 +1168,10 @@ export async function cmdFix(
       | Target
       | undefined;
     const all = standardTasks(aioMode === "dep", primaryTarget);
+    // An EXISTING app's tests were written against the harness of its aio:
+    // the scaffold's `AIO_TEST_WIRE=strict` (am-cmd-create.ts) can turn one
+    // red, so a repair adds the task every older scaffold had.
+    all["test"] = "deno test -A";
     // The app's declared fleet decides which of them apply. Electron is also
     // inferred from imports/tasks: an app already running Electron ships it,
     // whether or not it says so in `client`/`build.targets`.
@@ -1352,11 +1403,16 @@ export async function cmdFix(
       `skipped (--no-download) — run \`${spelled}\` when online`,
     );
   } else if (entry && !dry) {
+    const lock = () =>
+      Deno.readTextFile(join(dir, "deno.lock")).catch(() => null);
+    const before = await lock();
     const r = await run("deno", ["cache", ...toCache], dir);
     add(
       "dependencies cached",
       r.ok ? "fixed" : "advise",
-      r.ok ? toCache.join(" ") : `deno cache failed: ${r.err}`,
+      r.ok
+        ? toCache.join(" ") + lockChangeNote(before, await lock())
+        : `deno cache failed: ${r.err}`,
     );
   } else if (entry) {
     add("dependencies cached", "would-fix", spelled);
@@ -1454,6 +1510,65 @@ export async function cmdFix(
           `(docs/build/versioning.md)`,
       );
     } else add("app version", "ok");
+  }
+
+  // `--harden` only. deno.json is this command's to write; `aio.run()` is
+  // app source, so its keys are spelled out and left to the author. Every
+  // line names exactly what is (or would be) written.
+  if (harden) {
+    const entry = await resolveEntry(dir);
+    const findings = hardenFindings(
+      cfg,
+      declaredTargets(cfg),
+      entry === null
+        ? null
+        : await Deno.readTextFile(join(dir, entry)).catch(() => null),
+      await ownsActivity(dir),
+    );
+    if (findings.length === 0) {
+      add("harden", "ok", "no undecided security switch applies to this app");
+    }
+    for (const f of findings) {
+      const name = `harden: ${f.key}`;
+      if (f.file === "entry") {
+        add(
+          name,
+          "advise",
+          `add ${f.write} to aio.run() in ${entry} — ${f.hint}`,
+        );
+      } else if (keepComments) {
+        add(
+          name,
+          "advise",
+          `${keepComments} — add ${f.write} by hand (comments would be ` +
+            `lost in a rewrite) — ${f.hint}`,
+        );
+      } else {
+        await repair(name, true, async () => {
+          const now = parseDenoJson(
+            await Deno.readTextFile(jsonPath),
+            jsonPath,
+          );
+          const build = (now.build ?? {}) as Record<string, unknown>;
+          const android = build.android && typeof build.android === "object"
+            ? build.android
+            : {};
+          await Deno.writeTextFile(
+            jsonPath,
+            JSON.stringify(
+              {
+                ...now,
+                build: f.key === "build.android.strict"
+                  ? { ...build, android: { ...android, strict: true } }
+                  : { ...build, strictPin: true },
+              },
+              null,
+              2,
+            ) + "\n",
+          );
+        }, `writes ${f.write} to deno.json — ${f.hint}`);
+      }
+    }
   }
 
   // Advisory: Deno version floor.

@@ -7,6 +7,7 @@
 // verb and worked in the other, and the brief had to teach an agent the odd
 // spelling (`ui/Card.tsx`). One rule now (`resolveFileArg`): the cwd first,
 // then the fallbacks in order, first that exists wins.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { resolveFileArg } from "../src/am/am-project.ts";

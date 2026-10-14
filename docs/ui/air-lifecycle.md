@@ -29,9 +29,12 @@ function JobsPanel() {
 Move the hooks above the `return`. `aiol` reports the shape in the source (after
 an early `return`, behind a condition, in a loop). At runtime the renderer
 reports it when the count changes between renders —
-`<JobsPanel> called 1 state hooks this render but 0 last render` — on
+`<JobsPanel> called 1 state hooks this render but 0 last render` — on the page's
 `console.error`, in dev on every such render and in a production build once per
-component, so it reaches the server log of a packaged app too.
+component. The page's console is forwarded to `~/.<appId>/logs/client.log`, so a
+packaged app's log has the line too. A hook called outside any render (from a
+timer, a promise, an event handler) is dropped with a `console.warn` naming it —
+every time in dev, once per hook in a production build.
 
 ---
 

@@ -7,6 +7,7 @@
 // releases it was being asked for. Both spellings are one act; this pins them
 // to it.
 
+import "./store-sandbox.ts";
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { pinTarget } from "../src/am/am-cmd-pin.ts";
 import { LATEST, MAIN } from "../src/am/am-versions.ts";

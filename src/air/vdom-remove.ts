@@ -6,10 +6,11 @@ import { _cleanupActions, _unbindSignalText } from "./vdom-helpers.ts";
 import { _detachRef } from "./vdom-create.ts";
 import { _componentName, _reportHookError } from "./hook-error.ts";
 import {
-  _devWarn,
   _domNodeCount,
   _hasRawHtml,
+  _MOVED,
   _SignalText,
+  _wrong,
   ErrorBoundary,
   Fragment,
   Portal,
@@ -260,8 +261,13 @@ export function _removeDomCleanup(
     _cleanupActions(vnode._dom as HTMLElement);
   }
   // AIO-58: Null element refs on cleanup (was missing — ref callbacks never got
-  // null on replace/unmount, leaking event listeners and DOM references)
-  if (typeof vnode.tag === "string" && vnode.props.ref) {
+  // null on replace/unmount, leaking event listeners and DOM references).
+  // Only a ref that was ATTACHED: an element that was never built (a portal
+  // that never mounted, a child behind the one that threw) has no `_dom`, and
+  // its ref was never given one — a `null` for it is a detach nothing
+  // preceded, and it takes a shared ref's node away from an element that is
+  // still on the page.
+  if (typeof vnode.tag === "string" && vnode.props.ref && vnode._dom) {
     _detachRef(vnode.props.ref, vnode._dom, _componentName(vnode.tag));
   }
   for (const child of _cleanupChildren(vnode)) {
@@ -288,33 +294,41 @@ export function removeDom(
   // Portal: remove children from target DOM
   if (typeof vnode === "object" && vnode.tag === Portal) {
     const target = vnode.props.target as Node;
-    // Every MOUNTED portal has an `_anchor` (see the Portal branch of
-    // `createDom`); one without it never put anything in its target. Walking
-    // it from `target.firstChild` treated the target's own content as this
-    // portal's: a hydration mismatch tears down the whole unmounted tree, and
-    // a `<Portal target={document.body}>Saved</Portal>` in it deleted the
-    // page's first body node (a site header outside the app) as its "text".
-    if (target && vnode._anchor) {
+    if (target) {
+      // THE one question of a portal's teardown: does it have a region in
+      // this target? Its region begins after `_anchor`, so it has one exactly
+      // while that comment is a child of the target. Two portals have none:
+      //
+      //  · one that never mounted (no anchor — every MOUNTED portal has one,
+      //    see the Portal branch of `createDom`). A hydration mismatch tears
+      //    down the whole unmounted tree, and a commit that threw is kept
+      //    with the children behind the throw never built. Walked from
+      //    `target.firstChild`, a `<Portal target={document.body}>Saved
+      //    </Portal>` deleted the page's first body node (a site header
+      //    outside the app) as its "text";
+      //  · one whose anchor has left the target and took the region with it:
+      //    the OTHER vnode of the same portal retired it (a boundary catching
+      //    on an update removes the old tree, then sweeps the half-diffed new
+      //    one — and the diff had already moved each signal child's effect
+      //    onto the NEW vnode). Walked as a removal, a signal child kept its
+      //    subscription for good (its detached text is no child of the
+      //    target) and a bare text was reported as one that "will stay on
+      //    the page forever".
+      //
+      // For both, nothing is left to remove and everything is left to
+      // release.
+      const anchor = vnode._anchor;
+      const region = anchor !== undefined && isChildOf(anchor, target);
       // Walk from the portal's own region anchor, not `target.firstChild` —
       // that is the OTHER portal's content when two share a target, and
       // removing this portal by it deleted their nodes instead of its own.
-      let cursor: Node | null = _advance(vnode._anchor, 1);
-      // An anchor that has left the target took the region with it: the OTHER
-      // vnode of the same portal retired it (a boundary catching on an update
-      // removes the old tree, then sweeps the half-diffed new one — and the
-      // diff had already moved each signal child's effect onto the NEW vnode).
-      // Nothing is left to remove, everything is left to release: walked as a
-      // removal, a signal child kept its subscription for good (its detached
-      // text is no child of the target) and a bare text was reported as one
-      // that "will stay on the page forever".
-      const gone = !isChildOf(vnode._anchor, target);
-      //
-      // Unless only the ANCHOR left (foreign code stripping comments): a child
-      // whose live node is still under the target is still on the page, and
-      // is removed as ever.
+      let cursor: Node | null = region ? _advance(anchor, 1) : null;
       for (const child of vnode.children) {
         const live = _liveFirstDom(child);
-        if (gone && !isChildOf(live, target)) {
+        // No region — unless only the ANCHOR left (foreign code stripping
+        // comments): a child whose live node is still under the target is
+        // still on the page, and is removed as ever.
+        if (!region && !isChildOf(live, target)) {
           if (typeof child === "object") _removeDomCleanup(child, ctx);
           continue;
         }
@@ -322,9 +336,7 @@ export function removeDom(
         cursor = _advance(at, _domNodeCount(child));
         removeDom(target, child, ctx, at);
       }
-      if (vnode._anchor && isChildOf(vnode._anchor, target)) {
-        target.removeChild(vnode._anchor);
-      }
+      if (region) target.removeChild(anchor);
       vnode._anchor = undefined;
     }
     return;
@@ -374,10 +386,11 @@ export function removeDom(
     }
     return;
   }
-  // Element: null ref before removing
+  // Element: null ref before removing — a ref that was attached (see
+  // `_removeDomCleanup`).
   if (
     typeof vnode === "object" && typeof vnode.tag === "string" &&
-    vnode.props.ref
+    vnode.props.ref && vnode._dom
   ) {
     _detachRef(vnode.props.ref, vnode._dom, _componentName(vnode.tag));
   }
@@ -385,13 +398,13 @@ export function removeDom(
   // position is its identity. Anything else that reaches here owns a `_dom`.
   const dom = getDom(vnode) ?? (typeof vnode !== "object" ? posDom : null);
   if (typeof vnode !== "object" && !dom) {
-    _devWarn(
+    _wrong(
       "remove-text-no-position",
       `A text child (${
         JSON.stringify(String(vnode))
       }) is being removed without its DOM position, so it will stay on the ` +
-        `page forever. The caller lost the positional cursor. This is an aio ` +
-        `bug; please report the component's child shape.`,
+        `page forever.${_MOVED}`,
+      ` The caller lost the positional cursor.`,
     );
   }
   if (dom && isChildOf(dom, parent)) {

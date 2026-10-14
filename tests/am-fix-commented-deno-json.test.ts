@@ -6,6 +6,7 @@
 // `am fix` exited 1). A commented deno.json is now treated like deno.jsonc —
 // advised, never rewritten (a JSON rewrite would destroy the comments) — and
 // a plain file with a trailing comma (JSONC, no comments) is repaired.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { cmdFix } from "../src/am/am-cmd-fix.ts";

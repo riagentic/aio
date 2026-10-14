@@ -9,7 +9,7 @@ android {
 
     defaultConfig {
         applicationId = "{{APPLICATION_ID}}"
-        minSdk = 24
+        minSdk = 29 // Android 10: the oldest whose WebView still gets updates
         targetSdk = 35
         versionCode = {{VERSION_CODE}}
         versionName = "{{VERSION_NAME}}"

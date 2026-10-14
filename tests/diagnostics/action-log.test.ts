@@ -71,9 +71,12 @@ Deno.test("action-log: skips the __exec marker, keeps the write-set", async () =
   await alog.flush();
 });
 
-Deno.test("action-log: actions.jsonl is 0600 — payloads are user data, like every other retaining sink", () =>
+Deno.test({
+  name:
+    "action-log: actions.jsonl is 0600 — payloads are user data, like every other retaining sink",
+  ignore: Deno.build.os === "windows", // POSIX mode bits do not exist on Windows
+}, () =>
   permissiveUmask(async () => {
-    if (Deno.build.os === "windows") return;
     const path = `${TEST_DIR}/actions-mode.jsonl`;
     // Pre-existing world-readable file (what every install before the fix has) —
     // the first append tightens it, matching the journal/checkpoint contract.

@@ -177,19 +177,24 @@ nothing louder.
 
 ### The shutdown flush, and who hears its verdict
 
-A clean shutdown (`am stop`, SIGTERM, `app.close()`) runs one last flush before
-the door closes. If SQLite refuses that final write, the refusal is logged as an
-error, `/__aio/health` reports `persist: { ok: false }` for as long as the
-process is still answering, and **`am stop` exits 1 naming the cell** —
-`am
-stop` is the operator's door and the one that returns the verdict. The
-process itself still exits 0 and `app.close()` still resolves: the process is
-leaving either way, and an exit code nobody reads is not a verdict. The same
-rule covers `am restart` (it prints `NOT SAVED` and still restarts) and
-`am snapshot load` (it flushes and reports `unsaved` before it says loaded).
-`journal: true` is the other half: a refused write is recoverable from the
-actions themselves on the next boot — nothing past the last clean write is
-committed, so the journal keeps every one of those actions and replays them.
+A clean shutdown (`am stop`, Ctrl-C, closing the window, `app.close()`; SIGTERM
+on Linux and macOS) runs one last flush before the door closes. A hard kill —
+`kill -9`, Task Manager, `taskkill /F`, and on Windows an `am kill` the app did
+not answer within 3 seconds (Windows has no SIGTERM, so `am kill` asks first and
+says `ended hard` when it had to end the process) — runs none
+([per OS](../basics/windows-macos.md#stopping-an-app)). If SQLite refuses that
+final write, the refusal is logged as an error, `/__aio/health` reports
+`persist: { ok: false }` for as long as the process is still answering, and
+**`am stop` exits 1 naming the cell** — `am
+stop` is the operator's door and the
+one that returns the verdict. The process itself still exits 0 and `app.close()`
+still resolves: the process is leaving either way, and an exit code nobody reads
+is not a verdict. The same rule covers `am restart` (it prints `NOT SAVED` and
+still restarts) and `am snapshot load` (it flushes and reports `unsaved` before
+it says loaded). `journal: true` is the other half: a refused write is
+recoverable from the actions themselves on the next boot — nothing past the last
+clean write is committed, so the journal keeps every one of those actions and
+replays them.
 
 ### What the SQLite settings buy
 
@@ -330,9 +335,11 @@ recovered instead of lost.
   `<cell>:__worker` in `am timeline`). A cell with any `redactActions` pattern
   has its batches' values withheld, because a batch carries no method name. A
   call is answered after the saves its batches owe, and a failed one makes its
-  reply `unsaved`. A batch carries no call either, so on a worker cell a failed
-  save marks every call in flight on that cell `unsaved` — a conservative
-  answer, never a false `ok` — where the main isolate answers per call.
+  reply `unsaved`. A batch names the calls that wrote it, so a failed save is
+  answered to those calls alone, as on the main isolate; a batch the worker
+  cannot name a call for (an `onInit` dispatch, an effect's follow-up) and a
+  call answered from another call's run (`concurrency: "first"`) keep the
+  conservative answer — every call in flight on the cell, never a false `ok`.
 - **A database that went back in time is never replayed onto.** Every compaction
   records what it dropped in `<journal>.base`. When the store's watermark is
   below that — `checkIntegrityOnBoot` restored `<db>.snapshot`, or a backup was
@@ -363,14 +370,15 @@ recovered instead of lost.
 
 ### The shutdown flush is bounded
 
-A clean stop (SIGINT/SIGTERM, `am stop`, `app.stop()`) runs a final
-`flushPersist()`. It is not unbounded: shutdown drains in-flight method calls
-for up to **3 s** (`DRAIN_TIMEOUT_MS`), then **everything after that shares one
-5 s budget** (`TEARDOWN_TIMEOUT_MS` in `src/server/shutdown-budget.ts`) — the
-final persist, diagnostics, your `onStop`, the lock, the server and the
-databases. A flush that runs out of budget is logged and abandoned, so a very
-large final write, or a slow `onStop` ahead of it, can leave the last window
-unwritten. A clean stop is a best effort with a stated ceiling, not a guarantee.
+A clean stop (Ctrl-C, `am stop`, `app.stop()`; SIGTERM on Linux and macOS) runs
+a final `flushPersist()`. It is not unbounded: shutdown drains in-flight method
+calls for up to **3 s** (`DRAIN_TIMEOUT_MS`), then **everything after that
+shares one 5 s budget** (`TEARDOWN_TIMEOUT_MS` in
+`src/server/shutdown-budget.ts`) — the final persist, diagnostics, your
+`onStop`, the lock, the server and the databases. A flush that runs out of
+budget is logged and abandoned, so a very large final write, or a slow `onStop`
+ahead of it, can leave the last window unwritten. A clean stop is a best effort
+with a stated ceiling, not a guarantee.
 
 The databases close last, with a floor of 0.2 s (`STORES_RESERVE_MS`): whatever
 came before them, they get at least that. It is added, not set aside — a stop
@@ -401,6 +409,11 @@ action, and `synchronous = FULL` costs an fsync per commit.
 
 Persistence errors are reported as `PERSIST_ERROR` through the diagnostic bus.
 They never crash the app — state continues in memory even if disk writes fail.
+
+A client call's reply carries `unsaved` when a save that call's own write owed
+failed. A call that wrote nothing owes no save and is answered a plain `ok`,
+sync or async, even while saves are failing — the app-wide verdict is
+`/__aio/health`'s `persist.ok`, `am persist`, and the reply of `am dispatch`.
 
 There is no per-value size cap — SQLite has no 64KiB limit. Very large snapshot
 values are still a smell: prefer `db:` tables for arrays of records.

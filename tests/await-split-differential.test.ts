@@ -17,6 +17,7 @@
 // a boundary.
 import { assertEquals } from "@std/assert";
 import { fuzzEnvInt } from "./fuzz-seed.ts";
+import { dealer, mulberry32 } from "./sync/properties/_prop.ts";
 import {
   ALIAS_KINDS,
   applyOp,
@@ -38,10 +39,12 @@ const SEED = fuzzEnvInt("FUZZ_SEED", 0x5eed5917) & 0x7fffffff;
 const ROUNDS = fuzzEnvInt("FUZZ_ROUNDS", 60, 1);
 
 Deno.test("differential: an awaited async method equals the same program split into sync methods", async () => {
-  let seed = SEED;
-  const rnd = () =>
-    (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const rnd = mulberry32(SEED);
   const pick = (n: number) => Math.floor(rnd() * n);
+  const seen = new Set<string>();
+  // Half the ops are dealt (every kind comes up), half picked (a kind can
+  // repeat inside one program).
+  const deal = dealer(rnd, OP_KINDS);
 
   for (let round = 0; round < ROUNDS; round++) {
     // A program is a list of CHUNKS; the async variant awaits between them,
@@ -50,11 +53,12 @@ Deno.test("differential: an awaited async method equals the same program split i
       Array.from(
         { length: 1 + pick(5) },
         () => ({
-          kind: OP_KINDS[pick(OP_KINDS.length)]!,
+          kind: pick(2) ? deal() : OP_KINDS[pick(OP_KINDS.length)]!,
           i: pick(9),
           v: pick(100),
         }),
       ));
+    for (const o of chunks.flat()) seen.add(o.kind);
     const repro = `FUZZ_SEED=${SEED} round ${round}: ${JSON.stringify(chunks)}`;
 
     const syncLog: unknown[] = [];
@@ -91,5 +95,9 @@ Deno.test("differential: an awaited async method equals the same program split i
     } finally {
       h.dispose();
     }
+  }
+  // A generator that stopped drawing a kind compares nothing about it.
+  if (ROUNDS >= 60) {
+    assertEquals(OP_KINDS.filter((k) => !seen.has(k)), [], "kinds never run");
   }
 });

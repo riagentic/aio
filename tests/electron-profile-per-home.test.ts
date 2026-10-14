@@ -13,12 +13,14 @@
 // a real boot with a non-default home, its Electron binary replaced by a
 // script that captures the generated main, read back out of what the launch
 // actually produced.
+import { childEnv } from "./e2e-app-harness.ts";
 import { writeDenoProgram } from "./fake-program-helper.ts";
 import { spec } from "./module-spec-helper.ts";
 import { assert, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
 import { tempDir } from "../src/testing/temp-dir.ts";
+import { aioTestRoot } from "../src/testing/test-strict.ts";
 import { electronProfileName } from "../src/electron/electron-shared.ts";
 
 const ROOT = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
@@ -35,7 +37,10 @@ Deno.test({
     // shell's, which Windows does not have.)
     const fake = await writeDenoProgram(
       join(dir, "electron"),
-      `Deno.copyFileSync(Deno.args[0], ${JSON.stringify(captured)});\n` +
+      `Deno.writeTextFileSync(${
+        JSON.stringify(captured + ".path")
+      }, Deno.args[0]);\n` +
+        `Deno.copyFileSync(Deno.args[0], ${JSON.stringify(captured)});\n` +
         `await new Promise((r) => setTimeout(r, 4000));\n`,
     );
 
@@ -78,11 +83,11 @@ Deno.test({
     const child = new Deno.Command(Deno.execPath(), {
       args: ["run", "-A", "src/app.ts", "--client=electron", `--port=${port}`],
       cwd: app,
-      env: {
+      env: childEnv({
         ELECTRON_PATH: fake,
         AIO_APPS_DIR: join(dir, "home"),
         DISPLAY: Deno.env.get("DISPLAY") ?? ":0",
-      },
+      }),
       stdout: "piped",
       stderr: "piped",
     }).spawn();
@@ -105,6 +110,15 @@ Deno.test({
         script,
         `app.name = ${JSON.stringify(want)}`,
         "the window must open the profile this HOME owns, not the title's",
+      );
+      // …and that profile is this RUN's, on every OS: the main script is
+      // written into it, so where the script was says where the profile is.
+      // (`childEnv()` — without it this was `~/.config/<profile>`, 178 of
+      // which sat in one developer's home.)
+      const at = await Deno.readTextFile(captured + ".path");
+      assert(
+        at.startsWith(aioTestRoot()) && at.includes(want),
+        `the window's profile is outside the test root: ${at}`,
       );
     } finally {
       try {

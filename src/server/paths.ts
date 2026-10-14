@@ -2,10 +2,12 @@
 // Pure functions for resolving KV, SQLite, UDS, and data directory paths.
 
 import {
+  basename,
   dirname,
   fromFileUrl,
   isAbsolute,
   join,
+  relative,
   resolve,
   SEPARATOR,
 } from "@std/path";
@@ -181,6 +183,23 @@ export function assetDirCandidates(dir: string, opts: {
   return embedded === fromCwd ? [fromCwd] : [fromCwd, embedded];
 }
 
+/** Is a deno.json `assets` value outside the project it is declared in — an
+ *  absolute path, or one that climbs out of `root`? THE one test, for the
+ *  build that refuses such a mount and the server that does not serve it.
+ *  Pure. */
+export function mountLeavesProject(root: string, dir: string): boolean {
+  const rel = relative(root, join(root, dir));
+  return isAbsolute(dir) || rel.startsWith("..") || isAbsolute(rel);
+}
+
+/** …and THE sentence for it: the build's refusal, the server's warning. */
+export function mountOutsideMessage(prefix: string, dir: string): string {
+  return `deno.json assets["${prefix}"] ("${dir}") is outside the ` +
+    `project. An artifact carries paths relative to the project root, ` +
+    `so this directory could not travel with it — move it inside the ` +
+    `project and point the mount at the copy.`;
+}
+
 /** Ordered `dist/` candidates for prod-detection in a COMPILED binary, most
  *  authoritative first. Pure (every input injected) so the ORDER — the part
  *  that broke — is unit-testable without compiling.
@@ -270,6 +289,45 @@ export function homedir(): string {
   return home;
 }
 
+/** Windows: `%HOME%` and `%USERPROFILE%` both set and naming DIFFERENT
+ *  folders — or null. {@linkcode homedir} prefers `HOME` on every OS, so with
+ *  a custom `HOME` (Git Bash, MSYS, a login script) an app's data, the aio
+ *  checkout and the version store all hang off `HOME`, while Explorer, the
+ *  Start menu and anything that asks Windows itself say "home" is
+ *  `USERPROFILE`. The rule is not changed here — that would move every such
+ *  user's data — it is only made visible. Compared as Windows compares paths:
+ *  case-blind, either slash, no trailing separator. Pure. */
+export function homeMismatch(
+  os: string = Deno.build.os,
+  env: (name: string) => string | undefined = (n) => Deno.env.get(n),
+): { used: string; other: string } | null {
+  if (os !== "windows") return null;
+  const used = env("HOME"), other = env("USERPROFILE");
+  if (!used || !other) return null;
+  const norm = (p: string) =>
+    p.replaceAll("/", "\\").replace(/\\+$/, "").toLowerCase();
+  return norm(used) === norm(other) ? null : { used, other };
+}
+
+/** {@linkcode homeMismatch} as the one sentence the boot report and
+ *  `am doctor` say, or null. */
+export function homeMismatchNote(
+  os: string = Deno.build.os,
+  env: (name: string) => string | undefined = (n) => Deno.env.get(n),
+): string | null {
+  const m = homeMismatch(os, env);
+  return m
+    ? `home: %HOME% (${m.used}) and %USERPROFILE% (${m.other}) differ — aio ` +
+      `uses %HOME%: app data and aio's versions live under ${m.used}, not ` +
+      `under the Windows profile folder — and so does the aio checkout, ` +
+      `unless one is kept at ${m.other}\\.local\\lib\\aio (an install before ` +
+      `1.0.20 cloned there whatever HOME said; it stays THE checkout). A ` +
+      `program started without that HOME (a shortcut, a scheduled task) ` +
+      `looks under ${m.other} instead and finds none of the app data. ` +
+      `Unset HOME, or set it for the whole account, to have one home`
+    : null;
+}
+
 /** LEGACY layout only — `~/.local/share/<appId>/`, where auth.db / app.key /
  *  data.kv lived before the one-directory move. Both remaining callers only
  *  LOOK for files here (the migration, and the old-KV import), so this must not
@@ -338,8 +396,11 @@ export function resolveSocketPath(
   if (os === "windows") {
     // A pipe NAME, not a file: no directory, no length limit, no unlink. The
     // lock key keeps the per-home identity exactly as the unix path does, so
-    // `am --home` reaches the instance whose lock it read.
-    return `${PIPE_PREFIX}aio-${heldLockKey(appId)}${kind ? `-${kind}` : ""}`;
+    // `am --home` reaches the instance whose lock it read — and the lock DIR's
+    // name carries the `AIO_APPS_DIR` scope, as the directory does for a
+    // socket file.
+    return PIPE_PREFIX +
+      _pipeName(basename(lockDir()), heldLockKey(appId), kind);
   }
   const dir = lockDir();
   const suffix = kind ? `.${kind}.sock` : ".sock";
@@ -372,6 +433,33 @@ export function resolveSocketPath(
     return join(fallbackDir, _fallbackSocketName(appId, sockPath, suffix));
   }
   return sockPath;
+}
+
+/** A local pipe's NAME (after `\\.\pipe\`), from the name of the lock dir
+ *  (`aio`, or `aio-<scope>` under `AIO_APPS_DIR`) and the lock key.
+ *
+ *  The pipe namespace is machine-wide and flat, so what a socket file gets
+ *  from the DIRECTORY it sits in has to be in the name. It was not:
+ *  `aio-<lockKey>` whatever the apps root, so two apps of one appId under two
+ *  `AIO_APPS_DIR`s asked for one pipe — the second one's bind failed and its
+ *  window was served the FIRST app's state (measured on Windows 11).
+ *
+ *  Unscoped, the name is byte-for-byte what it always was (`aio-<lockKey>`):
+ *  an installed app, its window, `am` and an older client keep finding each
+ *  other. Scoped, it is `aio+<scope>+<lockKey>` — `+` is in no scope
+ *  (`[A-Za-z0-9-]`), so a scoped name can never be an unscoped app's, whatever
+ *  that app is called. "Scoped" is any lock dir but `aio` itself: an apps
+ *  root with no ASCII letter or digit in it scopes the dir to `aio-`, an
+ *  EMPTY scope, and that is `aio++<lockKey>` — never the unscoped name.
+ *  Pure. @internal */
+export function _pipeName(
+  lockDirName: string,
+  key: string,
+  kind?: "http",
+): string {
+  const scoped = lockDirName !== "aio";
+  const scope = lockDirName.replace(/^aio-?/, "");
+  return (scoped ? `aio+${scope}+` : "aio-") + key + (kind ? `-${kind}` : "");
 }
 
 /** The fallback socket's NAME: a readable prefix of the appId plus a hash of

@@ -64,7 +64,15 @@ if (step === "write") {
   await (bag as any).add("x");
   await (boom as any).bump();
   await (secret as any).set("CP-SECRET-7731");
-  await new Promise((r) => setTimeout(r, 300));
+  // Until the checkpoint of the LAST action is on disk — not a fixed 300 ms,
+  // which a loaded machine outran (a full Windows run: no file at all yet).
+  const file = Deno.env.get("DIR") + "/logs/checkpoint.json";
+  for (let i = 0; i < 300; i++) {
+    try {
+      if (Deno.readTextFileSync(file).includes("secret:set")) break;
+    } catch { /* not written yet */ }
+    await new Promise((r) => setTimeout(r, 100));
+  }
 }
 console.log("STATE " + JSON.stringify(app.getState()));
 Deno.exit(0);

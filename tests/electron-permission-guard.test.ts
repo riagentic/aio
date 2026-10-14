@@ -10,6 +10,7 @@
 // generated fragment against a fake `app`/session, so what is asserted is what
 // the shell decides; the ELECTRON_E2E case at the bottom proves it in a real
 // Electron with a real `<webview>`.
+import { childEnv } from "./e2e-app-harness.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { tmplPermissionGuard } from "../src/electron/electron-shared.ts";
@@ -350,6 +351,29 @@ Deno.test("permissions: with electron.permissions the app page gets exactly the 
   assertStringIncludes(own!, '"clipboard-read": ["app"]');
 });
 
+// Deny-by-default already has a spelling: the EMPTY list. (`"strict"` was asked
+// for as a second one; it would be a synonym of this.)
+Deno.test("permissions: an empty electron.permissions denies everything — the app's own page included, fullscreen included", async () => {
+  const m = fakeMain({});
+  await m.ready();
+  const s = m.defaultSession;
+  for (
+    const p of [
+      "clipboard-read",
+      "clipboard-sanitized-write",
+      "media",
+      "notifications",
+      "geolocation",
+      "fullscreen",
+    ]
+  ) {
+    assertEquals(ask(s, win(), p, APP + "/"), false, p);
+    assertEquals(s.check!(win(), p, APP), false, p);
+    assertEquals(ask(s, guest, p, "https://dapp.example/"), false, p);
+  }
+  assert(m.warnings.some((w) => w.includes('"clipboard-read" DENIED')));
+});
+
 Deno.test("permissions: the accepted names are exactly the installed Electron's", async (t) => {
   let dts: string;
   try {
@@ -484,7 +508,7 @@ app.whenReady().then(async () => {
     const { stdout, stderr } = await new Deno.Command(ELECTRON_BIN, {
       // Fake camera + microphone, so a GRANT is visible on a box with none.
       args: [file, "--no-sandbox", "--use-fake-device-for-media-stream"],
-      env: { ...testDisplayEnv(), ELECTRON_ENABLE_LOGGING: "0" },
+      env: childEnv({ ...testDisplayEnv(), ELECTRON_ENABLE_LOGGING: "0" }),
       stdout: "piped",
       stderr: "piped",
     }).output();

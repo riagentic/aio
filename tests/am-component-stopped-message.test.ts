@@ -14,6 +14,7 @@
 // terminates the process. The id IS this project's — it is one of the
 // components — so the answer is the same as for a single-app project, naming
 // the part: `am start agent`.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";

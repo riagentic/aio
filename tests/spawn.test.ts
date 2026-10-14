@@ -17,19 +17,29 @@ import {
   assertStringIncludes,
 } from "@std/assert";
 import { sessionLeaderSpec, spawn } from "../src/server/spawn.ts";
-import { SLEEP_ARGS } from "./proc-helper.ts";
+import { processParents, SLEEP_ARGS } from "./proc-helper.ts";
 
 const posix = Deno.build.os !== "windows";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Is this pid alive? `Deno.kill(pid, "SIGCONT")` throws NotFound if not. */
-function alive(pid: number): boolean {
+/** Is this pid alive? `Deno.kill(pid, "SIGCONT")` throws NotFound if not;
+ *  Windows has no signal to probe with, so there the process table is read. */
+async function alive(pid: number): Promise<boolean> {
+  if (!posix) return (await processParents()).has(pid);
   try {
     Deno.kill(pid, "SIGCONT");
     return true;
   } catch {
     return false;
   }
+}
+
+/** `sh -c <script>` — or, where there is no `sh`, the same program written
+ *  for the runtime every OS running this has. */
+function program(sh: string, js: string): [string, { args: string[] }] {
+  return posix
+    ? ["sh", { args: ["-c", sh] }]
+    : [Deno.execPath(), { args: ["eval", js] }];
 }
 
 /** Wait until `pred` is true, or throw naming `what`. An observable wait — not
@@ -69,14 +79,22 @@ async function state(pid: number): Promise<string> {
  *  which does not need shared pipes. */
 const TREE =
   `sleep 300 >/dev/null 2>&1 & echo "child:$$"; echo "grandchild:$!"; wait`;
+const TREE_JS = `const g = new Deno.Command(Deno.execPath(), {
+  args: ${
+  JSON.stringify(SLEEP_ARGS)
+}, stdin: "null", stdout: "null", stderr: "null",
+}).spawn();
+console.log("child:" + Deno.pid); console.log("grandchild:" + g.pid);
+await g.status;`;
+const [TREE_CMD, TREE_OPTS] = program(TREE, TREE_JS);
 
 /** Spawn the tree and wait until the grandchild pid LINE arrives — not a
  *  duration. Lines are kept so a failure can name what the child said. */
 async function spawnTree() {
   const pids: Record<string, number> = {};
   const lines: string[] = [];
-  const h = await spawn("sh", {
-    args: ["-c", TREE],
+  const h = await spawn(TREE_CMD, {
+    ...TREE_OPTS,
     onLine: (l, which) => {
       lines.push(`${which}:${l}`);
       const m = l.match(/^(child|grandchild):(\d+)$/);
@@ -110,7 +128,10 @@ async function stopSpawn(
   const st = await h.kill();
   if (opts.grandchild !== undefined) {
     try {
-      await until(() => !alive(opts.grandchild!), `${label} grandchild gone`);
+      await until(
+        async () => !(await alive(opts.grandchild!)),
+        `${label} grandchild gone`,
+      );
     } catch (e) {
       throw new Error(
         `${(e as Error).message}\n── ${label} exit ── code ${st.code}` +
@@ -122,7 +143,6 @@ async function stopSpawn(
 
 Deno.test({
   name: "spawn: kill() reaps the whole TREE, not just the child",
-  ignore: !posix,
   fn: async () => {
     const { h, pids } = await spawnTree();
     try {
@@ -131,10 +151,10 @@ Deno.test({
         "number",
         "grandchild never started",
       );
-      assertEquals(alive(pids.grandchild!), true);
+      assertEquals(await alive(pids.grandchild!), true);
       await stopSpawn(h, { grandchild: pids.grandchild, label: "kill-tree" });
       assertEquals(
-        alive(pids.grandchild!),
+        await alive(pids.grandchild!),
         false,
         "the grandchild outlived kill() — this is the orphaned-GPU-worker bug: " +
           "signalling the child alone leaves the tree running",
@@ -183,7 +203,7 @@ Deno.test({
 
 Deno.test({
   name: "spawn: killing a PAUSED job works — SIGCONT goes first",
-  ignore: !posix,
+  ignore: !posix, // Windows has no SIGSTOP: pause()/resume() throw there
   fn: async () => {
     // A stopped process cannot handle SIGTERM. Without the CONT, this hangs
     // until the grace timer's SIGKILL — or forever, in a hand-rolled version
@@ -205,11 +225,11 @@ Deno.test({
       );
       if (status !== "TIMED OUT") {
         await until(
-          () => !alive(pids.grandchild!),
+          async () => !(await alive(pids.grandchild!)),
           `paused-kill grandchild gone (exit code ${status.code})`,
         );
       }
-      assertEquals(alive(pids.grandchild!), false);
+      assertEquals(await alive(pids.grandchild!), false);
     } finally {
       await h.kill().catch(() => {});
     }
@@ -218,13 +238,12 @@ Deno.test({
 
 Deno.test({
   name: "spawn: an AbortSignal kills the tree — cancelOn needs no plumbing",
-  ignore: !posix,
   fn: async () => {
     const ac = new AbortController();
     const pids: Record<string, number> = {};
     const lines: string[] = [];
-    const h = await spawn("sh", {
-      args: ["-c", TREE],
+    const h = await spawn(TREE_CMD, {
+      ...TREE_OPTS,
       signal: ac.signal,
       onLine: (l, which) => {
         lines.push(`${which}:${l}`);
@@ -237,12 +256,12 @@ Deno.test({
       ac.abort(); // this is what `s.$signal` does when cancelOn fires
       const st = await h.status;
       await until(
-        () => !alive(pids.grandchild!),
+        async () => !(await alive(pids.grandchild!)),
         `abort grandchild gone (exit code ${st.code}; lines: ${
           lines.join("|")
         })`,
       );
-      assertEquals(alive(pids.grandchild!), false);
+      assertEquals(await alive(pids.grandchild!), false);
     } finally {
       await h.kill().catch(() => {});
     }
@@ -251,14 +270,17 @@ Deno.test({
 
 Deno.test({
   name: "spawn: \\r progress lines arrive as they happen",
-  ignore: !posix,
   fn: async () => {
     // A progress bar rewrites ONE line and emits no \n for the whole job. A
     // reader that splits on \n alone shows nothing until the process exits,
     // which is the difference between a progress bar and a frozen window.
     const lines: string[] = [];
-    const h = await spawn("sh", {
-      args: ["-c", `printf '10%%\\r20%%\\r30%%\\n'`],
+    const [cmd, o] = program(
+      `printf '10%%\\r20%%\\r30%%\\n'`,
+      `Deno.stdout.writeSync(new TextEncoder().encode("10%\\r20%\\r30%\\n"))`,
+    );
+    const h = await spawn(cmd, {
+      ...o,
       onLine: (l, which) => {
         if (which === "stdout") lines.push(l);
       },
@@ -270,11 +292,14 @@ Deno.test({
 
 Deno.test({
   name: "spawn: stderr is streamed too, and the pgid marker never leaks",
-  ignore: !posix,
   fn: async () => {
     const seen: string[] = [];
-    const h = await spawn("sh", {
-      args: ["-c", `echo out; echo err >&2`],
+    const [cmd, o] = program(
+      `echo out; echo err >&2`,
+      `console.log("out"); console.error("err")`,
+    );
+    const h = await spawn(cmd, {
+      ...o,
       onLine: (l, w) => seen.push(`${w}:${l}`),
     });
     await h.status;
@@ -289,7 +314,7 @@ Deno.test({
 
 Deno.test({
   name: "spawn: the group id is the child's own, never this process's",
-  ignore: !posix,
+  ignore: !posix, // Windows has no process groups: the tree is walked by taskkill /T
   fn: async () => {
     // The whole safety argument rests on this: Deno spawns children into the
     // CALLER's process group, so a negative-pid signal on an ungrouped child
@@ -316,7 +341,6 @@ Deno.test({
 
 Deno.test({
   name: "spawn: a missing command fails loudly instead of hanging",
-  ignore: !posix,
   fn: async () => {
     // The launcher prints the marker and only then execs, so a bad command
     // exits after the marker — but a launcher that dies BEFORE it (bad cwd)
@@ -330,9 +354,8 @@ Deno.test({
 
 Deno.test({
   name: "spawn: a command that exits non-zero reports its code",
-  ignore: !posix,
   fn: async () => {
-    const h = await spawn("sh", { args: ["-c", "exit 3"] });
+    const h = await spawn(...program("exit 3", "Deno.exit(3)"));
     const s = await h.status;
     assertEquals([s.code, s.success], [3, false]);
   },
@@ -457,16 +480,23 @@ Deno.test({
 Deno.test({
   name:
     "spawn: stdin is EOF by default, a pipe on request, and a write after exit is refused",
-  ignore: !posix,
   fn: async () => {
     const silent: string[] = [];
-    const eof = await spawn("cat", { onLine: (l) => silent.push(l) });
+    // `cat`, or the runtime doing what it does.
+    const [cat, o] = posix ? ["cat", {}] : [Deno.execPath(), {
+      args: ["eval", "await Deno.stdin.readable.pipeTo(Deno.stdout.writable)"],
+    }];
+    const eof = await spawn(cat, { ...o, onLine: (l) => silent.push(l) });
     assertEquals((await eof.status).code, 0, "cat with EOF stdin exits 0");
     assertEquals(silent, [], "and read nothing");
     assertEquals(eof.stdin, undefined, "no pipe unless asked for");
 
     const lines: string[] = [];
-    const h = await spawn("cat", { stdin: true, onLine: (l) => lines.push(l) });
+    const h = await spawn(cat, {
+      ...o,
+      stdin: true,
+      onLine: (l) => lines.push(l),
+    });
     await h.stdin!.write("one\n");
     await h.stdin!.write(new TextEncoder().encode("two\n"));
     await h.stdin!.close();

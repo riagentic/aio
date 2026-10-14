@@ -91,7 +91,7 @@ export type CellWorkerDeps = {
   /** Apply patches the worker produced to the authoritative state. Runs through
    *  the normal dispatch path, so broadcast, persistence and time-travel see
    *  the change exactly as they see a local one. */
-  applyPatches: (cell: string, ops: Patch[]) => void;
+  applyPatches: (cell: string, ops: Patch[], by?: object[]) => void;
   /** Execute an effect the worker handed back (schedules, cross-cell actions). */
   runEffect: (effect: Msg) => void;
   prod: boolean;
@@ -367,7 +367,16 @@ export function createCellWorker(
           );
           return;
         }
-        deps.applyPatches(name, msg.ops);
+        // The calls that wrote it, as the action objects their callers hold
+        // (a call already answered is no longer here: the batch is nobody's).
+        deps.applyPatches(
+          name,
+          msg.ops,
+          msg.calls?.flatMap((id) => {
+            const a = inflight.get(id)?.action;
+            return a !== null && typeof a === "object" ? [a] : [];
+          }),
+        );
         return;
       case "effects":
         for (const e of msg.list) {

@@ -450,10 +450,11 @@ running build declares:
 Ops fold in **`server_ts` order — the order the server applied them** — and the
 `version` stamp decides only _when_ to migrate between them. (It used to be the
 sort key, which is the same order only while an older build never runs again. A
-downgrade quarantines the cell and keeps writing, stamping fresh ops with the
-older version, and those then sorted ahead of chronologically earlier ops: the
-replay folded a sequence that never happened. Reducers are not commutative, so
-that is a different state, kept forever.)
+downgrade quarantined the cell and kept writing — a quarantined cell refuses
+client writes now — stamping fresh ops with the older version, and those then
+sorted ahead of chronologically earlier ops: the replay folded a sequence that
+never happened. Reducers are not commutative, so that is a different state, kept
+forever.)
 
 A cell with a skipped or failed op is **quarantined** — one decider, two
 outcomes:
@@ -476,12 +477,19 @@ is written before its dispatch and a refusal deletes it after, so a server
 killed in between leaves the row of an op it refused (or had not decided). Each
 row carries a `settled` mark, written once the dispatch accepted the op and
 before anyone is told it landed. A cell's last row without the mark — and with
-no commit in the journal — was not acknowledged by the build that wrote it: if
-the method refuses it at boot, the row is removed with a warning naming the op,
-and its author's resend meets the same answer. A marked op that no longer folds
-is still a quarantine. A row an older build wrote has no mark, so it is never
-removed for you; when it is the cell's last row the refusal names the one
-statement that removes it, for the case where the method refuses it by design.
+no commit in the journal — was not acknowledged by the build that wrote it (one
+exception: when writing the mark failed twice, which is logged as an error, an
+acknowledged op is left in that state): if the method refuses it at boot, the
+row is removed with a warning naming the op, and its author's resend meets the
+same answer. A marked op that no longer folds is still a quarantine, with one
+known limit in 1.0.19: with the journal on and an action something listens to,
+an op whose intent line is in the journal and whose commit line is not (a power
+cut, a restored journal) is treated as in flight, and a refused one is removed
+even though it was marked. A row an older build wrote has no mark and is not
+removed for you, except by that same journal path, which removes a refused
+in-flight row whatever its mark; when it is the cell's last row the refusal
+names the one statement that removes it, for the case where the method refuses
+it by design.
 
 Two limits. An **older build run over this data** (a rollback) folds such an
 unmarked row and acknowledges its resend without marking it; if no later op
@@ -547,8 +555,9 @@ one promise:
 - v3 without `onMigrate`, prod: `nav` runs at its v2 snapshot (a new field at
   its default; the v2 ops are **not** folded), `accounts` is untouched,
   `log.error` says `QUARANTINED`, `am migrations` shows `sync-quarantined`, a
-  new op still lands in the log, and a server-origin write does **not** compact
-  the cell (its snapshot keeps `cell_version = 2`; the warning names it).
+  new client op is refused with `op-rejected` and is not stored, and a
+  server-origin write does **not** compact the cell (its snapshot keeps
+  `cell_version = 2`; the warning names it).
 - v1 booted against the v2 log (downgrade): the newer snapshot and ops are
   skipped, reported as `sync-quarantined` with `(downgrade)` in the message, and
   the newer ops stay on disk for the build that understands them.

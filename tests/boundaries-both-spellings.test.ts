@@ -10,6 +10,7 @@
 //
 // The gate reads relative paths (`src/`, `deno.json`), so a fixture tree with
 // a cwd of its own is a complete, hermetic subject.
+import "./store-sandbox.ts";
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 

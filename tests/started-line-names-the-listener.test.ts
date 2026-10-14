@@ -8,6 +8,7 @@
 //
 // Real `aio.run` children (the Electron binary is a stand-in that sleeps), so
 // the line under test is the one the shipped boot writes.
+import { childEnv } from "./e2e-app-harness.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
@@ -54,11 +55,11 @@ await new Promise(() => {});
       ...extraArgs,
     ],
     cwd: dir,
-    env: {
+    env: childEnv({
       ...Deno.env.toObject(),
       AIO_APPS_DIR: apps,
       ELECTRON_PATH: electron,
-    },
+    }),
     stdout: "piped",
     stderr: "piped",
   }).spawn();

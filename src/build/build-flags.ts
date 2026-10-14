@@ -106,7 +106,8 @@ export const FLEET_BOOL_FLAGS = [
   // `deno task build --analyze`, and the fleet refused it as unknown.
   "--analyze",
   // Start what was built and fail when it does not come up clean — see
-  // build/smoke.ts. `--smoke=strict` is the valued form below. The FLEET's
+  // build/smoke.ts. `--smoke=strict` / `--smoke=desktop` are the valued form
+  // below. The FLEET's
   // flag only: it runs after every target is placed, which no single-target
   // build ever sees (`flagHint` says so to a caller who passes it there).
   "--smoke",

@@ -22,6 +22,7 @@
 //
 // The whole point is that BOTH are caught before any verb runs, so no command
 // has to grow its own opinion about them.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { parseGlobalFlags } from "../src/am/am-utils.ts";
 import { fromFileUrl } from "@std/path";

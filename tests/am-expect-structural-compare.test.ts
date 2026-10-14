@@ -8,6 +8,7 @@
 //    text typed: `am expect label contains 1.50` checks for "1.5" (false PASS
 //    against "total: 1.5"), and `contains 1e3` checks for "1000" (false FAIL
 //    against "1e3 units").
+import "./store-sandbox.ts";
 import { assertEquals } from "@std/assert";
 import { cmdExpect, compareValue } from "../src/am/am-cmd-state.ts";
 import type { GlobalFlags } from "../src/am/am-types.ts";

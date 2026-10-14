@@ -2,6 +2,7 @@
 // rendering, and dry-run replay. Live paths hit a running app's trojan channel
 // (covered in am-timeline-e2e + timeline route tests); here we cover the pure
 // logic and the file-driven offline modes deterministically.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import {

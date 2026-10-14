@@ -1,3 +1,4 @@
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { resolve } from "@std/path";
 import { isPlacedBinary } from "./e2e-app-harness.ts";
@@ -107,7 +108,9 @@ Deno.test("denoJson: the scaffold emits the dieted task set EXACTLY", () => {
   // build = the fleet; compile = the fleet narrowed to the default target.
   assertStringIncludes(dj.tasks.build!, "build-all");
   assertStringIncludes(dj.tasks.compile!, "--targets=browser");
-  assertEquals(dj.tasks.test, "deno test -A");
+  // A new app's UI tests cross the wire (`testUI`'s `wire.strict`) — aio's
+  // default stays the harness of 1.0.19, for tests written against it.
+  assertEquals(dj.tasks.test, "AIO_TEST_WIRE=strict deno test -A");
   // BOTH halves, the same reasoning as `lint` below. `deno check` type-checks
   // and does not bundle, and in aio those have different answers — anything
   // server-only imported into a cell type-checks cleanly and then fails to
@@ -220,10 +223,7 @@ Deno.test("scaffold: counter + todo emit the expected src/-based files", () => {
     // "tokens" (nothing that paints), so a new app that said nothing would
     // render as raw user-agent HTML while its template markup assumes cards
     // and a page shell.
-    assertStringIncludes(
-      files["src/app.ts"]!,
-      'aio.run({ ui: { theme: "auto" } })',
-    );
+    assertStringIncludes(files["src/app.ts"]!, 'ui: { theme: "auto" }');
   }
   assertStringIncludes(
     scaffold("app", "counter", true)["src/cell.ts"]!,
@@ -487,7 +487,13 @@ for (const tpl of ["counter", "todo"] as const) {
 Deno.test({
   name: "am create --force: the flag survives the global parser and lands",
   async fn() {
-    const cwd = await Deno.makeTempDir({ prefix: "am-create-force-" });
+    // `tempDir`, not `Deno.makeTempDir`: it arms the store sandbox this
+    // process hands its children. `am create` provisions the pinned framework
+    // version, and run on its own (`deno test -A` on this file) this test put
+    // a checkout of the tree under test into the REAL
+    // `~/.local/lib/aio-versions/` — which every pinned app on the machine
+    // runs.
+    const cwd = await tempDir("am-create-force-");
     try {
       await Deno.mkdir(resolve(cwd, "myapp"));
       await Deno.writeTextFile(resolve(cwd, "myapp/keepme.txt"), "existing");
@@ -518,7 +524,7 @@ Deno.test({
       await Deno.stat(resolve(cwd, "myapp/deno.json")); // it scaffolded
       await Deno.stat(resolve(cwd, "myapp/keepme.txt")); // …without wiping
     } finally {
-      await Deno.remove(cwd, { recursive: true }).catch(() => {});
+      await dropTempDir(cwd);
     }
   },
 });

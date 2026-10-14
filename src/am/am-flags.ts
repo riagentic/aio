@@ -188,7 +188,14 @@ export const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
   // rewriting tasks) with `"dryRun":false`, and `am publish --chanel=beta`
   // published to the prod channel. Gated here like every verb that owns its
   // flags; the lists are exactly what am-cmd-fix.ts / am-cmd-publish.ts read.
-  fix: ["--dry-run", "--check", "--no-download", "--migrate-tasks", "--aio"],
+  fix: [
+    "--dry-run",
+    "--check",
+    "--no-download",
+    "--migrate-tasks",
+    "--harden",
+    "--aio",
+  ],
   publish: [
     "--channel",
     "--dir",
@@ -198,9 +205,11 @@ export const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
     "--key",
     "--data",
     "--no-data",
+    "--no-zip",
     "--version",
     "--notes",
     "--min-from",
+    "--patch-from",
     "--allow-dirty",
   ],
   uninstall: [],

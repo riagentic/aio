@@ -41,11 +41,15 @@
 
 import { assert, assertEquals } from "@std/assert";
 import { fuzzEnvInt } from "./fuzz-seed.ts";
+import { mulberry32 } from "./sync/properties/_prop.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { _resetAuthFails } from "../src/server/server-auth.ts";
 import { _resetTotpReplay, totpCode } from "../src/server/auth-totp.ts";
 
-const SEED = fuzzEnvInt("FUZZ_SEED", 0x5eed1e55) & 0x7fffffff;
+// The default is a seed whose 44 ops reach every loop-guarded invariant: at
+// this size about half of all seeds leave one dark (no account removed, no
+// role flipped), and the coverage step at the end refuses such a run by name.
+const SEED = fuzzEnvInt("FUZZ_SEED", 0x5eed1e56) & 0x7fffffff;
 const ROUNDS = fuzzEnvInt("FUZZ_ROUNDS", 2, 1);
 const STEPS = fuzzEnvInt("FUZZ_STEPS", 22, 1);
 
@@ -154,9 +158,7 @@ Deno.test({
     const allHits: Record<string, number> = {};
     try {
       for (let round = 0; round < ROUNDS; round++) {
-        let seed = (SEED + round * 7919) & 0x7fffffff;
-        const rnd = () =>
-          (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+        const rnd = mulberry32((SEED + round * 7919) & 0x7fffffff);
         const pick = <T>(xs: readonly T[]): T =>
           xs[Math.floor(rnd() * xs.length)]!;
 

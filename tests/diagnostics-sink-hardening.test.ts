@@ -63,9 +63,11 @@ async function stopLogger(l: AioLogger | null): Promise<void> {
 
 // ── 1. the client log was world-readable ─────────────────────────────
 
-Deno.test("client log: the file is owner-only, like every other log sink", () =>
+Deno.test({
+  name: "client log: the file is owner-only, like every other log sink",
+  ignore: Deno.build.os === "windows", // POSIX mode bits do not exist on Windows
+}, () =>
   permissiveUmask(async () => {
-    if (Deno.build.os === "windows") return; // no POSIX mode
     const dir = await Deno.makeTempDir({ prefix: "aio-clientlog-mode-" });
     await Deno.chmod(dir, 0o755); // the realistic case: a loose parent
     try {
@@ -91,9 +93,11 @@ Deno.test("client log: the file is owner-only, like every other log sink", () =>
     }
   }));
 
-Deno.test("client log: a file left loose by an older build is tightened", async () => {
+Deno.test({
+  name: "client log: a file left loose by an older build is tightened",
+  ignore: Deno.build.os === "windows", // POSIX mode bits do not exist on Windows
+}, async () => {
   // aio-ok(umask): the file is chmod'ed 0644 first and must END 0600 — chmod ignores the umask, so none can fake the tightening.
-  if (Deno.build.os === "windows") return;
   const dir = await Deno.makeTempDir({ prefix: "aio-clientlog-fix-" });
   try {
     const path = join(dir, "client.log");
@@ -122,9 +126,11 @@ Deno.test("client log: a file left loose by an older build is tightened", async 
   }
 });
 
-Deno.test("logs: the log directory itself is owner-only", () =>
+Deno.test({
+  name: "logs: the log directory itself is owner-only",
+  ignore: Deno.build.os === "windows", // POSIX mode bits do not exist on Windows
+}, () =>
   permissiveUmask(async () => {
-    if (Deno.build.os === "windows") return;
     const base = await Deno.makeTempDir({ prefix: "aio-logdir-mode-" });
     let logger: AioLogger | null = null;
     try {

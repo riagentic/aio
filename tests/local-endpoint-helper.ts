@@ -80,3 +80,25 @@ export async function listenBound(path: string): Promise<LocalListener> {
   if (Deno.build.os !== "windows") return listenLocal(path);
   return (await import("../src/server/win-pipe.ts")).listenPipe(path);
 }
+
+/** Wait until something is bound at `path` — without connecting to it (a
+ *  connection is an event for the server under test). Unix: the socket file.
+ *  Windows: the pipe's name in the pipe namespace, which lists like a
+ *  directory. For a listener that binds after `listenLocal` returned (the
+ *  peer-credential backend, the pipe backend, a spawned app). */
+export async function localBound(path: string): Promise<void> {
+  const pipe = path.startsWith(PIPE_PREFIX);
+  for (let i = 0; i < 500; i++) {
+    try {
+      if (
+        pipe
+          ? [...Deno.readDirSync(PIPE_PREFIX)].some((e) =>
+            e.name === path.slice(PIPE_PREFIX.length)
+          )
+          : Deno.lstatSync(path).isSocket
+      ) return;
+    } catch { /* not yet */ }
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  throw new Error(`listener never bound ${path}`);
+}

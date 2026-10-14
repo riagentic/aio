@@ -4,12 +4,13 @@
 // rebuildFromGit, unattended under `auto`) was a plain spawn — a credential
 // challenge ran the askpass GUI, and a stalled remote hung the update forever.
 import { assert, assertEquals, assertMatch } from "@std/assert";
-import { DELIMITER, join } from "@std/path";
+import { join } from "@std/path";
 import { gitLsRemote, gitSshEnv } from "../src/server/updates-check.ts";
 import { rebuildFromGit } from "../src/server/updates-rebuild.ts";
 import type { Log } from "../src/diagnostics/logger.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { EXE, writeProgram } from "./fake-program-helper.ts";
+import { descendantsIn, gitRunsFrom, processParents } from "./proc-helper.ts";
 
 const silentLog = {
   info: () => {},
@@ -22,13 +23,16 @@ const silentLog = {
 function silentHost() {
   const l = Deno.listen({ hostname: "127.0.0.1", port: 0 });
   const conns: Deno.Conn[] = [];
+  const { promise: connected, resolve } = Promise.withResolvers<void>();
   const loop = (async () => {
     try {
-      for await (const c of l) conns.push(c);
+      for await (const c of l) conns.push(c), resolve();
     } catch { /* aio-ok: listener closed by the test */ }
   })();
   return {
     url: `http://127.0.0.1:${(l.addr as Deno.NetAddr).port}`,
+    /** Resolves when a client — git's transport helper — has connected. */
+    connected,
     async [Symbol.asyncDispose]() {
       l.close();
       for (const c of conns) c.close();
@@ -37,32 +41,16 @@ function silentHost() {
   };
 }
 
-/** Every live descendant of this process (Linux `/proc`). */
-function descendants(): number[] {
-  const kids = new Map<number, number[]>();
-  for (const e of Deno.readDirSync("/proc")) {
-    if (!/^\d+$/.test(e.name)) continue;
-    try {
-      const stat = Deno.readTextFileSync(`/proc/${e.name}/stat`);
-      const ppid = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
-      kids.set(ppid, [...(kids.get(ppid) ?? []), Number(e.name)]);
-    } catch { /* aio-ok: the process exited mid-scan */ }
-  }
-  const out: number[] = [];
-  const walk = (p: number) =>
-    (kids.get(p) ?? []).forEach((c) => (out.push(c), walk(c)));
-  walk(Deno.pid);
-  return out;
-}
+/** Every live descendant of this process. */
+const descendants = async () => descendantsIn(await processParents(), Deno.pid);
 
-function alive(pid: number): boolean {
-  try {
-    const stat = Deno.readTextFileSync(`/proc/${pid}/stat`);
-    return stat.slice(stat.lastIndexOf(")") + 2)[0] !== "Z";
-  } catch {
-    return false; // aio-ok: gone
-  }
-}
+// The deadline under test. Windows has no /proc: one look at its process
+// table takes seconds, and the clone must still be running when it is taken.
+const STALL_MS = Deno.build.os === "windows" ? 12_000 : 1500;
+
+/** For a git that is expected to FAIL at once (a stand-in `ssh` exits 255):
+ *  long enough that the deadline is never what ended it. */
+const PATIENT_MS = 60_000;
 
 /** No core.sshCommand from the machine this runs on. */
 const noUserConfig = {
@@ -95,32 +83,46 @@ async function withEnv<T>(
 Deno.test({
   name:
     "git rebuild: a clone from a stalled remote hits its deadline and leaves no process",
-  ignore: Deno.build.os !== "linux", // descendants are read from /proc
   async fn() {
     await using host = silentHost();
     const work = await tempDir("aio-rebuild-stall-");
     try {
-      const before = new Set(descendants());
+      const before = new Set(await descendants());
       const t0 = Date.now();
       const pending = rebuildFromGit({
         source: `${host.url}/repo.git`,
         ref: "main",
         workDir: work,
         log: silentLog,
-        timeoutMs: 1500,
+        timeoutMs: STALL_MS,
       });
-      await new Promise((r) => setTimeout(r, 1000));
-      const spawned = descendants().filter((p) => !before.has(p));
+      // git's transport helper is up (and git, its parent) once the silent
+      // host has a connection.
+      await host.connected;
+      const spawned = (await descendants()).filter((p) => !before.has(p));
       assert(spawned.length >= 2, `saw only ${spawned.length} process(es)`);
       const r = await pending;
       assert(!r.ok, "a stalled clone must not succeed");
-      assertMatch(r.error, /made no progress for 1\.5s/);
-      assert(Date.now() - t0 < 10_000, `took ${Date.now() - t0}ms`);
+      assertMatch(
+        r.error,
+        new RegExp(
+          `made no progress for ${STALL_MS / 1000}s`.replace(".", "\\."),
+        ),
+      );
+      assert(
+        Date.now() - t0 < STALL_MS + 8500,
+        `took ${Date.now() - t0}ms`,
+      );
+      const stillRunning = async () => {
+        const live = await processParents();
+        return spawned.filter((p) => live.has(p));
+      };
       const t1 = Date.now();
-      while (spawned.some(alive) && Date.now() - t1 < 3000) {
+      let left = await stillRunning();
+      while (left.length > 0 && Date.now() - t1 < 3000) {
         await new Promise((r) => setTimeout(r, 50));
+        left = await stillRunning();
       }
-      const left = spawned.filter(alive);
       assert(left.length === 0, `still running: ${left.join(", ")}`);
     } finally {
       await dropTempDir(work);
@@ -134,9 +136,10 @@ Deno.test({
   async fn() {
     const dir = await tempDir("aio-rebuild-askpass-");
     const marker = join(dir, "asked");
-    const askpass = join(dir, "askpass.sh");
-    await Deno.writeTextFile(askpass, `#!/bin/sh\ntouch "${marker}"\necho x\n`);
-    await Deno.chmod(askpass, 0o755);
+    // A program every OS can run (a real executable on Windows): were it a
+    // `.sh` there, "never ran" would hold whatever git was told.
+    const askpass = join(dir, `askpass${EXE}`);
+    await writeProgram(askpass, `#!/bin/sh\ntouch "${marker}"\necho x\n`);
     const ac = new AbortController();
     const server = Deno.serve(
       { hostname: "127.0.0.1", port: 0, signal: ac.signal, onListen() {} },
@@ -193,7 +196,6 @@ Deno.test("gitSshEnv: BatchMode + keepalives unless the user chose their own ssh
 Deno.test({
   name:
     "git over ssh: the poll and the clone both hand ssh BatchMode + keepalives",
-  ignore: Deno.build.os === "windows", // OPEN(windows): git there never ran the stand-in `ssh` put first on PATH, so what it is handed went unseen
   async fn() {
     const dir = await tempDir("aio-git-ssh-env-");
     const argv = join(dir, "argv");
@@ -204,26 +206,34 @@ Deno.test({
       join(bin, "ssh" + EXE),
       `#!/bin/sh\necho "$@" >> "${argv}"\nexit 255\n`,
     );
-    const path = `${bin}${DELIMITER}${Deno.env.get("PATH") ?? ""}`;
+    const first = gitRunsFrom(bin);
     const source = "ssh://nobody@127.0.0.1/repo.git";
     try {
       await withEnv(
         {
-          PATH: path,
+          ...first,
           GIT_SSH_COMMAND: undefined,
           GIT_SSH: undefined,
           ...noUserConfig,
         },
         async () => {
-          assert(!(await gitLsRemote(source, "main", 10_000)).ok);
+          // A deadline no first start of a just-written program reaches: at
+          // 10 s a busy Windows ended the poll before the stand-in `ssh` had
+          // recorded anything (one call seen, the clone's), and `!ok` could
+          // not tell that from the refusal this test is about. It fails in
+          // about a second either way.
+          const ls = await gitLsRemote(source, "main", PATIENT_MS);
+          assert(!ls.ok);
+          assert(!/did not answer within/.test(ls.error), ls.error);
           const r = await rebuildFromGit({
             source,
             ref: "main",
             workDir: join(dir, "work"),
             log: silentLog,
-            timeoutMs: 10_000,
+            timeoutMs: PATIENT_MS,
           });
           assert(!r.ok);
+          assertMatch(r.error, /git clone failed/);
         },
       );
       const calls = (await Deno.readTextFile(argv)).trim().split("\n");
@@ -235,8 +245,8 @@ Deno.test({
       // The user's own ssh command is left exactly as they set it.
       await Deno.remove(argv);
       await withEnv(
-        { PATH: path, GIT_SSH_COMMAND: "ssh -o User=mine", ...noUserConfig },
-        () => gitLsRemote(source, "main", 10_000),
+        { ...first, GIT_SSH_COMMAND: "ssh -o User=mine", ...noUserConfig },
+        () => gitLsRemote(source, "main", PATIENT_MS),
       );
       const theirs = (await Deno.readTextFile(argv)).trim();
       assertMatch(theirs, /-o User=mine/);

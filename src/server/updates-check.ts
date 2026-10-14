@@ -24,6 +24,7 @@ import { neutralCwd, outlivingParent } from "./no-console.ts";
 import {
   identity,
   made,
+  moved,
   OLD_STAGE_AGE_MS,
   record,
   sumOf,
@@ -564,7 +565,12 @@ const kindAbsentUntil = new Map<string, number>();
  *  second full wait. Only a 404 or 410 — the channel saying "no such file" —
  *  is believed for `KIND_ABSENT_MS`; any other status (a 403 of a private
  *  bucket, a 429, a 5xx) reads the platform's manifest this time and asks
- *  again next check. `etagFor` is the cached validator for a URL, if any. */
+ *  again next check — and believed only while the platform's manifest is one
+ *  this install can use: when that is the `.exe`'s (`binary`), the release was
+ *  published without its `.zip` and every check is refused until the publisher
+ *  adds it, so the kind manifest is asked for again on the next check instead
+ *  of a day (or a restart) later. `etagFor` is the cached validator for a
+ *  URL, if any. */
 export async function fetchInstallManifest(
   platformUrl: string,
   installed: InstalledTarget,
@@ -580,10 +586,13 @@ export async function fetchInstallManifest(
   if ((kindAbsentUntil.get(kind) ?? 0) > Date.now()) return read(platformUrl);
   const own = await read(kind);
   if (own.got.kind !== "error" || !own.got.absent) return own;
-  if (own.got.absent === "no-such-file") {
+  const plain = await read(platformUrl);
+  const refused = plain.got.kind === "ok" &&
+    plain.got.manifest.target === "binary";
+  if (own.got.absent === "no-such-file" && !refused) {
     kindAbsentUntil.set(kind, Date.now() + KIND_ABSENT_MS);
   }
-  return read(platformUrl);
+  return plain;
 }
 
 /** Fetch and parse a manifest. `file:` URLs skip conditional requests — there
@@ -786,7 +795,7 @@ async function writeAll(file: Deno.FsFile, data: Uint8Array): Promise<void> {
 
 /** Sizes a human can act on: bytes while they are countable, MB once they
  *  are not. "0.0 MB" told a test author nothing about a 15-byte artifact. */
-const MB = (n: number) =>
+export const MB = (n: number) =>
   n < 1_000_000 ? `${n} bytes` : `${(n / 1_000_000).toFixed(1)} MB`;
 
 /** Download an artifact, verifying its size and digest as the bytes arrive.
@@ -828,6 +837,11 @@ export async function downloadArtifact(opts: {
   /** The data directory of the app this download is for: what is made beside
    *  the install is recorded there before it is made. */
   owner?: string;
+  /** The artifact's bytes, made on this machine (a patch applied to what is
+   *  installed) instead of fetched from `url`: staged, counted and digested
+   *  exactly as fetched ones are — where they came from changes nothing
+   *  about what they must be. */
+  bytes?: Uint8Array;
 }): Promise<{ ok: true; path: string } | { ok: false; error: string }> {
   if (
     !Number.isInteger(opts.expectSize) || opts.expectSize <= 0
@@ -895,19 +909,20 @@ export async function downloadArtifact(opts: {
   };
   try {
     arm();
-    const res = await fetch(opts.url, {
+    const res = opts.bytes ? null : await fetch(opts.url, {
       redirect: "follow",
       signal: opts.signal
         ? AbortSignal.any([opts.signal, stall.signal])
         : stall.signal,
     });
-    if (!res.ok || !res.body) {
+    if (res && (!res.ok || !res.body)) {
       await res.body?.cancel();
       return {
         ok: false,
         error: `${res.status} ${res.statusText} from ${opts.url}`,
       };
     }
+    const body = opts.bytes ? slices(opts.bytes) : res!.body!;
     const hash = createHash("sha256");
     let seen = 0;
     // Whole percents only: each report is a dispatch, a persist and a
@@ -915,7 +930,7 @@ export async function downloadArtifact(opts: {
     let reported = -1;
     const file = await Deno.open(staged, { createNew: true, write: true });
     try {
-      for await (const chunk of res.body) {
+      for await (const chunk of body) {
         seen += chunk.length;
         if (seen > opts.expectSize) {
           // Returning cancels the stream; see readCapped.
@@ -987,6 +1002,9 @@ export async function downloadArtifact(opts: {
       });
     }
     await moveFile(staged, opts.dest);
+    // …where NTFS may have given it the creation time of a file removed
+    // from that name seconds ago: the record follows (`moved`).
+    if (opts.owner) moved(opts.owner, opts.dest);
     return { ok: true, path: opts.dest };
   } catch (e) {
     return {
@@ -1001,6 +1019,16 @@ export async function downloadArtifact(opts: {
   } finally {
     clearTimeout(stallTimer);
     if (!done) await Deno.remove(stage, { recursive: true }).catch(() => {});
+  }
+}
+
+/** `bytes` a few MiB at a time, each piece after a turn of the event loop —
+ *  hashing and writing a whole artifact in one go would hold the app still
+ *  for as long as it takes. */
+async function* slices(bytes: Uint8Array): AsyncGenerator<Uint8Array> {
+  for (let at = 0; at < bytes.length; at += 4 << 20) {
+    await new Promise((r) => setTimeout(r, 0));
+    yield bytes.subarray(at, at + (4 << 20));
   }
 }
 
@@ -1076,8 +1104,8 @@ export async function fileSha256(path: string): Promise<string> {
 /** End a git AND every helper it spawned: its process group on POSIX
  *  (spawned `detached`, it leads one), `taskkill /T` on Windows, where ending
  *  a process never ends its children. Never blocks: taskkill is spawned, not
- *  awaited — `outputSync` froze the event loop for as long as it ran, and a
- *  spawned taskkill still finishes when this is called on the way out.
+ *  awaited — `outputSync` froze the event loop for as long as it ran. (The
+ *  exit path does not call this on Windows: see the `unload` listener.)
  *  Returns taskkill's own end (Windows), for a caller that has time to see
  *  its helper out. */
 function killGitTree(pid: number): Promise<unknown> | void {
@@ -1111,8 +1139,54 @@ function killGitTree(pid: number): Promise<unknown> | void {
  *  `unload`, which ends each tree here. */
 const liveGit = new Set<number>();
 addEventListener("unload", () => {
-  for (const pid of liveGit) killGitTree(pid);
+  if (liveGit.size === 0) return;
+  if (Deno.build.os !== "windows") {
+    for (const pid of liveGit) killGitTree(pid);
+    return;
+  }
+  // Windows, on the way OUT: the one place a kill must be synchronous. A
+  // spawned `taskkill /T` walks the tree from git's pid, and git — a plain
+  // child — is ended WITH this process, before a taskkill that was only
+  // started here has looked: it then finds no such pid and the helpers git
+  // spawned (4 of them, measured on Windows 11) wait on the stalled host for
+  // good. ONE taskkill for every live git, and only when there is one, so an
+  // ordinary exit pays nothing; it is a local call that ends processes and
+  // waits on no one.
+  const pids = [...liveGit];
+  let said: string | null;
+  try {
+    const o = new Deno.Command("taskkill", {
+      args: ["/T", "/F", ...pids.flatMap((pid) => ["/PID", `${pid}`])],
+      cwd: neutralCwd(),
+      stdin: "null",
+      stdout: "null",
+      stderr: "piped",
+    }).outputSync();
+    said = _exitKillSaid(pids, o.code, new TextDecoder().decode(o.stderr));
+  } catch (e) {
+    said = _exitKillSaid(pids, null, `${e}`);
+  }
+  // aio-ok: the process is leaving — a levelled line is queued for a log
+  // file nobody will flush; the console is the one place left to say it.
+  if (said) console.error(said);
 });
+
+/** What the exit path says when its `taskkill` did not end the live gits, or
+ *  null when there is nothing to say: it ended them (0), or they were gone
+ *  already (128, "not found" — the check finished as the app was leaving).
+ *  `code` null: taskkill could not be run at all. Pure. @internal */
+export function _exitKillSaid(
+  pids: readonly number[],
+  code: number | null,
+  detail: string,
+): string | null {
+  if (code === 0 || code === 128) return null;
+  return `[aio] updates: the update check's git (pid ${pids.join(", ")}) ` +
+    `could not be ended on the way out — ${
+      code === null ? "taskkill did not run" : `taskkill exited ${code}`
+    }: ${detail.trim() || "it said nothing"}. Its helper processes ` +
+    `(git-remote-https, ssh) may still be running: end them in Task Manager.`;
+}
 
 /** What ssh is told for a background git, or nothing when the user chose
  *  their own ssh. `GIT_SSH_COMMAND` outranks `core.sshCommand` and `GIT_SSH`,

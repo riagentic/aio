@@ -15,6 +15,7 @@
 // The same shape is already recorded one comment above the fix: `am log
 // --client` read "a relative path no aio version has ever written", so it
 // answered "(no client log yet)" for every app that has ever existed.
+import "./store-sandbox.ts";
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { logPathFor } from "../src/am/am-cmd-inspect.ts";

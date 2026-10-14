@@ -10,6 +10,7 @@
 //     leave no stray `~/.pc-dev` and no ghost lock; `am instances` sees it
 //     right after the restart; bare `am status` names the profile;
 //     `am logs pc@dev` reads its log.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";

@@ -211,5 +211,11 @@ jobs:
       # and the packaged AppImage's doors hold.
       - name: Hosts (server · standalone · packaged Electron)
         run: deno task test:hosts
+      # The perf GATE (the `bench` step in the gates job only measures). The
+      # floors are 2x what the release workstation measures, so a hosted runner
+      # more than 2x slower is red here for its hardware: the step prints the
+      # machine's load and measures a red metric twice more before it fails.
+      - name: Perf gate (each metric's p10 against its committed floor)
+        run: deno task check:bench
       - name: Lab (fresh ubuntu container — docker is on the runner)
         run: deno task lab --scenario=install,create-dev,run-sh

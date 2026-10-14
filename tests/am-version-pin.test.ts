@@ -10,10 +10,12 @@
 // a git worktree of the install clone, with `dep/aio` pointed at it. These tests
 // drive the real thing — a real clone, real tags, real worktrees — because the
 // whole value is that it works on a machine that has never seen the app.
-import { assert, assertEquals } from "@std/assert";
-import { tempDir } from "../src/testing/temp-dir.ts";
+import "./store-sandbox.ts";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { join } from "@std/path";
 import {
+  allowScriptsDrift,
   compareVersions,
   currentLink,
   ensureVersion,
@@ -26,6 +28,7 @@ import {
   readPin,
   refOfLink,
   removeVersion,
+  rewriteAllowScripts,
   sortVersions,
   syncFrameworkDeps,
   versionPath,
@@ -355,3 +358,169 @@ Deno.test("pin: the framework's own dep versions are synced into the app", async
     await s.cleanup();
   }
 });
+
+// ── allowScripts follows the imports ─────────────────────────────────────────
+// A field report: `am pin` moved `imports.esbuild` 0.24.2 → 0.25.12 and left
+// `allowScripts` on `npm:esbuild@0.24.2`. Deno matches that list by exact
+// version, so the new package's install script was skipped without a word.
+
+Deno.test("allowScripts: an exact entry whose package is imported at another exact version is drift; nothing else is", () => {
+  const imports = {
+    esbuild: "npm:esbuild@0.25.12",
+    electron: "npm:electron@44.5.1",
+    "@scope/pkg": "npm:@scope/pkg@2.0.0",
+    immer: "npm:immer@^10",
+  };
+  assertEquals(
+    allowScriptsDrift({
+      imports,
+      allowScripts: [
+        "npm:esbuild@0.24.2",
+        "npm:electron@44.5.1", // in step
+        "npm:@scope/pkg@1.9.0",
+        "npm:esbuild", // bare: matches every version
+        "npm:immer@10.1.0", // a ranged import names no one version
+        "npm:sharp@0.33.0", // not imported: the app's own business
+      ],
+    }),
+    [
+      { from: "npm:esbuild@0.24.2", to: "npm:esbuild@0.25.12" },
+      { from: "npm:@scope/pkg@1.9.0", to: "npm:@scope/pkg@2.0.0" },
+    ],
+  );
+  // The object spelling's `allow` list; `deny` is never touched.
+  assertEquals(
+    allowScriptsDrift({
+      imports,
+      allowScripts: {
+        allow: ["npm:esbuild@0.24.2"],
+        deny: ["npm:electron@44.4.1"],
+      },
+    }),
+    [{ from: "npm:esbuild@0.24.2", to: "npm:esbuild@0.25.12" }],
+  );
+  // Two aliases at two versions: no single answer, so none is given.
+  assertEquals(
+    allowScriptsDrift({
+      imports: { a: "npm:esbuild@0.25.12", b: "npm:esbuild@0.24.0" },
+      allowScripts: ["npm:esbuild@0.24.2"],
+    }),
+    [],
+  );
+  for (const allowScripts of [undefined, true, [], "npm:esbuild@0.24.2"]) {
+    assertEquals(allowScriptsDrift({ imports, allowScripts }), []);
+  }
+});
+
+Deno.test("allowScripts: the rewrite stays inside the allowScripts value", () => {
+  const text = `{
+  "imports": { "old": "npm:esbuild@0.24.2", "esbuild": "npm:esbuild@0.25.12" },
+  "allowScripts": ["npm:esbuild@0.24.2", "npm:sharp@0.33.0"]
+}`;
+  const next = rewriteAllowScripts(text, [
+    { from: "npm:esbuild@0.24.2", to: "npm:esbuild@0.25.12" },
+  ]);
+  assertStringIncludes(next, '"old": "npm:esbuild@0.24.2"');
+  assertStringIncludes(
+    next,
+    '"allowScripts": ["npm:esbuild@0.25.12", "npm:sharp@0.33.0"]',
+  );
+});
+
+/** A stand-in for a provisioned framework checkout: its deno.json, and the
+ *  one source line the tested Electron is read from. */
+async function frameworkAt(electron: string): Promise<string> {
+  const fw = await tempDir("aio-fw-scripts-");
+  await Deno.writeTextFile(
+    join(fw, "deno.json"),
+    JSON.stringify({ imports: { esbuild: "npm:esbuild@0.25.12" } }),
+  );
+  await Deno.mkdir(join(fw, "src", "electron"), { recursive: true });
+  await Deno.writeTextFile(
+    join(fw, "src", "electron", "electron-runtime-fetch.ts"),
+    `export const DEFAULT_ELECTRON_VERSION = "${electron}";\n`,
+  );
+  return fw;
+}
+
+for (
+  const [name, text] of [
+    [
+      "deno.json",
+      JSON.stringify(
+        {
+          imports: {
+            esbuild: "npm:esbuild@0.24.2",
+            electron: "npm:electron@44.4.1",
+          },
+          allowScripts: [
+            "npm:electron@44.4.1",
+            "npm:esbuild@0.24.2",
+            "npm:sharp@0.33.0",
+          ],
+        },
+        null,
+        2,
+      ),
+    ],
+    [
+      "deno.jsonc",
+      `{
+  // the app's own config
+  "imports": {
+    "esbuild": "npm:esbuild@0.24.2", // aio's
+    "electron": "npm:electron@44.4.1",
+  },
+  "allowScripts": [
+    "npm:electron@44.4.1", // the runtime download
+    "npm:esbuild@0.24.2",
+    "npm:sharp@0.33.0",
+  ],
+}
+`,
+    ],
+  ] as const
+) {
+  Deno.test(`pin: the dep sync moves the allowScripts entries of the packages it moves, and reports them (${name})`, async () => {
+    const dir = await tempDir("aio-pin-scripts-");
+    const fw = await frameworkAt("44.5.1");
+    try {
+      await Deno.writeTextFile(join(dir, name), text);
+      const changes = await syncFrameworkDeps(dir, fw);
+      assertEquals(changes, [
+        {
+          key: "esbuild",
+          from: "npm:esbuild@0.24.2",
+          to: "npm:esbuild@0.25.12",
+        },
+        {
+          key: "electron",
+          from: "npm:electron@44.4.1",
+          to: "npm:electron@44.5.1",
+        },
+        {
+          key: "allowScripts",
+          from: "npm:electron@44.4.1",
+          to: "npm:electron@44.5.1",
+        },
+        {
+          key: "allowScripts",
+          from: "npm:esbuild@0.24.2",
+          to: "npm:esbuild@0.25.12",
+        },
+      ]);
+      const after = await Deno.readTextFile(join(dir, name));
+      assert(!after.includes("0.24.2") && !after.includes("44.4.1"), after);
+      assertStringIncludes(after, '"npm:sharp@0.33.0"');
+      if (name === "deno.jsonc") {
+        assertStringIncludes(after, "// the runtime download");
+        assertStringIncludes(after, "// the app's own config");
+      }
+      // Idempotent — and an entry that drifted on its own is not the pin's.
+      assertEquals(await syncFrameworkDeps(dir, fw), []);
+    } finally {
+      await dropTempDir(fw);
+      await dropTempDir(dir);
+    }
+  });
+}

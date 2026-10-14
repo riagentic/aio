@@ -2,6 +2,7 @@
 // the UI client's (its User-Agent, carried on the roster as `mac`) — not of the
 // machine running `am`. A Linux `am` driving a Safari tab sent Ctrl+K, which a
 // Mac app's `mod` shortcut does not answer.
+import "./store-sandbox.ts";
 import { assertEquals } from "@std/assert";
 import { cmdTrigger } from "../src/am/am-cmd-inspect.ts";
 import { _resetInstanceVerify } from "../src/am/am-http.ts";

@@ -1,5 +1,6 @@
 // `am top`: live runtime observability. Tests the pure frame
 // renderer + fmtBytes + the metrics route enrichment (per-cell state sizes).
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import {
   fmtBytes,

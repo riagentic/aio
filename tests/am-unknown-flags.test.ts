@@ -6,6 +6,7 @@
 // PATH and answered with the value at that path (undefined) — a typo reported
 // as an absent value. The flags now live in one table (src/am/am-flags.ts) and
 // one gate in `main()` reads it.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
   didYouMean,

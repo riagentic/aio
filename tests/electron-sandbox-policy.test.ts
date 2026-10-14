@@ -178,6 +178,8 @@ Deno.test("electron config: every key of the block reaches the window's meta", (
     guestDownloads: true,
     permissions: { "clipboard-sanitized-write": ["app"] },
     allowLocalPeers: true,
+    ignoreDebugEnv: true,
+    strictPin: true,
   };
   const on = electronMetaPolicy(set) as Record<string, unknown>;
   const off = electronMetaPolicy(undefined) as Record<string, unknown>;

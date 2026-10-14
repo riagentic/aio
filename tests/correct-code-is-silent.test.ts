@@ -13,6 +13,7 @@
 // — clicks every button, types into every field and changes every select,
 // three rounds over, and requires ZERO warnings and errors. A new warning
 // that fires on the code aio itself teaches turns this red with its text.
+import "./store-sandbox.ts";
 import { assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import { testUI } from "../src/cell-test.ts";

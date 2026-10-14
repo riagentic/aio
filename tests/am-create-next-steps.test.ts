@@ -1,6 +1,7 @@
 // `am create` ends with the commands that take a fresh app to "running, and
 // seen" — in the human output AND the JSON an agent reads. The first run is
 // the step agents postpone (a field report: 13.7 min to the first start).
+import "./store-sandbox.ts";
 import { assertEquals } from "@std/assert";
 import { nextSteps } from "../src/am/am-cmd-create.ts";
 

@@ -105,8 +105,10 @@ export function _getTransport(): Transport | null {
  *  @internal Cross-module wiring — not public API, stripped from the snapshot. */
 export function setSyncHandler(
   handler: ((action: { type: string; payload?: unknown }) => boolean) | null,
-): void {
+): typeof handler {
+  const prev = _syncHandler;
   _syncHandler = handler;
+  return prev; // for a caller that puts it back (testUI)
 }
 
 /** Set the abstract transport (WS adapter, IPC adapter, etc). */

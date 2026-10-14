@@ -69,14 +69,18 @@ Two things that are NOT true of it:
   them in `xvfb-run -a`, and see
   [Headless and VM hosts](../clients/electron.md#headless-and-vm-hosts-aio_electron_args)
   for the switch set a GPU-less runner needs.
-- **A browser e2e needs a browser.** `ubuntu-latest` ships Chrome; other runners
-  do not.
+- **A browser e2e needs a browser.** `ubuntu-latest` ships Chrome. aio looks for
+  one in the usual Linux places and in `/Applications` on macOS; on a Windows
+  runner (and anywhere else) set `CHROMIUM_BIN` to the browser's path.
 
 ## Building the other targets
 
 `deno task compile` builds the default target. `deno task build` builds every
-target in `deno.json`'s `build.targets` — and a native target has to be built
-**on** its platform:
+target in `deno.json`'s `build.targets`. Most of them cross-build from one Linux
+runner (`--platforms=…` —
+[what cross-compiles](targets.md#build-for-other-operating-systems----platforms));
+what a runner of the target OS adds is that the artifact is **run** there, and
+on macOS that the `.app` is signed and packed into a `.dmg`:
 
 ```yaml
 build:
@@ -88,19 +92,28 @@ build:
 ```
 
 macOS is the one worth paying for even on a small project: it is the only real
-signal for a `.app` bundle, and nothing on Linux reproduces it.
+signal for a `.app` bundle, and nothing on Linux reproduces it. A Linux AppImage
+is the one package that must be built on its own OS and CPU.
 
 ## Caching
 
-Deno caches to `~/.cache/deno`. Restoring it turns a cold two-minute resolve
-into seconds:
+Deno's cache is in a different place on each OS — `~/.cache/deno` on Linux,
+`~/Library/Caches/deno` on macOS, `%LOCALAPPDATA%\deno` on Windows (`deno info`
+prints it). Pin it with `DENO_DIR` so one cache step fits every runner;
+restoring it turns a cold two-minute resolve into seconds:
 
 ```yaml
-- uses: actions/cache@v4
-  with:
-    path: ~/.cache/deno
-    key: deno-${{ runner.os }}-${{ hashFiles('deno.lock') }}
+env:
+  DENO_DIR: ${{ github.workspace }}/.deno-cache
+steps:
+  - uses: actions/cache@v4
+    with:
+      path: .deno-cache
+      key: deno-${{ runner.os }}-${{ hashFiles('deno.lock') }}
 ```
+
+Add `.deno-cache/` to `.gitignore` if you also run the workflow's commands
+locally with that variable set.
 
 Commit `deno.lock`. Without it the cache key changes on every run and the
 dependency set is not pinned — two problems with one fix.

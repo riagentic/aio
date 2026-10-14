@@ -18,11 +18,14 @@ import path per symbol; the `aio/build` re-exports are gone, and
 
 ```sh
 deno task ship keygen                    # once, ever — writes it outside the repo
-deno task publish --key=~/.aio/keys/<app>-release-key.json
+deno task publish                        # signs with the key keygen wrote
 ```
 
 `keygen` writes the private key to `~/.aio/keys/<app>-release-key.json` and
-prints that path with the PUBLIC half.
+prints that path with the PUBLIC half. `publish` and `ship` use that file when
+it exists; `--key=<path>` names another. A leading `~/` is expanded to your home
+directory (a shell does not expand `~` after `=`, so aio does); `~user/…` is
+refused by name — write that path in full.
 
 **Do not redirect it.** Sending its output to a file captures the printed
 summary — valid JSON, a `publicKey`, and no private half — which looks like a

@@ -4,6 +4,7 @@
 import { enc } from "../protocol/envelope.ts";
 import { degraded } from "../diagnostics/degraded.ts";
 import { upstreamRendererNoise } from "../diagnostics/upstream-noise.ts";
+import { _isServerLogLine } from "../diagnostics/logger-format.ts";
 import type { ClientLogEntry } from "../air/dom-inspector-types.ts";
 
 /** Returns whether the frame reached the wire, when the transport can say.
@@ -191,6 +192,10 @@ export function _forward(
   // printing them (`_deliverDiag`, marked "[aio:diag]") must not loop them
   // back as a log frame or every diagnostic lands in the file twice.
   if (typeof args[0] === "string" && args[0].startsWith("[aio:diag]")) return;
+  // In one process with its server (the in-process harness) this console is
+  // the server's too: a line its logger prints is not the page's to send
+  // back. Never true in a browser — see `_isServerLogLine`.
+  if (_isServerLogLine()) return;
   _forwarding = true;
   try {
     const entry: ClientLogEntry = {

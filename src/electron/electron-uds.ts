@@ -319,6 +319,7 @@ ${tmplRendererDiagnostics(true)}
   };
   let down = false, lastErrCode = null; // report a backend outage ONCE, not per retry
   const _ipcQueue = [], IPC_QUEUE_MAX = 100; // AIO-284: offline queue
+  let _ipcDropped = 0; // sends refused by the full queue in THIS outage
   let closing = false;
   // close-to-tray (ui.tray) turned this close into a hide one listener
   // earlier; that is not the app going away, so it must not read as one.
@@ -666,6 +667,10 @@ ${tmplRendererDiagnostics(true)}
       // connection: open native dialogs owned by the window (see _openDialog).
       sock.write('{"v":2,"t":"type","d":{"kind":"electron","caps":["dialog"]}}\\n');
       while (_ipcQueue.length > 0 && sock && !sock.destroyed) sock.write(_ipcQueue.shift() + '\\n');
+      if (_ipcDropped > 0) {
+        console.warn("[aio:electron] backend is back — " + _ipcDropped + " message(s) the page sent while it was away were DROPPED (the offline queue holds " + IPC_QUEUE_MAX + "); those actions never reached the server.");
+        _ipcDropped = 0;
+      }
       if (!closing && rendererReady) { win.webContents.send('__aio:open'); _pump(); }
       _handshakeWatch(sock);
     });
@@ -894,7 +899,11 @@ ${tmplRendererDiagnostics(true)}
 
   ipcMain.on('__aio:send', (_event, json) => {
     const s = sock;
-    if (s && !s.destroyed) {
+    // \`connecting\` is NOT connected: a write into a socket whose connect
+    // attempt then fails dies with it (ERR_SOCKET_CLOSED_BEFORE_CONNECTION) —
+    // a send lost with no word, once per reconnect attempt of an outage. It
+    // waits in the queue, which 'connect' flushes in order.
+    if (s && !s.destroyed && !s.connecting) {
       s.write(json + '\\n', (err) => {
         if (err && !closing && sock === s) {
           s.destroy();
@@ -904,6 +913,10 @@ ${tmplRendererDiagnostics(true)}
       });
     } else if (_ipcQueue.length < IPC_QUEUE_MAX) {
       _ipcQueue.push(json);
+    } else if (_ipcDropped++ === 0) {
+      // Said at the FIRST drop of an outage (the count follows on reconnect):
+      // a user action discarded without a word reads as an app that ignored it.
+      console.warn("[aio:electron] the backend is not connected and the offline queue is full (" + IPC_QUEUE_MAX + " messages) — what the page sends from here on is DROPPED until it reconnects.");
     }
   });
 

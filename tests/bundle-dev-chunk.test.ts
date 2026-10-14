@@ -25,7 +25,10 @@
 // somebody names `dev-something.ts` without anyone making that argument.
 import { assert, assertEquals } from "@std/assert";
 import { bundleClient } from "../src/build/client-bundle.ts";
-import { DEV_CHUNK_URL } from "../src/build/esbuild-plugin.ts";
+import {
+  DEV_CHUNK_URL,
+  isFrameworkDevAir,
+} from "../src/build/esbuild-plugin.ts";
 import {
   ESBUILD_SPEC,
   stopEsbuildService,
@@ -53,6 +56,33 @@ const DEV_ONLY = [
   "src/air/ui-remote.ts",
   "src/air/ui-surface.ts",
   "src/air/ui-trigger.ts",
+  // the renderer's own dev layer: `air/dev-hooks.ts` imports `dev-air.ts`
+  // STATICALLY (so every runtime that runs source has it from its first
+  // line) and the browser bundler answers that import with an empty record
+  // (`DEV_AIR_RE` in esbuild-plugin.ts). Each is observe-only and returns —
+  // or is only called — under `isDevMode()`:
+  "src/air/dev-air.ts",
+  "src/air/dev-a11y.ts", // the accessibility lint and its role tables
+  "src/air/control-drift.ts", // a controlled input left showing unstored text
+  "src/air/dev-events.ts", // the known-event list and the typo lint over it
+  "src/air/dev-keys.ts", // missing / mixed / duplicate keys
+  "src/air/dev-align.ts", // the child-alignment walk after every diff
+  "src/air/dev-burst.ts", // the render-burst tripwire and its three messages
+] as const;
+
+/** What the probe app's own `src/ui/air/dev-air.ts` exports. */
+const APP_OWN = "app-owned-dev-air-marker";
+
+/** One sentence from each dev-layer module, as it would appear in the bundle.
+ *  The module list above reads esbuild's metafile; this reads the OUTPUT, so a
+ *  check that came back by being copied into a bundled file is caught too. */
+const DEV_PROSE = [
+  'missing "alt" attribute',
+  "the handler did not store the typed",
+  "the handler will never fire",
+  "children without keys",
+  "the child reconciler desynced",
+  "times in under a second",
 ] as const;
 
 /** Modules that must STAY in the bundle. Their absence would make production
@@ -107,9 +137,17 @@ export const counter = cell("counter", {
     await Deno.writeTextFile(
       `${dir}/src/App.tsx`,
       `import { counter } from "./cell.ts";
+import { OWN } from "./ui/air/dev-air.ts";
 export default function App() {
-  return <button type="button" onClick={() => counter.increment()}>{counter.count}</button>;
+  return <button type="button" title={OWN} onClick={() => counter.increment()}>{counter.count}</button>;
 }`,
+    );
+    // An app's OWN file that happens to be named like the framework's dev
+    // layer — the bundler cuts that one by name, and must not cut this.
+    await Deno.mkdir(`${dir}/src/ui/air`, { recursive: true });
+    await Deno.writeTextFile(
+      `${dir}/src/ui/air/dev-air.ts`,
+      `export const OWN = ${JSON.stringify(APP_OWN)};`,
     );
     await Deno.writeTextFile(
       `${dir}/src/app.ts`,
@@ -167,6 +205,43 @@ Deno.test({
         "bundle). Reach it through `devHooks` / `loadDevChunk()` " +
         "(src/air/dev-hooks.ts) instead of importing it statically, and put " +
         "the module in src/browser/dev-diagnostics.ts.",
+    );
+  },
+});
+
+Deno.test({
+  name:
+    "dev chunk: an app's own …/air/dev-air.ts is bundled — only the framework's is cut",
+  async fn() {
+    const { code } = await probe();
+    assert(
+      code.includes(APP_OWN),
+      "the app's own air/dev-air.ts was answered with the empty dev-layer " +
+        "stub: its export is `undefined` in dist/app.js",
+    );
+    assert(isFrameworkDevAir(`${ROOT}src/air/dev-air.ts`));
+    assert(!isFrameworkDevAir(`${ROOT}src/air/vdom.ts`));
+    assert(!isFrameworkDevAir(`${ROOT}no/such/air/dev-air.ts`));
+  },
+});
+
+Deno.test({
+  name: "dev chunk: none of the dev layer's prose is in the production bundle",
+  async fn() {
+    const { code } = await probe();
+    assertEquals(
+      DEV_PROSE.filter((line) => code.includes(line)),
+      [],
+      "a dev-only message is in dist/app.js — the check that says it was " +
+        "bundled (or copied into a bundled module). It belongs in the dev " +
+        "layer: src/air/dev-air.ts.",
+    );
+    // …and the seam is what is left: the render path still ASKS, on a slot
+    // that is null here. A bundle with no call sites would pass the lines
+    // above by having lost the checks in dev too.
+    assert(
+      /\.checkKeys\?\.\(/.test(code) && /\.renderBurst\?\.\(/.test(code),
+      "the bundle no longer calls the dev hooks — the seam is gone",
     );
   },
 });

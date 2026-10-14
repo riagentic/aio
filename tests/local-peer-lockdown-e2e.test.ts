@@ -3,10 +3,11 @@
 //
 // A real `aio.run` app is booted the way a production desktop app runs
 // (`--prod --client=electron`, local socket, no TCP port) with a STAND-IN
-// window: `$ELECTRON_PATH` names a script that becomes a small Deno program,
-// which reads the socket paths out of the generated Electron main script it is
-// handed — exactly what the real window uses — and opens a session. No window
-// is ever opened on any display.
+// window: `$ELECTRON_PATH` names a program that is a small Deno program
+// (a script that `exec`s it; on Windows, which has no `exec`, the program
+// compiled), which reads the socket paths out of the generated Electron main
+// script it is handed — exactly what the real window uses — and opens a
+// session. No window is ever opened on any display.
 //
 // This test process is the adversary: another process of the SAME user. It
 // enumerates EVERY socket in the app's lock dir — not the ones it expects, the
@@ -16,21 +17,27 @@
 // socket beside it upgraded the same process to a WebSocket, handed it the
 // full state and dispatched its action.
 //
-// Linux only: the stand-in is a `sh` script and the lock dir is enumerated
-// through the filesystem. macOS shares the code path (unverified there);
-// Windows pipes are not enumerable this way.
+// The doors are unix sockets in the app's lock dir, enumerated through the
+// filesystem; on Windows they are named pipes, enumerated through the pipe
+// namespace. What only Linux has is said where it is asserted: the
+// non-dumpable process, and the refusal that names a wrapper (`/proc`).
 import {
   assert,
   assertEquals,
+  assertMatch,
   assertRejects,
   assertStringIncludes,
 } from "@std/assert";
-import { dirname, fromFileUrl, join } from "@std/path";
+import { basename, dirname, fromFileUrl, join } from "@std/path";
 import { realElectronBin } from "../src/electron/electron-spawn.ts";
 import { localPeerLockdownPlan } from "../src/server/aio-server.ts";
+import { modeBitsAreMeaningful } from "../src/server/dir-permissions.ts";
+import { isPipePath, PIPE_PREFIX } from "../src/server/local-listen.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { childEnv } from "./e2e-app-harness.ts";
+import { connectRW, localIdle } from "./local-endpoint-helper.ts";
+import { spec } from "./module-spec-helper.ts";
 import { permissiveUmask } from "./permissive-umask.ts";
 
 const ROOT = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
@@ -38,6 +45,7 @@ const NOTE = "hkept-e2e-note";
 const ROUTE_BODY = "route-body-e2e";
 const enc = new TextEncoder();
 const dec = new TextDecoder();
+const WIN = Deno.build.os === "windows";
 
 // ── The claim, as a table ────────────────────────────────────────────────────
 
@@ -109,6 +117,9 @@ Deno.test("lockdown plan: the claim is printed only when the sockets are the onl
  *  given on stdout. Reconnects when the server stays silent — the same
  *  handshake watch the real window runs. */
 const WINDOW_TS = `
+import { connectRW } from ${
+  JSON.stringify(spec(join(ROOT, "tests", "local-endpoint-helper.ts")))
+};
 const script = Deno.readTextFileSync(Deno.args[0]);
 const lit = (name) => {
   const k = "const " + name + " = ";
@@ -120,7 +131,7 @@ const say = (s) => console.log("[window] " + s);
 const te = new TextEncoder(), td = new TextDecoder();
 say("pid " + Deno.pid);
 async function route() {
-  const c = await Deno.connect({ transport: "unix", path: HTTP_SOCK });
+  const c = await connectRW(HTTP_SOCK);
   await c.write(te.encode("GET /api/hello HTTP/1.1\\r\\nHost: app\\r\\nConnection: close\\r\\n\\r\\n"));
   let out = ""; const b = new Uint8Array(65536);
   try { while (true) { const n = await c.read(b); if (n === null) break; out += td.decode(b.subarray(0, n)); } } catch { /* closed */ }
@@ -128,7 +139,7 @@ async function route() {
   say("http " + out.split("\\r\\n")[0] + " | " + (out.split("\\r\\n\\r\\n")[1] ?? "").trim());
 }
 for (let attempt = 0; attempt < 20; attempt++) {
-  const c = await Deno.connect({ transport: "unix", path: SOCK });
+  const c = await connectRW(SOCK);
   let spoke = false, acted = false, buf = "";
   const watch = setTimeout(() => { if (!spoke) { say("no handshake — reconnecting"); try { c.close(); } catch { /* closed */ } } }, 2000);
   const b = new Uint8Array(1 << 16);
@@ -155,16 +166,23 @@ for (let attempt = 0; attempt < 20; attempt++) {
 }
 `;
 
-type Fixture = { dir: string; app: string; home: string; stub: string };
+type Fixture = {
+  dir: string;
+  app: string;
+  home: string;
+  stub: string;
+  /** The app's id. */
+  id: string;
+};
 
-async function fixture(): Promise<Fixture> {
+async function fixture(id = "myapp"): Promise<Fixture> {
   const dir = await tempDir("peer-e2e-");
   const app = join(dir, "app");
   await Deno.mkdir(join(app, "src"), { recursive: true });
   const head = JSON.parse(await Deno.readTextFile(join(ROOT, "deno.json")));
   const imports: Record<string, string> = {};
   for (const [k, v] of Object.entries(head.imports as Record<string, string>)) {
-    imports[k] = v.startsWith("./") ? `${ROOT}/${v.slice(2)}` : v;
+    imports[k] = v.startsWith("./") ? spec(`${ROOT}/${v.slice(2)}`) : v;
   }
   await Deno.writeTextFile(
     join(app, "deno.json"),
@@ -182,7 +200,7 @@ const c = cell("c", {
   methods: { inc(s: { n: number }) { s.n++; } },
 });
 await aio.run({
-  appId: "myapp",
+  appId: ${JSON.stringify(id)},
   cells: [c],
   persist: false,
   routes: { "/api/hello": () => new Response(${JSON.stringify(ROUTE_BODY)}) },
@@ -201,6 +219,9 @@ await aio.run({
 });
 `,
   );
+  if (WIN) {
+    return { dir, app, home: join(dir, "home"), stub: await winStub(), id };
+  }
   await Deno.writeTextFile(join(dir, "window.ts"), WINDOW_TS);
   // `exec`: the stand-in BECOMES the process the server spawned, as Electron
   // does. (The wrapper that does not is its own case below.)
@@ -210,7 +231,30 @@ await aio.run({
     `#!/bin/sh\nexec '${Deno.execPath()}' run -A '${dir}/window.ts' "$@"\n`,
   );
   await Deno.chmod(stub, 0o755);
-  return { dir, app, home: join(dir, "home"), stub };
+  return { dir, app, home: join(dir, "home"), stub, id };
+}
+
+let _winStub: Promise<string> | undefined;
+/** Windows: the stand-in as ONE executable — the process the server spawns
+ *  must itself be the window, and nothing there becomes another program in
+ *  place. Compiled once per run; its directory goes with the process. */
+function winStub(): Promise<string> {
+  return _winStub ??= (async () => {
+    const dir = await tempDir("peer-e2e-window-");
+    const src = join(dir, "window.ts");
+    const exe = join(dir, "window-standin.exe");
+    await Deno.writeTextFile(src, WINDOW_TS);
+    const out = await new Deno.Command(Deno.execPath(), {
+      args: ["compile", "-A", "--no-check", "--no-config", "-o", exe, src],
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    assert(
+      out.success,
+      `the stand-in window did not compile: ${dec.decode(out.stderr)}`,
+    );
+    return exe;
+  })();
 }
 
 type Running = {
@@ -307,6 +351,11 @@ function boot(
 
 // ── The adversary ────────────────────────────────────────────────────────────
 
+/** The adversary opens a dozen connections at once, and every one of them
+ *  gets in: a burst is the pipe host's to absorb (`PIPE_SPARE_INSTANCES`,
+ *  `PIPE_BUSY_WAIT_MS` in win-pipe.ts), as a unix socket's backlog does. */
+const connect = connectRW;
+
 /** Open `path`, send `bytes`, and return everything received until the peer
  *  closes, `done` says enough arrived, or `ms` passes. */
 async function exchange(
@@ -315,7 +364,7 @@ async function exchange(
   ms: number,
   done?: (got: string) => boolean,
 ): Promise<string> {
-  const c = await Deno.connect({ transport: "unix", path });
+  const c = await connect(path);
   let got = "";
   const timer = setTimeout(() => {
     try {
@@ -429,7 +478,7 @@ const RAW_HTTP: [string, string][] = [
 
 /** Attack ONE socket with every protocol, whatever it is for. Throws on the
  *  first thing a foreign process must not get. */
-async function attack(sock: string): Promise<void> {
+async function attack(sock: string, appId: string): Promise<void> {
   const leaks = (s: string) => s.includes(NOTE) || s.includes(ROUTE_BODY);
 
   // 1. The WebSocket upgrade — the door that handed out state and dispatched.
@@ -466,7 +515,7 @@ async function attack(sock: string): Promise<void> {
   // request that never ends. On the door that speaks HTTP every one is the
   // SAME answer — 403, decided at accept, before a byte is parsed — and the
   // connection is closed, never held. On the state socket they are noise.
-  const isHttpDoor = sock.endsWith(".http.sock");
+  const isHttpDoor = httpDoor(sock);
   const raw = await Promise.all(RAW_HTTP.map(async ([name, bytes]) => ({
     name,
     res: await exchange(sock, bytes, 6000),
@@ -542,7 +591,7 @@ async function attack(sock: string): Promise<void> {
       assertEquals(r.d.status, 200, `${what}: ${r.d.body}`);
       assertEquals(
         JSON.parse(r.d.body),
-        { status: "healthy", appId: "myapp" },
+        { status: "healthy", appId },
         `${what} must say only "up" and "which app"`,
       );
     } else {
@@ -554,7 +603,47 @@ async function attack(sock: string): Promise<void> {
   }
 }
 
-const linuxOnly = Deno.build.os !== "linux";
+/** The boot line that names the state door: a socket, or a pipe. */
+const DOOR = /transport: (?:UDS|named pipe) at (\S+)/;
+
+/** Is `sock` the door that speaks HTTP (`<app>.http.sock`, the `-http` pipe)? */
+const httpDoor = (sock: string) =>
+  sock.endsWith(isPipePath(sock) ? "-http" : ".http.sock");
+
+/** The HTTP door beside the state door `main`. */
+const httpDoorOf = (main: string) =>
+  isPipePath(main) ? `${main}-http` : main.replace(/\.sock$/, ".http.sock");
+
+/** Every local door of the app whose state door is `main` — found, not
+ *  assumed: each socket in its lock dir; on Windows each pipe that carries
+ *  its name (a pipe has no directory, and the namespace is the machine's). */
+async function doors(main: string): Promise<string[]> {
+  const socks: string[] = [];
+  if (isPipePath(main)) {
+    // By the SCOPE (`aio+<scope>+…`, the fixture's own apps root), not by
+    // the names expected of this app: a third door would carry the scope
+    // whatever it was called.
+    const scope = main.slice(0, main.lastIndexOf("+") + 1);
+    assert(
+      scope.startsWith(`${PIPE_PREFIX}aio+`),
+      `the fixture's pipe is not scoped: ${main}`,
+    );
+    for await (const e of Deno.readDir(PIPE_PREFIX)) {
+      const p = PIPE_PREFIX + e.name;
+      if (p.startsWith(scope)) socks.push(p);
+    }
+    return socks;
+  }
+  for await (const e of Deno.readDir(dirname(main))) {
+    const p = join(dirname(main), e.name);
+    if ((await Deno.lstat(p)).isSocket) socks.push(p);
+  }
+  return socks;
+}
+
+/** The non-dumpable process and the refusal that names a wrapper are Linux's
+ *  (`prctl`, `/proc`). */
+const linux = Deno.build.os === "linux";
 
 /** Can this process — the same user, a different process — read `pid`'s open
  *  descriptors? What `PR_SET_DUMPABLE 0` takes away. */
@@ -571,7 +660,6 @@ async function procReadable(pid: number): Promise<boolean> {
 Deno.test({
   name:
     "lockdown e2e: every socket in the lock dir refuses a foreign process; the window is served",
-  ignore: linuxOnly,
   async fn() {
     const f = await fixture();
     const app = boot(f);
@@ -590,17 +678,13 @@ Deno.test({
       );
 
       // Every socket that EXISTS — found, not assumed.
-      const main = (await app.until(/transport: UDS at (\S+)/))[1]!;
-      const socks: string[] = [];
-      for await (const e of Deno.readDir(dirname(main))) {
-        const p = join(dirname(main), e.name);
-        if ((await Deno.lstat(p)).isSocket) socks.push(p);
-      }
+      const main = (await app.until(DOOR))[1]!;
+      const socks = await doors(main);
       assert(
-        socks.includes(main) && socks.some((s) => s.endsWith(".http.sock")),
+        socks.includes(main) && socks.some(httpDoor),
         `this fixture must have BOTH local doors (state + http): ${socks}`,
       );
-      for (const s of socks.sort()) await attack(s);
+      for (const s of socks.sort()) await attack(s, f.id);
 
       // Nothing the adversary sent was dispatched: the window would have been
       // broadcast the next state.
@@ -614,8 +698,11 @@ Deno.test({
 
       // The memory behind the socket: the app made itself non-dumpable, so a
       // process of the same user cannot read its descriptors or environment.
-      assertStringIncludes(app.log(), "(this process is non-dumpable)");
-      assertEquals(await procReadable(app.pid), false);
+      // (Linux: `hardenLocalPeer` has no call to make elsewhere.)
+      if (linux) {
+        assertStringIncludes(app.log(), "(this process is non-dumpable)");
+        assertEquals(await procReadable(app.pid), false);
+      }
     } finally {
       await app.stop();
       await dropTempDir(f.dir);
@@ -626,7 +713,6 @@ Deno.test({
 Deno.test({
   name:
     "lockdown e2e: a dev-tree launcher (node_modules/.bin/electron) is not the window — the binary is spawned",
-  ignore: linuxOnly,
   async fn() {
     const f = await fixture();
     // npm's layout: `.bin/electron` is a shim that STARTS the binary path.txt
@@ -635,18 +721,26 @@ Deno.test({
     const pkg = join(f.app, "node_modules", "electron");
     await Deno.mkdir(join(pkg, "dist"), { recursive: true });
     await Deno.mkdir(join(f.app, "node_modules", ".bin"));
-    await Deno.writeTextFile(join(pkg, "path.txt"), "electron");
-    await Deno.copyFile(f.stub, join(pkg, "dist", "electron"));
-    await Deno.chmod(join(pkg, "dist", "electron"), 0o755);
-    const shim = join(f.app, "node_modules", ".bin", "electron");
-    await Deno.writeTextFile(
-      shim,
-      `#!/bin/sh\n'${pkg}/dist/electron' "$@"\n`,
-    );
-    await Deno.chmod(shim, 0o755);
+    const bin = WIN ? basename(f.stub) : "electron";
+    await Deno.writeTextFile(join(pkg, "path.txt"), bin);
+    await Deno.copyFile(f.stub, join(pkg, "dist", bin));
+    if (WIN) {
+      await Deno.writeTextFile(
+        join(f.app, "node_modules", ".bin", "electron.cmd"),
+        `@"${join(pkg, "dist", bin)}" %*\r\n`,
+      );
+    } else {
+      await Deno.chmod(join(pkg, "dist", "electron"), 0o755);
+      const shim = join(f.app, "node_modules", ".bin", "electron");
+      await Deno.writeTextFile(
+        shim,
+        `#!/bin/sh\n'${pkg}/dist/electron' "$@"\n`,
+      );
+      await Deno.chmod(shim, 0o755);
+    }
     const app = boot(f, { electronPath: "" });
     try {
-      await app.until(/launching Electron \(dev, UDS\)/);
+      await app.until(/launching Electron \(dev, (?:UDS|named pipe)\)/);
       await app.until(/\[window\] state \{"c":\{"n":1,/);
       // The window was served, so it was never the refused peer.
       assert(
@@ -690,7 +784,7 @@ Deno.test("lockdown: the dev launcher resolves to the binary under $ELECTRON_OVE
 Deno.test({
   name:
     "lockdown e2e: a wrapper that does not exec the window is refused LOUDLY, with the way out",
-  ignore: linuxOnly,
+  ignore: !linux, // the refusal names the wrapper from /proc ancestry (`_descendsFrom`): Linux only
   async fn() {
     const f = await fixture();
     const wrapper = join(f.dir, "wrapper");
@@ -715,7 +809,6 @@ Deno.test({
 Deno.test({
   name:
     "lockdown e2e: when the window exits the gate is disarmed — its pid is no longer the trusted one",
-  ignore: linuxOnly,
   async fn() {
     const f = await fixture();
     const app = boot(f, {
@@ -723,7 +816,7 @@ Deno.test({
       env: { E2E_WINDOW_EXITS: "1" },
     });
     try {
-      const main = (await app.until(/transport: UDS at (\S+)/))[1]!;
+      const main = (await app.until(DOOR))[1]!;
       const pid = (await app.until(/\[window\] pid (\d+)/))[1]!;
       await app.until(/\[window\] state /);
       await app.until(/electron closed/);
@@ -746,7 +839,6 @@ Deno.test({
 Deno.test({
   name:
     "lockdown e2e: without --allow-ffi the app refuses to start, naming the flag",
-  ignore: linuxOnly,
   async fn() {
     const f = await fixture();
     const app = boot(f, {
@@ -769,9 +861,23 @@ Deno.test({
       assert(st, `the app kept running ungated:\n${app.log()}`);
       assert(st.code !== 0, `exit 0 for a refused boot:\n${app.log()}`);
       await app.stop();
-      assertStringIncludes(app.log(), "local-peer lockdown cannot start");
       assertStringIncludes(app.log(), "--allow-ffi");
-      assertStringIncludes(app.log(), "allowLocalPeers");
+      // Windows: the pipe itself is FFI, lockdown or not, so the refusal is
+      // the pipe's (`reservePipe`) — made where the name is taken, before
+      // the app says it is up. The lockdown's own refusal (and its
+      // `allowLocalPeers` way out, which is none there) is the unix
+      // peer-credential backend's.
+      if (WIN) {
+        assertStringIncludes(app.log(), "cannot be opened");
+        assertStringIncludes(app.log(), "started without `--allow-ffi`");
+        assert(
+          !/NotCapable|\brunning \(/.test(app.log()),
+          `the app said it was up, or died in the runtime's words:\n${app.log()}`,
+        );
+      } else {
+        assertStringIncludes(app.log(), "local-peer lockdown cannot start");
+        assertStringIncludes(app.log(), "allowLocalPeers");
+      }
       assert(
         !app.log().includes("launching Electron"),
         `a window was launched for a server that serves no one:\n${app.log()}`,
@@ -786,12 +892,11 @@ Deno.test({
 Deno.test({
   name:
     "lockdown e2e: beside a named port the socket is still gated, and the log does not claim more",
-  ignore: linuxOnly,
   async fn() {
     const f = await fixture();
     const app = boot(f, { args: [`--port=${freePort()}`] });
     try {
-      const main = (await app.until(/transport: UDS at (\S+)/))[1]!;
+      const main = (await app.until(DOOR))[1]!;
       await app.until(/\[window\] state \{"c":\{"n":1,/);
       assertStringIncludes(app.log(), "covers this app's local socket ONLY");
       assert(
@@ -809,17 +914,16 @@ Deno.test({
 Deno.test({
   name:
     "lockdown e2e: electron.allowLocalPeers opts out — a companion process gets a session, and the log says so",
-  ignore: linuxOnly,
   async fn() {
     const f = await fixture();
     const app = boot(f, { env: { E2E_ALLOW_PEERS: "true" } });
     try {
-      const main = (await app.until(/transport: UDS at (\S+)/))[1]!;
+      const main = (await app.until(DOOR))[1]!;
       await app.until(/\[window\] state \{"c":\{"n":1,/);
       assertStringIncludes(app.log(), "local-peer lockdown is OFF");
       // The control for the non-dumpable check above: an ungated app is an
       // ordinary process, readable by its user.
-      assertEquals(await procReadable(app.pid), true);
+      if (linux) assertEquals(await procReadable(app.pid), true);
       const got = await exchange(main, "", 3000, (g) => g.includes(NOTE));
       assertStringIncludes(got, '"t":"proto"');
       assertStringIncludes(got, NOTE);
@@ -833,7 +937,6 @@ Deno.test({
 Deno.test({
   name:
     "lockdown e2e: a non-boolean allowLocalPeers does NOT open the doors, and says so",
-  ignore: linuxOnly,
   async fn() {
     const f = await fixture();
     // "yes" is truthy. Read by truthiness it turned the lockdown off.
@@ -843,7 +946,7 @@ Deno.test({
       // the app runs GATED and says the value was not understood. (Which one
       // is the config validator's call; that the door stays shut is not.)
       const first = await app.until(
-        /transport: UDS at (\S+)|allowLocalPeers[^\n]*(not true or false)/,
+        /transport: (?:UDS|named pipe) at (\S+)|allowLocalPeers[^\n]*(not true or false)/,
       );
       assert(
         !app.log().includes("local-peer lockdown is OFF"),
@@ -859,7 +962,7 @@ Deno.test({
       const warned = (await app.until(/WARN .*allowLocalPeers is "yes".*/))[0];
       assertStringIncludes(warned, "not a boolean");
       assertEquals(await exchange(main, SESSION_FRAMES, 700), "");
-      const http = main.replace(/\.sock$/, ".http.sock");
+      const http = httpDoorOf(main);
       assertStringIncludes(
         await exchange(
           http,
@@ -878,13 +981,12 @@ Deno.test({
 Deno.test({
   name:
     "lockdown e2e: beside a DevTools port (--cdp) the socket is still gated, and the log does not claim more",
-  ignore: linuxOnly,
   async fn() {
     const f = await fixture();
     const cdp = freePort();
     const app = boot(f, { args: [`--cdp=${cdp}`] });
     try {
-      const main = (await app.until(/transport: UDS at (\S+)/))[1]!;
+      const main = (await app.until(DOOR))[1]!;
       await app.until(/\[window\] state \{"c":\{"n":1,/);
       const warned =
         (await app.until(/WARN .*local-peer lockdown covers.*/))[0];
@@ -912,12 +1014,14 @@ Deno.test({
 
 /** This boot's control credential, read where `am` reads it. */
 async function controlKey(f: Fixture): Promise<{ key: string; path: string }> {
-  const path = join(f.home, "myapp", "data", "control.key");
+  const path = join(f.home, f.id, "data", "control.key");
   const end = Date.now() + 20_000;
   while (Date.now() < end) {
     try {
       const st = await Deno.stat(path);
-      assertEquals(st.mode! & 0o077, 0, `${path} is readable by others`);
+      if (modeBitsAreMeaningful()) {
+        assertEquals(st.mode! & 0o077, 0, `${path} is readable by others`);
+      }
       return { key: (await Deno.readTextFile(path)).trim(), path };
     } catch (e) {
       if (!(e instanceof Deno.errors.NotFound)) throw e;
@@ -1040,7 +1144,6 @@ async function assertStopRefused(
 Deno.test({
   name:
     "lockdown e2e: the stop — with this boot's control credential a clean stop; without it, or with a stale one, nothing",
-  ignore: linuxOnly,
   // Under 022, so the owner-only mode checked below is the code's doing.
   fn: () =>
     permissiveUmask(async () => {
@@ -1048,7 +1151,7 @@ Deno.test({
       let app = boot(f);
       try {
         await app.until(/\[window\] state \{"c":\{"n":1,/);
-        const main = (await app.until(/transport: UDS at (\S+)/))[1]!;
+        const main = (await app.until(DOOR))[1]!;
         const first = await controlKey(f);
         const ask = (m: string, p: string, k?: string) =>
           ctlOnce(main, m, p, k);
@@ -1074,7 +1177,7 @@ Deno.test({
         // The next boot mints a new credential; the old one opens nothing.
         app = boot(f);
         await app.until(/\[window\] state \{"c":\{"n":1,/);
-        const main2 = (await app.until(/transport: UDS at (\S+)/))[1]!;
+        const main2 = (await app.until(DOOR))[1]!;
         const second = await controlKey(f);
         assert(second.key !== first.key, "a credential is per boot");
         await assertStopRefused(
@@ -1091,7 +1194,7 @@ Deno.test({
             "-A",
             `${ROOT}/src/am.ts`,
             "stop",
-            "--app=myapp",
+            `--app=${f.id}`,
             "--json",
           ],
           cwd: f.app,
@@ -1113,7 +1216,6 @@ Deno.test({
 Deno.test({
   name:
     "prod stop over TCP: the same credential, the same one request — and nothing else of the control API",
-  ignore: linuxOnly,
   // Under 022, so the owner-only mode checked below is the code's doing.
   fn: () =>
     permissiveUmask(async () => {
@@ -1164,7 +1266,7 @@ Deno.test({
 
 /** The app's own log file, as an operator reads it. */
 const appLog = (f: Fixture) =>
-  Deno.readTextFileSync(join(f.home, "myapp", "logs", "app.log"));
+  Deno.readTextFileSync(join(f.home, f.id, "logs", "app.log"));
 
 // ONE place decides and logs a refused stop — the server's stop branch; the
 // lockdown door only lets `POST /__aio/trojan/shutdown` through to it — on
@@ -1175,7 +1277,6 @@ for (const wire of ["lockdown socket", "TCP"] as const) {
     Deno.test({
       name:
         `refused stop (${wire}, ${presented} key): the line is in app.log BEFORE the answer — a kill right after cannot lose it`,
-      ignore: linuxOnly,
       // Under 022 like the other stop tests: controlKey() checks the mode.
       fn: () =>
         permissiveUmask(async () => {
@@ -1209,7 +1310,7 @@ for (const wire of ["lockdown socket", "TCP"] as const) {
               r = { status: res.status, body: await res.text() };
             } else {
               await app.until(/\[window\] state \{"c":\{"n":1,/);
-              const main = (await app.until(/transport: UDS at (\S+)/))[1]!;
+              const main = (await app.until(DOOR))[1]!;
               r = await ctlOnce(main, "POST", "/__aio/trojan/shutdown", k);
             }
             assertEquals(r.status, 404, r.body);
@@ -1239,7 +1340,6 @@ for (const wire of ["lockdown socket", "TCP"] as const) {
 Deno.test({
   name:
     "refused stop: `am stop` says the app refused its credential and how the app ended — never silently",
-  ignore: linuxOnly,
   // Under 022 like the other stop tests: controlKey() checks the mode.
   fn: () =>
     permissiveUmask(async () => {
@@ -1260,7 +1360,7 @@ Deno.test({
             "-A",
             `${ROOT}/src/am.ts`,
             "stop",
-            "--app=myapp",
+            `--app=${f.id}`,
             "--json",
           ],
           cwd: f.app,
@@ -1273,8 +1373,8 @@ Deno.test({
         assertStringIncludes(err, "the app refused the stop credential");
         assertStringIncludes(err, "is missing or does not match this boot");
         assertStringIncludes(err, "ending it without a clean shutdown");
-        // A signal here (Linux); `killed` on Windows, where it is one.
-        assertEquals(JSON.parse(out).how, "signal", out);
+        // A signal here; `killed` on Windows, where a signal is one.
+        assertEquals(JSON.parse(out).how, WIN ? "killed" : "signal", out);
         await app.status;
         assertStringIncludes(appLog(f), "wrong control credential");
       } finally {
@@ -1282,4 +1382,158 @@ Deno.test({
         await dropTempDir(f.dir);
       }
     }),
+});
+
+Deno.test({
+  name:
+    "lockdown e2e: two apps of ONE appId, each under its own AIO_APPS_DIR, have their own doors",
+  async fn() {
+    const a = await fixture("myapp");
+    const b = await fixture("myapp");
+    const first = boot(a);
+    let second: Running | undefined;
+    try {
+      const doorA = (await first.until(DOOR))[1]!;
+      await first.until(/\[window\] state \{"c":\{"n":1,/);
+      second = boot(b);
+      const doorB = (await second.until(DOOR))[1]!;
+      assert(doorA !== doorB, `both apps listen on ${doorA}`);
+      // Its OWN state: `n` is 1 here, 2 by now in the app that was first.
+      await second.until(/\[window\] state \{"c":\{"n":1,/);
+      await second.until(/\[window\] ack \{"cid":"w1","ok":true/);
+      assert(
+        !/already exists|accept loop error/.test(second.log()),
+        second.log(),
+      );
+    } finally {
+      await second?.stop();
+      await first.stop();
+      await dropTempDir(a.dir);
+      await dropTempDir(b.dir);
+    }
+  },
+});
+
+/** `status`, or null when the app is still running after `ms`. */
+async function ended(
+  app: Running,
+  ms = 25_000,
+): Promise<Deno.CommandStatus | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      app.status,
+      new Promise<null>((r) => timer = setTimeout(() => r(null), ms)),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+Deno.test({
+  name:
+    "lockdown e2e: a pipe name somebody else holds — the app refuses, says who may hold it and the way out, and `--transport=ws` IS one",
+  ignore: !WIN, // a pipe name is machine-wide and can be held by anyone; a unix socket path is the app's own lock dir
+  async fn() {
+    const { listenPipe } = await import("../src/server/win-pipe.ts");
+    const f = await fixture();
+    let app = boot(f);
+    let held: { close(): void } | undefined;
+    try {
+      const main = (await app.until(DOOR))[1]!;
+      await app.stop();
+      // Another process — this one — holds the app's state door now: what
+      // another Windows user running the same app is, to this one.
+      held = listenPipe(main);
+      app = boot(f);
+      const st = await ended(app);
+      assert(st, `the app kept running without its door:\n${app.log()}`);
+      assert(st.code !== 0, `exit 0 for a refused boot:\n${app.log()}`);
+      for (
+        const part of [
+          main,
+          "the pipe name is taken",
+          "another Windows user",
+          "a distinct appId",
+          "`--transport=ws`",
+        ]
+      ) assertStringIncludes(app.log(), part);
+      assert(!/\brunning \(/.test(app.log()), app.log());
+      await app.stop();
+      // The way out it names: no pipe is asked for, and the app is up.
+      app = boot(f, { args: ["--transport=ws"] });
+      await app.until(/running \(prod, electron\)/);
+      await app.until(/ws {2,}ws:\/\/localhost:\d+\/ws/);
+      assert(!app.log().includes("the pipe name is taken"), app.log());
+    } finally {
+      await app.stop();
+      held?.close();
+      await localIdle();
+      await dropTempDir(f.dir);
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "lockdown e2e: a boot that fails after taking its pipe names gives them back — in a process that lives on, nobody is left hosting them",
+  ignore: !WIN, // the names are reserved ahead of their listeners on Windows only (`reservePipes`)
+  async fn() {
+    const f = await fixture();
+    const busy = Deno.listen({ hostname: "127.0.0.1", port: 0 });
+    const port = (busy.addr as Deno.NetAddr).port;
+    await Deno.writeTextFile(
+      join(f.app, "src", "fails.ts"),
+      `import { aio, cell } from "aio";
+import { resolveSocketPath } from ${
+        JSON.stringify(spec(join(ROOT, "src", "server", "paths.ts")))
+      };
+import { connectPipe } from ${
+        JSON.stringify(spec(join(ROOT, "src", "server", "win-pipe.ts")))
+      };
+const c = cell("c", { state: { n: 1 }, methods: {} });
+let threw = "";
+try {
+  await aio.run({ appId: "myapp", cells: [c], persist: false, libraryMode: true });
+} catch (e) { threw = String(e); }
+console.log("[fails] run threw: " + (threw ? "yes" : "no"));
+const door = resolveSocketPath("myapp");
+try {
+  (await connectPipe(door, 0)).close();
+  console.log("[fails] door " + door + " is HOSTED");
+} catch (e) {
+  console.log("[fails] door " + door + " is " + (e instanceof Deno.errors.NotFound ? "free" : String(e)));
+}
+console.log("[fails] threw " + threw);
+Deno.exit(0);
+`,
+    );
+    const child = new Deno.Command(Deno.execPath(), {
+      args: [
+        "run",
+        "-A",
+        "src/fails.ts",
+        "--client=electron",
+        "--prod",
+        `--port=${port}`,
+      ],
+      cwd: f.app,
+      env: childEnv({
+        WAYLAND_DISPLAY: "aio-standin",
+        ELECTRON_PATH: f.stub,
+        AIO_APPS_DIR: f.home,
+      }),
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+    try {
+      const o = await child.output();
+      const out = dec.decode(o.stdout) + dec.decode(o.stderr);
+      assertStringIncludes(out, "[fails] run threw: yes", out);
+      assertMatch(out, /\[fails\] door \S+pipe\S+ is free/, out);
+    } finally {
+      busy.close();
+      await dropTempDir(f.dir);
+    }
+  },
 });

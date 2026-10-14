@@ -11,12 +11,13 @@
 //    was killed on every check — re-downloaded forever, never installed, and
 //    reported as "unreachable or stalled".
 import { assert, assertEquals, assertMatch } from "@std/assert";
-import { DELIMITER, join } from "@std/path";
+import { join } from "@std/path";
 import { gitLsRemote } from "../src/server/updates-check.ts";
 import { rebuildFromGit } from "../src/server/updates-rebuild.ts";
 import type { Log } from "../src/diagnostics/logger.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { EXE, programBytes, writeProgram } from "./fake-program-helper.ts";
+import { gitRunsFrom } from "./proc-helper.ts";
 
 const silentLog = {
   info: () => {},
@@ -169,7 +170,6 @@ Deno.test({
 Deno.test({
   name:
     "git over ssh under an inherited GIT_DIR: another repo's core.sshCommand does not switch off BatchMode",
-  ignore: Deno.build.os === "windows", // OPEN(windows): git there never ran the stand-in `ssh` put first on PATH, so what it is handed went unseen
   async fn() {
     const dir = await tempDir("aio-git-own-ssh-");
     try {
@@ -187,7 +187,7 @@ Deno.test({
       );
       await withEnv(
         {
-          PATH: `${bin}${DELIMITER}${Deno.env.get("PATH") ?? ""}`,
+          ...gitRunsFrom(bin),
           GIT_DIR: join(dir, "hook", ".git"),
           GIT_SSH_COMMAND: undefined,
           GIT_SSH: undefined,
@@ -215,7 +215,6 @@ Deno.test({
 Deno.test({
   name:
     "git rebuild: a clone slower than the deadline but still MOVING completes",
-  ignore: Deno.build.os === "windows", // the slow transport is an sh pipeline (dd, sleep) behind git's ext:: helper — not ported
   async fn() {
     const dir = await tempDir("aio-git-slow-clone-");
     try {
@@ -230,19 +229,30 @@ Deno.test({
         files[`f${i}`] = crypto.getRandomValues(new Uint8Array(3000));
       }
       const want = await repo(join(dir, "src"), { ...app, ...files });
-      const trickle = join(dir, "trickle.sh");
+      // The slow transport: `git upload-pack`, its output passed on one
+      // piece at a time. (The runtime, not `sh`+`dd`+`sleep`: Windows has
+      // none of the three.)
+      const trickle = join(dir, "trickle.js");
       await Deno.writeTextFile(
         trickle,
-        `#!/bin/sh
-exec 3>&1
-while :; do
-  s=$(dd bs=16384 count=1 2>&1 >&3)
-  case "$s" in *"0+0 records in"*) break;; esac
-  sleep 0.2
-done
+        `const up = new Deno.Command("git", {
+  args: ["upload-pack", Deno.args[0]],
+  stdin: "inherit",
+  stdout: "piped",
+  stderr: "inherit",
+}).spawn();
+for await (const chunk of up.stdout) {
+  for (let at = 0; at < chunk.length; at += 16384) {
+    const piece = chunk.subarray(at, at + 16384);
+    for (let n = 0; n < piece.length;) {
+      n += await Deno.stdout.write(piece.subarray(n));
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+}
+Deno.exit((await up.status).code);
 `,
       );
-      await Deno.chmod(trickle, 0o755);
       const cfg = join(dir, "gitconfig");
       await Deno.writeTextFile(cfg, `[protocol "ext"]\n\tallow = always\n`);
       const t0 = Date.now();
@@ -250,9 +260,18 @@ done
         { GIT_CONFIG_GLOBAL: cfg, GIT_CONFIG_NOSYSTEM: "1" },
         () =>
           rebuildFromGit({
-            source: `ext::sh -c git% upload-pack% ${
-              join(dir, "src")
-            }|${trickle}`,
+            source: `ext::${
+              [
+                Deno.execPath(),
+                "run",
+                "-A",
+                "--no-config",
+                trickle,
+                join(dir, "src"),
+              ]
+                .map((w) => w.replaceAll("%", "%%").replaceAll(" ", "% "))
+                .join(" ")
+            }`,
             ref: "main",
             workDir: join(dir, "work"),
             log: silentLog,

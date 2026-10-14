@@ -9,6 +9,7 @@
 // crash is worse than saying "use more of the id". And `show` prints the WHOLE
 // document, because a summarized bug report is one that has to be collected
 // again.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { cmdReport } from "../src/am/am-cmd-report.ts";

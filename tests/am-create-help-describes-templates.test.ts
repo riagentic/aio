@@ -9,6 +9,7 @@
 // (`am-help-text.ts`, beside the list they describe) and `am-agent-text.ts`
 // re-exports them. This file pins that: same OBJECT, and both surfaces
 // actually render it.
+import "./store-sandbox.ts";
 import { assert, assertStrictEquals } from "@std/assert";
 import {
   BRIEF_TARGETS as AGENT_TARGETS,

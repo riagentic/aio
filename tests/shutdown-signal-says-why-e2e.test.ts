@@ -96,7 +96,7 @@ async function startApp(appTs: string, args: string[]) {
       for await (
         const f of walk(join(dir, "home"), { match: [/app\.log$/] })
       ) {
-        text += await Deno.readTextFile(f.path);
+        text += `==> ${f.path}\n` + await Deno.readTextFile(f.path);
       }
       return text;
     },
@@ -118,7 +118,9 @@ function assertSaidAboveStop(text: string, said: string, where: string) {
   assertEquals(
     [stopped >= 0, at < stopped],
     [true, true],
-    `${where}: the reason must stand above the stop:\n${text.slice(-2000)}`,
+    // The whole text: the one failure seen (a loaded suite, 2026-10-14) had
+    // an earlier stop line out of the 2000-char tail's sight.
+    `${where}: the reason must stand above the stop:\n${text}`,
   );
 }
 

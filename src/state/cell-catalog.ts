@@ -7,6 +7,8 @@ import { dispatchTracked } from "./cell-impl.ts";
 import { settlesCalls } from "../protocol/ack-registry.ts";
 import { nameIsTaken } from "./cell-helpers.ts";
 import { pendingSignal } from "./pending.ts";
+import { log } from "../diagnostics/logger-api.ts";
+import { firstTime } from "../protocol/said-once.ts";
 
 /** The raw creators of cells an app has composed and is initialising, but has
  *  not bound yet. Keyed by the creator (`__aio.actions[key]`), which is unique
@@ -34,6 +36,32 @@ export function _whileCellsBoot<T>(cells: readonly CellDef[], fn: () => T): T {
   } finally {
     for (const raw of raws) _booting.delete(raw);
   }
+}
+
+/** The `worker: true` cell whose thread this isolate is — set once, by its
+ *  host. No cell's methods are ever bound there. */
+let _hostedCell: string | undefined;
+/** @internal */
+export function _setHostedCell(name: string): void {
+  _hostedCell = name;
+}
+
+/** The refusal for a cell method called inside a worker cell's thread. ONE
+ *  text, so the in-process harnesses (boot-refusals.ts), which run worker
+ *  cells on the main isolate, refuse the same call with the same words.
+ *  @internal */
+export function methodCallInWorkerMessage(
+  hosted: string,
+  cellName: string,
+  key: string,
+): string {
+  return `[${cellName}] ${key}() called inside the worker cell "${hosted}" — ` +
+    `no cell's methods are bound in a worker thread, ` +
+    (hosted === cellName ? `its own included` : `a peer's or its own`) +
+    ` (the cell IS in aio.run; the call has nowhere to go from here). Share ` +
+    `the logic as a plain function and call that, or return and let the ` +
+    `main isolate make the call (a component, onStart, another cell's ` +
+    `method). See docs/state/cell-workers.md.`;
 }
 
 /** Wrap a raw action creator with a guard for the pre-binding state. Calling a
@@ -65,6 +93,9 @@ export function makeUnboundGuard(
           `runs after binding; from a hook, skip \`:__init\` actions and make ` +
           `it on the first real action.`,
       );
+    }
+    if (_hostedCell !== undefined) {
+      throw new Error(methodCallInWorkerMessage(_hostedCell, cellName, key));
     }
     throw new Error(
       `[${cellName}] ${key}() called before the cell's runtime is booted — ` +
@@ -357,8 +388,8 @@ export function installDefaultStateGetters(def: CellDef): void {
  *  both spellings read a silent `undefined` and the TypeError arrived one
  *  property later, naming nothing (field report cc §4, h3 Y4). In dev — and
  *  under every harness, which runs dev-strict — the read THROWS, naming the
- *  spelling that works. In prod it answers `undefined`, exactly as before:
- *  category (b), dev stricter, never the reverse. Decided at READ time,
+ *  spelling that works. In prod it answers `undefined`, exactly as before
+ *  (category (b), dev stricter, never the reverse) and SAYS so once. Decided at READ time,
  *  because cells are defined at module load, before `__aioDev` is armed.
  *
  *  Only where the cell owns no such name: `state` is reserved (RESERVED_KEYS),
@@ -374,23 +405,27 @@ function installReflexGuards(def: CellDef): void {
     ) continue;
     Object.defineProperty(def, key, {
       get() {
-        if ((globalThis as Record<string, unknown>).__aioDev !== true) {
-          return undefined;
-        }
         const id = a.id;
+        const dev = (globalThis as Record<string, unknown>).__aioDev === true;
+        // Prod degrades to `undefined`, as it always has — and says so, once
+        // per cell and spelling: the TypeError one property later names
+        // nothing, and this was the only line that could. Asked BEFORE the
+        // message is built: a read in a render loop must cost one Set lookup.
+        if (!dev && !firstTime(`reflex ${id}.${key}`)) return undefined;
         const field = Object.keys(a.state as Record<string, unknown>)[0] ??
           "field";
         const sel = Object.keys(a.selectors ?? {})[0] ?? "selector";
-        throw new Error(
-          key === "state"
-            ? `[cell:${id}] ${id}.state does not exist — the cell IS its ` +
-              `state: read ${id}.${field}, not ${id}.state.${field} (a ` +
-              `React/Redux reflex). A component re-renders on that read.`
-            : `[cell:${id}] ${id}.selectors does not exist — a selector is ` +
-              `called on the cell itself: ${id}.${sel}(), not ` +
-              `${id}.selectors.${sel}(). The cell IS its state and its ` +
-              `selectors.`,
-        );
+        const msg = key === "state"
+          ? `[cell:${id}] ${id}.state does not exist — the cell IS its ` +
+            `state: read ${id}.${field}, not ${id}.state.${field} (a ` +
+            `React/Redux reflex). A component re-renders on that read.`
+          : `[cell:${id}] ${id}.selectors does not exist — a selector is ` +
+            `called on the cell itself: ${id}.${sel}(), not ` +
+            `${id}.selectors.${sel}(). The cell IS its state and its ` +
+            `selectors.`;
+        if (dev) throw new Error(msg);
+        log.warn("cell", `${msg} (undefined was returned)`);
+        return undefined;
       },
       set(v: unknown) {
         Object.defineProperty(def, key, {

@@ -46,12 +46,14 @@ import {
   fileSha256,
   forgetInstalledDigest,
   gitLsRemote,
+  MB,
   pinKey,
   readTrust,
   recordInstalledSha256,
   verifyDownload,
   writeTrust,
 } from "./updates-check.ts";
+import { artifactFromPatch } from "./updates-patch.ts";
 import {
   artifactPath,
   clearPending,
@@ -81,7 +83,13 @@ import {
   writeRecordAtomic,
   zipLauncher,
 } from "./updates-apply.ts";
-import { assertNotInTheWay, claim, made } from "./updates-owned.ts";
+import {
+  assertNotInTheWay,
+  claim,
+  isOwn,
+  made,
+  setAsideChanged,
+} from "./updates-owned.ts";
 import { dataCompatibility, followsPrereleases } from "./updates-core.ts";
 import { rebuildFromGit } from "./updates-rebuild.ts";
 import { retireProfile } from "./updates-retire.ts";
@@ -554,43 +562,115 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
     // leftover of an earlier try is removed — only one the record proves is
     // the updater's. Anything else under one of these names refuses the
     // update here, before a byte is downloaded.
+    // A download of ours that was kept and no longer holds the bytes it was
+    // made with is in nobody's way: moved aside, said, downloaded again.
+    const damaged = setAsideChanged(deps.dataDir, download);
+    if (damaged) {
+      log.warn(
+        "updates",
+        `${download} — the download of ${m.version} this app's updater kept ` +
+          `— no longer holds the bytes it was made with (damaged, or ` +
+          `changed by something else). It is not used and not removed: ` +
+          `moved to ${damaged}, which can be deleted by hand. ${m.version} ` +
+          `is downloaded again.`,
+      );
+    }
     // Every name checked before any is written down: a refusal leaves no
     // entry for something that was never made.
     for (const p of [download, staged, `${current}.old-${deps.appVersion}`]) {
       assertNotInTheWay(deps.dataDir, p);
     }
-    claim(deps.dataDir, download, "file");
+    // The download of this very release, kept from a try whose swap was
+    // never made (the install folder was held; the running file could not be
+    // set aside): not downloaded again — when the record proves it the
+    // updater's AND its bytes still verify against the signed manifest,
+    // under today's expectations. Anything less is a leftover: removed by
+    // `claim`, and downloaded.
+    const kept = isOwn(deps.dataDir, download) &&
+      (await verifyDownload(download, m, expectations())).ok;
+    if (!kept) claim(deps.dataDir, download, "file");
     if (isDirectory) claim(deps.dataDir, staged, "dir");
     const url = artifactUrl(manifestUrl(config.source, channel, platform), m);
 
-    log.info("updates", `downloading ${m.name} ${m.version} from ${url}`);
+    if (kept) {
+      log.info(
+        "updates",
+        `${m.name} ${m.version} is not downloaded again: ${download} was ` +
+          `kept from the last try, and verifies`,
+      );
+    }
     // The cell already said "downloading" optimistically; this is the applier
     // confirming that bytes are actually being asked for, and it is what makes
     // the phase true rather than hopeful.
     phase("downloading");
-    const dl = await downloadArtifact({
-      url,
-      dest: download,
-      expectSha256: m.sha256,
-      expectSize: m.size,
-      owner: deps.dataDir,
-      // Progress rides the normal state channel: the applier dispatches into
-      // the same cell the UI is bound to, so a progress bar is an ordinary
-      // reactive read rather than a second transport.
-      //
-      // Best-effort, and deliberately so. Progress is observe-only; if the
-      // cell is not bound (an applier driven outside a booted app) a failed
-      // dispatch must not abort a download that is otherwise fine. Reporting
-      // never breaks the thing it reports on.
-      onProgress: (f) => {
-        try {
-          void Promise.resolve(
-            (deps.cell ?? createUpdatesCell()).setProgress(f),
-          )
-            .catch(() => {});
-        } catch { /* not bound — the download continues either way */ }
-      },
+    // A single-file install first tries the release's patch against the file
+    // installed here (updates-patch.ts). What a patch makes goes through the
+    // same size and digest check as a download, and ANY miss — said in one
+    // line — ends in the whole release being downloaded, as before.
+    const fromPatch = kept || isDirectory ? null : await artifactFromPatch({
+      manifest: m,
+      manifestUrl: manifestUrl(config.source, channel, platform),
+      installed: current,
+      dataDir: deps.dataDir,
     });
+    const patched = fromPatch && "bytes" in fromPatch
+      ? await downloadArtifact({
+        url: `the patch ${fromPatch.patch.url}`,
+        dest: download,
+        expectSha256: m.sha256,
+        expectSize: m.size,
+        owner: deps.dataDir,
+        bytes: fromPatch.bytes,
+      })
+      : null;
+    const miss = fromPatch && "why" in fromPatch
+      ? fromPatch.why
+      : patched && !patched.ok
+      ? patched.error
+      : null;
+    if (miss) {
+      log.info(
+        "updates",
+        `${m.version} is not installed from a patch (${miss}) — ` +
+          `downloading the whole release`,
+      );
+    } else if (patched && fromPatch && "bytes" in fromPatch) {
+      log.info(
+        "updates",
+        `made ${m.name} ${m.version} from the installed build and a ` +
+          `${MB(fromPatch.patch.size)} patch — the whole release (${
+            MB(m.size)
+          }) was not downloaded`,
+      );
+    }
+    if (!kept && !patched?.ok) {
+      log.info("updates", `downloading ${m.name} ${m.version} from ${url}`);
+    }
+    const dl = kept || patched?.ok
+      ? { ok: true as const }
+      : await downloadArtifact({
+        url,
+        dest: download,
+        expectSha256: m.sha256,
+        expectSize: m.size,
+        owner: deps.dataDir,
+        // Progress rides the normal state channel: the applier dispatches into
+        // the same cell the UI is bound to, so a progress bar is an ordinary
+        // reactive read rather than a second transport.
+        //
+        // Best-effort, and deliberately so. Progress is observe-only; if the
+        // cell is not bound (an applier driven outside a booted app) a failed
+        // dispatch must not abort a download that is otherwise fine. Reporting
+        // never breaks the thing it reports on.
+        onProgress: (f) => {
+          try {
+            void Promise.resolve(
+              (deps.cell ?? createUpdatesCell()).setProgress(f),
+            )
+              .catch(() => {});
+          } catch { /* not bound — the download continues either way */ }
+        },
+      });
     if (!dl.ok) throw new Error(dl.error);
 
     // Verify the BYTES on disk, not the ones we think we downloaded, and under
@@ -612,8 +692,12 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       const unpacked = isMacApp
         ? await unpackAppTarball(download, staged)
         : await unpackArchive(download, staged);
-      await Deno.remove(download).catch(() => {});
+      // The archive stays, on the record, until this update is confirmed or
+      // given up: a swap that cannot be made (the folder is held) is tried
+      // again, and the next try must not download it again. One that does
+      // not unpack, or does not run here, goes at once.
       if (!unpacked.ok) {
+        await Deno.remove(download).catch(() => {});
         await Deno.remove(staged, { recursive: true }).catch(() => {});
         throw new Error(unpacked.error);
       }
@@ -647,6 +731,11 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
         }
         : await smokeTestArtifact(exe);
       if (!smoked.ok) {
+        await Deno.remove(download).catch(() => {
+          // aio-ok: the throw below carries the reason. An archive that
+          // stays is on the record — a start with no update in flight
+          // removes it.
+        });
         await Deno.remove(staged, { recursive: true }).catch(() => {
           // aio-ok: the throw below carries the reason the update was
           // refused. Failing to tidy the staged copy leaves a directory
@@ -780,18 +869,43 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       return;
     }
 
-    await swapArtifact({
-      current,
-      staged,
-      fromVersion: deps.appVersion,
-      // Names the new file when this app was installed by `run.sh`
-      // (~/app/<name>/<name>-<version>) — without it the swap would flatten
-      // that layout into a single file and lose every earlier version.
-      toVersion: m.version,
-      // The marker goes down BEFORE the first rename — the swap owns that
-      // ordering, so nothing here can get it wrong.
-      pending,
-    });
+    try {
+      await swapArtifact({
+        current,
+        staged,
+        fromVersion: deps.appVersion,
+        // Names the new file when this app was installed by `run.sh`
+        // (~/app/<name>/<name>-<version>) — without it the swap would flatten
+        // that layout into a single file and lose every earlier version.
+        toVersion: m.version,
+        // The marker goes down BEFORE the first rename — the swap owns that
+        // ordering, so nothing here can get it wrong.
+        pending,
+      });
+    } catch (e) {
+      // The verified download the swap left on the record outlives this run
+      // too: counted on the trust record like a directory swap that could not
+      // be made, which is what a start reads before it removes leftovers — a
+      // try after a restart does not download the release again.
+      try {
+        if (isOwn(deps.dataDir, staged)) {
+          const prior = readTrust(deps.dataDir).failedSwaps;
+          writeTrust(deps.dataDir, {
+            failedSwaps: {
+              to: m.version,
+              count: (prior?.to === m.version ? prior.count : 0) + 1,
+            },
+          });
+        }
+      } catch (w) {
+        log.warn(
+          "updates",
+          `could not count the failed install (${w}) — ${staged} is removed ` +
+            `at the next start, and downloaded again`,
+        );
+      }
+      throw e;
+    }
     await pruneOld(current, KEEP_OLD, deps.dataDir);
     // What is installed now, by digest. This is the fact that makes the NEXT
     // "same version, re-published" detectable, and it is the digest that was

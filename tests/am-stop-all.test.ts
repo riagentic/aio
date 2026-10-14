@@ -10,6 +10,7 @@
 // These tests are mostly about the boundary, therefore: what counts as "this
 // project", and what sits just outside it.
 
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import {

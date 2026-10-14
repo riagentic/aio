@@ -778,7 +778,6 @@ export const LEDGER: readonly string[] = [
   "no-assertions|tests/logger.test.ts|logger: public log API falls back to console when no logger set",
   "empty-loop|tests/multi-client.test.ts|multi-client: both surfaces dispatching at once — no lost update",
   "empty-loop|tests/multi-client.test.ts|multi-client: concurrent appends from 3 surfaces all survive",
-  "empty-loop|tests/rejection-attribution-fuzz.test.ts|D11 property: acked ⟺ applied, op-rejected ⟺ refused",
   "empty-loop|tests/removals-registry.test.ts|removals: lastGood is the release BEFORE the removal",
   "empty-loop|tests/removals-registry.test.ts|removals: every guide named by a row exists",
   "empty-loop|tests/removals-registry.test.ts|removals: the escape-hatch pin is a real tag",

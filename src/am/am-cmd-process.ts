@@ -52,6 +52,7 @@ import {
   type LockData,
   lockDir,
   lockKey,
+  otherAppsRootOf,
   ownerIdentity,
   probeEndpoint,
   readLaunchInfo,
@@ -94,6 +95,7 @@ import {
   tally,
 } from "./am-output.ts";
 import { repoRoot } from "./am-cmd-create.ts";
+import { holdLeftover, sweepIncomplete, sweptLine } from "./am-cmd-data.ts";
 import {
   amLockKey,
   appIsAmbiguous,
@@ -105,6 +107,7 @@ import {
   maintenanceMessage,
   maintenanceOp,
   noDoorMessage,
+  otherRootRefusal,
   printable,
   readEntryConfig,
   readPid,
@@ -113,6 +116,7 @@ import {
   resolveAmAppId,
   resolveEntry,
   runningApps,
+  sayOtherRoot,
 } from "./am-utils.ts";
 import {
   componentLaunchArgs,
@@ -905,7 +909,10 @@ export async function cmdStart(
   // lock the app writes. `am` inventing 8000 here made the two commands
   // disagree about the same app, and made `am start` refuse over a port the app
   // was never going to bind.
-  const declared = declaredPort(flags.port);
+  const declared = declaredPort(
+    flags.port,
+    args.find((a) => a.startsWith("--client="))?.slice(9),
+  );
   let reused: number | undefined;
   if (declared === undefined && opts?.reusePort) {
     if (await isPortInUse(opts.reusePort)) {
@@ -1419,17 +1426,33 @@ async function awaitStarted(o: {
     // failure, started it AGAIN (cc §6). The child's own log says when that
     // is what it is doing; wait for it — bounded, announced, and only when
     // no explicit `--wait` was given (an explicit number is the caller's).
-    if (slowStart === null && !flags.wait) {
-      slowStart = slowStartReason(readLogTail(logPath()));
-      if (slowStart) {
-        timeout = SLOW_START_WAIT_MS;
-        deadline = startedAt + timeout;
+    //
+    // Read on EVERY tick, never latched: the first look often lands while
+    // Deno sets up a new app's packages, and holding the long wait from then
+    // on gave an app that had since started — and then booted slowly, or
+    // hung — 180 s under a note about a download that was over.
+    if (!flags.wait) {
+      // Both files: Deno's own lines are stderr, split off on Windows.
+      const why = slowStartReason(
+        readLogTail(logPath()),
+        readLogTail(`${logPath()}.err`),
+      );
+      timeout = startWaitMs(
+        slowStart,
+        why,
+        Date.now() - startedAt,
+        timeout,
+        10_000,
+      );
+      deadline = startedAt + timeout;
+      if (why && why !== slowStart) {
         sayErr(
-          `am: note: ${slowStart} — waiting up to ${
+          `am: note: ${why} — waiting up to ${
             SLOW_START_WAIT_MS / 1000
           }s for it (--wait=N to change)`,
         );
       }
+      slowStart = why;
     }
     {
       // Our own child's lock — and only if it IS our child's (same pid):
@@ -1857,13 +1880,55 @@ export function clientOpensTabs(client: string | undefined): boolean {
  *  and the alternative is exit 1 for an app that is about to be fine. */
 export const SLOW_START_WAIT_MS = 180_000;
 
+/** How long `am start` waits in all, as of one look at the child's log:
+ *  the long wait while a reason holds (`why`); once it has ended (`was`, and
+ *  no `why`), the default wait again, counted from now; else as it was.
+ *  Never moved by a look that changes nothing, so the loop's own deadline
+ *  stands between two changes.
+ *  Pure. @internal */
+export function startWaitMs(
+  was: string | null,
+  why: string | null,
+  elapsedMs: number,
+  waitMs: number,
+  defaultMs: number,
+): number {
+  if (why) return SLOW_START_WAIT_MS;
+  // Whole seconds: the number is said ("still starting after 11s").
+  return was ? Math.ceil((elapsedMs + defaultMs) / 1000) * 1000 : waitMs;
+}
+
 /** Why a boot may legitimately take longer than the default wait, read from
  *  the child's log — or null when nothing in it says so. Pure, so the rule is
- *  testable without a spawn. Today one reason exists: the Electron runtime
+ *  testable without a spawn. Two reasons exist. The Electron runtime
  *  download (`downloading runtime <v> for <slug> (~100 MB, once per machine)…`,
  *  src/electron/electron-runtime-fetch.ts) that has not yet reported
- *  `runtime … — cached` or failed. @internal */
-export function slowStartReason(log: string): string | null {
+ *  `runtime … — cached` or failed. And Deno's own first-run fetch of the
+ *  app's modules, before a line of the app has run: the log's LAST line is
+ *  one of its `Download <url>` / `Initialize <package>` lines (measured: 80
+ *  of them for a one-import entry on an empty cache) — the app had not
+ *  started to start, and on a loaded machine that alone outlasted the
+ *  default wait. @internal */
+export function slowStartReason(log: string, err = ""): string | null {
+  // deno-lint-ignore no-control-regex
+  const plain = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "").trimEnd();
+  // `err`: the child's stderr where that is a file of its own (Windows,
+  // `detachedSpawnSpec`). Deno's lines are there and the app's `console.log`
+  // is not, so no order between them is left: read one after the other,
+  // Deno's line stayed "the last" after the app had spoken, and every new
+  // app's start was "downloading the app's modules" for as long as it took
+  // (measured on Windows 11: a 25 s boot was waited for, exit 0, where the
+  // answer is "still starting", exit 1). There Deno is still fetching while
+  // its line ends ITS file and the app has written nothing to the other.
+  const last = plain(err) || plain(log);
+  // Any line ending: Windows writes CRLF, and a bare CR is still a new line.
+  if (
+    /(^|[\r\n])\s*(Download|Initialize) \S+$/.test(last) &&
+    !(err && plain(log))
+  ) {
+    return "first run: Deno is downloading the app's modules";
+  }
+  if (err) log = `${log}\n${err}`;
   const at = log.lastIndexOf("downloading runtime ");
   if (at < 0) return null;
   const after = log.slice(at);
@@ -2316,6 +2381,10 @@ export async function stopOne(
   flags: GlobalFlags,
 ): Promise<StopResult> {
   const { appId, port, pf } = target;
+  // Another apps root's app, listed here because the two roots share a lock
+  // folder name: not this `am`'s to stop (or to restart).
+  const otherRoot = pf && otherRootRefusal("stop", pf);
+  if (otherRoot) return { ok: false, appId, error: otherRoot };
   // A lock with NO DOOR (`am start`'s "starting, port 0" placeholder — see
   // `lockHasNoDoor`) has nothing to ask for a graceful shutdown or a persist
   // verdict: both went to `:0` and came back as the runtime's "Requests to
@@ -2492,6 +2561,18 @@ export async function stopOne(
   };
 }
 
+/** The line `am stop` adds when the app did NOT get its clean shutdown on
+ *  Windows: the stop request was not accepted (an app too old to have one, a
+ *  refused credential, a door that never answered) and the fallback there is
+ *  TerminateProcess. Elsewhere the fallback is SIGTERM — a clean stop — and
+ *  nothing is added. Pure. */
+export function hardStopNote(
+  how: "graceful" | "signal" | "killed",
+  os: string = Deno.build.os,
+): string {
+  return os === "windows" && how === "killed" ? `\n  ⚠ ${ENDED_HARD}` : "";
+}
+
 export async function cmdStop(
   _args: string[],
   flags: GlobalFlags,
@@ -2605,6 +2686,7 @@ export async function cmdStop(
         out(
           r.ok
             ? `${waited ? "stopped" : "stopping"} ${r.appId}` +
+              hardStopNote(r.how) +
               (r.unsaved ? `\n  ⚠ NOT SAVED — ${r.unsaved}` : "")
             : `✗ ${r.appId}: ${r.error}`,
           mode,
@@ -2635,6 +2717,7 @@ export async function cmdStop(
       ? (waited
         ? `stopped ${r.appId}`
         : `stopping ${r.appId} (pid ${r.pid ?? "?"}, port ${r.port})`) +
+        hardStopNote(r.how) +
         (r.unsaved ? `\n  ⚠ NOT SAVED — ${r.unsaved}` : "")
       : waited
       ? {
@@ -2849,6 +2932,13 @@ async function restartApp(
   // "restart: …" note announces a relaunch that is not going to happen.
   if (pf && running && maintenanceOp(pf)) {
     outError(maintenanceMessage(appId, pf), mode);
+    Deno.exit(1);
+  }
+  // …and another apps root's app is not this `am`'s to restart: said first,
+  // by its own reason (`stopOne` would refuse it after the notes).
+  const otherRoot = pf && running ? otherRootRefusal("restart", pf) : null;
+  if (otherRoot) {
+    outError(otherRoot, mode);
     Deno.exit(1);
   }
 
@@ -3192,6 +3282,8 @@ export async function cmdStatus(
   // Wherever the instance's home is: `am status` and `am instances` read the
   // same fact, so they can never disagree about an `appDir`-homed app again.
   const pf = liveLock(appId);
+  // Another apps root's app under this lock folder name: answered, and said.
+  const otherAppsDir = sayOtherRoot(pf);
 
   // No lock file → stopped. But "stopped" is only half an answer when OTHER
   // aio apps are up: `am status` said `stopped` while `am instances` listed
@@ -3382,6 +3474,7 @@ export async function cmdStatus(
           ...(pf.client ? { client: pf.client } : {}),
           ...(url ? { url } : {}),
           ...(pf.socketPath ? { socketPath: pf.socketPath } : {}),
+          ...(otherAppsDir ? { otherAppsDir } : {}),
           ...m,
         }, mode);
       }
@@ -3407,6 +3500,7 @@ export async function cmdStatus(
           ...(pf.client ? { client: pf.client } : {}),
           ...(url ? { url } : {}),
           ...(pf.socketPath ? { socketPath: pf.socketPath } : {}),
+          ...(otherAppsDir ? { otherAppsDir } : {}),
         }, mode);
       }
     }
@@ -3541,7 +3635,10 @@ export function cmdInstances(_args: string[], flags: GlobalFlags): void {
     const rows = all.map((inst) => ({
       "": mark(inst.status === "started" ? "run" : "warn"),
       // The KEY for a profile (`myapp@dev`) — what `am stop myapp@dev` takes.
-      APP: inst.profile ? `${inst.appId}@${inst.profile}` : inst.appId,
+      // Another apps root's app (one lock folder name for two roots) is
+      // listed, and marked: this `am` does not act on it.
+      APP: (inst.profile ? `${inst.appId}@${inst.profile}` : inst.appId) +
+        (otherAppsRootOf(inst) ? " (other apps dir)" : ""),
       PID: String(inst.pid),
       // A maintenance hold listens on nothing: name the op instead of `:0`.
       // An app with BOTH wires (a socket, and a TCP port for a browser or
@@ -3599,6 +3696,13 @@ export function cmdInstances(_args: string[], flags: GlobalFlags): void {
       // process-table match, which takes all of them down. So when there is
       // more than one, the safe spelling is offered right here, next to the
       // list that tempts the unsafe one.
+      ...all.filter((i) => otherAppsRootOf(i)).map((i) =>
+        style.yellow(
+          `${i.appId} (pid ${i.pid}) runs under another apps dir, ` +
+            `${otherAppsRootOf(i)} — am acts on it only with that ` +
+            `AIO_APPS_DIR`,
+        )
+      ),
       all.length > 1
         ? hints([[
           stopCommandFor({ appId: "<APP>" }, {
@@ -3640,12 +3744,25 @@ export function cmdInstances(_args: string[], flags: GlobalFlags): void {
         // the one whose next move, after listing every aio process on the
         // box, is to match them by name and kill them all. Naming the safe
         // command inline costs a field and removes the guess.
+        // Another apps root's app, here because the two roots' lock folders
+        // have one name: named, and stopped with ITS root.
+        ...(otherAppsRootOf(inst)
+          ? { otherAppsDir: otherAppsRootOf(inst) }
+          : {}),
         ...(maintenanceOp(inst) ? {} : {
-          stopWith: stopCommandFor(inst, {
-            instance: flags.instance,
-            appsDir: appsDirEnv(),
-            defaultHome: appHome(inst.appId),
-          }),
+          stopWith: stopCommandFor(
+            inst,
+            otherAppsRootOf(inst)
+              ? {
+                appsDir: otherAppsRootOf(inst)!,
+                defaultHome: join(otherAppsRootOf(inst)!, inst.appId),
+              }
+              : {
+                instance: flags.instance,
+                appsDir: appsDirEnv(),
+                defaultHome: appHome(inst.appId),
+              },
+          ),
         }),
         // The DevTools port, when the app was started with `--cdp`.
         //
@@ -3793,6 +3910,9 @@ function pidCommandLine(pid: number): string | null {
 export function stalePidRefusal(
   pid: number,
   locked: Map<number, { appId: string; dir: string }>,
+  /** Does `pid` itself hold the listening socket that answered as an aio
+   *  app? Asked only when its NAME does not say so ({@linkcode listenerPids}). */
+  ownsPort: () => boolean = () => false,
 ): string | null {
   if (!Number.isInteger(pid) || pid <= 0) return `"${pid}" is not a pid`;
   if (pid === Deno.pid) return "that is am itself";
@@ -3812,13 +3932,248 @@ export function stalePidRefusal(
   }
   const cmd = pidCommandLine(pid);
   if (cmd === null) return null; // platform will not say; the pid is all there is
-  if (!/\bdeno\b|aio/i.test(cmd)) {
+  // A COMPILED app runs under its own name (`notes`, `notes.exe`), so the
+  // name alone spared every compiled app's orphan, for good. The name is not
+  // widened: such a process is accepted only on evidence that it IS the aio
+  // app that answered — the kernel says this very pid holds the listening
+  // socket the aio health route was served from. A stranger whose pid a
+  // listener merely NAMED does not hold that socket.
+  if (!/\bdeno\b|aio/i.test(cmd) && !ownsPort()) {
     return `pid ${pid} is not an aio process — it is running: ${
       cmd.slice(0, 120)
     }`;
   }
   return null;
 }
+
+/** The pids holding a LISTENING TCP socket on `port` — what the OS says, not
+ *  what anything on the port claims. Empty when it cannot be read (no tool,
+ *  no permission): then nothing is proven and the caller's refusal stands.
+ *  `run` is a seam so each OS's parsing is a test on any host. */
+export function listenerPids(
+  port: number,
+  os: string = Deno.build.os,
+  run: (cmd: string, args: string[]) => string | null = runForText,
+  /** Linux: the kernel's name for `pid` (`/proc/<pid>/comm`), or null. */
+  comm: (pid: number) => string | null = procComm,
+): number[] {
+  const pids = new Set<number>();
+  if (os === "linux") {
+    // `LISTEN 0 511 127.0.0.1:8123 0.0.0.0:* users:(("notes",pid=4242,fd=9))`
+    const out = run("ss", ["-H", "-ltnp", `sport = :${port}`]) ?? "";
+    // The process NAME is in that text too, and a name is anything its owner
+    // likes (`pid=1`, `",pid=1,fd=3`): a pid counts only as part of a whole
+    // `("<its own name>",pid=N,fd=M)` entry — one character more than a name
+    // can hold (15), so no name can contain one.
+    for (const m of out.matchAll(/,pid=(\d+),fd=\d+\)/g)) {
+      const name = comm(Number(m[1]));
+      if (name !== null && out.includes(`("${name}"${m[0]}`)) {
+        pids.add(Number(m[1]));
+      }
+    }
+  } else if (os === "darwin") {
+    const out = run("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"]) ??
+      "";
+    for (const l of out.split("\n")) if (/^\d+$/.test(l.trim())) pids.add(+l);
+  } else if (os === "windows") {
+    // `  TCP    127.0.0.1:8123    0.0.0.0:0    LISTENING    4242`
+    const out = run("netstat", ["-ano", "-p", "TCP"]) ?? "";
+    for (const l of out.split("\n")) {
+      const f = l.trim().split(/\s+/);
+      if (
+        f.length === 5 && f[3] === "LISTENING" && f[1]!.endsWith(`:${port}`)
+      ) pids.add(Number(f[4]));
+    }
+  }
+  return [...pids].filter((p) => Number.isInteger(p) && p > 0);
+}
+
+function procComm(pid: number): string | null {
+  try {
+    return Deno.readTextFileSync(`/proc/${pid}/comm`).replace(/\n$/, "");
+  } catch {
+    return null; // aio-ok: gone, or not readable — then it is not proven
+  }
+}
+
+function runForText(cmd: string, args: string[]): string | null {
+  try {
+    const r = new Deno.Command(cmd, { args, stdout: "piped", stderr: "null" })
+      .outputSync();
+    return r.success ? new TextDecoder().decode(r.stdout) : null;
+  } catch {
+    return null; // aio-ok: no such tool here — nothing is proven, and the caller refuses
+  }
+}
+
+/** `am kill` on Windows, where the POSIX branch's SIGTERM is TerminateProcess.
+ *
+ *  An APP is asked to stop first ({@linkcode askThenKill}) and the answer says
+ *  whether it stopped cleanly or was ended hard. An `am backup` / `am restore`
+ *  holding the lock has no door to ask through and cannot catch anything: it
+ *  is terminated, and — being provably dead then — the incomplete copy its
+ *  lock names is removed HERE, with its lock. The POSIX sentence ("it removes
+ *  its partial copy and exits 143") is a promise that op cannot keep on this
+ *  OS. */
+async function killOnWindows(
+  appId: string,
+  pf: LockData,
+  mode: import("./am-types.ts").OutputMode,
+): Promise<void> {
+  const alive = () => isLockOwnerAlive(pf);
+  const kill = () => {
+    try {
+      Deno.kill(pf.pid, "SIGTERM");
+    } catch { /* aio-ok: raced us to the exit */ }
+  };
+  const op = maintenanceOp(pf);
+  if (op) {
+    const how = await askThenKill({
+      ask: () => Promise.resolve(false),
+      alive,
+      kill,
+    });
+    if (how === "alive") {
+      outError(`${op} on ${appId} (pid ${pf.pid}) is still alive`, mode);
+      Deno.exit(1);
+    }
+    const ended = how === "gone"
+      ? `${op} on ${appId} (pid ${pf.pid}) was not running any more — ` +
+        `nothing was ended here; what it left`
+      : `ended ${op} on ${appId} (pid ${pf.pid}) hard — Windows has no ` +
+        `signal it could catch, so it did not clean up itself`;
+    const data = join(pf.home ?? appDirs(appId).home, "data");
+    const isThere = (p: string) => {
+      try {
+        Deno.lstatSync(p);
+        return true;
+      } catch {
+        return false; // aio-ok: the answer — reported below
+      }
+    };
+    const dataThere = isThere(data);
+    const left = holdLeftover(pf, data);
+    const swept = left ? sweepIncomplete(left) : null;
+    removeLockKeyed(pf);
+    const copy = swept
+      ? sweptLine(swept)
+      : left && isThere(left)
+      ? `${left} is still there and does not say it is this op's copy — ` +
+        `check it, then delete it`
+      : `it left no copy behind`;
+    const dataSaid = dataThere
+      ? `data/ is in place`
+      : `data/ is MISSING — the kill landed between the two renames of the ` +
+        `swap: the previous data is in ${data}.replaced-*; rename it back ` +
+        `to ${data}`;
+    out(
+      mode === "pretty" ? `${ended}: ${copy}; ${dataSaid}` : {
+        appId,
+        pid: pf.pid,
+        killed: how === "hard",
+        op,
+        how,
+        ...(swept
+          ? { partial: swept.path, partialRemoved: swept.removed }
+          : {}),
+        dataPresent: dataThere,
+      },
+      mode,
+    );
+    if (!dataThere || (swept && !swept.removed)) Deno.exit(1);
+    return;
+  }
+  const how = await askThenKill({
+    // A lock with no door (still booting) has nobody to ask.
+    ask: async () =>
+      !lockHasNoDoor(pf) &&
+      (await trojanPost(
+        pf.port,
+        "shutdown",
+        undefined,
+        appId,
+        QUICK_TIMEOUT_MS,
+        pf.pid,
+      )).ok,
+    alive,
+    kill,
+  });
+  if (how === "alive") {
+    outError(
+      `${appId} (pid ${pf.pid}) is still alive after it was terminated — ` +
+        `not killed`,
+      mode,
+    );
+    Deno.exit(1);
+  }
+  removePid(appId, pf);
+  out(
+    mode === "pretty"
+      ? killSaid(appId, pf.pid, how)
+      : { appId, pid: pf.pid, killed: how !== "gone", how },
+    mode,
+  );
+}
+
+/** What `am kill` on Windows says about an APP, per outcome. Pure. */
+export function killSaid(
+  appId: string,
+  pid: number,
+  how: "clean" | "hard" | "gone",
+): string {
+  return how === "clean"
+    ? `stopped ${appId} cleanly (pid ${pid}) — it was asked first, ` +
+      `because Windows has no signal an app can catch`
+    : how === "gone"
+    ? `${appId} (pid ${pid}) was not running any more — nothing was ` +
+      `stopped or killed; its lock is removed`
+    : `killed ${appId} (pid ${pid}) — ${ENDED_HARD}`;
+}
+
+/** How long `am kill` on Windows waits for an app that ACCEPTED the stop to
+ *  be gone before it ends it the hard way. Short: this is `kill`, not `stop`. */
+const KILL_ASK_WAIT_MS = 3000;
+
+/** End a process where there is no signal it could catch (Windows: `kill` is
+ *  TerminateProcess — no handler, no `onStop`, no final flush). So it is
+ *  ASKED first, through the same keyed stop `am stop` uses, for a short
+ *  bound; only then ended the hard way — and the answer says which happened,
+ *  because "killed" alone hid a lost last write.
+ *
+ *  Every effect is handed in, so the three outcomes are a test on any host:
+ *  `"clean"` — it accepted the stop and exited; `"hard"` — it was terminated;
+ *  `"gone"` — it never accepted anything and was not running any more (it
+ *  had crashed, or somebody else ended it): nothing is known about HOW it
+ *  ended, so neither of the other two is said; `"alive"` — it survived even
+ *  the termination. */
+export async function askThenKill(o: {
+  /** The keyed stop. True when the app accepted it. */
+  ask: () => Promise<boolean>;
+  alive: () => boolean;
+  kill: () => void;
+  waitMs?: number;
+  pollMs?: number;
+}): Promise<"clean" | "hard" | "gone" | "alive"> {
+  const gone = async (ms: number) => {
+    const deadline = Date.now() + ms;
+    while (o.alive()) {
+      if (Date.now() >= deadline) return false;
+      await new Promise((r) => setTimeout(r, o.pollMs ?? KILL_POLL_MS));
+    }
+    return true;
+  };
+  const waitMs = o.waitMs ?? KILL_ASK_WAIT_MS;
+  const asked = await o.ask();
+  if (asked && await gone(waitMs)) return "clean";
+  // Gone between the bound and this look: clean only if it had accepted.
+  if (!o.alive()) return asked ? "clean" : "gone";
+  o.kill();
+  return await gone(waitMs) ? "hard" : "alive";
+}
+
+/** What `am kill` / `am stop` say about HOW an app ended, when that was not
+ *  a clean shutdown. Pure. */
+export const ENDED_HARD = "ended hard: onStop and the last flush did not run";
 
 export async function cmdKill(
   _args: string[],
@@ -3861,10 +4216,14 @@ export async function cmdKill(
       );
       Deno.exit(1);
     }
-    const foreign = foreignOwnerRefusal(pf);
+    const foreign = foreignOwnerRefusal(pf) ?? otherRootRefusal("kill", pf);
     if (foreign) {
       outError(foreign, mode);
       Deno.exit(1);
+    }
+    if (Deno.build.os === "windows") {
+      await killOnWindows(appId, pf, mode);
+      return;
     }
     try {
       Deno.kill(pf.pid, "SIGTERM");
@@ -3931,7 +4290,12 @@ export async function cmdKill(
     // Accounted for by a live lock, and the SAME process — this is the app.
     if (known && known.pid === health.pid) continue;
     // The pid arrived over an unauthenticated loopback socket. Check it.
-    const refusal = stalePidRefusal(health.pid, lockedPids);
+    const claimed = health.pid;
+    const refusal = stalePidRefusal(
+      claimed,
+      lockedPids,
+      () => listenerPids(port).includes(claimed),
+    );
     if (refusal) {
       spared.push({ port, pid: health.pid, why: refusal });
       continue;

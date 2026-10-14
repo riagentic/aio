@@ -52,21 +52,35 @@ Deno.test({
       db.close();
       return rows.map((r) => r.v);
     };
+    // The write reaches SQLite on the persistence worker, after the debounce:
+    // wait for the rows themselves, not for a time that is long enough on an
+    // idle machine (120 ms was not, on a loaded one).
+    const rowsBecome = async (want: string[]): Promise<string[]> => {
+      const end = Date.now() + 15_000;
+      let got = readRows();
+      while (got.join("\n") !== want.join("\n") && Date.now() < end) {
+        await new Promise((r) => setTimeout(r, 20));
+        got = readRows();
+      }
+      return got;
+    };
 
     try {
       const app1 = await boot();
       await notes.add("keep");
-      await new Promise((r) => setTimeout(r, 120));
+      assertEquals(await rowsBecome(["keep"]), ["keep"], "precondition");
       const backup = app1.snapshot!();
 
       // Drift away from the backup, and persist that.
       await notes.add("drift");
-      await new Promise((r) => setTimeout(r, 120));
-      assertEquals(readRows(), ["keep", "drift"], "precondition: both stored");
+      assertEquals(
+        await rowsBecome(["keep", "drift"]),
+        ["keep", "drift"],
+        "precondition: both stored",
+      );
 
       // Restore.
       app1.loadSnapshot!(backup);
-      await new Promise((r) => setTimeout(r, 120));
       assertEquals(
         (app1.getState() as { notes: { items: Item[] } }).notes.items.map((
           r,
@@ -75,7 +89,7 @@ Deno.test({
         "state is restored (this half has always worked)",
       );
       assertEquals(
-        readRows(),
+        await rowsBecome(["keep"]),
         ["keep"],
         "the SQL table must be restored too — it is what the next boot reads",
       );

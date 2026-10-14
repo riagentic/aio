@@ -195,7 +195,11 @@ export function writeLnk(lnk: string, target: string, dir: string): void {
 /** Give a one-click install the Start-menu shortcut its `.exe` did not add —
  *  once ({@link sfxShortcutAction}). A no-op anywhere else. Never throws: a
  *  start must not stop over a shortcut, so a failure is said, with the path
- *  and why, and — nothing being recorded — the next start tries again. */
+ *  and why, and — nothing being recorded — the next start tries again.
+ *
+ *  Returns the shortcut's path on the ONE start that created it — the fact an
+ *  app can word for its user ("added to Start; the download can be deleted",
+ *  `updates.shortcutAdded`) — and undefined on every other. */
 export function ensureSfxShortcut(o: {
   install: string;
   log: Log;
@@ -206,7 +210,7 @@ export function ensureSfxShortcut(o: {
   os?: string;
   appData?: string;
   write?: typeof writeLnk;
-}): void {
+}): string | undefined {
   const os = o.os ?? Deno.build.os;
   if (os !== "windows" || !sfxInstall(o.install)) return;
   const record = o.install + SFX_SHORTCUT_RECORD;
@@ -240,6 +244,7 @@ export function ensureSfxShortcut(o: {
         `added a Start-menu shortcut for this app (${lnk}) — the downloaded ` +
           `.exe it was installed from is no longer needed and can be deleted`,
       );
+      return lnk;
     }
   } catch (e) {
     o.log.warn(

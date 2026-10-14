@@ -27,6 +27,8 @@ import { log } from "../diagnostics/logger-api.ts";
 // importing logger-core is fine" — breaks the bundle with a blank screen.
 
 /** One value that changed shape on the way through JSON. */
+import type { AioWindow } from "./protocol-types.ts";
+
 export interface LossyConversion {
   /** Path from the walked root, e.g. `value.items[0].due`, `args[1]`. */
   path: string;
@@ -229,10 +231,55 @@ export interface SerializedArgs {
  *  Warns (console, not the structured logger — this runs in the browser) and
  *  hands back the JSON-clean arguments; `dropped` says the call must not be
  *  sent at all. `what` names the call so the warning is actionable. */
+/** Is `wire.omitTrailingUndefined` on in this runtime? The server's
+ *  `aio.run({ wire })`, as the client learned it (`__aioConfig`: the page
+ *  shell, or the `cfg` frame for a shell the build templated). */
+export function omitsTrailingUndefined(): boolean {
+  return (globalThis as { __aioConfig?: AioWindow["__aioConfig"] }).__aioConfig
+    ?.wire?.omitTrailingUndefined === true;
+}
+
+/** THE decision for a call's argument list on its way to a wire, for every
+ *  door (an action frame, a CRDT op, a `serverFn` call) and for the harness
+ *  that models them.
+ *
+ *  JSON has no `undefined`: in an array it is written `null`. So
+ *  `cell.m(a, undefined)` reaches the method as `m(a, null)`, and a default
+ *  parameter — which applies to `undefined` only — is skipped. With
+ *  `wire.omitTrailingUndefined` the trailing `undefined`s are not sent, and
+ *  the method runs with the arguments that were really given, as it does in
+ *  process. Only TRAILING ones: `m(undefined, 1)` cannot be shortened without
+ *  moving `1`, so it is left alone and reported like every other change.
+ *
+ *  Pure, and the same array back when there is nothing to drop. */
+export function wireArgs<T>(
+  args: readonly T[],
+  omit: boolean = omitsTrailingUndefined(),
+): readonly T[] {
+  if (!omit) return args;
+  let n = args.length;
+  while (n > 0 && args[n - 1] === undefined) n--;
+  return n === args.length ? args : args.slice(0, n);
+}
+
+/** {@linkcode wireArgs} for a payload of the shape every method call has,
+ *  `{ args: [...] }`; anything else is returned as it is. */
+export function wirePayload<P>(
+  payload: P,
+  omit: boolean = omitsTrailingUndefined(),
+): P {
+  if (!omit || payload === null || typeof payload !== "object") return payload;
+  const args = (payload as { args?: unknown }).args;
+  if (!Array.isArray(args)) return payload;
+  const kept = wireArgs(args, true);
+  return kept === args ? payload : { ...payload, args: kept };
+}
+
 export function serializeArgs(
   args: unknown[],
   what?: string,
 ): SerializedArgs {
+  args = wireArgs(args) as unknown[];
   let round: unknown;
   try {
     round = JSON.parse(JSON.stringify(args));

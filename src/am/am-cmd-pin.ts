@@ -298,6 +298,25 @@ export function pinRefusal(ref: string, blocking: readonly Blocker[]): string {
     `says so.`;
 }
 
+/** What a pin that moved BACK between two releases says — null for any
+ *  other move, and for a ref that cannot be ordered (`main`, a path pin).
+ *
+ *  The preflight reads the app for what a NEWER version removed. Nothing can
+ *  read it for what an older one never had: an app scaffolded by the newer
+ *  `am create` (or edited since) passes options the older types do not know,
+ *  and its first `deno task check` failed on each with no word about why.
+ *  The check is the detector — it names every one; this names the cause.
+ *  Pure. */
+export function pinnedBackNote(from: string | null, to: string): string | null {
+  const was = from ? parseVersion(from) : null;
+  const now = parseVersion(to);
+  if (!was || !now || compareVersions(now, was) >= 0) return null;
+  return `moved BACK: ${from} → ${to}. Source written for ${from} — by its ` +
+    `\`am create\`, or by hand since — may pass options ${to} does not ` +
+    `have. \`deno task check\` names each one: remove it, or return with ` +
+    `\`am pin ${from}\`.`;
+}
+
 /** Does `ref` still accept an API whose last supporting release was `lastGood`?
  *  A ref we cannot order (`main`, `main-<sha>`, a path pin) is the tip by
  *  definition — treat it as newer, never as "probably fine". */
@@ -615,6 +634,10 @@ export async function cmdPin(
     );
     Deno.exit(1);
   }
+  // Always on stderr, every mode: the pin stands, and the next type check
+  // is where this shows.
+  const back = pinnedBackNote(pinned, res.ref);
+  if (back) sayErr(`⚠ ${back}`);
   const minDeno = await pinnedMinDeno(res.path);
   const electron = await alignElectronRuntime(
     appDir,

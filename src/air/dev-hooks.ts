@@ -47,6 +47,7 @@
 import type { UISurfaceNode } from "./ui-surface.ts";
 import type { UITriggerRequest, UITriggerResult } from "./ui-remote.ts";
 import type { SurfaceMeasurement } from "./ui-surface.ts";
+import { airDevHooks } from "./dev-air.ts";
 
 /** The `am surface` / `am trigger` executor, as `browser-air-commands.ts`
  *  uses it. Type-only imports above: erased by the bundler, so naming these
@@ -78,13 +79,17 @@ export type DevHooks = {
   /** The AIO2 hint for a handler that wrote read-only state
    *  (`dev-readonly-hint.ts`) — called with what the handler threw. */
   readOnlyHint: ((err: unknown) => void) | null;
-};
+} & Partial<typeof airDevHooks>;
 
+/** The chunk's slots start null; the renderer's own dev layer (`dev-air.ts`)
+ *  is here from the first line wherever source runs, and absent — the bundler
+ *  answers that import with an empty record — in a production bundle. */
 export const devHooks: DevHooks = {
   auditContrast: null,
   auditIdSelectors: null,
   uiRemote: null,
   readOnlyHint: null,
+  ...airDevHooks,
 };
 
 /** Called by the dev chunk as it loads. Partial: a chunk that grows a hook
@@ -141,7 +146,7 @@ export function loadDevChunk(): Promise<void> {
         "[aio] the dev-only chunk did not load — the colour-contrast audit, " +
           "the #id-selector audit, the dev error overlay, the read-only-state " +
           "hint and the `am surface` / `am trigger` engine are NOT running on " +
-          "this page. A production bundle does not carry them; `aio dev` " +
+          "this page. A production bundle does not carry them; `deno task dev` " +
           "serves them at /__aio/browser/dev-diagnostics.ts. Cause: " +
           String(e),
       );

@@ -8,6 +8,7 @@
 //   · `am preview` of a component calling a selector threw "notes.open is not
 //     a function" — nothing in the am process had bound the cells, while the
 //     live `am surface` (inside the server, cells bound) rendered it.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, toFileUrl } from "@std/path";
 import { renderHeadlessSurface } from "../src/server/server-surface.ts";

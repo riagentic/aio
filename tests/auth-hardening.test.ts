@@ -9,6 +9,7 @@
 // step of the state-machine fuzzer in auth-fuzz.test.ts — this file is the
 // legible statement of each one, that file is the one that hunts for the next.
 
+import "./store-sandbox.ts";
 import {
   assert,
   assertEquals,

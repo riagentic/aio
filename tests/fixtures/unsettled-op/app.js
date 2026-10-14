@@ -18,7 +18,7 @@ const notes = cell("notes", {
       // once accepted.
       if (Deno.env.get("STRICT") === "1") throw new Error("strict " + t);
       if (s.items.includes(t)) {
-        if (PHASE === "kill-refused") die();
+        if (PHASE === "kill-refused" || PHASE === "kill-pending-list") die();
         throw new Error("dup " + t);
       }
       if (PHASE === "kill-accepted" && t === "n2") die();
@@ -63,7 +63,8 @@ ws.onmessage = (e) => {
   } catch { /* not a frame */ }
 };
 await new Promise((r) => (ws.onopen = r));
-let n = 0;
+// NBASE / FIRST: a later run on the same data — fresh ids, a fresh text.
+let n = Number(Deno.env.get("NBASE") ?? "0");
 const send = (arg) => {
   const id = "op-" + (++n);
   ws.send(JSON.stringify({
@@ -81,26 +82,31 @@ const send = (arg) => {
 };
 // PENDING: the op arrives in a `sync-req`'s pending list — the reconnect
 // door — not as an `op` frame.
-const sendPending = (arg) => {
-  const id = "op-" + (++n);
+const sendPending = (...args) => {
+  const pendingOps = args.map((arg) => ({
+    id: "op-" + (++n),
+    hlc: [Date.now(), n, "c1"],
+    cell: "notes",
+    action: "add",
+    payload: { args: [arg] },
+  }));
   ws.send(JSON.stringify({
     v: 2,
     t: "sync-req",
-    d: {
-      clientId: "c1",
-      cells: {},
-      pendingOps: [{
-        id,
-        hlc: [Date.now(), n, "c1"],
-        cell: "notes",
-        action: "add",
-        payload: { args: [arg] },
-      }],
-    },
+    d: { clientId: "c1", cells: {}, pendingOps },
   }));
-  return id;
+  return pendingOps[0].id;
 };
-const first = (Deno.env.get("PENDING") === "1" ? sendPending : send)("n1");
+// One reconnect's whole queue, the kill falling inside it: op-3 is refused
+// (and kills), op-4 is never reached.
+if (PHASE === "kill-pending-list") {
+  sendPending("n1", "n2", "n1", "n3");
+  await new Promise((r) => setTimeout(r, 30000));
+  Deno.exit(3);
+}
+const first = (Deno.env.get("PENDING") === "1" ? sendPending : send)(
+  Deno.env.get("FIRST") ?? "n1",
+);
 while (!acks.has(first)) await new Promise((r) => setTimeout(r, 2));
 // op-2: the method kills the process while it is in flight.
 if (PHASE === "kill-refused") send("n1");

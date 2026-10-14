@@ -7,6 +7,7 @@
 // `AIO_APPS_DIR=demo/../apps` wrote its lock in `aio-…-demo-apps`, `am` run
 // with `AIO_APPS_DIR=apps` searched `aio-…-apps`, and answered "not running"
 // about an app whose data sat in the directory it was pointed at.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import { lockDir } from "../src/server/single-instance-lock.ts";

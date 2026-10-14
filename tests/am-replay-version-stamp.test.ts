@@ -6,6 +6,7 @@
 // longer has. `am replay` ignored the stamp: it re-sent a v1 `add(5)` ("+5
 // units") to a running v2 app whose `add` takes cents — a repro of a state no
 // build ever held, reported as "replayed 1 action".
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { aio } from "../src/server/aio.ts";
 import { cell } from "../src/state/cell-create.ts";

@@ -15,13 +15,19 @@
 
 import { assertEquals } from "@std/assert";
 import { CLAIMS } from "../scripts/proof.ts";
+import { SUITE_ROWS } from "../scripts/proof-record.ts";
 
 const ROOT = new URL("../", import.meta.url);
 
 /** Every `recordProof("<target>", "<env>"` in tests/ and scripts/, with the
- *  file it lives in. Read as text: importing the gates would run them. */
+ *  file it lives in. Read as text: importing the gates would run them. Plus
+ *  the rows `deno task update:proof` writes from another machine's suite log
+ *  (SUITE_ROWS) — the second writer, and the only other one. */
 async function recordedPairs(): Promise<Map<string, string[]>> {
   const found = new Map<string, string[]>();
+  for (const r of SUITE_ROWS) {
+    found.set(`${r.target}/${r.env}`, ["scripts/proof-record.ts"]);
+  }
   for (const dir of ["tests", "scripts"]) {
     for await (const e of Deno.readDir(new URL(dir, ROOT))) {
       if (!e.isFile || !/\.(ts|tsx)$/.test(e.name)) continue;

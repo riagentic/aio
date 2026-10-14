@@ -12,6 +12,7 @@
 // Every ordering surface the framework has agrees on this line, and this test
 // is where that is pinned: `am pin latest`, `am fix` (seriesRank → removals),
 // the in-app updater (compareVersions in updates-core), and the tag sort.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import {
   compareVersions,

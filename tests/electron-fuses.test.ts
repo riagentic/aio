@@ -99,7 +99,7 @@ Deno.test("fuses: am prune knows a -fused runtime as the same Electron", () => {
   });
 });
 
-const DIST = "node_modules/.deno/electron@44.4.1/node_modules/electron/dist";
+const DIST = "node_modules/electron/dist";
 
 function realSkip(): string | null {
   if (!Deno.env.get("ELECTRON_E2E")) return "set ELECTRON_E2E=1 to run";

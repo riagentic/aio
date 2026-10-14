@@ -27,7 +27,7 @@
  * ```
  */
 
-import { dec } from "../protocol/envelope.ts";
+import { dec, wireError } from "../protocol/envelope.ts";
 import { connectCli } from "../server/cli-client.ts";
 import type { CliApp } from "../server/cli-client.ts";
 import { composeCellsWiring } from "../server/aio-composition.ts";
@@ -119,7 +119,7 @@ export type Patch = {
 type Sink = {
   push(batch: Patch[]): void;
   /** One per-action ack — the reply to a client-context method call. */
-  ack(cid: string, ok: boolean, value: unknown, error?: string): void;
+  ack(cid: string, ok: boolean, value: unknown, error: Error): void;
   socket: WebSocket | null;
 };
 const _sinks = new Set<Sink>();
@@ -157,9 +157,17 @@ function _installSocketCapture(): void {
             ok?: boolean;
             value?: unknown;
             error?: string;
+            code?: string;
           };
           if (typeof d.cid === "string") {
-            owner.ack(d.cid, d.ok !== false, d.value, d.error);
+            // `wireError` — the browser's own reader of a failed ack, so a
+            // rejection here carries its `code` as it does in a tab.
+            owner.ack(
+              d.cid,
+              d.ok !== false,
+              d.value,
+              wireError(d, "the server refused the action"),
+            );
           }
         }
       });
@@ -290,9 +298,7 @@ export async function testMultiClient(
           if (!waiter) return; // not ours (connectCli's own bound calls)
           acks.delete(cid);
           if (ok) waiter.ok(value);
-          else {waiter.fail(
-              new Error(error ?? "the server refused the action"),
-            );}
+          else waiter.fail(error);
         },
       };
       _sinks.add(sink);

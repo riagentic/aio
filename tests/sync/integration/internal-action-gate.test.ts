@@ -21,6 +21,8 @@ import { createServerSyncHandler } from "../../../src/sync/server-handler.ts";
 import { isValidSyncOp } from "../../../src/sync/server-handler.ts";
 import { createTestDb } from "../_test-db.ts";
 import { tempDir } from "../../../src/testing/temp-dir.ts";
+import { connectLocal } from "../../../src/server/local-listen.ts";
+import { localEndpoint } from "../../local-endpoint-helper.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -147,7 +149,6 @@ Deno.test({
 Deno.test({
   name:
     "UDS: `sync-req.pendingOps` refuses a framework-internal action exactly like `op` does",
-  ignore: Deno.build.os === "windows",
   async fn() {
     const { db, close } = createTestDb();
     const dispatched: string[] = [];
@@ -169,10 +170,10 @@ Deno.test({
       broadcastRaw: { fn: () => {} },
       log: { debug: () => {}, warn: () => {}, error: () => {} },
     });
-    const socketPath = join(
+    const socketPath = localEndpoint(join(
       await tempDir("aio-internal-gate-uds-"),
       "gate.sock",
-    );
+    ));
     const uds = createUDSListener(
       socketPath,
       () => ({ notes: state }),
@@ -184,7 +185,7 @@ Deno.test({
       handler,
     );
     await sleep(50);
-    const conn = await Deno.connect({ path: socketPath, transport: "unix" });
+    const conn = await connectLocal(socketPath);
     const writer = conn.writable.getWriter();
     const send = (t: Kind, d: unknown) =>
       writer.write(new TextEncoder().encode(enc(t, d) + "\n"));

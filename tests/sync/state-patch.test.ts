@@ -166,3 +166,22 @@ Deno.test("a function, symbol or undefined value is absent to a patch, as JSON h
   }
   assertEquals(diffState({ a: 1 }, { a: 1, f }), [], "nothing JSON would see");
 });
+
+// The copy of a touched array is `[].concat(x)` (a frozen array's `slice` is
+// V8's slow path): the same copy — a hole stays a hole, the length stays, and
+// the frozen input is not touched.
+Deno.test("applyStatePatch: a touched array is copied with its holes and its length; the frozen input is untouched", () => {
+  const rows: unknown[] = [{ n: 1 }, , { n: 3 }];
+  rows.length = 5;
+  const state = Object.freeze({ rows: Object.freeze(rows) });
+  const next = applyStatePatch(state, [{ p: ["rows", 2, "n"], v: 9 }]) as {
+    rows: { n: number }[];
+  };
+  assertEquals(next.rows.length, 5);
+  assertEquals(1 in next.rows, false);
+  assertEquals(4 in next.rows, false);
+  assertEquals(next.rows[2], { n: 9 });
+  assertEquals(next.rows[0], rows[0]);
+  assertEquals(Object.getPrototypeOf(next.rows), Array.prototype);
+  assertEquals((rows[2] as { n: number }).n, 3);
+});

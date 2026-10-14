@@ -150,6 +150,9 @@ export function planDisplay(opts: {
    *  nothing and one rule is better than two), the NOTE is not printed.
    *  Default true: every caller that does not say is the old behaviour. */
   tabs?: boolean;
+  /** The host OS — a parameter so the Windows/macOS wording is checked on
+   *  whichever host runs the suite. */
+  os?: string;
 }): DisplayPlan {
   const { choice, gui, interactive } = opts;
   const probe = opts.probe ?? REAL;
@@ -209,10 +212,19 @@ export function planDisplay(opts: {
   if (!probe.hasParent()) {
     // Nothing to nest inside, and no focus to steal either. Contain the tab,
     // leave the window alone.
+    // …on Linux. Windows and macOS have no nested display at all, and DO
+    // have a desktop: "nothing to contain" there was said while the window
+    // opened in front of whoever was sitting at the machine.
+    const os = opts.os ?? Deno.build.os;
     return {
       env,
       level: "note",
-      note: "no desktop session — nothing to contain",
+      note: os === "linux"
+        ? "no desktop session — nothing to contain"
+        : `${
+          os === "darwin" ? "macOS" : os === "windows" ? "Windows" : os
+        } has no nested display — this app's window opens on the desktop ` +
+          `and may take focus; browser tabs suppressed`,
     };
   }
 

@@ -173,7 +173,13 @@ Deno.test("am build without a build task names the repair (am fix), exit 1", asy
 
 /** The first command of every `&&`-joined segment of a task string. */
 function commandsOf(taskStr: string): string[][] {
-  return taskStr.split("&&").map((seg) => seg.trim().split(/\s+/));
+  // A leading `NAME=value` is the task shell's environment for the command
+  // (`AIO_TEST_WIRE=strict deno test -A`), not the command.
+  return taskStr.split("&&").map((seg) =>
+    seg.trim().split(/\s+/).filter((w, i, all) =>
+      !all.slice(0, i + 1).every((x) => /^[A-Z_][A-Z0-9_]*=\S*$/.test(x))
+    )
+  );
 }
 
 Deno.test("scaffold: the task set is the promised one, and every task resolves", async () => {

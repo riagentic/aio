@@ -8,6 +8,7 @@
 //
 // Fixture monorepo in a temp dir; HOME, AIO_HOME, the versions store and the
 // apps dir are all throwaway — no network, no real HOME, no real repo.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join, resolve } from "@std/path";
 import { depAioProvider, isOwnDepAio } from "../src/am/am-cmd-fix.ts";

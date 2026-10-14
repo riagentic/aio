@@ -1,5 +1,10 @@
 // Two `am` surfaces that read a project's config or write a machine's output,
 // and got one of them wrong for a jsonc project / a piped stdout.
+// `tempDir`, not `Deno.makeTempDir`: it arms the store sandbox. `am fix`,
+// `am add` and `am create` provision the pinned framework version, and run on
+// its own this file put one into the REAL `~/.local/lib/aio-versions/`.
+import "./store-sandbox.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { assert, assertEquals } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { cmdFix } from "../src/am/am-cmd-fix.ts";
@@ -28,7 +33,7 @@ async function captureLog(fn: () => Promise<void>): Promise<string[]> {
 // still said "Now run: deno task dev".
 Deno.test("am fix: finds the entry in a COMMENTED deno.jsonc", async () => {
   const orig = Deno.cwd();
-  const dir = await Deno.makeTempDir({ prefix: "am-jsonc-" });
+  const dir = await tempDir("am-jsonc-");
   try {
     await Deno.writeTextFile(
       join(dir, "deno.jsonc"),
@@ -60,7 +65,7 @@ Deno.test("am fix: finds the entry in a COMMENTED deno.jsonc", async () => {
     );
   } finally {
     Deno.chdir(orig);
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 });
 
@@ -70,7 +75,7 @@ Deno.test("am fix: finds the entry in a COMMENTED deno.jsonc", async () => {
 // the PRETTY STRING, JSON-stringified — valid JSON, wrong document.
 Deno.test("am add cell: piped stdout gets the JSON document, not a stringified sentence", async () => {
   const orig = Deno.cwd();
-  const dir = await Deno.makeTempDir({ prefix: "am-add-" });
+  const dir = await tempDir("am-add-");
   try {
     Deno.chdir(dir);
     // No `--json` flag: the mode comes from stdout not being a terminal,
@@ -85,7 +90,7 @@ Deno.test("am add cell: piped stdout gets the JSON document, not a stringified s
     assert(await Deno.stat(join(dir, "src", "cell", "todos.ts")));
   } finally {
     Deno.chdir(orig);
-    await Deno.remove(dir, { recursive: true });
+    await dropTempDir(dir);
   }
 });
 
@@ -98,7 +103,7 @@ Deno.test("am add cell: piped stdout gets the JSON document, not a stringified s
 Deno.test({
   name: "am create: a PIPED stdout is a JSON document, not a quoted sentence",
   fn: async () => {
-    const dir = await Deno.makeTempDir({ prefix: "am-create-pipe-" });
+    const dir = await tempDir("am-create-pipe-");
     try {
       const am = fromFileUrl(new URL("../src/am.ts", import.meta.url));
       const out = await new Deno.Command(Deno.execPath(), {
@@ -132,7 +137,7 @@ Deno.test({
       assertEquals(d.target, "browser");
       assert(d.files.includes("deno.json"), "names the files it wrote");
     } finally {
-      await Deno.remove(dir, { recursive: true });
+      await dropTempDir(dir);
     }
   },
 });

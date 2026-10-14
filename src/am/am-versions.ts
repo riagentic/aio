@@ -1004,6 +1004,62 @@ export const FRAMEWORK_DEPS = [
 
 export type DepChange = { key: string; from: string | null; to: string };
 
+/** An `allowScripts` entry that names a version the app no longer imports. */
+export type AllowScriptsDrift = { from: string; to: string };
+
+const EXACT_NPM = /^npm:((?:@[^@/]+\/)?[^@/]+)@(\d+\.\d+\.\d+[\w.+-]*)$/;
+
+/** `allowScripts` entries whose package the app imports at ANOTHER exact
+ *  version — each with the entry that would match.
+ *
+ *  Deno matches `allowScripts` by exact version (measured on 2.9.7: with
+ *  `imports.esbuild` at 0.25.12, `"npm:esbuild@0.24.2"` leaves the package
+ *  without its `.scripts-run` marker and prints nothing; `"npm:esbuild@0.25.12"`
+ *  and the bare `"npm:esbuild"` both run the script). So an import that moved
+ *  while its entry stayed is an install script that silently stopped running
+ *  — for Electron, the one that downloads the runtime. A field report:
+ *  `am pin` moved the imports and reported the app healthy.
+ *
+ *  Only what can be decided: an exact entry, and ONE exact imported version of
+ *  that package. A bare or ranged entry, a ranged import and a `deny` list are
+ *  left alone. Pure. */
+export function allowScriptsDrift(
+  config: { imports?: unknown; allowScripts?: unknown },
+): AllowScriptsDrift[] {
+  const scripts = config.allowScripts as { allow?: unknown } | unknown[];
+  const entries = Array.isArray(scripts) ? scripts : scripts?.allow;
+  if (!Array.isArray(entries)) return [];
+  const imported = new Map<string, Set<string>>();
+  for (const v of Object.values(config.imports ?? {})) {
+    const m = typeof v === "string" ? EXACT_NPM.exec(v) : null;
+    if (m) imported.set(m[1]!, (imported.get(m[1]!) ?? new Set()).add(m[2]!));
+  }
+  return entries.flatMap((entry) => {
+    const m = typeof entry === "string" ? EXACT_NPM.exec(entry) : null;
+    const versions = m ? imported.get(m[1]!) : undefined;
+    if (!m || versions?.size !== 1 || versions.has(m[2]!)) return [];
+    return [{ from: entry, to: `npm:${m[1]}@${[...versions][0]}` }];
+  });
+}
+
+/** `text` (a deno.json) with each drifted `allowScripts` entry rewritten —
+ *  inside the `allowScripts` value only, so an import alias that pins the old
+ *  version on purpose keeps it. Comments and layout survive. Pure. */
+export function rewriteAllowScripts(
+  text: string,
+  drift: readonly AllowScriptsDrift[],
+): string {
+  return text.replace(
+    /("allowScripts"\s*:\s*)(\[[^\]]*\]|\{[^}]*\})/,
+    (_all, key: string, value: string) =>
+      key +
+      drift.reduce(
+        (v, d) => v.replaceAll(JSON.stringify(d.from), JSON.stringify(d.to)),
+        value,
+      ),
+  );
+}
+
 /** Align the app's framework-owned dep entries with what the pinned version
  *  declares. Returns what changed, so the caller can SAY so — silently editing
  *  someone's deno.json would be its own kind of failure. */
@@ -1028,7 +1084,10 @@ export async function syncFrameworkDeps(
   if (!found) return [];
   const appPath = found.path;
   const raw = await Deno.readTextFile(appPath);
-  const app = found.config as { imports?: Record<string, string> };
+  const app = found.config as {
+    imports?: Record<string, string>;
+    allowScripts?: unknown;
+  };
   const have = app.imports ?? {};
   const changes: DepChange[] = [];
   let out = raw;
@@ -1061,6 +1120,24 @@ export async function syncFrameworkDeps(
         to: electronSpec(tested),
       });
     }
+  }
+  // …and the `allowScripts` entries of the packages that just moved: Deno
+  // matches them by exact version, so an entry left on the old one is an
+  // install script that no longer runs (see `allowScriptsDrift`).
+  const moved = new Set(changes.map((c) => c.to));
+  const scripts = allowScriptsDrift({
+    imports: {
+      ...have,
+      ...Object.fromEntries(changes.map((c) => [c.key, c.to])),
+    },
+    allowScripts: app.allowScripts,
+  }).filter((d) => moved.has(d.to));
+  const withScripts = rewriteAllowScripts(out, scripts);
+  if (withScripts !== out) {
+    out = withScripts;
+    changes.push(
+      ...scripts.map((d) => ({ key: "allowScripts", from: d.from, to: d.to })),
+    );
   }
   if (changes.length > 0) await Deno.writeTextFile(appPath, out);
   return changes;

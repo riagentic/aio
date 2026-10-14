@@ -9,12 +9,14 @@ import {
   assertStringIncludes,
 } from "@std/assert";
 import {
+  connectCodeFromFacts,
   entryOverlapped,
   ERROR_BROKEN_PIPE,
   ERROR_FILE_NOT_FOUND,
   ERROR_INVALID_HANDLE,
   ERROR_IO_PENDING,
   ERROR_MORE_DATA,
+  ERROR_NO_DATA,
   ERROR_OPERATION_ABORTED,
   ERROR_PIPE_BUSY,
   ERROR_PIPE_CONNECTED,
@@ -187,9 +189,9 @@ Deno.test("win-pipe: no per-operation blocking wait — the completion port is t
     parked.sort(),
     // GetQueuedCompletionStatusEx: ONE, for the whole process, only while
     // something is pending. FlushFileBuffers: bounded by PIPE_DRAIN_TIMEOUT_MS,
-    // then the connection is closed. WaitNamedPipeW: bounded, 2 s, and only
-    // when every pipe instance is mid-connect.
-    ["FlushFileBuffers", "GetQueuedCompletionStatusEx", "WaitNamedPipeW"],
+    // then the connection is closed. (A client's wait on a busy pipe is a JS
+    // timer, PIPE_BUSY_WAIT_MS — `WaitNamedPipeW` parked a thread per client.)
+    ["FlushFileBuffers", "GetQueuedCompletionStatusEx"],
     "a new parked FFI call needs a bound — an unbounded one is the freeze",
   );
   // The drain's bound is a number, and the timeout closes the connection.
@@ -243,4 +245,33 @@ Deno.test("win-pipe: a server end is closed, never DisconnectNamedPipe'd", async
     false,
     "DisconnectNamedPipe drops unread bytes — the empty-window bug",
   );
+});
+
+Deno.test("win-pipe: a connect whose error code was lost is answered from the instance, never by closing the listener", async () => {
+  // `ConnectNamedPipe` returned FALSE and the `GetLastError()` after it read
+  // 0 on a real Windows 11 under a full suite (2026-10-13). 0 is no answer the
+  // call has, so `listen` took it for a failure and closed the whole
+  // listener: "ConnectNamedPipe failed … Win32 error 0". The table is the one
+  // measured there.
+  assertEquals(connectCodeFromFacts(false, false), ERROR_IO_PENDING);
+  assertEquals(connectCodeFromFacts(true, true), ERROR_PIPE_CONNECTED);
+  assertEquals(connectCodeFromFacts(false, true), ERROR_NO_DATA);
+  // Readable is a connected client, whatever the second fact says.
+  assertEquals(connectCodeFromFacts(true, false), ERROR_PIPE_CONNECTED);
+  // …and `listen` asks, before it judges the code.
+  const src = await Deno.readTextFile(
+    new URL("../src/server/win-pipe.ts", import.meta.url),
+  );
+  const listen = src.slice(
+    src.indexOf("function listen(o: Owned): void {"),
+    src.indexOf("function fail(e: Error): void {"),
+  );
+  const asked = listen.indexOf("if (code === 0) {");
+  assert(asked > 0, "listen() recovers a lost code");
+  assert(
+    asked < listen.indexOf("if (code === ERROR_PIPE_CONNECTED)") &&
+      asked < listen.indexOf("if (code !== ERROR_IO_PENDING)"),
+    "the recovery runs before the code is judged",
+  );
+  assert(listen.slice(asked).includes("connectCodeFromFacts("));
 });

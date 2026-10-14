@@ -135,6 +135,9 @@ export interface SyncReplayContext {
   report?: MigrationReport;
   /** Declared defaults — fills fields a filtered snapshot left out. */
   initialState: Record<string, unknown>;
+  /** Where the database is on disk, when it is — a repair the replay asks
+   *  for by hand names the file. */
+  dbPath?: string;
 }
 
 const _syncContexts = new WeakMap<DB, SyncReplayContext>();
@@ -623,7 +626,7 @@ export async function replaySyncOps<S>(
     const last = ops.at(-1);
     const lastId = last?.id;
     /** The last row's mark: 0 unsettled, 1 settled, null no build marked it. */
-    const lastMark = last === undefined
+    let lastMark = last === undefined
       ? undefined
       : (await db.query<{ settled: number | null }>(
         "SELECT settled FROM sync_ops WHERE id = ?",
@@ -631,9 +634,23 @@ export async function replaySyncOps<S>(
       )).rows[0]?.settled;
     // …and never one the journal holds the COMMIT of: that run reduced it
     // and journalled its reactions (a kill between the commit and the mark).
-    const inFlight = lastMark === 0 &&
-      !opts.committed?.has(opKey(last!.id, last!.serverTs ?? NaN));
+    // The mark that run owed is written NOW, whether or not the cell folds:
+    // the commit line is the only proof the op was accepted, and a clean
+    // stop compacts it away — a cell quarantined at this boot met its next
+    // one with an unmarked last row and no commit, and the row was removed
+    // as one nobody accepted.
+    if (
+      lastMark === 0 &&
+      opts.committed?.has(opKey(last!.id, last!.serverTs ?? NaN))
+    ) {
+      await settleOp(db, last!.id);
+      lastMark = 1;
+    }
+    const inFlight = lastMark === 0;
     let refusedInFlight: string | undefined;
+    /** Ops not in flight that this build's `validate` refuses — see the
+     *  warning below. `key`: the op's commit, if the journal holds one. */
+    const unvalidated: { id: string; key: string; said: string }[] = [];
     /** Ops a method threw on, and whether the cell's last row is one. */
     let threw = 0;
     let lastThrew = false;
@@ -705,14 +722,21 @@ export async function replaySyncOps<S>(
             string,
             unknown
           >;
-          if (inFlight && op.id === lastId) {
-            // A `validate` refusal does not throw — the live server reads it
-            // here too (D11).
-            const refusal = takeRejectionFor(action, cell)?.reason;
-            if (refusal !== undefined) {
+          // A `validate` refusal does not throw — the live server reads it
+          // here too (D11).
+          const refusal = takeRejectionFor(action, cell)?.reason;
+          if (refusal !== undefined) {
+            if (inFlight && op.id === lastId) {
               refusedInFlight = refusal;
               continue;
             }
+            // An op the server accepted: its fold is a no-op, as it always
+            // was — and said (below).
+            unvalidated.push({
+              id: op.id,
+              key: opKey(op.id, op.serverTs ?? NaN),
+              said: `${op.id} (${op.cell}:${op.action}): ${refusal}`,
+            });
           }
           next = {
             ...(next as Record<string, unknown>),
@@ -747,7 +771,55 @@ export async function replaySyncOps<S>(
     }
     const total = ops.length - (refusedInFlight === undefined ? 0 : 1);
     const bad = failures.length > 0 || skipped.older > 0 || skipped.newer > 0;
-    // Nothing is written for a cell that does not fold (below).
+    // A `validate` (or a machine guard) that changed since it accepted an op
+    // refuses it WITHOUT a throw: the reducer returns the state unchanged,
+    // so the op folds as nothing — where a method that throws on it
+    // quarantines the cell. The state is what it always was in this case; it
+    // is no longer silent.
+    // "ACCEPTED" is said only of an op something proves was: its row's mark
+    // (`settleOp`) or its commit in the journal. A row with neither — an
+    // older build's (it marked nothing), or a refused one whose delete
+    // failed while the run went on — was KEPT, and that is all that is known.
+    if (unvalidated.length > 0) {
+      const marked = new Set(
+        (await db.query<{ id: string }>(
+          "SELECT id FROM sync_ops WHERE cell = ? AND settled = 1",
+          [cell],
+        )).rows.map((r) => r.id),
+      );
+      const proven = unvalidated.filter((u) =>
+        marked.has(u.id) || opts.committed?.has(u.key)
+      );
+      const kept = unvalidated.filter((u) => !proven.includes(u));
+      for (
+        const [group, accepted] of [[proven, true], [kept, false]] as const
+      ) {
+        const n = group.length;
+        if (n === 0) continue;
+        log.warn(
+          `sync: "${cell}": ${count(n, "op")} in the op-log that the server ` +
+            (accepted
+              ? `ACCEPTED ${n === 1 ? "is" : "are"}`
+              : `kept — nothing records that it accepted ${
+                n === 1 ? "it" : "them"
+              } (no settled mark, no journal commit) — ${
+                n === 1 ? "is" : "are"
+              }`) +
+            ` refused by this build (a \`validate\` or a guard, no throw) — ` +
+            `first: op ${group[0]!.said}. Each is folded as a NO-OP: ` +
+            `"${cell}" is restored without its effect, while the op stays in ` +
+            `the log and every client that applied it still holds it — and ` +
+            `the next compaction of "${cell}" drops the op for good. If the ` +
+            `op is valid, fix what refuses it and restart before that.`,
+        );
+      }
+    }
+    // Nothing is removed for a cell that does not fold (below) — its last
+    // row included, though this boot's reduce refused it: an earlier op was
+    // skipped or threw, so the state that refusal was decided on is not the
+    // state the live server would decide on. The cell is quarantined
+    // (read-only: no op is stored after that row), so it is still the last
+    // row, still unsettled, at the boot that folds — and decided there.
     if (!bad && inFlight) {
       if (refusedInFlight !== undefined) {
         await db.execute("DELETE FROM sync_ops WHERE id = ?", [lastId]);
@@ -792,7 +864,8 @@ export async function replaySyncOps<S>(
         `author was never told it landed. That build marked nothing that ` +
         `tells such a row from an accepted one, so it is not removed for ` +
         `you: stop the app, run \`DELETE FROM sync_ops WHERE id = ` +
-        `'${lastId!.replaceAll("'", "''")}'\` on its state.db, and restart.`
+        `'${lastId!.replaceAll("'", "''")}'\` on its state.db, and restart.` +
+        dropOpHow(ctx.dbPath, lastId!)
       : "";
     const fix = (downgradeWrites > 0
       ? `An OLDER build wrote to "${cell}"'s op-log after a newer one — its ` +
@@ -850,6 +923,22 @@ export async function replaySyncOps<S>(
     );
   }
   return next;
+}
+
+/** The same repair for a machine with no `sqlite3` — Deno's own SQLite, the
+ *  file and the statement as arguments so one line is valid in sh, cmd and
+ *  PowerShell. Empty when the database is not a file, or when a name in it
+ *  would need quoting that differs between those shells. Pure. @internal */
+export function dropOpHow(dbPath: string | undefined, id: string): string {
+  if (dbPath === undefined || dbPath.includes(":memory:")) return "";
+  const file = resolve(dbPath);
+  if (/[\x22$\x60%!\r\n]/.test(file + id) || file.endsWith("\\")) {
+    return ` The file: ${file}`;
+  }
+  return ` The file: ${file} — with no sqlite3 at hand: \`deno eval ` +
+    `"import{DatabaseSync as D}from'node:sqlite';const d=new D(Deno.args[0]);` +
+    `d.exec(Deno.args[1]);d.close()" "${file}" "DELETE FROM sync_ops WHERE ` +
+    `id = '${id.replaceAll("'", "''")}'"\``;
 }
 
 /** The format a build that records its reactions stamped this op-log with
@@ -3384,6 +3473,7 @@ async function bootStorageOpening<S>(
       dev: isDevBoot(),
       report: migrations?.report,
       initialState: initialState as Record<string, unknown>,
+      ...(openedDbPath !== undefined ? { dbPath: openedDbPath } : {}),
     });
   }
 

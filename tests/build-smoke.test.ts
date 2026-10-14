@@ -18,6 +18,7 @@ import {
   smokePlan,
   type SmokeRow,
   smokeTable,
+  unpackDesktop,
 } from "../src/build/smoke.ts";
 import { makeApp, task } from "./e2e-app-harness.ts";
 import { testDisplayEnv } from "../src/testing/test-display.ts";
@@ -411,6 +412,114 @@ Deno.test({
           f.includes(DECLARED)
         ),
         `no refusal line:\n${fails.join("\n")}`,
+      );
+    } finally {
+      await dropTempDir(dir);
+      await dropTempDir(box);
+    }
+  },
+});
+
+/** Every path under `dir` whose `/`-spelled relative form ends with `suffix`. */
+function findUnder(dir: string, suffix: string): string[] {
+  const out: string[] = [];
+  const walk = (d: string) => {
+    for (const e of Deno.readDirSync(d)) {
+      const p = join(d, e.name);
+      if (e.isDirectory && !e.isSymlink) walk(p);
+      else if (p.replaceAll("\\", "/").endsWith(suffix)) out.push(p);
+    }
+  };
+  walk(dir);
+  return out;
+}
+
+// The Windows and macOS hosts: no AppImage and no nested display there — the
+// smoke unpacks the zip / the bundle tarball into its throwaway dir and
+// starts the program inside. (The window opens on the desktop of whoever
+// runs this: it is behind the same two gates as the Linux one.)
+Deno.test({
+  name:
+    "build e2e --smoke (electron, Windows/macOS host): the packaged app passes; the same package with its declared guest preload removed FAILS; nothing is left",
+  ignore: !GATE || Deno.env.get("AIO_BUILD_ELECTRON") !== "1" ||
+    Deno.build.os === "linux", // Linux drives the AppImage — the test above
+  sanitizeResources: false, // aio-ok: real Electron children; the smoke stops and awaits them
+  sanitizeOps: false, // aio-ok: real Electron children; the smoke stops and awaits them
+  async fn() {
+    const dir = await makeApp("counter", "build-e2e-smoke-el-");
+    const box = await tempDir("build-e2e-smoke-extract-");
+    const smokeDirs = () =>
+      [...Deno.readDirSync(Deno.env.get("TMPDIR") ?? Deno.env.get("TEMP")!)]
+        .map((e) => e.name).filter((n) => n.startsWith("aio-smoke-")).sort();
+    const before = smokeDirs();
+    // Where a window of THIS account keeps its profile: the smoke's window
+    // must leave nothing there (Windows: `%APPDATA%` alone did not move it).
+    const profiles = () => {
+      const at = Deno.build.os === "windows"
+        ? Deno.env.get("APPDATA")!
+        : join(Deno.env.get("HOME")!, "Library", "Application Support");
+      try {
+        return [...Deno.readDirSync(at)].map((e) => e.name).sort();
+      } catch {
+        return []; // aio-ok: no such folder yet — an empty listing, compared below
+      }
+    };
+    const profilesBefore = profiles();
+    try {
+      await Deno.mkdir(join(dir, "src", "guest"), { recursive: true });
+      await Deno.writeTextFile(join(dir, DECLARED), `// guest preload\n`);
+      await setCfg(dir, (c) => c.build.guestPreloads = [DECLARED]);
+
+      // `--smoke=desktop`: plain `--smoke` lists the row and starts nothing
+      // on these hosts, as 1.0.19 did (build-smoke-desktop-hosts.test.ts).
+      const r = await task(
+        dir,
+        "compile",
+        "--targets=electron",
+        "--smoke=desktop",
+      );
+      const said = r.out + r.err;
+      assertEquals(r.code, 0, said);
+      assert(/✓ electron\s+passed/.test(said), said);
+      assertStringIncludes(said, "the window opens on this desktop");
+      assertEquals(smokeDirs(), before, "the smoke left its throwaway dir");
+
+      // The seam: the package as shipped, minus the declared file.
+      const win = Deno.build.os === "windows";
+      const pkg = [...Deno.readDirSync(join(dir, "dist"))]
+        .map((e) => e.name)
+        .find((n) =>
+          win ? /-win-[^.]+\.zip$/i.test(n) : /\.app\.tar\.gz$/.test(n)
+        );
+      assert(pkg, "no desktop package in dist/");
+      await unpackDesktop(join(dir, "dist", pkg), join(box, "x"));
+      const staged = findUnder(join(box, "x"), `guest-preloads/${DECLARED}`);
+      assertEquals(staged.length, 1, `staged copies: ${staged.join(", ")}`);
+      await Deno.remove(staged[0]!);
+      const cut = join(box, win ? "cut-win-x64.zip" : "cut.app.tar.gz");
+      const top = [...Deno.readDirSync(join(box, "x"))].map((e) => e.name);
+      const packed = await new Deno.Command("tar", {
+        args: [win ? "-acf" : "-czf", cut, "-C", join(box, "x"), ...top],
+        stderr: "piped",
+      }).output();
+      assert(packed.success, new TextDecoder().decode(packed.stderr));
+      const fails = await smokeElectron({
+        file: cut,
+        guestPreloads: [DECLARED],
+      });
+      assert(Array.isArray(fails), JSON.stringify(fails));
+      assert(
+        fails.some((f) =>
+          f.includes("guest preload REFUSED in the package") &&
+          f.includes(DECLARED)
+        ),
+        `no refusal line:\n${fails.join("\n")}`,
+      );
+      assertEquals(smokeDirs(), before, "the smoke left its throwaway dir");
+      assertEquals(
+        profiles(),
+        profilesBefore,
+        "the smoke's window kept its profile in this account's own",
       );
     } finally {
       await dropTempDir(dir);

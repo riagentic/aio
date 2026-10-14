@@ -11,10 +11,12 @@
 // it, so ONE env var isolates an instance completely". This is a NAME for that,
 // bound before any command resolves a lock, so the `am` process and the child
 // it starts land in the same private world without either knowing about it.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { writeLock } from "../src/server/single-instance-lock.ts";
 import { fromFileUrl } from "@std/path";
+import { DENO_DIR } from "./deno-dir-helper.ts";
 
 const REPO = fromFileUrl(new URL("..", import.meta.url));
 
@@ -30,7 +32,11 @@ async function am(
     // spelling — which is exactly how this file failed, pointing three hundred
     // files away from the tls module-level pin that caused it. Unless a case
     // sets it deliberately, it is cleared here.
-    env: { AIO_APPS_DIR: "", ...env },
+    // …and the module cache is the parent's: two cases give the child a
+    // temp HOME, which is also where deno looks for its cache — an empty one,
+    // so each run downloaded every module again and the test failed with the
+    // network (a stalled download, 1 min 3 s, 2026-10-13).
+    env: { AIO_APPS_DIR: "", DENO_DIR, ...env },
     stdout: "piped",
     stderr: "piped",
   }).output();

@@ -118,13 +118,42 @@ function named(log: string, k: string): boolean {
     new RegExp(`"${k}": \\d+ listensTo reactions? of the sync op`).test(log);
 }
 
+/** The `notes` texts v1.0.9 had STORED but not yet applied when it was
+ *  killed: it writes an op's row, then reduces it, then acknowledges it — so
+ *  a kill inside a burst leaves at most one row whose text the live state
+ *  (expected.json) never held. That op is in the record: recovering it, once,
+ *  is no double count. (A refused duplicate's row repeats a text live holds;
+ *  it is not one of these.) */
+function storedUnapplied(db: string, live: Snap): Set<string> {
+  const d = new DatabaseSync(db);
+  try {
+    const rows = d.prepare(
+      "SELECT id, payload FROM sync_ops WHERE cell = 'notes'",
+    ).all() as { id: string; payload: string }[];
+    return new Set(
+      rows.filter((r) => !live.acked?.includes(r.id))
+        .map((r) => JSON.parse(r.payload).args[0] as string)
+        .filter((t) => !live.notes.includes(t)),
+    );
+  } finally {
+    d.close();
+  }
+}
+
 /** `got` holds nothing `live` does not, as often as it does (a reaction
- *  applied twice is a duplicate item). Returns how many are missing. */
-function shortfall(got: string[], live: string[]): number {
+ *  applied twice is a duplicate item) — but for the `stored` ops, each once.
+ *  Returns how many are missing. */
+function shortfall(
+  got: string[],
+  live: string[],
+  stored = new Set<string>(),
+): number {
   const left = new Map<string, number>();
   for (const x of live) left.set(x, (left.get(x) ?? 0) + 1);
+  const once = new Set(stored);
   for (const x of got) {
     const n = left.get(x) ?? 0;
+    if (n === 0 && once.delete(x)) continue;
     assert(n > 0, `"${x}" recovered more often than it was written`);
     left.set(x, n - 1);
   }
@@ -160,10 +189,19 @@ Deno.test("journal upgrade sweep: v1.0.9 killed at random points — this build 
     : Array.from({ length: n }, (_, i) => (0xa10 + i * 0x9E3779B9) >>> 0);
   assert(seeds.length > 0);
   let namedRuns = 0;
+  let remedyRuns = 0;
+  // The remedy branch below is taken only when a kill happens to fall in
+  // one window of v1.0.9's — so one more run makes exactly that kill's
+  // leftover itself (`stuck`), and the branch is never untested.
+  const runs = [
+    ...seeds.map((seed) => ({ seed, stuck: false })),
+    ...(replay === undefined ? [{ seed: seeds[0]!, stuck: true }] : []),
+  ];
   try {
-    for (const seed of seeds) {
+    for (const { seed, stuck: forced } of runs) {
       const rng = rngOf(seed);
-      const phase = rng.pick(PHASES);
+      const picked = rng.pick(PHASES);
+      const phase = forced ? "rejdrift" : picked;
       const env = {
         PDM: String(rng.pick([0, 10, 50, 100, 300, 1000])),
         KILLAT: String(rng.int(400)),
@@ -189,6 +227,26 @@ Deno.test("journal upgrade sweep: v1.0.9 killed at random points — this build 
           throw new Error(`${what}: v1.0.9 never reached its kill\n${crash}`);
         });
         const recorded = mirrorRecords(join(dir, "data", "state.db"));
+        const stored = storedUnapplied(join(dir, "data", "state.db"), live);
+        assert(stored.size <= 1, `${[...stored]} stored, unapplied: ${what}`);
+        if (forced) {
+          // What v1.0.9 leaves when killed between storing a refused
+          // duplicate and deleting its row: the row, last, unmarked.
+          const d = new DatabaseSync(join(dir, "data", "state.db"));
+          try {
+            d.exec(
+              `INSERT INTO sync_ops (id, cell, action, payload, hlc_phys,
+                 hlc_cnt, hlc_node, server_ts, version)
+               SELECT 'op-stuck', cell, action, '{"args":["n1"]}', hlc_phys,
+                 hlc_cnt + 1, hlc_node,
+                 (SELECT MAX(server_ts) + 1 FROM sync_ops), version
+               FROM sync_ops WHERE cell = 'notes'
+               ORDER BY server_ts DESC LIMIT 1`,
+            );
+          } finally {
+            d.close();
+          }
+        }
         let log1 = await run(dir, TREE, "read", env);
         // The kill fell between v1.0.9 storing a refused duplicate and
         // deleting its row. v1.0.9 marked nothing that tells that row from
@@ -196,13 +254,18 @@ Deno.test("journal upgrade sweep: v1.0.9 killed at random points — this build 
         // the row and the statement that removes it
         // (tests/sync-op-killed-before-settle.test.ts makes that kill
         // deterministic). Taken as told; every property below still holds.
-        const stuck =
-          /run `(DELETE FROM sync_ops WHERE id = '[^']+')` on its state\.db/
-            .exec(log1)?.[1];
-        if (
-          phase === "rejdrift" && stuck &&
-          /refusing to boot[^\n]*\(notes:add\) threw: Error: dup n1/.test(log1)
-        ) {
+        // (Twice at most: the forced row, and one a real kill left under it.)
+        for (let round = 0; round < 2; round++) {
+          const stuck =
+            /run `(DELETE FROM sync_ops WHERE id = '[^']+')` on its state\.db/
+              .exec(log1)?.[1];
+          if (
+            !(phase === "rejdrift" && stuck &&
+              /refusing to boot[^\n]*\(notes:add\) threw: Error: dup n1/.test(
+                log1,
+              ))
+          ) break;
+          remedyRuns++;
           // Only ever an op nobody was told landed.
           const id = /id = '([^']+)'/.exec(stuck)![1]!;
           assert(live.acked, "expected.json names the acked ops");
@@ -225,7 +288,11 @@ Deno.test("journal upgrade sweep: v1.0.9 killed at random points — this build 
         // as v1.0.9 put them — the same items). With no journal, a write in
         // the save window before the kill is gone in any build: never more.
         for (const k of ["notes", "inbox"] as const) {
-          const short = shortfall(got[k], live[k]);
+          const short = shortfall(
+            got[k],
+            live[k],
+            k === "notes" ? stored : undefined,
+          );
           assert(env.JOURNAL === "0" || short === 0, `${k}: ${ctx}`);
         }
         // With no journal, a SERVER write (`srv-…`, `sm-…`: no op, so no
@@ -268,8 +335,12 @@ Deno.test("journal upgrade sweep: v1.0.9 killed at random points — this build 
   } finally {
     if (given === undefined) await dropTempDir(old);
   }
-  // Non-vacuity: the sync listener's missing reactions were named.
-  if (replay === undefined) assert(namedRuns > 0, "no run named a listener");
+  // Non-vacuity: the sync listener's missing reactions were named, and the
+  // unmarked-row remedy was taken.
+  if (replay === undefined) {
+    assert(namedRuns > 0, "no run named a listener");
+    assert(remedyRuns > 0, "no run took the unmarked-row remedy");
+  }
 });
 
 // Downgrade interleavings: this build, then v1.0.9 on the same data (crashed

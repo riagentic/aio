@@ -77,11 +77,12 @@ import {
   type QueuedAction,
   type QueuedEntry,
 } from "../state/offline-queue.ts";
-import { encodeAction } from "../state/action-encode.ts";
+import { encodeAction, wireAction } from "../state/action-encode.ts";
 import { resetTT } from "../air/time-travel-panel.ts";
 import { authUser } from "./browser-auth-ui.ts";
 import { SIGNED_IN_EVENT, SIGNED_OUT_EVENT } from "./auth-client.ts";
 import {
+  _noteClientFrame,
   _noteClientPatch,
   _pauseClientVitals,
   _startClientVitals,
@@ -707,6 +708,16 @@ async function _upgradeRefusedAsSignedOut(): Promise<boolean | null> {
   }
 }
 
+/** Does the server answer HTTP at all? The silent-socket watchdog's question:
+ *  true = some answer (any status), false = the network refused. A request
+ *  that hangs — a busy server — settles neither way, which is the point. */
+function _serverAnswersHttp(): Promise<boolean> {
+  return fetch(buildWsUrl().replace(/^ws/, "http"), {
+    credentials: "same-origin",
+    cache: "no-store",
+  }).then((r) => (void r.body?.cancel(), true), () => false);
+}
+
 const SIGNED_OUT = "signed out — the session was revoked or expired";
 
 /** The credential is dead: stop presenting it, and say signed out — through
@@ -1012,7 +1023,10 @@ function _connectIPC() {
     _setSyncUp(true);
     _coreResendSubs();
     _flushPending(pending, (e) => {
-      _ipc!.send(enc("action", e.action));
+      // `wireAction`: the queue holds the action as it was CALLED, and the
+      // wire shape (`wire.omitTrailingUndefined`) is decided when the frame is
+      // built — the one moment the page is sure to know its config.
+      _ipc!.send(enc("action", wireAction(e.action)));
       // The frame is out now — this is when a queued call's ack clock starts.
       if (e.action.cid) _armAckTimer(e.action.cid);
     });
@@ -1128,7 +1142,7 @@ function _connect() {
     _coreResendSubs();
     _flushPending(pending, (e) =>
       void pacer.push({
-        frame: enc("action", e.action),
+        frame: enc("action", wireAction(e.action)),
         action: e.action,
         seq: e.seq,
         ...(e.tries ? { tries: e.tries } : {}),
@@ -1137,11 +1151,14 @@ function _connect() {
     // Client vitals ride the WS only (envelope.ts: `vitals-ping` is refused
     // on UDS/IPC). The heartbeat is per connection; the meter is per page.
     _startClientVitals(
-      _sendRaw,
+      // Left = written: a ping the pacer still holds has asked nothing.
+      (raw) => _sendRaw(raw) && _openPacer()?.length === 0,
       () => _ws === ws && ws.readyState === WebSocket.OPEN,
+      { reach: _serverAnswersHttp, onDead },
     );
   };
   ws.onmessage = (e) => {
+    _noteClientFrame();
     if (typeof e.data !== "string") return;
     _route(e.data);
   };
@@ -1213,6 +1230,27 @@ function _connect() {
     _scheduleReconnect();
   };
   ws.onerror = () => ws.close();
+  // The socket went silent without closing (browser-vitals.ts holds the
+  // evidence): it is lost in every way a closed one is, so it takes the SAME
+  // path — and takes it now, because a browser's `close()` on a dead network
+  // waits out the closing handshake before it fires `onclose`.
+  const onDead = (why: string) => {
+    if (_ws !== ws) return;
+    // One sentence, said twice (console + diagnostics): page bytes.
+    const message = `the connection went silent without closing (${why}) — ` +
+      `reconnecting; sent calls are rejected "connection lost"`;
+    console.warn(`[aio:air] ${message}`);
+    diagEmit({
+      type: "browser-air-transport:silent-socket",
+      severity: "warning",
+      source: "browser-air-transport",
+      message,
+    });
+    const lost = ws.onclose as unknown as () => void;
+    ws.onmessage = ws.onclose = ws.onerror = null;
+    lost();
+    ws.close();
+  };
   _ws = ws;
 }
 

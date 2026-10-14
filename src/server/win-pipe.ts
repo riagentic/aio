@@ -98,6 +98,34 @@ export const PIPE_DRAIN_TIMEOUT_MS = 3000;
  *  because `local-listen.ts` imports this module, not the other way round. */
 export const PIPE_LINGER_MS = 2000;
 
+/** How many instances of a hosted pipe wait for a client at once. Each
+ *  connection takes one, and the next is created only when JS hears of it —
+ *  with a single one, every client of a burst but the first met
+ *  ERROR_PIPE_BUSY in that gap. */
+export const PIPE_SPARE_INSTANCES = 4;
+/** How long a client keeps asking a pipe whose every instance is taken
+ *  (ERROR_PIPE_BUSY) before it says so. A bound in TIME: it was a count of
+ *  tries, five, and 14 simultaneous `connectLocal` calls ran out of them on
+ *  Windows 11 against a server that was merely busy accepting the others. */
+export const PIPE_BUSY_WAIT_MS = 2000;
+/** How many instances of one hosted pipe exist that its consumer was not
+ *  handed yet — waiting for a client, or connected and waiting to be
+ *  accepted. A unix socket's backlog, for a pipe: past it a client meets
+ *  ERROR_PIPE_BUSY (and waits, {@linkcode PIPE_BUSY_WAIT_MS}) instead of the
+ *  host making one more kernel object for every connect a consumer that is
+ *  busy — or stuck — has not taken. */
+export const PIPE_BACKLOG = 128;
+
+/** The way out of a pipe name somebody else holds — the same words wherever
+ *  the name is refused. The namespace is one per MACHINE: not per user, not
+ *  per session, and an unscoped name carries neither. */
+const PIPE_TAKEN = "the pipe name is taken: another instance of this app, " +
+  "another Windows user running it (a pipe name is machine-wide), or " +
+  "another process on this machine holds it — and an app whose id is this " +
+  "one's with `-http` added or removed asks for the same name. Stop the " +
+  "other one, give this app a distinct appId, or run with `--transport=ws` " +
+  "for a loopback port instead of a pipe";
+
 /** How many completion packets one `GetQueuedCompletionStatusEx` may take. */
 export const IOCP_BATCH = 64;
 
@@ -195,6 +223,31 @@ export function overlappedBytes(hEvent: bigint): Uint8Array {
   return buf;
 }
 
+/** The code a `ConnectNamedPipe` that returned FALSE would have given, from
+ *  two facts about the instance that need no `GetLastError`.
+ *
+ *  `GetLastError()` is a second FFI call, and the thread's last error does
+ *  not always survive until it: a real Windows 11 run answered FALSE with
+ *  code 0 once (2026-10-13, under a full suite; 0 of 300,000 when idle). Code
+ *  0 is none of the three answers the call has, so the listener was closed
+ *  for good — the app deaf on its pipe — over an instance that was fine.
+ *
+ *  Measured on that Windows, for an overlapped instance:
+ *
+ *  | the instance              | `PeekNamedPipe` | `GetNamedPipeClientProcessId` | code |
+ *  | ------------------------- | --------------- | ----------------------------- | ---- |
+ *  | waits for a client        | fails           | fails                         | 997  |
+ *  | a client is connected     | succeeds        | succeeds                      | 535  |
+ *  | a client came and left    | fails           | succeeds                      | 232  |
+ */
+export function connectCodeFromFacts(
+  readable: boolean,
+  hadClient: boolean,
+): number {
+  if (readable) return ERROR_PIPE_CONNECTED;
+  return hadClient ? ERROR_NO_DATA : ERROR_IO_PENDING;
+}
+
 /** `hEvent` back out of an `OVERLAPPED` (the inverse of the encoder). */
 export function overlappedEvent(buf: Uint8Array): bigint {
   return new DataView(buf.buffer, buf.byteOffset).getBigUint64(24, true);
@@ -278,15 +331,15 @@ const K32_SYMBOLS = {
     parameters: ["buffer", "u32", "u32", "pointer", "u32", "u32", "pointer"],
     result: "pointer",
   },
-  WaitNamedPipeW: {
-    parameters: ["buffer", "u32"],
-    result: "i32",
-    nonblocking: true,
-  },
   // The peer's pid, for the local-peer gate. Windows has no uid to compare —
   // the pipe DACL already keeps other users out — so pid is the whole check.
   GetNamedPipeClientProcessId: {
     parameters: ["pointer", "buffer"],
+    result: "i32",
+  },
+  // Asked only for its yes/no — see `connectCodeFromFacts`.
+  PeekNamedPipe: {
+    parameters: ["pointer", "pointer", "u32", "pointer", "buffer", "pointer"],
     result: "i32",
   },
   GetLastError: { parameters: [], result: "u32" },
@@ -536,7 +589,10 @@ class IoPort {
           const n = readU32(this.#removed);
           for (let i = 0; i < n; i++) {
             const w = this.#waiting.get(entryOverlapped(this.#entries, i));
-            if (w === undefined) continue; // see `completion`: unreachable
+            // Nobody waits on it: a connect whose code was lost and which
+            // was then found connected (`connectCodeFromFacts`). Otherwise
+            // unreachable — see `completion`.
+            if (w === undefined) continue;
             this.#waiting.delete(entryOverlapped(this.#entries, i));
             w.done();
           }
@@ -938,7 +994,7 @@ function createInstance(path: string, first: boolean): Owned {
       const code = k32().GetLastError();
       throw winError(
         first && code === ERROR_ACCESS_DENIED
-          ? "CreateNamedPipeW (pipe already exists — another instance of this app is running?)"
+          ? `CreateNamedPipeW (${PIPE_TAKEN})`
           : "CreateNamedPipeW",
         code,
         path,
@@ -959,44 +1015,228 @@ function createInstance(path: string, first: boolean): Owned {
   });
 }
 
+/** Pipes bound ahead of their listener — see {@linkcode reservePipe}. */
+const reserved = new Map<string, Owned>();
+
+/** Take the pipe NAME now, synchronously, for the `listenPipe(path)` that
+ *  follows — or throw.
+ *
+ *  The app's listeners reach `listenPipe` through a dynamic import
+ *  (`local-listen.ts`), so their bind lands a few turns after boot moved on,
+ *  and a bind that failed was an `accept loop error` line in the log of an app
+ *  that kept running without its door: it printed `running`, and its window
+ *  was served by whoever DID hold the name (measured on Windows 11 — another
+ *  instance's state in this one's window). A unix bind throws where it is
+ *  made; this is that, for a pipe. Boot calls it before anything is announced.
+ *
+ *  Without `--allow-ffi` there is no pipe at all, and that too is said here,
+ *  in one line with the flag, not as a `NotCapable … advapi32.dll` after the
+ *  app said it was up. */
+export function reservePipe(path: string): void {
+  // Twice in one process — two apps of one appId, `singleton: false` — is
+  // two apps asking for one door: said here, not as the second one's
+  // `accept loop error` a few turns later.
+  if (reserved.has(path)) {
+    throw new Error(
+      `the local pipe ${path} is already reserved in this process — ` +
+        PIPE_TAKEN,
+    );
+  }
+  try {
+    reserved.set(path, createInstance(path, true));
+  } catch (e) {
+    if (
+      e instanceof Deno.errors.NotCapable ||
+      e instanceof Deno.errors.PermissionDenied
+    ) {
+      throw new Error(
+        `the local pipe ${path} cannot be opened: on Windows a local ` +
+          "Electron app is served over a named pipe, which needs FFI, and " +
+          "this process was started without `--allow-ffi`. Fix: add " +
+          "`--allow-ffi` to the `deno run` flags (a compiled build already " +
+          "has it) — or run with `--transport=ws` for a loopback port.",
+      );
+    }
+    throw e;
+  }
+}
+
+/** {@linkcode reservePipe} for every name of one app, or for none: when one
+ *  cannot be taken the ones before it are given back, and the refusal is
+ *  thrown. A name left reserved is a name hosted by an instance nobody will
+ *  ever accept on — its clients hang, a liveness probe says "alive", and the
+ *  next process to ask is refused. */
+export function reservePipes(paths: readonly string[]): void {
+  const taken: string[] = [];
+  try {
+    for (const p of paths) {
+      reservePipe(p);
+      taken.push(p);
+    }
+  } catch (e) {
+    releasePipes(taken);
+    throw e;
+  }
+}
+
+/** Give back the names {@linkcode reservePipe} took that no `listenPipe`
+ *  has claimed — for a boot that failed after reserving, in a process that
+ *  lives on (library mode, a caller that catches `aio.run`, a test). A name
+ *  a listener already serves is not touched. */
+export function releasePipes(paths: readonly string[]): void {
+  for (const p of paths) {
+    const o = reserved.get(p);
+    if (o === undefined) continue;
+    reserved.delete(p);
+    closeOwned(o);
+  }
+}
+
 /** Host `path`. The first instance is created HERE, synchronously, with
  *  FILE_FLAG_FIRST_PIPE_INSTANCE — so "already running" fails at the bind, as
- *  a unix socket does. Each accepted connection is one pipe instance; the
- *  next instance is created before the current one is yielded, so a client
- *  never meets ERROR_PIPE_BUSY. */
+ *  a unix socket does (or was, by {@linkcode reservePipe}). Each accepted
+ *  connection is one pipe instance, and {@linkcode PIPE_SPARE_INSTANCES} more
+ *  wait for a client at any moment: a replacement is created the moment a
+ *  connection is HEARD of, not when it is handed out, so a burst no larger
+ *  than that never meets ERROR_PIPE_BUSY and a larger one meets it briefly
+ *  (`connectPipe` waits it out) — up to {@linkcode PIPE_BACKLOG} instances the
+ *  consumer has not taken. */
 export function listenPipe(path: string): LocalListener {
-  let next: Owned | null = createInstance(path, true);
+  const first = reserved.get(path) ?? createInstance(path, true);
+  reserved.delete(path);
   let closed = false;
+  let started = false;
+  /** Instances with a ConnectNamedPipe pending — what a client can open. */
+  const listening = new Set<Owned>([first]);
+  /** Connected, not handed out yet. */
+  const ready: Owned[] = [];
+  let failure: Error | null = null;
+  let wake: (() => void) | null = null;
+  const signal = () => {
+    const w = wake;
+    wake = null;
+    w?.();
+  };
 
-  async function accept(): Promise<LocalConn | null> {
-    if (closed || next === null) return null;
-    const o = next;
-    // This OVERLAPPED belongs to the pending connect and to nothing else; the
-    // frame below keeps it alive until the port reports it.
-    const ovl = overlappedBytes(0n);
-    const ok = k32().ConnectNamedPipe(o.h, ovl);
-    if (!ok) {
-      const code = k32().GetLastError();
-      if (code === ERROR_IO_PENDING) {
-        // Gated on the CLAIM, not on `closed`: `close()` below releases and
-        // closes this very instance while this frame is parked, and asking a
-        // value that now belongs to someone else for this connect's result
-        // is the same use-after-free the reads have.
-        const r = await finishOverlapped(o, ovl);
-        if (closed || !handles.isLive(o.slot)) return null;
-        if (!r.ok && r.code !== ERROR_PIPE_CONNECTED) {
-          throw winError("ConnectNamedPipe", r.code, path);
+  /** Start the connect on `o`. Its OVERLAPPED belongs to that connect and to
+   *  nothing else; the closure keeps it alive until the port reports it. */
+  function listen(o: Owned): void {
+    listening.add(o);
+    const connected = () => {
+      listening.delete(o);
+      ready.push(o);
+      refill();
+      signal();
+    };
+    const failed = (code: number) => {
+      listening.delete(o);
+      if (code === ERROR_NO_DATA) {
+        // A client opened this instance and closed it again before the
+        // connect was started on it — a liveness probe does exactly that to
+        // the instance `reservePipe` made, long before the first accept.
+        // Nobody is there to serve and nothing is wrong with the pipe: this
+        // instance is spent, the next one takes its place. Made BEFORE this
+        // one is closed — the last instance closing is the name going away.
+        try {
+          if (!closed) listen(createInstance(path, false));
+        } catch (e) {
+          fail(e instanceof Error ? e : new Error(String(e)));
         }
-      } else if (code !== ERROR_PIPE_CONNECTED) {
-        // ERROR_PIPE_CONNECTED means the client got in first: no packet is
-        // queued for it, and there is nothing to wait for.
-        throw winError("ConnectNamedPipe", code, path);
+        closeOwned(o);
+        return;
+      }
+      closeOwned(o);
+      fail(winError("ConnectNamedPipe", code, path));
+    };
+    const ovl = overlappedBytes(0n);
+    if (k32().ConnectNamedPipe(o.h, ovl)) return connected();
+    let code = k32().GetLastError();
+    // FALSE with "no error" is a code that was lost on the way here, not an
+    // answer: ask the instance itself. A connect that was pending and
+    // finished in between reads as connected — its packet then arrives for
+    // an OVERLAPPED nobody waits on, which the port skips.
+    if (code === 0) {
+      code = connectCodeFromFacts(
+        k32().PeekNamedPipe(o.h, null, 0, null, new Uint8Array(4), null) !== 0,
+        k32().GetNamedPipeClientProcessId(o.h, new Uint8Array(4)) !== 0,
+      );
+    }
+    // ERROR_PIPE_CONNECTED means the client got in first: no packet is
+    // queued for it, and there is nothing to wait for.
+    if (code === ERROR_PIPE_CONNECTED) return connected();
+    if (code !== ERROR_IO_PENDING) return failed(code);
+    finishOverlapped(o, ovl).then((r) => {
+      // Gated on the CLAIM, not on `closed` alone: `close()` below releases
+      // and closes this very instance while the connect is parked, and asking
+      // a value that now belongs to someone else for this connect's result is
+      // the same use-after-free the reads have.
+      if (closed || !handles.isLive(o.slot)) return;
+      if (!r.ok && r.code !== ERROR_PIPE_CONNECTED) failed(r.code);
+      else connected();
+    }, (e) => {
+      listening.delete(o);
+      closeOwned(o);
+      fail(e instanceof Error ? e : new Error(String(e)));
+    });
+  }
+
+  /** The listener cannot wait for a client any more. Every instance nobody
+   *  was handed goes with it: one left hosted is a door that opens onto
+   *  nothing — its client hangs, and a liveness probe calls the app alive.
+   *  Closed, they get "no pipe"; the consumer gets `e` from its accept. */
+  function fail(e: Error): void {
+    if (failure !== null || closed) return;
+    failure = e;
+    log.error("pipe", `${path} is closed, it can no longer listen — ${e}`);
+    drop();
+    signal();
+  }
+
+  /** Cancel every pending ConnectNamedPipe (its wait returns ABORTED) and
+   *  drop the instances nobody was handed. Accepted connections are
+   *  untouched — each one owns its own claim, and this releases only ours. */
+  function drop(): void {
+    for (const o of [...listening, ...ready.splice(0)]) {
+      if (handles.release(o.slot)) {
+        k32().CancelIoEx(o.h, null);
+        closeHandle(o.h);
       }
     }
+    listening.clear();
+  }
+
+  /** Keep {@linkcode PIPE_SPARE_INSTANCES} instances waiting — while the
+   *  consumer is no more than {@linkcode PIPE_BACKLOG} behind. */
+  function refill(): void {
+    try {
+      while (
+        !closed && failure === null &&
+        listening.size < PIPE_SPARE_INSTANCES &&
+        listening.size + ready.length < PIPE_BACKLOG
+      ) listen(createInstance(path, false));
+    } catch (e) {
+      fail(e instanceof Error ? e : new Error(String(e)));
+    }
+  }
+
+  async function accept(): Promise<LocalConn | null> {
+    if (!started && !closed) {
+      started = true;
+      listen(first);
+      refill();
+    }
+    while (ready.length === 0) {
+      if (closed) return null;
+      // For good: a listener that cannot wait for a client is not one
+      // (`fail` closed what it had).
+      if (failure !== null) throw failure;
+      await new Promise<void>((r) => wake = r);
+    }
     if (closed) return null;
-    // Pre-create the next instance BEFORE handing this one out. Ownership of
-    // `o` passes to the connection, which is now the only thing that closes it.
-    next = createInstance(path, false);
+    // Ownership passes to the connection, which is now the only thing that
+    // closes it — and its place in the backlog is free.
+    const o = ready.shift()!;
+    refill();
     return new PipeConn(o, path, true);
   }
 
@@ -1005,15 +1245,8 @@ export function listenPipe(path: string): LocalListener {
     close() {
       if (closed) return;
       closed = true;
-      // Cancel the pending ConnectNamedPipe (its wait returns ABORTED) and
-      // drop the unconnected instance. Accepted connections are untouched —
-      // each one owns its own claim, and this releases only ours.
-      const o = next;
-      next = null;
-      if (o !== null && handles.release(o.slot)) {
-        k32().CancelIoEx(o.h, null);
-        closeHandle(o.h);
-      }
+      drop();
+      signal();
     },
     async *[Symbol.asyncIterator]() {
       while (!closed) {
@@ -1121,10 +1354,19 @@ export function writeOwnerOnlyFile(path: string, contents: string): string {
 /** Open `path` as a client. Throws `Deno.errors.NotFound` when nothing hosts
  *  the pipe (the unix `connect` on a missing socket throws the same), so a
  *  caller's "the app is not running" branch reads the same on both OSs. A
- *  busy pipe (every instance mid-connect) is waited on, briefly, then retried. */
-export async function connectPipe(path: string): Promise<LocalConn> {
+ *  busy pipe (every instance taken, the server not yet back with the next) is
+ *  asked again for {@linkcode PIPE_BUSY_WAIT_MS}, then it is an error that
+ *  says so. A timer between tries, never `WaitNamedPipeW`: that parks one
+ *  blocking-pool thread per waiting client, and the pool is what the
+ *  completion port's own wait runs on (see the module doc). */
+export async function connectPipe(
+  path: string,
+  /** Test seam: the busy bound (default {@linkcode PIPE_BUSY_WAIT_MS}). */
+  busyWaitMs = PIPE_BUSY_WAIT_MS,
+): Promise<LocalConn> {
   const name = wstr(path);
-  for (let attempt = 0;; attempt++) {
+  const until = performance.now() + busyWaitMs;
+  for (let pause = 1;; pause = Math.min(pause * 2, 20)) {
     const h = k32().CreateFileW(
       name,
       u32(GENERIC_READ | GENERIC_WRITE),
@@ -1151,12 +1393,14 @@ export async function connectPipe(path: string): Promise<LocalConn> {
         `no pipe at ${path} (Win32 error ${code} ERROR_FILE_NOT_FOUND)`,
       );
     }
-    if (code === ERROR_PIPE_BUSY && attempt < 5) {
-      // Every instance is between CreateFile and ConnectNamedPipe; the server
-      // pre-creates instances so this is rare. Wait up to 2s for one.
-      await k32().WaitNamedPipeW(name, 2000);
-      continue;
+    if (code !== ERROR_PIPE_BUSY) throw winError("CreateFileW", code, path);
+    if (performance.now() >= until) {
+      throw winError(
+        `CreateFileW (every instance of the pipe stayed taken for ${busyWaitMs} ms — its host is not accepting)`,
+        code,
+        path,
+      );
     }
-    throw winError("CreateFileW", code, path);
+    await new Promise((r) => setTimeout(r, pause));
   }
 }

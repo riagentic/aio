@@ -103,7 +103,12 @@ Deno.test({
           },
         ));
       await sleep(500);
-      await stopChild(proc, { label: "cliblip server A" });
+      // KILLED, as in the measured run — a blip takes no time. A graceful
+      // stop does (seconds on a loaded Windows, where it is a process-table
+      // look and a request), and server A went on answering 30 calls/sec
+      // through it: 98 were left where the precondition below needs > 100.
+      proc.kill("SIGKILL");
+      await proc.status;
       onA = false;
       // Pending, or already evicted for them — either way, unsent at the blip.
       const left = outcome.filter((o) =>

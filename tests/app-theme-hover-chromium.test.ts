@@ -22,7 +22,8 @@ import { cdpConnect } from "../src/media/cdp.ts";
 import { tempDir } from "../src/testing/temp-dir.ts";
 import { testDisplayEnv } from "../src/testing/test-display.ts";
 import { stopChild } from "./stop-child.ts";
-import { findBrowser } from "./e2e-harness.ts";
+import { browserOsFlags, findBrowser } from "./e2e-harness.ts";
+import { browserHomeEnv } from "../src/testing/chromium.ts";
 
 const BROWSER = findBrowser();
 
@@ -76,6 +77,7 @@ Deno.test({
     const profile = await tempDir("aio-theme-hover-");
     const browser = new Deno.Command(BROWSER!, {
       args: [
+        ...browserOsFlags,
         "--headless=new",
         "--no-sandbox",
         "--disable-gpu",
@@ -86,7 +88,7 @@ Deno.test({
         "--remote-debugging-port=0",
         "about:blank",
       ],
-      env: testDisplayEnv(),
+      env: { ...browserHomeEnv(profile), ...testDisplayEnv() },
       stdin: "null",
       stdout: "null",
       stderr: "null",

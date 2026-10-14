@@ -4,6 +4,7 @@
 // upgrade-test fixture carried `execute:` in a template string and the pin
 // refused to move an app whose real config was already migrated. The refusal
 // also QUOTES the line it matched, so the reader sees what it saw.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { isFixturePath, removalsInSource } from "../src/state/removals.ts";

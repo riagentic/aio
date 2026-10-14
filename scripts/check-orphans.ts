@@ -24,7 +24,7 @@
 //   deno task clean:tmp              also SIGTERM them, remove ownerless
 //                                    /tmp/aio-* dirs, stale lock dirs and
 //                                    stale watcher sentinels
-import { basename, join, SEPARATOR } from "@std/path";
+import { basename, DELIMITER, join, SEPARATOR } from "@std/path";
 import {
   foreignOwnerRefusal,
   isLockOwnerAlive,
@@ -35,6 +35,8 @@ import {
   sweepRootRegistry,
   taggedOwnerGone,
 } from "../src/server/single-instance-lock.ts";
+import { LIVE_OWNER } from "../src/testing/temp-dir.ts";
+import { pruneTestWorktrees } from "./test-shards.ts";
 
 const clean = Deno.args.includes("--clean");
 /** Sweep only the DEBRIS a finished run leaves: scoped lock dirs with no live
@@ -91,15 +93,30 @@ function cmdlineOf(pid: number): string {
     return dec.decode(Deno.readFileSync(`/proc/${pid}/cmdline`))
       .split("\0").filter(Boolean).join(" ");
   } catch {
-    return "?";
+    return listed.get(pid)?.text ?? "?";
   }
+}
+/** Where there is no /proc: pid → its OS parent and what the OS shows of it
+ *  (`processRefs` fills it — macOS the command line with the environment,
+ *  Windows the command line). It was nothing, so there every test RUNNER read
+ *  as "?" — not a runner — and a fixture lock a live suite wrote with its own
+ *  pid was an ORPHAN: `clean:tmp` on Windows ended the suite. */
+const listed = new Map<number, { parent: number; text: string }>();
+/** The process that started `pid` and that it dies with (`AIO_PARENT_PID`):
+ *  read from its environment — and on Windows, which shows nobody that, its
+ *  OS parent, the same process for an app a test spawned. 0 when unknown. */
+function parentOf(pid: number): number {
+  const said = envOf(pid)?.AIO_PARENT_PID ??
+    /(?:^|\s)AIO_PARENT_PID=(\d+)/.exec(listed.get(pid)?.text ?? "")?.[1];
+  if (said !== undefined) return Number(said);
+  return Deno.build.os === "windows" ? listed.get(pid)?.parent ?? 0 : 0;
 }
 
 function lockRoots(): string[] {
   // A test's seam: its own fake runtime base ONLY, so the gate's test never
   // scans — let alone prunes — the machine's real `/tmp`.
   const only = Deno.env.get("AIO_ORPHANS_LOCK_ROOTS");
-  if (only) return only.split(":").filter(Boolean);
+  if (only) return only.split(DELIMITER).filter(Boolean);
   const roots = new Set<string>();
   const xdg = Deno.env.get("XDG_RUNTIME_DIR");
   if (xdg) roots.add(xdg);
@@ -159,6 +176,40 @@ function tempRooted(lock: { cwd?: string; home?: string } | null): boolean {
 
 type Orphan = { pid: number; appId: string; port: number; dir: string };
 const orphans: Orphan[] = [];
+
+/** What the live process a lock with NO start token names actually is.
+ *
+ *  A lock records its owner's start time so a reused pid is told from the
+ *  owner (`isLockOwnerAlive`). One without it — written before 1.0.19, or by
+ *  hand as a fixture — falls back to "the pid is alive", and a pid the system
+ *  has since given to something else then read as a live aio app: reported
+ *  as an ORPHAN, and SIGTERMed by `clean:tmp` (seen on Windows naming
+ *  `dllhost.exe` and `msedge.exe`).
+ *
+ *  So it is judged by what the process IS, with the decider `am kill --stale`
+ *  already uses for the same question (`stalePidRefusal`: the command line on
+ *  Linux and macOS, the image name on Windows). Loaded only when such a lock
+ *  is met — it is the app manager's module, and no run has one normally. */
+async function tokenlessOwner(
+  pid: number,
+): Promise<{ is: "aio" | "stranger" | "unknown"; why: string }> {
+  const { stalePidRefusal } = await import("../src/am/am-cmd-process.ts");
+  const why = stalePidRefusal(pid, new Map());
+  if (why === null) return { is: "aio", why: "" };
+  // POSITIVELY not the app: another program has the pid, or nothing has it
+  // any more (it ended since the scan read it alive). Everything else is a
+  // live process this cannot name.
+  const not = why.includes("is not an aio process") ||
+    why.includes("is already gone");
+  return { is: not ? "stranger" : "unknown", why };
+}
+/** Locks left out of the orphan list because their pid is positively another
+ *  program's: said, never signalled, never a red gate. */
+const unverified: string[] = [];
+/** Locks whose LIVE pid could not be told from an aio app: never signalled
+ *  (it may be anybody's), and RED — "cannot tell" was printed and passed, so
+ *  an app left running under a pid this could not read passed the gate. */
+const unidentified: string[] = [];
 const staleDirs: string[] = [];
 
 /** Everything a lock dir ever holds: `<key>.lock`, the app's `.sock` /
@@ -183,7 +234,7 @@ const staleDirs: string[] = [];
 function isLockDirEntry(e: Deno.DirEntry): boolean {
   if (e.isDirectory) return false;
   return /\.(?:lock|sock|hold|launch\.json)$/.test(e.name) ||
-    /^watch-\d+(?:d[0-9a-f]{8})?\.tmp$/.test(e.name);
+    /^watch-\d+(?:d[0-9a-f]{8})?(?:-\d+)?\.tmp$/.test(e.name);
 }
 
 /** A lock dir touched this recently belongs to a run that is making it right
@@ -207,6 +258,95 @@ function touchedRecently(mtime: number | null): boolean {
   if (mtime === null) return true;
   return Date.now() - mtime < LOCK_DIR_RECENT_MS;
 }
+
+/** What every live process refers to: its command line, and where the OS
+ *  shows them its cwd and its environment. null when that cannot be read —
+ *  the caller then counts and removes NOTHING: with no live set every temp
+ *  dir reads as ownerless, a live run's among them.
+ *
+ *  Linux reads /proc. macOS has none, so every dir here read as ownerless
+ *  there and a live run's `/tmp/xdg-shard-*` was one `clean:tmp` from deleted
+ *  once it was ten minutes old: `ps e` prints each command line WITH its
+ *  environment (the cwd is not in it). Windows had neither and the same
+ *  defect: it shows nobody another process's environment or cwd, so there it
+ *  is the command lines alone (CIM) — and what a process WROTE about itself,
+ *  which every OS reads below: a live lock's cwd and home, and the suite
+ *  runner's owner file in each shard runtime dir (`runOwners`). */
+function processRefs(): string[] | null {
+  const run = (cmd: string, args: string[]): string[] | null => {
+    try {
+      const out = new Deno.Command(cmd, {
+        args,
+        stdin: "null",
+        stdout: "piped",
+        stderr: "null",
+      }).outputSync();
+      const text = dec.decode(out.stdout);
+      if (!out.success || text.trim() === "") return null;
+      // `<pid> <parent pid> <the rest>` a line.
+      for (const line of text.split(/\r?\n/)) {
+        const m = /^\s*(\d+)\s+(\d+)\s(.*)$/.exec(line);
+        if (m) listed.set(Number(m[1]), { parent: Number(m[2]), text: m[3]! });
+      }
+      return [text];
+    } catch {
+      return null; // aio-ok: no such program — "cannot be read", said by the caller
+    }
+  };
+  if (Deno.build.os === "windows") {
+    return run("powershell", [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      // A parent is named only if it was born first: Windows keeps the pid of
+      // a parent that is gone, and hands that pid to somebody else.
+      "[Console]::OutputEncoding = [Text.Encoding]::UTF8; " +
+      "$all = Get-CimInstance Win32_Process; $born = @{}; " +
+      "foreach ($p in $all) { $born[[int]$p.ProcessId] = $p.CreationDate }; " +
+      "foreach ($p in $all) { $pp = [int]$p.ParentProcessId; " +
+      "if (-not $born.ContainsKey($pp) -or $born[$pp] -gt $p.CreationDate) " +
+      "{ $pp = 0 }; " +
+      "[string]$p.ProcessId + ' ' + $pp + ' ' + $p.CommandLine }",
+    ]);
+  }
+  if (Deno.build.os === "darwin") {
+    return run("ps", ["axeww", "-o", "pid=,ppid=,command="]);
+  }
+  // A test's seam: another directory can only make this answer "unreadable"
+  // (it does not hold this very process), never "nothing is live".
+  const proc = Deno.env.get("AIO_ORPHANS_PROC") ?? "/proc";
+  const refs: string[] = [];
+  let self = false;
+  try {
+    for (const p of Deno.readDirSync(proc)) {
+      const pid = Number(p.name);
+      if (!(pid > 0)) continue;
+      self ||= pid === Deno.pid;
+      try {
+        refs.push(Deno.readLinkSync(`${proc}/${pid}/cwd`));
+      } catch { /* not ours */ }
+      try {
+        refs.push(dec.decode(Deno.readFileSync(`${proc}/${pid}/environ`)));
+        refs.push(dec.decode(Deno.readFileSync(`${proc}/${pid}/cmdline`)));
+      } catch { /* not ours */ }
+    }
+  } catch { /* aio-ok: no /proc — `self` stays false, and that is said */ }
+  return self ? refs : null;
+}
+// Read BEFORE anything is removed: a run that cannot tell removes nothing.
+const liveRefs = processRefs() ?? (() => {
+  console.error(
+    "check-orphans: the live processes could not be read (/proc, `ps axeww`, " +
+      "CIM on Windows) — cannot tell a live run's temp dir from a dead " +
+      "one's; none is counted or removed",
+  );
+  Deno.exit(2);
+})();
+/** Dirs the lock rule owns: lock-shaped (pruned file by file, never
+ *  recursively) or holding a LIVE lock. The temp sweep below goes by name and
+ *  recursively, and on Windows both walk `%TEMP%` — a live app's `aio-<scope>`
+ *  lock dir there is not an ownerless temp home. */
+const lockRuled = new Set<string>();
 
 for (const root of lockRoots()) {
   let entries: Deno.DirEntry[] = [];
@@ -245,6 +385,8 @@ for (const root of lockRoots()) {
         const pid = lock?.pid ?? 0;
         if (ownerAlive(lock, dir)) {
           live++;
+          // What the app wrote about itself: where it runs is in use.
+          for (const p of [lock?.cwd, lock?.home]) if (p) liveRefs.push(p);
           // Another pid namespace's app: its pid is a stranger here — never
           // an orphan to report, and never one to SIGTERM.
           if (foreignOwnerRefusal({ pid, ns: lock?.ns }) !== null) continue;
@@ -272,7 +414,7 @@ for (const root of lockRoots()) {
           // matter who started it.
           const started = Number(lock?.startedAt ?? 0);
           const fresh = started > 0 && Date.now() - started < PARENT_GRACE_MS;
-          const parent = Number(envOf(pid)?.AIO_PARENT_PID ?? "");
+          const parent = parentOf(pid);
           if (parent > 0 && alive(parent) && fresh) continue;
           // A lock whose "owner" is a test RUNNER (or this very process) is a
           // fixture a test wrote with its own pid, not an app — the am
@@ -280,6 +422,20 @@ for (const root of lockRoots()) {
           // must not read as seven orphans.
           if (pid === Deno.pid || /\bdeno(\S*)? test\b/.test(cmdlineOf(pid))) {
             continue;
+          }
+          if (!lock?.startToken && typeof lock?.startEpoch !== "number") {
+            const who = await tokenlessOwner(pid);
+            if (who.is !== "aio") {
+              (who.is === "stranger" ? unverified : unidentified).push(
+                who.is === "stranger"
+                  ? `stale lock (no start token; its pid was reused)  ` +
+                    `${lock?.appId ?? f.name}\n        ${who.why}`
+                  : `unverifiable (no start token)  pid ${pid}  ` +
+                    `${lock?.appId ?? f.name}\n        ${who.why}`,
+                `        lock: ${path}`,
+              );
+              continue;
+            }
           }
           orphans.push({
             pid,
@@ -296,11 +452,12 @@ for (const root of lockRoots()) {
         // A watcher sentinel whose process is gone is a hard-killed app. The
         // name carries the PID (and pid namespace) of the process that wrote
         // it — a pid from another namespace proves nothing here.
-        const m = /^watch-(\d+)(?:d([0-9a-f]{8}))?\.tmp$/.exec(f.name);
+        const m = /^watch-(\d+)(?:d([0-9a-f]{8}))?(?:-\d+)?\.tmp$/.exec(f.name);
         if (!m || !taggedOwnerGone(path, Number(m[1]), m[2])) live++;
         else if (clean && !foreign) Deno.removeSync(path);
       }
     }
+    if (!foreign || live > 0) lockRuled.add(dir);
     if (scoped && live === 0 && !foreign && !touchedRecently(mtime)) {
       staleDirs.push(dir);
     }
@@ -314,20 +471,6 @@ for (const root of lockRoots()) {
 // ago is in use by something even if we cannot see by whom. Never delete what
 // is not clearly abandoned: this script runs with write permission.
 const RECENT_MS = 10 * 60_000;
-const liveRefs: string[] = [];
-try {
-  for (const p of Deno.readDirSync("/proc")) {
-    const pid = Number(p.name);
-    if (!(pid > 0)) continue;
-    try {
-      liveRefs.push(Deno.readLinkSync(`/proc/${pid}/cwd`));
-    } catch { /* not ours */ }
-    try {
-      liveRefs.push(dec.decode(Deno.readFileSync(`/proc/${pid}/environ`)));
-      liveRefs.push(dec.decode(Deno.readFileSync(`/proc/${pid}/cmdline`)));
-    } catch { /* not ours */ }
-  }
-} catch { /* no /proc */ }
 /** Where a test's throwaway directories live.
  *
  *  BOTH roots. This swept `/tmp` only, and `src/testing/temp-dir.ts` used to
@@ -339,32 +482,138 @@ try {
  *  `/tmp` stays here so anything an older checkout left behind is still found.
  *
  *  Under the test root a directory is a leftover whatever it is called, so the
- *  `aio-` prefix is only required in the shared `/tmp`. */
+ *  `aio-` prefix is only required in the shared `/tmp`.
+ *
+ *  …and `xdg-shard-`: the suite runner gives each shard a runtime dir of its
+ *  own (`/tmp/xdg-shard-XXXX`, scripts/test-shards.ts) and removes it when
+ *  the shard ends — so one whose RUN was killed stays, lock dirs inside it,
+ *  where the lock scan above never looks (it is not named `aio*`). Same rule
+ *  as every other dir here: no live process names it, untouched for a while. */
+const TMP_PREFIXES = ["aio-", "xdg-shard-"];
+/** The shared temp dir's scratch, as a message names it on this OS — it said
+ *  `/tmp/aio-*` on Windows, where the sweep reads `%TEMP%`. */
+const TMP_GLOBS = TMP_PREFIXES.map((p) =>
+  Deno.build.os === "windows" ? `%TEMP%\\${p}*` : `/tmp/${p}*`
+).join(", ");
 function scratchRoots(): { dir: string; requirePrefix: boolean }[] {
-  const out = [{ dir: "/tmp", requirePrefix: true }];
+  // The test seam replaces the shared `/tmp` here too (see lockRoots): a
+  // test of this sweep must never count, or remove, the machine's own.
+  const only = Deno.env.get("AIO_ORPHANS_LOCK_ROOTS");
+  // Where the runner and the tests put them: `/tmp`, on Windows `%TEMP%` —
+  // the literal `/tmp` there named nothing, so nothing was counted or swept.
+  const shared = Deno.build.os === "windows"
+    ? [Deno.env.get("TEMP") ?? Deno.env.get("TMP") ?? ""].filter(Boolean)
+    : ["/tmp"];
+  const out = (only ? only.split(DELIMITER).filter(Boolean) : shared)
+    .map((dir) => ({ dir, requirePrefix: true }));
   const override = Deno.env.get("AIO_TEST_ROOT")?.trim();
   const home = (Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE") ?? "")
     .replace(/[/\\]+$/, "");
   const root = override || (home ? join(home, "tmp", "aio") : "");
-  if (root && root !== "/tmp") out.push({ dir: root, requirePrefix: false });
+  if (root && !out.some((o) => o.dir === root)) {
+    out.push({ dir: root, requirePrefix: false });
+  }
   return out;
 }
+
+/** The suite runs that are LIVE, by the owner file their runner wrote into
+ *  each shard runtime dir (`markShardRuntime`, scripts/test-shards.ts): the
+ *  dirs themselves, and when the earliest of those runs began. A scratch dir
+ *  touched since then may be that run's — a test process's own temp dir is on
+ *  nobody's command line or environment — and is left. */
+function runOwners(): { dirs: Set<string>; since: number } {
+  const dirs = new Set<string>();
+  let since = Infinity;
+  for (const { dir: root } of scratchRoots()) {
+    try {
+      for (const e of Deno.readDirSync(root)) {
+        if (!e.isDirectory || !e.name.startsWith("xdg-shard-")) continue;
+        try {
+          const o = JSON.parse(
+            Deno.readTextFileSync(join(root, e.name, ".run-owner")),
+          );
+          if (!ownerAlive(o, join(root, e.name))) continue;
+          dirs.add(join(root, e.name));
+          if (typeof o.startedAt === "number") {
+            since = Math.min(since, o.startedAt);
+          }
+        } catch { /* aio-ok: no owner file (an older runner's), or torn */ }
+      }
+    } catch { /* aio-ok: no such root */ }
+  }
+  return { dirs, since };
+}
+const liveRuns = runOwners();
+
+/** One spelling for a path and the text it is looked for in: Windows names
+ *  a file in either case and with either separator (a command line carries
+ *  `file:///C:/…` as readily as `C:\…`). */
+const fold = (t: string) =>
+  Deno.build.os === "windows" ? t.toLowerCase().replaceAll("/", "\\") : t;
+const foldedRefs = liveRefs.map(fold);
+
+/** The dirs a LIVE test process wrote down as its own (`LIVE_OWNER`,
+ *  src/testing/temp-dir.ts): `<root>/.live-<pid>` — who it is, then a dir a
+ *  line. The one sign of a bare `deno test`'s temp dirs that every OS can
+ *  read: they are on no command line, and Windows shows nobody another
+ *  process's environment or cwd. A record whose owner is gone (it was
+ *  SIGKILLed) protects nothing, and `--clean` removes it. */
+function liveOwnedDirs(): Set<string> {
+  const out = new Set<string>();
+  for (const { dir: root } of scratchRoots()) {
+    let names: string[];
+    try {
+      names = [...Deno.readDirSync(root)]
+        .filter((e) => e.isFile && e.name.startsWith(LIVE_OWNER))
+        .map((e) => e.name);
+    } catch {
+      continue; // aio-ok: no such root
+    }
+    for (const name of names) {
+      const path = join(root, name);
+      try {
+        const [who, ...dirs] = Deno.readTextFileSync(path).split("\n");
+        if (!ownerAlive(JSON.parse(who!), root)) {
+          if (clean) Deno.removeSync(path);
+          continue;
+        }
+        for (const d of dirs.filter(Boolean)) {
+          out.add(fold(d));
+          // …and as this scan spells it: the same root under another name
+          // (a symlinked /tmp, a short Windows path).
+          out.add(fold(join(root, basename(d))));
+        }
+      } catch {
+        /* aio-ok: torn mid-write, or removed by its owner's exit — the next look reads it */
+      }
+    }
+  }
+  return out;
+}
+const liveOwned = liveOwnedDirs();
 
 const tmpDirs: string[] = [];
 for (const { dir: root, requirePrefix } of scratchRoots()) {
   try {
     for (const e of Deno.readDirSync(root)) {
       if (!e.isDirectory) continue;
-      if (requirePrefix && !e.name.startsWith("aio-")) continue;
+      if (requirePrefix && !TMP_PREFIXES.some((p) => e.name.startsWith(p))) {
+        continue;
+      }
+      // An Electron window's preload dir, as builds before 1.0.17 made it
+      // (the temp dir, no owner recorded): any aio app's, maybe a live one's.
+      if (e.name.startsWith("aio-preload-")) continue;
       const dir = join(root, e.name);
-      if (liveRefs.some((r) => r.includes(dir))) continue;
+      if (lockRuled.has(dir) || liveRuns.dirs.has(dir)) continue;
+      if (foldedRefs.some((r) => r.includes(fold(dir)))) continue;
+      if (liveOwned.has(fold(dir))) continue;
       let mtime = 0;
       try {
         mtime = Deno.statSync(dir).mtime?.getTime() ?? 0;
       } catch {
         continue;
       }
-      if (Date.now() - mtime < RECENT_MS) continue;
+      if (Date.now() - mtime < RECENT_MS || mtime >= liveRuns.since) continue;
       tmpDirs.push(dir);
     }
   } catch { /* no such root */ }
@@ -415,6 +664,8 @@ for (const { dir: root, requirePrefix } of scratchRoots()) {
   }
 }
 
+for (const line of unverified) console.log(line);
+for (const line of unidentified) console.error(line);
 for (const o of orphans) {
   console.error(
     `ORPHAN  pid ${o.pid}  ${o.appId}${o.port ? ` :${o.port}` : ""}\n` +
@@ -510,8 +761,17 @@ if (clean) {
   }
   console.log(
     `clean: ${orphans.length} orphan(s) signalled, ${removed} stale lock ` +
-      `dir(s) and ${homes} ownerless temp dir(s) (/tmp/aio-*, every dir under the test root) removed`,
+      `dir(s) and ${homes} ownerless temp dir(s) (${TMP_GLOBS}, every dir under the test root) removed`,
   );
+  // A removed test store leaves its `git worktree` registration in THIS
+  // checkout's `.git` — forgotten here as the suite runner forgets them.
+  const forgotten = pruneTestWorktrees(Deno.cwd(), Deno.env.toObject());
+  if (forgotten.length) {
+    console.log(
+      `clean: ${forgotten.length} worktree registration(s) of removed test ` +
+        `stores forgotten`,
+    );
+  }
   // Never a silent "0 removed": say which ones resisted, and why.
   for (const k of kept) console.error(`  could not remove ${k}`);
   Deno.exit(0);
@@ -575,6 +835,15 @@ if (clean) {
     }
   }
 }
+if (unidentified.length) {
+  console.error(
+    `\n${unidentified.length / 2} lock(s) with no start token name a live ` +
+      `process that could not be identified — it may be an aio app left ` +
+      `running. Nothing was signalled. Look at each pid; remove the lock ` +
+      `file if it is not one.`,
+  );
+  if (!orphans.length) Deno.exit(1);
+}
 if (orphans.length) {
   console.error(
     `\n${orphans.length} aio process(es) outlived their test run. ` +
@@ -585,7 +854,7 @@ if (orphans.length) {
 }
 console.log(
   `no orphaned aio processes (${staleDirs.length} stale lock dir(s), ` +
-    `${tmpDirs.length} ownerless temp dir(s): /tmp/aio-* and every dir under the test root, apps-* included — deno task clean:tmp removes them)`,
+    `${tmpDirs.length} ownerless temp dir(s): ${TMP_GLOBS} and every dir under the test root, apps-* included — deno task clean:tmp removes them)`,
 );
 
 // ── The leak nobody was failing on ──
@@ -607,13 +876,17 @@ console.log(
 // ~90 (measured, twice), and 400 was chosen when nothing swept them and the
 // number climbed by a couple of hundred per run. A ceiling far above the real
 // count is a ceiling that rots — the win has to be locked in or it is not one.
-const LEFTOVER_CEILING = 200;
+// 200 → 100 (1.0.20): a suite run measured 37, and this printed "lower it" at
+// every one. 100 is that with room for a second checkout's run beside it; a
+// machine over it has a leak or a round of killed runs, and `clean:tmp` is the
+// answer to both.
+const LEFTOVER_CEILING = 100;
 const leftovers = staleDirs.length + tmpDirs.length;
 if (leftovers > LEFTOVER_CEILING) {
   console.error(
     `\ncheck:orphans FAIL — ${leftovers} abandoned director(ies) ` +
       `(${staleDirs.length} stale lock, ${tmpDirs.length} ownerless ` +
-      `/tmp/aio-*), ceiling ${LEFTOVER_CEILING}.\n` +
+      `${TMP_GLOBS}), ceiling ${LEFTOVER_CEILING}.\n` +
       `  They are invisible one at a time and 4 GB in aggregate.\n` +
       // The two halves have DIFFERENT causes and different fixes, and saying
       // "every one is a test that did not remove its temp home" of both sent
@@ -625,7 +898,7 @@ if (leftovers > LEFTOVER_CEILING) {
       `owner is gone. A suite boots hundreds of apps, and \`deno task test\` ` +
       `resets that home each run — so roughly one run's worth is expected, ` +
       `and a number far above that is the signal.\n` +
-      `  ${tmpDirs.length} ownerless temp dir(s) (/tmp/aio-*, the test root's apps-*/aio-*/…): a test made a temp dir and ` +
+      `  ${tmpDirs.length} ownerless temp dir(s) (${TMP_GLOBS}, the test root's apps-*/aio-*/…): a test made a temp dir and ` +
       `did not remove it. THIS is the one to fix at the source — find the ` +
       `test and give it an \`await using\` or a finally.\n` +
       `  \`deno task clean:tmp\` removes both.`,

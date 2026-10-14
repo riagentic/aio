@@ -325,8 +325,11 @@ Deno.test("swap helper (posix): the plain spawn, never through a Windows launche
 // on Linux it drops every inherited descriptor first, exactly as the relaunch
 // does (tests/relaunch-closes-inherited-fds.test.ts proves each shell closes
 // them), so neither it nor the version it starts holds a pipe or mount alive.
-Deno.test("swap helper (linux): started through the descriptor-closing shell, the helper as $0", () => {
-  if (Deno.build.os !== "linux") return;
+Deno.test({
+  name:
+    "swap helper (linux): started through the descriptor-closing shell, the helper as $0",
+  ignore: Deno.build.os !== "linux", // the shell is chosen by what THIS host has (/proc/self/fd): only a Linux host has one
+}, () => {
   const spawned: [string, Deno.CommandOptions][] = [];
   spawnSwapHelper("/bin/sh", ["x.sh", "1"], undefined, {
     os: "linux",

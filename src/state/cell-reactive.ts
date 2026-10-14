@@ -25,6 +25,7 @@ import {
   uiKeyVisibility,
 } from "./state-filter.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { firstTime } from "../protocol/said-once.ts";
 import { deepFreeze } from "./immutable.ts";
 import { unregisterCancelOn } from "./method-cancel.ts";
 
@@ -42,18 +43,23 @@ const _cellRegistry = new Map<string, CellDef>();
  *  catches the import-time registration overwrite. */
 export function registerCell(def: CellDef): void {
   const id = def.__aio.id;
-  if (
-    _cellRegistry.has(id) &&
-    (globalThis as Record<string, unknown>).__aioDev === true
-  ) {
-    // HMR re-import produces an identical def — only warn when the new def
-    // differs from the registered one (genuine conflict, not hot reload).
-    const existing = _cellRegistry.get(id);
-    if (existing !== def) {
+  // HMR re-import produces an identical def — only a DIFFERENT def under the
+  // same name is a conflict. Dev says it every time. Production says it once
+  // per name: one of two cells is gone, its state and methods with it, and
+  // nothing but this line would ever say which (it was dev-only). A WARN in
+  // both — production is never the stricter of the two, and an ERROR line at
+  // boot fails the build's smoke run of an app that built yesterday.
+  const existing = _cellRegistry.get(id);
+  if (existing !== undefined && existing !== def) {
+    const dev = (globalThis as Record<string, unknown>).__aioDev === true;
+    if (dev || firstTime("dupcell " + id)) {
+      const msg = `duplicate cell name '${id}' — cell() called twice with ` +
+        `this name. The previous definition is being replaced.`;
       log.warn(
-        `duplicate cell name '${id}' — cell() called twice with this ` +
-          `name. The previous definition is being replaced. If this is HMR, ` +
-          `ignore; if two modules define the same cell name, rename one.`,
+        dev
+          ? `${msg} If this is HMR, ignore; if two modules define the same ` +
+            `cell name, rename one.`
+          : `${msg} Two modules define the same cell name: rename one.`,
       );
     }
   }

@@ -14,6 +14,7 @@
 // rather than in someone's app.
 import { assert, assertEquals } from "@std/assert";
 import { fuzzEnvInt } from "./fuzz-seed.ts";
+import { dealer, mulberry32 } from "./sync/properties/_prop.ts";
 import { serializeReturn } from "../src/protocol/return-value.ts";
 import { serializeArgs } from "../src/protocol/wire-value.ts";
 import {
@@ -205,20 +206,21 @@ Deno.test("return-value: a lossy value is named per PATH, not just flagged", () 
 });
 
 Deno.test("return-value: fuzz — random compositions never report a false EXACT", () => {
-  let seed = SEED;
-  const rnd = () =>
-    (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
-  const pick = <T>(a: T[]) => a[Math.floor(rnd() * a.length)]!;
+  const rnd = mulberry32(SEED);
+  const seen = new Set<string>();
+  // Dealt, not picked: 150 picks over 50 classes left three never composed.
+  const deal = dealer(rnd, CLASSES.filter((c) => c.name !== "circular"));
 
   for (let round = 0; round < ROUNDS; round++) {
     // Build a random tree out of the classes above and predict its verdict
     // from its parts: a composite is exact only if every part is.
     const parts = Array.from(
       { length: 1 + Math.floor(rnd() * 4) },
-      () => pick(CLASSES.filter((c) => c.name !== "circular")),
+      deal,
     );
     const obj: Record<string, unknown> = {};
     for (const [i, p] of parts.entries()) obj[`k${i}`] = p.make();
+    for (const p of parts) seen.add(p.name);
     const expectDropped = parts.some((p) =>
       p.verdict === "dropped" && /bigint/i.test(p.name)
     );
@@ -257,6 +259,15 @@ Deno.test("return-value: fuzz — random compositions never report a false EXACT
         } reported EXACT — ${repro}`,
       );
     }
+  }
+  if (ROUNDS >= 60) {
+    assertEquals(
+      CLASSES.map((c) => c.name).filter((n) =>
+        n !== "circular" && !seen.has(n)
+      ),
+      [],
+      "classes the generator never drew",
+    );
   }
 });
 
@@ -373,9 +384,7 @@ Deno.test("wire-value: the truncation warning fires once per walk, not per node"
 });
 
 Deno.test("wire-value: fuzz — beyond MAX_NODES, EXACT is never reported in silence", () => {
-  let seed = SEED ^ 0x9e37;
-  const rnd = () =>
-    (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const rnd = mulberry32(SEED ^ 0x9e37);
   const pick = <T>(a: T[]) => a[Math.floor(rnd() * a.length)]!;
   const lossyClasses = CLASSES.filter((c) => c.verdict === "lossy");
 

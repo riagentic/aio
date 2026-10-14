@@ -353,6 +353,39 @@ Deno.test("aiol: a REAL legacy import still warns", async () => {
   });
 });
 
+// `aio/src/…` resolves only through a path install's import map; nothing said
+// it is not a supported door (before: zero findings for all four lines).
+Deno.test("aiol: an `aio/src/…` import warns per line, names the published entry when there is one, and can be acknowledged", async () => {
+  await withTmpDir(async (dir) => {
+    await project(
+      dir,
+      [
+        `import { signal } from "aio/src/air.ts";`,
+        `import {`,
+        `  encodeFrame,`,
+        `} from "aio/src/media/encode.ts";`,
+        `// aio-ok`,
+        `export { x } from "aio/src/state/internal.ts";`,
+        `import { cell } from "aio";`,
+        `const NOTE = "import { a } from 'aio/src/b.ts'";`,
+        ``,
+      ].join("\n"),
+    );
+    const got = (await runCheckPatterns(dir)).filter((i) =>
+      i.message.includes("INTERNALS")
+    );
+    assertEquals(got.map((i) => [i.severity, i.line]), [["warn", 1], [
+      "warn",
+      4,
+    ]]);
+    assert(
+      got[0]!.message.includes("published entry `aio/air`"),
+      got[0]!.message,
+    );
+    assert(got[1]!.message.includes("No `aio/*` entry"), got[1]!.message);
+  });
+});
+
 Deno.test("aiol: a Node API named in a comment or string is not a Node API use", async () => {
   await withTmpDir(async (dir) => {
     await project(

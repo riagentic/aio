@@ -17,11 +17,16 @@
 //
 // Every fast gate runs even after one fails — a release report that stops at
 // the first problem makes you re-run the whole thing per fix. The heavy tier is
-// skipped when the fast tier failed, and only then.
+// skipped when the fast tier failed, and only then — and the report NAMES the
+// gates that did not run, so a red fast gate never reads as "the rest is fine".
+// `--keep-going` runs the heavy tier anyway: one pass that reports everything,
+// for when the fast failure is known and the hour is cheaper than a second run.
 //
-//   deno task check:release          # everything (fast, then heavy)
-//   deno task check:release --fast   # static gates + surfaces only
+//   deno task check:release                # everything (fast, then heavy)
+//   deno task check:release --fast         # static gates + surfaces only
+//   deno task check:release --keep-going   # heavy gates even if a fast one is red
 import { VERSION } from "../src/server/aio-cli.ts";
+import { DEFAULT_ELECTRON_VERSION } from "../src/electron/electron-runtime-fetch.ts";
 import { HEAP_FLOOR_MB } from "../src/server/heap-policy.ts";
 import { STAMP_PATH, writeStamp } from "./release-stamp.ts";
 import { descendantPids } from "../src/server/single-instance-lock.ts";
@@ -30,6 +35,7 @@ import { fromFileUrl } from "@std/path";
 
 const root = fromFileUrl(new URL("../", import.meta.url));
 const FAST_ONLY = Deno.args.includes("--fast");
+const KEEP_GOING = Deno.args.includes("--keep-going");
 
 /** One gate's answer. `skipped` marks a gate that did not RUN — it does not
  *  fail the release (only the docker-less lab may skip, and
@@ -97,7 +103,14 @@ async function run(name: string, cmd: string[]): Promise<Result> {
     // AIO_MAX_HEAP_MB caps every app a gate spawns at the heap floor, so the
     // suite cannot inherit 25% of the host's RAM per app and sum past the box
     // (see envHeapCapMB in src/server/heap-policy.ts).
-    env: { AIO_TEST_FENCED: "1", AIO_MAX_HEAP_MB: String(HEAP_FLOOR_MB) },
+    // AIO_PROOF_RECORD: the release check is the run that RECORDS proof rows
+    // (scripts/proof.ts); a plain `deno task test:build` leaves the tracked
+    // matrix alone.
+    env: {
+      AIO_TEST_FENCED: "1",
+      AIO_MAX_HEAP_MB: String(HEAP_FLOOR_MB),
+      AIO_PROOF_RECORD: "1",
+    },
     stdout: "piped",
     stderr: "piped",
   }).spawn();
@@ -358,6 +371,12 @@ const HEAVY: [string, string[]][] = [
   // is a release nobody checked it against. `.katana/beta.md` requires every
   // row to be proven or waiting on hardware/time; `--require` is beta's job.
   ["check:proof", ["deno", "task", "check:proof"]],
+  // The perf gate: each metric's p10 against its committed floor. It existed
+  // for nine releases outside this list, and boot sat 50% over its floor for
+  // six of them with nobody told. Gates run one at a time, so it has the
+  // fence to itself; a metric over its floor is measured twice more before it
+  // fails, and the machine's load is printed beside the verdict.
+  ["check:bench", ["deno", "task", "check:bench"]],
   // ~36 min at 347 rows: breaks each load-bearing invariant on purpose and
   // requires its named test to go red — `deno test` twice per entry.
   ["check:mutations", ["deno", "task", "check:mutations"]],
@@ -417,6 +436,37 @@ function labRuntime(): string | null {
 /** The onboarding lab's gate name — the one gate allowed to skip. */
 const LAB = "lab (fresh ubuntu)";
 
+/** Every heavy gate by name, in run order — the lab included. */
+export function heavyGateNames(): string[] {
+  return [...HEAVY.map(([name]) => name), LAB];
+}
+
+/** Does the heavy tier run? `--fast` never; a red fast tier stops it unless
+ *  `--keep-going`. Pure. */
+export function heavyPlan(
+  o: { fastOnly: boolean; keepGoing: boolean; failedEarly: number },
+): "run" | "fast-only" | "stopped" {
+  if (o.fastOnly) return "fast-only";
+  return o.failedEarly > 0 && !o.keepGoing ? "stopped" : "run";
+}
+
+/** What is printed in place of the heavy tier when it does not run: why, and
+ *  every gate that therefore did NOT run, one per line — a gate that is not
+ *  in the report at all reads as a gate that does not exist. Pure. */
+export function notRunReport(
+  plan: "fast-only" | "stopped",
+  failedEarly: number,
+  names: string[],
+): string {
+  const why = plan === "fast-only"
+    ? "NOT RUN (--fast)"
+    : `NOT RUN: fix the ${failedEarly} failure(s) above first (they cost ` +
+      `seconds, these cost over an hour) — or pass --keep-going to run ` +
+      `them anyway`;
+  return `\ngates (heavy)  — ${why}\n` +
+    names.map((n) => `  – ${n.padEnd(38)} did not run`).join("\n");
+}
+
 /** One report line. A SKIPPED gate is `⚠`, never `✓`: the lab skipped for
  *  want of docker printed the same tick as a lab that passed, so a release
  *  that never tested onboarding on a stranger's machine looked like one that
@@ -439,6 +489,123 @@ export function verdictLine(fastOnly: boolean, results: Result[]): string {
   return "\n✓ releasable" + lab + " — every gate and surface in " +
     ".katana/release.md passes; `deno task check:release-stamp` confirms " +
     "the tree before you tag\n";
+}
+
+const ELECTRON_LINE = "electron tested = newest patch";
+
+/** Is the Electron aio tests against (and every build ships) behind the
+ *  newest release of its own major? An ADVISORY — `ok` either way, marked ⚠
+ *  when behind: Electron is a desktop app's largest outside attack surface,
+ *  and a field report found aio one patch release late with nothing in the
+ *  repo to say so. Never a red: a release is not held for an upstream that
+ *  moved this morning, and the bump is a tested change of its own.
+ *  `tags` — npm's dist-tags for `electron`, which carry one `<major>-x-y` per
+ *  line. Null when they say nothing about this major. Pure. */
+export function electronAdvisory(
+  tested: string,
+  tags: Record<string, unknown>,
+): Result | null {
+  const newest = tags[`${tested.split(".")[0]}-x-y`];
+  if (typeof newest !== "string" || !/^\d+\.\d+\.\d+$/.test(newest)) {
+    return null;
+  }
+  const [a, b] = [tested, newest].map((v) => v.split(".").map(Number));
+  const behind = a!.findIndex((n, i) => n !== b![i]);
+  return behind >= 0 && a![behind]! < b![behind]!
+    ? {
+      name: ELECTRON_LINE,
+      ok: true,
+      skipped: true,
+      detail: `ADVISORY — aio tests and ships Electron ${tested}; ${newest} ` +
+        `is out (DEFAULT_ELECTRON_VERSION, ` +
+        `src/electron/electron-runtime-fetch.ts). Not a failure.`,
+    }
+    : { name: ELECTRON_LINE, ok: true, detail: tested };
+}
+
+/** {@link electronAdvisory} against the registry: ONE small request, and
+ *  nothing at all — no line, no failure — when it cannot be made. */
+async function electronAdvisoryNow(): Promise<Result | null> {
+  try {
+    const res = await fetch(
+      "https://registry.npmjs.org/-/package/electron/dist-tags",
+      { signal: AbortSignal.timeout(5000) },
+    );
+    if (!res.ok) {
+      await res.body?.cancel();
+      return null;
+    }
+    return electronAdvisory(DEFAULT_ELECTRON_VERSION, await res.json());
+  } catch {
+    return null; // aio-ok: offline — an advisory about upstream has no answer
+  }
+}
+
+const STUB_LINE = "windows stub = its source, rebuilt";
+/** The name of the test that rebuilds the committed Windows stub PE from its
+ *  committed source and compares the bytes (a guard test holds this text to
+ *  the test file). */
+export const STUB_REBUILD_TEST =
+  "the committed PE is what the committed source builds to";
+
+/** Was the prebuilt Windows stub REBUILT on this machine? The test that does
+ *  it is `ignore`d without the pinned Rust + mingw-w64 — and an ignored test
+ *  is one quiet word in a 13000-test run, so a release could ship a PE that
+ *  nothing here tied to its source by more than the recorded source hash.
+ *  ⚠ when it did not run (never a red: a release cut on a machine without
+ *  the toolchain ships the same committed bytes); ✗ when it ran and did not
+ *  pass. `output` — that one test's `deno test` output. Pure. */
+export function stubRebuildAdvisory(success: boolean, output: string): Result {
+  const n = (word: string) =>
+    Number(new RegExp(`(\\d+) ${word}`).exec(output)?.[1] ?? 0);
+  if (success && n("passed") === 1) {
+    return {
+      name: STUB_LINE,
+      ok: true,
+      detail: "byte-identical to the committed PE",
+    };
+  }
+  if (success && n("ignored") === 1) {
+    return {
+      name: STUB_LINE,
+      ok: true,
+      skipped: true,
+      detail: "ADVISORY — NOT rebuilt on this machine (the pinned rustc + " +
+        "mingw-w64 of src/build/windows-sfx-stub/README.md are not here): " +
+        "the committed PE is tied to its source by the recorded source " +
+        "hash only. Not a failure.",
+    };
+  }
+  return {
+    name: STUB_LINE,
+    ok: false,
+    detail: "the rebuild did not pass (or its test is gone) — deno test -A " +
+      "tests/build-windows-sfx-stub.test.ts",
+  };
+}
+
+async function stubRebuildNow(): Promise<Result> {
+  const [bin, ...args] = [
+    ...FENCE,
+    Deno.execPath(),
+    "test",
+    "-A",
+    "--preload=tests/preload-ffi.ts",
+    "tests/build-windows-sfx-stub.test.ts",
+    `--filter=${STUB_REBUILD_TEST}`,
+  ];
+  const o = await new Deno.Command(bin!, {
+    args,
+    cwd: root,
+    env: { NO_COLOR: "1" },
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  const dec = new TextDecoder();
+  return stubRebuildAdvisory(
+    o.success,
+    dec.decode(o.stdout) + dec.decode(o.stderr),
+  );
 }
 
 function report(results: Result[]): void {
@@ -467,6 +634,9 @@ async function main(): Promise<void> {
   }).output();
 
   const surfaces = await surfaceChecks();
+  const electron = await electronAdvisoryNow();
+  if (electron) surfaces.push(electron);
+  surfaces.push(await stubRebuildNow());
   report(surfaces);
 
   console.log("\ngates (fast)");
@@ -476,15 +646,20 @@ async function main(): Promise<void> {
 
   const failedEarly = [...surfaces, ...fast].filter((r) => !r.ok);
   let heavy: Result[] = [];
-  if (FAST_ONLY) {
-    console.log("\ngates (heavy)  — skipped (--fast)");
-  } else if (failedEarly.length > 0) {
-    console.log(
-      `\ngates (heavy)  — skipped: fix the ${failedEarly.length} failure(s) ` +
-        `above first (they cost seconds, these cost ~12 minutes)`,
-    );
+  const plan = heavyPlan({
+    fastOnly: FAST_ONLY,
+    keepGoing: KEEP_GOING,
+    failedEarly: failedEarly.length,
+  });
+  if (plan !== "run") {
+    console.log(notRunReport(plan, failedEarly.length, heavyGateNames()));
   } else {
-    console.log("\ngates (heavy)");
+    console.log(
+      failedEarly.length > 0
+        ? `\ngates (heavy)  — running although ${failedEarly.length} ` +
+          `gate(s) above failed (--keep-going)`
+        : "\ngates (heavy)",
+    );
     for (const [name, cmd] of HEAVY) heavy.push(await run(name, cmd));
     // The lab last: it is the slowest, and everything above has to hold before
     // "does a stranger's machine survive this?" is even a meaningful question.
@@ -516,6 +691,10 @@ async function main(): Promise<void> {
     console.log(
       `\n✗ NOT releasable — ${failed.length} failing: ${
         failed.map((f) => f.name).join(", ")
+      }${
+        plan === "stopped"
+          ? ` · ${heavyGateNames().length} heavy gates did NOT run`
+          : ""
       }\n`,
     );
     Deno.exit(1);

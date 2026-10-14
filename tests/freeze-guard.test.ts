@@ -28,10 +28,25 @@ Deno.test("headroom: declines when RAM is nearly spent", () => {
   if (!v.ok) assertEquals(v.reason.includes("RAM available"), true);
 });
 
-Deno.test("headroom: declines when swap is thrashing", () => {
-  const v = headroom(mem({ swapUsedBytes: 7 * GB })); // 87.5% — over the line
-  assertEquals(v.ok, false);
-  if (!v.ok) assertEquals(v.reason.includes("swap"), true);
+Deno.test("headroom: declines when swap is nearly full AND RAM is short", () => {
+  // Swap 87.5% full, 12.5% of RAM available: above the RAM floor alone, and
+  // the machine is swapping to stay there.
+  const v = headroom(mem({ swapUsedBytes: 7 * GB, availableBytes: 4 * GB }));
+  assertEquals(v, {
+    ok: false,
+    reason: "swap 88% full with only 13% RAM available",
+  });
+});
+
+// The false positive this rule had: swap filled during some earlier peak
+// stays full, and the pack was declined — the build shipping the larger zip
+// payload — on a machine with a third of its RAM free.
+Deno.test("headroom: full swap beside plenty of free RAM is not pressure", () => {
+  const full = { swapUsedBytes: 7.9 * GB };
+  assertEquals(headroom(mem({ ...full, availableBytes: 11 * GB })).ok, true);
+  // Exactly a fifth of RAM available is plenty; just under is not.
+  assertEquals(headroom(mem({ ...full, availableBytes: 6.4 * GB })).ok, true);
+  assertEquals(headroom(mem({ ...full, availableBytes: 6.3 * GB })).ok, false);
 });
 
 Deno.test("headroom: no swap is judged on RAM alone", () => {

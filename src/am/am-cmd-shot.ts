@@ -74,6 +74,15 @@ export function shotDiffOptions(
   return { ok: true, opts };
 }
 
+/** Pure: the window a positional index names — 0 when absent, null when it
+ *  cannot be read. `Number("")` is 0, so `am shot "$N"` with an unset variable
+ *  captured the first window. @internal exported for tests. */
+export function shotWindowIndex(raw: string | undefined): number | null {
+  if (raw === undefined) return 0;
+  const n = parseNumArg(raw, "window index", { min: 0, integer: true });
+  return n.ok ? n.value : null;
+}
+
 /** Clients with a desktop window. Everything else has nothing to screenshot,
  *  and no flag will give it one. */
 const WINDOWED = new Set(["electron"]);
@@ -111,7 +120,8 @@ export function noCdpMessage(
           `is no window to shoot at all — use \`am surface\` instead.) `
         : " "
     }Restart with the flag: am restart ${appId} --cdp ` +
-    `(or run the app with --cdp / AIO_CDP=1), then am ${need.verb} again. ` +
+    `(or run the app with --cdp; AIO_CDP=1 does the same unless the app ` +
+    `sets electron: { ignoreDebugEnv: true }), then am ${need.verb} again. ` +
     `Opt-in on purpose: --cdp binds a loopback port, and an app that did not ` +
     `ask binds none. Without restarting anything, \`am surface ${appId} ` +
     `--json\` reads the live UI as text — every component and element with ` +
@@ -177,8 +187,8 @@ export async function cmdShot(
     );
     Deno.exit(1);
   }
-  const idx = idxRaw === undefined ? 0 : Number(idxRaw);
-  if (!Number.isInteger(idx) || idx < 0) {
+  const idx = shotWindowIndex(idxRaw);
+  if (idx === null) {
     outError(
       `invalid window index: ${idxRaw} — a non-negative integer (0 = the ` +
         `first window)`,

@@ -21,6 +21,7 @@
 // (tests/fuzz-ops.ts) — one language, two axes.
 import { assertEquals } from "@std/assert";
 import { fuzzEnvInt } from "./fuzz-seed.ts";
+import { dealer, mulberry32 } from "./sync/properties/_prop.ts";
 import {
   ALIAS_KINDS,
   applyOp,
@@ -82,20 +83,23 @@ const SEED = fuzzEnvInt("FUZZ_SEED", 0x7c0ffee1) & 0x7fffffff;
 const ROUNDS = fuzzEnvInt("FUZZ_ROUNDS", 90, 1);
 
 Deno.test("differential: with one writer, transaction/serialize are observationally a no-op", async () => {
-  let seed = SEED;
-  const rnd = () =>
-    (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const rnd = mulberry32(SEED);
   const pick = (n: number) => Math.floor(rnd() * n);
+  const seen = new Set<string>();
+  // Half the ops are dealt (every kind comes up), half picked (a kind can
+  // repeat inside one program).
+  const deal = dealer(rnd, ALL_KINDS);
 
   for (let round = 0; round < ROUNDS; round++) {
     const program: Op[] = Array.from(
       { length: 6 + pick(14) },
       () => ({
-        kind: ALL_KINDS[pick(ALL_KINDS.length)]!,
+        kind: pick(2) ? deal() : ALL_KINDS[pick(ALL_KINDS.length)]!,
         i: pick(9),
         v: pick(100),
       }),
     );
+    for (const o of program) seen.add(o.kind);
     const repro = `FUZZ_SEED=${SEED} round ${round}: ${
       JSON.stringify(program)
     }`;
@@ -149,5 +153,9 @@ Deno.test("differential: with one writer, transaction/serialize are observationa
     } finally {
       h.dispose();
     }
+  }
+  // A generator that stopped drawing a kind compares nothing about it.
+  if (ROUNDS >= 90) {
+    assertEquals(ALL_KINDS.filter((k) => !seen.has(k)), [], "kinds never run");
   }
 });

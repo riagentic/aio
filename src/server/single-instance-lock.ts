@@ -711,7 +711,9 @@ export function lockDir(): string {
   const before = new Set(
     scope === "" ? [] : _lockDirCandidates(base, scope).filter(_exists),
   );
-  _lockDir = _chooseLockDir(base, scope);
+  // ONE wait for the whole step — both candidates and the registry.
+  const until = _lockDeps.now() + MUTEX_WAIT_MS;
+  _lockDir = _chooseLockDir(base, scope, until);
   if (scope !== "" && !before.has(_lockDir)) {
     pruneAtExit(_lockDir);
     // Which apps root this dir serves, so the suite's end gate
@@ -719,7 +721,7 @@ export function lockDir(): string {
     // live — from a dir some process is about to use. Only there, AFTER
     // every test has ended: at runtime a missing root is no proof (an
     // `AIO_APPS_DIR` is often created on first use, after its lock dir).
-    registerRoot(_lockDir, appsRoot);
+    registerRoot(_lockDir, appsRoot, until);
   }
   return _lockDir;
 }
@@ -756,9 +758,9 @@ export function rootRegistryEntry(dir: string): string {
  *  registry is checked like a lock dir (ours, 0700, no link) — under a
  *  shared `/tmp` another account could pre-create it and have this write
  *  follow a link it planted. */
-function registerRoot(dir: string, appsRoot: string): void {
+function registerRoot(dir: string, appsRoot: string, until?: number): void {
   const entry = rootRegistryEntry(dir);
-  if (_prepareLockDir(dirname(entry)) !== null) return;
+  if (_prepareLockDir(dirname(entry), { until }) !== null) return;
   sweepRootRegistry(dirname(dir));
   try {
     Deno.writeTextFileSync(entry, appsRoot, { mode: 0o600 });
@@ -795,8 +797,20 @@ function unregisterRoot(dir: string): void {
 }
 
 /** Where `lockDir()` puts the lock dir for an apps root ("" = the shared
- *  one): the base and the `-<scope>` suffix. Pure over the env. */
-function _lockDirParts(appsRoot: string): { base: string; scope: string } {
+ *  one): the base and the `-<scope>` suffix. Pure over the env.
+ *
+ *  The scope is the last 48 of the root's ASCII letters and digits, and it is
+ *  a CONTRACT between builds: an app pinned to an older aio and an `am` on
+ *  this one must name the same directory, or the lock no longer refuses a
+ *  second start and `am` says "not running" about a live app. So two roots
+ *  that differ only in what the scope drops (letters of another script, a
+ *  prefix past 48 characters) are one lock dir, by design of that contract —
+ *  the start that loses says so by name (`_alreadyRunningMessage`), and the
+ *  data folder's own claim (`claimHome`) keeps the two apart. @internal */
+// aio-ok: exported for its test (tests/lock-dir-scope-of-a-root.test.ts) — the product reaches it through `lockDir()`
+export function _lockDirParts(
+  appsRoot: string,
+): { base: string; scope: string } {
   const base = Deno.build.os === "windows"
     ? (Deno.env.get("TEMP") ?? Deno.env.get("TMP") ?? "C:\\Temp")
     : (Deno.env.get("XDG_RUNTIME_DIR") ?? "/tmp");
@@ -887,7 +901,7 @@ export function pruneDeadLockDirAt(dir: string, rootGone = false): boolean {
       if (bound === undefined) bound = boundUnixSockets();
       if (bound && !bound.has(path)) removeIfSocket(path);
     } else {
-      const m = new RegExp(`^watch-${PID_TAG}\\.tmp$`).exec(n) ??
+      const m = SENTINEL_NAME.exec(n) ??
         new RegExp(`\\.lock\\.${PID_TAG}\\.[0-9a-f]{8}\\.tmp$`).exec(n);
       // With the apps root gone, an untagged file (an older build, or no
       // `/proc` access) goes once its pid is dead — the 10-minute age wait
@@ -1007,6 +1021,13 @@ function netstatUnix(): string {
   return new TextDecoder().decode(r.stdout);
 }
 
+/** Remove what was just created at `path` — a file or a socket. */
+function removeIfNotDir(path: string): void {
+  try {
+    if (!Deno.lstatSync(path).isDirectory) Deno.removeSync(path);
+  } catch { /* aio-ok: gone, or never made */ }
+}
+
 /** Remove `path` only if it is still a socket (never a file swapped in). */
 function removeIfSocket(path: string): void {
   try {
@@ -1017,18 +1038,18 @@ function removeIfSocket(path: string): void {
 /** Re-create a lock dir a sibling's prune removed between our `lockDir()`
  *  and our write. A scoped one is then OURS to prune at exit, like one
  *  `lockDir()` created — else it outlived every process, unmarked. */
-function remakeLockDir(dir: string): void {
+function remakeLockDir(dir: string, until?: number): void {
   const was = _exists(dir);
   // The same checks `lockDir()` made (ours, 0700, not a link) — EVERY time,
   // not only when it is missing: under a shared `/tmp` another account can
   // create the path in the gap a prune opened, and "it exists" is exactly
   // what that looks like.
-  const why = _prepareLockDir(dir);
+  const why = _prepareLockDir(dir, { until });
   if (why !== null) throw new Error(`aio: ${why}`);
   const appsRoot = appsDirEnv() ?? "";
   if (was || appsRoot === "" || dir !== _lockDir) return;
   pruneAtExit(dir);
-  registerRoot(dir, appsRoot);
+  registerRoot(dir, appsRoot, until);
 }
 
 /** Make sure the lock dir holding `path` exists before a file is created in
@@ -1036,19 +1057,34 @@ function remakeLockDir(dir: string): void {
  *  a sibling's exit prune removes the dir whenever it is empty: a
  *  `singleton: false` app (no lock to keep it) then bound its socket into a
  *  void, ENOENT. No-op for a pipe name or a dir that is there. */
-export function ensureLockDirOf(path: string): void {
-  if (inLockDir(path)) remakeLockDir(dirname(path));
+export function ensureLockDirOf(path: string, until?: number): void {
+  if (inLockDir(path)) return remakeLockDir(dirname(path), until);
+  // A caller's own socket path (`createUDSListener` is public) whose
+  // directory is MISSING: made, 0700 — made here, so ours, and nobody's
+  // arrangement to respect. 1.0.19 made it (for `/run/aio/x.sock`: by the
+  // name rule that is gone), and a start that worked there failed ENOENT. One
+  // that EXISTS is theirs, and is never touched: no chmod, as `inLockDir`
+  // says. A mkdir that fails is thrown, with its path.
+  if (isPipePath(path) || _exists(dirname(path))) return;
+  Deno.mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
 }
 
-/** Is `path` a file in a LOCK dir — this one, or the `/tmp` fallback
- *  `resolveSocketPath` picks (`aio` / `aio-u<uid>`)? Only a lock dir gets
- *  the lock dir's rules. A socket path a caller chose (`createUDSListener` is
- *  public) is left as it was: its directory is theirs to make, and chmodding
- *  it 0700 is not ours to do. Never a Windows pipe name, which is no file. */
+/** Is `path` a file in a LOCK dir — this one, or one `_chooseLockDir`
+ *  answered with (the `/tmp` fallback `resolveSocketPath` picks)? Only a
+ *  lock dir gets the lock dir's rules. A socket path a caller chose
+ *  (`createUDSListener` is public) is left as it was: chmodding its directory
+ *  0700 is not ours to do (one that is missing is made:
+ *  {@linkcode ensureLockDirOf}).
+ *
+ *  By the exact PATH aio chose, never by the directory's name: any directory
+ *  called `aio` or `aio-u<digits>` used to count — a caller's socket at
+ *  `/run/aio/app.sock`, or in a project folder named `aio`, had its directory
+ *  made 0700, which cut off the reverse proxy that reached it through the
+ *  group. Never a Windows pipe name, which is no file. */
 function inLockDir(path: string): boolean {
   if (isPipePath(path)) return false;
   const dir = dirname(path);
-  return dir === lockDir() || /^aio(-u\d+)?$/.test(basename(dir));
+  return _lockDeps.chosen.has(dir) || dir === lockDir();
 }
 
 /** Is `e` a create's answer to "the directory is not there"? ENOENT on every
@@ -1059,8 +1095,20 @@ function inLockDir(path: string): boolean {
 function dirGone(e: unknown): boolean {
   return e instanceof Deno.errors.NotFound ||
     (e as { code?: unknown } | null)?.code === "ENOENT" ||
-    removedUnderCreate(e);
+    removedUnderCreate(e) || e instanceof PrunedUnderCreate;
 }
+
+/** macOS's THIRD answer to a create in a directory that is removed under it:
+ *  success. The create returns, and what it made is in no directory — the
+ *  rmdir went through beside it (measured, APFS on macOS 26.5, 3 processes
+ *  of mkdir + create + lstat + unlink + rmdir on one dir: after 24 of 60 000
+ *  creates that succeeded the dir was gone, the file not at its path, its
+ *  handle's link count 0; a socket's bind, 6 of 90 000; Linux, 0 of either).
+ *  So there a dir that is gone right after a create WAS pruned: the refusal
+ *  {@linkcode holdLockDir} throws is this one, which {@linkcode dirGone}
+ *  reads as "made again, try again" for as long as any pruned dir is waited
+ *  for — and which is thrown as the refusal it is once that is over. */
+class PrunedUnderCreate extends Error {}
 
 /** A create at `path`, first tried at `since` (`performance.now()`), failed
  *  with `e`: was its lock dir removed under it (a sibling's exit prune of the
@@ -1084,23 +1132,120 @@ export function lockDirRemade(
   // creates). Waited out as the mutex's open waits out a file being deleted.
   const gone = dirGone(e) || (_lockDeps.windows() && isHeldOpenError(e));
   if (
-    !gone || !inLockDir(path) || performance.now() - since > MUTEX_WAIT_MS
+    !gone || !inLockDir(path) || _lockDeps.now() - since > MUTEX_WAIT_MS
   ) return false;
-  pauseSync(1);
-  ensureLockDirOf(path);
+  _lockDeps.pause(1);
+  saySlowLockDir(dirname(path), since);
+  try {
+    // Until the SAME bound: making the dir again used to bring a wait of its
+    // own (`_prepareLockDir`), so one create could take twice the time.
+    ensureLockDirOf(path, since + MUTEX_WAIT_MS);
+  } catch (refusal) {
+    // The dir cannot be made again: that is what is said, and the create's
+    // own error — the reason anything was being made — stays with it.
+    if (refusal instanceof Error && refusal.cause === undefined) {
+      refusal.cause = e;
+    }
+    throw refusal;
+  }
   return true;
+}
+
+/** One line, once a process (`_lockDeps.saidSlow`), when a step in the lock
+ *  dir has been waiting for {@linkcode SLOW_NOTE_MS}: a start that takes
+ *  seconds here took them without a word. */
+function saySlowLockDir(dir: string, since: number): void {
+  if (_lockDeps.saidSlow || _lockDeps.now() - since < SLOW_NOTE_MS) return;
+  _lockDeps.saidSlow = true;
+  log.warn(
+    `waiting for the lock directory ${dir} — another aio process keeps ` +
+      `removing it (for up to ${MUTEX_WAIT_MS / 1000} s)`,
+  );
+}
+const SLOW_NOTE_MS = 500;
+
+/** The lock dirs judged by {@linkcode _prepareLockDir}, each by the file
+ *  identity of the entry that was judged. */
+const _judged = new Map<string, { dev: number; ino: number | null }>();
+
+/** Something was just created in the lock dir `dir`: is `dir` still the
+ *  entry that was judged private — or, when a sibling pruned it and made it
+ *  again meanwhile, one that passes the same judgement? Null when it is,
+ *  else why not.
+ *
+ *  What this closes: the path is resolved once to judge the dir and again by
+ *  the create, and Deno has no `openat` to tie the two. An entry that is ours
+ *  cannot be replaced by another account under a sticky `/tmp`, but a scoped
+ *  dir is REMOVED by whoever leaves it empty, and in that gap the name is
+ *  free for anyone. What stays open: a create that went through such an entry
+ *  has happened by the time this looks (it is undone by path, through the
+ *  same entry), and an entry swapped and swapped back between the create and
+ *  this look is not seen. Neither exists under `$XDG_RUNTIME_DIR`. */
+function lockDirMoved(dir: string): string | null {
+  const was = _judged.get(dir);
+  if (was === undefined || _lockDeps.windows()) return null;
+  let now: Deno.FileInfo;
+  try {
+    now = _lockDeps.lstat(dir);
+  } catch (e) {
+    // Gone — and what was just created is in it, so it was not pruned (a
+    // prune removes an EMPTY dir): the name was taken away with our file
+    // behind it. It read as "pruned, so empty" while the peer listener was
+    // looked at before its bind; that look is now made after it (`bound`).
+    // (macOS does prune it under a create: `PrunedUnderCreate`.)
+    if (e instanceof Deno.errors.NotFound) return `${dir} is no longer there`;
+    return `${dir} cannot be read (${e instanceof Error ? e.message : e})`;
+  }
+  if (now.dev === was.dev && now.ino === was.ino) return null;
+  const why = judgeLockDir(dir, now);
+  if (why === null) _judged.set(dir, { dev: now.dev, ino: now.ino });
+  return why;
+}
+
+/** {@linkcode lockDirMoved} after a create at `path`: a dir that is no
+ *  longer ours is REFUSED — `undo` what was made, and throw. */
+function holdLockDir(path: string, undo: () => void): void {
+  if (!inLockDir(path)) return;
+  const why = lockDirMoved(dirname(path));
+  if (why === null) return;
+  try {
+    undo();
+  } catch { /* aio-ok: the refusal below is what is said */ }
+  const pruned = _lockDeps.darwin() &&
+    why === `${dirname(path)} is no longer there`;
+  throw new (pruned ? PrunedUnderCreate : Error)(
+    `aio: ${why} — it was replaced while ${path} was being created in it; ` +
+      `refusing to keep this app's lock or control socket there`,
+  );
 }
 
 /** `create()` something at `path` in the lock dir — a socket, the watcher's
  *  sentinel — with the dir made first and made AGAIN when it is pruned
  *  between the two ({@linkcode lockDirRemade}). What still fails is thrown
  *  as it came; a "no such directory" that does not say where gets the path. */
-export function createInLockDir<T>(path: string, create: () => T): T {
-  const since = performance.now();
-  ensureLockDirOf(path);
+export function createInLockDir<T>(
+  path: string,
+  create: () => T,
+  /** Close what `create` returned — when the dir turns out to have been
+   *  replaced under it ({@linkcode lockDirMoved}); the file at `path` is
+   *  removed here. */
+  undo?: (made: T) => void,
+  /** `create` only STARTS what makes the file (the peer listener, bound
+   *  after an import): nothing is at `path` to look for yet, and its maker
+   *  holds the dir itself once it is. */
+  later = false,
+): T {
+  const since = _lockDeps.now();
+  ensureLockDirOf(path, since + MUTEX_WAIT_MS);
   for (;;) {
     try {
-      return create();
+      const made = create();
+      if (later) return made;
+      holdLockDir(path, () => {
+        undo?.(made);
+        removeIfNotDir(path);
+      });
+      return made;
     } catch (e) {
       if (lockDirRemade(path, e, since)) continue;
       if (dirGone(e) && e instanceof Error && !e.message.includes(path)) {
@@ -1115,14 +1260,30 @@ export function createInLockDir<T>(path: string, create: () => T): T {
  *  {@linkcode createInLockDir}'s rule — also for the peer listener, whose
  *  bind fails after this returns. */
 export function listenInLockDir(path: string, peer: boolean): LocalListener {
-  const since = performance.now();
+  // The peer listener binds LATER (after an import): its wait starts at its
+  // own first failure. Counted from this call, a bind that first failed 2 s
+  // in — a cold start on a slow machine — was never asked again.
+  let since = 0;
   return createInLockDir(
     path,
     () =>
       _lockDeps.listen(path, {
         peer,
-        rebind: (e) => lockDirRemade(path, e, since),
+        rebind: (e, tries) =>
+          lockDirRemade(
+            path,
+            e,
+            tries === 1 ? (since = _lockDeps.now()) : since,
+          ),
+        // The look at the dir AFTER the socket is in it: for the peer
+        // listener that is here, not when `listen` returned — the look came
+        // before the bind, and a dir replaced in between was never seen.
+        bound: () => holdLockDir(path, () => removeIfSocket(path)),
       }),
+    (l) => l.close(),
+    // A Windows pipe is no file in the dir: as ever (`holdLockDir` is a
+    // no-op for it either way).
+    peer && !isPipePath(path),
   );
 }
 
@@ -1132,14 +1293,22 @@ export function listenInLockDir(path: string, peer: boolean): LocalListener {
  *  the shared dir (232 found in one after a week of test runs), and one
  *  keeps a scoped dir from pruning. Called by a watcher making its own. */
 export function sweepDeadSentinels(dir: string): void {
-  const name = new RegExp(`^watch-${PID_TAG}\\.tmp$`);
+  let entries: Deno.DirEntry[];
   try {
-    for (const e of [...Deno.readDirSync(dir)]) {
-      const m = e.isFile ? name.exec(e.name) : null;
-      const path = join(dir, e.name);
-      if (m && taggedOwnerGone(path, Number(m[1]), m[2])) Deno.removeSync(path);
-    }
-  } catch { /* aio-ok: no dir, or a sibling swept first — nothing to remove */ }
+    entries = [...Deno.readDirSync(dir)];
+  } catch {
+    return; // aio-ok: no dir — nothing to remove
+  }
+  // EACH one: a remove that fails (a sibling swept it first, a file somebody
+  // holds on Windows) used to end the sweep for every sentinel after it.
+  for (const e of entries) {
+    const m = e.isFile ? SENTINEL_NAME.exec(e.name) : null;
+    const path = join(dir, e.name);
+    if (!m || !taggedOwnerGone(path, Number(m[1]), m[2])) continue;
+    try {
+      Deno.removeSync(path);
+    } catch { /* aio-ok: a sibling swept it first — the next one is tried */ }
+  }
 }
 
 /** Scoped lock dirs THIS process created, removed (when empty) at exit. */
@@ -1180,19 +1349,25 @@ function pruneAtExit(dir: string): void {
 function dropOwnPlants(dir: string): void {
   // This process's live-reload sentinel (`server-watcher.ts`): its watcher is
   // gone with the process, and left behind it keeps the dir from pruning.
+  let files: string[];
   try {
-    const sentinel = join(dir, `watch-${ownPidTag()}.tmp`);
-    if (Deno.lstatSync(sentinel).isFile) Deno.removeSync(sentinel);
-  } catch { /* aio-ok: no sentinel — this process never watched here */ }
-  let names: string[];
-  try {
-    names = [...Deno.readDirSync(dir)]
-      .filter((e) => e.isFile && e.name.endsWith(".lock"))
+    files = [...Deno.readDirSync(dir)].filter((e) => e.isFile)
       .map((e) => e.name);
   } catch {
     return; // aio-ok: gone — nothing planted in it
   }
-  for (const n of names) {
+  const own = `watch-${ownPidTag()}`;
+  for (const n of files) {
+    // One per watcher this process ran (`sentinelName`).
+    if (
+      !n.startsWith(own) || !SENTINEL_NAME.test(n) ||
+      !/^[-.]/.test(n.slice(own.length))
+    ) continue;
+    try {
+      Deno.removeSync(join(dir, n));
+    } catch { /* aio-ok: its watcher removed it first */ }
+  }
+  for (const n of files.filter((f) => f.endsWith(".lock"))) {
     const path = join(dir, n);
     try {
       const raw = Deno.readTextFileSync(path);
@@ -1247,88 +1422,69 @@ export function _prepareLockDir(
   // the pure rule tested in isolation. @internal
   ops: {
     chmod?: (path: string, mode: number) => void;
+    /** The look THROUGH a link of ours, at what it names. */
     stat?: (path: string) => Deno.FileInfo;
     /** The same seam, for the OTHER account's half of the symlink case: a
      *  link this process planted is its own, and a test has one uid.
      *  @internal */
     lstat?: (path: string) => Deno.FileInfo;
+    /** Until when (`performance.now()`) a dir that keeps being pruned is
+     *  made again — the caller's own bound, so one start step waits once.
+     *  Default: {@linkcode MUTEX_WAIT_MS} from now. */
+    until?: number;
   } = {},
 ): string | null {
-  const chmod = ops.chmod ?? Deno.chmodSync;
-  const stat = ops.stat ?? Deno.statSync;
-  const lstat = ops.lstat ?? Deno.lstatSync;
-  /** Make it and narrow it; false when it could not be made. */
+  const lstat = ops.lstat ?? _lockDeps.lstat;
+  const since = _lockDeps.now();
+  const until = ops.until ?? since + MUTEX_WAIT_MS;
+  /** Make it; false when it could not be made. */
   const make = (): boolean => {
-    let made = true;
     try {
       // Made 0700, not made and THEN narrowed: a sibling that looks between
       // the two saw a dir of ours at the umask's 0755 and refused it as
       // "not owner-only" (macOS, 3 processes making and pruning one dir: 39
-      // of 9 000). The chmod below is for one that was already there.
+      // of 9 000). The chmod (`judgeLockDir`) is for one that was already
+      // there.
       Deno.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      return true;
     } catch (e) {
       // "Exists" or "not there" from a recursive mkdir: the dir was pruned
       // inside the call itself (it found the dir, then looked at it) — as
-      // good as made and gone. (A FILE of that name is "exists" too; the
-      // stat below finds it.) Anything else could not be made.
-      made = e instanceof Deno.errors.NotFound ||
-        e instanceof Deno.errors.AlreadyExists;
+      // good as made and gone. (A FILE of that name is "exists" too, and so
+      // is a link to nothing; the look below finds either.) Anything else
+      // could not be made.
+      return pruned(e) || e instanceof Deno.errors.AlreadyExists;
     }
-    try {
-      if (Deno.build.os !== "windows") chmod(dir, 0o700);
-    } catch { /* not ours to chmod — precisely what the stat is for */ }
-    return made;
   };
+  // Windows answers ACCESS_DENIED for a directory that is BEING removed —
+  // to the mkdir and to the look alike — until the removal is done.
+  const pruned = (e: unknown): boolean =>
+    e instanceof Deno.errors.NotFound ||
+    (_lockDeps.windows() && isHeldOpenError(e));
   let made = make();
-  if (Deno.build.os === "windows") return null; // no POSIX mode to read
-  // The LOOK must not be pointed somewhere else. `stat` FOLLOWS a symlink, so
-  // on the host this rule exists for — no `$XDG_RUNTIME_DIR`, base `/tmp`, a
-  // predictable path any local account can pre-create — another user can make
-  // `/tmp/aio` a link to a directory of OURS that is already 0700 (`~/.ssh`,
-  // `~/.config/…`) and every check below passes: the target's mode is 0700
-  // and its owner is us. The app's lock files and its control socket then sit
-  // where somebody else decided.
-  //
-  // The link's OWN owner is the question, because that is the part they have
-  // to forge: a link they planted is theirs, and a link we (or the user) made
-  // is ours and its target is still judged below. An uid we cannot read is
-  // "cannot tell", which must not refuse — the same rule as everywhere else
-  // here.
-  try {
-    const link = lstat(dir);
-    const me = selfUid();
-    if (
-      link.isSymlink && me !== null && link.uid !== null &&
-      link.uid !== undefined && link.uid !== me
-    ) {
-      return `${dir} is a symbolic link owned by uid ${link.uid}, not by you ` +
-        `(uid ${me}) — whoever owns the link chooses where this app's lock ` +
-        `and control socket actually go`;
-    }
-  } catch {
-    // aio-ok: the symlink question is an EXTRA screen, not the decision. If
-    // lstat cannot answer — the path vanished between the mkdir above and
-    // here, or the parent directory is unreadable — the `stat` below is the
-    // real check and it refuses loudly with the reason. Swallowing here
-    // cannot make a bad directory look good; it can only defer to the gate
-    // that was always the one saying yes.
-  }
-  let st: Deno.FileInfo;
-  for (const since = performance.now();;) {
+  // ONE look, at the entry itself, and that one result is judged. It was
+  // three steps — chmod, `lstat` for "whose link", `stat` for the mode — each
+  // resolving the path again, on a base (`/tmp`, no `$XDG_RUNTIME_DIR`) where
+  // any local account can make the name first:
+  // - the chmod FOLLOWED a link: `/tmp/aio` planted as a link to a directory
+  //   of ours was narrowed to 0700 before the link was refused;
+  // - a directory of theirs passed the `lstat` (not a link) and was swapped
+  //   for a link to a 0700 directory of ours before the `stat`, which
+  //   followed it and found nothing wrong.
+  for (;;) {
+    let entry: Deno.FileInfo;
     try {
-      st = stat(dir);
-      break;
+      entry = lstat(dir);
     } catch (e) {
       // MADE a moment ago and not there: a sibling's exit pruned the (empty)
       // scoped dir between the two — made again, for as long as the mutex
       // waits. It was refused instead, and the next candidate taken: an app
       // then kept its lock where `am` does not look (six processes making
       // and pruning one dir: 1 150 of 18 000 looks). One that could not be
-      // made is refused at once, as ever.
-      if (
-        made && e instanceof Deno.errors.NotFound &&
-        performance.now() - since < MUTEX_WAIT_MS
-      ) {
+      // made is refused at once, as ever. With a pause: the loop ran hot.
+      if (made && pruned(e) && _lockDeps.now() < until) {
+        _lockDeps.pause(1);
+        saySlowLockDir(dir, since);
         made = make();
         continue;
       }
@@ -1336,9 +1492,97 @@ export function _prepareLockDir(
         e instanceof Error ? e.message : e
       })`;
     }
+    if (_lockDeps.windows()) {
+      // No POSIX mode or owner to read: the profile's ACLs are the boundary.
+      // But it has to BE there — a dir that could not be made was answered
+      // "fine" without a look, and the create after it failed unexplained.
+      // (A junction or a link counts by what it names.)
+      try {
+        const at = entry.isSymlink ? (ops.stat ?? Deno.statSync)(dir) : entry;
+        return at.isDirectory ? null : `${dir} exists and is not a directory`;
+      } catch (e) {
+        return `${dir} cannot be created or read (${
+          e instanceof Error ? e.message : e
+        })`;
+      }
+    }
+    const why = judgeLockDir(dir, entry, ops);
+    if (why === null) _judged.set(dir, { dev: entry.dev, ino: entry.ino });
+    return why;
   }
-  if (!st.isDirectory) return `${dir} exists and is not a directory`;
-  return privateDirRefusal(dir, st.mode, st.uid);
+}
+
+/** Why the lock dir entry `entry` (an `lstat` of `dir`) cannot hold a
+ *  control socket, or null. Narrows a directory of OURS that is wider than
+ *  0700; touches nothing else.
+ *
+ *  A real directory is judged by that one result — owner and mode — and
+ *  chmodded only when it is provably ours: an entry of ours cannot be swapped
+ *  by another account under a sticky `/tmp`, so the chmod names what was
+ *  judged. (Without `--allow-sys` there is no uid to prove it with: a wider
+ *  directory that is no link is narrowed and looked at again — `blind`.)
+ *
+ *  A symbolic link is refused when it is somebody else's: whoever owns the
+ *  link chooses where the lock and the socket go, and a link to a 0700
+ *  directory of ours passes every check on its target. A link of OURS (or
+ *  one whose owner cannot be read — "cannot tell" must not refuse) is the
+ *  user's own arrangement: its target is looked at ONCE and judged, never
+ *  waited for — one that names nothing is refused at once. A link in the
+ *  path ABOVE the dir (macOS's `/tmp` → `/private/tmp`) is not this entry
+ *  and is followed as any path is. */
+function judgeLockDir(
+  dir: string,
+  entry: Deno.FileInfo,
+  ops: {
+    chmod?: (path: string, mode: number) => void;
+    stat?: (path: string) => Deno.FileInfo;
+    lstat?: (path: string) => Deno.FileInfo;
+  } = {},
+): string | null {
+  const me = selfUid();
+  const known = (uid: number | null | undefined): uid is number =>
+    uid !== null && uid !== undefined;
+  let at = entry;
+  if (entry.isSymlink) {
+    if (me !== null && known(entry.uid) && entry.uid !== me) {
+      return `${dir} is a symbolic link owned by uid ${entry.uid}, not by ` +
+        `you (uid ${me}) — whoever owns the link chooses where this app's ` +
+        `lock and control socket actually go`;
+    }
+    try {
+      at = (ops.stat ?? Deno.statSync)(dir);
+    } catch (e) {
+      return `${dir} is a symbolic link to nothing usable (${
+        e instanceof Error ? e.message : e
+      })`;
+    }
+  }
+  if (!at.isDirectory) return `${dir} exists and is not a directory`;
+  const wide = typeof at.mode === "number" && (at.mode & 0o077) !== 0;
+  const ours = me !== null && at.uid === me &&
+    (!entry.isSymlink || entry.uid === me);
+  // No uid to prove it with (no `--allow-sys`): a real directory — never a
+  // link, which a chmod follows — is narrowed all the same, as 1.0.19 did
+  // (an app that started there on a 0755 `/tmp/aio` was refused, with no
+  // fallback to take). Whose it is the chmod itself answers: it fails on
+  // somebody else's, and the mode then refuses below. What it LEFT is looked
+  // at again and must be the entry that was judged.
+  const blind = me === null && !entry.isSymlink;
+  if (wide && (ours || blind)) {
+    try {
+      (ops.chmod ?? Deno.chmodSync)(dir, 0o700);
+      // Looked at again the same way: what the chmod LEFT is what is judged.
+      const again = (ops.lstat ?? _lockDeps.lstat)(dir);
+      if (
+        again.isSymlink !== entry.isSymlink ||
+        (blind && (again.dev !== entry.dev || again.ino !== entry.ino))
+      ) {
+        return `${dir} was replaced while it was being checked`;
+      }
+      at = again.isSymlink ? (ops.stat ?? Deno.statSync)(dir) : again;
+    } catch { /* not ours to chmod after all — the mode below says so */ }
+  }
+  return privateDirRefusal(dir, at.mode, at.uid);
 }
 
 /** The lock/socket directory this process may actually use.
@@ -1358,10 +1602,19 @@ export function _prepareLockDir(
  *  socket in a shared `/tmp` too and must ask the SAME question — it used to
  *  mkdir + chmod and hope, which is the half that does not hold. @internal
  *  @decider */
-export function _chooseLockDir(base: string, scope: string): string {
+export function _chooseLockDir(
+  base: string,
+  scope: string,
+  /** The caller's bound for the whole choice; else one for both candidates. */
+  until = _lockDeps.now() + MUTEX_WAIT_MS,
+): string {
+  const chosen = (dir: string): string => {
+    _lockDeps.chosen.add(dir); // a lock dir by aio's own choice: `inLockDir`
+    return dir;
+  };
   const preferred = join(base, "aio" + scope);
-  const first = _prepareLockDir(preferred);
-  if (first === null) return preferred;
+  const first = _prepareLockDir(preferred, { until });
+  if (first === null) return chosen(preferred);
   const uid = selfUid();
   if (uid === null) {
     throw new Error(
@@ -1371,13 +1624,13 @@ export function _chooseLockDir(base: string, scope: string): string {
     );
   }
   const scoped = join(base, `aio-u${uid}${scope}`);
-  const second = _prepareLockDir(scoped);
+  const second = _prepareLockDir(scoped, { until });
   if (second === null) {
     log.warn(
       `${first} — using ${scoped} for this app's lock and control socket ` +
         `instead. Other users' aio apps are not visible to \`am\` from here.`,
     );
-    return scoped;
+    return chosen(scoped);
   }
   throw new Error(
     `aio: refusing to place a control socket where another local user can ` +
@@ -1585,6 +1838,18 @@ export function ownPidTag(): string {
 /** The `<pid>[d<ns>]` of {@linkcode ownPidTag}, as a regex source: groups
  *  pid, namespace hex. */
 const PID_TAG = String.raw`(\d+)(?:d([0-9a-f]{8}))?`;
+
+/** A watcher's sentinel: `watch-<pid tag>.tmp`, and `watch-<pid tag>-<n>.tmp`
+ *  for every further watcher of one process ({@linkcode sentinelName}). */
+const SENTINEL_NAME = new RegExp(`^watch-${PID_TAG}(?:-\\d+)?\\.tmp$`);
+
+/** The sentinel of this process's watcher number `n` (from 0). The first
+ *  keeps the name every build has used; a second one used to share it — it
+ *  replaced the first's file, and the first's shutdown removed the file the
+ *  second still touched: "watcher unresponsive" a minute later. @internal */
+export function sentinelName(n: number): string {
+  return `watch-${ownPidTag()}${n === 0 ? "" : `-${n}`}.tmp`;
+}
 
 /** Is the process a file's name tags (`pid`, namespace hex `ns`) gone? A pid
  *  means something only in the namespace that wrote it: ours (or none on
@@ -1886,6 +2151,35 @@ export function foreignOwnerRefusal(
     `namespace (a container sharing this lock dir), so that pid means a ` +
     `different process here.\n  fix: stop it where it runs (inside that ` +
     `container), or with \`am stop\` there.`;
+}
+
+/** The apps root the owner of `lock` was started under, when that is ANOTHER
+ *  `AIO_APPS_DIR` than `appsDir` whose lock folder has the same name
+ *  ({@linkcode _lockDirParts}) — else null.
+ *
+ *  Two such roots share one lock dir, so an `am` under one lists the other's
+ *  apps and, reading `<appId>.lock`, took the other root's app for its own:
+ *  `am stop` there stopped it. The root is read from the record's `home`
+ *  (`<root>/<appId>`, `<root>/<appId>-<profile>`), and only a root with THIS
+ *  lock folder's name counts — an app whose folder is fixed elsewhere
+ *  (`aio.run({ appDir })`, `--home`) is this scope's, wherever its data is.
+ *  Null on missing data, never a guess: no `AIO_APPS_DIR` here, or a record
+ *  with no `home` (written before alpha66). Pure but for the link look. */
+export function otherAppsRootOf(
+  lock: { home?: string },
+  appsDir: string | undefined = appsDirEnv(),
+): string | null {
+  if (!appsDir || !lock.home) return null;
+  const root = dirname(resolve(lock.home));
+  if (root === resolve(appsDir)) return null;
+  if (_lockDirParts(root).scope !== _lockDirParts(resolve(appsDir)).scope) {
+    return null;
+  }
+  // One directory under two spellings (a link in the path) is one root.
+  try {
+    if (Deno.realPathSync(root) === Deno.realPathSync(appsDir)) return null;
+  } catch { /* aio-ok: one of them is gone — the paths differ, as compared */ }
+  return root;
 }
 
 /** Is the hold file at `path` OS-locked by a live process? False when it is
@@ -2355,12 +2649,29 @@ export const _lockDeps = {
   open: (path: string): Deno.FsFile =>
     Deno.openSync(path, { read: true, write: true }),
   windows: (): boolean => Deno.build.os === "windows",
+  /** The clock and the pause of every wait in the lock dir — for a pruned
+   *  dir (`_prepareLockDir`, `lockDirRemade`), for the mutex — MONOTONIC. A test hands in its
+   *  own, and asserts on what was done instead of on how long it took. */
+  now: (): number => performance.now(),
+  pause: (ms: number): void => pauseSync(ms),
+  /** {@linkcode saySlowLockDir} has said its line in this process. */
+  saidSlow: false,
   /** Create a file in the lock dir (0600) — the mutex, a record's temp. */
   create: (path: string, how: Deno.OpenOptions): Deno.FsFile =>
     Deno.openSync(path, { ...how, mode: 0o600 }),
   darwin: (): boolean => Deno.build.os === "darwin",
   /** Bind a socket in the lock dir. */
   listen: listenLocal,
+  /** The look at a lock dir's own entry (`_prepareLockDir`). */
+  lstat: (path: string): Deno.FileInfo => Deno.lstatSync(path),
+  /** What a held mutex file is, by its handle and by its path
+   *  (`sameFile`) — a filesystem's answers, which a test hands in. */
+  fstat: (f: Deno.FsFile): Deno.FileInfo => f.statSync(),
+  stat: (path: string): Deno.FileInfo => Deno.statSync(path),
+  /** The lock dirs aio itself chose (`_chooseLockDir`), beside `lockDir()`:
+   *  what {@linkcode ensureLockDirOf} may make and narrow. A test adds its
+   *  own temp dir. */
+  chosen: new Set<string>(),
 };
 
 /** Is `e` macOS's OTHER answer to creating a file in a directory that was
@@ -2481,16 +2792,28 @@ function publishExclusive(
     return true;
   };
   let f: Deno.FsFile;
-  try {
-    f = fill(tmp);
-  } catch (e) {
-    // The directory can vanish between `lockDir()` and this write: a sibling
-    // app's shutdown pruned its (momentarily empty) scoped dir. Re-create and
-    // try once more — an ENOENT here is never "someone holds the lock"
-    // (nor is macOS's EINVAL for the same thing: `removedUnderCreate`).
-    if (!(e instanceof Deno.errors.NotFound) && !removedUnderCreate(e)) throw e;
-    remakeLockDir(dirname(path));
-    f = fill(tmp);
+  let moved = false; // the lock dir was replaced under the publish: refused
+  // The directory can vanish between `lockDir()` and this write: a sibling
+  // app's shutdown pruned its (momentarily empty) scoped dir. Made again and
+  // tried again — an ENOENT here is never "someone holds the lock" (nor is
+  // macOS's EINVAL for the same thing). For as long as every other create
+  // waits (`lockDirRemade`): it was ONE more try, and two prunes in a row
+  // threw the raw error out of `acquire`.
+  for (const since = _lockDeps.now();;) {
+    try {
+      const made = fill(tmp);
+      // macOS: the temp can be made in a dir pruned under it — in no dir,
+      // so the link below found nothing and the fallback no directory. The
+      // look every other create gets (`createInLockDir`), and the same wait.
+      holdLockDir(tmp, () => {
+        made.close();
+        removeIfNotDir(tmp);
+      });
+      f = made;
+      break;
+    } catch (e) {
+      if (!lockDirRemade(tmp, e, since)) throw e;
+    }
   }
   try {
     // The handle opened on the temp name IS the published file (a hard link
@@ -2499,6 +2822,11 @@ function publishExclusive(
     // can have the file open in a way that refuses it, since their open had
     // to allow this handle's writing. Not opened: this one is kept.
     Deno.linkSync(tmp, path);
+    // The record is at its name: is the dir it is in still ours?
+    holdLockDir(path, () => {
+      moved = true;
+      removeIfNotDir(path);
+    });
     if (!keep) return done(f);
     let named: Deno.FsFile;
     try {
@@ -2511,6 +2839,7 @@ function publishExclusive(
   } catch (e) {
     f.close();
     if (e instanceof Deno.errors.AlreadyExists) return false;
+    if (moved) throw e;
     // A filesystem without hard links: fall back to an exclusive create. The
     // content goes in with ONE write call; readers treat a short/empty file
     // as "being written" for a grace period (see `acquire`), never as dead.
@@ -2563,10 +2892,10 @@ export function withLockMutexAt<T>(
 ): T | undefined {
   const mx = `${lockFile}.mx`;
   // MONOTONIC: a wall-clock jump must neither stretch nor skip this wait.
-  const deadline = performance.now() + MUTEX_WAIT_MS;
+  const deadline = _lockDeps.now() + MUTEX_WAIT_MS;
   let f: Deno.FsFile;
   let deniedUntil = 0; // the end of the current streak of refused opens
-  for (;;) {
+  for (let lost = 0;;) {
     try {
       f = _lockDeps.create(mx, { read: true, write: true, create: true });
     } catch (e) {
@@ -2584,9 +2913,9 @@ export function withLockMutexAt<T>(
       // all.
       if (
         (_lockDeps.windows() ? isHeldOpenError(e) : removedUnderCreate(e)) &&
-        performance.now() < (deniedUntil ||= performance.now() + MUTEX_WAIT_MS)
+        _lockDeps.now() < (deniedUntil ||= _lockDeps.now() + MUTEX_WAIT_MS)
       ) {
-        pauseSync(1 + Math.floor(Math.random() * 3));
+        _lockDeps.pause(1 + Math.floor(Math.random() * 3));
         continue;
       }
       // A sibling's shutdown pruned the (momentarily empty) scoped lock dir.
@@ -2597,12 +2926,23 @@ export function withLockMutexAt<T>(
     }
     deniedUntil = 0;
     let locked = false;
-    while (!(locked = f.tryLockSync(true)) && performance.now() < deadline) {
-      pauseSync(1 + Math.floor(Math.random() * 3));
+    while (!(locked = f.tryLockSync(true)) && _lockDeps.now() < deadline) {
+      _lockDeps.pause(1 + Math.floor(Math.random() * 3));
     }
     if (!locked) f.lockSync(true); // a LIVE holder: wait for it, never break
     if (sameFile(f, mx)) break;
     f.close(); // locked a file its holder already unlinked — start over
+    // Each such round is another holder having come and gone, so a waiter
+    // loses a handful of them. Thousands in a row is a filesystem on which
+    // a file is never "the one at its path" (identities that change between
+    // two looks — some FUSE and network mounts): it looped for good, hot.
+    if (++lost >= MUTEX_LOST_ROUNDS) {
+      throw new Error(
+        `aio: cannot take the lock mutex ${mx}: after ${lost} tries the ` +
+          `file locked was never the one at that path — this filesystem ` +
+          `does not give a file a stable identity`,
+      );
+    }
   }
   try {
     return fn();
@@ -2614,15 +2954,19 @@ export function withLockMutexAt<T>(
   }
 }
 
+/** How many times in a row a waiter may lock a file that is not (any longer)
+ *  the mutex before it gives up — see `withLockMutexAt`. */
+const MUTEX_LOST_ROUNDS = 1_000;
+
 /** Is the file open as `f` the one at `path` right now? */
 function sameFile(f: Deno.FsFile, path: string): boolean {
   let at: Deno.FileInfo;
   try {
-    at = Deno.statSync(path);
+    at = _lockDeps.stat(path);
   } catch {
     return false; // aio-ok: unlinked since we opened it — not the mutex
   }
-  const mine = f.statSync();
+  const mine = _lockDeps.fstat(f);
   // A file with no name left is at no path — asked of the HANDLE, which is
   // exact. The numbers below are not, on Windows: a file id is 64 bits (16
   // of sequence over 48 of record) and arrives as a JS number, 53 — two
@@ -2631,7 +2975,12 @@ function sameFile(f: Deno.FsFile, path: string): boolean {
   // path for its own, and two processes were inside (measured, Windows 11,
   // 3 × 6 processes × 3 000 rounds: a clash in 8 of 39 runs; every OS says
   // 0 links for an unlinked file that is still open).
-  if (mine.nlink === 0) return false;
+  //
+  // Unless the file AT the path has no links either: it has a name, so a
+  // count of 0 there is a filesystem that does not count links at all (some
+  // FUSE mounts — a project dir, for `pid-lock.ts`), and 0 on the handle is
+  // then no evidence. Every live mutex read as unlinked there, forever.
+  if (mine.nlink === 0 && at.nlink !== 0) return false;
   // No file identity on this filesystem: the mutex file is then never
   // unlinked (`unlinkHeldMutex`), so the path cannot have moved under us.
   if (mine.ino === null || at.ino === null) return true;

@@ -16,6 +16,11 @@ import { freePort } from "../src/testing/server-test.ts";
 import { getLogger, setLogger } from "../src/diagnostics/logger-api.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** Bounded poll on something observable — returns whether it came true. */
+async function until(ok: () => boolean, ms = 20_000): Promise<boolean> {
+  for (const end = Date.now() + ms; !ok() && Date.now() < end;) await sleep(25);
+  return ok();
+}
 const frame = (t: string, d?: unknown) => JSON.stringify({ v: 2, t, d });
 
 Deno.test("cli client: after a refused full state it is out of sync — never a stale copy with new patches", async () => {
@@ -78,7 +83,9 @@ Deno.test("cli client: after a refused full state it is out of sync — never a 
     peer!.send(
       frame("patches", [{ op: "replace", path: ["big", "n"], value: 2 }]),
     );
-    await sleep(300);
+    // The ask for a new state is what the client does with a patch it has no
+    // base for — once the server has it, the refusal and a patch were read.
+    await until(() => received.includes("resync"));
     assert(
       app.state === null || app.state.big.n !== 2 || app.state.big.blob !== "",
       `a state that never existed: ${JSON.stringify(app.state)}`,
@@ -98,7 +105,7 @@ Deno.test("cli client: after a refused full state it is out of sync — never a 
     peer!.send(
       frame("patches", [{ op: "replace", path: ["big", "blob"], value: "s" }]),
     );
-    for (let i = 0; i < 50 && app.state === null; i++) await sleep(100);
+    await until(() => app.state !== null);
     assertEquals(app.state, { big: { blob: "small", n: 3 } });
     assert(app.connected);
   } finally {
@@ -166,7 +173,18 @@ Deno.test({
         body: JSON.stringify({ type }),
       });
       await r.body?.cancel();
-      await sleep(2_000);
+      // What the step can be SEEN to end in: the copy dropped (the refusal
+      // was read), or the server's own state held again — which the client
+      // asks for at most once per 2 s, so a fixed 2 s wait raced that ask.
+      // A change that arrives while already out of sync has nothing to wait
+      // for (the client shows no sign of a patch it did not apply): that
+      // step is judged at once, and again by the state the shrink ends in.
+      const srv = app.getState().big;
+      await until(() =>
+        srv.blob.length > 1024
+          ? cli.state === null
+          : cli.state?.big.n === srv.n && cli.state.big.blob === srv.blob
+      );
     };
     /** Never a state the server does not have: either in sync, or saying so. */
     const honest = (step: string) => {

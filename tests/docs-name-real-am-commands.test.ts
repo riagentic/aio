@@ -7,6 +7,7 @@
 // says `am upgrade`. alpha70 dropped the aliases (they answer with the new
 // spelling, exit 1 — src/state/removals.ts); the documented surface is the
 // help text; docs must spell what it spells.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { walk } from "@std/fs/walk";
 import { HELP_TEXT } from "../src/am/am-cmd-meta.ts";

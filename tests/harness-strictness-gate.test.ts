@@ -75,6 +75,9 @@ const EXEMPT: Record<string, string> = {
     "process; the app under test boots in its own server (via testServer, " +
     "which arms). Nothing app-side runs in this isolate, and it makes its own " +
     "temp profile dir rather than resolving appDirs.",
+  testPageFetch:
+    "carries the cookies of an ALREADY-BOOTED testServer (which armed) on " +
+    "this process's fetch — it boots nothing and runs no app code",
 };
 
 /** Harnesses that run app code in this process — each must arm. */

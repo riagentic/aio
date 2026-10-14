@@ -291,13 +291,28 @@ Deno.test("local-peer gate: when the window exits, its open session is closed â€
   const c = await connectRW(sock);
   const b = new Uint8Array(1 << 16);
   try {
-    // A session: the server greets it.
+    // A session: the server greets it â€” or this FAILS: a read with no
+    // deadline is a test that hangs where it should say what is missing.
     let got = "";
-    while (!got.includes('"t":"proto"')) {
-      const n = await c.read(b);
-      assert(n !== null, `the armed window was not served: ${got}`);
-      got += new TextDecoder().decode(b.subarray(0, n));
-    }
+    let greetTimer: ReturnType<typeof setTimeout> | undefined;
+    const greeting = await Promise.race([
+      (async () => {
+        while (!got.includes('"t":"proto"')) {
+          const n = await c.read(b);
+          if (n === null) return "closed";
+          got += new TextDecoder().decode(b.subarray(0, n));
+        }
+        return "greeted";
+      })(),
+      new Promise<"silent">((r) =>
+        greetTimer = setTimeout(() => r("silent"), 3000)
+      ),
+    ]).finally(() => clearTimeout(greetTimer));
+    assertEquals(
+      greeting,
+      "greeted",
+      `the armed window was not served within 3 s: ${got}`,
+    );
     const sessions = handle.clients().length;
     assert(sessions >= 1);
     // The window process exits. A child it forked still holds this very

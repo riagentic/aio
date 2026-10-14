@@ -6,6 +6,7 @@
 // loads, so the one agent most likely to be driving aio started without the
 // brief. The file is one line that IMPORTS AGENTS.md (`@AGENTS.md`), so there
 // is still a single pointer to keep true, not two.
+import "./store-sandbox.ts";
 import { assert, assertStringIncludes } from "@std/assert";
 import { scaffold } from "../src/am/am-cmd-create.ts";
 import { TEMPLATES } from "../src/am/am-help-text.ts";

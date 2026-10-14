@@ -40,23 +40,40 @@ const SAFE: Record<string, { why: string; proof: RegExp[] }> = {
   },
 };
 
-Deno.test("tests: a file that runs run.sh / install.sh takes its HOME from ownHome()", async () => {
+/** THE scan: the files that name a repo script (`named`), and those of them
+ *  with neither `ownHome(` nor a SAFE entry whose proof still holds
+ *  (`offenders`). Pure. */
+function scan(
+  files: { name: string; src: string }[],
+  safeList: typeof SAFE = SAFE,
+): { named: string[]; offenders: string[] } {
   const offenders: string[] = [];
   const named: string[] = [];
-  for await (const e of Deno.readDir(TESTS)) {
-    if (!e.isFile || !e.name.endsWith(".ts")) continue;
-    const src = await Deno.readTextFile(join(TESTS, e.name));
+  for (const { name, src } of files) {
     if (!SCRIPT.test(src)) continue;
-    named.push(e.name);
+    named.push(name);
     if (/\bownHome\(/.test(src)) continue;
-    const safe = SAFE[e.name];
-    if (!safe) offenders.push(e.name);
+    const safe = safeList[name];
+    if (!safe) offenders.push(name);
     else if (!safe.proof.every((re) => re.test(src))) {
       offenders.push(
-        `${e.name} (listed as safe — "${safe.why}" — but that is no longer in it)`,
+        `${name} (listed as safe — "${safe.why}" — but that is no longer in it)`,
       );
     }
   }
+  return { named, offenders };
+}
+
+Deno.test("tests: a file that runs run.sh / install.sh takes its HOME from ownHome()", async () => {
+  const files: { name: string; src: string }[] = [];
+  for await (const e of Deno.readDir(TESTS)) {
+    if (!e.isFile || !e.name.endsWith(".ts")) continue;
+    files.push({
+      name: e.name,
+      src: await Deno.readTextFile(join(TESTS, e.name)),
+    });
+  }
+  const { named, offenders } = scan(files);
   assert(named.length >= 5, `the scan found only ${named.join(", ")}`);
   assertEquals(
     offenders,
@@ -69,4 +86,43 @@ Deno.test("tests: a file that runs run.sh / install.sh takes its HOME from ownHo
   );
   // A listed file that no longer names a script is a stale exemption.
   assertEquals(Object.keys(SAFE).filter((f) => !named.includes(f)), []);
+});
+
+// The control: the scan above is green today, and a scan that can only be
+// green proves nothing. These are the files it exists to refuse.
+Deno.test("tests: the scan REFUSES a file that runs a repo script with neither ownHome() nor a SAFE entry", () => {
+  const spawn = (extra: string) =>
+    `const RUN = join(REPO, "run.sh");\n` +
+    `await new Deno.Command("sh", { args: [RUN], env: { ...Deno.env.toObject()${extra} } }).output();\n`;
+  const safe = {
+    "listed.test.ts": { why: "a cleared env", proof: [/clearEnv: true/] },
+    "rotted.test.ts": { why: "a cleared env", proof: [/clearEnv: true/] },
+  };
+  const { named, offenders } = scan([
+    // The 2026-10-07 shape: the developer's env, HOME and all, into run.sh.
+    { name: "leaks.test.ts", src: spawn("") },
+    // The same file through the other spelling of the repo root, and install.ps1.
+    {
+      name: "leaks-ps1.test.ts",
+      src: `const I = join(REPO_ROOT, "install.ps1");\n`,
+    },
+    { name: "owns.test.ts", src: spawn(", ...await ownHome(root)") },
+    { name: "listed.test.ts", src: spawn("") + "// clearEnv: true\n" },
+    // Listed, and the text that made it safe is gone.
+    { name: "rotted.test.ts", src: spawn("") },
+    // Names no script: not this guard's business.
+    { name: "other.test.ts", src: `const x = join(REPO, "mod.ts");\n` },
+  ], safe);
+  assertEquals(named, [
+    "leaks.test.ts",
+    "leaks-ps1.test.ts",
+    "owns.test.ts",
+    "listed.test.ts",
+    "rotted.test.ts",
+  ]);
+  assertEquals(offenders, [
+    "leaks.test.ts",
+    "leaks-ps1.test.ts",
+    'rotted.test.ts (listed as safe — "a cleared env" — but that is no longer in it)',
+  ]);
 });

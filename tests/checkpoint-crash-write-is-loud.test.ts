@@ -108,9 +108,11 @@ Deno.test("crash checkpoint: a directory that vanished is re-created and the wri
   }
 });
 
-Deno.test("crash checkpoint: owner-only permissions survive the retry", () =>
+Deno.test({
+  name: "crash checkpoint: owner-only permissions survive the retry",
+  ignore: Deno.build.os === "windows", // POSIX mode bits do not exist on Windows
+}, () =>
   permissiveUmask(async () => {
-    if (Deno.build.os === "windows") return;
     const base = await Deno.makeTempDir({ prefix: "cp-mode-" });
     const dir = `${base}/logs`;
     try {

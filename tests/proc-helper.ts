@@ -29,13 +29,18 @@ export function exits0(): Deno.ChildProcess {
  *  it is held ("os error 32"). (Deno opens every file fully shared, so a
  *  second program does it.) Resolves once the file is held; call the result
  *  to let go. */
-export async function holdUnshared(path: string): Promise<() => Promise<void>> {
+export async function holdUnshared(
+  path: string,
+  // "ReadWrite": the file cannot even be READ meanwhile. (Measured: held for
+  // "Read" alone, another reader still gets in; only replace/remove fail.)
+  access: "Read" | "ReadWrite" = "Read",
+): Promise<() => Promise<void>> {
   const p = new Deno.Command("powershell", {
     args: [
       "-NoProfile",
       "-NonInteractive",
       "-Command",
-      "$f = [IO.File]::Open($env:AIO_HOLD, 'Open', 'Read', 'None'); " +
+      `$f = [IO.File]::Open($env:AIO_HOLD, 'Open', '${access}', 'None'); ` +
       "[Console]::Out.WriteLine('held'); [Console]::In.ReadLine() | Out-Null; " +
       "$f.Close()",
     ],
@@ -104,6 +109,108 @@ export async function processList(): Promise<{ pid: number; cmd: string }[]> {
     .map((l) => l.trim().match(/^(\d+)\s+(.*)$/))
     .filter((m) => m !== null)
     .map((m) => ({ pid: Number(m[1]), cmd: m[2]! }));
+}
+
+/** The Windows query both tree walks in tests/ use: one process per line,
+ *  `<pid> <parent pid> <creation ticks>`. */
+export const WINDOWS_PROCESS_QUERY =
+  'Get-CimInstance Win32_Process | % { "$($_.ProcessId) $($_.ParentProcessId) $($_.CreationDate.Ticks)" }';
+
+/** pid → parent pid from `[pid, parent, born]` rows, with every tie that is
+ *  not a family tie cut (parent 0).
+ *
+ *  Windows never re-parents and hands pids out again: a process whose parent
+ *  DIED keeps that number, and the next process to get it is no relation. So
+ *  a process is a child only when it was created at or after the process now
+ *  holding its parent's pid. These helpers KILL by this tree, on a machine
+ *  other people use: by parent pid alone, a long-lived program whose dead
+ *  parent once had a test child's pid was "under" that child. An unknown
+ *  creation time (NaN) proves nothing and ties nobody. Every pid stays a key
+ *  — the map is also "which pids are live". Pure. */
+export function familyTies(
+  rows: readonly (readonly [number, number, number])[],
+): Map<number, number> {
+  const born = new Map(rows.map(([pid, , at]) => [pid, at]));
+  return new Map(
+    rows.map(([pid, parent, at]) => [
+      pid,
+      at >= born.get(parent)! ? parent : 0, // false for NaN on either side
+    ]),
+  );
+}
+
+/** {@linkcode WINDOWS_PROCESS_QUERY}'s output → rows. Pure. */
+export function windowsProcessRows(
+  listing: string,
+): [number, number, number][] {
+  return listing.split("\n").map((l) => l.trim().split(/\s+/))
+    .filter(([pid, parent]) => pid && parent)
+    .map(([pid, parent, at]) => [
+      Number(pid),
+      Number(parent),
+      at ? Number(at) : NaN,
+    ]);
+}
+
+/** Every live process's parent, pid → parent pid: `/proc` without `/proc`
+ *  (`ps`; on Windows CIM, through {@linkcode familyTies}). A zombie is not
+ *  live and is left out; so are the program that did the listing and
+ *  whatever it started. */
+export async function processParents(): Promise<Map<number, number>> {
+  const windows = Deno.build.os === "windows";
+  const lister = windows
+    ? new Deno.Command("powershell", {
+      args: ["-NoProfile", "-Command", WINDOWS_PROCESS_QUERY],
+      stdout: "piped",
+      stderr: "null",
+    }).spawn()
+    : new Deno.Command("ps", {
+      args: ["-axo", "pid=,ppid=,stat="],
+      stdout: "piped",
+      stderr: "null",
+    }).spawn();
+  let parents = new Map<number, number>();
+  const o = await lister.output();
+  const text = new TextDecoder().decode(o.stdout);
+  if (windows) parents = familyTies(windowsProcessRows(text));
+  else {
+    for (const line of text.split("\n")) {
+      const [pid, ppid, stat] = line.trim().split(/\s+/);
+      if (!ppid || stat?.startsWith("Z")) continue;
+      parents.set(Number(pid), Number(ppid));
+    }
+  }
+  for (const pid of [lister.pid, ...descendantsIn(parents, lister.pid)]) {
+    parents.delete(pid);
+  }
+  return parents;
+}
+
+/** Everything under `root` in a {@linkcode processParents} listing. Pure. */
+export function descendantsIn(
+  parents: Map<number, number>,
+  root: number,
+): number[] {
+  const out: number[] = [];
+  const walk = (p: number) => {
+    for (const [pid, ppid] of parents) {
+      if (ppid === p && !out.includes(pid) && pid !== root) {
+        out.push(pid), walk(pid);
+      }
+    }
+  };
+  walk(root);
+  return out;
+}
+
+/** The environment in which a program in `bin` (a stand-in `ssh`) is the one
+ *  git runs. First on PATH is enough where `git` is git. Git for Windows puts
+ *  its own directories — `usr\\bin`, with the ssh it ships — AHEAD of PATH, and
+ *  ahead of those only its exec-path, so there `bin` is named as that too. */
+export function gitRunsFrom(bin: string): Record<string, string> {
+  const win = Deno.build.os === "windows";
+  const PATH = `${bin}${win ? ";" : ":"}${Deno.env.get("PATH") ?? ""}`;
+  return win ? { PATH, GIT_EXEC_PATH: bin } : { PATH };
 }
 
 /** Last resort for a test that started real apps: SIGKILL whatever still runs

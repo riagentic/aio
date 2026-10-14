@@ -7,6 +7,7 @@
 // deno.json. Measured: `{"root":".../fh","stopped":[r2stopp1,r2stopp2]}`.
 //
 // An instance belongs to the NEAREST project above where it was launched.
+import "./store-sandbox.ts";
 import { SLEEP_ARGS } from "./proc-helper.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";

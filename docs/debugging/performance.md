@@ -173,14 +173,8 @@ large document, chart math) and client-scoped cell methods.
 - **Derive once, not per render:** `useProjection(fn, deps)` keeps derived data
   structurally shared instead of rebuilt on every pass.
 - **Genuinely heavy client compute belongs in a `Worker`** — the same rule as
-  the server, without a framework wrapper (aio doesn't bundle one for you yet):
-
-```ts
-// worker.ts is bundled by your app; postMessage in, onmessage out.
-const worker = new Worker(new URL("./worker.ts", import.meta.url), {
-  type: "module",
-});
-```
+  the server, without a framework wrapper: see
+  [Browser workers](#browser-workers) for how to ship one.
 
 aio tells you when the UI thread stalls: the render meter measures staleness and
 frame time on every frame, and a stall surfaces as `UI_FREEZE` in the console
@@ -196,6 +190,132 @@ and at `/__aio/vitals`.
 | A whole CELL that does dangerous work  | `worker: true` on the cell ([cell workers](../state/cell-workers.md)) |
 | Slow work on a timer                   | `schedule.every(...)` whose action does the above                     |
 | Big state clients don't need           | `visible: { exclude: [...] }` — don't ship it at all                  |
+
+## Browser workers
+
+aio bundles a browser `Worker` whose script is SOURCE (`.ts`, `.tsx`, `.jsx`)
+named the way every guide shows — a string literal, relative to the module that
+starts it:
+
+```ts
+const worker = new Worker(
+  new URL("./transcribe.ts", import.meta.url),
+  { type: "module" },
+);
+worker.onmessage = (e) => show(e.data);
+worker.postMessage(audio);
+```
+
+That line runs the same in `deno task dev`, with `--prod`, from a compiled
+binary, in the packaged Electron app, in the `web` build (under a sub-path too)
+and in a standalone APK. The worker's script is bundled with the app's own
+import map and packages — a bare import (`import { produce } from "immer"`)
+works in it, which a worker served module by module cannot do: a worker has no
+import map.
+
+- **In a build**, each worker is one file beside the bundle,
+  `dist/worker-<name>-<hash>.js`. The build prints it, every target carries it,
+  the `web` build's service worker precaches it with a pinned digest.
+- **In dev**, the server bundles it when the page asks. Editing the worker or
+  anything it imports reloads the page.
+- **`{ type: "module" }` in the call** makes it a module worker. Without it the
+  worker is classic, and is built as one (`importScripts` works, top-level
+  `await` is a build error). It is ONE bundle, in dev as in a build, so its
+  top-level names are the bundle's own and not worker globals: what a script
+  loaded with `importScripts` reads from it is assigned to `self`
+  (`self.helper = helper`), and the handler is `self.onmessage = …`. An options
+  argument that is not a literal `{ type: "module" }` builds classic too — such
+  a bundle runs under either worker type.
+- **A classic worker's `importScripts("./x.js")`** resolves from the worker's
+  own URL: its source's in dev (`/workers/w.ts`), the bundle's folder in a
+  build. From a worker in a sub-folder that is two different files, and dev and
+  the build both warn. Name the script from the root
+  (`importScripts("/workers/x.js")`), or `import` it.
+- **`SharedWorker`** takes the same spelling. (Android's WebView has no
+  `SharedWorker`: test `typeof SharedWorker`.)
+- A worker may start workers of its own, the same way.
+- **In a standalone APK, a worker that a worker starts runs from a `blob:`
+  URL.** Android's WebView (133 and later) loads no script for a worker's own
+  worker out of an APK's packaged files, so there each bundled worker starts its
+  workers through a same-origin Blob that loads the real script. Nothing changes
+  in the code that starts them, and `import.meta.url` is still the worker's
+  file. `self.location` is the Blob's: inside a worker's worker a relative
+  `fetch("x.json")` or `importScripts("x.js")` has nothing to resolve against —
+  write `new URL("x.json", import.meta.url)`, which is right on every target. A
+  worker [you build yourself](#a-worker-you-build-yourself) is not touched: on
+  that WebView its own `new Worker(…)` fails (the `error` event), so start that
+  worker from the page or from a bundled worker.
+- Inside a built worker `import.meta.url` is that worker's file beside the
+  bundle — as it is the bundle's in page code — so a file the worker fetches
+  belongs in an `assets` mount, not beside its source.
+- A worker needs its packages installed where the app's are (`deno install`):
+  the build says so, with the command, when one is missing.
+- **A worker that cannot be bundled does not fail the build.** Its import names
+  no file, a package is not installed, or it reaches a `*.server.ts` module: the
+  build (and the dev server) prints a warning that names the worker and the
+  reason, leaves that one `new Worker(new URL(…))` exactly as written and emits
+  no file for it — so that worker does not run in the built app, which is what
+  every build did with it before workers were bundled. The other workers are
+  bundled. Fix what the warning names and it is bundled on the next build.
+
+What is followed is exactly that spelling. aio says so — the dev server and
+`deno task build` both, naming the line — when a worker is started another way:
+
+| Written                                              | What happens                                                           |
+| ---------------------------------------------------- | ---------------------------------------------------------------------- |
+| `new URL("./w.ts", import.meta.url)`, the file there | bundled, every target                                                  |
+| the same, and no such file                           | warned: the path is wrong everywhere                                   |
+| `new URL("./w.js", import.meta.url)` — a `.js` file  | yours: never re-bundled; warned unless the module is beside the bundle |
+| `new URL(name, import.meta.url)` — computed          | warned: no build can follow it; write one literal per worker           |
+| `new Worker("./w.ts")` — source by plain path        | warned: runs in dev only                                               |
+| `new Worker("workers/w.js")` — a built file by path  | yours: served as written (see below), never rewritten                  |
+| `https:`, `blob:`, `data:` URLs, a variable          | yours                                                                  |
+
+A `.js` named relative to a module in the app's own folder (where `App.tsx` is)
+is the same request in dev and in a build, so it is not warned about; from a
+module in another folder the build asks from the bundle's folder, and that is
+said.
+
+A script the app serves has to be in the artifact. `deno task build` warns — the
+build stays green — when a worker is started from a file of the app's folder
+(`new Worker("/x.js")` with `src/x.js`) that the artifact will not carry: a
+compiled binary embeds it only when deno.json `compile.include` names it, and a
+`web` build or an APK carries the bundle and the `assets` mounts only. It also
+warns when a `web` build starts a worker by an absolute path, which is the
+host's root and not the build's folder under a sub-path. A path the build cannot
+see the server of (a route, an `aio.run({ assets })` mount) is not judged.
+
+A worker inside an npm package is that package's build's business: aio follows
+workers in the app's own modules.
+
+### A worker you build yourself
+
+A script only known at run time, or one produced by another toolchain, goes in a
+directory the app serves
+([`assets`](../build/imports.md#assets--directories-your-app-serves)) and is
+started by path:
+
+```jsonc
+// deno.json — served in dev and prod, carried into every target
+{ "assets": { "/workers": "./workers" } }
+```
+
+```sh
+deno bundle --platform browser -o workers/worker.js src/worker.ts
+```
+
+```ts
+// A RELATIVE path: the web and Android builds package the directory beside
+// the page.
+const worker = new Worker("workers/worker.js");
+```
+
+Rebuild the file when its source changes (`deno bundle --watch` beside
+`deno task dev`) — nothing in aio's module graph sees it.
+
+Measured in Chromium and in Electron, both forms, in every target named above
+(`tests/browser-worker-mount-chromium.test.ts`,
+`tests/build-e2e-worker.test.ts`).
 
 ## Budget configuration
 

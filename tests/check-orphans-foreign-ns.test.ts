@@ -69,6 +69,10 @@ Deno.test({
         home: root,
         startedAt: Date.now() - 5 * 60 * 60_000,
         ns: ownPidNs()! + 1,
+        // As every lock since 1.0.19 has. Without one the lock is ALSO judged
+        // by what its pid is here ("no such process" → stale), and that rule
+        // hid the namespace one: this test stayed green with it removed.
+        startToken: "4242 1700000000",
       };
       const deadLock = join(dir, "dead.lock");
       const liveLock = join(dir, "live.lock");

@@ -32,11 +32,20 @@ Work top to bottom — each item links to the details.
 - [ ] **Health endpoint** — supervisor/loadbalancer checks `/__aio/health`.
 - [ ] **Limits reviewed** — `wsLimits` (message rate/size), `maxConnections`,
       `dispatchStorm` left ON ([run config](../state/lifecycle.md)).
-- [ ] **Logs rotating** — `~/.<appId>/logs/` grows; ship or rotate it.
+- [ ] **Logs bounded** — aio rotates `~/.<appId>/logs/` itself: at each start (7
+      archives per file) and under a 200 MB ceiling for the whole directory,
+      enforced during the run too (`backupKeep`, `logBudget` —
+      [where files live](../persistence/where-files-live.md)). Do not add
+      `logrotate` on top; ship the files elsewhere if you need more history. A
+      service's stdout goes to the journal, which has its own limits.
 - [ ] **Soak once** — `deno task soak` (or the 72h variant) against a
       prod-shaped build; heap slope must stay flat.
-- [ ] **systemd unit** (service targets) — `Restart=on-failure`; the server
-      exits(1) on a dead listener by design, so restarts are the recovery path.
+- [ ] **systemd unit** (service targets) — keep the generated `Restart=always`
+      with `RestartPreventExitStatus=143`: the server exits(1) on a dead
+      listener by design, and exits 0 after updating itself, so restarts are the
+      recovery path for both (`on-failure` leaves an updated app down). On
+      Windows and macOS there is no generated unit —
+      [run at startup](../basics/windows-macos.md#run-at-startup-or-as-a-service).
       (No `WatchdogSec` — aio doesn't sd_notify; a watchdog would kill a healthy
       service.)
 

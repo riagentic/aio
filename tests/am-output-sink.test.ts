@@ -4,6 +4,7 @@
 // (an appId, a home, a socket path) reached the terminal unfiltered in
 // `am instances` after the lock stopped cleaning it on read. This makes the
 // whole class red rather than each site a review comment.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { mask } from "../scripts/source-mask.ts";

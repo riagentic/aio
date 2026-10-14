@@ -60,6 +60,10 @@ const LoginForm = () => (
 );
 ```
 
+`form.bind(name)` answers `value: unknown`. `bindInput(form, "age")` (from
+`aio/air`) is the same object with the field's type — `value: number` here — for
+when the bound value is used, not only spread.
+
 **FormState\<T\>:**
 
 | Member       | Type                         | Description                            |
@@ -173,6 +177,27 @@ const TagEditor = () => (
 | `move(from, to)`   | `void` | Reorder                |
 | `set(index, item)` | `void` | Replace at index       |
 | `reset()`          | `void` | Reset to initial array |
+
+## Plain inputs: `value` or `defaultValue`
+
+Without `useForm`, an input is yours to wire:
+
+```tsx
+<input value={s.text} onInput={(e) => s.text = e.currentTarget.value} /> // controlled
+<input name="q" defaultValue={initial} /> // starting value, read on submit
+```
+
+- `value` / `checked` **with a handler** — controlled: every render puts the
+  control back on the prop, so typed input the handler did not store is undone.
+- `defaultValue` / `defaultChecked` — set once when the element is created (and
+  written by SSR as the `value` / `checked` attribute); no render writes it
+  again. Use it for a field read through `FormData` or a ref.
+- `value` / `checked` with **no handler**, no `key`/`ref`/`use` and only
+  string/number/boolean props — kept as typed for as long as its props do not
+  change, like `defaultValue`. A changed prop (any prop) puts it back. The first
+  time such a control shows something other than its prop, the console says so
+  once and names `defaultValue`. Write `defaultValue` when that is what you
+  mean.
 
 ## Testing form inputs
 

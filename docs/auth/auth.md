@@ -42,7 +42,9 @@ listening on.
 3. Main server listens on HTTPS — `wss://` WebSocket included
 4. **A key by default when exposed** (alpha52) — an app that is `--expose`d with
    no per-user auth and no `key` decision gets a GENERATED shared key
-   (persisted, 0600; the share link carries it). Loopback apps stay open — the
+   (persisted; 0600 on Linux and macOS, on Windows protected only by the ACL of
+   its folder — private under `%USERPROFILE%`, not under a shared `appDir` or
+   `AIO_APPS_DIR`; the share link carries it). Loopback apps stay open — the
    default only changes where strangers can reach the port.
 
 **Choosing the key** — the `key` option, three modes plus the default:
@@ -104,6 +106,24 @@ via `?token=` query parameter or `Authorization: Bearer` header.
 2. Browser shows a security warning ("Your connection is not private")
 3. Click "Advanced" -> "Proceed to [IP] (unsafe)" (one-time per cert)
 4. The cert is cached by the browser — no warning on subsequent visits
+
+**No warning at all: trust this machine's aio root, once.** The certificate is
+issued by one root per user (`~/.aio/ca/aio-root.pem`), shared by every aio app.
+`am trust` prints the command that adds it to the trust store of the OS you run
+it on; on another device, copy the file `am trust path` names and import it
+there. On Windows it is one line, in an ordinary PowerShell:
+
+```powershell
+Import-Certificate -FilePath "$HOME\.aio\ca\aio-root.pem" -CertStoreLocation Cert:\CurrentUser\Root
+```
+
+`Cert:\CurrentUser\Root` is your own store: it needs no administrator, and
+Windows asks once to confirm. Chrome and Edge read it. (`am trust` also prints
+the `Cert:\LocalMachine\Root` line, for every account on the PC — that one needs
+an administrator PowerShell.) Firefox keeps its own store on every OS (Settings
+→ Privacy & Security → Certificates → View Certificates → Import). When another
+machine cannot reach the server at all, look at the
+[firewall](../basics/windows-macos.md#the-firewall-when-you---expose) first.
 
 **Bring your own cert (CA-signed, no browser warning):**
 
@@ -587,6 +607,13 @@ app.sessions!.revokeUser("alice"); // kick every session (breach response)
 Session tokens resolve ahead of `users`/`resolveUser` and compose with both.
 `sessions: { ttlMs: 3_600_000 }` overrides the default TTL.
 
+**A ceiling per account — `auth: { maxSessions: 10 }`.** A correct password is
+never rate-limited (see the budget rule below), so by default one account can
+hold any number of live sessions. With `maxSessions`, a login past the ceiling
+revokes that account's oldest sessions: a warning names the user and the count,
+and their open sockets close as on any logout. It applies to every way a session
+is issued — password, TOTP, OIDC and `app.sessions.issue()`.
+
 ### Built-in password auth (`auth: true`)
 
 The full login system — no external identity provider required:
@@ -624,6 +651,15 @@ const app = await aio.run({ cells: [/* … */], auth: true });
   are still anonymous**, because a sign-in page's logo is one of them: never
   write private uploads into the app directory — put them in the blob store
   (`/__aio/blobs/*` is always gated).
+- **`auth: { publicDir: "public" }` replaces the extension rule with a place.**
+  Anonymous callers then read files only from `<app dir>/public/` (served at
+  `/public/…`, any file type) and the built shell itself — `/app.js`,
+  `/style.css`, `/index.html`, `/manifest.json`, `/favicon.ico`, `/robots.txt`,
+  `/humans.txt`, `/__aio/*`, `/.well-known/*`. `/uploads/passport.png` and
+  `/report.html` answer `401`. Move the sign-in page's logo and fonts into the
+  directory when you turn it on. In dev, code files (`.ts`, `.tsx`, `.js`,
+  `.css`) stay readable by name, because the dev page loads every module that
+  way; a production build serves only the bundle.
 - **Every app route (`routes:`) requires a signed-in user** — in both per-user
   modes (`auth: true` and `users`/`resolveUser`). Only the shell is public: an
   anonymous request to a declared route gets `401` naming the route, never the

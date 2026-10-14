@@ -25,7 +25,10 @@
 import { assert, assertEquals } from "@std/assert";
 import { createProdGraphCheck } from "../src/server/graph-validator.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
-import { ESBUILD_SPEC } from "../src/build/esbuild-shared.ts";
+import {
+  ESBUILD_SPEC,
+  stopEsbuildService,
+} from "../src/build/esbuild-shared.ts";
 import { fromFileUrl } from "@std/path";
 import { spec } from "./module-spec-helper.ts";
 import { fixtureNodeModules } from "./symlink-helper.ts";
@@ -127,9 +130,11 @@ Deno.test('browser bundle: every name a cell module imports from "aio" bundles',
   } finally {
     // esbuild's service is a child process; stopping it here keeps the
     // sanitizers ON for this file instead of opting out of them.
-    await (await import(ESBUILD_SPEC)).stop();
-    // stop() signals the child; its exit is observed a tick later.
-    await new Promise((r) => setTimeout(r, 50));
+    // NOT a bare `stop()` and a fixed 50 ms: that only sends the kill, and on
+    // a loaded Windows machine the service outlived the wait (a leaked child
+    // in a full run). `stopEsbuildService` waits for the exit itself.
+    const esbuild = await import(ESBUILD_SPEC);
+    await stopEsbuildService(() => esbuild.stop());
   }
   assertEquals(
     refused,

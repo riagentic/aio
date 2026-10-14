@@ -596,9 +596,13 @@ export const LEGACY_RECOVERED_TYPE = "__aioLegacyRecovered";
  *
  *   INTENT(X)  {@linkcode SYNC_INTENT_TYPE} — after X.ts is issued, BEFORE
  *              X's row is inserted.
- *   COMMIT(X)  {@linkcode SYNC_APPLIED_TYPE} — after X is reduced, in ONE
- *              journal line ({@linkcode BATCH_TYPE}) with every reaction line
- *              X's reduce wrote.
+ *   COMMIT(X)  {@linkcode SYNC_APPLIED_TYPE} — after X is reduced and not
+ *              refused by its own cell, in ONE journal line
+ *              ({@linkcode BATCH_TYPE}) with every reaction line X's reduce
+ *              wrote. An X that c refuses without a throw (a `validate`, a
+ *              guard) is reduced too, as a no-op: it gets NO commit, so a
+ *              kill before its row is deleted leaves it in flight (J4) and
+ *              the boot refuses it again — never "covered", never acked.
  *   ROW(X)     the op-log row.
  *
  * What holds, and what each rule below rests on:
@@ -651,8 +655,8 @@ export const LEGACY_RECOVERED_TYPE = "__aioLegacyRecovered";
  *  to every build's reducer. */
 export const SYNC_INTENT_TYPE = "__aioSyncIntent";
 
-/** COMMIT(X) — see the block above. Payload `{ cell, id, ts }` (`ts` = the
- *  op's `server_ts`); always inside the op's {@linkcode BATCH_TYPE} line when
+/** COMMIT(X) — see the block above: X was reduced and not refused by its
+ *  own cell. Payload `{ cell, id, ts }` (`ts` = the op's `server_ts`); always inside the op's {@linkcode BATCH_TYPE} line when
  *  the live server wrote it. Lives by its cell's own watermark (`only`).
  *  `__`-prefixed with no `cell:` part: a no-op to every build's reducer. */
 export const SYNC_APPLIED_TYPE = "__aioSyncApplied";

@@ -22,7 +22,11 @@ async function client(
   example: "cli" | "cli-remote",
   args: string[],
   env: Record<string, string>,
-  ms = 20_000,
+  // The client's own give-up window is 10 s (a dead URL exits after 11 s
+  // alone, measured). 20 s left 9 s for a `deno run` to start and load its
+  // graph — a fully loaded suite run took longer once, and "slow to start"
+  // read as "hung". A hang is for ever; a minute tells it apart just as well.
+  ms = 60_000,
 ): Promise<{ code: number | "hung"; out: string; err: string }> {
   const dir = join(ROOT, "examples", "targets", example);
   const cwd = await Deno.makeTempDir({ prefix: "cli-client-cwd-" });

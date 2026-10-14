@@ -215,16 +215,31 @@ needs it exactly as much as dev does:
 { "assets": { "/media": "./media" } }
 ```
 
+`GET /media/song.mp3` then works in `deno task dev`, in `--prod`, and from a
+compiled binary — one declaration, read by the server that serves the mount and
+by the build that ships it.
+
+A mount declared in `deno.json` alone **fills in**: it answers a path when it
+holds that file and nothing else does — a route, an `aio.run({ assets })` mount,
+`serveDirs`, a file of the app's own folder at the same path all answer first.
+So `"assets": { "/": "./public" }` puts `public/robots.txt` at `/robots.txt` and
+takes nothing over. A mount passed to `aio.run({ assets })` claims its whole
+prefix, as it always has.
+
+The server names every mount that comes from `deno.json` alone in one boot line
+(`assets  serving deno.json mount(s) /media → …`), in dev and in prod. Under
+`--expose` with `key: false` and no auth that line is a warning: anyone who can
+reach the port reads those files.
+
 ```ts
-// …or in code, if it is computed
-await aio.run({ cells, assets: { "/media": "./media" } });
+// A mount that is COMPUTED goes in code instead. The server serves it; no
+// build can read it, so nothing embeds or packages it.
+await aio.run({ cells, assets: { "/cache": cacheDir } });
 ```
 
-`GET /media/song.mp3` then works in `deno task dev`, in `--prod`, and from a
-compiled binary. You get the MIME table, ETag revalidation, range requests and
-compression the rest of the static path already does — and every guard `baseDir`
-has: traversal, symlink escape, dotfiles, `*.server.ts`. An extra root is never
-a weaker root.
+You get the MIME table, ETag revalidation, range requests and compression the
+rest of the static path already does — and every guard `baseDir` has: traversal,
+symlink escape, dotfiles, `*.server.ts`. An extra root is never a weaker root.
 
 Binary files (and text files over 8 MB) are streamed from disk, never read
 whole: a `Range: bytes=…` request answers `206` with `Content-Range`, a range
@@ -235,16 +250,18 @@ memory per request.
 **Declare it in `deno.json` and the build embeds it.** `deno compile` cannot
 trace a directory nobody imports, so a mount declared only in code serves in dev
 and 404s from the binary. Declared in deno.json there is nothing to keep in sync
-— no `compile.include` entry, one fact read by both the server that serves it
-and the build that ships it. A mount pointing outside the project is refused at
-build time rather than dropped: a silently skipped mount produces a binary
-missing the data it was told to carry. A standalone APK has no server, so its
-build packages each mount under the page instead. Fetch with a relative URL
+— no `compile.include` entry, and no second copy in `aio.run()`: one fact read
+by both the server that serves it and the build that ships it. (A prefix
+declared in both is `aio.run()`'s.) A mount pointing outside the project is
+refused at build time rather than dropped: a silently skipped mount produces a
+binary missing the data it was told to carry. A standalone APK has no server, so
+its build packages each mount under the page instead. Fetch with a relative URL
 (`fetch("media/song.mp3")`) and the same line works on both
 ([targets](targets.md#content-denojson-assets-travel-into-the-apk)).
 
-**Both paths resolve the same way** — against the process's working directory,
-exactly like `baseDir` — so write them from the same vantage point. A root that
+**Where a path resolves from:** a `deno.json` mount is relative to that file —
+the project root, which is what the build embeds — and an `aio.run()` mount,
+like `serveDirs` and `baseDir`, to the process's working directory. A root that
 does not exist is reported on first use, naming the resolved path, rather than
 404ing every file under it.
 

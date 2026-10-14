@@ -7,6 +7,7 @@
 // every app that finished booting mid-list, and `am restart` exited 1. The
 // compare is the OWNER (pid + start identity); what the owner writes since is
 // kept. Each case runs in a child with its own XDG_RUNTIME_DIR/AIO_APPS_DIR.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { join, toFileUrl } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";

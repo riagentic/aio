@@ -106,12 +106,17 @@ available. `am state` can be right while the page is wrong, and the reverse.
 ## Windows without stealing the keyboard
 
 A real Electron window opens on the user's desktop and takes focus mid-keystroke
-— on every retry. Use the nested display:
+— on every retry. On Linux with X11, use the nested display. `am start` from a
+non-interactive caller starts one by itself when Xephyr is installed; by hand:
 
 ```sh
-scripts/xephyr.sh            # starts Xephyr on :77, ONCE; leave it running
+scripts/xephyr.sh            # in the aio repo: starts Xephyr on :77, ONCE; leave it running
 DISPLAY=:77 am start --cdp   # everything the app opens lives inside it
 ```
+
+Windows and macOS have no nested display: there the window opens on the desktop.
+Drive the app with `--client=browser` (no tab is opened for a non-interactive
+caller) or headless, and open a window only when the window is what you test.
 
 The display is yours alone: it starts with an access cookie (never `-ac`), kept
 in `$XDG_RUNTIME_DIR/aio/xephyr-77.auth`, and `am start` hands the cookie to the

@@ -13,6 +13,7 @@ import { assert, assertEquals, assertRejects } from "@std/assert";
 import { bootCells } from "../src/testing/cell-test.ts";
 import { cell } from "../src/state/cell-create.ts";
 import { fuzzEnvInt } from "./fuzz-seed.ts";
+import { mulberry32 } from "./sync/properties/_prop.ts";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
@@ -173,14 +174,12 @@ Deno.test("foreign move: a row fetched after the method's own overwrite stays va
 // on ITS row or is refused by name — never on another row, never silently
 // lost. And a program that re-addressed nothing must never be refused.
 Deno.test("foreign move: random foreign programs never redirect a held write", async () => {
-  let seed = fuzzEnvInt("FUZZ_SEED", 0x5a1e) & 0x7fffffff;
-  const rnd = (n: number) =>
-    Math.floor(
-      ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x80000000) * n,
-    );
+  const next = mulberry32(fuzzEnvInt("FUZZ_SEED", 0x5a1e) & 0x7fffffff);
+  const rnd = (n: number) => Math.floor(next() * n);
   const ops = ["prepend", "sortDesc", "append", "edit", "remove"] as const;
   let refused = 0, landed = 0;
   let checked = 0;
+  const seen = new Set<string>();
   for (let round = 0; round < fuzzEnvInt("FUZZ_ROUNDS", 60, 1); round++) {
     const { c, release } = fixture(`fm_fz_${round}`);
     const h = await bootCells([c]);
@@ -192,6 +191,7 @@ Deno.test("foreign move: random foreign programs never redirect a held write", a
         { length: 1 + rnd(3) },
         () => ops[rnd(ops.length)]!,
       );
+      for (const o of drawn) seen.add(o);
       // Excluded, by name — the one blind spot, and it fails OPEN (the
       // pre-fix behaviour): a slot whose row became a NEW object. Identity is
       // the only evidence a commit leaves, and an edited row is a new object,
@@ -260,4 +260,7 @@ Deno.test("foreign move: random foreign programs never redirect a held write", a
     `both outcomes exercised (${refused}/${landed})`,
   );
   assert(checked > 0, "rows were left to check across the rounds");
+  if (fuzzEnvInt("FUZZ_ROUNDS", 60, 1) >= 60) {
+    assertEquals(ops.filter((o) => !seen.has(o)), [], "ops never drawn");
+  }
 });

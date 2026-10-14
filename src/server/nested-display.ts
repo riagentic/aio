@@ -440,7 +440,10 @@ export const XEPHYR_INSTALL_HINT: string =
  *
  *  Xephyr is nested: with no parent display there is nothing to nest in — and
  *  no focus to steal either, so containment is moot. Callers use this to skip
- *  a doomed spawn and its 3-second wait. */
+ *  a doomed spawn and its 3-second wait.
+ *
+ *  Always false off Linux, where it means something else: Windows and macOS
+ *  have no nested display, and a window there opens on the desktop. */
 export function hasParentDisplay(): boolean {
   return Deno.build.os === "linux" && !!Deno.env.get("DISPLAY");
 }

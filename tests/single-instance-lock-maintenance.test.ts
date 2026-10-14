@@ -3,6 +3,7 @@
 // reclaimed, a takeover never SIGTERMs it, and the app's own refused boot says
 // which op to wait for — not "Already running … am stop", which sent the
 // operator to stop a backup half-way through.
+import "./store-sandbox.ts";
 import { sleeper } from "./proc-helper.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join, toFileUrl } from "@std/path";

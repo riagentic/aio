@@ -8,6 +8,7 @@
 // (archive, target) pair either restores into a home that passes the SAME
 // owner check boot runs, or is refused up front with data/ untouched and the
 // command that restores it into its own home.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { cmdRestore } from "../src/am/am-cmd-data.ts";

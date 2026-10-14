@@ -16,6 +16,7 @@
 //
 // Same gate and harness shape as tests/electron-route-change-e2e.test.ts:
 // opt in with ELECTRON_E2E=1, needs node_modules/.bin/electron and a display.
+import { childEnv } from "./e2e-app-harness.ts";
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { electronMainScriptUDS } from "../src/electron/electron.ts";
@@ -163,11 +164,11 @@ Deno.test({
         ],
         stdout: "null",
         stderr: "piped",
-        env: {
+        env: childEnv({
           ...Deno.env.toObject(),
           ELECTRON_DISABLE_SECURITY_WARNINGS: "1",
           ...testDisplayEnv(),
-        },
+        }),
       }).spawn();
       (async () => {
         for await (

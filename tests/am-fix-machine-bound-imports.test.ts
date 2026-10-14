@@ -3,6 +3,7 @@
 // disk path at run time, so the artifact dies with `Module not found` anywhere
 // else). The same words the build warns with; advised, never rewritten.
 // Driven through the real `am fix --dry-run --json`.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";

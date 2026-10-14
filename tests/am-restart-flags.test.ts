@@ -2,6 +2,7 @@
 // (esp. --env-file), so the vault stopped auto-unlocking after a restart.
 // Two guarantees: (1) deno-runtime flags are placed BEFORE the entry script so
 // Deno actually honors them, and (2) the launch is recorded so restart replays.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { buildDenoArgs } from "../src/am/am-cmd-process.ts";
 import {

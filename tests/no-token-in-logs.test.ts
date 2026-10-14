@@ -135,9 +135,12 @@ Deno.test("no-token-in-logs: no log/console call in src/ prints a token", async 
       `// aio-ok(token-log): <why>\n  ${findings.join("\n  ")}`,
   );
   assert(files > 300, `the scan saw only ${files} files — it is blind`);
-  // The allow-list is exactly the two --expose share-link lines. A third is a
-  // decision, and it belongs in this number.
-  assertEquals(justifiedCount, 2, "aio-ok(token-log) markers in src/");
+  // The allow-list is exactly the two --expose share-link lines, and the aio
+  // client's "cannot open <address>" line, which goes through the generated
+  // script's own redactor (`__aioRedact` — pinned to the TS one below; this
+  // scan knows only `redactUrlToken`). A fourth is a decision, and it belongs
+  // in this number.
+  assertEquals(justifiedCount, 3, "aio-ok(token-log) markers in src/");
 });
 
 Deno.test("no-token-in-logs: the gate goes red on each leak shape it guards", () => {

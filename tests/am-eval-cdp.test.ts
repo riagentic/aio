@@ -14,6 +14,7 @@
 //
 // Skipped when the box has no Chromium — an environment that cannot look must
 // not report a pass.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { cdpConnect, cdpTargets } from "../src/am/am-cdp.ts";
 import {
@@ -22,7 +23,9 @@ import {
   wrapExpression,
 } from "../src/am/am-cmd-eval.ts";
 import { findChromium, freePort } from "../src/testing/server-test.ts";
-import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { tempDir } from "../src/testing/temp-dir.ts";
+import { browserHomeEnv, dropBrowserProfile } from "../src/testing/chromium.ts";
+import { browserOsFlags } from "./e2e-harness.ts";
 
 const CHROME = findChromium();
 const PAGE =
@@ -37,6 +40,7 @@ async function withPage(
   const profile = await tempDir("am-eval-");
   const child = new Deno.Command(CHROME!, {
     args: [
+      ...browserOsFlags,
       "--headless=new",
       `--remote-debugging-port=${port}`,
       `--user-data-dir=${profile}`,
@@ -44,6 +48,7 @@ async function withPage(
       "--disable-gpu",
       PAGE,
     ],
+    env: browserHomeEnv(profile),
     stdout: "null",
     stderr: "null",
   }).spawn();
@@ -65,7 +70,11 @@ async function withPage(
       let state = "";
       for (let i = 0; i < 80 && state !== "complete"; i++) {
         const r = await cdp.call("Runtime.evaluate", {
-          expression: "document.readyState",
+          // …and before its NAVIGATION does: Edge (Windows) shows the page
+          // target on its initial blank document, complete, and only then
+          // loads the URL it was given.
+          expression:
+            "location.href.startsWith('data:') ? document.readyState : ''",
           returnByValue: true,
         }) as { result?: { value?: string } };
         state = r.result?.value ?? "";
@@ -87,7 +96,9 @@ async function withPage(
   } finally {
     child.kill("SIGKILL");
     await child.status;
-    await dropTempDir(profile);
+    // The browser's helpers outlive it for a moment and hold the profile
+    // (on Windows the directory then cannot be removed): ended first.
+    await dropBrowserProfile(profile);
   }
 }
 

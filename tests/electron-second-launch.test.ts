@@ -153,7 +153,7 @@ for (const answer of [true, false]) {
     name: answer
       ? "second launch of a desktop app: the running window shows, exit 0"
       : "second launch, window never answers: refused as before, exit 1",
-    ignore: Deno.build.os === "darwin", // macOS: left out as it was (never run there)
+    ignore: Deno.build.os === "darwin", // unverified on macOS: never run there
     async fn() {
       const dir = await tempDir("el-second-");
       // Written once: Windows cannot rewrite a program that is running.

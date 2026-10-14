@@ -19,6 +19,7 @@
 // of rounds; a fixed test had to know to look.
 import { assert, assertEquals } from "@std/assert";
 import { fuzzEnvInt } from "./fuzz-seed.ts";
+import { mulberry32 } from "./sync/properties/_prop.ts";
 import { connectCli } from "../src/server/cli-client.ts";
 import { cell } from "../src/state/cell-create.ts";
 import type { CellDef } from "../src/state/cell-types.ts";
@@ -41,13 +42,28 @@ const STEPS = fuzzEnvInt("FUZZ_STEPS", 40, 4);
 
 type Call = { cid: string; t: Tracked };
 
+/** What the network does in a schedule, and how a call can end. */
+const KINDS = [
+  "open",
+  "failed-connect",
+  "drop",
+  "ack",
+  "lost-ack",
+  "call sync",
+  "call async",
+  "kill",
+  "outcome: never written",
+  "outcome: resolved",
+  "outcome: applied, then rejected",
+  "outcome: rejected, never applied",
+];
+
 Deno.test({
   name: "chaos: one intent, one outcome — under drop / kill / reconnect",
   async fn() {
-    let seed = SEED;
-    const rnd = () =>
-      (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+    const rnd = mulberry32(SEED);
     const chance = (p: number) => rnd() < p;
+    const seen = new Set<string>();
 
     for (let round = 0; round < ROUNDS; round++) {
       const restoreWS = installFakeWS();
@@ -97,6 +113,7 @@ Deno.test({
           if (!d.cid) continue;
           if (chance(0.12)) {
             log.push(`drop ${d.cid.slice(0, 4)}`);
+            seen.add("drop");
             continue; // the frame never reached the server
           }
           applied.set(d.cid, (applied.get(d.cid) ?? 0) + 1);
@@ -104,7 +121,8 @@ Deno.test({
           log.push(`apply ${d.cid.slice(0, 4)}`);
           if (chance(0.75) && ws.readyState === FakeWS.OPEN) {
             ws.deliver(enc("ack", { cid: d.cid, ok: true, value: 1 }));
-          } // else: applied, but the ack is lost
+            seen.add("ack");
+          } else seen.add("lost-ack"); // applied, but the ack is lost
         }
         consumed.set(ws, ws.sent.length);
       };
@@ -116,6 +134,7 @@ Deno.test({
             if (chance(0.6)) {
               ws.open();
               log.push("open");
+              seen.add("open");
             } else if (chance(0.5)) {
               // A connect attempt that never establishes (server still down).
               // This is the interleaving that exposes the shipped bug: the
@@ -123,6 +142,7 @@ Deno.test({
               // rejects everything pending settles calls it is about to send.
               ws.close();
               log.push("failed-connect");
+              seen.add("failed-connect");
             }
           }
           if (ws && ws.readyState === FakeWS.OPEN) serve(ws);
@@ -137,17 +157,34 @@ Deno.test({
               t: track(useAsync ? box.bumpAsync(1) : box.bump(1), now),
             });
             log.push(`call ${calls.length - 1}${useAsync ? " async" : ""}`);
+            seen.add(useAsync ? "call async" : "call sync");
           }
           if (ws && ws.readyState === FakeWS.OPEN && chance(0.3)) {
             ws.close();
             log.push("kill");
+            seen.add("kill");
           }
           await tick(2);
         }
 
         // Calm down: let the client reconnect and drain everything it still
         // holds, so I1 is about hangs and not about the test giving up early.
-        for (let i = 0; i < 60; i++) {
+        // One round in four skips it: close() then meets calls nobody ever
+        // wrote, and those may only reject (I2's other half).
+        const calm = !chance(0.25);
+        if (!calm) {
+          // …one of them for certain: made with the socket down, so it is
+          // queued and never sent (not left to how the timers happened to
+          // fall — under load every call had been written by here).
+          const live = FakeWS.live[FakeWS.live.length - 1];
+          if (live && live.readyState === FakeWS.OPEN) live.close();
+          calls.push({
+            cid: `call${calls.length}`,
+            t: track(box.bump(1), now),
+          });
+          log.push("no calm-down, one last call offline");
+        }
+        for (let i = 0; calm && i < 60; i++) {
           const ws = FakeWS.live[FakeWS.live.length - 1];
           if (ws && ws.readyState === FakeWS.CONNECTING) ws.open();
           if (ws && ws.readyState === FakeWS.OPEN) {
@@ -202,6 +239,7 @@ Deno.test({
         for (const [i, c] of calls.entries()) {
           const cid = wireCids[i];
           if (cid === undefined) {
+            seen.add("outcome: never written");
             assert(
               !c.t.ok,
               `I2: call ${i} resolved without ever reaching the wire — ${repro}`,
@@ -210,6 +248,7 @@ Deno.test({
           }
           if (c.t.ok) {
             // I2 — a resolve means the server really ran it.
+            seen.add("outcome: resolved");
             assertEquals(
               applied.get(cid) ?? 0,
               1,
@@ -217,12 +256,13 @@ Deno.test({
             );
           } else if (appliedAt.has(cid)) {
             // I4 — a rejection is final: nothing may be applied after it.
+            seen.add("outcome: applied, then rejected");
             assert(
               appliedAt.get(cid)! < c.t.at,
               `I4: cid ${cid} was applied AFTER its caller was told it ` +
                 `failed — one intent, a rejection AND an application — ${repro}`,
             );
-          }
+          } else seen.add("outcome: rejected, never applied");
         }
       } finally {
         try {
@@ -231,6 +271,11 @@ Deno.test({
         restoreT();
         restoreWS();
       }
+    }
+    // A schedule that stopped producing a fault, or an outcome an invariant
+    // is about, checks nothing about it.
+    if (ROUNDS >= 24 && STEPS >= 40) {
+      assertEquals(KINDS.filter((k) => !seen.has(k)), [], "kinds never run");
     }
   },
 });

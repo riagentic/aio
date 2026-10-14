@@ -27,7 +27,7 @@ import { BUILD_BOOL_FLAGS, BUILD_VALUE_FLAGS } from "../build/build-flags.ts";
  *  annotation is a WIDENING for every consumer — with the literal type,
  *  `VERSION === "1.0.0-alpha76"` was a compile error for having no overlap;
  *  now it is an ordinary comparison. */
-export const VERSION: string = "1.0.19-beta";
+export const VERSION: string = "1.0.20-beta";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *
@@ -334,8 +334,15 @@ let _cdpEnvIgnoredSaid = false;
  *  compose environment into a failed boot for every server-only app and every
  *  `testServer` under it. A variable someone exported for another app is not
  *  a flag someone just typed: `--cdp` there is still refused
- *  ({@linkcode electronOnlyFlagRefusal}). */
-export function cdpPort(client?: string): number | undefined {
+ *  ({@linkcode electronOnlyFlagRefusal}).
+ *
+ *  `ignoreEnv` — the same first read — is `electron: { ignoreDebugEnv }`
+ *  ({@linkcode ignoredDebugEnv}): `AIO_CDP` is then not read at all, and only
+ *  a typed `--cdp` opens the port. */
+export function cdpPort(
+  client?: string,
+  ignoreEnv?: boolean,
+): number | undefined {
   if (
     client !== undefined && client !== "electron" &&
     parseCli().cdp === undefined
@@ -355,7 +362,10 @@ export function cdpPort(client?: string): number | undefined {
     return undefined;
   }
   if (_cdpPort !== undefined) return _cdpPort ?? undefined;
-  const want = parseCdp(parseCli().cdp, Deno.env.get("AIO_CDP"));
+  const want = parseCdp(
+    parseCli().cdp,
+    ignoreEnv ? undefined : Deno.env.get("AIO_CDP"),
+  );
   _cdpPort = want === undefined ? null : want === true ? findFreePort() : want;
   return _cdpPort ?? undefined;
 }
@@ -423,6 +433,41 @@ export function envDefaultPort(): number | undefined {
     );
   }
   return n;
+}
+
+/** `electron: { ignoreDebugEnv }` — which of the three AMBIENT variables that
+ *  open a door (`AIO_CDP`: a DevTools port; `AIO_PORT`, `AIO_DEFAULT_PORT`: a
+ *  loopback TCP listener beside the local socket) this boot will NOT read.
+ *
+ *  A desktop app inherits its environment from whatever launched it, so a
+ *  variable exported for another aio app opens the same door on this one: a
+ *  field report found a wallet whose window any local process could drive
+ *  over CDP because a tester's shell still had `AIO_CDP=1`. Ignoring them by
+ *  default is what 1.0.15 did and 1.0.17 took back (an environment that
+ *  booted an app yesterday must boot it today), so it is the app's to ask
+ *  for. `--cdp` and `--port` are typed for THIS launch and keep working.
+ *
+ *  Only on the Electron client: a server or a service has no command line to
+ *  hang `--port` on, and its unit file sets `AIO_DEFAULT_PORT` on purpose.
+ *  The same in dev and prod. A value that is not a boolean still ignores (the
+ *  key was written to close a door) and is named in `mistyped`.
+ *
+ *  `undefined` — the environment is read as always. Otherwise the variables
+ *  that are set and now ignored (possibly none). Pure. */
+export function ignoredDebugEnv(
+  ignore: unknown,
+  client: string,
+  get: (name: string) => string | undefined,
+): { ignored: string[]; mistyped: boolean } | undefined {
+  if (ignore === undefined || ignore === false || client !== "electron") {
+    return undefined;
+  }
+  return {
+    ignored: ["AIO_CDP", "AIO_PORT", DEFAULT_PORT_ENV].filter((name) =>
+      (get(name) ?? "").trim() !== ""
+    ),
+    mistyped: ignore !== true,
+  };
 }
 
 /** Did this command line ask for prod — `--prod`, before any bare `--`?

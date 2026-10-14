@@ -3,6 +3,7 @@
 // the column read the socket first and hid the port, so the one number a
 // person scans that table for — "which port is this on" — was missing for the
 // very app that had one. Both wires are shown when both exist.
+import "./store-sandbox.ts";
 import { assert } from "@std/assert";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { writeLock } from "../src/server/single-instance-lock.ts";

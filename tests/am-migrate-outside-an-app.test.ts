@@ -20,6 +20,7 @@
 // inside one." — refusal, exit 1, and a `fix` line. `am migrate` scans an app
 // and reports on it, so it has the same precondition and now gives the same
 // answer.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { fromFileUrl } from "@std/path";

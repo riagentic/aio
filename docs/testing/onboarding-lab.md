@@ -174,13 +174,14 @@ negative control (a pipe nobody hosts fails fast, `ENOENT`); then `deno.exe`
 again through `connectLocal` — the `am` path. One summary line,
 `WINE PIPE: N passed, M failed`, with each failure naming the Win32 call and
 `GetLastError` code; `tests/wine-pipe-e2e.test.ts` (gated by `AIO_WINE_E2E=1`)
-asserts it. Wine's pipe emulation is not the NT kernel, so the claim is exactly
-"proven under Wine in CI; one pass on real Windows still pending". Not yet
-covered here: the compiled `.exe` booting in pipe mode under Wine and `am state`
-reaching it (a `windows-pipe` lab scenario) — Wine offers no `netstat` view of a
-pipe namespace and the compiled binary picks the pipe only for the electron
-client, which Wine cannot launch, so that half waits for a flag that forces the
-transport without a window.
+asserts it. Wine's pipe emulation is not the NT kernel, so this scenario's claim
+is exactly "proven under Wine". Since 1.0.19 the suite also runs natively on
+Windows 11, by hand each release; that is not this lab and not a recorded gate.
+Not yet covered here: the compiled `.exe` booting in pipe mode under Wine and
+`am state` reaching it (a `windows-pipe` lab scenario) — Wine offers no
+`netstat` view of a pipe namespace and the compiled binary picks the pipe only
+for the electron client, which Wine cannot launch, so that half waits for a flag
+that forces the transport without a window.
 
 What **neither** proves, printed on every run rather than left implied:
 
@@ -191,8 +192,10 @@ What **neither** proves, printed on every run rather than left implied:
 - The real registry, Start Menu `.lnk`, a winget-installed deno, SmartScreen on
   an unsigned binary, and true file locking when replacing a **running** `.exe`.
 
-Both remain best-effort until there is a Windows runner. The point of two
-scenarios is that a green line names exactly what went green.
+Since 1.0.19 the test suite runs natively on Windows 11 by hand each release; it
+does not execute `install.ps1` or `run.ps1`, so both items remain best-effort
+until a gate runs them on Windows. The point of two scenarios is that a green
+line names exactly what went green.
 
 ## When it fails
 

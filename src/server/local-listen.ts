@@ -10,11 +10,14 @@
  * socket, `am`'s client — sees the same `LocalConn` on both, which is what
  * lets a Linux test and a Wine run prove the same code.
  *
- * `win-pipe.ts` is loaded ONLY on windows here (dynamic import) so Linux/macOS
- * never touch FFI. (`app-key.ts` imports its secret-file writer statically;
- * the libraries are opened only when a function is CALLED, on Windows.) A path that cannot be bound or opened is THROWN — on unix at the
- * call site, on windows from the first accept (the import is asynchronous) —
- * never logged and forgotten.
+ * `win-pipe.ts` is imported dynamically HERE (this module is its dependency,
+ * not the other way round); `aio-server.ts` and `app-key.ts` import it
+ * statically. Either way Linux/macOS never touch FFI: the libraries are
+ * opened only when a function is CALLED, on Windows. A path that cannot be
+ * bound or opened is THROWN, never logged and forgotten — on unix at the call
+ * site; on windows at boot, where `reservePipes` takes an app's pipe names
+ * before anything is announced (a caller that did not reserve hears it from
+ * the first accept: the import is asynchronous).
  */
 
 /** A pipe path — the one spelling (`\\.\pipe\…`) that is NOT a filesystem
@@ -88,6 +91,11 @@ export interface ListenLocalOpts {
    *  cannot retry it: asked when try `tries` of the bind failed with `e` —
    *  true once the cause is cured, and the bind is tried again. */
   rebind?: (e: unknown, tries: number) => boolean;
+  /** The peer listener only: called once its socket IS bound — what a caller
+   *  of the plain path does when `listenLocal` returns. A throw closes the
+   *  listener and is the bind's failure (the first `next()`), unless
+   *  `rebind` answers true for it: then the socket is bound again. */
+  bound?: () => void;
 }
 
 /** The pipe backend, resolved once. Loaded lazily and only on windows: the
@@ -183,7 +191,7 @@ export function listenLocal(
   // expose. The fd-bearing backend is taken ONLY when a caller asks (the
   // production local-peer lockdown); every other unix listener is byte-for-byte
   // the path it always was.
-  if (opts?.peer) return listenUnixPeer(path, opts.rebind);
+  if (opts?.peer) return listenUnixPeer(path, opts.rebind, opts.bound);
   const l = Deno.listen({ transport: "unix", path });
   let closed = false;
   return {
@@ -272,6 +280,7 @@ function closeOnExec(fd: number): void {
 function listenUnixPeer(
   path: string,
   rebind?: ListenLocalOpts["rebind"],
+  bound?: ListenLocalOpts["bound"],
 ): LocalListener {
   let closed = false;
   const queue: LocalConn[] = [];
@@ -442,10 +451,17 @@ function listenUnixPeer(
         guarded = guard();
       });
     for (let tries = 1;; tries++) {
+      let up = false;
       try {
         await bind();
+        up = true;
+        // Inside the loop: macOS binds in a dir that is removed under the
+        // bind, and the socket is then at no path — `rebind` is asked about
+        // that too, and the server listens again once it is closed.
+        bound?.();
         break;
       } catch (e) {
+        if (up) await new Promise<void>((done) => srv.close(() => done()));
         if (closed || !rebind?.(e, tries)) throw e;
         failure = null; // parked by the handler above — the bind is asked again
       }

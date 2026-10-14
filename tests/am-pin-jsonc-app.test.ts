@@ -8,6 +8,7 @@
 // `deno.json` holding one `//` comment threw AFTER the pin was written (the
 // exact case `cmdPin`'s own comment names), and a `.jsonc` app silently got
 // no dep sync at all. Both go through THE reader now.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { syncFrameworkDeps, writePin } from "../src/am/am-versions.ts";

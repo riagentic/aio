@@ -33,6 +33,15 @@
 //   deno task check:mutations --only='a||b'   entries matching any alternative
 //   deno task check:mutations --jobs=8        parallel workers (default 4)
 //   deno task check:mutations --list          print the ledger, run nothing
+//   deno task check:mutations --os-only       only the rows NO other OS checks
+//
+// A row with `os` names where its test RUNS: the test is `ignore`d on every
+// other OS (a named-pipe peer check is Windows's, POSIX mode bits are not),
+// so a host that is not named leaves the row out and says how many it left.
+// `--os-only` runs the rows tagged for this OS alone — the ones no other host
+// ever checks. The tag is not written by hand: tests/mutation-ledger.test.ts
+// loads each gated test file as each OS would and fails on a row whose tag
+// is not exactly where its test runs.
 //
 // ADDING AN ENTRY IS THE POINT AND MUST STAY CHEAP: four fields, no
 // registration anywhere else. If you fix a bug that no test caught, the
@@ -67,17 +76,313 @@ export type Mutation = {
    *  AppImage) is `ignore`d without it, and an ignored test proves nothing
    *  (the baseline then reports "did not run", never a false kill). */
   env?: Record<string, string>;
+  /** Where the test runs, when that is not everywhere: the one OS, or the
+   *  OSes. Any other host skips the row (its test is `ignore`d there) and
+   *  counts it in the summary. */
+  os?: typeof Deno.build.os | readonly (typeof Deno.build.os)[];
 };
+
+/** The OSes a row is tagged for — none for a row every host checks. Pure. */
+export function rowOses(m: Pick<Mutation, "os">): (typeof Deno.build.os)[] {
+  return m.os === undefined ? [] : [m.os].flat();
+}
 
 // ─── the ledger ────────────────────────────────────────────────────────────
 
 import { LEDGER_1 } from "./mutations/ledger-1.ts";
 import { fromFileUrl } from "@std/path";
+import { copy } from "@std/fs/copy";
 
 export const LEDGER: readonly Mutation[] = [
   // The oldest rows live in scripts/mutations/ledger-1.ts (this file must
   // stay under aiol's 512 KB per-file limit, or it is not linted at all).
   ...LEDGER_1,
+  {
+    what:
+      "an am run from the registry (an https: module) throws `URL must be a file URL` in a path-pinned app, and every command dies",
+    file: "src/am.ts",
+    find: '  return moduleUrl.startsWith("file:") &&',
+    replace: '  return moduleUrl !== "" &&',
+    test: "tests/am-path-pin-once.test.ts",
+    filter:
+      "delegation from an am that is NOT a file (run from the registry): not the checkout, no throw",
+  },
+  {
+    what:
+      "a test that spreads its whole environment into a window launch hands the child the developer's own HOME / config home, and the window's profile is written there",
+    file: "tests/e2e-app-harness.ts",
+    find: "      )).filter(([k]) => !chose(k)),",
+    replace: "      )).filter(([k]) => !own[k]),",
+    test: "tests/child-env-config-home.test.ts",
+    filter:
+      "childEnv: an account value that only repeats this process's is not a choice — the sandbox stands; ownAccount() gives this process the same one and hands it back",
+  },
+  {
+    what:
+      "a suite run that leaves a test app's install or window profile in the developer's real home ends green",
+    file: "scripts/test-shards.ts",
+    find:
+      "  if (bad.length === 0 && storeWrites.length === 0 && strays.length === 0) {",
+    replace: "  if (bad.length === 0 && storeWrites.length === 0) {",
+    test: "tests/test-shards-leftover.test.ts",
+    filter:
+      "test-shards: a green suite that leaves a test app's profile in the REAL home FAILS the run, named; one that was there before is not charged to it",
+  },
+  {
+    what:
+      "a withdrawal refused as a TX_CONFLICT still sends the receipt it scheduled — an aborted transaction keeps its effects",
+    file: "src/state/cell-methods-internals.ts",
+    find: "            txEffects.push(...resolved);",
+    replace: "            sendEffects(resolved);",
+    test: "tests/tx-effects-abort-with-write-set.test.ts",
+    filter: "transaction: a TX_CONFLICT abort sends none of its effects",
+  },
+  {
+    what:
+      "a call superseded under cancelOn self still schedules its follow-up — two receipts for one committed write",
+    file: "src/state/cell-methods-internals.ts",
+    find: "            txEffects.push(...resolved);",
+    replace: "            sendEffects(resolved);",
+    test: "tests/tx-effects-abort-with-write-set.test.ts",
+    filter:
+      "transaction: a superseded (cancelled) call sends none of its effects",
+  },
+  {
+    what:
+      "a local-socket client's subs frame is kept whole whatever its size — an unbounded set held per connection and walked on every broadcast",
+    file: "src/server/uds.ts",
+    find: '              const parsed = parseSubs(paths, "uds");',
+    replace: "              const parsed = new Set((paths ?? []) as string[]);",
+    test: "tests/uds-parity-with-ws.test.ts",
+    filter:
+      "uds: a subs frame past the cap is refused, not held per connection",
+  },
+  {
+    what:
+      "an artifact whose file tree the audit cannot find is reported clean of build tools",
+    file: "src/build/artifact-audit.ts",
+    find: "    throw new ArtifactUnreadable(candidates);",
+    replace: "    return { tree: [], dataAt: 0 };",
+    test: "tests/build-tool-audit.test.ts",
+    filter:
+      "artifact audit: an artifact it cannot read is UNREADABLE, never clean — and the build says so",
+  },
+  {
+    what:
+      "a module whose minified text TypeScript reads as a generic call ships minified, and the compiled app computes something else than dev",
+    file: "src/build/minify-server.ts",
+    find: "    if (asTs !== await read(jsLoader)) {",
+    replace: "    if (asTs === undefined) {",
+    test: "tests/build-minify-fallback.test.ts",
+    filter:
+      "minify fallback: a comparison TypeScript would re-read as a generic call is refused by minifyModule",
+  },
+  {
+    what:
+      "a shard with a process left behind, or a test file that never ran, prints ✓ and the run ends green",
+    file: "scripts/test-shards.ts",
+    find: "  return r.code === 0 && !r.left && !r.unrun;",
+    replace: "  return r.code === 0;",
+    test: "tests/test-shards-leftover.test.ts",
+    filter:
+      "shardPassed: ONE verdict — a green suite with a leftover is red, a red suite is red",
+  },
+  {
+    what:
+      "aiol --safe-fix renames an action payload's own `backoff` field when the action is spelled without a literal `type:` key",
+    file: "aiol/fixes.ts",
+    find:
+      '      if (index === 2 && topLevelKeyOffsets(src, brace, "every").length === 0) {',
+    replace: "      if (index === 2 && src.length === 0) {",
+    test: "tests/aiol-safe-fix-own-code.test.ts",
+    filter:
+      "aiol poll-backoff: an action without a literal `type:` key is not the opts",
+  },
+  {
+    what:
+      "a test file that runs run.sh / install.sh with the developer's HOME passes the guard, and installs into the real home on every run",
+    file: "tests/script-spawns-own-their-home.test.ts",
+    find: "    if (!safe) offenders.push(name);",
+    replace: "    if (!safe) continue;",
+    test: "tests/script-spawns-own-their-home.test.ts",
+    filter:
+      "tests: the scan REFUSES a file that runs a repo script with neither ownHome() nor a SAFE entry",
+  },
+  {
+    what:
+      "every plain test run that passes a gated test rewrites the tracked proof-matrix.json, and a row's date moves for a run nobody meant as proof",
+    file: "scripts/proof.ts",
+    find: '  return value === "1";',
+    replace: '  return value !== "0";',
+    test: "tests/proof-matrix.test.ts",
+    filter:
+      "proof: a passing gate leaves `git status` empty; under AIO_PROOF_RECORD=1 it writes the row",
+  },
+  {
+    what:
+      "a suite run that exited non-zero on another machine is recorded as proof that the suite passed there",
+    file: "scripts/proof-record.ts",
+    find: "  if (code !== undefined && code !== 0) return no(",
+    replace: "  if (code !== undefined && code < 0) return no(",
+    test: "tests/proof-record.test.ts",
+    filter:
+      "update:proof — a run with a failure, a cut run, or a non-zero exit is refused",
+  },
+  {
+    what:
+      "half a suite log — a shard's line missing — is recorded as the whole suite having passed",
+    file: "scripts/proof-record.ts",
+    find: "  if (shards.length !== Number(all[1])) {",
+    replace: "  if (shards.length > Number(all[1])) {",
+    test: "tests/proof-record.test.ts",
+    filter:
+      "update:proof — a run with a failure, a cut run, or a non-zero exit is refused",
+  },
+  {
+    what:
+      "--keep-going is ignored: a red fast gate still hides what the suite, the builds and the mutation gate would have said",
+    file: "scripts/release-check.ts",
+    find: '  return o.failedEarly > 0 && !o.keepGoing ? "stopped" : "run";',
+    replace: '  return o.failedEarly > 0 ? "stopped" : "run";',
+    test: "tests/release-check-skip-visible.test.ts",
+    filter:
+      "release check: a red fast gate stops the heavy tier — unless --keep-going",
+  },
+  {
+    what:
+      "a release check stopped by a red fast gate names none of the heavy gates that did not run, so its report reads as if they did not exist",
+    file: "scripts/release-check.ts",
+    find: "  return [...HEAVY.map(([name]) => name), LAB];",
+    replace: "  return [LAB];",
+    test: "tests/release-check-skip-visible.test.ts",
+    filter:
+      "release check: a heavy tier that did not run names every gate in it",
+  },
+  {
+    what:
+      "the perf gate leaves the release check again, and a metric drifts over its floor for six releases with nobody told",
+    file: "scripts/release-check.ts",
+    find: '  ["check:bench", ["deno", "task", "check:bench"]],',
+    replace: "",
+    test: "tests/ci-mirrors-release-check.test.ts",
+    filter:
+      "ci: check:release keeps its required lanes, and only the lab may skip",
+  },
+  {
+    what:
+      "the perf gate fails on its first attempt, so a busy machine is a red release check and the gate is switched off",
+    file: "scripts/check-bench.ts",
+    find: "export const RETRIES = 2;",
+    replace: "export const RETRIES = 0;",
+    test: "tests/check-bench-retry.test.ts",
+    filter:
+      "check:bench — a red metric is measured again, alone, and the best attempt is judged",
+  },
+  {
+    what:
+      "a lock with no start token whose pid the system reused is reported as a live aio orphan, and clean:tmp SIGTERMs a stranger's process",
+    file: "scripts/check-orphans.ts",
+    find: '            if (who.is !== "aio") {',
+    replace: '            if (who.is === "unknown") {',
+    test: "tests/check-orphans-tokenless.test.ts",
+    filter:
+      "check-orphans: a lock with no start token whose pid is now another program is a stale lock — never an ORPHAN, never signalled",
+  },
+  {
+    what:
+      "a killed suite run's /tmp/xdg-shard-* runtime dirs are never counted nor swept, and pile up with their lock dirs inside",
+    file: "scripts/check-orphans.ts",
+    find: 'const TMP_PREFIXES = ["aio-", "xdg-shard-"];',
+    replace: 'const TMP_PREFIXES = ["aio-"];',
+    test: "tests/check-orphans-tokenless.test.ts",
+    filter:
+      "check-orphans: a dead run's xdg-shard-* dir is counted and swept by clean:tmp; a live run's, and a stranger's dir, are left",
+  },
+  {
+    what:
+      "clean:tmp removes a LIVE suite run's shard runtime dir once it is ten minutes old — on Windows nothing else says the run is alive",
+    file: "scripts/check-orphans.ts",
+    find: "      if (lockRuled.has(dir) || liveRuns.dirs.has(dir)) continue;",
+    replace: "      if (lockRuled.has(dir)) continue;",
+    test: "tests/check-orphans-tokenless.test.ts",
+    filter:
+      "check-orphans: a dead run's xdg-shard-* dir is counted and swept by clean:tmp; a live run's, and a stranger's dir, are left",
+  },
+  {
+    what:
+      "clean:tmp removes the temp dirs a live suite run's tests made once they are ten minutes old — a test's own dir is on nobody's command line",
+    file: "scripts/check-orphans.ts",
+    find:
+      "      if (Date.now() - mtime < RECENT_MS || mtime >= liveRuns.since) continue;",
+    replace: "      if (Date.now() - mtime < RECENT_MS) continue;",
+    test: "tests/check-orphans-tokenless.test.ts",
+    filter:
+      "check-orphans: a dead run's xdg-shard-* dir is counted and swept by clean:tmp; a live run's, and a stranger's dir, are left",
+  },
+  {
+    what:
+      "check:orphans cannot read the live processes and goes on: every temp dir reads as ownerless, and clean:tmp removes a live run's",
+    file: "scripts/check-orphans.ts",
+    find: "  Deno.exit(2);\n})();",
+    replace: "  return [] as string[];\n})();",
+    test: "tests/check-orphans-tokenless.test.ts",
+    filter:
+      "check-orphans: when the live processes cannot be read, no temp dir is counted or removed — exit 2",
+  },
+  {
+    what:
+      "clean:tmp removes a live app's scoped lock dir recursively as an ownerless temp dir — a second instance then opens the same data",
+    file: "scripts/check-orphans.ts",
+    find: "    if (!foreign || live > 0) lockRuled.add(dir);",
+    replace: "    if (!foreign && live < 0) lockRuled.add(dir);",
+    test: "tests/check-orphans-tokenless.test.ts",
+    filter:
+      "check-orphans: a lock dir holding a live lock, and the home that lock names, are never swept as ownerless temp dirs",
+  },
+  {
+    what:
+      "clean:tmp removes the temp home of an app that is running — its state.db goes while the app holds it",
+    file: "scripts/check-orphans.ts",
+    find:
+      "          for (const p of [lock?.cwd, lock?.home]) if (p) liveRefs.push(p);",
+    replace:
+      '          for (const p of [lock?.cwd, lock?.home]) if (!p) liveRefs.push("");',
+    test: "tests/check-orphans-tokenless.test.ts",
+    filter:
+      "check-orphans: a lock dir holding a live lock, and the home that lock names, are never swept as ownerless temp dirs",
+  },
+  {
+    what:
+      "clean:tmp removes the preload dir of a live window of an app built before 1.0.17 — the window's next page loads with no preload",
+    file: "scripts/check-orphans.ts",
+    find: '      if (e.name.startsWith("aio-preload-")) continue;',
+    replace: '      if (e.name.startsWith("aio-preload-\\0")) continue;',
+    test: "tests/check-orphans-tokenless.test.ts",
+    filter:
+      "check-orphans: an aio-preload-* dir in the temp dir is some app's window's — never counted, never swept",
+  },
+  {
+    what:
+      "Windows: check:orphans walks a literal /tmp — a killed run's %TEMP%\\xdg-shard-* and aio-* dirs are never counted or swept",
+    file: "scripts/check-orphans.ts",
+    find:
+      '    ? [Deno.env.get("TEMP") ?? Deno.env.get("TMP") ?? ""].filter(Boolean)',
+    replace: '    ? ["/tmp"]',
+    test: "tests/check-orphans-tokenless.test.ts",
+    filter:
+      "check-orphans: on Windows the temp dirs are the ones in %TEMP% — a dead run's xdg-shard-* dir there is counted and swept",
+    os: "windows",
+  },
+  {
+    what:
+      "an interrupted suite run neither prunes nor names the lock dirs of shards that have no runtime dir of their own — every shard on Windows",
+    file: "scripts/test-shards.ts",
+    find: "  for (const [home, base] of homes) {",
+    replace: "  for (const [home, base] of new Map<string, string>()) {",
+    test: "tests/test-shards-interrupt.test.ts",
+    filter:
+      "interruptShards: a shard with no runtime dir of its own — its home's lock dirs in the shared base are pruned, a held one named, the base kept",
+  },
   {
     what:
       "a falsy visible/persist warning claims the default all even when cellDefaults fills the absent value",
@@ -1047,7 +1352,7 @@ export const LEDGER: readonly Mutation[] = [
       "a systemd unit is written for Windows and macOS server binaries, which have no systemd and collide in dist",
     file: "src/build/build-compile.ts",
     find: '  if (cfg.os === "windows" || cfg.os === "darwin") {\n',
-    replace: '  if (cfg.os === "plan9") {\n',
+    replace: '  if ((cfg.os as string) === "plan9") {\n',
     test: "tests/build-service-unit-platforms.test.ts",
     filter:
       "fleet: a server target built for several platforms places one unit per Linux binary",
@@ -1156,8 +1461,8 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "Textarea onChange silently hands the DOM Event to a handler the docs promised the value to, with no dev hint",
     file: "src/ui/mod.ts",
-    find: 'typeof props.onChange === "function" && !_textareaChangeWarned &&',
-    replace: 'typeof props.onChange === "string" && !_textareaChangeWarned &&',
+    find: '    typeof props.onChange === "function" &&\n    (dev ?',
+    replace: '    typeof props.onChange === "string" &&\n    (dev ?',
     test: "tests/ui-textarea-onchange-event.test.ts",
     filter: "Textarea onChange: still the Event, and dev says so once",
   },
@@ -1465,9 +1770,13 @@ export const LEDGER: readonly Mutation[] = [
     file: "src/air/vdom-diff-boundary.ts",
     find: "    if (own && !isChildOf(own, parent)) {",
     replace: "    if (own && !isChildOf(own, parent) && children.length < 0) {",
-    test: "tests/air-boundary-fallback-sweeps-region.test.ts",
+    // Was `air-boundary-fallback-sweeps-region`: since a region that runs out
+    // where a sweep follows is no longer reported (1.0.20), that test passes
+    // without this guard. What the guard still decides is HOW a child the
+    // attempt removed is released.
+    test: "tests/air-boundary-retire-departed-text.test.ts",
     filter:
-      "a boundary falling back leaves none of its old text beside the fallback",
+      "boundary retire: a keyed fragment the failed diff removed is released, not reported — its second text goes in the model",
   },
   {
     what:
@@ -2842,6 +3151,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/nested-display.test.ts",
     filter:
       "nestedDisplayAccepts: the server's own answer — a stale cookie file is refused, the right one accepted",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -2927,6 +3237,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/build.test.ts",
     filter:
       "build: another namespace's lock and journal untouched for 2 min are recovered",
+    os: "linux",
   },
   {
     what:
@@ -2937,6 +3248,7 @@ export const LEDGER: readonly Mutation[] = [
     replace: "  return touchedRecently(path);",
     test: "tests/build.test.ts",
     filter: "build: recovery trusts a watched foreign lock over its old mtime",
+    os: "linux",
   },
   {
     what:
@@ -2968,6 +3280,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/lock-temp-pid-namespace.test.ts",
     filter:
       "lock acquire sweep: another pid namespace's in-flight temp is kept until untouched for 10 min",
+    os: "linux",
   },
   {
     what:
@@ -2979,6 +3292,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/lock-temp-pid-namespace.test.ts",
     filter:
       "lock dir prune: another pid namespace's temp and sentinel are kept until untouched for 10 min",
+    os: "linux",
   },
   {
     what:
@@ -3018,6 +3332,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/updates-e2e.test.ts",
     filter:
       "updates e2e: a translocated .app refuses before downloading, naming /Applications",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -3038,6 +3353,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/updates-e2e.test.ts",
     filter:
       "updates e2e: a .app release is unpacked AS the bundle, seal-checked, and relaunched via open -n",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -3070,6 +3386,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/updates-first-boot-rollback.test.ts",
     filter:
       "first-boot rollback: helper claims first — the running new version is stopped before the swap back, and its boot then loses",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -3080,6 +3397,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/updates-first-boot-rollback.test.ts",
     filter:
       "first-boot rollback: new version claims first, even at the timeout instant — the helper steps aside",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -3101,6 +3419,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/updates-first-boot-rollback.test.ts",
     filter:
       "swap failure: the new version cannot be moved into place — the old one is started, and the record says why",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -3112,6 +3431,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/updates-first-boot-rollback.test.ts",
     filter:
       "swap failure: an earlier copy that cannot be removed — nothing moves, the old one is started",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -3135,6 +3455,7 @@ export const LEDGER: readonly Mutation[] = [
       "        `${pending.from} → ${pending.to} (${e}) — booting anyway, uncounted`,\n      );\n      throw e;",
     test: "tests/updates-boot-judge-hardening.test.ts",
     filter: "judge: an attempt that cannot be recorded does not kill the boot",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -3176,6 +3497,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/updates-boot-judge-hardening.test.ts",
     filter:
       "judge: the failed record is replaced atomically, never written in place",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -3196,6 +3518,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/updates-first-boot-rollback.test.ts",
     filter:
       "first-boot rollback: a new version that rewrites the marker (aio <= 1.0.12) keeps running, without the wait",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -3206,6 +3529,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/updates-first-boot-rollback.test.ts",
     filter:
       "first-boot rollback: an aio <= 1.0.12 boot at the claim instant keeps the new version",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -3307,6 +3631,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/updates-targets.test.ts",
     filter:
       "appimage: $APPIMAGE counts only for a process running inside $APPDIR",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -3349,6 +3674,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/updates-first-boot-rollback.test.ts",
     filter:
       "first-boot rollback: cmp fails to run — still no claim, the dead version is put back",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -3359,6 +3685,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/updates-first-boot-rollback.test.ts",
     filter:
       "first-boot rollback: the marker cannot be read — still no claim, the dead version is put back",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -3369,6 +3696,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/updates-first-boot-rollback.test.ts",
     filter:
       "first-boot rollback: neither version can be moved back — the record says so, and the old one is started where it is",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -3379,6 +3707,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/updates-first-boot-rollback.test.ts",
     filter:
       "swap failure: neither version can be moved into place — the record says why, and the old one is started where it is",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -3389,6 +3718,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/updates-first-boot-rollback.test.ts",
     filter:
       "swap failure: a launcher outside the install is handed the copy that is left",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -3430,6 +3760,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/updates-first-boot-rollback.test.ts",
     filter:
       "first-boot rollback: the old version cannot be moved back — the version in place is started, and the record says the rollback failed",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -3564,6 +3895,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/lock-foreign-namespace-hold.test.ts",
     filter:
       "app lock, foreign pid namespace, no hold (a placeholder): alive only until a boot that long counts as stuck",
+    os: "linux",
   },
   {
     what:
@@ -3574,6 +3906,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/lock-foreign-namespace-hold.test.ts",
     filter:
       "app lock, foreign pid namespace: alive while its hold is locked — even when its pid is ours — never taken, never signalled; dead once the hold is free",
+    os: "linux",
   },
   {
     what:
@@ -3584,6 +3917,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/lock-foreign-namespace-hold.test.ts",
     filter:
       "app lock, foreign pid namespace: alive while its hold is locked — even when its pid is ours — never taken, never signalled; dead once the hold is free",
+    os: "linux",
   },
   {
     what: "a pid from another pid namespace is signalled here",
@@ -3593,6 +3927,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/lock-foreign-namespace-hold.test.ts",
     filter:
       "app lock, foreign pid namespace: alive while its hold is locked — even when its pid is ours — never taken, never signalled; dead once the hold is free",
+    os: "linux",
   },
   {
     what: "a takeover (killExisting) probes and signals a live container's app",
@@ -3602,6 +3937,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/lock-foreign-namespace-hold.test.ts",
     filter:
       "app lock, foreign pid namespace: alive while its hold is locked — even when its pid is ours — never taken, never signalled; dead once the hold is free",
+    os: "linux",
   },
   {
     what:
@@ -3612,6 +3948,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/lock-foreign-namespace-hold.test.ts",
     filter:
       "app lock, foreign pid namespace: alive while its hold is locked — even when its pid is ours — never taken, never signalled; dead once the hold is free",
+    os: "linux",
   },
   {
     what: "a lock CAS for our pid 7 rewrites a container's pid 7",
@@ -3621,6 +3958,7 @@ export const LEDGER: readonly Mutation[] = [
     replace: "  if (was.ns === -1) {",
     test: "tests/lock-foreign-namespace-hold.test.ts",
     filter: "app lock CAS: the same pid in another namespace is another owner",
+    os: "linux",
   },
   {
     what:
@@ -3837,6 +4175,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/lock-foreign-namespace-hold.test.ts",
     filter:
       "app lock, foreign pid namespace, the record naming OUR pid: never taken over, updated or released as ours",
+    os: "linux",
   },
   {
     what: "update() writes into a container's live lock that names our pid",
@@ -3846,6 +4185,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/lock-foreign-namespace-hold.test.ts",
     filter:
       "app lock, foreign pid namespace, the record naming OUR pid: never taken over, updated or released as ours",
+    os: "linux",
   },
   {
     what: "release() removes a container's live lock that names our pid",
@@ -3855,6 +4195,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/lock-foreign-namespace-hold.test.ts",
     filter:
       "app lock, foreign pid namespace, the record naming OUR pid: never taken over, updated or released as ours",
+    os: "linux",
   },
   {
     what:
@@ -3865,6 +4206,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/check-orphans-foreign-ns.test.ts",
     filter:
       "check-orphans: a foreign-namespace lock is judged by its hold — a live host pid is never reported (signalled), a live container's lock never removed",
+    os: "linux",
   },
   {
     what:
@@ -3876,6 +4218,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/check-orphans-foreign-ns.test.ts",
     filter:
       "check-orphans: a foreign-namespace lock is judged by its hold — a live host pid is never reported (signalled), a live container's lock never removed",
+    os: "linux",
   },
   {
     what:
@@ -4219,6 +4562,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/relaunch-closes-inherited-fds.test.ts",
     filter:
       "relaunch: the successor does not inherit the predecessor's descriptors (an AppImage keep-alive pipe) — via /bin/bash",
+    os: "linux",
   },
   {
     what:
@@ -4231,6 +4575,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/relaunch-closes-inherited-fds.test.ts",
     filter:
       "relaunch: the successor does not inherit the predecessor's descriptors (an AppImage keep-alive pipe) — via /bin/dash",
+    os: "linux",
   },
   {
     what:
@@ -4315,6 +4660,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/relaunch-closes-inherited-fds.test.ts",
     filter:
       "relaunch: the successor does not inherit the predecessor's descriptors (an AppImage keep-alive pipe) — via /bin/bash",
+    os: "linux",
   },
   {
     what:
@@ -4346,6 +4692,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/relaunch-closes-inherited-fds.test.ts",
     filter:
       "relaunch: bash's -p does not ride an exported SHELLOPTS into the successor",
+    os: "linux",
   },
   {
     what:
@@ -4378,6 +4725,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/relaunch-closes-inherited-fds.test.ts",
     filter:
       "relaunch: the successor gets the environment it would have inherited directly — via /bin/dash",
+    os: "linux",
   },
   {
     what:
@@ -4411,6 +4759,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/lock-prune-untagged-root-gone.test.ts",
     filter:
       "lock prune: an untagged watch file of a dead pid keeps a live root's dir, and goes once the root is gone",
+    os: "linux",
   },
   {
     what:
@@ -4423,6 +4772,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/lock-prune-untagged-root-gone.test.ts",
     filter:
       "lock prune: dropping a temp dir removes its tagged lock dir holding an untagged dead watch file",
+    os: "linux",
   },
   {
     what: "release stamp: the check's own lock-file rewrite voided every stamp",
@@ -4529,6 +4879,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/updates-orphaned-staged-trees.test.ts",
     filter:
       "leftovers: one is moved out of its name before anything is deleted — under a name that is on record",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -4655,9 +5006,8 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "no boot looks for what an unfinished update left — a whole copy of the app per failed swap, a download that was cut off",
     file: "src/server/updates-boot.ts",
-    find:
-      "    sweepLeftovers(\n      deps.dataDir,\n      here ?? deps.artifact ?? artifactPath(),\n      deps.log,\n    );",
-    replace: "    void sweepLeftovers;",
+    find: "    sweepLeftovers(deps.dataDir, install, deps.log, keep);",
+    replace: "    void sweepLeftovers, void keep;",
     test: "tests/updates-orphaned-staged-trees.test.ts",
     filter:
       "leftovers: a boot of a directory install with no update in flight removes them, and says which — and which it left",
@@ -4671,6 +5021,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/updates-first-boot-rollback.test.ts",
     filter:
       "swap failure: the record carries what the failing move said — one line, bounded, still JSON",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -4681,6 +5032,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/updates-first-boot-rollback.test.ts",
     filter:
       "swap failure: the record carries what the failing move said — one line, bounded, still JSON",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -4799,6 +5151,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/updates-apply.test.ts",
     filter:
       "swap: the kept copy is done only when it is whole — before the new build goes in; a short one stops the update",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -4809,6 +5162,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/updates-apply.test.ts",
     filter:
       "swap: the kept copy is done only when it is whole — before the new build goes in; a short one stops the update",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -4849,6 +5203,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/updates-apply.test.ts",
     filter:
       "prune: what it deletes leaves the record in the same step — one it cannot delete stays on it",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -4860,6 +5215,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/updates-apply.test.ts",
     filter:
       "prune: what it deletes leaves the record in the same step — one it cannot delete stays on it",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -5076,6 +5432,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/updates-apply.test.ts",
     filter:
       "directory swap: a helper that cannot be started leaves no script behind",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -5118,6 +5475,7 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/updates-first-boot-rollback.test.ts",
     filter:
       "swap failure: after an exchange, a copy that cannot be set aside is exchanged back ONCE — the record names that move and why",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -5198,11 +5556,21 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "a test that installs programs into the developer's real home passes every release check while the disk fills",
     file: "scripts/check-home-clean.ts",
-    find: "      if (INSTALL_SHAPE.test(n)) out.push(join(dir, n));",
-    replace: "      if (!n) out.push(join(dir, n));",
+    find: "      if (INSTALL_SHAPE.test(n) || isStubProfile(join(dir, n))) {",
+    replace: "      if (!n || isStubProfile(join(dir, n))) {",
     test: "tests/check-home-clean-stores.test.ts",
     filter:
       "check:home-clean: a test-shaped INSTALL in the real home is RED, named — the user's own apps are not",
+  },
+  {
+    what:
+      "a window profile a stand-in Electron left in the real home — nothing in it but aio-main/, under the default appId's name — passes the home-clean gate",
+    file: "scripts/check-home-clean.ts",
+    find: "      if (INSTALL_SHAPE.test(n) || isStubProfile(join(dir, n))) {",
+    replace: "      if (INSTALL_SHAPE.test(n)) {",
+    test: "tests/check-home-clean-shapes.test.ts",
+    filter:
+      "check:home-clean: a profile holding only aio-main/ is a window that never ran — flagged under ANY name, on every OS's profile parent; a real profile is not",
   },
   {
     what:
@@ -5213,6 +5581,851 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/check-home-clean-stores.test.ts",
     filter:
       "check:home-clean: a test-shaped INSTALL in the real home is RED, named — the user's own apps are not",
+  },
+  {
+    what:
+      "an op frame is acknowledged and broadcast before its row is marked settled, so a kill in between leaves an ACKED op the next boot may remove as never accepted",
+    file: "src/sync/server-handler.ts",
+    find: "            } else await settle(op.id, op.cell);",
+    replace: "            } else void settle(op.id, op.cell);",
+    test: "tests/sync-settled-marks.test.ts",
+    filter:
+      "the `op` door marks the row settled BEFORE the ack and the broadcast",
+  },
+  {
+    what:
+      "a reconnect's pending op is broadcast and acknowledged before its row is marked settled, so a kill in between leaves an ACKED op the next boot may remove as never accepted",
+    file: "src/sync/server-handler.ts",
+    find: "                } else await settle(pending.id, pending.cell);",
+    replace: "                } else void settle(pending.id, pending.cell);",
+    test: "tests/sync-settled-marks.test.ts",
+    filter:
+      "the pending-list door marks each row settled BEFORE its broadcast and its ack",
+  },
+  {
+    what:
+      "an acknowledged sync op whose commit line the journal lost is taken for one caught in flight, and a build that refuses it deletes the row every peer still holds",
+    file: "src/server/aio.ts",
+    find: '          if (p === "in-flight" && r.settled !== 1) {',
+    replace: '          if (p === "in-flight") {',
+    test: "tests/sync-op-killed-before-settle.test.ts",
+    filter:
+      "an ACKNOWLEDGED op whose commit line the journal lost is never removed as in flight (dev: the boot refuses)",
+  },
+  {
+    what:
+      "an accepted op whose mark a kill took is removed as never accepted once its commit line is gone from the journal, because the boot that read the commit did not write the mark",
+    file: "src/server/aio-boot.ts",
+    find: "      opts.committed?.has(opKey(last!.id, last!.serverTs ?? NaN))",
+    replace: "      false",
+    test: "tests/sync-settled-marks.test.ts",
+    filter:
+      "an unsettled last row the journal holds the commit of is MARKED by the boot that reads it — folding or not, dev or prod",
+  },
+  {
+    what:
+      "a settled mark that could not be written is never written again, so an acknowledged op stays removable by the next boot for as long as it is its cell's last",
+    file: "src/sync/server-handler.ts",
+    find:
+      "    const run = () => _owedMarks.size === 0 ? fn() : settleOwed(cell).then(fn);",
+    replace: "    const run = fn;",
+    test: "tests/sync-settled-marks.test.ts",
+    filter:
+      "a mark that could not be written is owed, said truthfully, and written at the cell's next op",
+  },
+  {
+    what:
+      "an op whose mark rides a joint write with other cells' is acknowledged before that write commits, so a kill in between leaves an ACKED op the next boot may remove",
+    file: "src/sync/server-handler.ts",
+    find: "      _markQueue.push({ id, done, fail });",
+    replace: "      _markQueue.push({ id, done, fail }), done();",
+    test: "tests/sync-settled-marks.test.ts",
+    filter:
+      "marks of ops in flight on different cells are written together — each ack still after the write that holds its mark",
+  },
+  {
+    what:
+      "on Windows two apps of one appId under two AIO_APPS_DIR roots ask for ONE pipe name, and the second app's window is served the first app's state",
+    file: "src/server/paths.ts",
+    find:
+      // aio-ok: the literal SOURCE line this mutation patches in and out
+      '  return (scoped ? `aio+${scope}+` : "aio-") + key + (kind ? `-${kind}` : "");',
+    // aio-ok: the literal SOURCE line this mutation patches in and out
+    replace: '  return "aio-" + key + (kind ? `-${kind}` : "");',
+    test: "tests/win-pipe-burst.test.ts",
+    filter:
+      "pipe name: unscoped it is what it always was, scoped it carries the lock dir's scope and can be no unscoped app's",
+  },
+  {
+    what:
+      "the incomplete-copy sweep removes the staging directory of an `am backup` / `am restore` that is still RUNNING — the copy it is writing is deleted under it",
+    file: "src/am/am-cmd-data.ts",
+    find: "  if (isLockOwnerAlive(who as { pid: number })) return null;",
+    replace: "  void isLockOwnerAlive;",
+    test: "tests/am-kill-hard.test.ts",
+    filter:
+      "an incomplete copy is swept only when its own mark names a process that is gone",
+  },
+  {
+    what:
+      "`am kill --stale` ends ANY process a loopback listener names — a stranger's pid is accepted without evidence that it holds the port that answered",
+    file: "src/am/am-cmd-process.ts",
+    find: "  if (!/\\bdeno\\b|aio/i.test(cmd) && !ownsPort()) {",
+    replace:
+      "  if (!/\\bdeno\\b|aio/i.test(cmd) && !ownsPort() && Number.isNaN(0)) {",
+    test: "tests/am-kill-stale-compiled.test.ts",
+    filter:
+      "kill --stale: a process under its own name is accepted only when it holds the port that answered",
+  },
+  {
+    what:
+      "a test browser on Windows is launched without --guest — each launch on a fresh profile costs the Windows account one failed logon, and ten lock the account",
+    file: "src/testing/chromium.ts",
+    find: '    ...(os === "windows" ? ["--guest"] : []),',
+    replace: '    ...(os === "windows" ? [] : []),',
+    test: "tests/chromium-bin.test.ts",
+    filter:
+      "launchChromium: Windows launches a guest window; other hosts launch what they always did",
+  },
+  {
+    what:
+      "a Windows creation time is written to a build lock's stamp through a double and comes back rounded — every live holder reads as a recycled pid and a second build takes the held lock",
+    file: "src/server/pid-lock.ts",
+    find: "  return Number(token) > Number.MAX_SAFE_INTEGER",
+    replace: "  return Number(token) > Infinity",
+    test: "tests/pid-lock-start-tag.test.ts",
+    filter:
+      "start tag: a Windows creation time survives the round trip exactly",
+  },
+  {
+    what:
+      "a rounded Windows start stamp an older build wrote is compared as if exact — its live holder is judged dead and its build lock, journals and unpack stage are taken from under it",
+    file: "src/server/pid-lock.ts",
+    find: "    : Number.isSafeInteger(n)",
+    replace: "    : Number.isFinite(n)",
+    test: "tests/pid-lock-start-tag.test.ts",
+    filter:
+      "start tag: an older build's rounded Windows stamp is no stamp — the pid decides",
+  },
+  {
+    what:
+      "Windows refuses the mutex file's name while its last holder's unlink is pending, and the waiter throws instead of waiting — an app's start or stop dies because another one just left the lock",
+    file: "src/server/single-instance-lock.ts",
+    find:
+      "        (_lockDeps.windows() ? isHeldOpenError(e) : removedUnderCreate(e)) &&",
+    replace: "        (_lockDeps.windows() ? false : removedUnderCreate(e)) &&",
+    test: "tests/lock-mutex-same-file.test.ts",
+    filter:
+      "lock mutex: Windows's ACCESS_DENIED on a file being deleted is waited out — to the bound, and only there",
+  },
+  {
+    what:
+      "Windows has no start identity for a process — a lock whose pid the system gave to another program reads as its live owner, and `am stop` / `am kill` end a stranger",
+    file: "src/server/single-instance-lock.ts",
+    find: "      return t[0]! > 0n ? String(t[0]) : null;",
+    replace: "      return t[0]! > 0n ? null : null;",
+    test: "tests/pid-lock-start-tag.test.ts",
+    filter:
+      "start identity: Windows names a process by its creation time — another start under its pid is not the owner",
+    os: "windows",
+  },
+  {
+    what:
+      "a second process hosts a pipe name an app already serves — the app's window and `am` are answered by whoever came second, with the app's state and control door",
+    file: "src/server/win-pipe.ts",
+    find: "          (first ? FILE_FLAG_FIRST_PIPE_INSTANCE : 0),",
+    replace: "          (first ? 0 : 0),",
+    test: "tests/win-pipe-burst.test.ts",
+    filter:
+      "pipe reserve: the name is taken synchronously — a hosted one throws there, and the listener that follows serves on the reserved one",
+    os: "windows",
+  },
+  {
+    what:
+      "the local-peer gate on a named pipe judges a pid the kernel did not give for that client — the window is locked out of its own app, or another process of the same user is let in",
+    file: "src/server/win-pipe.ts",
+    find: "        ? readU32(pidBuf)",
+    replace: "        ? Deno.pid",
+    test: "tests/local-peer-real-pid.test.ts",
+    filter:
+      "local peer: an accepted connection names its client's pid — the kernel's, not this process's",
+    os: "windows",
+  },
+  // ── the local-peer lockdown's one decider (`peerRefusal`) and its gate ────
+  {
+    what:
+      "local-peer lockdown: another user's process on the app's socket is served like the window",
+    file: "src/server/local-peer.ts",
+    find:
+      "    policy.selfUid !== null && peer.uid !== null && peer.uid !== policy.selfUid",
+    replace: "    policy.selfUid === null && peer.uid !== policy.selfUid",
+    test: "tests/local-peer.test.ts",
+    filter: "local-peer: another user is refused, and named as another user",
+  },
+  {
+    what:
+      "local-peer lockdown: any process of the same user is served as the app's window",
+    file: "src/server/local-peer.ts",
+    find: "  if (peer.pid !== policy.allowedPid) {",
+    replace: "  if (peer.pid === null) {",
+    test: "tests/local-peer.test.ts",
+    filter:
+      "local-peer: a different pid is refused, and named as not the window",
+  },
+  {
+    what:
+      "local-peer lockdown: a process that got the exited window's pid is served as the window",
+    file: "src/server/local-peer.ts",
+    find: "    policy.startOf?.(peer.pid) !== policy.allowedStart",
+    replace: "    policy.startOf?.(peer.pid) === undefined",
+    test: "tests/local-peer.test.ts",
+    filter:
+      "local-peer: the window's pid with ANOTHER start time is refused (pid reuse)",
+  },
+  {
+    what:
+      "local-peer lockdown: the gate stays armed after the window exits — its pid is trusted for whoever gets it next",
+    file: "src/server/local-peer.ts",
+    find: "      if (allowedPid !== pid) return;\n      allowedPid = null;",
+    replace: "      if (allowedPid !== pid) return;",
+    test: "tests/local-peer.test.ts",
+    filter:
+      "local-peer gate: unarmed refuses, armed admits the window, disarmed refuses again",
+  },
+  {
+    what:
+      "a start refused by an app of ANOTHER apps root that maps to the same lock dir is told to set the AIO_APPS_DIR it had set, and is not told which root holds it",
+    file: "src/server/aio-run-helpers.ts",
+    find: "  if (elsewhere && o.appsDir && otherRoot) {",
+    replace: "  if (elsewhere && o.appsDir && otherRoot && Number.isNaN(0)) {",
+    test: "tests/lock-dir-scope-of-a-root.test.ts",
+    filter:
+      "lock dir scope: a start refused by ANOTHER apps root's app is told so, by path",
+  },
+  {
+    what:
+      "macOS: a lock dir pruned under the temp file of a lock record is not made again — an app's start fails with 'the lock DIRECTORY is unusable' because a sibling app quit",
+    file: "src/server/single-instance-lock.ts",
+    find: "      holdLockDir(tmp, () => {",
+    replace: "      void (() => {",
+    test: "tests/lock-record-pruned-under-create.test.ts",
+    filter:
+      "lock record, macOS: a dir pruned under the record's temp file is made again — the start takes its lock",
+    os: ["darwin", "linux"],
+  },
+  {
+    what:
+      "`am restart` names its own child as the started app while another launch of the app holds the lock and answers on the port — the pid it reports exits a moment later",
+    file: "src/am/am-cmd-process.ts",
+    find:
+      "      if (holder && !_ofLaunch(holder, pid) && isLockOwnerAlive(holder)) {",
+    replace:
+      "      if (holder && !_ofLaunch(holder, pid) && !isLockOwnerAlive(holder)) {",
+    test: "tests/am-restart-lost-race.test.ts",
+    filter:
+      "am restart: a racing relaunch that won the lock is reported, not 'did not start' (declared port)",
+  },
+  {
+    what:
+      "the strict certificate pin accepts a changed certificate through the validated-host list \u2014 whoever answers in a paired app's place on the network is loaded as the app and handed its key",
+    file: "src/electron/electron-client-script.ts",
+    find: "      if (!got || (_pinDecided.get(host) !== got && !keyless)) {",
+    replace: "      if (false) {",
+    test: "tests/electron-client-generated-eval.test.ts",
+    filter:
+      "aio-client strict pin: the page load is refused even for a host on the validated list, and for a certificate Chromium itself would accept",
+  },
+  {
+    what:
+      "the strict certificate pin only warns on the client's own fetch \u2014 the request line, with the saved token in it, is sent to a host presenting another certificate",
+    file: "src/electron/electron-client-script.ts",
+    find:
+      "          if (__AIO_STRICT_PIN) { refuse(pinRefusal(new Error(note))); req.destroy(); }",
+    replace:
+      "          if (false) { refuse(pinRefusal(new Error(note))); req.destroy(); }",
+    test: "tests/electron-client-generated-eval.test.ts",
+    filter:
+      "aio-client strict pin: a pinned host with ANOTHER certificate gets no request \u2014 not the page fetch, not the icon fetch",
+  },
+  {
+    what:
+      "a paired client (not strict) sends its request, saved key and all, to a certificate its pin does not cover before anything was decided about it",
+    file: "src/electron/electron-client-script.ts",
+    find: "            refuse(e); req.destroy();\n            return;",
+    replace: "            return;",
+    test: "tests/electron-client-generated-eval.test.ts",
+    filter:
+      "aio-client: a changed certificate gets NO request with the key before it is decided",
+  },
+  {
+    what:
+      "a pin proof is accepted for a certificate other than the one the connection presents \u2014 what sits in the middle relays the real server's proof and is handed the key",
+    file: "src/electron/electron-client-script.ts",
+    find: "crypto.timingSafeEqual(a, b) && !!der && pinMatches(j.cert, der);",
+    replace: "crypto.timingSafeEqual(a, b);",
+    test: "tests/electron-client-generated-eval.test.ts",
+    filter:
+      "aio-client: a pairing that HAS proved gives its key to nothing that cannot \u2014 not a silent server, not a relay of the real one's proof",
+  },
+  {
+    what:
+      "a pairing known to prove sends its key to an address that could not \u2014 answering 'no such endpoint' is all it takes to be handed the key",
+    file: "src/electron/electron-client-script.ts",
+    find: "  if (rec && rec.proves) {",
+    replace: "  if (false) {",
+    test: "tests/electron-client-generated-eval.test.ts",
+    filter:
+      "aio-client: a pairing that HAS proved gives its key to nothing that cannot \u2014 not a silent server, not a relay of the real one's proof",
+  },
+  {
+    what:
+      "the pin-proof endpoint answers a caller that does not hold the key \u2014 anyone on the network collects material to guess a weak key against, unmetered",
+    file: "src/server/pin-proof.ts",
+    find: "  if (!_timingSafeEqual(tag, await pinProofTag(key, nonce))) {",
+    replace: "  if (false) {",
+    test: "tests/pin-proof.test.ts",
+    filter:
+      "pin proof: only a caller that holds the key is answered, and the answer names the certificate",
+  },
+  {
+    what:
+      "auth.maxSessions stops evicting \u2014 a script holding one password mints live sessions without bound",
+    file: "src/server/sessions.ts",
+    find: "      if (maxPerUser !== undefined) {",
+    replace: "      if (maxPerUser !== undefined && Number.isNaN(0)) {",
+    test: "tests/auth-max-sessions.test.ts",
+    filter:
+      "auth.maxSessions: 60 logins leave the newest N live, the oldest revoked, another account untouched",
+  },
+  {
+    what:
+      "auth.publicDir admits every path as the built shell \u2014 a file outside the public directory is served with no session",
+    file: "src/server/server-static.ts",
+    find: "  if (BUILT_SHELL_PATHS.has(pathname)) return true;",
+    replace: "  if (pathname) return true;",
+    test: "tests/auth-public-dir.test.ts",
+    filter:
+      "auth: { publicDir } \u2014 only that directory and the shell answer without a session",
+  },
+  {
+    what:
+      "wire.refuseShortCalls refuses nothing \u2014 a WS frame with no argument list still runs the method with undefined and is acked ok",
+    file: "src/server/aio-server.ts",
+    find:
+      "      if (config.wire?.refuseShortCalls === true && !Array.isArray(argv)) {",
+    replace:
+      "      if (config.wire?.refuseShortCalls === true && Array.isArray(argv)) {",
+    test: "tests/short-call-refused-opt-in.test.ts",
+    filter:
+      "wire.refuseShortCalls: a frame with no argument list is refused on WS and UDS, and nothing runs",
+  },
+  {
+    what:
+      "electron.ignoreDebugEnv still reads AIO_CDP \u2014 a variable left over from another app opens a DevTools port on the app that asked for none",
+    file: "src/server/aio-cli.ts",
+    find: '    ignoreEnv ? undefined : Deno.env.get("AIO_CDP"),',
+    replace: '    Deno.env.get("AIO_CDP"),',
+    test: "tests/electron-ignore-debug-env.test.ts",
+    filter:
+      "ignoreDebugEnv: cdpPort does not read AIO_CDP when told to ignore it",
+  },
+  {
+    what:
+      "electron.ignoreDebugEnv still reads AIO_PORT \u2014 an ambient variable adds a loopback TCP listener beside the locked-down local socket",
+    file: "src/server/aio.ts",
+    find:
+      "  const _envPort = carriedPort() ?? (_debugEnv ? undefined : envPort());",
+    replace: "  const _envPort = carriedPort() ?? envPort();",
+    test: "tests/electron-ignore-debug-env.test.ts",
+    filter:
+      "ignoreDebugEnv boot: ambient AIO_CDP / AIO_PORT / AIO_DEFAULT_PORT open nothing and are named once; without the key they do, as before; a typed --cdp still works",
+    os: ["darwin", "linux"],
+  },
+  // ── the renderer: what the extended differentials found ──────────────────
+  {
+    what:
+      "a portal that never mounted is torn down from its target's first node — the page's own content (a site header) is deleted as the portal's",
+    file: "src/air/vdom-remove.ts",
+    find:
+      "      let cursor: Node | null = region ? _advance(anchor, 1) : null;",
+    replace: "      let cursor: Node | null = target.firstChild;",
+    test: "tests/air-portal-teardown-one-decider.test.ts",
+    filter:
+      "portal teardown: a portal that never mounted takes nothing out of its target — retarget",
+  },
+  {
+    what:
+      "a boundary that falls back stops unmounting where its region ran out — a portal behind it keeps its content on the page, twice after the next mount",
+    file: "src/air/vdom-diff-boundary.ts",
+    find:
+      '      if (typeof child === "object") _removeDomCleanup(child, ctx);\n      continue;\n    }\n    cursor = _advance(at, _domNodeCount(child));',
+    replace:
+      "      break;\n    }\n    cursor = _advance(at, _domNodeCount(child));",
+    test: "tests/air-boundary-retire-portal-behind-stop.test.ts",
+    filter:
+      "boundary retire: a portal and a component behind the end of the region are unmounted — no second copy, nothing left after unmount",
+  },
+  {
+    what:
+      "a control with a value and no handler stops keeping what was typed into it — a field an app reads on submit is wiped by every re-render",
+    file: "src/air/vdom-diff.ts",
+    find: "    nv.tag === ov.tag && _keepsTyped(nv) && _keepsTyped(ov) &&",
+    replace: "    nv.tag !== ov.tag && _keepsTyped(nv) && _keepsTyped(ov) &&",
+    test: "tests/air-keeps-typed.test.ts",
+    filter: "typed text is KEPT across a render: bare",
+  },
+  {
+    what:
+      "api gate: an appended optional parameter is read as additive with no reviewed entry — a callback caller (ids.map(f)) is broken in silence",
+    file: "scripts/api-snapshot.ts",
+    find:
+      "      const unreviewed = optional && isParamKey(b.kind, b.members, key) &&",
+    replace:
+      '      const unreviewed = optional && isParamKey("", b.members, key) &&',
+    test: "tests/api-gate-additive-params.test.ts",
+    filter:
+      "appended optional parameter: REFUSED without a reviewed entry, and the line names the list",
+  },
+  {
+    what:
+      "api gate: a reviewed appended-parameter entry for one symbol accepts the same position on every other symbol",
+    file: "scripts/api-snapshot.ts",
+    find:
+      "          r.entry === entry && r.symbol === name && r.param === key &&",
+    replace: "          r.param === key &&",
+    test: "tests/api-gate-additive-params.test.ts",
+    filter:
+      "appended optional parameter: an entry for another symbol, entry, position, or with no reason accepts nothing",
+  },
+  {
+    what:
+      "api gate: an optional parameter made REQUIRED is read as additive — every call that left it out stops compiling",
+    file: "scripts/api-snapshot.ts",
+    find:
+      "      const relaxed = mb.optional && isParamKey(b.kind, b.members, key) &&",
+    replace: "      const relaxed = isParamKey(b.kind, b.members, key) &&",
+    test: "tests/api-gate-additive-params.test.ts",
+    filter:
+      "a parameter that may now be left out is additive; one that must now be passed is BREAKING",
+  },
+  {
+    what:
+      "api gate: a PROPERTY going required to optional is read as additive — a reader relying on it gets undefined",
+    file: "scripts/api-snapshot.ts",
+    find:
+      "      const relaxed = mb.optional && isParamKey(b.kind, b.members, key) &&\n        isParamKey(a.kind, a.members, key);",
+    replace: "      const relaxed = mb.optional;",
+    test: "tests/api-gate-additive-params.test.ts",
+    filter:
+      "a PROPERTY going required → optional stays BREAKING — a reader relies on it being there",
+  },
+  {
+    what:
+      "api gate: an array parameter turning into a union of its element (A[] to A | B) is read as widened — a caller passing an array stops compiling",
+    file: "scripts/api-snapshot.ts",
+    find:
+      // aio-ok: ledger text is SOURCE, matched verbatim — never interpolated
+      "    return unionParts(t.value as DocDeclaration | undefined, `${wrap}[]`);",
+    replace:
+      "    return unionParts(t.value as DocDeclaration | undefined, wrap);",
+    test: "tests/api-gate-additive-params.test.ts",
+    filter:
+      "an array parameter: its ELEMENT may widen; the array turning into a union is BREAKING",
+  },
+  {
+    what:
+      "sync op under FULL: the ack leaves before its `settled` mark is committed — a power cut then leaves an acknowledged op unmarked, and a boot whose method refuses it removes it",
+    file: "src/sync/server-handler.ts",
+    find: "      await markSettled(id).catch(() => settleOp(deps.db, id));",
+    replace: "      void markSettled(id).catch(() => settleOp(deps.db, id));",
+    test: "tests/sync-op-row-synced-before-reduce.test.ts",
+    filter:
+      "sync op under synchronous = FULL: the row's synced commit is on the file when the reduce runs, the mark's when the ack is sent",
+  },
+  {
+    what:
+      "worker ack: a call answered from another call's run no longer collects that run's batches — a failed save is acked ok",
+    file: "src/server/cell-worker-pool.ts",
+    find:
+      "    const own = by === undefined || c.all === true || by.includes(c);",
+    replace: "    const own = by === undefined || by.includes(c);",
+    test: "tests/worker-ack-verdicts.test.ts",
+    filter:
+      "worker ack: a batch that names its calls is theirs alone — and an adopter's, which wrote nothing of its own",
+  },
+  {
+    what:
+      'browser worker: the build stops following `new Worker(new URL("./w.ts", import.meta.url))` — the page names a source file no build serves, and the worker never loads',
+    file: "src/build/client-bundle.ts",
+    find: "    workerPlugin(worker),",
+    replace: "",
+    test: "tests/browser-worker-bundle.test.ts",
+    filter:
+      "build: each worker is one bundle beside app.js — its imports inlined, its own workers followed, the page's URLs pointing at them",
+  },
+  {
+    what:
+      "browser worker: a worker that reaches a server-only module is bundled and shipped — a key in dist/worker-*.js with the build green",
+    file: "src/build/client-bundle.ts",
+    find: '    : workerLeaks(w, opts.root).join(" ");',
+    replace: '    : "";',
+    test: "tests/browser-worker-bundle.test.ts",
+    filter:
+      "build: a worker that reaches a server-only module is not shipped — left as written and said, the build green",
+  },
+  {
+    what:
+      "browser worker: the page is pointed at the bundle of a worker that could not be bundled — a file the build never writes, where the literal was left alone before",
+    file: "src/build/client-bundle.ts",
+    // aio-ok: the literal SOURCE line this mutation patches in and out
+    find: "    return (await probed(name, e)).skipped ? e.spec : `./${name}`;",
+    // aio-ok: the literal SOURCE line this mutation patches in and out
+    replace: "    return (await probed(name, e)), `./${name}`;",
+    test: "tests/browser-worker-bundle.test.ts",
+    filter:
+      "build: a worker that cannot be bundled does not fail the build — its literal is left as written, no file is emitted, and the reason is said",
+  },
+  {
+    what:
+      "browser worker: a prebuilt `.js` named by URL literal is re-bundled — a classic script's globals and its own URL change in an app that ran",
+    file: "src/server/graph-validator.ts",
+    find:
+      "    if (!meta || !/^\\.\\.?\\//.test(spec) || !WORKER_SOURCE_RE.test(spec)) {",
+    replace: "    if (!meta || !/^\\.\\.?\\//.test(spec)) {",
+    test: "tests/browser-worker-bundle.test.ts",
+    filter:
+      "build: a `.js` named by URL literal is the app's own file — the bundle is byte for byte what a build without the worker plugin emits",
+  },
+  {
+    what:
+      "browser worker: a build whose worker lacked a file reads as fresh after the file is created — the worker stays unbundled until something else changes",
+    file: "src/build/build-bundle.ts",
+    find:
+      "      if (await Deno.stat(p).then(() => true, () => false)) return false;",
+    replace: "",
+    test: "tests/browser-worker-bundle.test.ts",
+    filter:
+      "staleness: a worker's bundle missing from dist/ makes the bundle not fresh",
+  },
+  {
+    what:
+      "browser worker in dev: the module that starts a worker that cannot be bundled is pointed at its bundle anyway — a worker that ran from source in dev now throws",
+    file: "src/server/server-static.ts",
+    find: "        if ((await devWorkerProbe(absBaseDir, e)).skipped) {",
+    replace:
+      "        if ((await devWorkerProbe(absBaseDir, e)).skipped && false) {",
+    test: "tests/browser-worker-bundle.test.ts",
+    filter:
+      "dev server: the module that starts a worker asks for it bundled, and gets its bare import inlined",
+  },
+  {
+    what:
+      "browser worker in dev: a worker that cannot be bundled is answered from its probe's bundle — the dev server serves an empty script (or a server-only module) with 200",
+    file: "src/server/graph-validator.ts",
+    find:
+      '  if (probe.skipped) {\n    return { code: "", inputs: [], errors: [probe.skipped.reason] };\n  }',
+    replace: "",
+    test: "tests/browser-worker-bundle.test.ts",
+    filter:
+      "dev server: the module that starts a worker asks for it bundled, and gets its bare import inlined",
+  },
+  {
+    what:
+      "browser worker: dev serves the module that starts a worker without pointing it at the bundled script — a worker with a bare import fails in dev again",
+    file: "src/server/server-static.ts",
+    find:
+      // aio-ok: the literal SOURCE line this mutation patches in and out
+      "        (e) => left.has(`${e.abs}\\0${e.format}`) ? e.spec : workerUrl(e),",
+    replace: "        (e) => e.spec,",
+    test: "tests/browser-worker-bundle.test.ts",
+    filter:
+      "dev server: the module that starts a worker asks for it bundled, and gets its bare import inlined",
+  },
+  {
+    what:
+      "browser worker: the prod server does not serve dist/worker-*.js — every worker 404s with --prod and from a compiled binary",
+    file: "src/server/server-static.ts",
+    find: "        (isWorkerBundle(pathname.slice(1)) &&",
+    replace: '        (pathname === "" &&',
+    test: "tests/browser-worker-bundle.test.ts",
+    filter:
+      "prod server: a worker's bundle is served from dist/ beside app.js — to an anonymous caller of an auth app too",
+  },
+  {
+    what:
+      "browser worker: with auth.publicDir set, the sign-in page's worker bundle answers 401 to the anonymous caller that loads it",
+    file: "src/server/server-static.ts",
+    find: "  if (isWorkerBundle(pathname.slice(1))) return true;",
+    replace: "",
+    test: "tests/browser-worker-bundle.test.ts",
+    filter:
+      "prod server: a worker's bundle is served from dist/ beside app.js — to an anonymous caller of an auth app too",
+  },
+  {
+    what:
+      "browser worker: the dist/ clean before `deno compile` deletes the worker bundles — the binary embeds a page whose workers are gone",
+    file: "src/build/dist-staging.ts",
+    find: "  return DIST_STAGED.includes(name) || isWorkerBundle(name);",
+    replace: "  return DIST_STAGED.includes(name);",
+    test: "tests/browser-worker-bundle.test.ts",
+    filter:
+      "worker bundle names: one spelling, recognised by every staging site, and nothing else is",
+  },
+  {
+    what:
+      "browser worker: the web build leaves the worker bundles out of the site — not copied, not precached, not digest-pinned",
+    file: "src/build/build-web.ts",
+    find: "  await copyWorkerBundles(dist, outDir);",
+    replace: "",
+    test: "tests/browser-worker-bundle.test.ts",
+    filter:
+      "targets: the web folder and the APK's assets carry every worker bundle, and the service worker precaches and pins them",
+  },
+  {
+    what:
+      "browser worker: the APK's assets carry app.js without the worker bundles it starts",
+    file: "src/build/build-android.ts",
+    find:
+      "  await _apkWorkers(assetsDir, await copyWorkerBundles(dist, assetsDir));",
+    replace: "",
+    test: "tests/browser-worker-bundle.test.ts",
+    filter:
+      "targets: the web folder and the APK's assets carry every worker bundle, and the service worker precaches and pins them",
+  },
+  {
+    what:
+      "browser worker: the packaged Electron app's dist/ has no worker bundles — the window's aio:// read of each one is a 404",
+    file: "src/build/build-electron.ts",
+    find: "  await copyWorkerBundles(dist, appDirDist);",
+    replace: "",
+    test: "tests/build-e2e-worker.test.ts",
+    filter:
+      "artifact: browser workers run in an Electron window — dev, and the packaged app (foreign cwd, no source tree)",
+    env: { AIO_BUILD_E2E: "1", AIO_BUILD_ELECTRON: "1" },
+    os: "linux",
+  },
+  {
+    what:
+      "assets mount in a packaged Electron app: with no custom route the handler is skipped and every file of the mount is a 404 in the window",
+    file: "src/server/aio-server.ts",
+    find: "    routeCount: routeCount + mountCount,",
+    replace: "    routeCount,",
+    test: "tests/build-e2e-worker.test.ts",
+    filter:
+      "artifact: browser workers run in an Electron window — dev, and the packaged app (foreign cwd, no source tree)",
+    env: { AIO_BUILD_E2E: "1", AIO_BUILD_ELECTRON: "1" },
+    os: "linux",
+  },
+  {
+    what:
+      "browser worker: a worker bundle deleted from dist/ still reads as a fresh bundle — a headless build embeds the page without its worker",
+    file: "src/build/build-bundle.ts",
+    find:
+      "    for (const w of rec.workers ?? []) await Deno.stat(join(dirname(out), w));",
+    replace: "",
+    test: "tests/browser-worker-bundle.test.ts",
+    filter:
+      "staleness: a worker's bundle missing from dist/ makes the bundle not fresh",
+  },
+  {
+    what:
+      "browser worker: the build bundles the workers and writes none of them to dist/ — the page asks for files that are not there",
+    file: "src/build/build-bundle.ts",
+    find: "      await Deno.writeTextFile(join(dist, w.name), w.code);",
+    replace: "",
+    test: "tests/browser-worker-mount-chromium.test.ts",
+    filter:
+      "browser Worker (chromium): a worker named by URL literal runs in dev and in a build — module, classic, nested, shared, with a bare import — and so does one in a deno.json assets mount",
+  },
+  {
+    what:
+      "assets declared in deno.json only: the server does not read them — 404 in dev and with --prod for a mount the build embeds and packages",
+    file: "src/server/server.ts",
+    find: "  const _served = _servedAssets(config.assets, absBaseDir);",
+    replace: "  const _served = config.assets;",
+    test: "tests/browser-worker-mount-chromium.test.ts",
+    filter:
+      "browser Worker (chromium): a worker named by URL literal runs in dev and in a build — module, classic, nested, shared, with a bare import — and so does one in a deno.json assets mount",
+  },
+  {
+    what:
+      "browser worker in dev: a worker that could not be bundled is fixed by creating the file it lacked, and keeps its warning — the verdict is kept by the page's modules alone",
+    file: "src/server/graph-validator.ts",
+    find: "    ...bundle.workersSkipped.flatMap((w) => w.watch),",
+    replace: "",
+    test: "tests/browser-worker-bundle.test.ts",
+    filter:
+      "dev: a worker that cannot be bundled is a warning in the build's words, never the diagnostic page — kept while its files are as they were, judged again when one changes or the missing one appears",
+  },
+  {
+    what:
+      "browser worker in dev: an edit to a worker's source is not judged — a worker broken while dev runs is found by the build, not by the save",
+    file: "src/server/graph-validator.ts",
+    find: "      last.stamp === await stampOf(last.files)",
+    replace: "      last.stamp !== undefined",
+    test: "tests/browser-worker-bundle.test.ts",
+    filter:
+      "dev: a worker that cannot be bundled is a warning in the build's words, never the diagnostic page — kept while its files are as they were, judged again when one changes or the missing one appears",
+  },
+  {
+    what:
+      "browser worker: a package only a worker imports is missing, and the advice installs from the UI entry — which never reaches it, so the same warning comes back",
+    file: "src/build/client-bundle.ts",
+    find: "    explainMissingPackage(failed, opts.root, w.entryKey);",
+    replace:
+      '    explainMissingPackage(failed, opts.root, opts.uiEntry || "src/App.tsx");',
+    test: "tests/browser-worker-bundle.test.ts",
+    filter:
+      "build: a package only a worker imports is installed from the WORKER, not from the UI entry that never reaches it",
+  },
+  {
+    what:
+      "update patch: bytes a patch made that are NOT the release pass the door a download goes through — a wrong patch is staged as the release",
+    file: "src/server/updates-check.ts",
+    find: "    if (sha !== opts.expectSha256.toLowerCase()) {",
+    replace: "    if (false) {",
+    test: "tests/updates-patch.test.ts",
+    filter:
+      "downloadArtifact: bytes made here that are not the release are refused at the same door as a download",
+  },
+  {
+    what:
+      "update patch: a signed manifest's patch list is used without its own signature — whoever can write to the channel points every install at a host of theirs",
+    file: "src/build/ship.ts",
+    find: "    if (!good) {\n      return none(\"the manifest's patch list",
+    replace: "    if (false) {\n      return none(\"the manifest's patch list",
+    test: "tests/updates-patch.test.ts",
+    filter:
+      "manifest patches: a signed manifest's patches are used only under its key's signature over them AND the release",
+  },
+  {
+    what:
+      "update patch: the patch list's signature does not cover the release it belongs to — a list signed for one release is replayed on another",
+    file: "src/build/ship.ts",
+    find: "    core: manifestCore(m),",
+    replace: '    core: "",',
+    test: "tests/updates-patch.test.ts",
+    filter:
+      "manifest patches: a signed manifest's patches are used only under its key's signature over them AND the release",
+  },
+  {
+    what:
+      "update patch: a patch for another build is applied to this install — every such update decodes garbage, fails its digest and downloads the release anyway, the patch's bytes on top",
+    file: "src/server/updates-patch.ts",
+    find: "    p.from.toLowerCase() === installed.toLowerCase()",
+    replace: "    p.from.length === installed.length",
+    test: "tests/updates-patch.test.ts",
+    filter:
+      "pickPatch: the patch that starts from the installed build, unless it is over half the release",
+  },
+  {
+    what:
+      "baked persist: an APK rebuilt from a source that says `persist: false` stops restoring the state an install already holds — the user's data is gone after an update",
+    file: "src/standalone-air.ts",
+    find: '  if (!off && (!filter || filter === "all")) return {};',
+    replace: "  if (off || !off) return {};",
+    test: "tests/android-bake-run-options.test.ts",
+    filter:
+      "bake: the standalone boot honours the baked options — and never at the price of state an install already holds",
+  },
+  {
+    what:
+      "run-options probe: the build runs the app's entry with every permission — a top-level write, listen or subprocess happens during a build",
+    file: "src/build/android-run-options.ts",
+    find:
+      '      args: ["run", ...PROBE_PERMISSIONS, "--no-check", "--no-lock", "-"],',
+    replace: '      args: ["run", "-A", "--no-check", "--no-lock", "-"],',
+    test: "tests/android-bake-run-options.test.ts",
+    filter:
+      "bake: the probe's process can read and nothing else — an entry with a top-level side effect is not baked, and leaves no mark",
+  },
+  {
+    what:
+      "android client pin: once a host is pinned, ANY certificate it presents is let through — whatever answers at a paired address gets the key",
+    file: "src/build/android-template.ts",
+    find: "if (pin != null && der != null && pinMatches(pin, der)) {",
+    replace: "if (pin != null) {",
+    test: "tests/android-bake-run-options.test.ts",
+    filter:
+      "android client: a self-signed server is let through ONLY on the certificate this client pinned for it",
+  },
+  {
+    what:
+      "the Windows smoke env moves %APPDATA% alone — Electron derives its profile from %USERPROFILE%, so a build --smoke writes it into the developer's own",
+    file: "src/build/smoke.ts",
+    find: "      USERPROFILE: config,",
+    replace: "      XDG_CONFIG_HOME: config,",
+    test: "tests/build-smoke-desktop-hosts.test.ts",
+    filter:
+      "desktop env: the window's profile never lands in the developer's own",
+  },
+  {
+    what:
+      "smoke's process tree takes a process OLDER than the one now holding its parent's pid for its child — a stranger is killed with the app",
+    file: "src/build/smoke.ts",
+    find: "      b >= born.get(parent)! // false for NaN on either side",
+    replace: "      true",
+    test: "tests/build-smoke-desktop-hosts.test.ts",
+    filter:
+      "process tree: a process OLDER than the one holding its parent's pid is not its child",
+  },
+  {
+    what:
+      "smoke's Windows process listing reads a row without a creation time as born at 0 — older than everything, so the age rule lets it through",
+    file: "src/build/smoke.ts",
+    find: "      [Number(p), Number(parent), born ? Number(born) : NaN] as [",
+    replace: "      [Number(p), Number(parent), Number(born ?? 0)] as [",
+    test: "tests/build-smoke-desktop-hosts.test.ts",
+    filter: "process tree: the Windows listing is read with its creation time",
+  },
+  {
+    what:
+      "the Windows smoke picks the installer .exe as the package to start — a smoke run installs the app on the developer's machine",
+    file: "src/build/smoke.ts",
+    find: '  windows: { is: /-win-[^.]+\\.zip$/i, what: "Windows .zip" },',
+    replace:
+      '  windows: { is: /-win-[^.]+\\.(?:exe|zip)$/i, what: "Windows .zip" },',
+    test: "tests/build-smoke-desktop-hosts.test.ts",
+    filter: "smoke plan: each host OS starts its own desktop package",
+  },
+  {
+    what:
+      "an unpacked desktop zip with NO program at its top is accepted — the smoke starts `undefined`",
+    file: "src/build/smoke.ts",
+    find: "    if (hit.length !== 1) {",
+    replace: "    if (hit.length > 1) {",
+    test: "tests/build-smoke-desktop-hosts.test.ts",
+    filter: "Windows package: the one program at the top of the unpacked zip",
+  },
+  {
+    what:
+      "worker ack: a call adopted late forgets the batches that went by before the owner heard of the adoption — a failed save of the run it is answered with is acked ok",
+    file: "src/server/cell-worker-pool.ts",
+    find: "  for (const p of c.rest?.pending ?? []) c.pending.add(p);",
+    replace: "",
+    test: "tests/worker-ack-verdicts.test.ts",
+    filter:
+      "worker ack: a call adopted late owns the batches that went by since it was routed — saving or already failed",
+  },
+  {
+    what:
+      "clean:tmp ignores the owner record — a running bare `deno test` has its temp dir deleted under it once it is ten minutes old",
+    file: "scripts/check-orphans.ts",
+    find: "      if (liveOwned.has(fold(dir))) continue;",
+    replace: "      void liveOwned;",
+    test: "tests/check-orphans-live-owner.test.ts",
+    filter:
+      "clean:tmp: a temp dir whose recorded owner is alive is never swept; once the owner is gone it is, and so is the record",
+  },
+  {
+    what:
+      "a test process makes temp dirs without writing its owner record — nothing on Windows says they are a live run's",
+    file: "src/testing/temp-dir.ts",
+    find: "  if (!registry.has(dir)) recordOwned(dir);",
+    replace: "  void recordOwned;",
+    test: "tests/check-orphans-live-owner.test.ts",
+    filter:
+      "clean:tmp: a temp dir whose recorded owner is alive is never swept; once the owner is gone it is, and so is the record",
   },
 ];
 
@@ -5232,6 +6445,8 @@ const COPY = [
   "mod.ts",
   "deno.json",
   "deno.lock",
+  // src/build-all.ts imports it: the matrix the framework ships.
+  "proof-matrix.json",
   "README.md",
   "CHANGELOG.md",
   "todo.md",
@@ -5260,7 +6475,8 @@ async function sh(
     stdout: "piped",
     stderr: "piped",
   }).spawn();
-  const r = await p.output();
+  running.add(p);
+  const r = await p.output().finally(() => running.delete(p));
   return {
     code: r.code,
     out: new TextDecoder().decode(r.stdout) +
@@ -5268,8 +6484,34 @@ async function sh(
   };
 }
 
+/** The children running now, and every scratch tree made: what a run that
+ *  ends EARLY has to take with it. A copy of the repo per worker stayed in
+ *  the temp dir after each Ctrl-C, `timeout` or failed setup. */
+const running = new Set<Deno.ChildProcess>();
+const scratchDirs: string[] = [];
+
+function dropScratches(): void {
+  for (const p of running) {
+    try {
+      p.kill("SIGKILL");
+    } catch {
+      // aio-ok: it exited between the look and the kill
+    }
+  }
+  for (const dir of scratchDirs.splice(0)) {
+    try {
+      Deno.removeSync(dir, { recursive: true });
+    } catch (e) {
+      if (!(e instanceof Deno.errors.NotFound)) {
+        console.error(`check:mutations: could not remove ${dir}: ${e}`);
+      }
+    }
+  }
+}
+
 async function makeScratch(i: number): Promise<string> {
   const dir = await Deno.makeTempDir({ prefix: `aio-mutate-${i}-` });
+  scratchDirs.push(dir);
   for (const rel of COPY) {
     try {
       await Deno.stat(`${ROOT}${rel}`);
@@ -5279,6 +6521,10 @@ async function makeScratch(i: number): Promise<string> {
     const dest = `${dir}/${rel}`;
     const parent = dest.slice(0, dest.lastIndexOf("/"));
     await Deno.mkdir(parent, { recursive: true });
+    if (Deno.build.os === "windows") {
+      await copy(`${ROOT}${rel}`, dest); // no `cp` there
+      continue;
+    }
     const cp = await sh("cp", ["-a", `${ROOT}${rel}`, dest]);
     if (cp.code !== 0) throw new Error(`cp ${rel} failed:\n${cp.out}`);
   }
@@ -5288,7 +6534,8 @@ async function makeScratch(i: number): Promise<string> {
   for (const nm of ["node_modules", "amui/node_modules"]) {
     try {
       await Deno.stat(`${ROOT}${nm}`);
-      await Deno.symlink(`${ROOT}${nm}`, `${dir}/${nm}`);
+      // A junction on Windows: a symlink there needs a privilege.
+      await Deno.symlink(`${ROOT}${nm}`, `${dir}/${nm}`, { type: "junction" });
     } catch {
       // aio-ok: an absent node_modules is a valid tree; the tests that need it
       // will say so themselves, loudly, in the baseline run.
@@ -5445,6 +6692,23 @@ export function mutationExitCode(
   return results.length === selected && allKilled(killed, selected) ? 0 : 1;
 }
 
+/** The rows this host can check, and how many it cannot: a row not tagged
+ *  for this OS is left out (never run, never counted as guarded); `osOnly`
+ *  keeps just the rows tagged for this one ALONE. Pure. */
+export function rowsForHost(
+  ledger: readonly Mutation[],
+  os: typeof Deno.build.os,
+  osOnly: boolean,
+): { rows: Mutation[]; elsewhere: number } {
+  const here = ledger.filter((m) =>
+    m.os === undefined || rowOses(m).includes(os)
+  );
+  return {
+    rows: osOnly ? here.filter((m) => rowOses(m).join() === os) : here,
+    elsewhere: ledger.length - here.length,
+  };
+}
+
 // ─── main ──────────────────────────────────────────────────────────────────
 
 if (import.meta.main) {
@@ -5460,20 +6724,40 @@ if (import.meta.main) {
   // `--only=a||b` runs the entries matching ANY of the alternatives — one
   // pass for a batch of rows (a hunt round's), not one scratch setup per row.
   const alts = only?.toLowerCase().split("||").filter(Boolean) ?? [];
-  const entries = LEDGER.filter((m) => {
+  const osOnly = args.includes("--os-only");
+  const matched = LEDGER.filter((m) => {
     if (alts.length === 0) return true;
     const hay = (m.what + m.file + m.test).toLowerCase();
     return alts.some((a) => hay.includes(a));
   });
+  const { rows: entries, elsewhere } = rowsForHost(
+    matched,
+    Deno.build.os,
+    osOnly,
+  );
+  const skipped = elsewhere
+    ? `${elsewhere} row(s) are for another OS and were not run on ` +
+      `${Deno.build.os} — run --os-only there`
+    : "";
 
   if (args.includes("--list")) {
     for (const m of LEDGER) {
-      console.log(`${m.what}\n    ${m.file}\n    → ${m.test} :: ${m.filter}\n`);
+      console.log(
+        `${m.what}\n    ${m.file}\n    → ${m.test} :: ${m.filter}` +
+          `${m.os ? `\n    ${rowOses(m).join(", ")} only` : ""}\n`,
+      );
     }
     Deno.exit(0);
   }
   if (entries.length === 0) {
-    console.error(`no ledger entries match --only=${only}`);
+    console.error(
+      osOnly && !elsewhere && !only
+        ? `no ledger row is tagged for ${Deno.build.os}`
+        : `no ledger entries match --only=${only}${
+          osOnly ? " --os-only" : ""
+        }` +
+          (skipped ? ` (${skipped})` : ""),
+    );
     Deno.exit(1);
   }
 
@@ -5483,10 +6767,23 @@ if (import.meta.main) {
       `Each one is broken on purpose; its test must notice.\n`,
   );
 
+  // Ended by a signal, by a throw or at its end: the scratch trees go.
+  for (
+    const sig of (Deno.build.os === "windows"
+      ? ["SIGINT", "SIGBREAK"]
+      : ["SIGINT", "SIGTERM", "SIGHUP"]) as Deno.Signal[]
+  ) {
+    Deno.addSignalListener(sig, () => {
+      dropScratches();
+      Deno.exit(130);
+    });
+  }
+  addEventListener("unload", dropScratches);
   const scratches = await Promise.all(
     Array.from(
       { length: Math.min(jobs, entries.length) },
-      (_, i) => makeScratch(i),
+      (_, i) =>
+        makeScratch(i),
     ),
   );
   const queue = [...entries];
@@ -5510,7 +6807,7 @@ if (import.meta.main) {
       results.push(r);
     }
   }));
-  for (const d of scratches) await Deno.remove(d, { recursive: true });
+  dropScratches();
 
   const survived = results.filter((r) => r.verdict === "survived");
   const invalid = results.filter((r) => r.verdict === "invalid");
@@ -5548,7 +6845,8 @@ if (import.meta.main) {
   const killed = results.filter((r) => r.verdict === "killed").length;
   console.log(
     `\n${killed}/${entries.length} ` +
-      `invariants are genuinely guarded  (${secs}s)`,
+      `invariants are genuinely guarded  (${secs}s)` +
+      (skipped ? `\n${skipped}` : ""),
   );
   Deno.exit(mutationExitCode(results, entries.length));
 }

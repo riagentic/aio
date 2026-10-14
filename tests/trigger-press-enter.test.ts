@@ -13,6 +13,7 @@
 // strict guard is exactly the kind that grows one condition too many, and an
 // <input> that a user can plainly see and type into is the case that must
 // never be caught by it.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { testUI } from "../src/testing/ui-test.ts";
 import { h } from "../src/air/vdom.ts";

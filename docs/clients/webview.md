@@ -199,8 +199,8 @@ things follow:
   without one, the session is new each launch. A guest with **no** `partition`
   that shows another site gets the session `persist:aio-webview`, never your
   app's own: a page in the app's session can read, and POST to, everything the
-  app serves on `aio://app` (measured on Electron 44, from a worker too). This
-  is logged once. So does one that starts on `about:blank` or with no `src`.
+  app serves on `aio://app` (measured on Electron 44, from a worker too). So
+  does one that starts on `about:blank` or with no `src`. This is logged once.
   `partition="persist:"` (nothing after the colon) is not a partition: Electron
   resolves it to the app's own session, so aio treats it as no `partition` at
   all. A guest with no `partition` whose `src` is your app's own origin (or a
@@ -213,7 +213,8 @@ things follow:
 - **An `<iframe>` is not a `<webview>`.** A frame from another site inside your
   app's own window lives in the app's session: under the default policy it
   loads, and a page in it can read, and POST to, what the app serves on
-  `aio://app` (measured on Electron 44). aio logs this once per site
+  `aio://app` (measured on Electron 44). In a window served on `aio://` (not one
+  served over http, as in dev) aio logs this once per site
   (`[aio:electron] an <iframe> from … loaded in the app's own window`). Embed
   another site with `<webview partition="persist:name">`, or refuse foreign
   frames altogether:
@@ -226,8 +227,8 @@ things follow:
   storage, cache and HTTP auth. It resolves `{ ok: true, partition }` and
   rejects with the reason. An empty name and `"persist:"` are refused: both
   resolve to the app's own session, and clearing it would sign your app out.
-  Only the app's own page can call it. Guests that named no partition are in
-  `"persist:aio-webview"`.
+  Only the app's own page can call it. Guests that named no partition and show
+  another site are in `"persist:aio-webview"`.
 - The guest **cannot reach your cells**. It runs in its own process with no
   `nodeIntegration` and no aio client, and with no preload unless you declare
   one ([above](#a-preload-for-the-guest)) — the only channels between you and it
@@ -239,19 +240,24 @@ things follow:
   webpreferences="sandbox=no">` still gets none of
   them, and a `preload` on it runs sandboxed, with no `fs` (measured on Electron
   44).
-- **Injecting a provider into a page** (a wallet connector, say) is
-  `__aioIPC.openWindow(url, { preload })`: a child window, not an inline guest,
-  gated by `childWindows`. The preload must live inside the app directory
-  (symlinks are resolved first), and the sandbox stays on unless you pass
+- **Injecting a provider into a page** (a wallet connector, say) is done by a
+  preload, in a `<webview>` guest ([above](#a-preload-for-the-guest)) or in a
+  child window (`__aioIPC.openWindow(url, { preload })`, gated by
+  `childWindows`). Both take `guestPreload("…")` of a file declared in
+  `build.guestPreloads`; a plain path loads in dev only and is refused in a
+  package. A child window's sandbox stays on unless the app sets
+  `electron: { unsandboxedChildWindows: true }` and the call passes
   `sandbox: false`. A refused request logs which rule it broke. A child window's
   preload has no channel back to the app; one that must answer the app (a
   signing request) belongs in a `<webview>` guest, whose preload reaches the
   host with `ipcRenderer.sendToHost`.
 - **A guest's navigation cannot be refused from the renderer.** Electron
   documents that `event.preventDefault()` on a `<webview>`'s `will-navigate`
-  event has no effect, and aio sets no navigation policy on guests. The page
-  loads; `onNavigate` / `did-navigate` is where you learn of it, so an app that
-  restricts where a guest may go steps back after the fact.
+  event has no effect. aio's one rule is the one above: a guest with no
+  `partition` that shows your app's own page may not leave it. A guest with a
+  `partition` goes where the page takes it; `onNavigate` / `did-navigate` is
+  where you learn of it, so an app that restricts where such a guest may go
+  steps back after the fact.
 - **A guest opens no window.** Without `allowpopups` on the tag, Electron drops
   `window.open` and `target=_blank` (measured on Electron 44). With it, aio
   denies the window and hands an http(s) link to the system browser only after a

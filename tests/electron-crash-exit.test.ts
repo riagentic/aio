@@ -78,9 +78,9 @@ const ROWS: Row[] = [
 for (const row of ROWS) {
   Deno.test({
     name: `electron window ${row.name} → app exit ${row.code}, state saved`,
-    // macOS: left out as it was (the launch is DISPLAY-gated). Windows: a
-    // process cannot die of a signal there, so the SIGTRAP row has no subject.
-    ignore: Deno.build.os === "darwin" ||
+    // Windows: a process cannot die of a signal there, so the SIGTRAP row
+    // has no subject.
+    ignore: Deno.build.os === "darwin" || // unverified on macOS: never run there
       (Deno.build.os === "windows" && row.end.startsWith("kill")), // no signal to die of on Windows
     async fn() {
       const dir = await tempDir("el-crash-");

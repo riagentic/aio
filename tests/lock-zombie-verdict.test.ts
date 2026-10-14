@@ -47,6 +47,7 @@ import { childEnv } from "./e2e-app-harness.ts";
 import { stopChild } from "./stop-child.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { spec } from "./module-spec-helper.ts";
+import { holdUnshared } from "./proc-helper.ts";
 
 const REPO = join(import.meta.dirname!, "..");
 /** The repo as a URL — an import map (and an `import`) takes URLs: a bare
@@ -1283,7 +1284,6 @@ Deno.test("a refused second launch leaves ONE line in the running app's app.log 
 Deno.test({
   name:
     "a lock file that cannot even be read (held open, not shared): the launch says ONCE what it waits for",
-  ignore: Deno.build.os === "windows", // OPEN(windows): no stand-in found — a file held open with FileShare.None is still read by Deno there (only its removal fails), and chmod/icacls right after writeLock report the file NotFound
   async fn() {
     const appId = `unreadable-${crypto.randomUUID().slice(0, 8)}`;
     writeLock({
@@ -1300,7 +1300,11 @@ Deno.test({
       pub: (lvl: string, _c: string, msg: string) =>
         void said.push(`${lvl} ${msg}`),
     } as unknown as LogSink);
-    Deno.chmodSync(path, 0o000);
+    // Unix: no read permission. Windows: another program holds it open
+    // without sharing it — the case the line was written for (os error 32).
+    const WIN = Deno.build.os === "windows";
+    const letGo = WIN ? await holdUnshared(path, "ReadWrite") : undefined;
+    if (!WIN) Deno.chmodSync(path, 0o000);
     const lock = new AppLock(appId);
     try {
       const r = await lock.acquire(4900);
@@ -1311,7 +1315,8 @@ Deno.test({
       assertStringIncludes(waits[0]!, "waiting for it");
     } finally {
       lock.release();
-      Deno.chmodSync(path, 0o600);
+      await letGo?.();
+      if (!WIN) Deno.chmodSync(path, 0o600);
       removeLock(appId);
     }
   },

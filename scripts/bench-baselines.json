@@ -12,14 +12,19 @@
     "boot": 10,
     "dispatch-sync": 0.12,
     "dispatch-async": 0.18,
-    "persist-write": 0.02,
+    "persist-write": 0.014,
     "patch-10k": 6.8,
     "memory-boot-1k": 2.2,
     "proxy-array-10k": 75,
     "overlay-write-loop-10k": 96,
     "ssr-provider-stream-10k": 46,
-    "ssr-provider-ttfb": 1,
-    "ssr-fragment-nest-ratio": 1.0
+    "ssr-provider-ttfb": 0.08,
+    "ssr-fragment-nest-ratio": 1.0,
+    "op-door-normal": 1.1,
+    "op-door-full": 17.8,
+    "row-toggle-10k": 1.33,
+    "update-patch-64m": 145,
+    "update-patch-64m-rss": 160
   },
   "measured-2026-07-31": {
     "proxy-array-10k": 30.2
@@ -47,5 +52,22 @@
     "ssr-provider-stream-10k": 22.6,
     "ssr-provider-ttfb": 0.014,
     "ssr-fragment-nest-ratio": 0.77
+  },
+  "measured-2026-10-08": {
+    "note": "Five runs each (p10 per run), on cores 20-23 of a shared 32-core box at load 12-16, on the tree after v1.0.19-beta (071e78e0c plus the round's uncommitted work, the sync handler's included). persist-write: 0.007 0.007 0.007 0.008 0.007 — floor 0.02 was 3x, now 0.014 = 2x. ssr-provider-ttfb: 0.035 0.038 0.054 0.045 0.039 — floor 1 was 37x the number and gated only the ~1000x buffered-Fragment regression; 0.08 = 2x the median run, and the gate now measures a red metric again (up to twice, best attempt) so 2x of a sub-0.1 ms number no longer needs a quiet machine to hold. NEW metrics op-door-normal / op-door-full: one sync op over a real WebSocket, sent to its sync-ack, one at a time, with `PRAGMA synchronous` NORMAL (the default) and FULL (an fsync per commit: the disk's number as much as the framework's — this box, NVMe). normal: 0.718 0.717 0.484 0.531 0.518; full: 9.79 9.58 9.94 8.43 8.94. Floors 2x the median run. boot: the floor 10 is unchanged and RED on this tree (p10 ~15 ms against 7.4 at 1.0.9) — the regression is real, not noise: every config walk at boot pays ~30 us per missing deno.json candidate for a thrown NotFound, ~190 of them. The floor stays where it was so the gate keeps saying so.",
+    "persist-write": 0.007,
+    "ssr-provider-ttfb": 0.039,
+    "op-door-normal": 0.531,
+    "op-door-full": 9.58
+  },
+  "measured-2026-10-10": {
+    "note": "Five runs each (p10 per run), core 27 of the shared 32-core box, on the tree after v1.0.19-beta plus this round. op-door-full: 8.83 8.90 8.90 9.26 10.40 — an accepted sync op is TWO synced commits under `synchronous = FULL` (its row before the reduce, its `settled` mark before the ack), as in 1.0.19; floor 17.8 = 2x the median run. NEW metric row-toggle-10k: one flag of one row in a 10 000-row array, dispatched through an app with the dev defaults on. 0.637 0.632 0.665 0.674 0.679; it was 4.1 before the state-diff line stopped serializing the whole changed value to print 80 characters of it (50 000 rows: 19.4 -> 3.0 ms). Floor 1.33 = 2x the median run. What is left is the state core (0.4 ms at 10k, 2.0 at 50k), four fifths of it Immer: `Array.prototype.slice` on a FROZEN array is V8's slow path (1.0 ms for 50 000 elements where a spread takes 14 us) and finalize visits every element; immer 11.1.21 measured slower on this shape (2.4 ms against 1.6).",
+    "op-door-full": 8.9,
+    "row-toggle-10k": 0.665
+  },
+  "measured-2026-10-10-update-patch": {
+    "note": "NEW metrics, core 22 of the shared box: a zstd update patch applied to a 64 MiB installed file (updates-patch.ts — read the file, decode against it; the whole-release download it replaces is 64 MiB of network). update-patch-64m p10 over four runs: 64.4 66.0 78.9 95.4 ms; floor 145 = 2x the median run. update-patch-64m-rss is the growth of a fresh process around one apply: 131.4 MiB in every run, which is the one buffer of install + release (128 MiB) — it does not vary, so its floor is NOT 2x: 160 is below what one more copy of either file would cost (195). On two real `deno compile` binaries a commit apart (104.6 MB each, patch 10.7 KB by `zstd -19 --patch-from`): 0.5 s to apply; making the patch took the zstd tool 27 s and 482 MB.",
+    "update-patch-64m": 72,
+    "update-patch-64m-rss": 131.4
   }
 }

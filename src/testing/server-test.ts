@@ -18,6 +18,7 @@ import "./harness-flags.ts";
 
 export { findChromium };
 import type { AioApp, CellsConfig } from "../server/aio-types.ts";
+import { _resetAuthUi } from "../browser/browser-auth-ui.ts";
 
 /** A booted test app — its URL, the app handle, and fetch/state/close helpers.
  *  `await using` disposes it (closes the app + removes the temp data dir). */
@@ -33,6 +34,91 @@ export interface TestServer<S = unknown> {
   state(): S;
   close(): Promise<void>;
   [Symbol.asyncDispose](): Promise<void>;
+}
+
+/** `globalThis.fetch` as ONE browser page on a test server makes it: a
+ *  relative URL resolves against the server, and the cookies the server sets
+ *  are kept and sent back to it (and to nobody else).
+ *
+ *  It is what joins a UI test to a real server. `testUI` mounts a component
+ *  with no server behind it, so a `<SignIn/>` had nobody to sign in to: the
+ *  form was tested against canned answers and the endpoints with hand-made
+ *  requests, and nothing ran the one against the other. Install this BEFORE
+ *  the mount and the form's own requests reach the real endpoints, the
+ *  session cookie they answer with is carried, and the next mount — a
+ *  reload — is signed in by it:
+ *
+ *  ```ts
+ *  await using srv = await testServer({ cells: [shop], auth: true });
+ *  using page = testPageFetch(srv);
+ *  await using ui = await testUI(App);
+ *  ui.SignIn.UserIdInput.type("alice"); // …and submit
+ *  ```
+ *
+ *  A page starts with no identity resolved (`useUser()` asks `/me`), and
+ *  `reload()` returns it there with its cookies kept. Disposing forgets the
+ *  identity too and restores the `fetch` it replaced; while it is installed
+ *  `srv.fetch` goes through it too (it is this process's `fetch`). The app's
+ *  STATE still comes from `testUI`'s in-process cells, not from this
+ *  server's socket. */
+export interface TestPageFetch extends Disposable {
+  /** The page's `fetch` (also installed as `globalThis.fetch`). */
+  fetch: typeof fetch;
+  /** The cookies the server has set and not cleared, by name. */
+  cookies: ReadonlyMap<string, string>;
+  /** What a reload does to the page's identity: the user it had resolved is
+   *  forgotten, so the next mount asks the server again — with the cookies. */
+  reload(): void;
+}
+
+/** Make this process's `fetch` a page's of `server`, until disposed — see
+ *  {@linkcode TestPageFetch}. */
+export function testPageFetch(server: { url: string }): TestPageFetch {
+  const origin = new URL(server.url).origin;
+  const cookies = new Map<string, string>();
+  const real = globalThis.fetch;
+  const page = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === "string" && !URL.canParse(input)
+      ? new URL(input, origin)
+      : input;
+    const target = new URL(url instanceof Request ? url.url : url);
+    // A cookie is this origin's: a request anywhere else carries none, and
+    // an answer from anywhere else sets none.
+    if (target.origin !== origin) return await real(url, init);
+    const headers = new Headers(
+      init?.headers ?? (url instanceof Request ? url.headers : undefined),
+    );
+    if (cookies.size > 0 && !headers.has("cookie")) {
+      headers.set(
+        "cookie",
+        [...cookies].map(([k, v]) => `${k}=${v}`).join("; "),
+      );
+    }
+    const res = await real(url, { ...init, headers });
+    for (const line of res.headers.getSetCookie()) {
+      const [pair, ...attrs] = line.split(";");
+      const eq = pair!.indexOf("=");
+      const name = pair!.slice(0, eq).trim(), value = pair!.slice(eq + 1);
+      // Cleared as a browser clears it: no value, or no time left to live.
+      if (value === "" || attrs.some((a) => /^\s*max-age=0\s*$/i.test(a))) {
+        cookies.delete(name);
+      } else cookies.set(name, value);
+    }
+    return res;
+  }) as typeof fetch;
+  globalThis.fetch = page;
+  _resetAuthUi();
+  return {
+    fetch: page,
+    cookies,
+    reload: _resetAuthUi,
+    [Symbol.dispose]() {
+      // The next test must not inherit this page's user.
+      _resetAuthUi();
+      // Only undo OUR replacement — whoever replaced it since keeps theirs.
+      if (globalThis.fetch === page) globalThis.fetch = real;
+    },
+  };
 }
 
 /** How `worker: true` cells run under a test server.

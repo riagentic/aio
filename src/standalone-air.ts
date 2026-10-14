@@ -1,6 +1,7 @@
 // Standalone AIR runtime — signal-based client-side dispatch loop for Android WebView builds
 // Replaces standalone.ts when building with --android + renderer: "aio". Same API, no React.
 import { applyCellDefaults, applyLocalFirst } from "./state/cell-defaults.ts";
+import { applyCellFieldFilter } from "./state/state-filter.ts";
 import { type Draft, produce } from "immer";
 import { msg } from "./state/msg.ts";
 import type { Msg } from "./state/cell-types.ts";
@@ -228,7 +229,7 @@ export { integer, pk, real, ref, table, text } from "./state/table-schema.ts";
 export { Show } from "./air/show.ts";
 export { on, watch } from "./state/watch.ts";
 export type { WatchOptions } from "./state/watch.ts";
-export { useFieldArray, useForm } from "./air/form.ts";
+export { bindInput, useFieldArray, useForm } from "./air/form.ts";
 export type {
   FieldArrayState,
   FieldState,
@@ -2479,8 +2480,111 @@ export function ensureConnected(): void {
   const id = (globalThis as { __aioConfig?: { appId?: unknown } })
     .__aioConfig?.appId;
   if (cells.length) {
-    bootStandalone(cells, typeof id === "string" && id ? { appId: id } : {});
+    const appId = typeof id === "string" && id ? { appId: id } : {};
+    const baked = _bakedRunOptions() ?? {};
+    bootStandalone(cells, {
+      ...baked,
+      ..._keepStoredState(
+        baked,
+        cells,
+        () =>
+          _pickPersistStore(
+            globalThis as unknown as Parameters<typeof _pickPersistStore>[0],
+          ).restore(`aio:${appId.appId ?? "app"}`),
+      ),
+      ...appId,
+    });
   }
+}
+
+/** A baked option that NARROWS what is saved (`persist: false`,
+ *  `cellDefaults.persist`) meets an install that already holds state: every
+ *  APK and web build before 1.0.20 saved every cell whatever the entry said
+ *  (the options never reached it), so the same source, rebuilt, would stop
+ *  restoring a user's data — or scrub it from the store at boot. The option
+ *  is the app's own and is honoured, but only where it discards nothing: an
+ *  install whose store holds nothing it would drop (a new one — and it then
+ *  never writes such a thing, so the answer is the same on every launch).
+ *  Where it would, saving stays as it was, said once. Returns the overrides
+ *  for the boot; marks a kept cell `persist: "all"` (what `cellDefaults`
+ *  fills is only what a cell left undecided). */
+export function _keepStoredState(
+  baked: {
+    persist?: boolean | string;
+    cellDefaults?: import("./state/cell-defaults.ts").CellDefaults;
+  },
+  cells: readonly CellDef[],
+  restore: () => ReturnType<_PersistStore["restore"]>,
+): { persist?: undefined } {
+  const off = baked.persist === false || baked.persist === "none";
+  const filter = baked.cellDefaults?.persist;
+  if (!off && (!filter || filter === "all")) return {};
+  let doc: Record<string, unknown> | null = null;
+  try {
+    const r = restore();
+    // Unreadable: something IS there — the restore says what, and writes
+    // nothing over it. No stored text, or text that is no document: nothing
+    // to keep (the restore sets a corrupt one aside).
+    if (!("raw" in r)) return off ? { persist: undefined } : {};
+    const d = r.raw === null ? null : JSON.parse(r.raw);
+    if (d && typeof d === "object" && !Array.isArray(d)) doc = d;
+  } catch {
+    // aio-ok: an unparsable value holds no state this could keep; the boot's own restore reports and sets it aside.
+  }
+  if (!doc) return {};
+  const said = (what: string) =>
+    console.warn(
+      `[aio] \u26a0 persist: ${what} — but this install already holds saved ` +
+        `state from a build that saved everything. It is kept, and still ` +
+        `saved. To drop it for good, set \`persist\` on the cell itself.`,
+    );
+  if (off) said(`the app declares persist: ${JSON.stringify(baked.persist)}`);
+  if (filter && filter !== "all") {
+    const kept: string[] = [];
+    for (const c of cells) {
+      const slice = doc[c.__aio.id];
+      if (
+        c.__aio.persist || c.__aio.scope === "client" || !slice ||
+        typeof slice !== "object"
+      ) continue;
+      const after = applyCellFieldFilter(
+        filter,
+        slice as Record<string, unknown>,
+      );
+      if (!after || Object.keys(slice).some((k) => !Object.hasOwn(after, k))) {
+        c.__aio.persist = "all";
+        kept.push(c.__aio.id);
+      }
+    }
+    if (kept.length) {
+      said(
+        `cellDefaults.persist would drop stored fields of ${kept.join(", ")}`,
+      );
+    }
+  }
+  return off ? { persist: undefined } : {};
+}
+
+/** The `aio.run()` options the BUILD read from the app's entry and wrote into
+ *  the packaged shell (`__aioRunOptions`; build/android-run-options.ts) — the
+ *  entry itself never runs in an APK or a web build. Picked by name: nothing
+ *  else in that object reaches the boot (never `appId`/`persistKey` — the
+ *  store key of a shipped app must not move). */
+function _bakedRunOptions(): Parameters<typeof bootStandalone>[1] {
+  const o = (globalThis as { __aioRunOptions?: StandaloneRunConfig })
+    .__aioRunOptions;
+  if (!o || typeof o !== "object") return {};
+  return {
+    persist: o.persist,
+    persistDebounceMs: typeof o.persistDebounceMs === "number"
+      ? Math.min(o.persistDebounceMs, STORE_DEBOUNCE_MS)
+      : undefined,
+    circuitBreaker: o.circuitBreaker,
+    refusalsReject: o.refusalsReject,
+    cellDefaults: o.cellDefaults,
+    perfBudget: o.perfBudget as PerfBudget | undefined,
+    effectTimeoutMs: o.effectTimeoutMs as number | undefined,
+  };
 }
 // The router's "boot before the first route renders" step, on this runtime.
 // Installed at load AND on every run (below): a process that has loaded the
@@ -2556,10 +2660,9 @@ type StandaloneRunConfig = {
  *  in its own APK, which is the WYSIDIWYSIP break the shells exist to prevent.
  *
  *  Runs only when `aio.run()` runs in the page — the in-process harnesses do.
- *  A packaged APK's bundle does NOT: its entry imports App.tsx alone
- *  (`makeEntryCode`), so this never fires on a phone today; the android build
- *  says so by name (build/android-run-options.ts; todo.md "APK: bake app.ts
- *  config into the bundle").
+ *  A packaged APK's bundle does NOT (its entry imports App.tsx alone,
+ *  `makeEntryCode`): there the BUILD reads the entry's `ui` and writes the
+ *  shell with it (build/android-run-options.ts), so this has nothing to do.
  *
  *  Observe-only and defensive: no document (a test, a worker) means nothing to
  *  do, and a shell without the deferred sheet is simply left alone. */

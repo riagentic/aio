@@ -82,17 +82,33 @@ export function handleSfnResult(data: unknown): boolean {
   _pending.delete(r.cid);
   clearTimeout(p.timer);
   if (r.ok) p.resolve(r.value);
-  else {
-    // `[server] ` says WHERE it failed, which a bare message cannot — but it
-    // is the only prefix now (the send side stopped stringifying with
-    // `String(e)`, which prepended a second "Error: " that the client then
-    // wrapped into a third). The classification travels beside the text, not
-    // inside it: `wireError` puts the server's `code` on the rejection.
-    const e = wireError(r, "serverFn failed");
-    e.message = `[server] ${e.message}`;
-    p.reject(e);
-  }
+  else p.reject(sfnError(r));
   return true;
+}
+
+/** The rejection for a call whose arguments cannot be encoded at all.
+ *  @internal */
+export function sfnArgsDropped(what: string): Error {
+  return new Error(
+    `${what} was called with an argument JSON cannot carry ` +
+      `(BigInt or a circular structure) — nothing was sent. Pass ` +
+      `JSON-safe data across the wire.`,
+  );
+}
+
+/** The Error a failed `sfnr` rejects its caller with — ONE reader, for this
+ *  module and for the harness that stands in for it (`testUI`).
+ *
+ *  `[server] ` says WHERE it failed, which a bare message cannot — but it is
+ *  the only prefix now (the send side stopped stringifying with `String(e)`,
+ *  which prepended a second "Error: " that the client then wrapped into a
+ *  third). The classification travels beside the text, not inside it:
+ *  `wireError` puts the server's `code` on the rejection.
+ *  @internal */
+export function sfnError(r: { error?: string; code?: string }): Error {
+  const e = wireError(r, "serverFn failed");
+  e.message = `[server] ${e.message}`;
+  return e;
 }
 
 // deno-lint-ignore no-explicit-any
@@ -136,15 +152,7 @@ export function serverFn<T extends FnMap>(ns: string): Remote<T> {
           // nothing.
           const what = `serverFn("${ns}").${prop}`;
           const { args: safeArgs, dropped } = serializeArgs(args, what);
-          if (dropped) {
-            return reject(
-              new Error(
-                `${what} was called with an argument JSON cannot carry ` +
-                  `(BigInt or a circular structure) — nothing was sent. Pass ` +
-                  `JSON-safe data across the wire.`,
-              ),
-            );
-          }
+          if (dropped) return reject(sfnArgsDropped(what));
           // OFFLINE IS AN ANSWER, NOT A WAIT. There is no offline queue for
           // serverFn calls: the transport's raw send drops the frame when the
           // socket is not open, so a call made while disconnected used to sit

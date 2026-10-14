@@ -6,8 +6,14 @@
 // the refusals, which are the half that has to be right.
 import { EXE, programBytes, writeProgram } from "./fake-program-helper.ts";
 import { zipTree } from "./zip-helper.ts";
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "@std/assert";
 import { basename, join } from "@std/path";
+import { existsSync } from "node:fs";
 import {
   buildReleaseManifest,
   buildShipManifest,
@@ -28,8 +34,17 @@ import {
   startUpdates,
 } from "../src/server/updates-boot.ts";
 import type { UpdatesSlot } from "../src/state/updates-cell.ts";
-import { readTrust, writeTrust } from "../src/server/updates-check.ts";
-import { identity, readOwned } from "../src/server/updates-owned.ts";
+import {
+  fileSha256,
+  readTrust,
+  writeTrust,
+} from "../src/server/updates-check.ts";
+import {
+  forget,
+  identity,
+  isOwn,
+  readOwned,
+} from "../src/server/updates-owned.ts";
 import type { Log } from "../src/diagnostics/logger.ts";
 
 const platform = { os: Deno.build.os, arch: Deno.build.arch };
@@ -668,17 +683,16 @@ Deno.test("updates e2e: a .zip release is verified, unpacked, and handed to the 
     await rt.apply();
     await settle(rt);
 
-    // Unpacked beside the install, contents intact, archive cleaned up.
+    // Unpacked beside the install, contents intact. The archive stays, on
+    // the record, until the update is confirmed or given up (a swap that
+    // could not be made is tried again without downloading it again).
     assertEquals(swaps.length, 1);
     assertEquals(swaps[0]!.current, install);
     assertEquals(
       await Deno.readTextFile(join(swaps[0]!.staged, "VERSION")),
       "2.0.0",
     );
-    assertEquals(
-      await Deno.stat(`${install}.zip-2.0.0`).catch(() => null),
-      null,
-    );
+    assert(isOwn(r.dataDir, `${install}.zip-2.0.0`), "the archive is kept");
 
     // The rollback marker is handed to the swapper, which writes it BEFORE it
     // moves anything — or a build that cannot come up would have nothing
@@ -697,6 +711,111 @@ Deno.test("updates e2e: a .zip release is verified, unpacked, and handed to the 
     assertEquals(swaps[0]!.pending?.releasedAt, manifest.releasedAt);
     // The install itself is untouched by this process — the shell does that.
     assertEquals(await Deno.readTextFile(join(install, "VERSION")), "1.0.0");
+  } finally {
+    await Deno.remove(r.root, { recursive: true });
+  }
+});
+
+// A swap that could not be made (the install folder was held) is tried again
+// up to MAX_FAILED_SWAPS times, and every try downloaded the whole release
+// again. The verified archive is kept on the updater's record instead, and a
+// later try uses it — only while the record proves it the updater's and its
+// bytes still match the signed manifest.
+Deno.test("updates e2e: a second try of a .zip release uses the archive kept from the first — verified again, never trusted", async () => {
+  const r = await rig();
+  try {
+    await publishZip(r, { version: "2.0.0", channel: "prod" });
+    const install = join(r.root, "MyApp");
+    await Deno.mkdir(join(install, "electron"), { recursive: true });
+    const published = join(r.releases, "prod", "app-2.0.0.zip");
+    const kept = `${install}.zip-2.0.0`;
+    const said: string[] = [];
+    const warned: string[] = [];
+    const swaps: string[] = [];
+    const attempt = async () => {
+      const rt = createUpdatesRuntime({
+        config: resolveUpdates({
+          source: `file://${r.releases}`,
+          channel: "prod",
+        }),
+        dataDir: r.dataDir,
+        appVersion: "1.0.0",
+        local: { schema: 1, cells: { todos: 1 } },
+        exposed: false,
+        log: {
+          ...silentLog,
+          info: (...a: unknown[]) => void said.push(a.join(" ")),
+          warn: (...a: unknown[]) => void warned.push(a.join(" ")),
+        } as Log,
+        argv: [],
+        artifact: install,
+        canInstall: ["electron-zip"],
+        exit: () => {},
+        // The helper's move fails after this process: nothing is swapped.
+        swapDirectory: ({ current, staged }) => {
+          swaps.push(staged);
+          return { previous: `${current}.old-1.0.0` };
+        },
+        shutdown: () => Promise.resolve(),
+      });
+      assertEquals((await rt.check({ dismissed: null })).kind, "offer");
+      await rt.apply();
+      await settle(rt);
+    };
+    const downloads = () => said.filter((m) => m.includes("downloading app"));
+    const reused = () => said.filter((m) => m.includes("not downloaded again"));
+
+    await attempt();
+    assertEquals([downloads().length, reused().length], [1, 0]);
+
+    // The release cannot be downloaded any more: only the kept archive can
+    // have made the second try.
+    await Deno.rename(published, `${published}.away`);
+    await attempt();
+    assertEquals([downloads().length, reused().length], [1, 1]);
+    assertEquals(swaps.length, 2);
+    assertEquals(
+      await Deno.readTextFile(join(swaps[1]!, "VERSION")),
+      "2.0.0",
+    );
+
+    // The same version published again with other bytes: the kept archive is
+    // the updater's, and is not this release — removed, and downloaded.
+    await Deno.writeTextFile(join(r.root, "stage-2.0.0", "REBUILT"), "1");
+    const again = await publishZip(r, { version: "2.0.0", channel: "prod" });
+    await attempt();
+    assertEquals([downloads().length, reused().length], [2, 1]);
+    assertEquals(await fileSha256(kept), again.sha256);
+    assert(existsSync(join(swaps[2]!, "REBUILT")));
+
+    // The kept archive damaged where it lies (the same file, other bytes of
+    // the same size): not used, and not in the way of its release for good —
+    // moved aside with every byte, said, and the release downloaded again.
+    const forged = await Deno.readFile(kept);
+    forged[forged.length - 1]! ^= 1;
+    await Deno.writeFile(kept, forged);
+    await attempt();
+    assertEquals([downloads().length, reused().length], [3, 1]);
+    assertEquals(swaps.length, 4);
+    assertEquals(await Deno.readFile(`${kept}~damaged`), forged);
+    assertEquals(await fileSha256(kept), again.sha256);
+    const moved = () => warned.filter((w) => w.includes("no longer holds"));
+    assertEquals(moved().length, 1, warned.join("\n"));
+    assertStringIncludes(moved()[0]!, `moved to ${kept}~damaged`);
+
+    // Somebody's file under the kept name (another object): never moved,
+    // never used — it refuses the update until it is moved away.
+    // (Not on NTFS: a file made under a name deleted a moment ago inherits
+    // its creation time there, so the record cannot tell the two apart by
+    // identity — which is why the changed one is moved and never removed.)
+    if (Deno.build.os !== "windows") {
+      await Deno.remove(kept);
+      await Deno.writeFile(kept, forged);
+      await assertRejects(attempt, Error, "is in the way of the update");
+      assertEquals([downloads().length, reused().length], [3, 1]);
+      assertEquals(swaps.length, 4);
+      assertEquals(moved().length, 1);
+    }
   } finally {
     await Deno.remove(r.root, { recursive: true });
   }
@@ -974,10 +1093,9 @@ Deno.test(
       assertEquals(s.launcher, "/usr/bin/open");
       assertEquals(s.args, ["-n", app, "--args", "--client=electron"]);
       assertEquals(s.pending?.to, "2.0.0");
-      assertEquals(
-        await Deno.stat(`${app}.zip-2.0.0`).catch(() => null),
-        null,
-        "the downloaded tarball is cleaned up",
+      assert(
+        isOwn(r.dataDir, `${app}.zip-2.0.0`),
+        "the downloaded tarball is kept, on the record, for a second try",
       );
     } finally {
       await Deno.remove(r.root, { recursive: true });

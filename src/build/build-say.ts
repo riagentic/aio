@@ -35,6 +35,37 @@ export function warn(headline: string, body?: string, fix?: string): void {
   console.warn(block("warn", headline, body, fix, { indent: "" }));
 }
 
+/** Set by the fleet to a file each target's build appends its
+ *  {@link summaryNote}s to, one per line. */
+export const BUILD_NOTES_ENV = "AIO_BUILD_NOTES";
+
+/** An advisory that must not be lost in the log: warned where it happens, and
+ *  — under the fleet — repeated in the closing summary. */
+export function summaryNote(msg: string): void {
+  console.warn(`${mark("warn")} ${msg}`);
+  const file = Deno.env.get(BUILD_NOTES_ENV);
+  if (!file) return;
+  try {
+    Deno.writeTextFileSync(file, msg.replaceAll("\n", " ") + "\n", {
+      append: true,
+    });
+  } catch (e) {
+    console.warn(`${mark("warn")} could not record that for the summary: ${e}`);
+  }
+}
+
+/** The notes of {@link summaryNote} in `file`, each once. */
+export function readSummaryNotes(file: string): string[] {
+  try {
+    return [...new Set(Deno.readTextFileSync(file).split("\n"))].filter(
+      Boolean,
+    );
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) return [];
+    throw e;
+  }
+}
+
 /** A refusal. stderr. Returns the rendered text so a caller that must ALSO
  *  throw carries exactly the words it printed, never a second wording. */
 export function bad(headline: string, body?: string, fix?: string): string {

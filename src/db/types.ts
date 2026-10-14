@@ -52,8 +52,7 @@ export interface DB {
    *  Safe on a live database — SQLite takes the copy at a single point in time,
    *  so it is never half-written, and compacts it on the way out. This is the
    *  durable half of profile integrity: a rolling snapshot beside the app's
-   *  data gives a corrupt file somewhere to come back to. `path` must not
-   *  already exist.
+   *  data gives a corrupt file somewhere to come back to.
    *
    *  Optional so a custom `DB` implementation (or a test fake) stays valid
    *  without it — aio's own `createDB` always provides it. */

@@ -22,7 +22,7 @@ const POSIX = Deno.build.os !== "windows";
 
 Deno.test({
   name: "unix: listen → connect → bytes both ways → EOF on close",
-  ignore: !POSIX,
+  ignore: !POSIX, // a unix socket: Deno has none on Windows (`op_net_listen_unix`) — the pipe branch of this seam is tests/win-pipe-*.test.ts
   async fn() {
     const dir = await Deno.makeTempDir({ prefix: "aio-ll-" });
     const path = join(dir, "s.sock");
@@ -64,7 +64,7 @@ Deno.test({
 
 Deno.test({
   name: "unix: listener.close() stops accepting; open conns unaffected",
-  ignore: !POSIX,
+  ignore: !POSIX, // a unix socket: Deno has none on Windows (`op_net_listen_unix`) — the pipe branch of this seam is tests/win-pipe-*.test.ts
   async fn() {
     const dir = await Deno.makeTempDir({ prefix: "aio-ll-" });
     const path = join(dir, "s.sock");
@@ -93,17 +93,24 @@ Deno.test({
 
 Deno.test({
   name: "connect to nothing: NotFound, as the unix primitive reports it",
-  ignore: !POSIX,
   async fn() {
+    // A pipe nobody hosts says the same on Windows (`connectPipe`).
     await assertRejects(
-      () => connectLocal("/nonexistent/aio/x.sock"),
+      () =>
+        connectLocal(
+          POSIX
+            ? "/nonexistent/aio/x.sock"
+            : `\\\\.\\pipe\\aio-nobody-${crypto.randomUUID()}`,
+        ),
       Deno.errors.NotFound,
     );
   },
 });
 
-Deno.test("a pipe path on a non-windows OS is refused by name, not tried", async () => {
-  if (Deno.build.os === "windows") return;
+Deno.test({
+  name: "a pipe path on a non-windows OS is refused by name, not tried",
+  ignore: Deno.build.os === "windows", // the refusal is the non-Windows branch: on Windows a pipe path is the endpoint
+}, async () => {
   const p = "\\\\.\\pipe\\aio-x";
   assert(isPipePath(p));
   assertThrows(() => listenLocal(p), Error, "named-pipe path");

@@ -70,7 +70,7 @@ import {
 import { _zipFallbackSpec, electronStagingDir } from "./build-electron.ts";
 import { runDenoCompile } from "./build-compile.ts";
 import { ensureHeadroom } from "./freeze-guard.ts";
-import { artifactMode, formatMb } from "./build-helpers.ts";
+import { artifactMode, formatMb, WINDOWS_ICON_FILE } from "./build-helpers.ts";
 import {
   ELECTRON_VERSION_FILE,
   electronSlug,
@@ -78,6 +78,8 @@ import {
   ensureElectronZip,
 } from "../electron/electron-runtime-fetch.ts";
 import { HEY, NO, OK } from "../diagnostics/fmt.ts";
+import { peIconMismatch, peWithIcon } from "./pe-icon.ts";
+import { summaryNote } from "./build-say.ts";
 
 export {
   parseSfxTrailer,
@@ -94,7 +96,7 @@ export {
  *  built from `windows-sfx-stub/` by the command in its README — update this
  *  line with every rebuild. */
 export const SFX_STUB_SHA256 =
-  "f685aac7226c59da6500f184899fcdcc95c5399745f28ebe41a62792a31c9d65";
+  "91fb1d0b7368cb70f5e3b9172678f38d1e540ab3bb5f33803517e07d4bc4a2e2";
 
 /** SHA-256 over the stub's SOURCES (`src/*.rs`, `Cargo.toml`, `Cargo.lock`) as
  *  they were when {@link SFX_STUB_SHA256} was built. Rebuilding needs Rust,
@@ -103,7 +105,7 @@ export const SFX_STUB_SHA256 =
  *  (`tests/build-windows-sfx-stub.test.ts` prints the value to put here). */
 // aio-ok: a test-only seam — the pin a gate without Rust compares the sources with.
 export const SFX_STUB_SOURCE_SHA256 =
-  "2928a44f50f85ba9fde382595e415ca34b3f15a2a4b83efb476fc5f8b90862b9";
+  "2f06ef0ead5c18074f2feb24aa8e097c62827d64838faf440f00be634a34afcd";
 
 /** The self-contained exe's file name — the zip's name with `.exe`, so the
  *  two Windows desktop artifacts sort together and neither is mistaken for
@@ -718,7 +720,9 @@ async function buildWindowsSfxExe(
     console.warn(
       `${HEY} ${
         e instanceof Error ? e.message : e
-      }\n       falling back to the zip payload (larger, still one-click offline).`,
+      }\n       falling back to the zip payload: the .exe carries ${
+        formatMb(zipSize)
+      } MB instead of the smaller zstd one (still one-click, offline).`,
     );
     format = "zip";
     payloadForPack = zipPath;
@@ -736,11 +740,35 @@ async function buildWindowsSfxExe(
     }
   }
 
+  // The stub is one file for every app; the copy this exe starts with wears
+  // the app's icon — the `.ico` the compile step gave the inner exe. A stub
+  // that cannot take one is packed as it is, and the build says so.
+  const icoPath = join(scratch, WINDOWS_ICON_FILE);
+  const iconStubPath = join(scratch, "aio-sfx-stub-icon.exe");
+  let ico: Uint8Array | null = null;
+  let noIcon: string;
+  try {
+    ico = await Deno.readFile(icoPath);
+    const made = peWithIcon(await Deno.readFile(stubPath), ico);
+    noIcon = "refused" in made ? made.refused : "";
+    if ("pe" in made) await Deno.writeFile(iconStubPath, made.pe);
+  } catch (e) {
+    noIcon = e instanceof Error ? e.message : String(e);
+  }
+  if (noIcon) {
+    ico = null;
+    summaryNote(
+      `${selfContainedExeName(binaryName, archStr)} has no icon of its own ` +
+        `(${noIcon}) — Explorer shows the generic program icon for it; the ` +
+        `app it installs is unaffected.`,
+    );
+  }
+
   const out = join(outDir, selfContainedExeName(binaryName, archStr));
   let result: { size: number; sha256: string; payloadSize: number };
   try {
     result = await writeWindowsSfxExe({
-      stubPath,
+      stubPath: ico ? iconStubPath : stubPath,
       payloadPath: payloadForPack,
       payloadFormat: format,
       outPath: out,
@@ -756,6 +784,7 @@ async function buildWindowsSfxExe(
     // Build scratch, removed once its bytes are inside the SFX.
     await removeQuietly(payloadPath);
     await removeQuietly(zipPayloadPath);
+    await removeQuietly(iconStubPath);
   }
 
   // Sanity: what is on disk ends in the trailer just written, and the SFX
@@ -768,6 +797,18 @@ async function buildWindowsSfxExe(
     trailer.payloadLength !== result.payloadSize
   ) {
     return `SFX trailer missing or checksum mismatch after write`;
+  }
+  // …and, when the stub took the icon, that Windows will find exactly it.
+  if (ico) {
+    using f = await Deno.open(out);
+    const head = new Uint8Array(trailer.payloadOffset);
+    for (let n = 0; n < head.length;) {
+      const r = await f.read(head.subarray(n));
+      if (r === null) break;
+      n += r;
+    }
+    const wrong = peIconMismatch(head, ico);
+    if (wrong) return `SFX icon wrong after write: ${wrong}`;
   }
   const ratio = result.size / Math.max(1, zipSize + linkedBytes);
   if (ratio > 1.15) {

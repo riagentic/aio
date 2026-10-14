@@ -2,8 +2,11 @@
 
 Desktop app packaging, thin client, and window management.
 
-For build targets (AppImage, zip, systemd), see
-[Build Targets](../build/targets.md). For the docs index, see
+For build targets (AppImage, `.dmg`, `.exe`/zip), see
+[Build Targets](../build/targets.md). For what Windows and macOS add around a
+desktop app (first-launch warnings, where it is installed, uninstalling, the
+PowerShell spelling of `VAR=1 deno task …`), see
+[aio on Windows and macOS](../basics/windows-macos.md). For the docs index, see
 [the docs index](../basics/index.md).
 
 ## Setup
@@ -355,7 +358,8 @@ rows** — the local socket there is a named pipe (`\\.\pipe\aio-<lockKey>`)
 hosted by Deno, which Electron's `net.connect` / `http.request({ socketPath })`
 open natively, so a local Windows app binds no TCP port either
 ([transports.md → Windows](transports.md#windows-a-named-pipe-the-same-protocol);
-proven under Wine in CI, one pass on real Windows pending).
+proven under Wine, an opt-in gate; since 1.0.19 the suite also runs natively on
+Windows 11, by hand each release, not as a recorded gate).
 
 On an `aio://` page the IPC bridge is the **only** transport. The renderer never
 falls back to `ws://app/ws` (a socket that cannot exist): if the bridge is
@@ -491,9 +495,11 @@ yet therefore heals itself within the reconnect backoff, out loud.
 
 ## `<webview>` and other custom elements
 
-`<webview>` renders fine — the runtime never cared. What TypeScript refuses is
-its **attributes**: aio's intrinsic element map admits any tag name and hands
-back the standard HTML attribute set, which has no `src` or `partition`.
+`<webview>` renders once the app turns the tag on (`childWindows: true` or
+`electron: { webviewTag: true }`, see [webview](webview.md#turn-it-on)); without
+either it does not render at all. What TypeScript refuses is its **attributes**:
+aio's intrinsic element map admits any tag name and hands back the standard HTML
+attribute set, which has no `src` or `partition`.
 
 Declare it once, and it is typed exactly the way you want:
 
@@ -555,14 +561,17 @@ await __aioIPC.openWindow("https://dapp.example/", {
 A plain path still works where the file is inside the directory the window
 serves the app from (a relative one is resolved against that directory, never
 the process's working directory). That is your project in dev; in a package it
-is `dist/`, which holds only aio's own bundle, so a path that works in dev is
-refused there. An Electron build warns about a literal
+is `dist/`, which holds what the build put there — aio's bundle and the declared
+guest preloads — and none of your source tree, so a source path that works in
+dev is refused there. An Electron build warns about a literal
 `__aioIPC.openWindow(…, { preload: "path" })`. Every refusal is logged with its
-reason (`[aio:electron] openWindow refused — …`) and returned to the caller; a
-refused preload also names the fix and reaches the page as the
-`aio:guest-preload-refused` event. See [webview](webview.md) for the inline
-alternative. An app that only embeds pages sets `electron: { webviewTag: true }`
-instead: `<webview>` works and `openWindow` stays refused.
+reason (`[aio:electron] openWindow refused — …`), and an awaited `openWindow`
+rejects with that reason; a refused preload also names the fix and reaches the
+page as the `aio:guest-preload-refused` event. See [webview](webview.md) for the
+inline alternative. An app that only embeds pages sets
+`electron: { webviewTag: true }` instead: `<webview>` works and `openWindow`
+stays refused, logged as
+`[aio:electron] openWindow denied — enable with aio.run({ childWindows: true })`.
 
 A child window shows somebody else's site, so it is kept apart from the app:
 
@@ -674,6 +683,29 @@ Two things follow from the lockdown for the window itself: a wrapper named by
 launched), and running `--prod --client=electron` from source needs
 `--allow-ffi`.
 
+## Ambient debug variables (`electron: { ignoreDebugEnv }`)
+
+`AIO_CDP` opens a DevTools port and `AIO_PORT` / `AIO_DEFAULT_PORT` add a
+loopback TCP listener beside the local socket. A desktop app inherits its
+environment from whatever launched it, so a variable left over from another aio
+app opens the same door here — and any local process can then drive the window.
+An app that must not be reachable that way says so:
+
+```ts
+await aio.run({ electron: { ignoreDebugEnv: true } });
+```
+
+The three variables are then not read when the app runs as an Electron client,
+in dev and in a packaged build alike; one boot warning names the ones that are
+set. `--cdp` and `--port` are typed for one launch and keep working, so a test
+harness passes the flag. A server or service run of the same app still reads
+them — a unit file has no command line.
+
+The key covers those three variables and nothing else. `--expose`, `--cdp`,
+`--port` and every other typed flag do what they say: whoever can pass the app
+its arguments can already run any program as you, so there is no door there to
+close.
+
 ## Permissions (`electron: { permissions }`)
 
 Electron grants every permission a page asks for unless the main process says
@@ -688,7 +720,8 @@ every `<webview>` partition, including ones created later:
 - **With `electron.permissions`:** the list is the whole policy. Your app's own
   page gets exactly the permissions listed, and guests, foreign frames and child
   windows get nothing at all, not even fullscreen (a guest that fills the window
-  could draw a fake one).
+  could draw a fake one). An empty list — `permissions: {}` — is
+  deny-everything.
 
 ```ts
 await aio.run({
@@ -1019,8 +1052,9 @@ deno task dev --server-url=http://192.168.1.100:8000
 ## Unified aio client + LAN discovery
 
 **aio-client** is a standalone Electron app — one install that connects to _any_
-remote aio app. No Deno runtime, no per-app build. Scaffolded projects get a
-task for it:
+remote aio app. No Deno runtime, no per-app build. It is an AppImage: **Linux
+only**, built on a Linux host (a Windows or macOS build of it is refused, naming
+the `electron` target as the way out). Scaffolded projects get a task for it:
 
 ```sh
 deno task install:electron   # once — the client needs Electron
@@ -1046,6 +1080,30 @@ Its connect page does four things:
   app's `/__aio/pair` endpoint, receives the profile (cert + key), pins the
   cert, saves it as a recent, and connects — once. Next launch it's one click,
   no code.
+- **A changed certificate has to prove itself — or is refused, if you say so.**
+  By default a paired host that presents a certificate its pin does not cover is
+  asked, before anything else is sent, to prove it holds the app's key
+  (`POST /__aio/pin-proof`: an HMAC over a nonce and the certificate it is
+  presenting — the key never crosses the wire, and a relayed answer names the
+  wrong certificate). A server that regenerated its certificate proves it, is
+  pinned again and connected to with no prompt. One that cannot is opened
+  **without the key**, and the client says so. The one exception keeps old
+  deployments working: a pairing that has never seen its server prove (the
+  server runs an aio older than 1.0.20, or was not connected to since) is warned
+  about and reached as before, key included — so upgrade the server and connect
+  once. The same question is asked when the certificate changes while the window
+  is open: a server that proves is followed without a restart, anything else
+  stays refused. A key that was withheld is withheld from every later connect of
+  that run until the server proves, and a pairing whose server presented a
+  changed certificate without proving carries a `⚠ certificate changed` mark on
+  the connect page until it is pinned again. The strict pin refuses instead —
+  nothing is sent, the page does not load — until the host is paired again by
+  PIN (start the client with `--connect` for the connect page) or a fresh
+  `.aioapp` is imported: `aio.run({ electron: { strictPin: true } })` for a
+  client the app launches (`--server-url`), `"build": { "strictPin": true }` in
+  `deno.json` for a packaged client, `--strict-pin` for one run. A leaf
+  re-issued under the pinned root (the machine's addresses changed) still meets
+  the pin.
 - **Remembers where you've been.** Recent servers persist across launches; click
   to reconnect, ✕ to forget.
 - **Validates the target.** Before loading, it checks the page actually looks
@@ -1070,10 +1128,18 @@ deno run -A jsr:@riagentic/aio/am discover
   LAN/subnet only (broadcast doesn't cross routers), and **best-effort** — UDP
   runs over `node:dgram` (stable, no flags), but it's silently blocked on some
   corporate/guest networks, so manual entry is always the fallback.
-- A probe that could not be **sent** is not "no apps": `am discover` says why
-  and exits 1. On macOS that is the Local Network permission (System Settings →
-  Privacy & Security → Local Network) — the app the command runs under needs it,
-  and a process that outlived the login session that started it has none.
+- **Every network the machine is on is asked.** The probe goes to the limited
+  broadcast address (`255.255.255.255`) and to the broadcast address of each
+  IPv4 interface (`192.168.1.255` for `192.168.1.7/24`). The limited one alone
+  leaves by a single interface — with a VPN up, usually the VPN — and the LAN
+  was never asked. An app on this machine, answering from several of its
+  addresses, is listed once.
+- A probe that could not be **sent** to any of them is not "no apps":
+  `am discover` says why and exits 1. On macOS that is the Local Network
+  permission (System Settings → Privacy & Security → Local Network) — the app
+  the command runs under needs it, and a process that outlived the login session
+  that started it (a detached job) has none: its broadcast is refused with "no
+  route to host" (`EHOSTUNREACH`, which Deno reports as `UNKNOWN`).
 - **Many apps on one host all show up.** Each exposed app stamps its discovery
   info (`name, port, title, needsAuth, tls`) into its lock file — the same
   per-host registry `am instances` uses. A probe is answered with _every_

@@ -168,6 +168,10 @@ export type UpdatesSlot = {
    *  dismiss — whatever the poll setting, so a manual `check()` in a
    *  `check: false` app does not offer it again. */
   rolledBack?: string;
+  /** The Start-menu shortcut THIS start added to a one-click Windows install
+   *  (its path), handed to `ready()` the same way — see
+   *  `UpdatesState.shortcutAdded`. */
+  shortcutAdded?: string;
 };
 const _process: UpdatesSlot = { runtime: null, cell: null };
 
@@ -244,6 +248,17 @@ export function _isProcessUpdatesSlot(slot: UpdatesSlot): boolean {
   return slot === _process;
 }
 
+/** The Start-menu shortcut this start added (`ensureSfxShortcut`), for the
+ *  next `ready()` to publish as `updates.shortcutAdded`. Called by the boot
+ *  path, before `readyUpdates`; undefined — every other start — is a no-op.
+ *  @internal */
+export function _noteShortcutAdded(
+  path: string | undefined,
+  slot: UpdatesSlot = _process,
+): void {
+  if (path !== undefined) slot.shortcutAdded = path;
+}
+
 /** Publish the CONFIGURATION into the cell, before any check has run.
  *
  *  Called by the boot path the moment the cells are bound. `enabled`, `kind`,
@@ -298,6 +313,12 @@ export type UpdatesState = {
   dismissed: string | null;
   /** The pre-migration backup taken by the install in flight, or null. */
   backupPath: string | null;
+  /** The path of the Start-menu shortcut THIS start added to a one-click
+   *  Windows install, else null. Set once in an install's life (by an app
+   *  whose `.exe` added none — one made by aio 1.0.17-beta or older): from
+   *  then on the downloaded `.exe` is not needed, and an app can say so in
+   *  its own words. Null on every later start, and everywhere else. */
+  shortcutAdded?: string | null;
 };
 
 /** The whole public surface of the built-in updates cell.
@@ -414,6 +435,9 @@ function buildUpdatesCell(slot: UpdatesSlot): UpdatesCell {
        *  only in a log line. For an app holding anything a person would miss,
        *  that is the one sentence you want on screen. */
       backupPath: null as string | null,
+      /** The Start-menu shortcut this start added — see `UpdatesState`. Until
+       *  now the one-time "the download can be deleted" fact was a log line. */
+      shortcutAdded: null as string | null,
     },
 
     // Only `dismissed` is worth surviving a restart. Everything else describes
@@ -490,6 +514,10 @@ function buildUpdatesCell(slot: UpdatesSlot): UpdatesCell {
             s.status = "idle";
           }
           slot.rolledBack = undefined;
+        }
+        if (slot.shortcutAdded !== undefined) {
+          s.shortcutAdded = slot.shortcutAdded;
+          slot.shortcutAdded = undefined;
         }
       },
 

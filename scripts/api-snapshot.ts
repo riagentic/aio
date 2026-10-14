@@ -377,23 +377,34 @@ function typeLabel(t: DocDeclaration | undefined): string {
  *  it as BREAKING, and the only way past a failing gate is `update:api`, which
  *  erases the record. Each part is `<digest>~<label>`: compared by digest,
  *  printed by label. */
-async function unionParts(t: DocDeclaration | undefined): Promise<string[]> {
+async function unionParts(
+  t: DocDeclaration | undefined,
+  wrap = "",
+): Promise<string[]> {
   // A REST parameter's type is an array; what it accepts is the element. So
   // `...more: A[]` growing to `...more: (A | B)[]` reads as the widening it
   // is, instead of as one opaque part replaced by another.
-  // `(A | B)[]` arrives as array → parenthesized → union; both wrappers are
-  // spelling, not type.
-  if (t?.kind === "array" || t?.kind === "parenthesized") {
-    return unionParts(t.value as DocDeclaration | undefined);
+  // `(A | B)[]` arrives as array → parenthesized → union. The parentheses are
+  // spelling; the ARRAY is type, and every part carries it (`[]<digest>`):
+  // without the mark `x: A[]` becoming `x: A | B` read as "widened", and a
+  // caller passing an array no longer compiles.
+  if (t?.kind === "parenthesized") {
+    return unionParts(t.value as DocDeclaration | undefined, wrap);
   }
-  const branches = t?.kind === "union" && Array.isArray(t.value)
-    ? t.value as DocDeclaration[]
-    : t
-    ? [t]
-    : [];
+  if (t?.kind === "array") {
+    return unionParts(t.value as DocDeclaration | undefined, `${wrap}[]`);
+  }
+  // A branch in parentheses is the branch: `A` growing to `(A) | B` — how a
+  // function type must be written inside a union — keeps `A`'s digest.
+  const bare = (b: DocDeclaration): DocDeclaration[] =>
+    b?.kind === "parenthesized"
+      ? bare(b.value as DocDeclaration)
+      : b?.kind === "union" && Array.isArray(b.value)
+      ? (b.value as DocDeclaration[]).flatMap(bare)
+      : [b];
   const parts = await Promise.all(
-    branches.map(async (b) =>
-      `${await sha256Hex(JSON.stringify(normalize(b)))}~${typeLabel(b)}`
+    (t ? bare(t) : []).map(async (b) =>
+      `${wrap}${await sha256Hex(JSON.stringify(normalize(b)))}~${typeLabel(b)}`
     ),
   );
   return parts.sort();
@@ -452,6 +463,9 @@ function objectMembers(tsType: DocDeclaration | undefined): DocDeclaration[] {
   return [];
 }
 
+/** A function-half key of a member map: `param<N>`, `return`, `typeParams`. */
+const PARAM_KEY = /^(?:param\d+|return|typeParams)$/;
+
 /** Per-member digests for one symbol, or `undefined` when its shape has no
  *  members the gate can name — a union, a mapped type, a bare alias. Those
  *  keep the whole-declaration digest and its blunt verdict, which is correct:
@@ -462,10 +476,30 @@ function objectMembers(tsType: DocDeclaration | undefined): DocDeclaration[] {
 async function extractMembers(
   decls: DocDeclaration[],
 ): Promise<Record<string, string> | undefined> {
-  if (decls.length !== 1) return undefined;
-  const decl = decls[0]!;
+  // A function MERGED WITH A NAMESPACE (`blocking` + `blocking.cancel`) is one
+  // function and a set of named members, and is read as both: the function
+  // half exactly as a lone function, each namespace member under its own name
+  // as one digest. Without this the pair had no member map, so widening one
+  // parameter of the function read as a reshape of the whole symbol. A
+  // namespace member is recorded `opt:` because ADDING one breaks nobody;
+  // removing or changing one is reported like any other member.
+  const ns = decls.length === 2
+    ? decls.find((d) => d.kind === "namespace")
+    : undefined;
+  const fnDecl = ns ? decls.find((d) => d.kind === "function") : undefined;
+  if (decls.length !== 1 && !(ns && fnDecl)) return undefined;
+  const decl = fnDecl ?? decls[0]!;
   const def = (decl.def ?? {}) as DocDeclaration;
   const out: Record<string, string> = {};
+  for (const el of (ns?.def?.elements as DocDeclaration[] | undefined) ?? []) {
+    // A member named like a function-half key cannot share the map.
+    if (typeof el?.name !== "string" || PARAM_KEY.test(el.name)) {
+      return undefined;
+    }
+    out[el.name] = `opt:${await sigOf(
+      (el.declarations as DocDeclaration[] | undefined) ?? [],
+    )}`;
+  }
   const put = async (
     key: string,
     optional: boolean,
@@ -868,11 +902,51 @@ export function overloadAdded(a: SymbolEntry, b: SymbolEntry): boolean {
   return before.every((d, i) => after[i] === d);
 }
 
+/** APPENDED optional parameters a PERSON reviewed — the one accept the gate
+ *  cannot prove.
+ *
+ *  Every existing CALL of `f(a)` still type-checks and behaves the same once
+ *  `f` is `f(a, b?)`. A caller that hands `f` to something as a CALLBACK does
+ *  not: `ids.map(f)` has always passed `(value, index, array)`, the extra
+ *  arguments were dropped, and now `index` arrives as `b` — it compiles (or
+ *  stops compiling) and behaves differently. No snapshot can tell whether a
+ *  function is used that way, so an appended parameter is refused until an
+ *  entry here names the symbol, the new position and why no caller passes it
+ *  as a callback. `param` is the member key the gate prints (`param2`, or
+ *  `load.param1` under a `@served` type). An entry is spent once the snapshot
+ *  is regenerated: the position then exists on both sides.
+ *
+ *  Not needed for a parameter that WIDENS or goes required → optional: both
+ *  leave every position where it was. */
+export type AcceptedAppendedParam = {
+  entry: string;
+  symbol: string;
+  param: string;
+  reason: string;
+};
+
+export const APPENDED_PARAMS_ACCEPTED: readonly AcceptedAppendedParam[] = [];
+
+/** Is `key` a PARAMETER position — of the function itself, or of a
+ *  function-typed member of a `@served` type (whose parent says `:fn`)? */
+function isParamKey(
+  kind: string,
+  members: Record<string, string>,
+  key: string,
+): boolean {
+  const m = /^(?:(.+)\.)?param\d+$/.exec(key);
+  if (!m) return false;
+  return m[1] === undefined
+    ? kind === "function" || kind === "function+namespace"
+    : /^(?:opt|req):fn$/.test(members[m[1]] ?? "");
+}
+
 export function diffMembers(
   entry: string,
   name: string,
   a: SymbolEntry,
   b: SymbolEntry,
+  accepted: readonly AcceptedAppendedParam[] = APPENDED_PARAMS_ACCEPTED,
 ): ApiChange[] | null {
   if (!a.members || !b.members) return null;
   const experimental = !!a.experimental;
@@ -914,11 +988,27 @@ export function diffMembers(
     if (va === undefined) {
       if (underA(key, addedKeys)) continue; // came with its parent
       const { optional } = splitMember(vb!);
+      // An appended optional PARAMETER is additive only with a reviewed entry
+      // (see APPENDED_PARAMS_ACCEPTED): a callback caller can feel it.
+      const unreviewed = optional && isParamKey(b.kind, b.members, key) &&
+        !accepted.some((r) =>
+          r.entry === entry && r.symbol === name && r.param === key &&
+          r.reason.trim() !== ""
+        );
       out.push(
-        optional ? at(false, `+ ${where} added (optional)`) : at(
-          true,
-          `+ ${where} added (REQUIRED — every existing caller must change)`,
-        ),
+        unreviewed
+          ? at(
+            true,
+            `+ ${where} added (optional parameter, NOT reviewed — a caller ` +
+              `passing ${name} as a callback now feeds it an argument; name ` +
+              `it in APPENDED_PARAMS_ACCEPTED, scripts/api-snapshot.ts)`,
+          )
+          : optional
+          ? at(false, `+ ${where} added (optional)`)
+          : at(
+            true,
+            `+ ${where} added (REQUIRED — every existing caller must change)`,
+          ),
       );
       continue;
     }
@@ -940,18 +1030,33 @@ export function diffMembers(
         widened
           ? at(
             false,
-            `~ ${where} widened — it now also accepts ${
-              added.map(partLabel).join(", ")
-            }`,
+            // The same alternatives in another order gain nothing to name.
+            added.length === 0
+              ? `~ ${where} reordered — it accepts the same alternatives`
+              : `~ ${where} widened — it now also accepts ${
+                added.map(partLabel).join(", ")
+              }`,
           )
           : at(true, `~ ${where} type changed`),
       );
     }
     if (ma.optional !== mb.optional) {
-      out.push(at(
-        true,
-        `~ ${where} became ${mb.optional ? "OPTIONAL" : "REQUIRED"}`,
-      ));
+      // A PARAMETER that may now be left out still takes every call that
+      // passed it, and no position moved. A property is different: a reader
+      // could be relying on it being there.
+      const relaxed = mb.optional && isParamKey(b.kind, b.members, key) &&
+        isParamKey(a.kind, a.members, key);
+      out.push(
+        relaxed
+          ? at(
+            false,
+            `~ ${where} became optional — every existing call still passes it`,
+          )
+          : at(
+            true,
+            `~ ${where} became ${mb.optional ? "OPTIONAL" : "REQUIRED"}`,
+          ),
+      );
     }
   }
   // The digest moved but no member explains it — the change is in a part the
@@ -966,6 +1071,7 @@ export function diffSnapshots(
   committed: Snapshot,
   current: Snapshot,
   reviewed: readonly ReviewedModifierChange[] = MODIFIER_REVIEWED,
+  accepted: readonly AcceptedAppendedParam[] = APPENDED_PARAMS_ACCEPTED,
 ): ApiChange[] {
   const lines: ApiChange[] = [];
   const add = (line: string, breaking: boolean, experimental = false): void => {
@@ -1061,7 +1167,7 @@ export function diffSnapshots(
             false,
           );
         } else {
-          const detail = diffMembers(entry, name, sa, sb);
+          const detail = diffMembers(entry, name, sa, sb, accepted);
           if (detail) {
             for (const c of detail) lines.push(c);
           } else {
@@ -1326,9 +1432,11 @@ async function main(): Promise<void> {
           "  • a value that needs a new spelling gains one; the old spelling " +
           "keeps working, forever.\n" +
           '  • "but this widening is provably source-compatible" is not an ' +
-          "exception. Adding an optional trailing parameter IS assignable in " +
-          "both directions, and it is still refused here — the value of the " +
-          "promise is that it has none.\n" +
+          "exception the gate takes on trust. The shapes it can PROVE are " +
+          "already read as additive (an added overload, a parameter that " +
+          "accepts more or may be left out); an appended optional parameter " +
+          "can be felt by a callback caller and needs a reviewed entry in " +
+          "APPENDED_PARAMS_ACCEPTED.\n" +
           "Genuinely nothing to break (nobody can be holding it yet)? Mark " +
           "the symbol `@experimental` and it carries no promise — the " +
           "snapshot tracks that per symbol."

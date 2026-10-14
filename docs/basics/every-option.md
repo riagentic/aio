@@ -1,13 +1,13 @@
 # Every option, one page
 
 > Generated from the source by `deno task update:reference` — do not edit by
-> hand; `check:release` fails when it is stale. 189 entries: the signature, what
+> hand; `check:release` fails when it is stale. 191 entries: the signature, what
 > it does, an example when the source has one, and the file it lives in. The
 > guides explain; this page is for looking a name up.
 
 - [cell options](#cell-options) — 25
-- [aio.run options](#aiorun-options) — 80
-- [aio/air](#aioair) — 84
+- [aio.run options](#aiorun-options) — 81
+- [aio/air](#aioair) — 85
 
 ## cell options
 
@@ -781,6 +781,20 @@ renderBudget?: …
 Client render-staleness / pending-patch thresholds — sent to the browser (page
 shell + `cfg` frame). <sub>src/server/aio-types.ts</sub>
 
+### `wire`
+
+```ts
+wire?: { omitTrailingUndefined?; refuseShortCalls? }
+```
+
+`wire` — see `CellsConfig.wire`. Sent to the client, which encodes.
+<sub>src/server/aio-types.ts</sub>
+
+```ts
+aio.run({ cells, wire: { omitTrailingUndefined: true } });
+aio.run({ cells, wire: { refuseShortCalls: true } });
+```
+
 ### `effectTimeoutMs`
 
 ```ts
@@ -896,9 +910,12 @@ Electron: let the app show OTHER sites — both ways at once.
 electron?: ElectronConfig
 ```
 
-The Electron process's own security decisions (sandbox policy, permissions, and
-`allowLocalPeers` — the opt-out of the production local-peer lockdown) — see
-`ElectronConfig`. <sub>src/server/aio-types.ts</sub>
+The Electron process's own security decisions (sandbox policy, permissions,
+`webviewTag` — the `<webview>` tag without `openWindow` —, `guestDownloads` —
+let a guest or child page save files —, `allowLocalPeers` — the opt-out of the
+production local-peer lockdown —, and `ignoreDebugEnv` — ambient `AIO_CDP` /
+`AIO_PORT` open nothing) — see `ElectronConfig`.
+<sub>src/server/aio-types.ts</sub>
 
 ```ts
 aio.run({
@@ -1202,6 +1219,21 @@ batch(fn: () => void): void
 
 Group multiple signal writes into one flush — subscribers notified once at the
 end. <sub>src/state/signal.ts</sub>
+
+### `bindInput`
+
+```ts
+bindInput<T, K>(form: FormState<T>, name: K): { value; onInput; onBlur }
+```
+
+`form.bind(name)` with the field's own type: `value` is `T[K]`, not `unknown`.
+<sub>src/air/form.ts</sub>
+
+```ts
+const form = useForm({ name: { initial: "" }, age: { initial: 0 } });
+h("input", bindInput(form, "name")); // value: string
+const next = bindInput(form, "age").value + 1; // value: number
+```
 
 ### `collectHead`
 

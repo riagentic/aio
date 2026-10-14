@@ -12,6 +12,7 @@
 // works from ANY directory — measured from /tmp: exit 0, stopped.
 //
 // An error message is a promise; this one could not be kept.
+import "./store-sandbox.ts";
 import { assert, assertStringIncludes } from "@std/assert";
 import { _alreadyRunningMessage } from "../src/server/aio-run-helpers.ts";
 

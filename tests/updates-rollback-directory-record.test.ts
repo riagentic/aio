@@ -11,6 +11,7 @@
 // And the other way round: the record is written BEFORE the helper moves
 // anything, so when the helper fails and starts the failed build again, that
 // boot has to put the record back — or it names a version that is not running.
+import { ownPidTag } from "../src/server/single-instance-lock.ts";
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import {
@@ -313,7 +314,7 @@ Deno.test({
       // root, which a read-only file never stopped.
       const nonce = _recordDeps.nonce;
       _recordDeps.nonce = () => "blocked";
-      const blocked = `${record}.tmp-${Deno.pid}-blocked`;
+      const blocked = `${record}.tmp-${ownPidTag()}-blocked`;
       await Deno.mkdir(join(blocked, "x"), { recursive: true });
       // The writer's own line (path and reason) goes to the process's log.
       const prev = getLogger();

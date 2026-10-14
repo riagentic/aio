@@ -12,6 +12,7 @@
 // This file pins the gate itself. The checkers are pure (docs in, issue lines
 // out), so each defect is a fixture rather than a temp docs tree, and a gate
 // that stops biting fails HERE rather than the next time someone reads a page.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import {
   anchorIssues,
@@ -24,6 +25,7 @@ import {
   loadTaskNames,
   pageLinkIssues,
   symbolIssues,
+  vacuumIntoIssues,
 } from "../scripts/check-docs.ts";
 import { fromFileUrl } from "@std/path";
 import { spec } from "./module-spec-helper.ts";
@@ -322,4 +324,29 @@ Deno.test("the examples README is walked, and every link in it lands", async () 
     issues.filter((l) => l.trim().startsWith("examples/README.md:"));
   assertEquals(mine(anchorIssues(all, onDisk)), []);
   assertEquals(mine(pageLinkIssues(all, onDisk)), []);
+});
+
+// ── A raw VACUUM INTO ─────────────────────────────────────────────────
+
+Deno.test("gate catches a fenced raw VACUUM INTO; a comment naming it, prose, and a block that says why are fine", () => {
+  const found = vacuumIntoIssues([{
+    rel: "fixture.md",
+    lines: [
+      "Backups use `VACUUM INTO` underneath.",
+      "```ts",
+      "await app.db!.execute(\"VACUUM INTO '/backups/a.db'\");",
+      "```",
+      "```ts",
+      "await app.db.snapshot(path); // VACUUM INTO — safe while live",
+      "```",
+      "```sql",
+      "-- not db.snapshot(): this copies ANOTHER attached database",
+      "vacuum other into '/backups/b.db';",
+      "VACUUM INTO '/backups/c.db';",
+      "```",
+    ],
+  }]);
+  assertEquals(found.length, 1, found.join("\n"));
+  assertStringIncludes(found[0]!, "fixture.md:3");
+  assertStringIncludes(found[0]!, "db.snapshot(path)");
 });

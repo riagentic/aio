@@ -1,4 +1,5 @@
 // Three places `am` answered without saying what it had left out.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { AIO_RUNTIME_FLAGS } from "../src/diagnostics/runtime-flags.ts";
 import { noCdpMessage } from "../src/am/am-cmd-shot.ts";

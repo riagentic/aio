@@ -32,7 +32,7 @@
 - [Cookbook — twenty recipes, each one tested](basics/cookbook.md) — Twenty things an app needs on its first day, each as a complete file you can
 - [Every option, one page](basics/every-option.md) — cell(name, { … }) — the keys a cell takes.
 - [FAQ](basics/faq.md) — Common questions about what aio does, doesn't do, and why.
-- [AIO Documentation](basics/index.md) — one table: Deno., hidden fields, tracked reads, and what refuses you
+- [AIO Documentation](basics/index.md) — files are, firewall, startup, stopping, uninstalling
 - [Migrating to AIO](basics/migration.md) — You have an existing Deno application and want to integrate AIO.
 - [Common Pitfalls](basics/pitfalls.md) — The traps people actually hit — each with the rule that avoids it.
 - [Plugins](basics/plugins.md) — A plugin is a reusable piece of app: its cells, its routes, its schedules
@@ -42,6 +42,7 @@
 - [Versioning & Deprecation Policy](basics/semver-policy.md) — aio follows semver from 1.0.0 on.
 - [Tutorial -- Building with AIO Step by Step](basics/tutorial.md) — Each section builds on the previous, but you can stop at any point.
 - [Where does this code run?](basics/where-code-runs.md) — aio has one syntax and six places it executes.
+- [aio on Windows and macOS](basics/windows-macos.md) — Most snippets in these docs are written for a POSIX shell on Linux.
 
 ## State — cells — the core: cells, methods, workflows, scheduling
 
@@ -166,10 +167,10 @@
 
 ## Upgrade guides — version-to-version migration notes
 
-- [Upgrade Guides](upgrade/README.md) — every one, newest first (94 pages)
+- [Upgrade Guides](upgrade/README.md) — every one, newest first (95 pages)
+- [Upgrading from 1.0.19-beta to 1.0.20-beta](upgrade/from-1.0.19-beta-to-1.0.20-beta.md) — Nothing is removed or renamed, and no default moves.
 - [Upgrading from 1.0.18-beta to 1.0.19-beta](upgrade/from-1.0.18-beta-to-1.0.19-beta.md) — Nothing is removed or renamed.
 - [Upgrading from 1.0.17-beta to 1.0.18-beta](upgrade/from-1.0.17-beta-to-1.0.18-beta.md) — Nothing is removed or renamed.
-- [Upgrading from 1.0.16-beta to 1.0.17-beta](upgrade/from-1.0.16-beta-to-1.0.17-beta.md) — Nothing is removed or renamed; the public surface gains optional keys only:
 - [The aio restructure — alpha27/alpha28 breaking changes](upgrade/restructure.md) — This guide tracks every breaking change of the restructure
 
 ## Design specs — decision records — background, not manuals

@@ -454,13 +454,15 @@ Deno.test("no window: the lifecycle asks the rule on BOTH paths a window can fai
     src.split("windowlessStops(isCompiled(), !!keepServer)").length - 1,
     2,
   );
-  const missing = src.indexOf("electronMissingLines(electronUrl, windowless)");
+  const missing = src.indexOf("electronMissingLines(");
   assert(missing > 0, "the missing-runtime path no longer passes the rule");
   assert(
-    src.slice(missing, missing + 200).includes(
+    src.slice(missing, missing + 300).includes(
       "if (windowless) stopProcess(1)",
     ),
     "…and must act on it",
   );
-  assert(src.includes("electronLaunchFailurePlan(e, url, windowless)"));
+  assert(src.includes(
+    "electronLaunchFailurePlan(e, url, windowless, localSocket)",
+  ));
 });

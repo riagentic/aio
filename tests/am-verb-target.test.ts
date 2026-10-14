@@ -16,6 +16,7 @@
 //     and relaunched the app from this tree.
 //  4. With the cwd's app down and some OTHER app up, the "one running instance"
 //     fallback let a MUTATION reach that other app after a note on stderr.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import {

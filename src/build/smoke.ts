@@ -8,8 +8,9 @@
  * and every field report of "works in dev, missing in the package" was that
  * gap: the first person to run the package was a user. This runs it here —
  * from a foreign cwd, with a throwaway home, on a free port, never on the
- * visible desktop — and turns each refusal into a build failure with its
- * line.
+ * visible desktop where the OS can contain a window (Linux; on Windows and
+ * macOS the window opens for the seconds the check takes, and the run says
+ * so) — and turns each refusal into a build failure with its line.
  *
  * The verdict rules are pure (unit-tested without a build); the runners are
  * the I/O around them. Internal — never re-exported from a public entry.
@@ -17,7 +18,7 @@
 import { dirname, join } from "@std/path";
 import { cdpConnect } from "../media/cdp.ts";
 import { HEY, NO } from "../diagnostics/fmt.ts";
-import { APP_STYLE, BUNDLE_JS } from "../server/app-files.ts";
+import { APP_STYLE, BUNDLE_JS, workerBundlesIn } from "../server/app-files.ts";
 import { readDenoJson } from "../server/deno-json.ts";
 import { declaredGuestPreloads } from "../server/guest-preloads.ts";
 import {
@@ -33,31 +34,65 @@ import {
 } from "../server/single-instance-lock.ts";
 import { assetUrlsIn } from "./build-compile.ts";
 
-/** Off, on, or `strict`: an artifact that COULD NOT be smoke-tested here
- *  (another OS, no display) is always listed; only `strict` makes it fail. */
-export type SmokeMode = false | true | "strict";
+/** Off, on, `desktop` or `strict`: an artifact that COULD NOT be smoke-tested
+ *  here (another OS, no display) is always listed; only `strict` makes it
+ *  fail.
+ *
+ *  `desktop` is "on" plus the desktop smoke on a Windows or macOS host, where
+ *  it opens a real window. Plain "on" skips it there, as it did through
+ *  1.0.19 (`smokeWindow`): a build with `"smoke": true` that passed on such a
+ *  host must not start failing — or opening windows — because aio was
+ *  upgraded. `strict` includes it: a skipped row fails a strict build. */
+export type SmokeMode = false | true | "desktop" | "strict";
 
-/** `--smoke` / `--smoke=strict` (the flag wins), else deno.json
- *  `"build": { "smoke": true | "strict" }`. A value that is neither is
- *  refused — read as "off", a typo would skip the check it asked for. Pure. */
+/** Does this mode run the desktop smoke on a host with no nested display
+ *  (Windows, macOS)? Pure. */
+export const smokeWindow = (mode: SmokeMode): boolean =>
+  mode === "desktop" || mode === "strict";
+
+/** `--smoke` / `--smoke=desktop` / `--smoke=strict` (the flag wins), else
+ *  deno.json `"build": { "smoke": true | "desktop" | "strict" }`. A value
+ *  that is none of them is refused — read as "off", a typo would skip the
+ *  check it asked for. Pure. */
 export function smokeMode(
   flag: { bare: boolean; value?: string },
   declared: unknown,
 ): SmokeMode {
   const bad = (where: string, v: unknown) =>
     new Error(
-      `${NO} ${where} is ${JSON.stringify(v)} — it must be true, false or ` +
-        `"strict" (--smoke, --smoke=strict).`,
+      `${NO} ${where} is ${JSON.stringify(v)} — it must be true, false, ` +
+        `"desktop" or "strict" (--smoke, --smoke=desktop, --smoke=strict).`,
     );
   if (flag.value !== undefined) {
-    if (flag.value === "strict") return "strict";
+    if (flag.value === "strict" || flag.value === "desktop") return flag.value;
     throw bad("--smoke=", flag.value);
   }
   if (flag.bare) return true;
   if (declared === undefined || declared === false) return false;
-  if (declared === true || declared === "strict") return declared;
+  if (declared === true || declared === "strict" || declared === "desktop") {
+    return declared;
+  }
   throw bad("deno.json build.smoke", declared);
 }
+
+/** The desktop artifact the smoke starts on each host OS — the one that runs
+ *  WITHOUT installing anything:
+ *
+ *  - Linux: the AppImage, as is;
+ *  - Windows: the `.zip`, unpacked into the throwaway dir. Not the one-click
+ *    `.exe`: it installs itself under `%LOCALAPPDATA%`, adds a Start-menu
+ *    shortcut, and exits as soon as it has started the app — there is no
+ *    process of it left to watch;
+ *  - macOS: the signed bundle in `<bin>-mac-<arch>.app.tar.gz`, unpacked into
+ *    the throwaway dir and started by the program in `Contents/MacOS` — no
+ *    disk image is mounted, nothing goes near `/Applications`, and Gatekeeper
+ *    is not involved (it judges what Finder opens, not a program a build
+ *    starts from its own output). */
+const DESKTOP_PACKAGE: Record<string, { is: RegExp; what: string }> = {
+  linux: { is: /\.appimage$/i, what: "AppImage" },
+  windows: { is: /-win-[^.]+\.zip$/i, what: "Windows .zip" },
+  darwin: { is: /\.app\.tar\.gz$/i, what: ".app.tar.gz" },
+};
 
 /** How one built target is smoke-tested on this host, or why it is not.
  *  Pure. `files` are the target's placed artifact names. */
@@ -69,6 +104,8 @@ export function smokePlan(opts: {
   files: readonly string[];
   /** The compiled binary's placed name, when the target has one. */
   binary?: string;
+  /** {@linkcode smokeWindow} of the run's mode. */
+  window?: boolean;
 }):
   | { run: "server" | "cli" | "electron"; file: string; page: boolean }
   | { skip: string } {
@@ -77,14 +114,27 @@ export function smokePlan(opts: {
     return { skip: `not smoke-tested here: built for ${opts.platform}` };
   }
   if (kind === "electron") {
-    const image = opts.files.find((f) => /\.appimage$/i.test(f));
-    if (opts.hostOs !== "linux" || !image) {
+    const pack = DESKTOP_PACKAGE[opts.hostOs];
+    if (pack && opts.hostOs !== "linux" && !opts.window) {
+      // What 1.0.19 did on these hosts, whatever was built: listed, not run.
       return {
-        skip: `not smoke-tested here: the desktop smoke drives a Linux ` +
-          `AppImage (this host: ${opts.hostOs})`,
+        skip: `not smoke-tested here: on ${opts.hostOs} the desktop smoke ` +
+          `opens a real window on this desktop for the seconds it takes, ` +
+          `so plain --smoke does not run it — \`--smoke=desktop\` (or ` +
+          `"build": { "smoke": "desktop" }) does`,
       };
     }
-    return { run: "electron", file: image, page: true };
+    const file = pack && opts.files.find((f) => pack.is.test(f));
+    if (!file) {
+      return {
+        skip: pack && opts.hostOs !== "linux"
+          ? `not smoke-tested here: no ${pack.what} among this target's ` +
+            `artifacts — the one the desktop smoke starts on ${opts.hostOs}`
+          : `not smoke-tested here: the desktop smoke drives a Linux ` +
+            `AppImage (this host: ${opts.hostOs})`,
+      };
+    }
+    return { run: "electron", file, page: true };
   }
   if (kind === "browser" || kind === "server-app" || kind === "server") {
     if (!opts.binary) return { skip: "not smoke-tested: no binary was placed" };
@@ -211,18 +261,28 @@ function spawnOrDrop(
 async function launch(
   file: string,
   args: string[],
-  env: Record<string, string>,
+  env: Record<string, string> | ((box: string) => Record<string, string>),
+  /** A package that must be unpacked first: answers the program to start. */
+  unpack?: (file: string, into: string) => Promise<string>,
 ): Promise<Running> {
   const box = await Deno.makeTempDir({ prefix: "aio-smoke-" });
   for (const d of ["home", "tmp", "cwd", "config"]) {
     await Deno.mkdir(join(box, d));
+  }
+  if (unpack) {
+    try {
+      file = await unpack(file, join(box, "app"));
+    } catch (e) {
+      await Deno.remove(box, { recursive: true });
+      throw e;
+    }
   }
   const proc = spawnOrDrop(box, () =>
     new Deno.Command(file, {
       args,
       cwd: join(box, "cwd"),
       env: {
-        ...env,
+        ...(typeof env === "function" ? env(box) : env),
         AIO_APPS_DIR: join(box, "home"),
         XDG_CONFIG_HOME: join(box, "config"),
         TMPDIR: join(box, "tmp"),
@@ -266,6 +326,145 @@ function appLogs(box: string): string {
     // aio-ok: the app never created its home — its console output says why
   }
   return t;
+}
+
+/** Every descendant of `pid` in a `[pid, parent, born]` table, shallowest
+ *  first. `born` is the process's creation time (any unit, one clock).
+ *
+ *  A parent pid alone is not a family tie on Windows: a child keeps the pid
+ *  of a parent that DIED, and that number is handed out again. So a process
+ *  is a child only when it was created at or after the process now holding
+ *  its parent's pid — applied at every level. Without it a long-lived
+ *  program of the user's whose dead parent once had the app's pid was
+ *  counted as the app's, failed the build ("left N process(es)") and was
+ *  KILLED. An unknown creation time proves nothing, so it ties nobody. Pure. */
+export function descendantsIn(
+  pid: number,
+  table: readonly (readonly [number, number, number])[],
+): number[] {
+  const born = new Map(table.map(([p, , at]) => [p, at]));
+  const out: number[] = [];
+  for (let at = [pid]; at.length;) {
+    at = table.filter(([p, parent, b]) =>
+      at.includes(parent) && !out.includes(p) && p !== pid &&
+      b >= born.get(parent)! // false for NaN on either side
+    ).map(([p]) => p);
+    out.push(...at);
+  }
+  return out;
+}
+
+/** The app's process tree, asked while it is up. `pgrep` where there is one;
+ *  on Windows — where there is none, and "left N process(es) running" was
+ *  therefore never checked — the system's own process table. */
+async function descendants(pid: number): Promise<number[]> {
+  if (Deno.build.os !== "windows") return await descendantPids(pid);
+  const o = await new Deno.Command("powershell", {
+    args: [
+      "-NoProfile",
+      "-Command",
+      'Get-CimInstance Win32_Process | % { "$($_.ProcessId) $($_.ParentProcessId) $($_.CreationDate.Ticks)" }',
+    ],
+    stdout: "piped",
+    stderr: "null",
+  }).output();
+  return descendantsIn(pid, processRows(new TextDecoder().decode(o.stdout)));
+}
+
+/** `<pid> <parent pid> <creation ticks>` lines → rows. A process with no
+ *  creation time (the idle and system processes) gets NaN. Pure. */
+export function processRows(listing: string): [number, number, number][] {
+  return listing.split("\n")
+    .map((l) => l.trim().split(/\s+/))
+    .map(([p, parent, born]) =>
+      [Number(p), Number(parent), born ? Number(born) : NaN] as [
+        number,
+        number,
+        number,
+      ]
+    )
+    .filter(([p, parent]) => p > 0 && parent > 0);
+}
+
+/** `CFBundleExecutable` of a bundle's `Info.plist`, or null. Pure. */
+export function plistExecutable(plist: string): string | null {
+  return /<key>CFBundleExecutable<\/key>\s*<string>([^<]+)<\/string>/
+    .exec(plist)?.[1]?.trim() ?? null;
+}
+
+/** Unpack a desktop package into `into` and answer the program to start:
+ *  the one `.exe` at the top of a Windows zip, or — in the one `.app` of a
+ *  macOS tarball — the program its `Info.plist` names, in `Contents/MacOS`.
+ *  `tar` on both (bsdtar there reads a zip and a tarball alike). Throws with
+ *  what it found when the package is not that shape. */
+export async function unpackDesktop(
+  file: string,
+  into: string,
+  os: string = Deno.build.os,
+): Promise<string> {
+  await Deno.mkdir(into, { recursive: true });
+  const o = await new Deno.Command("tar", {
+    args: ["-xf", file, "-C", into],
+    stdout: "null",
+    stderr: "piped",
+  }).output();
+  if (!o.success) {
+    throw new Error(
+      `could not unpack ${file}: ${new TextDecoder().decode(o.stderr).trim()}`,
+    );
+  }
+  const top = [...Deno.readDirSync(into)].map((e) => e.name).sort();
+  const sole = (re: RegExp, what: string) => {
+    const hit = top.filter((n) => re.test(n));
+    if (hit.length !== 1) {
+      throw new Error(
+        `${file} holds ${hit.length} ${what} at its top (${
+          top.join(", ") || "nothing"
+        }) — expected exactly one`,
+      );
+    }
+    return hit[0]!;
+  };
+  if (os !== "darwin") return join(into, sole(/\.exe$/i, ".exe file(s)"));
+  const app = join(into, sole(/\.app$/, ".app bundle(s)"));
+  const exe = plistExecutable(
+    await Deno.readTextFile(join(app, "Contents", "Info.plist")),
+  );
+  if (!exe) {
+    throw new Error(`${app}: its Info.plist names no CFBundleExecutable`);
+  }
+  return join(app, "Contents", "MacOS", exe);
+}
+
+/** What a desktop package is started with besides the throwaway home, per
+ *  host OS — everything that keeps the run out of the developer's own
+ *  profile. Pure.
+ *
+ *  - Linux: the AppImage unpacks itself (no FUSE needed);
+ *  - Windows: Electron keeps the window's profile under the roaming folder
+ *    the shell expands from `%USERPROFILE%` — measured on Windows 11 with
+ *    Electron 44: `%APPDATA%` alone does NOT move it. So the profile root
+ *    moves, and the two variables aio and others read agree with it;
+ *  - macOS: under `~/Library/Application Support` — so the home is the
+ *    throwaway one — and a bundle outside `/Applications` offers to move
+ *    itself there once it is up: never, for a smoke run. */
+export function desktopEnv(os: string, box: string): Record<string, string> {
+  const config = join(box, "config");
+  if (os === "windows") {
+    return {
+      USERPROFILE: config,
+      APPDATA: join(config, "AppData", "Roaming"),
+      LOCALAPPDATA: join(config, "AppData", "Local"),
+    };
+  }
+  if (os === "darwin") {
+    return {
+      HOME: config,
+      CFFIXED_USER_HOME: config,
+      AIO_MOVE_TO_APPLICATIONS: "never",
+    };
+  }
+  return { APPIMAGE_EXTRACT_AND_RUN: "1" };
 }
 
 /** The descendants still alive once the app has had `ms` to finish exiting.
@@ -392,7 +591,7 @@ export async function smokeServer(opts: {
       );
       return fails;
     }
-    kids = await descendantPids(run.proc.pid);
+    kids = await descendants(run.proc.pid);
     if (opts.page) {
       const get = async (path: string) => {
         const r = await fetch(base + path, {
@@ -413,6 +612,15 @@ export async function smokeServer(opts: {
           const r = await get(u);
           if (r.status !== 200) fails.push(`GET ${u} → ${r.status}`);
           else if (/\.(?:js|css)(?:\?|$)/.test(u)) bundle += r.text;
+        }
+        // The browser workers the bundle starts, and theirs: no tag names
+        // one, and a worker that is not there is only an `error` event.
+        const workers = new Set(workerBundlesIn(bundle));
+        for (const w of workers) {
+          const r = await get(`/${w}`);
+          if (r.status !== 200) {
+            fails.push(`GET /${w} → ${r.status} (a worker the bundle starts)`);
+          } else for (const n of workerBundlesIn(r.text)) workers.add(n);
         }
         // The asset list of the artifact's OWN bundle — `assetUrlsIn`, the
         // decider the compile's warning uses. A URL the source tree cannot
@@ -527,19 +735,32 @@ export async function smokeElectron(opts: {
   /** deno.json `build.guestPreloads` — each must resolve in the package. */
   guestPreloads: readonly string[];
 }): Promise<string[] | { skip: string }> {
-  const display = smokeDisplayEnv();
+  const os = Deno.build.os;
+  // Linux has a contained display to open the window on. Windows and macOS
+  // have none: there the window opens on this desktop for the seconds the
+  // check takes — said, because a build that puts a window up should not be
+  // a surprise.
+  const display = os === "linux" ? smokeDisplayEnv() : {};
   if (!display) {
     return {
       skip: `not smoke-tested: no display (a nested X display keeps the ` +
         `window off your desktop — ${XEPHYR_INSTALL_HINT})`,
     };
   }
+  if (os !== "linux") {
+    console.log(
+      `smoke: ${os} has no nested display — the window opens on this ` +
+        `desktop until the check is done`,
+    );
+  }
   const fails: string[] = [];
   const cdpPort = freePort();
-  const run = await launch(opts.file, [`--cdp=${cdpPort}`], {
-    ...display,
-    APPIMAGE_EXTRACT_AND_RUN: "1",
-  });
+  const run = await launch(
+    opts.file,
+    [`--cdp=${cdpPort}`],
+    (box) => ({ ...display, ...desktopEnv(os, box) }),
+    os === "linux" ? undefined : unpackDesktop,
+  );
   let kids: number[] = [];
   let stopped = false;
   try {
@@ -571,7 +792,7 @@ export async function smokeElectron(opts: {
       );
       return fails;
     }
-    kids = await descendantPids(run.proc.pid);
+    kids = await descendants(run.proc.pid);
     const cdp = await cdpConnect(wsUrl, 10_000);
     const evaluate = async (expression: string): Promise<unknown> => {
       const r = await cdp.call("Runtime.evaluate", {
@@ -605,6 +826,20 @@ export async function smokeElectron(opts: {
         >;
         for (const [u, s] of statuses ?? []) {
           if (s !== 200) fails.push(`the page's ${u} → ${s}`);
+        }
+        // …and the browser workers its bundle starts, which no tag names.
+        const bundle = await evaluate(
+          `fetch("/${BUNDLE_JS}").then((r) => r.text())`,
+        ) as string;
+        const workers = await evaluate(
+          `Promise.all(${
+            JSON.stringify(workerBundlesIn(bundle ?? ""))
+          }.map((w) => fetch("/" + w).then((r) => [w, r.status], (e) => [w, String(e)])))`,
+        ) as Array<
+          [string, number | string]
+        >;
+        for (const [w, s] of workers ?? []) {
+          if (s !== 200) fails.push(`the page's worker ${w} → ${s}`);
         }
       }
       // The window closed is how a person quits a desktop app.
@@ -651,7 +886,10 @@ async function smokeOne(
   cfg: Parameters<typeof declaredGuestPreloads>[0],
 ): Promise<string[] | { skip: string }> {
   const file = join(outDir, plan.file);
-  if (Deno.build.os !== "windows") await Deno.chmod(file, 0o755);
+  // A program is made runnable; a package that is unpacked first is not one.
+  if (Deno.build.os !== "windows" && !/\.tar\.gz$/i.test(file)) {
+    await Deno.chmod(file, 0o755);
+  }
   const appDir = join(root, dirname(t.entry));
   return plan.run === "electron"
     ? await smokeElectron({ file, guestPreloads: declaredGuestPreloads(cfg) })
@@ -682,6 +920,8 @@ export async function smokeBuild(opts: {
   outDir: string;
   mode: SmokeMode;
   hostPlatform: string;
+  /** The build host's OS — a test seam; `Deno.build.os`. */
+  hostOs?: string;
   targets: readonly SmokeTarget[];
   run?: (
     t: SmokeTarget,
@@ -694,7 +934,8 @@ export async function smokeBuild(opts: {
     const plan = smokePlan({
       ...t,
       hostPlatform: opts.hostPlatform,
-      hostOs: Deno.build.os,
+      hostOs: opts.hostOs ?? Deno.build.os,
+      window: smokeWindow(opts.mode),
     });
     if ("skip" in plan) {
       rows.push({

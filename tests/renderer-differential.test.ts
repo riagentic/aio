@@ -30,6 +30,7 @@ import { assert, assertEquals } from "@std/assert";
 import { Window } from "happy-dom";
 import { closeWindow } from "../src/testing/close-window.ts";
 import { fuzzEnvInt } from "./fuzz-seed.ts";
+import { mulberry32 } from "./sync/properties/_prop.ts";
 import {
   ErrorBoundary,
   Fragment,
@@ -255,8 +256,7 @@ function textOf(s: Spec): string {
 // ── generation ───────────────────────────────────────────────────────────
 
 function makeRnd(seed: number) {
-  let s = seed;
-  const rnd = () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const rnd = mulberry32(seed);
   return {
     rnd,
     pick: (n: number) => Math.floor(rnd() * n),
@@ -359,10 +359,12 @@ function texts(s: Spec, out: Extract<Spec, { k: "t" }>[] = []) {
  *  reconciler: reorder (positional identity), text edits over a colliding
  *  alphabet, emptying/filling containers (anchors), keying/unkeying (the two
  *  child-diff algorithms), and retagging (type mismatch replacement). */
+const opsDrawn = new Set<number>();
 function mutate(root: Spec, r: Rnd): Spec {
   const next = clone(root);
   const cs = containers(next);
   const op = r.pick(15);
+  opsDrawn.add(op);
   const c = r.of(cs);
   switch (op) {
     case 11: // swap an element's whole prop set (add/remove/replace attributes)
@@ -603,6 +605,12 @@ Deno.test("differential: incremental diff renders what a fresh render would", as
     // desync AND stay silent on every correct render, or it is decoration.
     if (/desync|wrong slot|no position|leftover/.test(s)) warnings.push(s);
   };
+  opsDrawn.clear(); // the test above drew its own
+  const kinds = new Set<string>();
+  const note = (s: Spec) => {
+    kinds.add(s.k);
+    if (isContainer(s)) s.kids.forEach(note);
+  };
   try {
     for (let round = 0; round < ROUNDS; round++) {
       setDevMode(false); // resets the once-per-id warning dedup
@@ -627,6 +635,7 @@ Deno.test("differential: incremental diff renders what a fresh render would", as
 
       for (let step = 1; step <= STEPS; step++) {
         spec = mutate(spec, r);
+        note(spec);
         history.push(clone(spec));
         const nextV = toVNode(clone(spec));
         _diff(host, nextV, prev, { doc });
@@ -656,6 +665,22 @@ Deno.test("differential: incremental diff renders what a fresh render would", as
       ROUNDS * STEPS
     } steps — the generator collapsed`,
   );
+  // …and one that stopped drawing an edit or a node kind compares nothing
+  // about it.
+  if (ROUNDS >= 150) {
+    assertEquals(
+      Array.from({ length: 15 }, (_, op) => op).filter((o) => !opsDrawn.has(o)),
+      [],
+      "mutate() ops never drawn",
+    );
+    assertEquals(
+      ["t", "x", "e", "s", "i", "u", "f", "b", "c"].filter((k) =>
+        !kinds.has(k)
+      ),
+      [],
+      "node kinds never diffed",
+    );
+  }
 });
 
 Deno.test("differential: SSR + hydrate + diff renders what mount would", async () => {
@@ -1597,9 +1622,20 @@ Deno.test("differential: a boundary showing a fallback keeps its slot and patche
 // over it. The replay then walked one node too far and removed the boundary's
 // NEXT SIBLING: keyed rows inside an `<ErrorBoundary>` that start throwing
 // silently deleted the element after the boundary, and nothing said so.
+//
+// …and the same shortfall, with the boundary as its parent's LAST child, must
+// not be REPORTED either: there the node past the region is "none", the walk
+// took "no node" for the missing text's position, and a correct document was
+// said to hold a text that "will stay on the page forever".
 Deno.test("differential: a boundary that falls back removes its own region and nothing else", async () => {
   const win = new Window({ url: "https://localhost" });
   const doc = win.document as unknown as Document;
+  const warnings: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...a: unknown[]) => {
+    warnings.push(a.map(String).join(" "));
+  };
+  setDevMode(true);
   try {
     const tree = (boom: boolean) =>
       h(
@@ -1638,7 +1674,14 @@ Deno.test("differential: a boundary that falls back removes its own region and n
           `was not part of its region`,
       );
     }
+    assertEquals(
+      warnings.filter((w) => /DOM position|desync|aio bug/.test(w)),
+      [],
+      "a correct fallback was reported as a renderer failure",
+    );
   } finally {
+    setDevMode(false);
+    console.warn = origWarn;
     await closeWindow(win);
   }
 });
@@ -1748,6 +1791,9 @@ type XSpec =
   | (XBase & { k: "f"; km: number; kids: XSpec[] })
   | (XBase & { k: "b"; km: number; kids: XSpec[] })
   | (XBase & { k: "p"; ti: number; kids: XSpec[] })
+  /** a form control with a `value`/`checked` prop: text input / checkbox /
+   *  textarea, with (`hd`) or without a handler of its own */
+  | (XBase & { k: "i"; kind: number; v: string; on: boolean; hd: boolean })
   | (XBase & { k: "c"; c: number; km: number; kids: XSpec[]; rv: string });
 
 const X_NONE = 0, X_STABLE = 1, X_INDEX = 2, X_DUP = 3;
@@ -1835,6 +1881,18 @@ function xBuild(s: XSpec, w: XWorld): VNode | string | number | null {
       return null;
     case "g":
       return X_SIGS[s.si] as unknown as VNode;
+    case "i": {
+      const p = {
+        "data-i": xControlSig(s, s.kk === undefined && !s.hd),
+        ...(s.hd ? { onInput: xNoRef } : {}),
+        ...kp,
+      };
+      return s.kind === 1
+        ? h("input", { type: "checkbox", checked: s.on, ...p })
+        : s.kind === 2
+        ? h("textarea", { value: s.v, ...p })
+        : h("input", { type: "text", value: s.v, ...p });
+    }
     case "e": {
       const props: Record<string, unknown> = {
         ...X_PROPS[s.pi % X_PROPS.length],
@@ -1896,7 +1954,17 @@ const xEl = (r: Rnd, kids: XSpec[]): XSpec => ({
 });
 
 function xLeaf(r: Rnd): XSpec {
-  const roll = r.pick(14);
+  const roll = r.pick(16);
+  if (roll >= 14) {
+    return {
+      k: "i",
+      id: _xNextId++,
+      kind: r.pick(3),
+      v: r.of(X_TEXTS),
+      on: r.pick(2) === 0,
+      hd: r.pick(2) === 0,
+    };
+  }
   if (roll < 4) return { k: "t", id: _xNextId++, v: r.of(X_TEXTS) };
   if (roll < 5) return { k: "x", id: _xNextId++ };
   if (roll < 8) return { k: "g", id: _xNextId++, si: r.pick(X_SIGS.length) };
@@ -1971,7 +2039,68 @@ function xMutate(root: XSpec, r: Rnd): XSpec {
     ...xCollect(next, "c"),
   ] as XContainer[];
   const c = r.of(cs);
-  switch (r.pick(20)) {
+  /** Is `t` inside `s` (or `s` itself)? A node is never moved into itself. */
+  const has = (s: XSpec, t: XSpec): boolean =>
+    s === t || (xIsC(s) && s.kids.some((k) => has(k, t)));
+  switch (r.pick(25)) {
+    case 20: { // REPARENT: a child leaves one container for another, key and all
+      const from = r.of(cs);
+      if (!from.kids.length) break;
+      const i = r.pick(from.kids.length);
+      const kid = from.kids[i]!;
+      const to = r.of(cs);
+      if (has(kid, to)) break;
+      from.kids.splice(i, 1);
+      to.kids.splice(r.pick(to.kids.length + 1), 0, kid);
+      break;
+    }
+    case 21: { // one position, same key and children, ANOTHER KIND of node:
+      // element ⇄ component ⇄ fragment ⇄ boundary ⇄ portal
+      const parent = r.of(cs);
+      const at = parent.kids.findIndex(xIsC);
+      if (at < 0) break;
+      const old = parent.kids[at] as XContainer;
+      const { id, kids } = old;
+      const km = "km" in old ? old.km : X_NONE;
+      const kinds = (["e", "f", "b", "p", "c"] as const).filter((k) =>
+        k !== old.k
+      );
+      const k = r.of([...kinds]);
+      parent.kids[at] = k === "e"
+        ? { ...xEl(r, kids), id, km, dih: undefined } as XSpec
+        : k === "p"
+        ? { k, id, ti: r.pick(3), kids }
+        : k === "c"
+        ? { k, id, c: r.pick(X_COMPS.length), km, kids, rv: r.of(X_TEXTS) }
+        : { k, id, km, kids };
+      break;
+    }
+    case 22: { // UNWRAP: a container goes, its children take its place
+      const at = c.kids.findIndex(xIsC);
+      if (at >= 0) c.kids.splice(at, 1, ...(c.kids[at] as XContainer).kids);
+      break;
+    }
+    case 23: { // a controlled control's value, checked or KIND changes in place
+      const is = xCollect(next, "i");
+      if (!is.length) break;
+      const t = r.of(is);
+      const roll = r.pick(5);
+      if (roll === 4) t.hd = !t.hd;
+      else if (roll === 0) t.kind = r.pick(3);
+      else if (roll === 1) t.on = !t.on;
+      else t.v = r.of(X_TEXTS) + r.pick(3);
+      break;
+    }
+    case 24: { // two children of DIFFERENT containers trade places
+      const a = r.of(cs), b = r.of(cs);
+      if (a === b || !a.kids.length || !b.kids.length) break;
+      const i = r.pick(a.kids.length), j = r.pick(b.kids.length);
+      const x = a.kids[i]!, y = b.kids[j]!;
+      if (has(x, b) || has(y, a)) break;
+      a.kids[i] = y;
+      b.kids[j] = x;
+      break;
+    }
     case 0: { // text edit (values collide by design, and `""` is one of them)
       const ts = xCollect(next, "t");
       if (ts.length) r.of(ts).v = r.of(X_TEXTS);
@@ -2121,11 +2250,90 @@ function xExpectedFocus(s: XSpec): number {
  *  should not (the leak) and a portal target missing content it should have are
  *  the same assertion. */
 function xSnap(host: Element, w: XWorld): string {
+  const html = (el: Element) =>
+    xNormStyle(xNormControls(el.innerHTML)) + xControls(el);
   const parts = [...w.targets.entries()]
     .filter(([, el]) => el.innerHTML !== "")
     .sort((a, b) => a[0] < b[0] ? -1 : 1)
-    .map(([k, el]) => ` ||${k}: ${xNormStyle(el.innerHTML)}`);
-  return xNormStyle(host.innerHTML) + parts.join("");
+    .map(([k, el]) => ` ||${k}: ${html(el)}`);
+  return html(host) + parts.join("");
+}
+
+/** The form controls under `root`, in document order. */
+const xControlEls = (root: Element) =>
+  Array.from(root.querySelectorAll("input,textarea")) as unknown as (
+    & HTMLInputElement
+    & { tagName: string }
+  )[];
+
+/** What a person sees in each control — the LIVE value and checked, which
+ *  markup does not carry. */
+function xControls(root: Element): string {
+  const cs = xControlEls(root).map((el) =>
+    `${el.tagName}:${el.type}|${el.value}|${el.checked}`
+  );
+  return cs.length ? ` ##${cs.join(",")}` : "";
+}
+
+/** A control's whole description, written on it as `data-i`: two renders of
+ *  one element with the same one passed it the same props. `kept` is
+ *  `_keepsTyped` (src/air/vdom-create.ts) said in the model's words — no
+ *  handler, no key. */
+const xControlSig = (
+  s: { id: number; kind: number; v: string; on: boolean },
+  kept: boolean,
+) => `${s.id}|${s.kind}|${s.on ? 1 : 0}|${kept ? 1 : 0}|${s.v}`;
+
+type XControl = ReturnType<typeof xControlEls>[number];
+const xShown = (el: XControl) => `${el.value}|${el.checked}`;
+
+/** Each control on screen, with what it shows right now. */
+function xControlsNow(roots: Element[]): Map<XControl, [string, string]> {
+  const out = new Map<XControl, [string, string]>();
+  for (const root of roots) {
+    for (const el of xControlEls(root)) {
+      const sig = el.getAttribute("data-i");
+      if (sig !== null) out.set(el, [sig, xShown(el)]);
+    }
+  }
+  return out;
+}
+
+/** The rule a fresh render cannot be the oracle for: a KEPT control rendered
+ *  again with the same props still shows what it showed before the render —
+ *  typed text included. Every other control shows its prop, which the fresh
+ *  render does say. Returns how many were kept, each put back on its prop
+ *  (the person clears the field) so the two worlds can be compared whole. */
+function xKeepsTyped(
+  before: Map<XControl, [string, string]>,
+  roots: Element[],
+  fail: (why: string) => string,
+): number {
+  let kept = 0;
+  for (const [el, [sig, shown]] of before) {
+    if (el.getAttribute("data-i") !== sig) continue;
+    if (!roots.some((root) => root.contains(el))) continue;
+    const [, kind, on, keeps, ...v] = sig.split("|");
+    if (keeps !== "1") continue;
+    assertEquals(
+      xShown(el),
+      shown,
+      fail(`a handler-less control lost what it showed (data-i="${sig}")`),
+    );
+    if (kind === "1") el.checked = on === "1";
+    else el.value = v.join("|");
+    kept++;
+  }
+  return kept;
+}
+
+/** The DEFAULT a control was created with (`value=`, `checked`, a textarea's
+ *  text) is not what it shows — see `normFormDefault` in the base fuzzer. */
+function xNormControls(html: string): string {
+  return normFormDefault(html).replace(
+    /(<textarea\b[^>]*>)[^<]*(<\/textarea>)/g,
+    "$1$2",
+  );
 }
 
 /** `normStyle`, plus the declaration ORDER.
@@ -2208,6 +2416,11 @@ type XRun = {
   portalTargetsFilled: number;
   signalChildren: number;
   rawHtmlElements: number;
+  /** Controls in the models, edits made to them by "a user", and how many
+   *  of those a render was required to keep. */
+  controls: number;
+  typed: number;
+  kept: number;
 };
 
 async function runExtended(mode: "diff" | "hydrate"): Promise<XRun> {
@@ -2245,7 +2458,7 @@ async function runExtended(mode: "diff" | "hydrate"): Promise<XRun> {
   const distinct = new Set<string>();
   let hydrated = 0, fellBack = 0, checks = 0, rounds = 0;
   let refsLiveSeen = 0, portalTargetsFilled = 0, signalChildren = 0;
-  let rawHtmlElements = 0;
+  let rawHtmlElements = 0, controls = 0, typed = 0, kept = 0;
   xRefCalls = 0;
   try {
     for (let round = 0; round < ROUNDS; round++) {
@@ -2334,6 +2547,7 @@ async function runExtended(mode: "diff" | "hydrate"): Promise<XRun> {
         rawHtmlElements += xCollect(spec, "e").filter((e) =>
           e.dih !== undefined
         ).length;
+        controls += xCollect(spec, "i").length;
         for (const el of w.targets.values()) {
           if (el.innerHTML !== "") portalTargetsFilled++;
         }
@@ -2348,11 +2562,25 @@ async function runExtended(mode: "diff" | "hydrate"): Promise<XRun> {
       );
 
       for (let step = 1; step <= STEPS; step++) {
+        // A person types into the controls on screen, and ticks them.
+        // Nothing stores it, so the next render — of any model — puts each
+        // control back on its prop, except the ones `xKeepsTyped` names.
+        const roots = [host as unknown as Element, ...w.targets.values()];
+        for (const root of roots) {
+          for (const el of xControlEls(root)) {
+            if (r.pick(2)) continue;
+            if (el.type === "checkbox") el.checked = !el.checked;
+            else el.value += "~";
+            typed++;
+          }
+        }
+        const before = xControlsNow(roots);
         spec = xMutate(spec, r);
         history.push(xClone(spec));
         const nextV = xToVNode(spec, w);
         _diff(host, nextV, prev, { doc });
         prev = nextV;
+        kept += xKeepsTyped(before, roots, (why) => repro(step, why));
         check(step, "incremental world ≠ fresh render");
       }
 
@@ -2407,6 +2635,9 @@ async function runExtended(mode: "diff" | "hydrate"): Promise<XRun> {
     portalTargetsFilled,
     signalChildren,
     rawHtmlElements,
+    controls,
+    typed,
+    kept,
   };
 }
 
@@ -2452,6 +2683,13 @@ function assertExercised(run: XRun, mode: "diff" | "hydrate"): void {
     `only ${run.rawHtmlElements} dangerouslySetInnerHTML elements — the ` +
       `raw-html path is not being exercised`,
   );
+  assert(
+    run.controls > ROUNDS / 2 && run.typed > ROUNDS / 4 &&
+      run.kept > ROUNDS / 8,
+    `only ${run.controls} controls, ${run.typed} edits typed into them and ` +
+      `${run.kept} a render had to keep — the controlled-input path is not ` +
+      `being exercised`,
+  );
   if (mode === "hydrate") {
     assert(
       run.hydrated > ROUNDS / 2,
@@ -2473,7 +2711,7 @@ Deno.test("extended differential: the same alphabet through SSR + hydrate", asyn
 // a kind that can be GENERATED but never MUTATED is a transition nothing tests,
 // and every one of the four bugs above is a transition.
 Deno.test("extended differential: every node kind the generator makes, a mutation can change", () => {
-  const KINDS = ["t", "g", "e", "f", "b", "p", "c"] as const;
+  const KINDS = ["t", "g", "e", "f", "b", "p", "c", "i"] as const;
   const touched = new Set<string>();
   const index = (s: XSpec, out = new Map<number, XSpec>()) => {
     out.set(s.id, s);

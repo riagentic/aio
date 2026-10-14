@@ -2,6 +2,7 @@
 // and Deno's message ("not a dependency and not in import map") reads like the
 // entry doesn't exist, so the app author blames the docs. The scaffold now maps
 // every public entry, and aiol catches (and fixes) the apps scaffolded before.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { buildContext } from "../aiol/context.ts";

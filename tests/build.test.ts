@@ -10,6 +10,7 @@ import {
 } from "../src/build/build-helpers.ts";
 import { _cleartextAttr, apkArtifact } from "../src/build/build-android.ts";
 import { ANDROID_TEMPLATE } from "../src/build/android-template.ts";
+import { withLockMutexAt } from "../src/server/single-instance-lock.ts";
 
 const buildScript = join(import.meta.dirname ?? ".", "..", "src", "build.ts");
 
@@ -664,8 +665,13 @@ Deno.test({
       });
       await new Promise((r) => setTimeout(r, 1_500));
       assertEquals(entered, false, "took a foreign namespace's lock at once");
-      await Deno.remove(`${lock}.id`);
-      await Deno.remove(lock);
+      // The holder lets go as a real one does: under the lock's mutex, stamp
+      // first. Two bare removes left a lock with no stamp for a moment, and a
+      // loaded box's waiter took it over in between (seen 2026-10-14).
+      withLockMutexAt(lock, () => {
+        Deno.removeSync(`${lock}.id`);
+        Deno.removeSync(lock);
+      }, false);
       // With no lock, its journal is still not ours to judge: kept, loudly.
       const warn = console.warn, said: string[] = [];
       console.warn = (m: string) => said.push(m);

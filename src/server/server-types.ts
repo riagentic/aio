@@ -83,6 +83,7 @@ export interface ServerConfig {
   layout?: boolean; // ui.layout — false drops the page-layout defaults
   themeName?: string; // identity the theme accent is derived from (appId)
   renderBudget?: RenderBudget; // sent to browser for RenderMeter thresholds
+  wire?: { omitTrailingUndefined?: boolean }; // sent to browser: it encodes
   /** Extra read-only DEV-server roots by URL prefix — see CellsConfig.serveDirs. */
   serveDirs?: Record<string, string>;
   /** Read-only roots served in dev AND prod — see CellsConfig.assets. */
@@ -127,6 +128,9 @@ export interface ServerConfig {
   /** Dev only: an edited file declares a cell — cells can't hot-reload, so
    *  aio.ts restarts the process. Absent ⇒ the watcher just warns. */
   onCellChange?: (path: string) => void;
+  /** Dev only: the source files saved before the watcher existed — see
+   *  `WatcherDeps.savedBeforeWatch`. */
+  savedBeforeWatch?: (roots: readonly string[]) => readonly string[];
   /** `aio.run({ watch })` — false turns live reload off, an array narrows the
    *  watched paths. See AioConfig.watch. */
   watch?: false | string[];

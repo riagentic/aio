@@ -70,7 +70,9 @@ const HAS_FILE = (() => {
     return false;
   }
 })();
-const ELECTRON = ELECTRON_GATE && HAS_FILE;
+// …and an AppImage is Linux's: with the lane open, another OS that has
+// `file` would start a build it cannot finish.
+const ELECTRON = ELECTRON_GATE && HAS_FILE && Deno.build.os === "linux";
 const APP_ID = "hostsfx";
 const dec = new TextDecoder();
 
@@ -599,10 +601,10 @@ const server = (mode: "single" | "multi"): Host => ({
   },
   // Instrument control: the same socket reader must SEE a listener where
   // one exists, or its "none" on the electron row proves nothing.
-  whileUp: async (run) => {
-    // The reader is /proc (lsof on macOS), and the only row it is a control
-    // for is the packaged AppImage — neither exists on Windows.
-    if (Deno.build.os === "windows") return;
+  // Gated, not skipped inside: the reader is /proc (lsof on macOS), and the
+  // only row it is a control for is the packaged AppImage — neither exists on
+  // Windows, so there the host declares no control at all.
+  whileUp: Deno.build.os === "windows" ? undefined : async (run) => {
     const tcp = tcpListeners(await tree(run.proc.pid));
     assert(
       tcp.length > 0,
@@ -779,8 +781,11 @@ async function runStep(
       await live?.();
       await askToStop(report.pid, run, root);
     }
-    if (step === "read" && host.whileUp) {
-      await host.whileUp(run, root);
+    // A host that holds on boot holds on read too (src/app.ts passes
+    // `holdOnRead`), whether or not it has a live check of its own — the
+    // stop belongs to the hold, not to the check.
+    if (step === "read" && host.holdsOnBoot) {
+      await host.whileUp?.(run, root);
       // The APP process (the pid it reported), not whatever wraps it: an
       // AppImage runtime dies of a SIGTERM (143) without passing it on.
       await askToStop(report.pid, run, root);

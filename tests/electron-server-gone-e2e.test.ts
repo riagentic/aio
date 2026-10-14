@@ -21,6 +21,7 @@
 // Same gate as tests/electron-second-launch-show-e2e.test.ts: opt in with
 // ELECTRON_E2E=1, needs node_modules/.bin/electron and a display (the nested
 // one — no window lands on your desktop).
+import { accountEnv } from "./e2e-app-harness.ts";
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { electronMainScriptUDS } from "../src/electron/electron.ts";
@@ -126,7 +127,8 @@ async function survivorsAfter(
     ...testDisplayEnv(),
     DBUS_SESSION_BUS_ADDRESS: `unix:path=${join(dir, "no-bus")}`,
     ELECTRON_DISABLE_SECURITY_WARNINGS: "1",
-    XDG_CONFIG_HOME: join(dir, "config"),
+    // The window's profile, wherever this OS keeps it.
+    ...accountEnv(join(dir, "config")),
     AIO_PARENT_PID: String(server.pid),
   };
   delete env.WAYLAND_DISPLAY;

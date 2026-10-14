@@ -36,6 +36,12 @@ export type Log = { info: (msg: string) => void; error: (msg: string) => void };
 /** The `<head>`-shaped half of `UiConfig` — everything the HTML shell must
  *  carry because no runtime frame can deliver it after the page exists. */
 export type ShellConfig = {
+  /** `aio.run({ wire })` — how this page encodes a call. In the shell, not
+   *  only the `cfg` frame: a call queued before the connection opens is
+   *  flushed BEFORE that frame arrives, and was encoded as if the app had
+   *  not asked. This shell is templated at launch, by the process that holds
+   *  the answer, so it can simply carry it. */
+  wire?: { omitTrailingUndefined?: boolean };
   showStatus?: boolean;
   width?: number;
   height?: number;
@@ -104,6 +110,15 @@ export type AioMeta = {
    *  opt-out. Decided by the SERVER (aio-server.ts); carried here because
    *  this mapping is total over the block. See ElectronConfig. */
   allowLocalPeers?: boolean;
+  /** `electron: { ignoreDebugEnv }` — ambient `AIO_CDP` / `AIO_PORT` open
+   *  nothing. Decided by the SERVER (aio.ts, the port chain); carried here
+   *  because this mapping is total over the block. See ElectronConfig. */
+  ignoreDebugEnv?: boolean;
+  /** `electron: { strictPin }` — the aio CLIENT refuses a paired host whose
+   *  certificate changed. Read where the client is launched
+   *  (`handleThinClient`); carried here because this mapping is total over
+   *  the block. See ElectronConfig. */
+  strictPin?: boolean;
   /** `ui.chrome` — how much of the window the OS draws. See UiConfig. */
   chrome?: "standard" | "themed" | "none";
   /** `ui.tray` — a system tray icon, menu and close-to-tray. See UiConfig. */
@@ -142,6 +157,8 @@ export function electronMetaPolicy(
   | "guestDownloads"
   | "permissions"
   | "allowLocalPeers"
+  | "ignoreDebugEnv"
+  | "strictPin"
 > {
   return {
     requireSandbox: !!cfg?.requireSandbox,
@@ -150,6 +167,8 @@ export function electronMetaPolicy(
     guestDownloads: !!cfg?.guestDownloads,
     permissions: cfg?.permissions ?? null,
     allowLocalPeers: cfg?.allowLocalPeers === true,
+    ignoreDebugEnv: !!cfg?.ignoreDebugEnv,
+    strictPin: cfg?.strictPin === true,
   };
 }
 
@@ -1654,8 +1673,14 @@ export const CONNECT_HTML = `<!DOCTYPE html>
     // Filled by the Electron main process (see electron-client-script). In a
     // plain browser these stay empty and only the manual field shows.
     function appRow(a, extra) {
-      const badge = a.needsAuth ? '<span class="badge">\\u26bf auth</span>': '';
-      const sub = esc(a.url || a.host + ':' + a.port);
+      // changed: this pairing's server last presented a certificate its pin
+      // does not cover and did not prove itself (electron-client-script:
+      // decidePin) — said here, where the next connect is chosen.
+      const badge = (a.needsAuth ? '<span class="badge">\\u26bf auth</span>': '') +
+        (a.changed ? '<span class="badge" title="The certificate pinned for this app changed and the server did not prove it holds the app key. Pair again to pin the new one.">\\u26a0 certificate changed</span>': '');
+      // shown: the address with its key masked (forPage, in the main
+      // process). Never a.url — a paired recent's carries '?token=<key>'.
+      const sub = esc(a.shown || a.host + ':' + a.port);
       const data = 'data-url="' + esc(a.url) + '" data-host="' + esc(a.host || '') +
         '" data-port="' + esc(a.port) + '" data-tls="' + (a.tls ? '1': '') +
         '" data-auth="' + (a.needsAuth ? '1': '') + '"';
@@ -2234,6 +2259,7 @@ export function udsProdHTML(
     dir: shell?.dir,
     csp: shell?.csp,
     nonce: shell?.nonce,
+    wire: shell?.wire,
   });
 }
 

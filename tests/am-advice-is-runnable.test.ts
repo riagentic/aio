@@ -10,6 +10,7 @@
 //
 // The command list is read from `am help` itself, so this cannot drift from
 // what `am` actually accepts.
+import "./store-sandbox.ts";
 import { assert } from "@std/assert";
 import { REMOVALS } from "../src/state/removals.ts";
 import { fromFileUrl } from "@std/path";

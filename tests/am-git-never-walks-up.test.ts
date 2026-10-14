@@ -10,6 +10,7 @@
 //
 // Throwaway repos, a sandboxed HOME/AIO_HOME/install roots, a cleared env —
 // never the aio repo, never the real home, no network (origins are local).
+import "./store-sandbox.ts";
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join, relative } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
@@ -121,7 +122,16 @@ Deno.test({
       // The "install": a plain copy of aio (no .git), am run from it.
       const copy = join(outer, "vendor", "aio");
       await Deno.mkdir(copy, { recursive: true });
-      for (const name of ["src", "mod.ts", "deno.json", "deno.lock"]) {
+      // `proof-matrix.json`: the build summary imports it (`src/build-all.ts`).
+      for (
+        const name of [
+          "src",
+          "mod.ts",
+          "deno.json",
+          "deno.lock",
+          "proof-matrix.json",
+        ]
+      ) {
         await copy_(join(REPO, name), join(copy, name));
       }
       const install = await Deno.realPath(copy);

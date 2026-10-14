@@ -176,10 +176,13 @@ argument list at all" — which still catches the reported bug and breaks nobody
 
 **How a capability ships now that a signature cannot change.** As a new door. A
 new route, a new flag, a new optional field, an internal type the public one
-does not mention. Adding an optional trailing parameter to a public function is
-provably source-compatible in TypeScript in both directions — and is still
-refused, because "provably safe" is a judgement call and this policy does not
-have one in it.
+does not mention. What `check:api` can PROVE breaks no caller it reads as
+additive: an overload added behind the unchanged first one, a parameter that
+accepts a strict superset of what it did, a parameter that may now be left out.
+Adding an optional trailing parameter is not in that list: every call still
+compiles, but a caller that passes the function as a callback (`ids.map(f)`)
+would start feeding it an argument, so it is refused until a reviewed entry
+names the symbol and why.
 
 ## Experimental surface
 

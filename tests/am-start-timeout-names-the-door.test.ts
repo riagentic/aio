@@ -6,6 +6,7 @@
 // reported as "not responding on port 0": a port no process can listen on,
 // naming nothing, while the unix socket it really waited at went unmentioned.
 // The 10s wait it blew was a real symptom; the address in the message was not.
+import "./store-sandbox.ts";
 import { assertEquals } from "@std/assert";
 import { waitedAt } from "../src/am/am-cmd-process.ts";
 

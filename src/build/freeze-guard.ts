@@ -15,7 +15,7 @@
  *  2. **Never add a memory-heavy step to a machine that is already tight.**
  *     This module. The one heavy burst aio owns is packing an ~800 MB AppDir
  *     into the Windows zstd payload; it asks for headroom first and declines
- *     while RAM or swap is nearly spent. Declining is free —
+ *     while RAM is nearly spent, or short with the swap nearly full. Declining is free —
  *     `buildWindowsSfxExe` already falls back to the zip payload — so a build
  *     still finishes, and the machine is never pushed over the edge.
  *
@@ -35,8 +35,15 @@ export type Memory = {
 /** Below this share of RAM available, a heavy step declines. This is roughly
  *  where a desktop has already begun to feel the pressure. */
 const MEM_AVAILABLE_FLOOR_PCT = 5;
-/** Swap this full means the machine is already thrashing; do not add to it. */
+/** Swap this full means the machine is already thrashing; do not add to it —
+ *  but only while RAM is short too ({@link SWAP_COUNTS_BELOW_PCT}). */
 const SWAP_FULL_PCT = 80;
+/** Swap is counted only below this share of RAM available. Full swap beside
+ *  plenty of free RAM is history, not pressure: pages pushed out during some
+ *  earlier peak stay in swap until something reads them. Counting it alone
+ *  declined the pack on a machine with a third of its RAM free, and the build
+ *  shipped the larger zip payload for no reason. */
+const SWAP_COUNTS_BELOW_PCT = 20;
 
 /** The verdict for one memory snapshot. Pure, so it is unit-testable without
  *  a real machine and without timing. */
@@ -47,10 +54,15 @@ export function headroom(
   if (availPct < MEM_AVAILABLE_FLOOR_PCT) {
     return { ok: false, reason: `only ${availPct.toFixed(1)}% RAM available` };
   }
-  if (m.swapTotalBytes > 0) {
+  if (m.swapTotalBytes > 0 && availPct < SWAP_COUNTS_BELOW_PCT) {
     const swapPct = (100 * m.swapUsedBytes) / m.swapTotalBytes;
     if (swapPct > SWAP_FULL_PCT) {
-      return { ok: false, reason: `swap ${swapPct.toFixed(0)}% full` };
+      return {
+        ok: false,
+        reason: `swap ${swapPct.toFixed(0)}% full with only ${
+          availPct.toFixed(0)
+        }% RAM available`,
+      };
     }
   }
   return { ok: true };
@@ -77,10 +89,15 @@ export async function readMemory(): Promise<Memory | null> {
   }
 }
 
+/** The memory read, replaceable by a test: what a pack does on a tight
+ *  machine must not depend on how tight the machine running the test is.
+ *  @internal */
+export const _freezeDeps = { readMemory };
+
 /** Throws when the machine is too tight to start `step`. The message names
  *  what was refused and why, so a log is actionable. */
 export async function ensureHeadroom(step: string): Promise<void> {
-  const m = await readMemory();
+  const m = await _freezeDeps.readMemory();
   if (!m || m.totalBytes === 0) return;
   const verdict = headroom(m);
   if (!verdict.ok) {

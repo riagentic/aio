@@ -16,6 +16,7 @@
 //   2. the scaffold's `compile` task is the SAME command as the explicit
 //      `compile:<target>` task for that target — one decider, checked.
 
+import "./store-sandbox.ts";
 import {
   assert,
   assertEquals,

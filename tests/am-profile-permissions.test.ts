@@ -4,6 +4,7 @@
 // that key 0600 inside a 0700 directory (app-key.ts); the export wrote it at
 // the process umask default (0644) into $HOME or /tmp, handing it to every
 // local user on the machine.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { cmdProfile } from "../src/am/am-cmd-inspect.ts";

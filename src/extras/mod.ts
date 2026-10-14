@@ -16,16 +16,20 @@
  *  `aio.run()` prints at boot.
  *
  *  ```ts
- *  const findings = await checkCells(initialState, config, Deno.cwd());
+ *  const findings = await checkCells([todo, user]);
  *  ```
  *
- *  NOT `checkCells(cells)`. That is what this comment said and what
- *  `api-reference.md` said, and it throws: the first argument is the initial
- *  STATE and the second the run config, so a cell array arrived where a
- *  config was expected and the first `config.reduce` read blew up with
- *  "Cannot read properties of undefined". `docs/api-snapshot.json` has always
- *  recorded the real signature, so `check:api` saw the truth while the doc
- *  comment beside the export did not.
+ *  A list of cells is composed as `aio.run({ cells })` composes it. The
+ *  config (default `{}`) and the app directory (default `Deno.cwd()`) are
+ *  optional since 1.0.20; before that a one-argument call threw on
+ *  `config.reduce`.
+ *
+ *  The first argument may also be the initial STATE, with the run config
+ *  second — the original form, unchanged:
+ *
+ *  ```ts
+ *  const findings = await checkCells(initialState, config, Deno.cwd());
+ *  ```
  *
  *  (alpha52 name; its `lint` alias — which collided with aiol's project
  *  linter — went out in alpha70, see src/state/removals.ts.) */

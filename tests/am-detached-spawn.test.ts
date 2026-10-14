@@ -3,6 +3,7 @@
 //. The spec builder is pure so BOTH
 // shapes are pinned on any OS; the POSIX contract is additionally proven by
 // executing it for real.
+import "./store-sandbox.ts";
 import {
   assert,
   assertEquals,

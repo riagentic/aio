@@ -24,27 +24,12 @@ import {
 } from "../src/testing/temp-dir.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { fromFileUrl } from "@std/path";
+// THE browser lookup (every OS), never a copy of its path list.
+import { browserOsFlags, findBrowser } from "./e2e-harness.ts";
+import { browserHomeEnv } from "../src/testing/chromium.ts";
 const _childCovDir = childCoverageDir();
 
 const ROOT = fromFileUrl(new URL("..", import.meta.url));
-
-function findBrowser(): string | null {
-  if (Deno.env.get("AIO_E2E") === "0") return null;
-  const fromEnv = Deno.env.get("AIO_E2E_BROWSER");
-  const candidates = fromEnv ? [fromEnv] : [
-    "/usr/bin/chromium",
-    "/usr/bin/chromium-browser",
-    "/usr/bin/google-chrome",
-    "/usr/bin/google-chrome-stable",
-  ];
-  for (const c of candidates) {
-    try {
-      Deno.statSync(c);
-      return c;
-    } catch { /* not this one */ }
-  }
-  return null;
-}
 
 const BROWSER = findBrowser();
 
@@ -142,6 +127,7 @@ Deno.test({
 
       browser = new Deno.Command(BROWSER!, {
         args: [
+          ...browserOsFlags,
           "--headless=new",
           "--no-sandbox",
           "--disable-gpu",
@@ -151,6 +137,7 @@ Deno.test({
           `--user-data-dir=${profile}`,
           `${base}/`,
         ],
+        env: browserHomeEnv(profile),
         stdin: "null",
         stdout: "null",
         stderr: "null",

@@ -18,7 +18,14 @@
  * TLS material, none of which are cell state.
  */
 
-import { basename, isAbsolute, join, relative, resolve } from "@std/path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+} from "@std/path";
 import type { GlobalFlags } from "./am-types.ts";
 import { detectMode, fail, out, outError, sayErr } from "./am-output.ts";
 import {
@@ -41,7 +48,9 @@ import {
   claimHome,
   heldLockLine,
   isLockOwnerAlive,
+  type LockData,
   lockDir,
+  ownerIdentity,
   STARTUP_GRACE_MS,
 } from "../server/single-instance-lock.ts";
 
@@ -345,6 +354,12 @@ export async function cmdBackup(
   async function copyBackup(): Promise<void> {
     const partial = `${dest}.partial`;
     hold?.leaves(partial);
+    // A `.partial` a KILLED backup left goes first, said out loud — it used
+    // to refuse this destination until somebody deleted it by hand.
+    const swept = sweepIncomplete(partial);
+    if (swept) {
+      sayErr(`am: ${swept.removed ? "" : "note: "}${sweptLine(swept)}`);
+    }
     try {
       Deno.statSync(partial);
       fail(
@@ -357,11 +372,13 @@ export async function cmdBackup(
     }
     let files: number;
     try {
+      markIncomplete(partial, "am backup");
       files = await copyTree(d.data, partial, hold?.interrupted, hold?.abandon);
       // A signal during the LAST file is seen here, before the name is given:
       // an interrupted backup never leaves a `<dest>` (exit 130/143).
       const sig = hold?.interrupted() ?? null;
       if (sig) throw new Interrupted(sig);
+      Deno.removeSync(join(partial, INCOMPLETE_MARK));
       Deno.renameSync(partial, dest);
     } catch (e) {
       removeTracked(partial);
@@ -684,6 +701,13 @@ export async function cmdRestore(
     // behind — never swept (a copy is user data until the user says it is
     // not), but NAMED, so it is not disk quietly eaten forever.
     for (const left of siblingsOf(d.data, ".restoring-")) {
+      // …unless it says itself that a restore was making it and that restore
+      // is dead: then it is an incomplete copy of an archive, and it goes.
+      const swept = sweepIncomplete(left);
+      if (swept) {
+        sayErr(`am: ${swept.removed ? "" : "note: "}${sweptLine(swept)}`);
+        continue;
+      }
       sayErr(
         `am: note: ${left} was left by an interrupted restore — an ` +
           `incomplete copy, not the live data. Delete it once you no longer ` +
@@ -704,12 +728,14 @@ export async function cmdRestore(
     hold.leaves(staging);
     let files: number;
     try {
+      markIncomplete(staging, "am restore");
       files = await copyTree(src, staging, hold.interrupted, hold.abandon);
       // A signal that landed during the LAST file is seen here: the swap
       // below is synchronous, so after this check nothing can interrupt it
       // half-way — an interrupted restore never changes data/.
       const sig = hold.interrupted();
       if (sig) throw new Interrupted(sig);
+      Deno.removeSync(join(staging, INCOMPLETE_MARK));
     } catch (e) {
       removeTracked(staging);
       failCopy(
@@ -813,6 +839,110 @@ function siblingsOf(dir: string, infix: string): string[] {
   } catch {
     return []; // aio-ok: no parent to list — nothing was left there
   }
+}
+
+/** The incomplete copy a `am backup` / `am restore` hold says it leaves if it
+ *  is killed (`LockData.maintenance.partial`) — or null when the record names
+ *  nothing, or names something that is not one of the two shapes these
+ *  commands create: `<dest>.partial` for a backup, `data.restoring-*` beside
+ *  `dataDir` for a restore. The path comes from a file, so the SHAPE is
+ *  checked before anything is removed on its word. Pure. */
+export function holdLeftover(
+  pf: Pick<LockData, "maintenance"> | null | undefined,
+  dataDir: string,
+): string | null {
+  const op = maintenanceOp(pf);
+  const path = pf?.maintenance?.partial;
+  if (!op || typeof path !== "string" || !isAbsolute(path)) return null;
+  if (/backup/.test(op)) return path.endsWith(".partial") ? path : null;
+  if (!/restore/.test(op)) return null;
+  return resolve(dirname(path)) === resolve(dirname(dataDir)) &&
+      basename(path).startsWith(`${basename(dataDir)}.restoring-`)
+    ? path
+    : null;
+}
+
+/** The file a copy in progress carries INSIDE its own directory
+ *  (a backup's `<dest>.partial`, a restore's `data.restoring-…`): who is
+ *  making it. Removed just
+ *  before the rename that gives the copy its real name, so it is never part
+ *  of a backup or of restored data. */
+export const INCOMPLETE_MARK = ".am-incomplete";
+
+/** Create `dir` and say, inside it, that THIS process is filling it. */
+function markIncomplete(dir: string, op: string): void {
+  Deno.mkdirSync(dir, { recursive: true });
+  Deno.writeTextFileSync(
+    join(dir, INCOMPLETE_MARK),
+    JSON.stringify({
+      op,
+      pid: Deno.pid,
+      host: Deno.hostname(),
+      ...ownerIdentity(Deno.pid),
+    }) + "\n",
+  );
+}
+
+/** Remove what a KILLED `am backup` / `am restore` left — only when the
+ *  directory itself proves it: it carries {@linkcode INCOMPLETE_MARK}, and the
+ *  process named there is gone. Then it is an incomplete copy by
+ *  construction — the mark comes off only on the way to the rename the dead
+ *  process never reached. A leftover WITHOUT the mark (an older am, a copy
+ *  somebody made by hand) is still only named, never deleted (see `swapIn`).
+ *
+ *  "Gone" is only ever said about a process THIS machine can see: the mark
+ *  names the host and the pid namespace it was written in, and a mark from
+ *  anywhere else (a container, a second machine writing to a shared
+ *  destination) — or one that names neither — is somebody's copy whose owner
+ *  cannot be judged from here. It is left, and named, as before.
+ *
+ *  A kill the op can catch (SIGINT/SIGTERM) needs none of this — it cleans up
+ *  itself. This is for the kill it cannot: SIGKILL, a power cut, and EVERY
+ *  kill on Windows, where `am kill` is TerminateProcess.
+ *
+ *  Null: not provably a dead op's copy (no directory, no mark, owner alive). */
+export function sweepIncomplete(
+  dir: string,
+):
+  | { path: string; op: string; pid: number; removed: boolean; error?: string }
+  | null {
+  let who: { op?: unknown; pid?: unknown; host?: unknown; ns?: unknown };
+  try {
+    // A real directory only: never through a link someone put at that name.
+    if (!Deno.lstatSync(dir).isDirectory) return null;
+    who = JSON.parse(Deno.readTextFileSync(join(dir, INCOMPLETE_MARK)));
+  } catch {
+    return null; // aio-ok: no mark to read — not provably ours, so left alone
+  }
+  if (typeof who?.pid !== "number" || !Number.isInteger(who.pid)) return null;
+  if (who.host !== Deno.hostname()) return null;
+  if (who.ns !== ownerIdentity(Deno.pid).ns) return null;
+  if (isLockOwnerAlive(who as { pid: number })) return null;
+  const op = typeof who.op === "string" ? who.op : "am";
+  try {
+    Deno.removeSync(dir, { recursive: true });
+    return { path: dir, op, pid: who.pid, removed: true };
+  } catch (e) {
+    return {
+      path: dir,
+      op,
+      pid: who.pid,
+      removed: false,
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+}
+
+/** What a sweep says. One sentence for `am backup`, `am restore` and
+ *  `am kill`. */
+export function sweptLine(
+  s: NonNullable<ReturnType<typeof sweepIncomplete>>,
+): string {
+  return s.removed
+    ? `removed ${s.path} — the incomplete copy a killed ${s.op} (pid ` +
+      `${s.pid}) left`
+    : `could not remove ${s.path}, the incomplete copy a killed ${s.op} ` +
+      `(pid ${s.pid}) left (${s.error}) — delete it`;
 }
 
 /** Remove a directory THIS command created (a `.partial` / `.restoring-*`

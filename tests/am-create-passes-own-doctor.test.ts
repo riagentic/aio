@@ -5,6 +5,7 @@
 // "deno.lock is missing 8 entries for aio's tools — run `am fix`" on an app
 // nobody had touched (and `am fix` needs the network on a cold cache). create
 // now seeds the lock's JSR side from the framework's own deno.lock — offline.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { seedLockText, writeScaffold } from "../src/am/am-cmd-create.ts";

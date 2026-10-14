@@ -83,8 +83,10 @@ Deno.test("oidc return path: property — every input yields a same-origin ByteS
   // Deterministic LCG so a failure reproduces from the seed in the message.
   let seed = 0x2225;
   const rnd = (n: number): number => {
-    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
-    return seed % n;
+    // Math.imul, and the HIGH bits: the plain product passes 2^53, its low
+    // bits are then always 0, and `% 4` never drew anything but 0.
+    seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff;
+    return (seed >>> 12) % n;
   };
   const alphabet = [
     "/",

@@ -6,8 +6,9 @@
  * own; it exists so the suites assert against ONE definition of "the app really
  * works" instead of drifting copies.
  */
+import "./store-sandbox.ts";
 import { assert } from "@std/assert";
-import { resolve } from "@std/path";
+import { join, resolve } from "@std/path";
 import { scaffold } from "../src/am/am-cmd-create.ts";
 import { stripVersionToken } from "../src/build/build-version.ts";
 import { descendantPids } from "../src/server/single-instance-lock.ts";
@@ -46,11 +47,21 @@ export async function makeApp(
 /** Is this the compiled binary a FLEET build placed in dist/? Placed names
  *  carry THE build version (`app-0.1.7`, `app-0.1.0-nogit.9f3ac2b1`), so
  *  "has no dot" — the rule for a builder's unversioned output in the project
- *  root — is wrong there: strip the version token, then ask for no extension. */
-export function isPlacedBinary(name: string): boolean {
+ *  root — is wrong there: strip the version token, then ask for no extension.
+ *  On Windows the binary this host runs is `app-0.1.7.exe`: that extension,
+ *  there only (elsewhere an `.exe` in dist/ is a cross-built artifact, not
+ *  the binary a test can start). `os`: for the test of this rule. */
+export function isPlacedBinary(
+  name: string,
+  os: string = Deno.build.os,
+): boolean {
   if (name === "manifest.json") return false;
-  const stripped = stripVersionToken(name);
-  return stripped === name ? false : !stripped.includes(".");
+  const bare = os === "windows" && name.endsWith(".exe")
+    ? name.slice(0, -4)
+    : name;
+  if (os === "windows" && bare === name) return false; // no `.exe`: not runnable there
+  const stripped = stripVersionToken(bare);
+  return stripped === bare ? false : !stripped.includes(".");
 }
 
 /** The one compiled binary a fleet build placed in `<dir>/dist/`. */
@@ -121,6 +132,7 @@ export { freePort };
 export function childEnv(
   own: Record<string, string> = {},
 ): Record<string, string> {
+  const chose = (k: string) => own[k] !== Deno.env.get(k) && own[k];
   return {
     AIO_PARENT_PID: String(Deno.pid),
     AIO_NO_OPEN: "1",
@@ -139,8 +151,105 @@ export function childEnv(
     // sandbox through the one variable that is the sandbox.
     AIO_APPS_DIR: own.AIO_APPS_DIR || Deno.env.get("AIO_APPS_DIR") ||
       _childAppsDir(),
+    // …and four, the same escape one directory over. An app started with
+    // `--client=electron` writes its window's main script into the window's
+    // PROFILE directory, and Electron keeps the whole Chromium profile there
+    // — which `AIO_APPS_DIR` does not move. Each test app has a unique name,
+    // so each run left one more: 73 `~/.config/app-<id>@<hash>` on one
+    // workstation, and 178 `aio-app@<hash>` no gate had a shape for. The
+    // parent's own value is NOT inherited here — that one IS the developer's.
+    // Per OS, {@linkcode accountEnv}; a test that names its own home keeps it
+    // — NAMES: a value that only repeats this process's (the whole env spread
+    // into `own`, as many callers do) is the developer's, not a choice.
     ...own,
+    ...Object.fromEntries(
+      Object.entries(accountEnv(
+        chose(
+          Deno.build.os === "windows"
+            ? "USERPROFILE"
+            : Deno.build.os === "darwin"
+            ? "HOME"
+            : "XDG_CONFIG_HOME",
+        ) || _childConfigHome(),
+      )).filter(([k]) => !chose(k)),
+    ),
   };
+}
+
+/** The variables that decide where a child keeps what its OS files under the
+ *  ACCOUNT — above all an Electron window's profile — pointed into `home`, a
+ *  directory of the test's (default: this test file's own, as
+ *  {@linkcode childEnv} hands out). Pure, given `home`.
+ *
+ *  - Linux: `$XDG_CONFIG_HOME` is the profile's parent, and it is all that is
+ *    moved (HOME stays: the module and tool caches hang off it).
+ *  - macOS: the profile is `~/Library/Application Support/<name>`, and there
+ *    is no variable for that directory alone — so the home moves: `HOME` (what
+ *    aio reads) and `CFFIXED_USER_HOME` (what Foundation, and so Electron,
+ *    reads).
+ *  - Windows: `%APPDATA%` (what aio reads) and `%USERPROFILE%`, from which
+ *    the shell expands the known folders Electron asks it for.
+ *
+ *  Where the home moves, the two caches that hang off it are pinned back to
+ *  the real ones: without `DENO_DIR` every spawn re-downloads its modules,
+ *  without `XDG_CACHE_HOME` every window test a 100 MB Electron. */
+export function accountEnv(
+  home: string = _childConfigHome(),
+  os: string = Deno.build.os,
+  env: (k: string) => string | undefined = (k) => Deno.env.get(k),
+): Record<string, string> {
+  if (os !== "windows" && os !== "darwin") return { XDG_CONFIG_HOME: home };
+  const real = env("HOME") ?? env("USERPROFILE");
+  const local = os === "darwin"
+    ? real && join(real, "Library", "Caches")
+    : env("LOCALAPPDATA");
+  const denoDir = env("DENO_DIR") ?? (local && join(local, "deno"));
+  const cache = env("XDG_CACHE_HOME") || (real && join(real, ".cache"));
+  return {
+    XDG_CONFIG_HOME: home, // every OS: what follows XDG anywhere reads it
+    ...(os === "darwin" ? { HOME: home, CFFIXED_USER_HOME: home } : {
+      USERPROFILE: home,
+      APPDATA: join(home, "AppData", "Roaming"),
+      LOCALAPPDATA: join(home, "AppData", "Local"),
+    }),
+    ...(denoDir ? { DENO_DIR: denoDir } : {}),
+    ...(cache ? { XDG_CACHE_HOME: cache } : {}),
+  };
+}
+
+/** {@linkcode accountEnv} for THIS process, until disposed — for a test that
+ *  launches a window in-process (`launchElectron()` reads the profile's
+ *  parent from the environment it runs in): `using _home = ownAccount();`. */
+export function ownAccount(): Disposable {
+  const env = accountEnv();
+  const prev = Object.keys(env).map((k) => [k, Deno.env.get(k)] as const);
+  for (const [k, v] of Object.entries(env)) Deno.env.set(k, v);
+  return {
+    [Symbol.dispose]() {
+      for (const [k, v] of prev) {
+        if (v === undefined) Deno.env.delete(k);
+        else Deno.env.set(k, v);
+      }
+    },
+  };
+}
+
+/** One account home per test file ({@linkcode accountEnv}), under
+ *  `<tmp>/aio/`, removed when the file unloads. Lazy, as
+ *  {@linkcode _childAppsDir}. */
+let _childConfig: string | undefined;
+function _childConfigHome(): string {
+  if (_childConfig) return _childConfig;
+  const dir = _childConfig = aioTestDir("spawned-config-");
+  globalThis.addEventListener("unload", () => {
+    try {
+      Deno.removeSync(dir, { recursive: true });
+    } catch {
+      // aio-ok: exit-time cleanup of a dir only this process made — see
+      // `_childAppsDir`.
+    }
+  });
+  return dir;
 }
 
 /** One sandbox per test PROCESS, under `<tmp>/aio/`. Lazy: a test file that
@@ -268,14 +377,27 @@ export async function kill(proc: Deno.ChildProcess): Promise<void> {
   // THE descendant walk (server/single-instance-lock.ts), not a third copy of
   // it: `am stop` and this harness are answering the same question — what did
   // this process start — and two answers to that is how one of them goes stale.
+  if (Deno.build.os === "windows") {
+    // No pgrep there, so the walk below finds nobody: `taskkill /T` is the
+    // tree walk, taken while the parent lives (`killTree`, stop-child.ts).
+    await new Deno.Command("taskkill", {
+      args: ["/T", "/F", "/PID", String(proc.pid)],
+      stdout: "null",
+      stderr: "null",
+    }).output().catch(() => {}); // aio-ok: no taskkill — the kill below still ends the child
+  }
   let kids: number[] = [];
   try {
     kids = await descendantPids(proc.pid);
   } catch { /* pgrep missing (windows) — the direct child is still killed */ }
   try {
     proc.kill("SIGKILL");
-    await proc.status;
   } catch { /* already gone */ }
+  // Reaped even when the kill above found nobody: on Windows `taskkill` has
+  // ended it by now and `proc.kill` throws (measured: "Child process has
+  // already terminated"); a status left unread there is a leaked child to
+  // the sanitizer — in every test that ends through here.
+  await proc.status.catch(() => {}); // aio-ok: cleanup never throws
   // Deepest first, so a parent cannot spawn a replacement on its way out.
   for (const pid of kids.reverse()) {
     try {

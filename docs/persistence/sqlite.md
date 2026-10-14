@@ -742,15 +742,20 @@ sync.
 ### Safe hot backup
 
 ```ts
-await app.db!.execute("VACUUM INTO '/backups/myapp-2026-03-17.db'");
+await app.db!.snapshot!("/backups/myapp-2026-03-17.db");
 ```
+
+Use `snapshot()`, not a hand-written `VACUUM INTO`: the raw statement fails when
+the target already exists, and on macOS whenever the folder is reached through a
+symlink (every temp dir there is). `snapshot()` resolves the folder, writes a
+temporary copy, verifies it and renames it into place.
 
 ### Scheduled backup
 
 ```ts
 methods: {
   async runBackup(s, ts: string) {
-    await app.db!.execute(`VACUUM INTO '/backups/myapp-${ts}.db'`)
+    await app.db!.snapshot!(`/backups/myapp-${ts}.db`)
     s.lastBackup = ts
   },
 },

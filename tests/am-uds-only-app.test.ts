@@ -21,6 +21,7 @@
 // command routes through it. These tests pin it end to end — a REAL `aio.run`
 // with a REAL UI client connected over the socket — and unit-pin the decider
 // so a revert is red without spawning anything.
+import { childEnv } from "./e2e-app-harness.ts";
 import { within } from "./within.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
@@ -96,11 +97,12 @@ await new Promise(() => {});
         `"${join(REPO, "tests/fixtures/uds-window-standin.tsx")}" "$@"\n`,
     );
 
-    const env = {
+    // `childEnv`: the window's profile directory is this run's, not yours.
+    const env = childEnv({
       ...Deno.env.toObject(),
       AIO_APPS_DIR: apps,
       ELECTRON_PATH: electron,
-    };
+    });
     const child = new Deno.Command(Deno.execPath(), {
       args: [
         "run",
@@ -194,7 +196,18 @@ await new Promise(() => {});
       assertEquals(inst.home, home, "the lock is keyed by the app's own home");
 
       // ── every control-plane command, through the socket ──
-      const state = await am("state");
+      // The first answer is waited for. The lock says "started" just before
+      // the app starts its window, and on Windows starting a program that
+      // has never run stops the caller's thread while the system checks the
+      // file: measured 1–11 s for a never-run exe (2 ms the second time), and
+      // this test writes its window stand-in anew on every run. `am state`
+      // sent inside that pause was accepted by the kernel and answered by
+      // nobody for its 8 s — 12 of 52 runs. An installed app's window binary
+      // is checked once, on its first start.
+      const state = await until("the app's first answer", async () => {
+        const r = await am("state");
+        return r.code === 0 ? r : undefined;
+      });
       assertEquals(state.code, 0, `am state: ${state.stdout} ${state.stderr}`);
       assertEquals(state.json, { c: { n: 1 } });
 

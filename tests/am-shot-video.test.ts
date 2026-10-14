@@ -5,6 +5,7 @@
 //
 // Skipped when the box has no Chromium; ffprobe is the independent decoder
 // when present.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import {
@@ -76,6 +77,15 @@ Deno.test("isStillRecording: the screencast's own first frame is not a paint", (
   assertEquals(isStillRecording(f(0, 900_000), 2_500_000), false);
   // Too short to call it still.
   assertEquals(isStillRecording(f(0, 33_000), 1_000_000), false);
+  // The window counts from when the screencast was STARTED. Measured on a
+  // loaded Windows: the start screenshot took ~380 ms, the initial frame came
+  // 36 ms after it — 416 ms in, and it was read as a paint.
+  assertEquals(isStillRecording(f(0, 416_000), 2_500_000), false);
+  assertEquals(isStillRecording(f(0, 416_000), 2_500_000, 380_000), true);
+  assertEquals(
+    isStillRecording(f(0, 416_000, 900_000), 2_500_000, 380_000),
+    false,
+  );
 });
 
 // `--json` used to stay silent until the final `{file,…}` document, so a
@@ -271,7 +281,10 @@ Deno.test({
       );
       assertEquals(rec.frames[0]!.us, 0);
       assert(rec.endUs >= 1_150_000, `${rec.endUs}`);
-      assertEquals(isStillRecording(rec.frames, rec.endUs), false);
+      assertEquals(
+        isStillRecording(rec.frames, rec.endUs, rec.startedUs),
+        false,
+      );
       for (const format of ["mp4", "webm"] as const) {
         const done = await encodeRecording(cdp, rec, format);
         const file = `${dir}/out.${format}`;
@@ -322,7 +335,7 @@ Deno.test({
           new Promise((r) => setTimeout(r, 1700)),
         );
         assert(
-          isStillRecording(rec.frames, rec.endUs),
+          isStillRecording(rec.frames, rec.endUs, rec.startedUs),
           `frames at ${rec.frames.map((f) => f.us).join(", ")} µs`,
         );
       },

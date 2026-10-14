@@ -77,6 +77,19 @@ Deno.test("moveOffer: nothing to offer", () => {
     ["a copy is in ~/Applications", {
       exists: (p) => p === "/Users/u/Applications/Counter.app",
     }],
+    ["installed by run.sh (the versioned path)", {
+      execPath:
+        "/Users/u/app/counter/versions/1.0.0/Counter.app/Contents/MacOS/counter",
+      exists: (p) =>
+        p === "/Users/u/app/counter/versions" ||
+        p === "/Users/u/app/counter/Counter.app",
+    }],
+    ["installed by run.sh (the stable link)", {
+      execPath: "/Users/u/app/counter/Counter.app/Contents/MacOS/counter",
+      exists: (p) =>
+        p === "/Users/u/app/counter/versions" ||
+        p === "/Users/u/app/counter/Counter.app",
+    }],
     ["the user said Not Now", { declined: true }],
     ["switched off", { env: "never" }],
     ["switched off (0)", { env: "0" }],
@@ -86,6 +99,14 @@ Deno.test("moveOffer: nothing to offer", () => {
   }
   // `move` is an instruction: it outranks an earlier "Not Now".
   assert(moveOffer(facts({ declined: true, env: "move" })) !== null);
+  // A folder merely NAMED `versions` is not an install: no stable link beside
+  // it, so this is a bundle somebody unpacked there.
+  assert(
+    moveOffer(facts({
+      execPath: "/Users/u/versions/1.0.0/Counter.app/Contents/MacOS/counter",
+      exists: (p) => p === "/Users/u/versions",
+    })) !== null,
+  );
   // A folder merely NAMED like Applications is not Applications.
   assert(
     moveOffer(facts({
@@ -339,5 +360,65 @@ Deno.test("offer: no window, no question — the dialog must not come before it"
     assertEquals([h.calls, h.moved, h.stopped], [[], false, 0]);
   } finally {
     await dropTempDir(h.dir);
+  }
+});
+
+// An app that can update where it runs (unpacked by hand into a folder of the
+// user's — one `run.sh` installed is not asked at all, see `moveOffer`) was
+// asked with "It was opened from where it was downloaded. There it cannot
+// update itself." — neither is true of it (seen on macOS 14).
+Deno.test("offer: the reason given is true of where the app runs — 'cannot update itself' only where it cannot", async () => {
+  const dir = await tempDir("macos-move-why-");
+  try {
+    const asked = async (
+      execPath: string,
+      writable: (d: string) => boolean,
+    ) => {
+      let question = "";
+      const result = await offerMoveToApplications({
+        title: "Counter",
+        dataDir: dir,
+        argv: [],
+        log,
+        shutdown: () => Promise.resolve(),
+        windowUp: () => Promise.resolve(true),
+        os: "darwin",
+        execPath,
+        home: "/Users/u",
+        env: "",
+        exists: () => false,
+        canWrite: writable,
+        run: (_cmd, args) => {
+          question = args.find((a) => a.startsWith("Move Counter")) ?? "";
+          return Promise.resolve({ code: 0, stdout: "gave up\n", stderr: "" });
+        },
+      });
+      assertEquals(result, "unanswered");
+      return question;
+    };
+    const stuck = "There it cannot update itself.";
+    const installed = await asked(
+      "/Users/u/tools/Counter.app/Contents/MacOS/counter",
+      () => true,
+    );
+    assertEquals(installed.includes(stuck), false, installed);
+    assertEquals(installed.includes("downloaded"), false, installed);
+    assert(installed.includes("It is not in Applications"), installed);
+    assert(installed.endsWith("reopens it from there."), installed);
+    // The mounted image: its folder cannot be written.
+    assert(
+      (await asked(EXE, (d) => d !== "/Volumes/Counter")).includes(stuck),
+    );
+    // A quarantined copy macOS runs from its read-only translocation.
+    assert(
+      (await asked(
+        "/private/var/folders/x/T/AppTranslocation/ABCD/d/Counter.app/Contents/MacOS/counter",
+        () => true,
+      )).includes(stuck),
+    );
+    // The pure default is the downloaded-copy sentence, as before.
+    assert(moveDialogArgs("Counter", null).at(-2)!.includes(stuck));
+  } finally {
+    await dropTempDir(dir);
   }
 });

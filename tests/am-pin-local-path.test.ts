@@ -3,6 +3,7 @@
 // a directory that exists on one laptop. It lives in the git-ignored
 // `.aio/pin.local` now; THE reader (`readFrameworkPin`) prefers it, and a
 // legacy in-file `path:` value is still honoured.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertThrows } from "@std/assert";
 import { join } from "@std/path";
 import { readPin, writePin } from "../src/am/am-versions.ts";

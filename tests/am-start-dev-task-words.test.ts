@@ -19,6 +19,7 @@
 //
 // The rule: the words are the plain positional arguments of THIS command. A
 // shell operator ends the command, so it ends the words.
+import "./store-sandbox.ts";
 import { assertEquals } from "@std/assert";
 import { entryTaskWords } from "../src/am/am-cmd-process.ts";
 import { join } from "@std/path";

@@ -38,13 +38,23 @@ import {
   resolveWindowsShortcut,
 } from "../src/build/build-config.ts";
 import { electronStagingDir } from "../src/build/build-electron.ts";
+import { _freezeDeps } from "../src/build/freeze-guard.ts";
 import { sha256Hex } from "../src/build/ship.ts";
 import { extractZip } from "../src/server/zip-extract.ts";
+import { appIconIco } from "../src/build/app-icon.ts";
+import { WINDOWS_ICON_FILE } from "../src/build/build-helpers.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { linkDir, linkFile } from "./symlink-helper.ts";
 
 const REPO = fromFileUrl(new URL("../", import.meta.url));
+
+// The pack declines on a machine that is out of memory headroom. Every test
+// here packs on a machine with room — these failed, all of them, whenever the
+// host's swap was over 80% full — and one test says what a tight one does.
+const ROOMY = { totalBytes: 100, availableBytes: 50 };
+_freezeDeps.readMemory = () =>
+  Promise.resolve({ ...ROOMY, swapUsedBytes: 0, swapTotalBytes: 0 });
 
 /** Run `fn` with `console.warn` captured; returns what was warned. */
 async function warnings(fn: () => Promise<void>): Promise<string> {
@@ -123,11 +133,16 @@ async function tarFiles(payload: Uint8Array): Promise<Record<string, string>> {
  *  throws — the same way it does for a real over-long path. */
 const UNPACKABLE = "z".repeat(120);
 
-/** A staged Windows AppDir + its zip, as `buildElectron` leaves them. The zip
- *  is opaque to the SFX step; 26 MB keeps stub + zip under the size gate. */
+/** A staged Windows AppDir + its zip, as `buildElectron` leaves them — and
+ *  the exe icon the compile step leaves beside the AppDir. The zip is opaque
+ *  to the SFX step; 26 MB keeps stub + zip under the size gate. */
 async function stagedBuild(tmp: string): Promise<BuildConfig> {
   const appDir = electronStagingDir(tmp);
   await Deno.mkdir(join(appDir, "electron"), { recursive: true });
+  await Deno.writeFile(
+    join(appDir, "..", WINDOWS_ICON_FILE),
+    await appIconIco("My App", "myapp"),
+  );
   await Deno.writeTextFile(join(appDir, "myapp.exe"), "inner");
   await Deno.writeTextFile(join(appDir, "electron", "electron.exe"), "e");
   await Deno.writeFile(
@@ -597,12 +612,54 @@ Deno.test({
       for await (const e of Deno.readDir(join(tmp, ".aio", "build"))) {
         scratch.push(e.name);
       }
-      assertEquals(scratch, ["AppDir"]);
+      assertEquals(scratch.sort(), ["AppDir", WINDOWS_ICON_FILE]);
     } finally {
       if (fat !== undefined) Deno.env.set("AIO_WINDOWS_FAT_EXE", fat);
       await dropTempDir(tmp);
     }
   },
+});
+
+Deno.test("a machine out of memory headroom: the zstd pack is declined, and the build falls back, loudly, to the zip payload", async () => {
+  const tmp = await tempDir("windows-sfx-");
+  const fat = Deno.env.get("AIO_WINDOWS_FAT_EXE");
+  Deno.env.delete("AIO_WINDOWS_FAT_EXE");
+  const roomy = _freezeDeps.readMemory;
+  const full = { swapUsedBytes: 90, swapTotalBytes: 100 };
+  try {
+    const cfg = await stagedBuild(tmp);
+    const exe = join(tmp, selfContainedExeName("myapp", "x64"));
+    // Full swap beside half the RAM free is not pressure: the pack runs.
+    // (It was declined, and every such build shipped the zip payload.)
+    _freezeDeps.readMemory = () => Promise.resolve({ ...ROOMY, ...full });
+    assertEquals(
+      await hushed(() => warnings(() => buildSelfContainedWindowsExe(cfg))),
+      "",
+    );
+    assertEquals(
+      (await readSfxTrailerOfFile(exe))?.header.format,
+      "tar.zstd",
+    );
+    // Full swap AND a tenth of the RAM free: declined, and said — with what
+    // it does to the artifact.
+    _freezeDeps.readMemory = () =>
+      Promise.resolve({ ...ROOMY, availableBytes: 10, ...full });
+    const said = await hushed(() =>
+      warnings(() => buildSelfContainedWindowsExe(cfg))
+    );
+    assertStringIncludes(
+      said,
+      "declined — swap 90% full with only 10% RAM available",
+    );
+    assertStringIncludes(said, "falling back to the zip payload");
+    assertStringIncludes(said, "MB instead of the smaller zstd one");
+    const trail = await readSfxTrailerOfFile(exe);
+    assertEquals(trail?.header.format, "zip");
+  } finally {
+    _freezeDeps.readMemory = roomy;
+    if (fat !== undefined) Deno.env.set("AIO_WINDOWS_FAT_EXE", fat);
+    await dropTempDir(tmp);
+  }
 });
 
 Deno.test("the payload is deterministic: sorted entries, fixed mtime", async () => {
@@ -1054,7 +1111,7 @@ Deno.test("the zip fallback of an app with a symlink carries the target, not the
     for await (const e of Deno.readDir(join(tmp, ".aio", "build"))) {
       scratch.push(e.name);
     }
-    assertEquals(scratch, ["AppDir"]);
+    assertEquals(scratch.sort(), ["AppDir", WINDOWS_ICON_FILE]);
   } finally {
     if (fat !== undefined) Deno.env.set("AIO_WINDOWS_FAT_EXE", fat);
     await dropTempDir(tmp);

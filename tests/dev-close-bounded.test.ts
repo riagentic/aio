@@ -30,10 +30,13 @@ import {
   transpileCache,
 } from "../src/server/server-transpile.ts";
 import { _runAppCssStep } from "../src/server/server-css-step.ts";
+import { _esbuildChildPids } from "../src/build/esbuild-shared.ts";
 import { loadEsbuild, stopEsbuild } from "../src/server/server-transpile.ts";
 import { toFileUrl } from "@std/path";
 import { TEARDOWN_TIMEOUT_MS } from "../src/server/shutdown-budget.ts";
 import { spec } from "./module-spec-helper.ts";
+import { processList } from "./proc-helper.ts";
+import { fixtureNodeModules } from "./symlink-helper.ts";
 
 const REPO = fromFileUrl(new URL("..", import.meta.url));
 const linux = Deno.build.os === "linux";
@@ -65,8 +68,12 @@ function children(): [number, string][] {
   }
   return out;
 }
+/** (Windows has no /proc: the process table, as the product's own listing
+ *  reads it.) */
 const allServices = () =>
-  children().filter(([, c]) => c.includes("--service=")).map(([p]) => p);
+  Deno.build.os === "windows"
+    ? _esbuildChildPids()
+    : children().filter(([, c]) => c.includes("--service=")).map(([p]) => p);
 /** Services this process had before the test began — not the test's. A suite
  *  runs every file in one process, and another isolate's service (a worker's,
  *  or one an earlier file left running) is a child of it too. */
@@ -76,6 +83,20 @@ const services = () => allServices().filter((p) => !foreign.has(p));
 const onlyOurServices = () => void (foreign = new Set(allServices()));
 const cssSteps = () =>
   children().filter(([, c]) => /(^|\/)sleep 30$/.test(c)).map(([p]) => p);
+/** The CSS step where there is no `sh`: a program that is instant until
+ *  `slow` exists, then takes 30 s — found by this mark in its command line. */
+const STEP_MARK = "aio-css-step-stand-in";
+const DENO_STEP = [
+  Deno.execPath(),
+  "eval",
+  `/* ${STEP_MARK} */ try { Deno.statSync("slow"); setTimeout(() => {}, 30000); } catch { /* no "slow": instant */ }`,
+];
+/** {@linkcode cssSteps} on any OS (the process table where /proc is not). */
+const cssStepsAnywhere = async (): Promise<number[]> =>
+  linux
+    ? cssSteps()
+    : (await processList()).filter((p) => p.cmd.includes(STEP_MARK))
+      .map((p) => p.pid);
 
 /** Wait for `cond`; red, with `what`, if it never holds. */
 async function until(
@@ -199,7 +220,7 @@ Deno.test({
     "close with a wedged esbuild service: bounded, said before it returns, and the database still closes",
   sanitizeOps: true,
   sanitizeResources: true,
-  ignore: !linux, // SIGSTOP, and the child found through /proc
+  ignore: !linux, // SIGSTOP wedges the service (Windows has none); macOS: the service is found through /proc
   fn: async () => {
     onlyOurServices();
     const { aio, cell } = await import("../mod.ts");
@@ -285,7 +306,7 @@ Deno.test({
     "close with esbuild wedged before the boot's graph verdict: bounded, said once, nothing after",
   sanitizeOps: true,
   sanitizeResources: true,
-  ignore: !linux, // SIGSTOP, and the child found through /proc
+  ignore: !linux, // SIGSTOP wedges the service (Windows has none); macOS: the service is found through /proc
   fn: async () => {
     onlyOurServices();
     const { aio, cell } = await import("../mod.ts");
@@ -392,14 +413,23 @@ async function cssApp(
   await Deno.writeTextFile(
     join(dir, "deno.json"),
     JSON.stringify({
-      build: { css: ["sh", "-c", `if [ -f slow ]; then ${slow}; fi`] },
+      build: {
+        css: linux
+          ? ["sh", "-c", `if [ -f slow ]; then ${slow}; fi`]
+          : DENO_STEP,
+      },
       imports: {
         "aio": `${spec(REPO)}mod.ts`,
-        "aio/jsx-runtime": `${REPO}src/jsx-runtime.ts`,
+        "aio/jsx-runtime": `${spec(REPO)}src/jsx-runtime.ts`,
         "immer": "npm:immer@10.2.0",
       },
+      // Its own `node_modules`: the prod-bundle judge resolves `immer` from
+      // disk, and a checkout with no `node_modules` above the temp dir (a
+      // fresh clone, the Windows lab) has none to lend.
+      nodeModulesDir: "auto",
     }),
   );
+  await fixtureNodeModules(dir);
   return dir;
 }
 
@@ -411,7 +441,6 @@ for (const when of ["boot", "save"] as const) {
       `close while the ${when}'s CSS step runs: the step is ended, said once, and no reload is sent or said`,
     sanitizeOps: true,
     sanitizeResources: true,
-    ignore: !linux, // the step's subprocess is found through /proc
     fn: async () => {
       const { aio, cell } = await import("../mod.ts");
       const dir = await cssApp(`aio-close-css-${when}-`, when === "boot");
@@ -440,13 +469,21 @@ for (const when of ["boot", "save"] as const) {
               await Deno.writeTextFile(join(dir, "slow"), "");
               await Deno.writeTextFile(join(dir, "App.tsx"), APP(1));
             }
-            await until(() => cssSteps().length === 1, "the CSS step");
+            for (const t0 = Date.now();;) {
+              if ((await cssStepsAnywhere()).length === 1) break;
+              assert(Date.now() - t0 < 30_000, "never happened: the CSS step");
+              await new Promise((r) => setTimeout(r, 2));
+            }
             const from = lines.length;
             const t0 = performance.now();
             await app.close();
             closed = true;
             const ms = performance.now() - t0;
-            assertEquals(cssSteps(), [], "the CSS step outlived close()");
+            assertEquals(
+              await cssStepsAnywhere(),
+              [],
+              "the CSS step outlived close()",
+            );
             assert(
               ms < 2000,
               `close waited ${ms.toFixed(0)} ms on a 30 s step`,
@@ -489,7 +526,7 @@ for (const when of ["boot", "save"] as const) {
       `close while the ${when}'s CSS step runs: a step slow to exit is waited for`,
     sanitizeOps: true,
     sanitizeResources: true,
-    ignore: !linux, // the step's subprocess is found through /proc
+    ignore: !linux, // the subject is a step that takes a moment to leave on TERM (a `trap`): Windows has no TERM to trap; macOS: found through /proc
     fn: async () => {
       const { aio, cell } = await import("../mod.ts");
       // On TERM it takes a moment to leave — inside the grace it is given;
@@ -566,7 +603,7 @@ Deno.test({
     "close mid boot-validation: the walk is waited for, inside the stop's bound, and named when given up on",
   sanitizeOps: true,
   sanitizeResources: true,
-  ignore: !linux, // mkfifo
+  ignore: !linux, // a read that never returns is a FIFO nobody wrote (mkfifo): Windows has no such file; macOS unverified
   fn: async () => {
     const { aio, cell } = await import("../mod.ts");
     const dir = await tempDir("aio-close-boot-walk-");
@@ -679,7 +716,7 @@ for (const when of ["boot", "save"] as const) {
         `close while the ${when}'s CSS step runs — ${what}: close is prompt, the port is closed, esbuild is stopped`,
       sanitizeOps: true,
       sanitizeResources: true,
-      ignore: !linux, // the step and what it started are found through /proc
+      ignore: !linux, // the subject is POSIX: a wrapper shell that does not exec, and TERM ignored (`trap ''`) — Windows has neither
       fn: async () => {
         onlyOurServices();
         const { aio, cell } = await import("../mod.ts");
@@ -772,7 +809,7 @@ Deno.test({
     "close with a response that never ends: esbuild is stopped without waiting for the listener",
   sanitizeOps: true,
   sanitizeResources: true,
-  ignore: !linux, // the service is found through /proc
+  ignore: Deno.build.os === "darwin", // macOS lists no children (no /proc, no process-table read): no service to count
   fn: async () => {
     onlyOurServices();
     const { aio, cell } = await import("../mod.ts");
@@ -838,7 +875,7 @@ Deno.test({
     "close with a request that transpiles late: the service it starts is stopped too",
   sanitizeOps: true,
   sanitizeResources: true,
-  ignore: !linux, // the service is found through /proc
+  ignore: Deno.build.os === "darwin", // macOS lists no children (no /proc, no process-table read): no service to count
   fn: async () => {
     onlyOurServices();
     const { aio, cell } = await import("../mod.ts");

@@ -62,6 +62,15 @@ import {
 import { count } from "../diagnostics/fmt.ts";
 import { redactUrlToken } from "../diagnostics/redact.ts";
 
+/** Where a server that outlives its window is reached — pure. An app with a
+ *  TCP port is at its URL; one without (`socketPath` given) is on its local
+ *  socket, and a URL printed for it would name a port nothing bound. */
+export function servedWhere(url: string, socketPath?: string): string {
+  return socketPath
+    ? `on its local socket ${socketPath} (no TCP port; reach it with am)`
+    : `at ${url}`;
+}
+
 /** What the Electron window's exit means for the process that launched it —
  *  pure, so the decision is a unit test rather than a window on a display.
  *
@@ -83,6 +92,9 @@ export function electronClosedPlan(
     keepServer: boolean;
     restarting: boolean;
     url: string;
+    /** The local socket of an app with NO TCP port — `url` then names a port
+     *  nothing listens on, so the line says the socket instead. */
+    socketPath?: string;
     /** This app's own shutdown already began — it killed the window. */
     stopping?: boolean;
   },
@@ -101,7 +113,7 @@ export function electronClosedPlan(
   if (ctx.keepServer) {
     return {
       line: `electron ${crashed ? "crashed" : "closed"} (${how}) — server ` +
-        `still running at ${ctx.url}`,
+        `still running ${servedWhere(ctx.url, ctx.socketPath)}`,
       stop: false,
       crashed,
       exitCode: 0,
@@ -166,6 +178,9 @@ export function electronLaunchFailurePlan(
   /** A PACKAGED desktop app that keeps no server on purpose — see
    *  {@linkcode windowlessStops}. */
   windowless = false,
+  /** The local socket of an app with NO TCP port — see
+   *  {@linkcode servedWhere}. */
+  socketPath?: string,
 ): { stop: boolean; lines: string[] } {
   if (e instanceof SandboxRefusal) {
     return {
@@ -192,8 +207,11 @@ export function electronLaunchFailurePlan(
     stop: false,
     lines: [
       `electron: the desktop window could not be started — ${e}. The server ` +
-      `is still running at ${url}; open it in a browser, or run with ` +
-      `--client=browser. \`am fix\` installs a missing Electron.`,
+      `is still running ${
+        socketPath
+          ? `${servedWhere(url, socketPath)}.`
+          : `at ${url}; open it in a browser, or run with --client=browser.`
+      } \`am fix\` installs a missing Electron.`,
     ],
   };
 }
@@ -460,6 +478,8 @@ export interface LifecycleDeps<S, A> {
    *  a response header. Without it a packaged app shipped with NO CSP while
    *  its config said it had one. See `headContent`'s `csp`. */
   security?: import("./security-config.ts").SecurityConfig;
+  /** `aio.run({ wire })`, for the aio:// shell — see `ShellConfig.wire`. */
+  wire?: { omitTrailingUndefined?: boolean };
   keepServer: boolean | undefined;
   /** Library/test mode — no process-wide signal handlers (the same contract
    *  aio-server honours for SIGINT/SIGTERM): an embedding host or test runner
@@ -733,6 +753,11 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
   // that bound nothing is the exact class of confidently-wrong line this
   // codebase keeps deleting.
   const noPort = skipHttp || !!deps.httpSocketPath;
+  // …and the lines that say where a server WITHOUT its window is reached
+  // must not print one either (`servedWhere`).
+  const localSocket = noPort
+    ? udsHandle?.socketPath ?? deps.httpSocketPath
+    : undefined;
   const headline = noPort
     ? `running (${mode}, ${shell}, ${localKind} — no TCP port)`
     : `running (${mode}, ${shell}${transportLabel})`;
@@ -1076,6 +1101,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
         // releases, set by this file and read by nobody, with a green
         // `deno task check`.
         shell: {
+          wire: deps.wire,
           showStatus: ui.showStatus,
           width: meta.width,
           height: meta.height,
@@ -1170,7 +1196,13 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
           // point of not calling it is that a desktop app staying a desktop app
           // is a rule, not a side effect of the environment.
           const windowless = windowlessStops(isCompiled(), !!keepServer);
-          for (const line of electronMissingLines(electronUrl, windowless)) {
+          for (
+            const line of electronMissingLines(
+              electronUrl,
+              windowless,
+              localSocket,
+            )
+          ) {
             log.error(line);
           }
           if (windowless) stopProcess(1);
@@ -1197,6 +1229,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
               keepServer: !!keepServer,
               restarting: isRestarting(),
               url,
+              socketPath: localSocket,
               stopping: !!stopSignal?.aborted,
             });
             if (plan.crashed) {
@@ -1225,7 +1258,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
         // unsandboxed launch must not be left serving, with its own log
         // pointing at a browser.
         const windowless = windowlessStops(isCompiled(), !!keepServer);
-        const plan = electronLaunchFailurePlan(e, url, windowless);
+        const plan = electronLaunchFailurePlan(e, url, windowless, localSocket);
         for (const line of plan.lines) log.error(line);
         if (plan.stop) stopProcess(1);
       });
@@ -1593,6 +1626,9 @@ export function electronMissingLines(
   electronUrl: string,
   /** The app stops instead of serving on — {@linkcode windowlessStops}. */
   windowless = false,
+  /** Set for an app with no TCP port: the URL is then one nothing listens
+   *  on — {@linkcode servedWhere}. */
+  socketPath?: string,
 ): string[] {
   if (windowless) {
     return [
@@ -1605,7 +1641,10 @@ export function electronMissingLines(
     "Electron not installed and auto-install failed — this app is a " +
     "desktop app and will NOT be opened in a browser instead",
     `install it with: deno task install:electron (then re-run). The ` +
-    `server is up meanwhile at ${redactUrlToken(electronUrl)} — open it ` +
-    `yourself, or run with --client=browser if that is what you want.`,
+    `server is up meanwhile ${
+      servedWhere(redactUrlToken(electronUrl), socketPath)
+    } — ` +
+    (socketPath ? "" : "open it yourself, or ") +
+    `run with --client=browser if that is what you want.`,
   ];
 }

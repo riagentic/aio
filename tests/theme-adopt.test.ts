@@ -5,6 +5,7 @@
 // move its UI with no compile error and no failing test. Adopting removes the
 // dependency rather than promising to be careful with it — the rules become a
 // file in the app's repo. These tests pin the three things that makes true.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { appThemeCss } from "../src/build/app-theme.ts";

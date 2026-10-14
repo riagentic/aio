@@ -19,9 +19,9 @@ Create a directory and add `deno.json`:
     "jsxImportSource": "aio"
   },
   "imports": {
-    "aio": "jsr:@riagentic/aio@^1.0.0-alpha",
-    "aio/air": "jsr:@riagentic/aio@^1.0.0-alpha/air",
-    "aio/jsx-runtime": "jsr:@riagentic/aio@^1.0.0-alpha/jsx-runtime",
+    "aio": "jsr:@riagentic/aio@1.0.0-beta",
+    "aio/air": "jsr:@riagentic/aio@1.0.0-beta/air",
+    "aio/jsx-runtime": "jsr:@riagentic/aio@1.0.0-beta/jsx-runtime",
     "esbuild": "npm:esbuild@^0.25"
   },
   "tasks": {
@@ -384,11 +384,15 @@ mocking needed.
 Compile to a standalone binary:
 
 ```sh
-deno run -A jsr:@riagentic/aio@^1.0.0-alpha/build --compile --service
+deno run -A jsr:@riagentic/aio@1.0.0-beta/build --compile --service
 ```
 
 This produces two files: a binary and a systemd unit file. The binary is
-self-contained -- AIR, the bundled UI, SQLite, everything.
+self-contained -- AIR, the bundled UI, SQLite, everything. The unit is written
+only for a Linux binary; a Windows or macOS binary gets the supervisor file of
+its own OS instead (`<artifact>.ps1`, `<artifact>.plist` — see
+[run at startup](../basics/windows-macos.md#run-at-startup-or-as-a-service)).
+The steps below are for a Linux host.
 
 Install it:
 

@@ -9,6 +9,7 @@
 // syntax. Both reports that asked for a watch wrote `until` loops around
 // `am state` anyway, all session (report 7 §6). A change is rare and a tick is
 // not, so a line per tick buries the one line that matters.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { aio, cell } from "../mod.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";

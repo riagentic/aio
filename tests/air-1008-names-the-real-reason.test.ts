@@ -30,9 +30,18 @@ Deno.test("browser transport: a 1008 'session revoked' close is not reported as 
       socket.onopen = () => {
         socket.send(enc("proto", protoHello()));
         socket.send(enc("state", {}));
-        if (n === 1) {
-          setTimeout(() => socket.close(1008, "session revoked"), 50);
-        }
+        if (n !== 1) return;
+        // Close only once the page has gone quiet. A frame that reaches a
+        // socket already closed here makes the kernel reset the connection,
+        // and a reset drops the close frame the page has not read yet — it
+        // then sees an unnamed drop (1006), not the 1008 under test. Under
+        // load the page's first frames landed inside a fixed 50 ms.
+        const close = () => socket.close(1008, "session revoked");
+        let quiet = setTimeout(close, 300);
+        socket.onmessage = () => {
+          clearTimeout(quiet);
+          quiet = setTimeout(close, 300);
+        };
       };
       return response;
     },
@@ -64,8 +73,14 @@ Deno.test("browser transport: a 1008 'session revoked' close is not reported as 
   const unsub = sub._subscribe(() => {});
   try {
     ensureConnected();
-    for (let i = 0; i < 100 && hints.length === 0; i++) await sleep(20);
-    assertEquals(hints.length, 1, "the policy close was reported once");
+    for (let i = 0; i < 750 && hints.length === 0; i++) await sleep(20);
+    assertEquals(
+      hints.length,
+      1,
+      `the policy close was reported once (${conn} connections; console: ${
+        errors.join(" | ")
+      })`,
+    );
     assert(
       !/budget/i.test(hints[0]!),
       `a revoked session was blamed on the message budget: ${hints[0]}`,

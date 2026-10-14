@@ -26,7 +26,8 @@ import { cdpConnect } from "../src/media/cdp.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { testDisplayEnv } from "../src/testing/test-display.ts";
 import { stopChild } from "./stop-child.ts";
-import { findBrowser, freePort } from "./e2e-harness.ts";
+import { browserOsFlags, findBrowser, freePort } from "./e2e-harness.ts";
+import { browserHomeEnv } from "../src/testing/chromium.ts";
 
 const BROWSER = findBrowser();
 
@@ -46,6 +47,10 @@ async function waitFor<T>(
 
 const SHELL = `<!doctype html><title>shell</title><p id=shell>shell</p>
 <script>navigator.serviceWorker.register("./sw.js")</script>`;
+
+// A name the precache must percent-encode. `?` cannot be in a Windows file
+// name (os error 123), so there the name keeps the space and the `#` only.
+const ODD = Deno.build.os === "windows" ? "notes #1.js" : "notes #1?.js";
 
 async function deploy(
   site: string,
@@ -113,6 +118,7 @@ Deno.test({
     );
     const browser = new Deno.Command(BROWSER!, {
       args: [
+        ...browserOsFlags,
         "--headless=new",
         "--no-sandbox",
         "--disable-gpu",
@@ -121,7 +127,7 @@ Deno.test({
         "--remote-debugging-port=0",
         "about:blank",
       ],
-      env: testDisplayEnv(),
+      env: { ...browserHomeEnv(profile), ...testDisplayEnv() },
       stdin: "null",
       stdout: "null",
       stderr: "null",
@@ -175,7 +181,7 @@ Deno.test({
       stale.set("/app.js", "A");
       await deploy(site, "b", {
         "app.js": "B",
-        "notes #1?.js": "N",
+        [ODD]: "N",
         "logo@2x.svg": "L",
       });
       // A refused install may reject the update — what is asserted is below.
@@ -210,7 +216,7 @@ Deno.test({
       assertEquals(await cached("./app.js"), "B", "the new build's bytes");
       assertEquals(await cached("./gone.js"), null, "a removed file is gone");
       assertEquals(
-        await cached("./notes%20%231%3F.js"),
+        await cached(`./${encodeURIComponent(ODD)}`),
         "N",
         "a name URLs escape",
       );

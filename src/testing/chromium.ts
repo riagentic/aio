@@ -11,22 +11,52 @@ import { testDisplayEnv } from "./test-display.ts";
 import { dropTempDir, tempDir } from "./temp-dir.ts";
 import { cdpConnect, type CdpSession } from "../media/cdp.ts";
 
-const CHROMIUM_PATHS = [
-  "/usr/bin/chromium",
-  "/usr/bin/chromium-browser",
-  "/usr/bin/google-chrome",
-  "/usr/bin/google-chrome-stable",
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-];
+/** Where a Chromium-family browser is installed on `os`, in the order they are
+ *  tried: what earlier releases probed, then the ones that speak the same flags and CDP
+ *  (Edge — on every Windows 11 — and Brave). `os` and `env` are parameters so
+ *  the Windows list is checked on whichever host runs the suite.
+ *  @internal exported for its test */
+export function _chromiumCandidates(
+  os: string = Deno.build.os,
+  env: (name: string) => string | undefined = (n) => Deno.env.get(n),
+): string[] {
+  if (os === "windows") {
+    const roots = ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"]
+      .map(env).filter((r): r is string => !!r);
+    return [
+      "Chromium\\Application\\chrome.exe",
+      "Google\\Chrome\\Application\\chrome.exe",
+      "Microsoft\\Edge\\Application\\msedge.exe",
+      "BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+    ].flatMap((rel) => roots.map((r) => `${r}\\${rel}`));
+  }
+  if (os === "darwin") {
+    return [
+      "Google Chrome.app/Contents/MacOS/Google Chrome",
+      "Chromium.app/Contents/MacOS/Chromium",
+      "Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+      "Brave Browser.app/Contents/MacOS/Brave Browser",
+    ].map((rel) => `/Applications/${rel}`);
+  }
+  return [
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/snap/bin/chromium",
+    "/usr/bin/microsoft-edge",
+    "/usr/bin/microsoft-edge-stable",
+    "/usr/bin/brave-browser",
+  ];
+}
 
 /** Locate a headless-capable Chromium/Chrome binary, or null. */
 export function findChromium(): string | null {
   const env = Deno.env.get("CHROMIUM_BIN") ?? Deno.env.get("CHROME_BIN");
   if (env) return env;
-  for (const c of CHROMIUM_PATHS) {
+  for (const c of _chromiumCandidates()) {
     try {
-      Deno.statSync(c);
-      return c;
+      if (Deno.statSync(c).isFile) return c;
     } catch {
       // aio-ok: this is a PROBE of a list of well-known install paths, and
       // "not here" is the answer for all but one of them on every machine.
@@ -96,7 +126,7 @@ export type LaunchedChromium = {
 };
 
 /** Every live process started with `--user-data-dir=<profile>` (Linux:
- *  `/proc`; empty elsewhere). Chromium's helpers — the network and storage
+ *  `/proc`; macOS: `ps`; Windows: its process table). Chromium's helpers — the network and storage
  *  services, the renderers — all carry it, and they are not this process's
  *  children: a helper that outlives the browser keeps writing into the
  *  profile, so a profile removed right after the browser exits came back
@@ -109,16 +139,66 @@ export type LaunchedChromium = {
  *  after it ends the argument (a longer profile path is another profile).
  *  @internal exported for its test */
 export function _holdsProfile(cmd: string, profile: string): boolean {
-  const flag = `--user-data-dir=${profile}`;
-  for (let i = cmd.indexOf(flag); i >= 0; i = cmd.indexOf(flag, i + 1)) {
-    const next = cmd[i + flag.length];
-    if (next === undefined || next === "\0" || next === " ") return true;
+  // Two spellings: the argument as given (which Windows wraps whole in quotes
+  // when it holds a space), and `--user-data-dir="<profile>"` — what Chromium
+  // on Windows writes into the command line of its OWN children (gpu,
+  // renderer, utility), with or without a space. Matching the first alone
+  // found the crashpad handler and none of those.
+  for (
+    const flag of [`--user-data-dir=${profile}`, `--user-data-dir="${profile}`]
+  ) {
+    for (let i = cmd.indexOf(flag); i >= 0; i = cmd.indexOf(flag, i + 1)) {
+      const next = cmd[i + flag.length];
+      if (
+        next === undefined || next === "\0" || next === " " || next === '"'
+      ) return true;
+    }
   }
   return false;
 }
 
+/** The pids in a `<pid> <command line>` listing (one process per line — what
+ *  `ps -axo pid=,command=` and the Windows query below print) that run on
+ *  `profile`. Pure.
+ *  @internal exported for its test */
+export function _profilePidsIn(listing: string, profile: string): number[] {
+  const out: number[] = [];
+  for (const line of listing.split("\n")) {
+    const m = /^\s*(\d+)\s+(.*)$/.exec(line.trimEnd());
+    if (m && _holdsProfile(m[2]!, profile)) out.push(Number(m[1]));
+  }
+  return out;
+}
+
+/** Off Linux there is no /proc: macOS is asked through `ps`, Windows through
+ *  its process table (CIM — the one place a command line can be read without
+ *  a privilege). Both returned nothing before, so a test browser's helpers
+ *  were never ended there and kept the profile directory busy. */
+function listedProfileProcesses(profile: string): number[] {
+  const [cmd, args] = Deno.build.os === "windows"
+    ? ["powershell", [
+      "-NoProfile",
+      "-Command",
+      'Get-CimInstance Win32_Process | % { "$($_.ProcessId) $($_.CommandLine)" }',
+    ]]
+    : ["ps", ["-axo", "pid=,command="]];
+  try {
+    const r = new Deno.Command(cmd as string, {
+      args: args as string[],
+      stdout: "piped",
+      stderr: "null",
+    }).outputSync();
+    return r.success
+      ? _profilePidsIn(new TextDecoder().decode(r.stdout), profile)
+        .filter((pid) => pid !== Deno.pid)
+      : [];
+  } catch {
+    return []; // aio-ok: no process listing here — nothing to look for
+  }
+}
+
 function profileProcesses(profile: string): number[] {
-  if (Deno.build.os !== "linux") return [];
+  if (Deno.build.os !== "linux") return listedProfileProcesses(profile);
   const out: number[] = [];
   let entries: Deno.DirEntry[];
   try {
@@ -142,10 +222,14 @@ function profileProcesses(profile: string): number[] {
  *  still running on it are killed and waited for (bounded), then the
  *  directory goes. Call it after the browser itself has exited. */
 export async function dropBrowserProfile(profile: string): Promise<void> {
-  const deadline = Date.now() + 5_000;
+  // Off Linux ONE look at the process table costs a second or more (a `ps`,
+  // a PowerShell query) — under load five seconds was two looks, and a
+  // helper outlived the bound (seen on Windows, 1 run in 5).
+  const deadline = Date.now() + (Deno.build.os === "linux" ? 5_000 : 20_000);
   for (;;) {
+    // What a look finds is killed — on the last look too: the bound ends the
+    // LOOKING, it never leaves a found helper running.
     const left = profileProcesses(profile);
-    if (left.length === 0 || Date.now() >= deadline) break;
     for (const pid of left) {
       try {
         Deno.kill(pid, "SIGKILL");
@@ -153,6 +237,7 @@ export async function dropBrowserProfile(profile: string): Promise<void> {
         // aio-ok: it exited on its own between the scan and the kill
       }
     }
+    if (left.length === 0 || Date.now() >= deadline) break;
     await new Promise((r) => setTimeout(r, 20));
   }
   await dropTempDir(profile);
@@ -165,11 +250,13 @@ export async function dropBrowserProfile(profile: string): Promise<void> {
  *  network service, flushing state on the way out, created it again
  *  (`Default/Cache`, `.org.chromium.Chromium.TransportSecurity.*`). */
 function dropBrowserProfileSync(profile: string): void {
-  const deadline = Date.now() + 2_000;
+  // Off Linux one look costs a second or more (see `dropBrowserProfile`):
+  // two seconds there was a single look, and whatever it found was never
+  // confirmed gone.
+  const deadline = Date.now() + (Deno.build.os === "linux" ? 2_000 : 10_000);
   const tick = new Int32Array(new SharedArrayBuffer(4));
   for (;;) {
     const left = profileProcesses(profile);
-    if (left.length === 0 || Date.now() >= deadline) break;
     for (const pid of left) {
       try {
         Deno.kill(pid, "SIGKILL");
@@ -177,6 +264,7 @@ function dropBrowserProfileSync(profile: string): void {
         // aio-ok: it exited on its own between the scan and the kill
       }
     }
+    if (left.length === 0 || Date.now() >= deadline) break;
     Atomics.wait(tick, 0, 0, 10); // exit time: no timer will run again
   }
   try {
@@ -188,6 +276,98 @@ function dropBrowserProfileSync(profile: string): void {
   }
 }
 
+/** The flags every test browser is launched with, before the caller's own.
+ *
+ *  Windows adds `--guest`: a Chromium there (Edge, measured) tries one
+ *  interactive logon as the Windows user per launch on a fresh profile. It
+ *  fails — Security event 4625 from `msedge.exe` — and Windows' default
+ *  policy locks the ACCOUNT after ten of those in ten minutes. A guest
+ *  window has no profile identity to sign in, so it costs none; `--inprivate`,
+ *  `--no-first-run` and `--disable-sync` each still cost one. Since
+ *  `findChromium` finds Edge on Windows, a launch without this flag is a
+ *  test suite that locks its own user out.
+ *  @internal exported for its test */
+export function _launchFlags(
+  profile: string,
+  os: string = Deno.build.os,
+): string[] {
+  return [
+    ...(os === "windows" ? ["--guest"] : []),
+    "--headless=new",
+    "--no-sandbox",
+    "--disable-gpu",
+    "--disable-dev-shm-usage",
+    `--password-store=basic`,
+    `--use-mock-keychain`,
+    `--user-data-dir=${profile}`,
+  ];
+}
+
+/** A HOME of its own for a test browser, and the fonts of the real one.
+ *
+ *  `--user-data-dir` does not hold everything a Chromium writes on Linux:
+ *  the crash database (`$XDG_CONFIG_HOME/chromium/Crash Reports/settings.dat`,
+ *  rewritten on every launch) and the NSS store (`~/.pki/nssdb`, opened
+ *  read-write) follow HOME — measured with `strace`, Chromium 153. Under
+ *  `home` both land in the throwaway profile.
+ *
+ *  A new HOME alone loses the user's fonts and font rules, which fontconfig
+ *  finds through HOME too, and a page then renders in other glyphs than the
+ *  developer sees. So `FONTCONFIG_FILE` names a file that includes the
+ *  configuration in force (which now resolves `~` and the XDG dirs to
+ *  `home`) and then the real user's directories by full path, read only: the
+ *  font cache is written under `home`.
+ *  @internal exported for its test */
+export function _ownHomeEnv(
+  home: string,
+  env: Record<string, string | undefined>,
+): { env: Record<string, string>; fontsConf: string } {
+  const real = env.HOME ?? "";
+  const config = env.XDG_CONFIG_HOME || `${real}/.config`;
+  const data = env.XDG_DATA_HOME || `${real}/.local/share`;
+  const xml = (s: string) =>
+    s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const include = (p: string) =>
+    `  <include ignore_missing="yes">${xml(p)}</include>\n`;
+  const fontsConf = `<?xml version="1.0"?>\n<fontconfig>\n` +
+    include(env.FONTCONFIG_FILE || "/etc/fonts/fonts.conf") +
+    (real
+      ? include(`${config}/fontconfig/conf.d`) +
+        include(`${config}/fontconfig/fonts.conf`) +
+        `  <dir>${xml(`${data}/fonts`)}</dir>\n` +
+        `  <dir>${xml(`${real}/.fonts`)}</dir>\n`
+      : "") +
+    `</fontconfig>\n`;
+  return {
+    env: {
+      HOME: home,
+      XDG_CONFIG_HOME: `${home}/.config`,
+      XDG_DATA_HOME: `${home}/.local/share`,
+      XDG_CACHE_HOME: `${home}/.cache`,
+      FONTCONFIG_FILE: `${home}/fonts.conf`,
+      // Xlib finds its cookie through HOME when the variable is unset.
+      ...(real && !env.XAUTHORITY ? { XAUTHORITY: `${real}/.Xauthority` } : {}),
+    },
+    fontsConf,
+  };
+}
+
+/** The env that gives a browser on `profile` a HOME of its own, inside the
+ *  profile (it goes when the profile goes) — or `{}`: this is opt-in
+ *  (`AIO_TEST_BROWSER_HOME=own`, Linux), and by default a test browser runs
+ *  in the developer's HOME, as it always has. Spread it into the spawn's
+ *  `env`, BEFORE the display's (whose `XAUTHORITY` must win). */
+export function browserHomeEnv(profile: string): Record<string, string> {
+  if (
+    Deno.build.os !== "linux" || Deno.env.get("AIO_TEST_BROWSER_HOME") !== "own"
+  ) return {};
+  const home = `${profile}/aio-home`;
+  const own = _ownHomeEnv(home, Deno.env.toObject());
+  Deno.mkdirSync(home, { recursive: true });
+  Deno.writeTextFileSync(`${home}/fonts.conf`, own.fontsConf);
+  return own.env;
+}
+
 /** Spawn headless Chromium with `args` (URL last). The process is killed and
  *  its profile removed on `close()`, and an `unload` backstop kills it even if
  *  Deno dies mid-test (the orphaned-chrome leak). */
@@ -197,16 +377,7 @@ export async function launchChromium(
 ): Promise<LaunchedChromium> {
   const profile = await tempDir("aio-test-browser-");
   const proc = new Deno.Command(bin, {
-    args: [
-      "--headless=new",
-      "--no-sandbox",
-      "--disable-gpu",
-      "--disable-dev-shm-usage",
-      `--password-store=basic`,
-      `--use-mock-keychain`,
-      `--user-data-dir=${profile}`,
-      ...args,
-    ],
+    args: [..._launchFlags(profile), ...args],
     stdin: "null",
     stdout: "null",
     stderr: "null",
@@ -214,7 +385,11 @@ export async function launchChromium(
     // someone drops that flag to debug a test, the window must land in the
     // nested display and not on the developer's desktop. Cheap now,
     // impossible to remember later.
-    env: { ...Deno.env.toObject(), ...testDisplayEnv() },
+    env: {
+      ...Deno.env.toObject(),
+      ...browserHomeEnv(profile),
+      ...testDisplayEnv(),
+    },
   }).spawn();
 
   let killed = false;

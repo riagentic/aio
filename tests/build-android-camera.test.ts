@@ -176,7 +176,7 @@ async function linkedApk(
     // The AppCompat theme and the launcher mipmap live in resources this
     // standalone link does not have; permissions are what is under test.
     .replace(
-      "@style/Theme.AppCompat.NoActionBar",
+      "@style/{{APP_THEME}}",
       "@android:style/Theme.Material",
     )
     .replace('android:icon="@mipmap/ic_launcher"', "")

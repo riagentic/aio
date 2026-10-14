@@ -91,7 +91,7 @@ Deno.test("the platform decides, never a null mode", () => {
 Deno.test({
   // aio-ok(umask): Windows-only measurement (no umask there); every other mode here is a literal fed to a pure function.
   name: "MEASURED on Windows: stat().mode is 0o40666, not null, for every dir",
-  ignore: !WINDOWS,
+  ignore: !WINDOWS, // a measurement of Windows itself
   fn() {
     const tmp = tempDirSync("aio-dirperm-");
     try {
@@ -131,7 +131,7 @@ Deno.test({
 
 Deno.test({
   name: "MEASURED on Windows: the control credential mints and reads back",
-  ignore: !WINDOWS,
+  ignore: !WINDOWS, // a measurement of Windows itself
   fn() {
     // The user-visible half: with the old predicate this returned
     // `{ error: "app data dir … is mode 666 (not owner-only) …" }` and `am`

@@ -12,6 +12,7 @@
 // generated main (`$ELECTRON_PATH` is the documented override), boots an app
 // with every head-shaped key set, and reads them back out of the script the
 // launch actually produced — the instrument, not the config.
+import { childEnv } from "./e2e-app-harness.ts";
 import { assert, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { freePort } from "../src/testing/server-test.ts";
@@ -79,11 +80,11 @@ Deno.test({
     const child = new Deno.Command(Deno.execPath(), {
       args: ["run", "-A", "src/app.ts", "--client=electron", `--port=${port}`],
       cwd: app,
-      env: {
+      env: childEnv({
         ELECTRON_PATH: fake,
         AIO_APPS_DIR: join(dir, "home"),
         DISPLAY: Deno.env.get("DISPLAY") ?? ":0",
-      },
+      }),
       stdout: "piped",
       stderr: "piped",
     }).spawn();

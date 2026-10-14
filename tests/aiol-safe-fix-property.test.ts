@@ -1875,9 +1875,10 @@ Object.assign(SHAPES, {
     "fixed",
     `import { call } from "aio";\nexport const n = (x: unknown) => <number>x; // it's </number>\nexport const m = (x: unknown) => (<string>x).length < 3 && 'a' > "b";\nexport const r = () => call({ timeout: 5 }, () => Promise.resolve(1));\n`,
   ),
+  // A `.ts` file cannot hold JSX: its `</p>` is a string's and a regex's.
   "src/k/A-j42-html-string.ts": shape(
     true,
-    "manual",
+    "fixed",
     `import { call } from "aio";\nexport const html = (x: string) => "<p>it's " + x + "</p>";\nexport const re = /<\\/p>/;\nexport const r = () => call({ timeout: 5 }, () => Promise.resolve(1));\n`,
   ),
 });

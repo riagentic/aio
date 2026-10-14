@@ -452,7 +452,15 @@ export async function appIconPng(
   size = 512,
   id = name,
 ): Promise<Uint8Array> {
-  const px = appIconPixels(name, size, id);
+  return await pngFromRgba(appIconPixels(name, size, id), size);
+}
+
+/** `size`×`size` RGBA pixels as a PNG — THE encoder: the monogram and an
+ *  app's own icon scaled down for Windows (png-scale.ts) both leave here. */
+export async function pngFromRgba(
+  px: Uint8Array,
+  size: number,
+): Promise<Uint8Array> {
   const stride = size * 4;
   const raw = new Uint8Array(size * (stride + 1));
   for (let y = 0; y < size; y++) {

@@ -3,6 +3,7 @@
 // commands (against a fake control-port HTTP server). These are the CLI's
 // user-facing behaviors; the HTTP seam (trojanGet/Post, httpGet) is exercised
 // for real — only the aio server behind it is canned.
+import "./store-sandbox.ts";
 import { VERSION } from "../src/server/aio-cli.ts";
 import {
   assert,
@@ -1081,6 +1082,10 @@ Deno.test("cmdFix: a browser-only app gets no android/cli/service tasks", async 
     assert(cfg.tasks["build"], "build is universal");
     assert(cfg.tasks["check"] && cfg.tasks["fmt"], "check/fmt are universal");
     assert(cfg.tasks["test"] && cfg.tasks["am"] && cfg.tasks["lint"]);
+    // The task of every older scaffold, NOT the new one's
+    // `AIO_TEST_WIRE=strict …`: this app's tests were written against the
+    // harness of its aio, and a repair must not turn one red.
+    assertEquals(cfg.tasks["test"], "deno test -A");
     // Nothing curated was removed or rewritten.
     assertEquals(cfg.tasks.dev, "deno run -A src/app.ts --port=9000");
     assertEquals(cfg.tasks.seed, "deno run -A scripts/seed.ts");

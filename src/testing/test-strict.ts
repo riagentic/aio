@@ -188,9 +188,27 @@ export function aioTestRoot(): string {
   return root;
 }
 
-/** A fresh directory under `aioTestRoot()`. @internal */
+// Who writes a fresh test dir into this process's owner record
+// (`<root>/.live-<pid>`, what keeps `clean:tmp` off a running test's dirs).
+// It is temp-dir.ts, which cannot be imported from here (it reaches a server
+// module — see the note at the top): it hands its writer over when it loads,
+// and takes the dirs made before that.
+let _recordDir: ((dir: string) => void) | undefined;
+const _unrecorded: string[] = [];
+
+/** @internal temp-dir.ts registers the owner-record writer. */
+export function _setTestDirRecorder(record: (dir: string) => void): void {
+  _recordDir = record;
+  for (const dir of _unrecorded.splice(0)) record(dir);
+}
+
+/** A fresh directory under `aioTestRoot()`, written into this process's
+ *  owner record. The caller removes it. @internal */
 export function aioTestDir(prefix: string): string {
-  return Deno.makeTempDirSync({ dir: aioTestRoot(), prefix });
+  const dir = Deno.makeTempDirSync({ dir: aioTestRoot(), prefix });
+  if (_recordDir) _recordDir(dir);
+  else _unrecorded.push(dir);
+  return dir;
 }
 
 // Every arm, not once: a test that hands `AIO_APPS_DIR` back by DELETING it

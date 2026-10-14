@@ -44,6 +44,7 @@
     "tests/air-ssr-hydrate-mount-differential.test.ts",
     "tests/air-transport-send-throw-queue.test.ts",
     "tests/air-transport-stale-close.test.ts",
+    "tests/air-transport-silent-socket.test.ts",
     "tests/air-transport-terminal-mismatch.test.ts",
     "tests/air-transport-ipc-raw-refused.test.ts",
     "tests/air-transport-retry-push-refused.test.ts",
@@ -76,6 +77,7 @@
     "tests/seam-paths.test.ts",
     "tests/signal-scope-differential.test.ts",
     "tests/standalone-server-parity-differential.test.ts",
+    "tests/state-diff-head-differential.test.ts",
     "tests/state-transport-handler.test.ts",
     "tests/timeline-diff-differential.test.ts",
     "tests/transaction-differential.test.ts",
@@ -145,6 +147,11 @@
       "file": "tests/cron-differential-fuzz.test.ts",
       "lane": "full",
       "why": "randomized cron differential — keep in full; not required on every edit"
+    },
+    {
+      "file": "tests/lock-dir-stress.test.ts",
+      "lane": "full",
+      "why": "~20s, six processes hammering one lock dir — a load test of the lock module, not a seam pin, and too slow for test:fast"
     }
   ],
   "budget": {

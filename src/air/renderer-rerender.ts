@@ -7,6 +7,7 @@ import {
   isDevMode,
   isDevModeExplicit,
 } from "../state/dev-flag.ts";
+import { firstTime } from "../protocol/said-once.ts";
 import {
   _computedCollectEnd,
   _computedCollectStart,
@@ -19,6 +20,8 @@ import {
 } from "../state/signal.ts";
 import type { ComponentFn, RenderCtx, VDomHooks, VNode } from "./vdom.ts";
 import { _diff, ErrorBoundary, Portal, Suspense } from "./vdom.ts";
+import { _tag, _wrong } from "./vdom-types.ts";
+import { devHooks } from "./dev-hooks.ts";
 import { _cleanupChildren, _removeDomCleanup } from "./vdom-remove.ts";
 import { _detachReused } from "./vdom-reuse.ts";
 import { _profilingOn } from "./component-profile.ts";
@@ -65,6 +68,12 @@ import { count } from "../diagnostics/fmt.ts";
 export function _scheduleComponentRender(inst: ComponentInstance): void {
   if (inst.disposed) return;
   const root = inst._root;
+  // A root being unmounted renders nothing more. Its queue was emptied first
+  // (`_unmount`), so an instance that was waiting in it is "pending and not
+  // queued" until the walk reaches it — and a cleanup that runs before then
+  // and writes a signal it reads (`onUnmount(() => count.set(0))`) was
+  // reported as a scheduler bug to recover from. It is neither.
+  if (root.disposed) return;
   if (inst.pendingRender) {
     // Already flagged pending. Normally it is also sitting in the queue (or is an
     // in-flight batch item during an active flush) — nothing to do. But if it is
@@ -75,12 +84,13 @@ export function _scheduleComponentRender(inst: ComponentInstance): void {
     // strand to a one-tick delay instead of a permanent invisible freeze, and
     // makes it loud in dev so the real cause gets fixed.
     if (root.flushing || root.pendingComponents.has(inst)) return;
-    if (isDevMode()) {
-      const name = typeof inst.vnode.tag === "function"
-        ? (inst.vnode.tag.name || "Anonymous")
-        : "Component";
+    // Prod says it too, once: a strand is the framework's defect, and the
+    // report it asks for can only come from where it happened.
+    if (isDevMode() || firstTime("stranded")) {
+      const name = _componentName(inst.vnode.tag);
       console.error(
-        `[aio-dev] Recovered a stranded <${name}> (flagged pending but absent ` +
+        `${_tag()}Recovered a stranded <${name}> ` +
+          `(flagged pending but absent ` +
           `from the render queue). This is an aio scheduler bug — please report; ` +
           `re-queueing so the update is not lost.`,
       );
@@ -126,11 +136,12 @@ export function _scheduleComponentRender(inst: ComponentInstance): void {
   // comes along: the render that wrote is often NOT the component that loops.
   if (isDevMode()) {
     const hook = _currentLifecycleHook();
-    const body = !hook && _currentCollector !== null;
-    _devOrigin.set(inst, hook ? "lifecycle" : body ? "render" : "push");
-    _devWriter.set(
+    devHooks.renderAsked?.(
       inst,
-      hook ?? (body ? (_currentCollector?._component ?? "a render") : ""),
+      hook,
+      !hook && _currentCollector !== null
+        ? (_currentCollector._component ?? "a render")
+        : null,
     );
   }
   root.pendingComponents.add(inst);
@@ -151,56 +162,6 @@ function _scheduleLentRender(inst: ComponentInstance): void {
 }
 
 // ── Per-component re-render ───────────────────────────────────────────
-
-const DEV_RENDER_LIMIT = 50;
-
-/** What scheduled an instance's latest counted render (dev only). */
-const _devOrigin = new WeakMap<
-  ComponentInstance,
-  "render" | "lifecycle" | "push"
->();
-
-/** …and WHO: the component whose body wrote, or the lifecycle hook that did. */
-const _devWriter = new WeakMap<ComponentInstance, string>();
-
-/** Dev only: dependency name → when it last fired a render of this instance.
- *
- *  A TIME, not a set. `_triggerSignals` is the DevTools feed and is emptied
- *  only while a DevTools handle is attached, so with nobody looking it is
- *  every dependency that ever fired this instance — and the burst message was
- *  reading it as "the dependencies that fired THESE renders". A value that
- *  fired once at boot got listed beside the stream that is actually looping,
- *  which is the reader hunting a dependency that had nothing to do with it:
- *  the same class of lie this whole tripwire was fixed for. The message's
- *  window is one second, so the answer has to be too. */
-const _devFiredAt = new WeakMap<ComponentInstance, Map<string, number>>();
-
-/** The named signals whose change fired this instance's renders IN THE BURST
- *  WINDOW, as one clause — the tripwire's "which dependency did this?" half.
- *
- *  A burst message that cannot name what fired the renders leaves the reader
- *  with the whole component to bisect (a field report asked for exactly this).
- *  Unnamed signals answer `anonymous`, which says nothing, so they are dropped
- *  and the one-liner that gives them names is offered instead. Cell signals are
- *  named after their cell, so the common case reads
- *  `fired by: cell:chat, streaming`. */
-function _firedBy(inst: ComponentInstance, now: number): string {
-  const cutoff = now - 1000;
-  const fired = _devFiredAt.get(inst);
-  const all = fired
-    ? [...fired].filter(([, at]) => at >= cutoff).map(([n]) => n)
-    : [];
-  const named = all.filter((n) => n && n !== "anonymous");
-  if (named.length > 0) {
-    return ` The renders were fired by: ${named.slice(0, 6).join(", ")}${
-      named.length > 6 ? `, … (${named.length} in all)` : ""
-    }.`;
-  }
-  return all.length > 0
-    ? ` The signals that fired them are unnamed — \`signal(value, "name")\` ` +
-      `makes this message name them.`
-    : "";
-}
 
 /** Dev tripwire: the state hooks (`useRef`/`useSignal`/`useId`, and
  *  `onUnmount`, which takes a slot) are matched
@@ -261,61 +222,9 @@ export function _rerenderComponent(inst: ComponentInstance): void {
 
   const loopCandidate = inst._devLoopCandidate === true;
   inst._devLoopCandidate = false;
-  if (isDevMode() && loopCandidate) {
-    const now = performance.now();
-    const window = inst._devRenderTimestamps ?? [];
-    // Evict timestamps older than 1 second
-    const cutoff = now - 1000;
-    let i = 0;
-    while (i < window.length && window[i]! < cutoff) i++;
-    if (i > 0) window.splice(0, i);
-    window.push(now);
-    inst._devRenderTimestamps = window;
-    if (window.length === DEV_RENDER_LIMIT) {
-      const name = typeof inst.vnode.tag === "function"
-        ? (inst.vnode.tag.name || "Anonymous")
-        : "Component";
-      const origin = _devOrigin.get(inst) ?? "push";
-      const writer = _devWriter.get(inst) ?? "";
-      const head =
-        `[aio-dev] ${name} re-rendered ${DEV_RENDER_LIMIT} times in under a second`;
-      console.warn(
-        origin === "render"
-          ? `${head} — ${
-            writer && writer !== name
-              ? `<${writer}>'s render is`
-              : "a render is"
-          } WRITING state that ${
-            writer && writer !== name ? "this render" : "the same render"
-          } READS, so every render schedules the next one.${
-            _firedBy(inst, now)
-          } ` +
-            `Two fixes: move the write into an event handler or onMount (a ` +
-            `render must only read), or wrap the read in untrack(() => …) if ` +
-            `the value is genuinely a one-shot initialisation that must not ` +
-            `subscribe.`
-          : origin === "lifecycle"
-          ? `${head} — its ${writer} callback is WRITING state this render ` +
-            `READS, so every render schedules the next one.${
-              _firedBy(inst, now)
-            } ` +
-            `Write only when the value really changed (compare first), or read ` +
-            `it with untrack(() => …) so the write cannot feed back.`
-          // NOT "a render is writing": nothing of ours was on the stack when
-          // the write happened, so the renders are driven from outside and
-          // naming a render-write sends the reader hunting for code that does
-          // not exist (a field report).
-          : `${head} from writes made outside any render, lifecycle callback ` +
-            `or event handler — a server push, a timer, a promise, a socket.` +
-            `${
-              _firedBy(inst, now)
-            } For a text input bound to a cell (one push per ` +
-            `keystroke re-renders every reader), keep the draft in useLocal ` +
-            `and commit it on blur/submit; for a timer or a stream, throttle ` +
-            `or batch the writes.`,
-      );
-    }
-  }
+  // The render-burst tripwire (air/dev-burst.ts): a clock read and a window
+  // per counted render, so it is a dev check.
+  if (isDevMode() && loopCandidate) devHooks.renderBurst?.(inst);
 
   // Timed when anything is WATCHING — a connected Redux DevTools, or a
   // profile someone asked for. Two `performance.now()` calls per render are
@@ -396,9 +305,7 @@ export function _rerenderComponent(inst: ComponentInstance): void {
     // AIO-160: dispose orphaned computeds/effects from the failed render
     _computedDisposeAll(collected);
     _effectDisposeAll(effectCollected);
-    const failedName = typeof vnode.tag === "function"
-      ? (vnode.tag.name || "Anonymous")
-      : "Component";
+    const failedName = _componentName(vnode.tag);
     console.error(
       `[aio-renderer] Component render error in <${failedName}>:`,
       error,
@@ -509,9 +416,7 @@ export function _rerenderComponent(inst: ComponentInstance): void {
     if (_devStart) {
       inst._dtRenders = (inst._dtRenders ?? 0) + 1;
       inst._dtLastMs = performance.now() - _devStart;
-      const name = typeof vnode.tag === "function"
-        ? (vnode.tag.name || "Anonymous")
-        : "Component";
+      const name = _componentName(vnode.tag);
       _recordRender({
         component: name,
         timestamp: Date.now(),
@@ -572,7 +477,7 @@ export function _rerenderComponent(inst: ComponentInstance): void {
     }
   }
 
-  if (isDevMode() && typeof vnode.tag === "function") {
+  if (typeof vnode.tag === "function") {
     _warnIfLostSubscription(vnode.tag as ComponentFn, inst, deps);
   }
 
@@ -583,13 +488,16 @@ export function _rerenderComponent(inst: ComponentInstance): void {
   // deps by design — "will not respond to future signal changes" was printed on
   // the very render that had just brought the page back. Its own signals were
   // never the reason it rendered, so their absence says nothing.
-  if (isDevMode() && !lent && deps.size === 0 && inst.unsubs.length === 0) {
-    const name = typeof vnode.tag === "function"
-      ? (vnode.tag.name || "Anonymous")
-      : "Component";
-    console.warn(
-      `[aio-dev] ${name} re-rendered with 0 signal deps — component will not respond to future signal changes.`,
-    );
+  //
+  // Said by a production page too, once per component: it IS the last update
+  // this instance will ever show.
+  if (!lent && deps.size === 0 && inst.unsubs.length === 0) {
+    const name = _componentName(vnode.tag);
+    if (isDevMode() || firstTime("0deps " + name)) {
+      console.warn(
+        `${_tag()}${name} re-rendered with 0 signal deps — component will not respond to future signal changes.`,
+      );
+    }
   }
 }
 
@@ -630,57 +538,30 @@ function _warnIfLostSubscription(
   // Subscribed through something other than a tracked read (a manual
   // `subscribe`) — not this bug.
   if (deps.size > 0 || seen === 0 || inst.unsubs.length > 0) return;
-  if (_warnedLostSub.has(tag)) return;
-  _warnedLostSub.add(tag);
-  console.warn(
-    `[aio-dev] <${
-      tag.name || "Anonymous"
-    }> rendered reading NO signals, while another instance of it read ` +
-      `${count(seen, "signal")} — this instance will never re-render.\n` +
-      `  A read is tracked only while the component body runs, so a cache ` +
-      `that returns a HIT without touching the cell subscribes to nothing. ` +
-      `Use \`trackedMemo\` from "aio/air", which replays the recorded read ` +
-      `set on a hit, or read one key of every input cell on every call. ` +
-      `See docs/ui/reactivity-tracking.md.`,
+  // A defect, so a production page says the fact too (`_wrong`): once per
+  // component name in either mode.
+  const name = _componentName(tag);
+  _wrong(
+    "unread " + name,
+    `<${name}> rendered reading NO signals, while another instance of it read ` +
+      `${count(seen, "signal")} — this instance will never re-render.`,
+    _LOST_SUB_FIX,
   );
 }
-const _warnedLostSub = new WeakSet<ComponentFn>();
+const _LOST_SUB_FIX = `\n` +
+  `  A read is tracked only while the component body runs, so a cache ` +
+  `that returns a HIT without touching the cell subscribes to nothing. ` +
+  `Use \`trackedMemo\` from "aio/air", which replays the recorded read ` +
+  `set on a hit, or read one key of every input cell on every call. ` +
+  `See docs/ui/reactivity-tracking.md.`;
 
 // ── Subscribe component instance to its deps ─────────────────────────
-
-const _warnedMissingDeps = new WeakMap<ComponentInstance, Set<string>>();
 
 export function _subscribeComponentDeps(
   inst: ComponentInstance,
   // deno-lint-ignore no-explicit-any
   deps: Set<any>,
 ): void {
-  if (isDevMode() && inst.parent) {
-    const parentDeps = inst.parent.deps;
-    for (const dep of deps) {
-      if (parentDeps.has(dep)) continue;
-      if (!dep._name) continue;
-      let warned = _warnedMissingDeps.get(inst);
-      if (!warned) {
-        warned = new Set();
-        _warnedMissingDeps.set(inst, warned);
-      }
-      if (warned.has(dep._name)) continue;
-      warned.add(dep._name);
-      const parentName = typeof inst.parent.vnode.tag === "function"
-        ? (inst.parent.vnode.tag.name || "Anonymous")
-        : "Component";
-      const childName = typeof inst.vnode.tag === "function"
-        ? (inst.vnode.tag.name || "Anonymous")
-        : "Component";
-      // AIO-7.5: child subscriptions are independent of the parent (tested in
-      // child-signal-subscription.test.ts) — this is a debug breadcrumb, not advice.
-      console.debug(
-        `[aio-dev] Child "${childName}" reads signal "${dep._name}" not read by parent "${parentName}" — fine since AIO-7.5.`,
-      );
-    }
-  }
-
   for (const dep of deps) {
     const subscriber = {
       execute: () => {
@@ -693,11 +574,7 @@ export function _subscribeComponentDeps(
         inst._triggerSignals.add(label);
         // WHEN it fired, for the burst message's one-second window — the set
         // above is the DevTools feed and outlives any window.
-        if (isDevMode()) {
-          let fired = _devFiredAt.get(inst);
-          if (!fired) _devFiredAt.set(inst, fired = new Map());
-          fired.set(label, performance.now());
-        }
+        if (isDevMode()) devHooks.depFired?.(inst, label);
         _scheduleComponentRender(inst);
       },
     };
@@ -1123,7 +1000,7 @@ export function _createHooks(rootState: RootState): VDomHooks {
         inst._dtLastMs = performance.now() - hs.dtStart;
       }
       _subscribeComponentDeps(inst, hs.deps!);
-      if (isDevMode() && typeof vnode.tag === "function") {
+      if (typeof vnode.tag === "function") {
         _warnIfLostSubscription(vnode.tag as ComponentFn, inst, hs.deps!);
       }
       inst._sweepEpoch = _discardEpochNow();

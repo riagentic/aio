@@ -6,6 +6,7 @@
 // whole-disk searching. `am create` knows the rule (`appHome`: `$AIO_APPS_DIR/
 // <appId>`, else `~/.<appId>`), so it says what is already there, and points
 // at `am data`.
+import "./store-sandbox.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";

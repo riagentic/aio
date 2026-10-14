@@ -4,6 +4,7 @@
 // imports is registered NOWHERE, so calling it from a cell fails at runtime
 // with "unknown namespace" — and the author has a file that looks finished.
 // The wiring is the part a generator is actually for.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { fromFileUrl } from "@std/path";

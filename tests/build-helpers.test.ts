@@ -10,6 +10,7 @@ import {
 } from "../src/build/build-helpers.ts";
 import { join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { writeDenoProgram } from "./fake-program-helper.ts";
 import { linkFile } from "./symlink-helper.ts";
 
 // ── resolveSdk (ANDROID_HOME may point at the SDK OR its parent) ──
@@ -74,16 +75,17 @@ Deno.test("resolveSdk: ANDROID_HOME points at the PARENT (…/Sdk subdir)", asyn
 async function stubJdk(version: string): Promise<string> {
   const home = await tempDir("aio-buildhelp-");
   await Deno.mkdir(join(home, "bin"));
-  const javac = join(home, "bin", "javac");
-  await Deno.writeTextFile(
-    javac,
-    `#!/bin/sh\nfor a in "$@"; do\n` +
-      `  case "$a" in\n` +
-      `    -version) echo 'javac ${version}' >&2 ;;\n` +
-      `    *.java) touch "\${a%.java}.class" ;;\n` +
-      `  esac\ndone\nexit 0\n`,
+  // A program on every OS (`javac.exe` on Windows), one body.
+  await writeDenoProgram(
+    join(home, "bin", "javac"),
+    `for (const a of Deno.args) {
+  if (a === "-version") console.error("javac ${version}");
+  else if (a.endsWith(".java")) {
+    Deno.writeTextFileSync(a.slice(0, -5) + ".class", "");
+  }
+}
+`,
   );
-  await Deno.chmod(javac, 0o755);
   return home;
 }
 
@@ -99,7 +101,6 @@ async function withJavaHome<T>(dir: string, fn: () => T): Promise<T> {
 }
 
 Deno.test("findJdk: picks an in-range JAVA_HOME (javac 21)", async () => {
-  if (Deno.build.os === "windows") return; // stub is a POSIX shell script
   const home = await stubJdk("21.0.0");
   try {
     await withJavaHome(home, () => assertEquals(findJdk().home, home));
@@ -109,7 +110,6 @@ Deno.test("findJdk: picks an in-range JAVA_HOME (javac 21)", async () => {
 });
 
 Deno.test("findJdk: never picks a too-new JDK (javac 25)", async () => {
-  if (Deno.build.os === "windows") return;
   const home = await stubJdk("25.0.3");
   try {
     await withJavaHome(home, () => {

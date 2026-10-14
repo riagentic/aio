@@ -24,6 +24,20 @@ type Any = any;
 
 const tick = (ms = 5) => new Promise((r) => setTimeout(r, ms));
 
+/** What `withdraw` and `withdrawSelf` wait on mid-call. A test that needs
+ *  something to happen WHILE a call is suspended closes it ({@link midCall}),
+ *  does that thing, and opens it — a timer in the method raced a timer in the
+ *  test, and on a throttled machine the method's 20 ms were over before the
+ *  test's 5 (the conflict case then read `ok`). */
+let mid: Promise<unknown> = Promise.resolve();
+
+/** Close {@link mid}; the answer opens it again. */
+function midCall(): () => void {
+  let open!: () => void;
+  mid = new Promise<void>((r) => open = r);
+  return open;
+}
+
 function wallet(name: string, tx: unknown = true) {
   return cell(name, {
     state: { balance: 100, receipts: 0, progress: 0 },
@@ -38,7 +52,7 @@ function wallet(name: string, tx: unknown = true) {
       },
       async withdraw(s: Any, amt: number) {
         const b = s.balance;
-        await tick(20);
+        await mid;
         s.balance = b - amt;
         s.$do(schedule.after(`${name}:r1`, 0, self("sendReceipt")));
       },
@@ -51,7 +65,7 @@ function wallet(name: string, tx: unknown = true) {
       async withdrawSelf(s: Any, amt: number) {
         s.balance -= amt;
         s.$do(schedule.after(`${name}:r3:${amt}`, 0, self("sendReceipt")));
-        await tick(20);
+        await mid;
         if (s.$signal.aborted) return;
       },
       async staged(s: Any) {
@@ -69,9 +83,10 @@ Deno.test("transaction: a TX_CONFLICT abort sends none of its effects", async ()
   const w = wallet("txfx_conflict");
   const h = await bootCells([w]);
   try {
+    const resume = midCall();
     const p = w.withdraw(30);
-    await tick(5);
     w.adjust(-50); // a concurrent sync write — withdraw's read is now stale
+    resume();
     const code = await p.then(() => "ok", (e: Any) => e.code);
     await h.advance(10);
     await h.settle();
@@ -105,9 +120,10 @@ Deno.test("transaction: a superseded (cancelled) call sends none of its effects"
   const w = wallet("txfx_cancel");
   const h = await bootCells([w]);
   try {
+    const resume = midCall();
     const a = w.withdrawSelf(1);
-    await tick(2);
     const b = w.withdrawSelf(2);
+    resume();
     await a;
     await b;
     await h.advance(10);

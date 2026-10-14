@@ -275,9 +275,46 @@ export function printConsole(e: LogEntry): void {
   // …and the CONSOLE METHOD matches too, so a host app, a browser devtools
   // filter, or a test that watches `console.info` sees the same level the line
   // claims. Every level used to go through console.log.
-  if (e.lvl === "error") console.error(line);
-  else if (e.lvl === "warn") console.warn(line);
-  else if (e.lvl === "info") console.info(line);
-  else if (e.lvl === "debug" || e.lvl === "trace") console.debug(line);
-  else console.log(line);
+  _printing = true;
+  try {
+    if (e.lvl === "error") console.error(line);
+    else if (e.lvl === "warn") console.warn(line);
+    else if (e.lvl === "info") console.info(line);
+    else if (e.lvl === "debug" || e.lvl === "trace") console.debug(line);
+    else console.log(line);
+  } finally {
+    _printing = false;
+  }
+}
+
+// ── One process, one console ────────────────────────────────────────────
+//
+// A page forwards what its console says to its server (console-intercept.ts).
+// A browser's console is the page's alone. In ONE process — the in-process
+// harness: a server and a page's runtime side by side — the console is also
+// the server's, so every line the server logged was forwarded back up the
+// socket to the server that had just said it. Not only noise: the server's
+// own "closing —" line, said the moment before a close for cause, came back
+// as a frame behind that close, and a close with unread data loses its code
+// (a revoked session's 1008 arrived in 22 of 30 runs).
+//
+// The line is the server's — and already in its log — exactly when the
+// framework logger is printing it AND a server lives in this process. A
+// browser has no server, so what a real page forwards is what it always was;
+// a `console.*` call written by hand is forwarded everywhere, as before.
+
+/** `printConsole` is writing a line right now. */
+let _printing = false;
+/** aio servers up in THIS process. */
+let _serversHere = 0;
+
+/** A server came up in (`1`) or left (`-1`) this process. @internal */
+export function _serverHere(delta: 1 | -1): void {
+  _serversHere = Math.max(0, _serversHere + delta);
+}
+
+/** Is the console line being written right now the log of a server in this
+ *  process — one a page here must not forward back to it? @internal */
+export function _isServerLogLine(): boolean {
+  return _printing && _serversHere > 0;
 }

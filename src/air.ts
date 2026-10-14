@@ -175,7 +175,7 @@ export type { WatchOptions } from "./state/watch.ts";
 export { isConnectionDegraded } from "./browser-air.ts";
 
 // ── Forms ────────────────────────────────────────────────────────────
-export { useFieldArray, useForm } from "./air/form.ts";
+export { bindInput, useFieldArray, useForm } from "./air/form.ts";
 export type {
   // `useForm`'s own option and rule types. Three of them were reachable only
   // structurally: `useForm(config, options)` takes a `FormOptions<T>` that an

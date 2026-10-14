@@ -11,10 +11,10 @@ cloud, no accounts — just your notes on your machine.
   "version": "0.1.0",
   "tasks": {
     "dev": "deno run -A src/app.ts",
-    "compile": "deno run -A jsr:@riagentic/aio/build-all --build-spec=jsr:@riagentic/aio/build --targets=electron"
+    "compile": "deno run -A jsr:@riagentic/aio@1.0.0-beta/build-all --build-spec=jsr:@riagentic/aio@1.0.0-beta/build --targets=electron"
   },
   "imports": {
-    "aio": "jsr:@riagentic/aio@^1.0.0-alpha"
+    "aio": "jsr:@riagentic/aio@1.0.0-beta"
   }
 }
 ```
@@ -272,9 +272,11 @@ notes state changes.
 
 We set `singleton: true` in the config. When the user double-clicks the app
 while it's already running, the second process detects the lock file
-(`/tmp/aio/aio-notes.lock`), sees the first process is alive, asks its window to
-come to the front (restored from a minimize or the tray), and exits 0 — also
-when the first one is still starting (two quick double-clicks): the second says
+(`aio-notes.lock` in the [lock folder](../persistence/where-files-live.md) —
+`/tmp/aio/` on macOS, `%TEMP%\aio\` on Windows), sees the first process is
+alive, asks its window to come to the front (restored from a minimize or the
+tray), and exits 0 — also when the first one is still starting (two quick
+double-clicks): the second says
 `<app> is starting (pid N) — waiting for its window…` and waits for that window
 to open. If the first one dies meanwhile, the second takes its lock and starts.
 If no window answers it exits 1 and says who holds the lock. Stale locks from

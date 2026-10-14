@@ -371,7 +371,13 @@ export function standardTasks(
     // — produces an app that can never update itself.
     publish: `deno run -A ${fw.am} publish`,
     ship: `deno run -A ${fw.ship}`,
-    test: "deno test -A",
+    // `AIO_TEST_WIRE=strict` — `testUI` puts the rest of a client call across
+    // the wire (a rejection is a plain Error with a `code`, a component's
+    // `serverFn` call meets its access rule, `useAio().send` runs). Opt-in in
+    // aio, because an existing app's tests were written against the harness
+    // that did none of it; a new app has no such tests. `am fix` therefore
+    // restores the plain task (am-cmd-fix.ts).
+    test: "AIO_TEST_WIRE=strict deno test -A",
     // BOTH halves, in one task — the same reasoning as `lint` below.
     // `deno check` type-checks; it does not bundle, and in aio those have
     // different answers: `"aio"` resolves to mod.ts for the type-checker and
@@ -542,7 +548,24 @@ export function denoJson(
     //   "platforms": ["host", "windows", "macos-arm64"]
     // (server · browser · cli · cli-client cross-compile; electron/android
     // package with per-OS tooling and build on their own OS.)
-    build: { targets: [target], platforms: ["host"], out: "dist" },
+    //
+    // `strictPin` — a packaged Electron CLIENT (`electron-client`) refuses a
+    // paired server whose certificate changed, until it is paired again.
+    // Off by default in aio (an existing client must keep connecting);
+    // on in a new app, and inert until that target is built. The entry's
+    // `electron.strictPin` is the same switch for `--server-url`. The `cli`
+    // template has no window to pair, so it carries neither.
+    build: {
+      targets: [target],
+      platforms: ["host"],
+      out: "dist",
+      ...(template === "cli" ? {} : { strictPin: true }),
+    },
+    // `colorScheme` — an Android build's page follows the phone's light/dark
+    // setting. Absent, aio keeps the dark theme every APK had through 1.0.19
+    // (a rebuilt app must look as it did); a new app has no look to keep.
+    // Inert until an android target is built.
+    ...(template === "cli" ? {} : { android: { colorScheme: "system" } }),
     // `.katana/` is a SPECIFICATION the author wrote, not prose to normalise.
     // The scaffold owned `deno fmt` with no exclude, so a mid-session
     // `deno task fmt` rewrapped the app's own quality spec — two field
@@ -639,6 +662,17 @@ dep/
 release-key.json
 *-release-key.json
 *.release-key.json
+`;
+
+/** One checkout on every OS. Without it git's `core.autocrlf` decides what a
+ *  Windows clone holds — CRLF, on a default Git for Windows — and then
+ *  `deno fmt --check` fails on every file there (deno writes LF), a test that
+ *  compares file text differs by OS, and anything hashed from the tree has
+ *  two answers. New apps only: an existing repo's line endings are its own. */
+const GITATTRIBUTES =
+  `# LF line endings in every checkout, whatever git's core.autocrlf says —
+# so a Windows clone holds the same bytes as a Linux one (deno fmt writes LF).
+* text=auto eol=lf
 `;
 
 /** Full file set for a new project — pure (path → content), no disk I/O.
@@ -824,6 +858,34 @@ testCell(world, "pausing stops the world", async (t) => {
 // the directory is a 404; creating the directory and forgetting the mount is a
 // 404 that looks like a build problem. Scaffolding both together is the point.
 
+/** The safe values a NEW app starts with, written into its entry.
+ *
+ *  Each closes a door that aio's own default has to leave as it was — an app
+ *  written against an older aio must upgrade with no change in behaviour, so
+ *  the default cannot move; the scaffold can (the `ui.theme` pattern). Inert
+ *  where they do not apply: `electron.*` is read only by a desktop run of the
+ *  app and by its remote client. No backtick and no `}` before a `)` in this
+ *  text: it sits inside the entries' template literals, and `am` reads the
+ *  `aio.run({ … })` block with a pattern that ends at the first `})`. */
+const SAFE_RUN_KEYS =
+  `  // The safe values, written out. aio's own defaults stay what they were, so
+  // an app from an older aio upgrades with no change in behaviour — a new one
+  // starts closed. Delete a line to get the default back.
+  //
+  // ignoreDebugEnv: as a desktop app, an AIO_CDP or AIO_PORT left in the
+  //   environment by another app opens no DevTools port and no TCP port here.
+  //   Typed for one launch, --cdp and --port still do.
+  // strictPin: a remote client (--server-url) REFUSES a paired server whose
+  //   certificate changed, until it is paired again by PIN. (Without it the
+  //   server is asked to prove it holds the app's key first — and one too
+  //   old to answer is still sent the key.) A packaged client reads the same
+  //   switch from deno.json, "build": { "strictPin": true } — written there.
+  electron: { ignoreDebugEnv: true, strictPin: true },
+  // refuseShortCalls: a hand-written client that states no argument list for
+  //   a method that takes arguments is refused, not run with undefined.
+  wire: { refuseShortCalls: true },
+`;
+
 const ASSETS_APP = `// Entry — with an \`assets\` mount.
 //
 // \`assets\` serves a directory in dev AND in production, with every guard
@@ -840,7 +902,10 @@ const ASSETS_APP = `// Entry — with an \`assets\` mount.
 import "./cell.ts";
 import { aio } from "aio";
 
-await aio.run({ assets: { "/media": "./media" }, ui: { theme: "auto" } });
+await aio.run({
+  assets: { "/media": "./media" },
+  ui: { theme: "auto" },
+${SAFE_RUN_KEYS}});
 `;
 
 const ASSETS_UI = `// UI — reading from the \`assets\` mount.
@@ -964,6 +1029,7 @@ export function scaffold(
     return {
       "deno.json": denoJson(name, source, target, template),
       ".gitignore": GITIGNORE,
+      ".gitattributes": GITATTRIBUTES,
       "src/app.ts": CLI_APP,
       "src/cell.ts": CLI_CELL,
       "tests/cell.test.ts": CLI_TEST,
@@ -982,6 +1048,7 @@ export function scaffold(
       ? GITIGNORE +
         "\n# generated by build.css (see docs/ui/css-toolchain.md)\nsrc/style.css\n"
       : GITIGNORE,
+    ".gitattributes": GITATTRIBUTES,
     ...(css === "tailwind"
       ? {
         // The SOURCE sheet. `src/style.css` beside it is the tool's output and
@@ -1823,7 +1890,7 @@ const COUNTER_APP =
   `// Entry — near-zero-config: cells self-register on import; appId/version/
 // baseDir are inferred from deno.json + this file's location.
 //
-// \`theme: "auto"\` is the one opt-in: aio's default look (typography, colour
+// \`theme: "auto"\` opts into aio's default look (typography, colour
 // in light AND dark, controls, cards — accented from this app's own name)
 // until you write \`src/style.css\`, at which point it steps aside and leaves
 // only the \`--aio-*\` variables. Delete the line and the app renders with the
@@ -1831,7 +1898,9 @@ const COUNTER_APP =
 import "./cell.ts";
 import { aio } from "aio";
 
-await aio.run({ ui: { theme: "auto" } });
+await aio.run({
+  ui: { theme: "auto" },
+${SAFE_RUN_KEYS}});
 `;
 
 const CLIENT_TS =
@@ -2120,7 +2189,15 @@ const APP_ID = resolveAppId(config.title);
 if (Deno.args[0] === "serve") {
   // aio parses its own flags (--port, --expose, …) from Deno.args; the bare
   // \`serve\` word is not a flag, so it passes through.
-  await aio.run({ appId: APP_ID, client: "server-only" });
+  await aio.run({
+    appId: APP_ID,
+    client: "server-only",
+    // The safe value, written out (aio's own default stays what it was, so an
+    // older app upgrades unchanged): a hand-written client that states no
+    // argument list for a method that takes arguments is refused, not run
+    // with undefined. The commands below always send theirs.
+    wire: { refuseShortCalls: true },
+  });
 } else {
   const a = args({
     name: "todo",
@@ -2247,7 +2324,9 @@ import { aio } from "aio";
 
 export type { Filter, Todo } from "./cell.ts";
 
-await aio.run({ ui: { theme: "auto" } });
+await aio.run({
+  ui: { theme: "auto" },
+${SAFE_RUN_KEYS}});
 `;
 
 const TODO_UI = `// UI — a filterable todo list.

@@ -8,11 +8,18 @@
  */
 import { join, relative, SEPARATOR } from "@std/path";
 import type { BuildConfig } from "./build-config.ts";
-import { emptyDir, foreignArtifactRefusal } from "./dist-staging.ts";
+import {
+  copyWorkerBundles,
+  emptyDir,
+  foreignArtifactRefusal,
+} from "./dist-staging.ts";
 import { normalizeArtifactModes, resolveAppIcon } from "./build-helpers.ts";
-import { _packAssetMounts, _warnRunOptions } from "./build-android.ts";
+import { _packAssetMounts, _readRunOptions } from "./build-android.ts";
 import { appHue, appIconLabel, appIconPng, hsl, pngSize } from "./app-icon.ts";
-import { androidLocalHTML } from "../server/server-html-gen.ts";
+import {
+  androidLocalHTML,
+  oldEngineNotice,
+} from "../server/server-html-gen.ts";
 import { APP_ICON, APP_STYLE, BUNDLE_JS } from "../server/app-files.ts";
 import { escHtml } from "../server/server-html-constants.ts";
 import { HEY, NO, OK } from "../diagnostics/fmt.ts";
@@ -258,6 +265,9 @@ export async function buildWeb(cfg: BuildConfig): Promise<void> {
   await emptyDir(outDir, [BUNDLE_JS]);
   await Deno.mkdir(outDir, { recursive: true });
   await Deno.copyFile(join(dist, BUNDLE_JS), join(outDir, BUNDLE_JS));
+  // …and the browser workers it starts, beside it: `listFiles` below then
+  // precaches and digest-pins them like the bundle.
+  await copyWorkerBundles(dist, outDir);
 
   let hasCSS = false;
   try {
@@ -267,8 +277,9 @@ export async function buildWeb(cfg: BuildConfig): Promise<void> {
     if (!(e instanceof Deno.errors.NotFound)) throw e; // no app stylesheet
   }
   // The app's entry module never runs in the page (only the UI and what it
-  // imports is bundled) — name the aio.run() options that are lost.
-  await _warnRunOptions(cfg, "web");
+  // imports is bundled) — its aio.run() options are read here and baked into
+  // the shell; the ones that cannot travel are named.
+  const run = await _readRunOptions(cfg, "web");
 
   const { icon: userIcon } = await resolveAppIcon(root, cfg.appDir);
   const size = userIcon ? pngSize(await Deno.readFile(userIcon)) : null;
@@ -297,11 +308,12 @@ export async function buildWeb(cfg: BuildConfig): Promise<void> {
     androidLocalHTML(title, hasCSS, {
       themeName: binaryName,
       appId: binaryName,
+      ...run.ui,
       head: webHead(
         title,
         icons[0]!.src,
         (JSON.parse(manifest) as { theme_color: string }).theme_color,
-      ),
+      ) + (run.ui.head ?? "") + run.script + oldEngineNotice("web"),
     }),
   );
   await _packAssetMounts(root, outDir, "the web build");

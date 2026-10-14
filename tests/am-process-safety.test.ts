@@ -25,6 +25,7 @@
 //       still the process the lock recorded. The lock file OUTLIVES A REBOOT
 //       whenever XDG_RUNTIME_DIR is unset — the base is then /tmp, which
 //       Debian and Ubuntu do not clear at boot — and pids wrap.
+import "./store-sandbox.ts";
 import {
   assert,
   assertEquals,

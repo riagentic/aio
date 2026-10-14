@@ -24,6 +24,7 @@ import {
   resetMethodPolicy,
 } from "../src/state/method-policy.ts";
 import { fuzzEnvInt } from "./fuzz-seed.ts";
+import { mulberry32 } from "./sync/properties/_prop.ts";
 
 // deno-lint-ignore no-explicit-any
 type Any = any;
@@ -60,12 +61,27 @@ function same(a: unknown, b: unknown): boolean {
 
 Deno.test("argsKey property: two argument lists with one key are the same call", () => {
   const SEED = fuzzEnvInt("FUZZ_SEED", 0x5eed4a11) & 0x7fffffff;
-  let seed = SEED;
   const rounds = fuzzEnvInt("FUZZ_ROUNDS", 3000, 1);
-  const rnd = () =>
-    (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const rnd = mulberry32(SEED);
   const pick = <T>(xs: T[]): T => xs[Math.floor(rnd() * xs.length)]!;
-  const leaf = (): unknown =>
+  const seen = new Set<string>();
+  const leaf = (): unknown => {
+    const v = leafValue();
+    // `-0` and `0` are two kinds; a class is its name.
+    seen.add(
+      Object.is(v, -0)
+        ? "-0"
+        : typeof v === "object" && v !== null
+        ? v.constructor.name
+        : typeof v === "function"
+        ? "function"
+        : typeof v === "string"
+        ? JSON.stringify(v)
+        : String(v),
+    );
+    return v;
+  };
+  const leafValue = (): unknown =>
     pick<() => unknown>([
       () => 0,
       () => -0,
@@ -89,13 +105,18 @@ Deno.test("argsKey property: two argument lists with one key are the same call",
       const arr: unknown[] = [];
       const n = Math.floor(rnd() * 3);
       for (let i = 0; i < n; i++) arr.push(value(depth - 1));
-      if (rnd() < 0.1) arr.length += 1; // a hole
+      seen.add("array");
+      if (rnd() < 0.1) {
+        arr.length += 1; // a hole
+        seen.add("hole");
+      }
       return arr;
     }
     const o: Record<string, unknown> = {};
     for (const k of ["a", "b"].slice(0, Math.floor(rnd() * 3))) {
       o[k] = value(depth - 1);
     }
+    seen.add("object");
     return o;
   };
   const byKey = new Map<string, unknown[]>();
@@ -108,6 +129,7 @@ Deno.test("argsKey property: two argument lists with one key are the same call",
     const prev = byKey.get(k);
     if (prev === undefined) byKey.set(k, args);
     else {
+      seen.add("one key, met twice");
       assert(
         same(prev, args),
         `FUZZ_SEED=${SEED} round ${r}: one key for two different calls — ${k}`,
@@ -118,6 +140,15 @@ Deno.test("argsKey property: two argument lists with one key are the same call",
     keyed > rounds / 10,
     `the generator must produce keyable calls too (${keyed})`,
   );
+  // A generator that stopped drawing a kind compares nothing about it.
+  if (rounds >= 3000) {
+    const kinds = [
+      ...["0", "-0", "1", "null", "NaN", "Infinity", "undefined", '"a"', '""'],
+      ...["true", "function", "Set", "Map", "Date", "Point"],
+      ...["array", "hole", "object", "one key, met twice"],
+    ];
+    assertEquals(kinds.filter((k) => !seen.has(k)), [], "kinds never drawn");
+  }
 });
 
 Deno.test("argsKey: the collisions JSON.stringify had are no key at all", () => {

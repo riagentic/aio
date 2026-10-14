@@ -17,6 +17,7 @@ import { assertEquals, assertStringIncludes } from "@std/assert";
 import { privateDirRefusal, selfUid } from "../src/server/dir-permissions.ts";
 import { _prepareLockDir } from "../src/server/single-instance-lock.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { join } from "@std/path";
 import { permissiveUmask } from "./permissive-umask.ts";
 
 const POSIX = Deno.build.os !== "windows";
@@ -71,7 +72,7 @@ Deno.test("the rule: owner-only, and OURS", () => {
 
 Deno.test({
   name: "an unusable lock dir falls back to one we own, loudly",
-  ignore: !POSIX,
+  ignore: !POSIX, // the fallback is the uid-scoped sibling `aio-u<uid>`: Windows has no uid (`selfUid()` is null), so there is none there
   fn: () =>
     permissiveUmask(async () => {
       const base = await Deno.makeTempDir({ prefix: "aio-lockdir-" });
@@ -127,7 +128,6 @@ Deno.test({
 
 Deno.test({
   name: "the ordinary case still uses the shared directory",
-  ignore: !POSIX,
   fn: () =>
     permissiveUmask(async () => {
       // The fallback must be the exception: one directory per machine is what
@@ -147,13 +147,17 @@ Deno.test({
           ],
           // AIO_APPS_DIR scopes the directory NAME (`aio-<slug>`), and the
           // suite sets it. Blank it so the preferred path is plain `<base>/aio`.
-          env: { XDG_RUNTIME_DIR: base, AIO_APPS_DIR: "" },
+          // (The base is `%TEMP%` on Windows, and a mode says nothing there.)
+          env: { [POSIX ? "XDG_RUNTIME_DIR" : "TEMP"]: base, AIO_APPS_DIR: "" },
           stdout: "piped",
           stderr: "null",
         }).output();
         const out = new TextDecoder().decode(stdout);
         assertEquals(code, 0, out);
-        assertStringIncludes(out, `DIR=${base}/aio MODE=700`);
+        assertStringIncludes(
+          out,
+          `DIR=${join(base, "aio")} MODE=${POSIX ? "700" : ""}`,
+        );
       } finally {
         await Deno.remove(base, { recursive: true });
       }
@@ -162,7 +166,7 @@ Deno.test({
 
 Deno.test({
   name: "a directory we cannot narrow is refused, not used",
-  ignore: !POSIX,
+  ignore: !POSIX, // the refusal is read off mode bits after a chmod: Windows has neither (`modeBitsAreMeaningful`) — the profile ACL is the boundary there
   fn: async () => {
     // THE production case: `/tmp/aio` already exists, owned by another local
     // account, mode 0777. `mkdir -p` succeeds, `chmod` returns EPERM, and the
@@ -210,7 +214,7 @@ Deno.test({
 // ours. A test has one uid, so "theirs" is injected the way the EPERM above is.
 Deno.test({
   name: "a lock dir that is somebody else's SYMLINK is refused",
-  ignore: !POSIX || selfUid() === null,
+  ignore: !POSIX || selfUid() === null, // the link's OWNER is a uid: Windows has none
   fn: () =>
     permissiveUmask(async () => {
       const base = await tempDir("aio-lockdir-link-");

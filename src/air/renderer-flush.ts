@@ -21,11 +21,12 @@ import {
   _setInsideMount,
 } from "./renderer-state.ts";
 import { _rerenderComponent } from "./renderer-rerender.ts";
-import { _reportHookError } from "./hook-error.ts";
+import { _componentName, _reportHookError } from "./hook-error.ts";
 import { onCleanup } from "./renderer-lifecycle.ts";
 import { devHooks, loadDevChunk } from "./dev-hooks.ts";
 import { runTrackedLifecycle } from "./untracked-read.ts";
 import { isDevMode } from "../state/dev-flag.ts";
+import { firstTime } from "../protocol/said-once.ts";
 import { _inSsrCall } from "./vdom-ssr.ts";
 
 // ── afterRender queue (per-root isolated) ────────────────────────────
@@ -66,15 +67,21 @@ export function afterRender(fn: () => void): void {
   // render produces a string, so `afterRender` has nothing to run after and
   // the author's component body is correct as written. See `_inServerRender`
   // in renderer-lifecycle.ts.
-  if (
-    (globalThis as Record<string, unknown>).__aioDev === true && !_inSsrCall()
-  ) {
+  //
+  // Prod says the first sentence, once: a dropped callback is the app's
+  // measurement or focus call not happening, and a packaged build was the
+  // quiet one.
+  const dev = (globalThis as Record<string, unknown>).__aioDev === true;
+  if (!_inSsrCall() && (dev || firstTime("afterRender()"))) {
     console.warn(
       "[aio] afterRender() called outside a render — no render cycle is " +
-        "active, so the callback was DROPPED. It only works during a " +
-        "component's render pass; from a timer, a promise continuation or an " +
-        "event handler there is nothing to run after. Move the call into the " +
-        "component body, or do the work directly.",
+        "active, so the callback was DROPPED." +
+        (dev
+          ? " It only works during a component's render pass; from a timer, " +
+            "a promise continuation or an event handler there is nothing to " +
+            "run after. Move the call into the component body, or do the " +
+            "work directly."
+          : ""),
     );
   }
 }
@@ -227,7 +234,25 @@ export function _setFlushBudget(ms?: number): void {
   _FLUSH_BUDGET_MS = ms == null || ms < 0 ? 12 : ms;
 }
 
-export function _flushPending(root: RootState): void {
+/** Render EVERYTHING that is pending, now, however long it takes — what a
+ *  mount handle's `_flush()` promises ("synchronously execute any pending
+ *  re-render").
+ *
+ *  It called {@linkcode _flushPending}, which stops at the 12 ms budget and
+ *  leaves the rest to a microtask — so on a slow machine a "flushed" DOM was
+ *  half rendered, and the caller's very next line read it. A randomized
+ *  differential test did exactly that on a loaded Windows VM (2026-10-13:
+ *  one seed, green everywhere else, red there once) and reported a renderer
+ *  defect that did not exist. The continuation a budget stop had already
+ *  queued finds nothing left and ends. */
+export function _flushAll(root: RootState): void {
+  _flushPending(root, Infinity);
+}
+
+export function _flushPending(
+  root: RootState,
+  budgetMs: number = _FLUSH_BUDGET_MS,
+): void {
   root.flushScheduled = false;
   if (root.disposed) return; // AIO-243
   const prevRoot = _activeRoot;
@@ -238,7 +263,7 @@ export function _flushPending(root: RootState): void {
     : Date.now;
   root.flushing = true;
   try {
-    const deadline = _now() + _FLUSH_BUDGET_MS;
+    const deadline = _now() + budgetMs;
     // AIO-167: Cycle detection — per-component render count within a single flush.
     // AIO-209: root-scoped map persists across yield boundaries.
     // AIO-288: limit raised from 10 to 25 to avoid false positives.
@@ -253,9 +278,7 @@ export function _flushPending(root: RootState): void {
         const count = (_renderCounts.get(inst) ?? 0) + 1;
         _renderCounts.set(inst, count);
         if (count > _CYCLE_LIMIT) {
-          const name = typeof inst.vnode.tag === "function"
-            ? (inst.vnode.tag.name || "Anonymous")
-            : "Component";
+          const name = _componentName(inst.vnode.tag);
           console.error(
             `[aio-renderer] ${name} re-rendered ${_CYCLE_LIMIT} times in a single flush — ` +
               `likely signal write during render. Breaking cycle for this component.`,
@@ -274,9 +297,7 @@ export function _flushPending(root: RootState): void {
         try {
           _rerenderComponent(inst);
         } catch (e) {
-          const name = typeof inst.vnode.tag === "function"
-            ? (inst.vnode.tag.name || "Anonymous")
-            : "Component";
+          const name = _componentName(inst.vnode.tag);
           console.error(
             `[aio-renderer] Uncaught error re-rendering <${name}> — ` +
               `its siblings in this flush are unaffected:`,

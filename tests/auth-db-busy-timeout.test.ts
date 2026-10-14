@@ -9,9 +9,15 @@ import { assert, assertEquals, assertThrows } from "@std/assert";
 import { openSessionStore } from "../src/server/sessions.ts";
 import { openUserStore } from "../src/server/auth-users.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { DatabaseSync } from "node:sqlite";
 
-/** Another process holds auth.db's write lock for `ms`. Resolves once held. */
-async function holdWriteLock(path: string, ms: number) {
+/** Another process holds auth.db's write lock — for `ms`, or, with `null`,
+ *  until the returned function is called. Resolves once held.
+ *
+ *  `null` is for the case that must MEET the lock: a hold timed from the
+ *  holder's side is a deadline on this process — on a throttled machine the
+ *  2.2 s were over before the write began, and it succeeded. */
+async function holdWriteLock(path: string, ms: number | null) {
   const child = new Deno.Command(Deno.execPath(), {
     args: [
       "eval",
@@ -19,11 +25,13 @@ async function holdWriteLock(path: string, ms: number) {
        const db = new DatabaseSync(${JSON.stringify(path)});
        db.exec("BEGIN IMMEDIATE");
        console.log("held");
-       const end = Date.now() + ${ms};
-       while (Date.now() < end) {}
+       const ms = ${ms};
+       if (ms === null) await Deno.stdin.read(new Uint8Array(1));
+       else { const end = Date.now() + ms; while (Date.now() < end) {} }
        db.exec("COMMIT");
        db.close();`,
     ],
+    stdin: "piped",
     stdout: "piped",
     stderr: "inherit",
   }).spawn();
@@ -31,6 +39,7 @@ async function holdWriteLock(path: string, ms: number) {
   const { value } = await reader.read();
   assertEquals(new TextDecoder().decode(value).trim(), "held");
   return async () => {
+    await child.stdin.close(); // end of input: the holder commits
     reader.releaseLock();
     await child.stdout.cancel();
     assert((await child.status).success);
@@ -59,6 +68,25 @@ Deno.test("auth.db stores wait for another process's write lock", async () => {
   }
 });
 
+/** What SQLite's own one-second busy wait takes on THIS machine, now, against
+ *  the lock held on `path` — the unit the stores' wait is read in.
+ *
+ *  The wait is some sixteen short sleeps, and a scheduler may end each one
+ *  late: at macOS background QoS the "about a second" was over two, and a
+ *  bound in wall seconds failed a store that waited exactly as told
+ *  (reproduced on Linux with a 100 ms timer slack: 2.5 s). */
+function oneSecondBusyWait(path: string): number {
+  const db = new DatabaseSync(path);
+  try {
+    db.exec("PRAGMA busy_timeout = 1000");
+    const t0 = performance.now();
+    assertThrows(() => db.exec("BEGIN IMMEDIATE"), Error, "database is locked");
+    return performance.now() - t0;
+  } finally {
+    db.close();
+  }
+}
+
 // The wait is synchronous (DatabaseSync): the whole event loop — every socket,
 // every timer — stands still while it lasts. 5 s froze the app for 5 s behind
 // any long `am auth` write. It is bounded at about a second, and a lock held
@@ -76,11 +104,17 @@ Deno.test("auth.db stores give up after about a second — loudly", async () => 
         () => users.setRole("alice", "admin"),
       ]
     ) {
-      const done = await holdWriteLock(path, 2200);
+      const done = await holdWriteLock(path, null);
+      const unit = oneSecondBusyWait(path);
       const t0 = performance.now();
       assertThrows(write, Error, "database is locked");
       const waited = performance.now() - t0;
-      assert(waited >= 800 && waited < 2000, `blocked ${waited} ms`);
+      // Never less than the second it was told (a sleep does not end
+      // early), and nowhere near the five it used to be.
+      assert(
+        waited >= 800 && waited < 2 * unit,
+        `blocked ${waited} ms; a one-second busy wait takes ${unit} ms here`,
+      );
       await done();
     }
   } finally {

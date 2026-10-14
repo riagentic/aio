@@ -1,5 +1,6 @@
 import { assert, assertEquals } from "@std/assert";
 import { fuzzEnvInt } from "./fuzz-seed.ts";
+import { mulberry32 } from "./sync/properties/_prop.ts";
 import type { Patch } from "immer";
 import { applyPatches, enablePatches, produceWithPatches } from "immer";
 import {
@@ -260,12 +261,13 @@ Deno.test("narrowArrayPatches: randomized edits always apply to the same array",
   // fixed by default (CI must be reproducible from its own commit), and
   // overridable so a sweep can explore past these 400 programs:
   // `for s in 3 17 501; do FUZZ_SEED=$s deno test -A tests/patch-compact.test.ts; done`
-  let seed = fuzzEnvInt("FUZZ_SEED", 0x2f6e2b1) & 0x7fffffff;
-  const SEED = seed;
+  const SEED = fuzzEnvInt("FUZZ_SEED", 0x2f6e2b1) & 0x7fffffff;
   const ROUNDS = fuzzEnvInt("FUZZ_ROUNDS", 400, 1);
-  const rnd = () =>
-    (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const rnd = mulberry32(SEED);
   const pick = (n: number) => Math.floor(rnd() * n);
+  // Each thing the generator can do to a row, counted: one it never drew
+  // was never compared.
+  const drew = { drop: 0, replace: 0, keep: 0, insert: 0, append: 0 };
 
   for (let round = 0; round < ROUNDS; round++) {
     const len = pick(12);
@@ -275,12 +277,26 @@ Deno.test("narrowArrayPatches: randomized edits always apply to the same array",
     const next: unknown[] = [];
     for (const item of before) {
       const r = rnd();
-      if (r < 0.15) continue; // drop
-      if (r < 0.25) next.push({ id: 1000 + pick(50) }); // replace with a new object
-      else next.push(item); // keep
-      if (rnd() < 0.15) next.push({ id: 2000 + pick(50) }); // insert after
+      if (r < 0.15) {
+        drew.drop++;
+        continue;
+      }
+      if (r < 0.25) {
+        drew.replace++;
+        next.push({ id: 1000 + pick(50) }); // a new object in its place
+      } else {
+        drew.keep++;
+        next.push(item);
+      }
+      if (rnd() < 0.15) {
+        drew.insert++;
+        next.push({ id: 2000 + pick(50) }); // insert after
+      }
     }
-    if (rnd() < 0.3) next.push({ id: 3000 + pick(50) }); // append
+    if (rnd() < 0.3) {
+      drew.append++;
+      next.push({ id: 3000 + pick(50) });
+    }
 
     const prev = { items: before };
     const original = [replace(["items"], next)];
@@ -292,6 +308,11 @@ Deno.test("narrowArrayPatches: randomized edits always apply to the same array",
         JSON.stringify(before.map((x) => x.id))
       } → ${JSON.stringify(next.map((x) => (x as { id: number }).id))}`,
     );
+  }
+  if (ROUNDS >= 400) {
+    for (const [what, n] of Object.entries(drew)) {
+      assert(n > 0, `the generator never drew "${what}"`);
+    }
   }
 });
 
@@ -459,12 +480,14 @@ Deno.test("narrowArrayPatches: randomized SHUFFLES never slip through as edits",
   // The reorder bail is load-bearing: a shuffle mis-read as remove+add would
   // reconstruct the wrong order. The other randomized test never permutes.
   // Same seeding contract as above (`FUZZ_SEED` sweeps, default is fixed).
-  let seed = fuzzEnvInt("FUZZ_SEED", 0x51f0a3d) & 0x7fffffff;
-  const SEED = seed;
+  const SEED = fuzzEnvInt("FUZZ_SEED", 0x51f0a3d) & 0x7fffffff;
   const ROUNDS = fuzzEnvInt("FUZZ_ROUNDS", 1000, 1);
-  const rnd = () =>
-    (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const rnd = mulberry32(SEED);
   const pick = (n: number) => Math.floor(rnd() * n);
+  // What a round drew, and what the narrowing made of it — counted: a case
+  // never drawn was never compared.
+  const drew = { reorder: 0, drop: 0, insert: 0, both: 0 };
+  const made = { "left as the replacement": 0, "rewritten": 0 };
 
   for (let round = 0; round < ROUNDS; round++) {
     const len = 2 + pick(10);
@@ -474,17 +497,30 @@ Deno.test("narrowArrayPatches: randomized SHUFFLES never slip through as edits",
       const j = pick(i + 1);
       [next[i], next[j]] = [next[j]!, next[i]!];
     }
-    if (pick(3) === 0) next.splice(pick(next.length), 1); // sometimes drop too
-    if (pick(3) === 0) {
+    const drop = pick(3) === 0, insert = pick(3) === 0;
+    if (drop) next.splice(pick(next.length), 1); // sometimes drop too
+    if (insert) {
       next.splice(pick(next.length + 1), 0, { id: 1000 + round });
     }
+    drew[
+      drop && insert ? "both" : drop ? "drop" : insert ? "insert" : "reorder"
+    ]++;
     const prev = { items: before };
     const ops = [replace(["items"], next)];
+    const narrowed = narrowArrayPatches(prev, ops);
+    made[narrowed === ops ? "left as the replacement" : "rewritten"]++;
     assertEquals(
-      applyPatches(prev, narrowArrayPatches(prev, ops)),
+      applyPatches(prev, narrowed),
       applyPatches(prev, ops),
       `FUZZ_SEED=${SEED} round ${round}`,
     );
+  }
+  if (ROUNDS >= 1000) {
+    const kinds = Object.entries({ ...drew, ...made });
+    assertEquals(kinds.length, 6, "four draws and two outcomes are counted");
+    for (const [what, n] of kinds) {
+      assert(n > 0, `the generator never drew "${what}"`);
+    }
   }
 });
 

@@ -7,6 +7,7 @@
 //    used to answer only "am does not know which app to target" while the
 //    docs said it shows the drift. It now says it needs a running app and
 //    that the refusal itself is the drift report.
+import "./store-sandbox.ts";
 import { assert, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { shapeDriftRefusal } from "../src/server/aio-boot.ts";

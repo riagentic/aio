@@ -4,6 +4,7 @@
 // `usage: am tt goto <index>` — `am tt` was removed in alpha70 and the CLI
 // refuses it by name, and help calls the argument `<id>`. A reader who typed
 // what the error told them got a second error.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { freePort } from "../src/testing/server-test.ts";
 import { fromFileUrl } from "@std/path";

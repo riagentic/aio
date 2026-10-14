@@ -3,6 +3,7 @@
 
 import { bindSignalProps } from "./signal-binding.ts";
 import { isDevMode } from "../state/dev-flag.ts";
+import { devHooks } from "./dev-hooks.ts";
 import {
   _actionsChanged,
   _applyActions,
@@ -14,13 +15,14 @@ import {
   _attachRef,
   _detachRef,
   _enterCommit,
+  _keepsTyped,
   _leaveCommit,
+  _saysTypedKept,
   _staticEqual,
   _tagComponentError,
   nullSlot,
 } from "./vdom-create.ts";
 import { _componentName } from "./hook-error.ts";
-import { _instanceStack } from "./renderer-state.ts";
 import {
   _hasSignalPropChange,
   applyChildDependentProps,
@@ -39,12 +41,14 @@ import { createDom } from "./vdom-render.ts";
 import { _detachReused } from "./vdom-reuse.ts";
 import { _getActiveDelegationRoot, _setDelegationRoot } from "./vdom-events.ts";
 import {
-  _devWarn,
+  _BUG,
   _domNodeCount,
   _hasRawHtml,
   _LAZY_PENDING,
+  _MOVED,
   _Null,
   _SignalText,
+  _wrong,
   childSvgMode,
   ErrorBoundary,
   Fragment,
@@ -59,6 +63,11 @@ import {
   _diffSuspense,
   _updateContainerDom,
 } from "./vdom-diff-boundary.ts";
+
+/** The dev half of "has no DOM node to diff against" (`_BUG`, the half a
+ *  production page says too, is vdom-types'). */
+const _NO_DOM = " The previous vnode was rendered without a _dom (partial " +
+  "hydration, or an earlier reconciler failure).";
 
 /** Carry `_dom` across an unchanged static subtree, at every depth.
  *
@@ -199,31 +208,29 @@ function _diffNode(
       // text node: the old text cannot be located, so the update would be
       // silently dropped. Replace it positionally rather than pretend.
       const fresh = ctx.doc.createTextNode(String(next));
+      // Said in dev and in production (`_wrong`): the positional model
+      // desynced, which is a reconciler bug, not an app one.
+      const what = `A text child (${JSON.stringify(String(old))} → ${
+        JSON.stringify(String(next))
+      }) was diffed `;
       if (oldDom && isChildOf(oldDom, parent)) {
         parent.insertBefore(fresh, oldDom);
-        // Loud in dev: the node in the way is real and stays (deleting it
-        // would take a subtree the vnode tree still owns), but the cursor
-        // landing on a non-text node means the positional model desynced —
-        // which is a reconciler bug, not an app one.
-        _devWarn(
+        // The node in the way is real and stays: deleting it would take a
+        // subtree the vnode tree still owns.
+        _wrong(
           "text-cursor-not-text",
-          `A text child (${JSON.stringify(String(old))} → ${
-            JSON.stringify(String(next))
-          }) was diffed against a <${
+          `${what}against a <${
             (oldDom as Element).nodeName ?? "?"
           }> instead of its text node, so it was written next to it rather ` +
-            `than updated in place. The node in the way was kept. This is an ` +
-            `aio bug; please report the component's child shape.`,
+            `than updated in place.${_MOVED}`,
+          ` The node in the way was kept.`,
         );
       } else {
         parent.appendChild(fresh);
-        _devWarn(
+        _wrong(
           "text-no-position",
-          `A text child (${JSON.stringify(String(old))} → ${
-            JSON.stringify(String(next))
-          }) was diffed without its DOM position, so it was appended instead ` +
-            `of updated in place. This is an aio bug; please report the ` +
-            `component's child shape.`,
+          `${what}without its DOM position, so it was appended instead ` +
+            `of updated in place.${_MOVED}`,
         );
       }
       return fresh;
@@ -274,6 +281,17 @@ function _diffNode(
     return nv._dom ?? null;
   }
 
+  // A control that keeps what was typed into it (`_keepsTyped`), rendered
+  // again with the same props: left alone, and said once if it shows it.
+  if (
+    nv.tag === ov.tag && _keepsTyped(nv) && _keepsTyped(ov) &&
+    _staticEqual(nv, ov)
+  ) {
+    _copyStaticDom(nv, ov);
+    _saysTypedKept(nv);
+    return nv._dom ?? null;
+  }
+
   // Null placeholder — transfer DOM reference (AIO-107)
   if (nv.tag === _Null) {
     nv._dom = ov._dom;
@@ -286,12 +304,11 @@ function _diffNode(
   if (nv.tag === _SignalText) {
     const text = ov._dom as Text | undefined;
     if (!text) {
-      _devWarn(
+      _wrong(
         "diff-no-dom-signal-text",
         `A signal child has no text node to diff against — it will stop ` +
-          `updating. The previous vnode was rendered without a _dom (partial ` +
-          `hydration, or an earlier reconciler failure). This is an aio bug; ` +
-          `please report the component's shape.`,
+          `updating.${_BUG}`,
+        _NO_DOM,
       );
       return null;
     }
@@ -363,7 +380,7 @@ function _diffNode(
     // to ignore the real one. `_rendered` is undefined exactly on the happy
     // path (Fragment never sets it).
     if (isDevMode() && nv._rendered === undefined) {
-      _assertRegionAlignment(nv, nv._dom ?? null, false);
+      devHooks.assertAligned?.(nv, nv._dom ?? null, false);
     }
     return nv._dom ?? null;
   }
@@ -540,28 +557,6 @@ function _mountPortalContent(target: Node, vnode: VNode, ctx: RenderCtx): void {
   }
 }
 
-/** Tear a portal's content out of `target` — its children AND its region
- *  anchor, walked from the anchor rather than from `target.firstChild`, which
- *  is another portal's content whenever two portals share a target. */
-function _removePortalContent(
-  target: Node,
-  vnode: VNode,
-  ctx: RenderCtx,
-): void {
-  let cursor: Node | null = vnode._anchor
-    ? _advance(vnode._anchor, 1)
-    : target.firstChild;
-  for (const child of vnode.children) {
-    const at = getDom(child) ?? cursor;
-    cursor = _advance(at, _domNodeCount(child));
-    removeDom(target, child, ctx, at);
-  }
-  if (vnode._anchor && isChildOf(vnode._anchor, target)) {
-    target.removeChild(vnode._anchor);
-  }
-  vnode._anchor = undefined;
-}
-
 function _diffPortal(nv: VNode, ov: VNode, ctx: RenderCtx): void {
   const target = nv.props.target as Node;
   const oldTarget = ov.props.target as Node | undefined;
@@ -573,7 +568,10 @@ function _diffPortal(nv: VNode, ov: VNode, ctx: RenderCtx): void {
     // corruption tripwire fired ("has no DOM node to diff against… this is an
     // aio bug"). No target means no content: tear the old children down and
     // carry the link over so the node stays diffable.
-    if (oldTarget) _removePortalContent(oldTarget, ov, ctx);
+    // `removeDom` is the ONE teardown of a portal (its Portal branch): this
+    // file had a walk of its own, which took a portal that never mounted —
+    // one behind a sibling that threw — for the owner of `target.firstChild`.
+    if (oldTarget) removeDom(oldTarget, ov, ctx);
     nv._dom = ov._dom;
     return;
   }
@@ -590,7 +588,7 @@ function _diffPortal(nv: VNode, ov: VNode, ctx: RenderCtx): void {
       // nothing, leaving the region permanently empty once a target came back.
       _mountPortalContent(target, nv, ctx);
     } else if (oldTarget !== target) {
-      _removePortalContent(oldTarget, ov, ctx);
+      removeDom(oldTarget, ov, ctx);
       _mountPortalContent(target, nv, ctx);
     } else {
       // The portal's region begins after its anchor (see `_anchor`), not at
@@ -624,115 +622,6 @@ function _diffPortal(nv: VNode, ov: VNode, ctx: RenderCtx): void {
   }
 }
 
-/** Dev-only reactivity invariant (AIO-412): after a diff, the region a vnode
- *  owns must hold its children's realized nodes IN ORDER — child i's node is
- *  the n-th node of the region, where n = Σ _domNodeCount(children before it).
- *
- *  The original check compared COUNTS only, and only for elements. Every defect
- *  this class produces is an order/identity error at a perfectly correct count
- *  — a text node reconciled into a sibling's slot, a fragment that adopted a
- *  detached anchor, two equal-valued strings swapped — so it fired for one
- *  reproduction in eight and the class shipped. Walking positions catches them
- *  at the source in dev, where the diff that caused it is still on the stack,
- *  instead of via a user's "the value isn't updating" report.
- *
- *  Bare text is verified by node type + content (a primitive has no identity to
- *  compare); everything that carries a `_dom` is verified by identity.
- *
- *  Skipped when the element opts out of vnode-owned children — a `ref` or `use`
- *  action may mutate the DOM imperatively, and dangerouslySetInnerHTML injects
- *  untracked nodes — so the check never cries wolf on legitimate escape hatches.
- *
- *  `exact` (elements only) additionally requires the region to END with the
- *  last child: an element owns ALL of its childNodes, a fragment does not. */
-/** @internal Exported as a test seam: the desync it reports is (correctly)
- *  hard to provoke through the public renderer, and the CLAIMS this function
- *  makes — that it names the class, the enclosing component, and the two app
- *  shapes that cause it, and that two different sites are two findings — are
- *  about the MESSAGE, not about when the desync happens. A test that drives a
- *  shape hoping to trip it passes vacuously the day AIR stops tripping. */
-export function _assertRegionAlignment(
-  nv: VNode,
-  first: Node | null,
-  exact: boolean,
-): void {
-  const p = nv.props;
-  if (p.ref || p.use || p.dangerouslySetInnerHTML) return;
-  // A server-rendered `<textarea value>` carries its value as a TEXT child
-  // (that is the only way HTML can say it); the vnode has none. Every
-  // re-render of a hydrated textarea reported that node as a desync.
-  if (nv.tag === "textarea" && !nv.children.length) return;
-  // NAME THE SITE, and key the dedupe by it.
-  //
-  // This said `<span> holds the wrong node at child 0`, keyed
-  // `child-desync-span` — one key for every `<span>` in the application. A
-  // field report's numbers say what that cost: ~180 spans across 25
-  // components, so "a span, somewhere, at child 0" is not a lead, and they
-  // spent two hours bisecting a fuzz run by hand. Worse, they then fixed NINE
-  // real shape instabilities in a row and the warning count stayed at exactly
-  // 1 the whole time, because the first one silenced the rest — which reads as
-  // "nothing I did helped". A count that cannot move is not a diagnostic.
-  //
-  // Everything needed was already in hand at the call site: `nv.props` carries
-  // the class, and the enclosing component is on the instance stack.
-  const cls = typeof nv.props.class === "string"
-    ? nv.props.class
-    : typeof nv.props.className === "string"
-    ? nv.props.className
-    : "";
-  const owner = _instanceStack[_instanceStack.length - 1]?._component;
-  const label = `<${_componentName(nv.tag)}${cls ? ` class="${cls}"` : ""}>` +
-    (owner ? ` inside <${owner}>` : "");
-  const bad = (why: string) =>
-    _devWarn(
-      `child-desync-${owner ?? "?"}-${String(nv.tag)}-${cls}`,
-      `${label} ${why} after diff — the child reconciler desynced (nodes ` +
-        `lost/duplicated, or dynamic text written to the wrong slot).\n` +
-        // NOT "this is an aio bug". The reported causes were all app shapes,
-        // and sending the author to file an issue is the wrong answer in the
-        // one message that is supposed to end the hunt. Both shapes below are
-        // idiomatic JSX, which is why a careful codebase hit them nine times.
-        `      The usual cause is a sibling whose NODE COUNT changes between ` +
-        `renders, among static siblings: \`{cond && <Icon/>}\` (a falsy ` +
-        `branch still occupies a slot) or \`{v === "" ? "" : v}\` (an empty ` +
-        `string renders to no node at all). Give the siblings keys, or render ` +
-        `a stable placeholder instead of nothing. If neither applies, this is ` +
-        `an aio bug — please report the component's child shape.`,
-    );
-  let cursor: Node | null = first;
-  for (let i = 0; i < nv.children.length; i++) {
-    const child = nv.children[i]!;
-    const count = _domNodeCount(child);
-    if (count === 0) continue; // Portal / component that rendered nothing
-    if (!cursor) return bad(`ran out of DOM nodes at child ${i}`);
-    if (typeof child === "object") {
-      // `_liveFirstDom`, not the vnode's own `_dom`: a component child whose
-      // nested component re-rendered on its own and swapped its root still
-      // carries the detached node in its copy, and comparing against THAT
-      // reported a desync for a render in which nothing was wrong (a field
-      // report: "holds the wrong node at child 6", twice, one dialog giving
-      // way to the next). A tripwire that fires when nothing is wrong teaches
-      // the reader to ignore the real one.
-      const d = _liveFirstDom(child);
-      if (d && d !== cursor) {
-        return bad(`holds the wrong node at child ${i}`);
-      }
-    } else if (
-      cursor.nodeType !== 3 || cursor.textContent !== String(child)
-    ) {
-      return bad(
-        `holds ${
-          cursor.nodeType === 3
-            ? JSON.stringify(cursor.textContent)
-            : `a <${(cursor as Element).nodeName?.toLowerCase()}>`
-        } where the text child ${i} (${JSON.stringify(String(child))}) belongs`,
-      );
-    }
-    cursor = _advance(cursor, count);
-  }
-  if (exact && cursor) bad("has leftover DOM children");
-}
-
 function _diffElement(
   _parent: Node,
   nv: VNode,
@@ -748,12 +637,11 @@ function _diffElement(
     // diffed, no error anywhere to explain why one part of the page had
     // stopped updating. It cannot be repaired from here, but it must not
     // be silent.
-    _devWarn(
+    _wrong(
       `diff-no-dom-${String(nv.tag)}`,
       `<${String(nv.tag)}> has no DOM node to diff against — it will stop ` +
-        `updating. The previous vnode was rendered without a _dom (partial ` +
-        `hydration, or an earlier reconciler failure). This is an aio bug; ` +
-        `please report the component's shape.`,
+        `updating.${_BUG}`,
+      _NO_DOM,
     );
     return;
   }
@@ -814,5 +702,5 @@ function _diffElement(
   // `_firstLive`, not `firstChild`: a node kept in the DOM for its exit
   // animation belongs to no vnode, so counting it made this tripwire cry
   // "this is an aio bug; please report" at a perfectly legitimate <Transition>.
-  if (isDevMode()) _assertRegionAlignment(nv, _firstLive(dom), true);
+  if (isDevMode()) devHooks.assertAligned?.(nv, _firstLive(dom), true);
 }

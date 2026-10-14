@@ -15,6 +15,7 @@
 // Same gate and harness shape as tests/electron-ipc.test.ts: opt in with
 // ELECTRON_E2E=1, needs node_modules/.bin/electron and a display (a nested
 // Xephyr on :77 is started for it, so no window lands on your desktop).
+import { childEnv } from "./e2e-app-harness.ts";
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { createServer } from "../src/server/server.ts";
@@ -162,11 +163,11 @@ Deno.test({
         ],
         stdout: "null",
         stderr: "piped",
-        env: {
+        env: childEnv({
           ...Deno.env.toObject(),
           ELECTRON_DISABLE_SECURITY_WARNINGS: "1",
           ...testDisplayEnv(),
-        },
+        }),
       }).spawn();
       (async () => {
         for await (

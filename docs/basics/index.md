@@ -4,6 +4,8 @@
 
 - [Architecture](architecture.md) — module map, data flow, key boundaries
 - [Quickstart](quickstart.md) — install and run your first app
+- [aio on Windows and macOS](windows-macos.md) — PowerShell spellings, where
+  files are, firewall, startup, stopping, uninstalling
 - [Core Concepts](concepts.md) — mental model and framework rules
 - [Where does this code run?](where-code-runs.md) — the six execution contexts,
   one table: `Deno.*`, hidden fields, tracked reads, and what refuses you

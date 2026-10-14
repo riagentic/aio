@@ -7,6 +7,7 @@ import type {
   StandardSchemaLike,
 } from "../state/arg-schema.ts";
 import { count } from "../diagnostics/fmt.ts";
+import { firstTime } from "../protocol/said-once.ts";
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -524,6 +525,28 @@ export function useForm<T extends Record<string, unknown>>(
   };
 }
 
+/**
+ * `form.bind(name)` with the field's own type: `value` is `T[K]`, not
+ * `unknown`. `FormState.bind` is frozen surface and answers `value: unknown`,
+ * so `<input value={form.bind("age").value + 1}>` needed a cast; this is the
+ * same object, typed.
+ *
+ * ```ts
+ * const form = useForm({ name: { initial: "" }, age: { initial: 0 } });
+ * h("input", bindInput(form, "name"));         // value: string
+ * const next = bindInput(form, "age").value + 1; // value: number
+ * ```
+ *  @tier Kit */
+export function bindInput<
+  T extends Record<string, unknown>,
+  K extends keyof T,
+>(
+  form: FormState<T>,
+  name: K,
+): { value: T[K]; onInput: (e: Event) => void; onBlur: () => void } {
+  return form.bind(name) as ReturnType<typeof bindInput<T, K>>;
+}
+
 // ── useFieldArray ───────────────────────────────────────────────────
 
 /**
@@ -545,12 +568,17 @@ export function useFieldArray<T>(initial: T[] = []): FieldArrayState<T> {
    *  view, the list re-sorted between render and click) changed nothing and
    *  said nothing: the row stayed on screen and there was no thread to pull.
    *
-   *  Observe-only, so dev and prod behave identically — prod still no-ops,
-   *  dev additionally says which call it was. Not a throw: an index that went
+   *  Observe-only, so dev and prod behave identically — both no-op, and both
+   *  say which call it was (prod once per operation). Not a throw: an index that went
    *  stale between a render and a click is a real race in correct code, and
    *  breaking the handler over it would be the worse trade. */
   const outOfRange = (op: string, index: number, len: number): true => {
-    if ((globalThis as Record<string, unknown>).__aioDev === true) {
+    // Prod says it once per operation: the click that did nothing is the
+    // same click in a packaged app, and there it left no line at all.
+    if (
+      (globalThis as Record<string, unknown>).__aioDev === true ||
+      firstTime("useFieldArray." + op)
+    ) {
       console.warn(
         `[aio] useFieldArray.${op}(${index}) is out of range — the list holds ` +
           `${

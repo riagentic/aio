@@ -4,7 +4,7 @@
 // download used to await it FOREVER: the updates cell sat on "checking" (or
 // "downloading", which also refuses every later check), and the poll — which
 // re-arms only after a check returns — never ran again for the process's life.
-import { assert, assertMatch } from "@std/assert";
+import { assert, assertEquals, assertMatch } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import {
   downloadArtifact,
@@ -13,6 +13,15 @@ import {
 } from "../src/server/updates-check.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { spec } from "./module-spec-helper.ts";
+import { EXE, writeProgram } from "./fake-program-helper.ts";
+import { _exitKillSaid } from "../src/server/updates-check.ts";
+import { freePort } from "../src/testing/server-test.ts";
+import {
+  askToStop,
+  descendantsIn,
+  processList,
+  processParents,
+} from "./proc-helper.ts";
 
 /** Accepts TCP, reads nothing, answers nothing — until closed. */
 function silentHost() {
@@ -54,51 +63,44 @@ Deno.test("updates: a git remote that never answers is an error, not a hang", as
   assert(Date.now() - t0 < 10_000, `took ${Date.now() - t0}ms`);
 });
 
-/** Every live descendant of `root` (Linux `/proc`). */
-function descendants(root = Deno.pid): number[] {
-  const kids = new Map<number, number[]>();
-  for (const e of Deno.readDirSync("/proc")) {
-    if (!/^\d+$/.test(e.name)) continue;
-    try {
-      const stat = Deno.readTextFileSync(`/proc/${e.name}/stat`);
-      const ppid = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
-      kids.set(ppid, [...(kids.get(ppid) ?? []), Number(e.name)]);
-    } catch { /* aio-ok: the process exited mid-scan */ }
-  }
-  const out: number[] = [];
-  const walk = (p: number) =>
-    (kids.get(p) ?? []).forEach((c) => (out.push(c), walk(c)));
-  walk(root);
-  return out;
+/** Every live descendant of `root`. */
+const descendants = async (root = Deno.pid) =>
+  descendantsIn(await processParents(), root);
+
+/** Which of `pids` are still running. */
+async function running(pids: number[]): Promise<number[]> {
+  const live = await processParents();
+  return pids.filter((p) => live.has(p));
 }
 
-function alive(pid: number): boolean {
-  try {
-    const stat = Deno.readTextFileSync(`/proc/${pid}/stat`);
-    return stat.slice(stat.lastIndexOf(")") + 2)[0] !== "Z";
-  } catch {
-    return false; // aio-ok: gone
-  }
-}
+const WIN = Deno.build.os === "windows";
 
 Deno.test({
   name: "updates: a timed-out git ls-remote leaves no process behind",
-  ignore: Deno.build.os !== "linux", // descendants are read from /proc
   async fn() {
     await using host = silentHost();
-    const before = new Set(descendants());
-    const pending = gitLsRemote(`${host.url}/repo.git`, "main", 1500);
-    await new Promise((r) => setTimeout(r, 1000));
-    const spawned = descendants().filter((p) => !before.has(p));
+    const before = new Set(await descendants());
+    // Windows has no /proc: one look at its process table takes seconds, and
+    // git must still be running when it is taken.
+    const pending = gitLsRemote(
+      `${host.url}/repo.git`,
+      "main",
+      WIN ? 12_000 : 1500,
+    );
+    // git's transport helper (and git, its parent) is up once the silent host
+    // has a connection.
+    await host.connected;
+    const spawned = (await descendants()).filter((p) => !before.has(p));
     // The instrument: git AND its transport helper were both seen.
     assert(spawned.length >= 2, `saw only ${spawned.length} process(es)`);
     const r = await pending;
     assert(!r.ok);
     const t0 = Date.now();
-    while (spawned.some(alive) && Date.now() - t0 < 3000) {
+    let left = await running(spawned);
+    while (left.length > 0 && Date.now() - t0 < 3000) {
       await new Promise((r) => setTimeout(r, 50));
+      left = await running(spawned);
     }
-    const left = spawned.filter(alive);
     assert(left.length === 0, `still running: ${left.join(", ")}`);
   },
 });
@@ -108,10 +110,10 @@ Deno.test({
   // terminal's Ctrl-C no longer reaches it: an app stopped during its boot
   // check against a stalled host left git + its transport helper behind.
   name: "updates: SIGINT during a stalled boot ls-remote leaves no git behind",
-  ignore: Deno.build.os !== "linux", // descendants are read from /proc
   async fn() {
     await using host = silentHost();
     const dir = await tempDir("aio-upd-sigint-");
+    const port = freePort();
     const root = fromFileUrl(new URL("..", import.meta.url));
     await Deno.writeTextFile(
       join(dir, "app.ts"),
@@ -119,6 +121,7 @@ Deno.test({
 await aio.run({
   appId: "upd-sigint",
   client: "server-only",
+  port: ${port},
   updates: { source: "${host.url}/repo.git", kind: "git", channel: "main" },
 });
 `,
@@ -152,23 +155,29 @@ await aio.run({
           : "the app neither reached git nor exited within 120 s of starting",
       );
       // git AND git-remote-http, both waiting on the silent host.
-      seen = descendants(app.pid).filter((p) => {
-        try {
-          return /\bgit\b/.test(Deno.readTextFileSync(`/proc/${p}/cmdline`));
-        } catch {
-          return false; // aio-ok: exited mid-scan
-        }
-      });
+      const cmd = new Map((await processList()).map((p) => [p.pid, p.cmd]));
+      seen = (await descendants(app.pid)).filter((p) =>
+        /\bgit\b/.test(cmd.get(p) ?? "")
+      );
       assert(seen.length >= 2, `saw only ${seen.length} git process(es)`);
-      app.kill("SIGINT");
+      if (WIN) {
+        // No signal can be sent there: the stop is the one `am stop` makes,
+        // and it ends in the same exit path (`unload`).
+        await askToStop(
+          app.pid,
+          port,
+          join(dir, "apps", "upd-sigint", "data", "control.key"),
+        );
+      } else app.kill("SIGINT");
       await app.status;
       // The group kill was SENT before the app exited; this only waits for the
       // kernel to finish it — a hang guard, not a readiness budget.
       const t0 = Date.now();
-      while (seen.some(alive) && Date.now() - t0 < 10_000) {
+      let left = await running(seen);
+      while (left.length > 0 && Date.now() - t0 < 10_000) {
         await new Promise((r) => setTimeout(r, 50));
+        left = await running(seen);
       }
-      const left = seen.filter(alive);
       assert(left.length === 0, `still running: ${left.join(", ")}`);
     } finally {
       for (const p of [app.pid, ...seen]) {
@@ -187,9 +196,10 @@ Deno.test({
   async fn() {
     const dir = await tempDir("aio-upd-askpass-");
     const marker = join(dir, "asked");
-    const askpass = join(dir, "askpass.sh");
-    await Deno.writeTextFile(askpass, `#!/bin/sh\ntouch "${marker}"\necho x\n`);
-    await Deno.chmod(askpass, 0o755);
+    // A program every OS can run (a real executable on Windows): were it a
+    // `.sh` there, "never ran" would hold whatever git was told.
+    const askpass = join(dir, `askpass${EXE}`);
+    await writeProgram(askpass, `#!/bin/sh\ntouch "${marker}"\necho x\n`);
     const ac = new AbortController();
     const server = Deno.serve(
       { hostname: "127.0.0.1", port: 0, signal: ac.signal, onListen() {} },
@@ -284,4 +294,20 @@ Deno.test("updates: an artifact download that stalls is aborted and cleaned up",
     await server.finished;
     await dropTempDir(dir);
   }
+});
+
+Deno.test("updates: the exit path's taskkill — ended and already-gone are silent, anything else is said with the pids", () => {
+  assertEquals(_exitKillSaid([41, 42], 0, ""), null);
+  // 128 is taskkill's "not found": the check ended as the app was leaving.
+  assertEquals(
+    _exitKillSaid([41], 128, 'ERROR: The process "41" not found.'),
+    null,
+  );
+  const denied = _exitKillSaid([41, 42], 1, "ERROR: Access is denied.\r\n");
+  for (
+    const part of ["pid 41, 42", "taskkill exited 1", "Access is denied."]
+  ) assert(denied?.includes(part), denied ?? "nothing said");
+  const absent = _exitKillSaid([41], null, "NotFound: program not found");
+  assert(absent?.includes("taskkill did not run"), absent ?? "nothing said");
+  assert(_exitKillSaid([41], 5, "  ")?.includes("it said nothing"));
 });

@@ -16,6 +16,7 @@
 // The rule, and this test: framework runtime code writes through the LOGGER, so
 // every message carries info / warn / error. Info = nothing to do. Warn =
 // should be fixed. Error = must be fixed. Nothing prints without one.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { codeText } from "../src/diagnostics/code-mask.ts";
 import { fromFileUrl, toFileUrl } from "@std/path";

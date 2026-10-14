@@ -4,9 +4,13 @@
 import { hostOf } from "./config-sources.ts";
 import { enc } from "../protocol/envelope.ts";
 import { installProcessSignals, stopProcess } from "./shutdown.ts";
-import { restartForCellChange } from "./dev-restart.ts";
+import {
+  isSupervisedChild,
+  restartForCellChange,
+  savedWhileStarting,
+} from "./dev-restart.ts";
 import { loadOrCreateCert, type TlsCert } from "./tls.ts";
-import { createServer } from "./server.ts";
+import { _denoJsonMountsNote, _servedAssets, createServer } from "./server.ts";
 import { cdpPort, parseCli, VERSION } from "./aio-cli.ts";
 import type { ServerHandle } from "./server-types.ts";
 import type { UiTheme } from "./aio-types.ts";
@@ -23,7 +27,13 @@ import type { AioUser } from "./aio.ts";
 import type { ServerSyncHandler } from "../sync/server-handler.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
 import type { AppLock } from "./single-instance-lock.ts";
-import { isPipePath, resolveSocketPath, resolveTransport } from "./paths.ts";
+import {
+  homeMismatchNote,
+  isPipePath,
+  resolveSocketPath,
+  resolveTransport,
+} from "./paths.ts";
+import { releasePipes, reservePipes } from "./win-pipe.ts";
 import type { Log } from "../diagnostics/logger-api.ts";
 import {
   clientDegradedReport,
@@ -32,7 +42,11 @@ import {
 import { cellAccessAllowed } from "./server-auth.ts";
 import type { Access } from "../state/cell-types.ts";
 import { createAioError } from "../diagnostics/error.ts";
-import { _noteShortCall, shortCallSentence } from "./action-ack.ts";
+import {
+  _noteShortCall,
+  noArgsRefusal,
+  shortCallSentence,
+} from "./action-ack.ts";
 import {
   _bindBudgetOwner,
   type BudgetLedger,
@@ -65,6 +79,7 @@ export interface TransportConfig {
    *  `AioConfig.host`. */
   host?: string;
   renderBudget?: import("../vitals/types.ts").RenderBudget;
+  wire?: { omitTrailingUndefined?: boolean; refuseShortCalls?: boolean };
   fullStateThreshold?: number;
   routes?: Record<string, import("./route.ts").RawRouteHandler>;
   maxConnections?: number;
@@ -278,6 +293,64 @@ export interface ServerSetupResult {
   advertiseHost: string;
 }
 
+/** The home-mismatch line is said once per process, not once per app. */
+let _homeSaid = false;
+
+/** The one boot line about the OS firewall, or null when there is nothing to
+ *  say. Windows and macOS may ASK the person at the screen whether a program
+ *  that starts listening beyond loopback may be reached — and an unanswered or
+ *  dismissed question leaves a server that is healthy here and dead from every
+ *  other machine, with nothing in aio's own output to explain it. Observe-only:
+ *  aio opens no rule. Linux shows no such question, so it gets no line. Pure.
+ *  @internal exported for its test */
+export function _firewallHint(
+  os: string,
+  expose: boolean,
+  loopbackBind: boolean,
+): string | null {
+  if (!expose || loopbackBind) return null;
+  if (os === "windows") {
+    return "firewall: Windows may ask whether this program can be reached " +
+      "from your networks — allow it. Dismissed or denied (or with nobody at " +
+      "the screen), a block rule is kept: the app works on this machine and " +
+      'looks unreachable from every other one. Fix it under "Allow an app ' +
+      'through Windows Firewall"';
+  }
+  if (os === "darwin") {
+    return "firewall: if the macOS firewall is on, it asks whether to accept " +
+      "incoming connections — allow it. Denied or dismissed, the app works " +
+      "on this Mac and looks unreachable from every other machine. Fix it " +
+      "under System Settings → Network → Firewall → Options";
+  }
+  return null;
+}
+
+/** The exit code of a stop asked through the control door (`am stop`, or a
+ *  new launch taking over): 0 — unless the supervisor file asked for `am
+ *  stop` to STAY down (`staysDown`), then the same 143 `aio.stop()` leaves
+ *  with, which the generated unit lists in `RestartPreventExitStatus=`.
+ *
+ *  With 0 the unit's `Restart=always` starts the app again a moment after
+ *  `am stop` said "stopped" — and that is what every app under the systemd
+ *  unit aio generated through 1.0.19 does (same unit, measured on its tree:
+ *  `stopProcess(0, …)`), so it is what `AIO_SUPERVISED=1` alone keeps doing:
+ *  a service that came back after `am stop` must not stay down because aio
+ *  was upgraded. `staysDown` is `AIO_SUPERVISED=1` WITH
+ *  `AIO_STOP_STAYS_DOWN=1` — set by the launchd agent and the Windows task
+ *  script a build writes (new in 1.0.20), offered as a comment in the systemd
+ *  unit. Never keyed on an inherited `INVOCATION_ID`, which a shell in a
+ *  desktop terminal carries too. A takeover exits 0: its successor is
+ *  already here. Under the dev supervisor a stop is a clean 0, as for
+ *  `aio.stop()`. Pure.
+ *  @internal exported for its test */
+export function _controlStopExitCode(
+  by: "am stop" | "takeover",
+  staysDown: boolean,
+  devSupervised: boolean,
+): number {
+  return by === "am stop" && staysDown && !devSupervised ? 143 : 0;
+}
+
 /** Resolve TLS, create HTTP server, wire sync broadcast, set up UDS & signal handlers */
 /**
  * What to say when TLS is off, named for HOW it was turned off.
@@ -348,7 +421,8 @@ export function _unusedCertWarning(source: "flag" | "config"): string {
  *  where the PAGE comes from:
  *    • prod with a readable dist/ — the page comes off disk; the HTTP handler
  *      is skipped entirely (`skipHttp`) UNLESS the app declares custom
- *      `routes`, which then run on a socket the window proxies to (an
+ *      `routes` (or `assets` mounts — counted with them: paths only the
+ *      handler answers), which then run on a socket the window proxies to (an
  *      `<img src="/nft-image/x">` resolves to `aio://app/nft-image/x`).
  *    • prod WITHOUT a readable dist/ — the page is in the binary's embedded
  *      VFS, which the foreign Electron process cannot open but THIS one can.
@@ -458,6 +532,25 @@ export function localPeerLockdownPlan(i: {
 
 export async function setupTransport<S, A>(
   deps: ServerSetupDeps<S, A>,
+): Promise<ServerSetupResult> {
+  // The pipe names this boot reserved (Windows): given back when the rest of
+  // it throws — a port in use, the lockdown, TLS — in a process that lives on
+  // (library mode, a caller that catches `aio.run`). A name left reserved is
+  // hosted by an instance nobody accepts on; one a listener bound meanwhile
+  // has been claimed and is not touched.
+  const reserved: string[] = [];
+  try {
+    return await setupTransportInner(deps, reserved);
+  } catch (e) {
+    releasePipes(reserved);
+    throw e;
+  }
+}
+
+async function setupTransportInner<S, A>(
+  deps: ServerSetupDeps<S, A>,
+  /** Filled with the pipe names reserved here, for the caller's undo. */
+  reserved: string[],
 ): Promise<ServerSetupResult> {
   const {
     appId,
@@ -595,6 +688,16 @@ export async function setupTransport<S, A>(
     }
   }
 
+  const _fw = _firewallHint(Deno.build.os, expose, _isLocalhostAddr);
+  if (_fw) log.info(_fw);
+  // Once per process, and only where it can happen (Windows): the two
+  // "home" variables name different folders. Observe-only.
+  if (!_homeSaid) {
+    _homeSaid = true;
+    const note = homeMismatchNote();
+    if (note) log.warn(note);
+  }
+
   // Resolve transport (client already resolved above)
   const transport = resolveTransport(
     cliTransport ?? config.transport,
@@ -625,12 +728,24 @@ export async function setupTransport<S, A>(
   const canServeFromDisk = !!electronDistDir;
   const localElectronUds = transport === "uds" && useElectron && !expose;
   const routeCount = config.routes ? Object.keys(config.routes).length : 0;
+  // An `assets` mount is a path only the handler answers, exactly like a
+  // route: with the handler skipped, a packaged window got 404 for every
+  // file of a mount that dev, `--prod` and the plain binary all served.
+  const _mounts = _servedAssets(config.assets, baseDir);
+  const mountCount = Object.keys(_mounts ?? {}).length;
+  const _mountsNote = _denoJsonMountsNote(
+    config.assets,
+    _mounts,
+    expose && !token && !users && !resolveUser && !sessionResolver &&
+      !authFlows,
+  );
+  if (_mountsNote) log[_mountsNote.level]("assets", _mountsNote.text);
   const zp = resolveZeroPort({
     prod,
     localElectronUds,
     canServeFromDisk,
     portRequested: deps.portRequested,
-    routeCount,
+    routeCount: routeCount + mountCount,
   });
   const { zeroPort, skipHttp } = zp;
   if (zeroPort && routeCount > 0) {
@@ -651,6 +766,34 @@ export async function setupTransport<S, A>(
   const httpSocketPath = zp.useHttpSocket
     ? resolveSocketPath(appId, "http")
     : undefined;
+  // Windows: both pipe NAMES are taken here, synchronously — a name already
+  // hosted, or no `--allow-ffi`, stops the boot at this line, as a unix bind
+  // does at its own. The listeners bind through a dynamic import, later, and
+  // a failure there left an app running without its door (win-pipe.ts).
+  const pipes = [
+    transport === "uds" ? resolveSocketPath(appId) : undefined,
+    httpSocketPath,
+  ].filter((p): p is string => !!p && isPipePath(p));
+  try {
+    reservePipes(pipes);
+    reserved.push(...pipes);
+  } catch (e) {
+    // The one shape that came up without its pipe through 1.0.19, and still
+    // does: a TCP port is served (it was named) and the pipe cannot be hosted
+    // for lack of `--allow-ffi`. The port answers its browsers and `am`; the
+    // window, which speaks the pipe, does not — said as an error, with the
+    // fix. A name that is TAKEN always stops the boot: that window would be
+    // served the other app's state.
+    if (
+      zeroPort || !(e instanceof Error) ||
+      Deno.permissions.querySync({ name: "ffi" }).state === "granted"
+    ) throw e;
+    log.error(
+      "boot",
+      `${e.message} The app goes on, served on port ${port} only — its ` +
+        `Electron window cannot connect.`,
+    );
+  }
   // THE local-peer lockdown. Production, Electron, local socket: the app's
   // window is the only legitimate session, so every local door — the NDJSON
   // socket and the HTTP socket beside it — asks ONE gate who is connecting
@@ -810,6 +953,24 @@ export async function setupTransport<S, A>(
       : undefined;
     if (required !== undefined && required > 0) {
       const argv = (tagged as { payload?: { args?: unknown } }).payload?.args;
+      // `wire: { refuseShortCalls }` — the trojan door's rule on every door: a
+      // call that STATES no argument list (no payload, `payload: {}`, named
+      // args) for a method that declares arguments is refused before anything
+      // runs. An `args` array, however short, is still taken at its word.
+      // Before the call id is registered below: nothing is left waiting.
+      if (config.wire?.refuseShortCalls === true && !Array.isArray(argv)) {
+        const refusal = Promise.reject(
+          createAioError("ACTION_REFUSED", noArgsRefusal(type, required), {
+            cellName: cellId,
+            actionType: type,
+          }),
+        );
+        refusal.catch(() => {
+          // aio-ok: pre-caught for a frame without a cid — the door that
+          // holds the returned promise turns it into the ack's error.
+        });
+        return refusal;
+      }
       const supplied = Array.isArray(argv) ? argv.length : 0;
       if (supplied < required) {
         _noteShortCall(tagged, shortCallSentence(type, required, supplied));
@@ -928,6 +1089,7 @@ export async function setupTransport<S, A>(
       // that changes with the route must not recolour the app mid-session.
       themeName: appId || title,
       renderBudget: config.renderBudget,
+      wire: config.wire,
       syncCells: config._syncCellIds,
       bootedCells: config._cellNames,
       callTimeouts: _getCallTimeouts(),
@@ -962,6 +1124,8 @@ export async function setupTransport<S, A>(
       // Never in prod (no watcher) and never in libraryMode, where the host
       // process is not ours to replace.
       ...(prod || config.libraryMode ? {} : {
+        savedBeforeWatch: (roots: readonly string[]) =>
+          savedWhileStarting(roots, performance.timeOrigin),
         onCellChange: (path: string) => {
           // The relaunched app binds the SAME port (dev-restart.ts,
           // `supervisorEnv`): read when the restart fires — `livePort` is
@@ -1102,7 +1266,21 @@ export async function setupTransport<S, A>(
           const why = `stop requested over the control API (${
             by === "takeover" ? "takeover by a new launch" : "am stop"
           })`;
-          if (!config.libraryMode) return stopProcess(0, why);
+          if (!config.libraryMode) {
+            const code = _controlStopExitCode(
+              by,
+              Deno.env.get("AIO_SUPERVISED") === "1" &&
+                Deno.env.get("AIO_STOP_STAYS_DOWN") === "1",
+              isSupervisedChild(),
+            );
+            return stopProcess(
+              code,
+              code === 0
+                ? why
+                : `${why} — under a supervisor (AIO_STOP_STAYS_DOWN=1): ` +
+                  `exiting with ${code} so it is not started again`,
+            );
+          }
           log.info(`${why} — closing this app`);
           return shutdown();
         },
@@ -1174,6 +1352,7 @@ export async function setupTransport<S, A>(
       syncHandler,
       {
         ...(config.renderBudget ? { renderBudget: config.renderBudget } : {}),
+        ...(config.wire ? { wire: config.wire } : {}),
         ...(config._syncCellIds && config._syncCellIds.length
           ? { syncCells: config._syncCellIds }
           : {}),

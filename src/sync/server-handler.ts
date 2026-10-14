@@ -415,9 +415,12 @@ export function createServerSyncHandler(
 
   function withLock(cell: string, fn: () => Promise<void>): Promise<void> {
     const prev = _locks.get(cell) ?? Promise.resolve();
+    // A mark this cell still owes (see `settle`) is written first: the next
+    // op's row must never follow an acknowledged one left unmarked.
+    const run = () => _owedMarks.size === 0 ? fn() : settleOwed(cell).then(fn);
     // F-8: mirror client-side sync-engine cleanup so the map doesn't retain
     // an entry per cell ever touched. Only delete if we're still the latest.
-    const next = prev.then(fn, fn).finally(() => {
+    const next = prev.then(run, run).finally(() => {
       if (_locks.get(cell) === next) {
         _locks.delete(cell);
       }
@@ -523,23 +526,79 @@ export function createServerSyncHandler(
           "(not applied, not dropped) and resent",
     );
   }
+  /** Accepted ops whose mark could not be written (id → cell) — see
+   *  `settle`. */
+  const _owedMarks = new Map<string, string>();
   /** The op's dispatch was ACCEPTED: said in its row before anyone is told
-   *  (`settleOp`). One retry; a mark that still cannot be written is an
-   *  error line and nothing else — the row IS saved, so the ack does not say
-   *  `unsaved`. Never throws: the caller's `catch` is for a failed DISPATCH,
-   *  and deletes the row. */
-  async function settle(id: string): Promise<void> {
+   *  (`settleOp`). One retry; a mark that still cannot be written is owed
+   *  (`settleOwed`) and an error line — the row IS saved, so the ack does
+   *  not say `unsaved`. Never throws: the caller's `catch` is for a failed
+   *  DISPATCH, and deletes the row. */
+  async function settle(id: string, cell: string): Promise<void> {
     try {
-      await settleOp(deps.db, id).catch(() => settleOp(deps.db, id));
+      await markSettled(id).catch(() => settleOp(deps.db, id));
     } catch (e) {
+      _owedMarks.set(id, cell);
       deps.log.error(
-        `[sync:server] op ${id} was applied and is in the op-log, but its ` +
-          `row could not be marked settled (tried twice) — if the server is ` +
-          `killed before this cell's next op AND the next boot's method ` +
-          `refuses it, that boot removes it as one the server never ` +
-          `accepted: ${e}`,
+        `[sync:server] op ${id} IS saved — applied, in the op-log, and ` +
+          `acknowledged; only its \`settled\` mark could not be written ` +
+          `(tried twice): ${e}. The mark is written again at "${cell}"'s ` +
+          `next op, on a resend of this one, and at shutdown. Only if the ` +
+          `server is KILLED before any of those AND the next boot's method ` +
+          `refuses the op does that boot remove it as one the server never ` +
+          `accepted.`,
       );
     }
+  }
+  /** Marks asked for while a write of marks is under way: they ride the
+   *  next one TOGETHER — one statement, one commit (one `fsync` under
+   *  `synchronous = FULL`) for the ops in flight on different cells. Every
+   *  caller still awaits the commit that holds ITS mark, so no ack leaves
+   *  before it; an op on its own is one statement at once, as it always
+   *  was. A write that fails fails each of its callers, and each retries
+   *  alone (`settle`). */
+  let _markQueue: {
+    id: string;
+    done: () => void;
+    fail: (e: unknown) => void;
+  }[] = [];
+  let _markWriting = false;
+  function markSettled(id: string): Promise<void> {
+    return new Promise((done, fail) => {
+      _markQueue.push({ id, done, fail });
+      if (!_markWriting) void writeMarks();
+    });
+  }
+  async function writeMarks(): Promise<void> {
+    _markWriting = true;
+    while (_markQueue.length > 0) {
+      const batch = _markQueue;
+      _markQueue = [];
+      try {
+        await settleOp(deps.db, ...batch.map((b) => b.id));
+        for (const b of batch) b.done();
+      } catch (e) {
+        for (const b of batch) b.fail(e);
+      }
+    }
+    _markWriting = false;
+  }
+  /** Write the marks still owed — `cell`'s, or (a shutdown) every one.
+   *  Returns the failure, said by the caller that must not lose it. */
+  async function settleOwed(cell?: string): Promise<string | undefined> {
+    for (const [id, c] of _owedMarks) {
+      if (cell !== undefined && c !== cell) continue;
+      try {
+        await settleOp(deps.db, id);
+        _owedMarks.delete(id);
+      } catch (e) {
+        // Owed still, and already said (`settle`): the next entry retries
+        // — this one and the rest, which the same database would refuse.
+        return `op ${id} ("${c}") is saved but its settled mark is still ` +
+          `not written: ${e}`;
+      }
+    }
+    return undefined;
   }
 
   async function dropRow(id: string): Promise<void> {
@@ -1235,6 +1294,12 @@ export function createServerSyncHandler(
         track(cell, foldLocked(cell, () => settleServerWrite(cell)))
       ),
     ]);
+    // The whole flush is what a clean shutdown awaits before it closes the
+    // database: no acknowledged op is left unmarked while it can be written.
+    if (only === undefined && _owedMarks.size > 0) {
+      const owed = await settleOwed();
+      if (owed !== undefined) deps.log.error(`[sync:server] ${owed}`);
+    }
     return verdicts.find((v) => v !== undefined) ??
       (only === undefined ? [..._foldFailed.values()][0] : undefined);
   }
@@ -1404,7 +1469,7 @@ export function createServerSyncHandler(
               await deps.db.execute("DELETE FROM sync_ops WHERE id = ?", [
                 op.id,
               ]);
-            } else await settle(op.id);
+            } else await settle(op.id, op.cell);
           } catch (e) {
             if (isHeldRefusal(e)) {
               // Not poison: the server was not TAKING input (see
@@ -1823,7 +1888,7 @@ export function createServerSyncHandler(
                   await deps.db.execute("DELETE FROM sync_ops WHERE id = ?", [
                     pending.id,
                   ]);
-                } else await settle(pending.id);
+                } else await settle(pending.id, pending.cell);
               } catch (e) {
                 if (isHeldRefusal(e)) { // see handleOp
                   heldMid = true;

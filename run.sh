@@ -21,6 +21,11 @@
 #        AIO_RAW (raw base for fetching install.sh) ·
 #        AIO_INSTALL (local install.sh path — offline/tests)
 # Windows: use run.ps1 (`irm .../run.ps1 | iex`).
+# macOS: a desktop (Electron) app is installed as its bundle —
+#        ~/app/<name>/versions/<version>/<Title>.app, linked from
+#        ~/app/<name>/<Title>.app — and opened with `open`. Never into
+#        /Applications (the app offers that move itself), and no .desktop
+#        entry: that is a Linux convention.
 #
 # `set -u`: with $HOME unset every `$HOME/...` path below silently becomes a
 # path under the filesystem root. Fail instead.
@@ -226,8 +231,14 @@ fi
 # The artifact is found by TIME, not by name: everything executable that the
 # build created after this marker is a candidate. That way this script never
 # re-implements the framework's binary-naming rules (and never goes stale).
-marker=".aio-run-marker.$$"
-: > "$marker"
+#
+# The marker lives OUTSIDE the app: an untracked file in the tree is a change
+# to the build (src/server/app-version.ts), so a marker beside deno.json
+# stamped every build of a clean checkout `-dirty.<hash>` — a new hash each
+# run, its name holding this shell's pid. Measured on macOS 14: six runs of
+# one commit installed six versions.
+marker=$(mktemp "${TMPDIR:-/tmp}/aio-run-marker.XXXXXX") \
+  || fail "could not create a temp file in ${TMPDIR:-/tmp}"
 trap 'rm -f "$marker"' EXIT INT TERM
 
 info "production build (default target)..."
@@ -270,6 +281,18 @@ for f in $(find . -maxdepth 3 -type f -newer "$marker" 2>/dev/null); do
     *) [ -z "$artifact" ] && artifact="$f" ;;
   esac
 done
+# macOS: a desktop build ships no executable FILE. Its artifacts are the .dmg
+# and `<name>-mac-<arch>.app.tar.gz` — the signed bundle, the same file an
+# installed copy updates itself from — so that tarball is what gets installed.
+# Looked for on Darwin only: everywhere else the search above is the whole rule.
+os=$(uname -s)
+mac_app=""
+if [ "$os" = "Darwin" ]; then
+  for f in $(find . -maxdepth 3 -type f -name '*.app.tar.gz' -newer "$marker" 2>/dev/null); do
+    case "$f" in */node_modules/*) continue ;; esac
+    mac_app="$f"; artifact="$f"; break
+  done
+fi
 IFS=$oldIFS
 [ -n "$artifact" ] || fail "build finished but no runnable artifact appeared — run 'deno task compile' by hand to see why"
 rm -f "$marker"; trap - EXIT INT TERM
@@ -338,6 +361,35 @@ ok "built $artifact"
 INSTALL_ROOT=$(deno run -A "$builder" --print-install-root 2>/dev/null || true)
 [ -n "$INSTALL_ROOT" ] || INSTALL_ROOT="${AIO_INSTALL_ROOT:-$HOME/app}"
 app_name=$(basename "$artifact")
+# The bundle is named for the app, not for the archive it travels in.
+if [ -n "$mac_app" ]; then app_name="${app_name%.app.tar.gz}"; fi
+# Unpack the macOS bundle into "$1" (via "$1.part", so a half-unpacked bundle
+# is never the one a launcher finds) and say, in $bundle, what it is called.
+unpack_app() {
+  rm -rf "$1.part"
+  mkdir -p "$1.part" || fail "cannot create $1.part"
+  tar -xzf "$artifact" -C "$1.part" || fail "could not unpack $artifact"
+  bundle=$(cd "$1.part" && ls -d ./*.app 2>/dev/null | head -1)
+  bundle="${bundle#./}"
+  [ -n "$bundle" ] || fail "$artifact holds no .app bundle"
+  # The same version again while the app is open: the bundle it runs from is
+  # not taken away under it. It is this build already.
+  if [ -d "$1/$bundle" ] && mac_app_open "$1"; then
+    rm -rf "$1.part"
+    info "${bundle%.app} is open and runs from $1/$bundle — that copy is left as it is"
+    return 0
+  fi
+  mkdir -p "$1" || fail "cannot create $1"
+  rm -rf "$1/$bundle"
+  mv "$1.part/$bundle" "$1/$bundle" || fail "install to $1/$bundle failed"
+  rm -rf "$1.part"
+}
+# Is a copy of this macOS app running from under "$1" — any version of it?
+# The pattern is the physical path: that is the one a process shows.
+mac_app_open() {
+  _root=$(cd "$1" 2>/dev/null && pwd -P) || return 1
+  pgrep -f "$_root/.*$bundle/Contents/MacOS/" >/dev/null 2>&1
+}
 # WHAT this artifact is installed as — base name, extension, and the version
 # its file name carries. The build owns that rule (`installArtifactName`), and
 # it is asked, never re-derived here: since artifacts carry the derived version
@@ -378,6 +430,11 @@ fi
 
 if [ "$NO_INSTALL" = 1 ]; then
   installed="$artifact"
+  # A tarball cannot be opened: the bundle is unpacked beside it instead.
+  if [ -n "$mac_app" ]; then
+    unpack_app "$(dirname "$artifact")"
+    installed="$(cd "$(dirname "$artifact")" && pwd)/$bundle"
+  fi
 else
   # The version this build IS — `major.minor.<commit count>`, derived by the
   # build and stamped into the artifact's name. deno.json's `version` is only
@@ -423,13 +480,25 @@ else
   else
     version_dir="$target_dir/versions/$(date +%Y%m%d%H%M%S)"
   fi
-  mkdir -p "$version_dir" || fail "cannot create $version_dir"
-  versioned="$version_dir/$app_base$app_ext"
-  cp "$artifact" "$versioned.part" || fail "copy to $versioned failed"
-  chmod +x "$versioned.part" 2>/dev/null || :
-  mv -f "$versioned.part" "$versioned" || fail "install to $versioned failed"
-  installed="$target_dir/$app_base$app_ext"
-  ln -sfn "$versioned" "$installed" 2>/dev/null || cp -f "$versioned" "$installed"
+  if [ -n "$mac_app" ]; then
+    # macOS: the same layout with the bundle in the file's place —
+    # versions/<version>/<Title>.app, and a stable link beside `versions/`.
+    # NOT /Applications: this is where `am upgrade`, `am remove` and the
+    # app's own updater find it. The app does not ask to be moved from here
+    # (src/server/macos-move.ts, `inInstallRoot`).
+    unpack_app "$version_dir"
+    versioned="$version_dir/$bundle"
+    installed="$target_dir/$bundle"
+    ln -sfn "$versioned" "$installed" || fail "could not link $installed"
+  else
+    mkdir -p "$version_dir" || fail "cannot create $version_dir"
+    versioned="$version_dir/$app_base$app_ext"
+    cp "$artifact" "$versioned.part" || fail "copy to $versioned failed"
+    chmod +x "$versioned.part" 2>/dev/null || :
+    mv -f "$versioned.part" "$versioned" || fail "install to $versioned failed"
+    installed="$target_dir/$app_base$app_ext"
+    ln -sfn "$versioned" "$installed" 2>/dev/null || cp -f "$versioned" "$installed"
+  fi
   ok "installed $installed"
 
   # What this is and where it came from — so `am installed` can say more than a
@@ -443,15 +512,28 @@ else
 
   # Old versions are the rollback, but only the last few: one ~156MB artifact
   # per update, kept forever, is a disk leak with a friendly name.
-  pruned=$(deno run -A "$AIO_HOME/src/server/install-record.ts" prune \
-    --name="$app_base" --keep="${AIO_KEEP_VERSIONS:-3}" \
-    --current="$version_dir" 2>/dev/null | tr '\n' ' ')
-  [ -n "$pruned" ] && info "pruned older version(s): $pruned"
+  #
+  # Not while the macOS app is open: it runs from one of those directories, and
+  # a bundle is a directory — pruned, the running app has no files left under
+  # it. Measured on macOS 14: the third install after the one that was open
+  # removed its bundle while its process was still up.
+  if [ -n "$mac_app" ] && mac_app_open "$target_dir"; then
+    info "older versions kept this time: ${bundle%.app} is open and runs from one of them"
+  else
+    pruned=$(deno run -A "$AIO_HOME/src/server/install-record.ts" prune \
+      --name="$app_base" --keep="${AIO_KEEP_VERSIONS:-3}" \
+      --current="$version_dir" 2>/dev/null | tr '\n' ' ')
+    [ -n "$pruned" ] && info "pruned older version(s): $pruned"
+  fi
 
   # A launcher, because "you can live without it" is a thing people say about
   # the step they then do by hand every time. Both files are plain text and
   # cost nothing; a desktop that ignores them loses nothing either.
-  if [ "$eff_client" = "electron" ] || [ "$eff_client" = "client" ]; then
+  if [ "$os" = "Darwin" ] && { [ "$eff_client" = "electron" ] || [ "$eff_client" = "client" ]; }; then
+    # macOS has no .desktop files: the bundle IS the launcher (Finder,
+    # Spotlight and the Dock read it), so there is nothing to write.
+    :
+  elif [ "$eff_client" = "electron" ] || [ "$eff_client" = "client" ]; then
     # The AppImage carries its own icon, but `.DirIcon` is a SYMLINK to the
     # real file (ico.svg, app.png, …) — extracting only `.DirIcon` yields a
     # dangling link and a menu entry with no icon, which is how this looked the
@@ -509,8 +591,32 @@ else
 fi
 
 if [ "$NO_RUN" = 1 ]; then
-  printf "${bold}Run it:${reset} %s\n" "$installed"
+  if [ -n "$mac_app" ]; then
+    printf "${bold}Run it:${reset} open \"%s\"\n" "$installed"
+  else
+    printf "${bold}Run it:${reset} %s\n" "$installed"
+  fi
   exit 0
+fi
+# macOS: a bundle is opened, not executed — `open` hands it to LaunchServices,
+# which is what makes it one Dock app with its own icon. The build commit
+# travels as --env (an opened app does not inherit this shell's environment).
+if [ -n "$mac_app" ]; then
+  # `open` on an app that is already running starts nothing: it brings that
+  # window forward. Measured on macOS 14 — the version before stayed up while
+  # this script ended "opening …" with exit 0, so it is said.
+  if mac_app_open "${target_dir:-$(dirname "$installed")}"; then
+    warn "${bundle%.app} is already open, so macOS only brings its window forward: quit it and open it again to run the copy just installed."
+  fi
+  info "opening $installed"
+  _commit=""
+  if [ -d .git ]; then _commit=$(git rev-parse HEAD 2>/dev/null || echo ""); fi
+  if [ -n "$_commit" ]; then
+    set -- --env "AIO_BUILD_COMMIT=$_commit" --args "$@"
+  else
+    set -- --args "$@"
+  fi
+  exec open "$installed" "$@"
 fi
 info "running $installed $*"
 artifact="$installed"

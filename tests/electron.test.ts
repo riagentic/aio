@@ -355,6 +355,13 @@ import { DEFAULT_ELECTRON_VERSION } from "../src/electron/electron-runtime-fetch
 Deno.test("autoInstallElectron: answers 'is it installed', not 'did the command exit 0'", async () => {
   const infos: string[] = [];
   const log = { info: (m: string) => infos.push(m), error: () => {} };
+  // An app with NO electron package: "not installed" otherwise falls through
+  // to the package's own `install.js` — and with the default root that is
+  // THIS checkout's real node_modules (four real installer runs per test
+  // run, each printing @electron/get's import error, or downloading 100 MB
+  // when a `dist/` was missing).
+  const bare = await tempDir("aio-electron-bare-");
+  await using _ = { [Symbol.asyncDispose]: () => dropTempDir(bare) };
 
   assertEquals(
     await autoInstallElectron(
@@ -370,6 +377,8 @@ Deno.test("autoInstallElectron: answers 'is it installed', not 'did the command 
       // The exact shape of the bug: the command succeeds, nothing is installed.
       () => Promise.resolve({ success: true }),
       () => Promise.resolve(false),
+      undefined,
+      bare,
     ),
     false,
     "an installer that exits 0 while installing nothing must NOT report success",
@@ -388,8 +397,28 @@ Deno.test("autoInstallElectron: answers 'is it installed', not 'did the command 
       log,
       () => Promise.reject(new Error("spawn")),
       () => Promise.resolve(false),
+      undefined,
+      bare,
     ),
     false,
+  );
+  // The package's own installer is the fallback — the one of the app that was
+  // ASKED ABOUT (`root`), not of whatever directory this process stands in.
+  await Deno.mkdir(join(bare, "node_modules", "electron"), { recursive: true });
+  await Deno.writeTextFile(
+    join(bare, "node_modules", "electron", "install.js"),
+    'require("node:fs").writeFileSync("ran", "1");\n',
+  );
+  await autoInstallElectron(
+    log,
+    () => Promise.resolve({ success: true }),
+    () => Promise.resolve(false),
+    undefined,
+    bare,
+  );
+  assertEquals(
+    await Deno.readTextFile(join(bare, "node_modules", "electron", "ran")),
+    "1",
   );
   // Loud: every attempt announces what it's doing (no silent installs).
   assertEquals(infos.length >= 4, true);

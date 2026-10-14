@@ -29,6 +29,7 @@ import {
   useSignal,
 } from "../air/aio-renderer.ts";
 import type { VChild, VNode } from "../air/vdom.ts";
+import { firstTime } from "../protocol/said-once.ts";
 
 /** Inline style object accepted by every kit component. */
 type Style = Record<string, string | number>;
@@ -410,16 +411,22 @@ export function Progress(props: ProgressProps): VNode {
   const { max = 100, label, showValue, class: cls } = props;
   // A non-finite value is an app bug, and the DOM's answer to it is to THROW
   // ("The provided double value is non-finite") — which blanks the page for a
-  // number that was only ever decoration. Dev says so; both modes render the
+  // number that was only ever decoration. Both modes say so and render the
   // indeterminate bar, which is the honest reading of "we do not know".
   // Found by `scripts/audit-round.ts 16`.
   let value = props.value;
   if (value !== undefined && !Number.isFinite(value)) {
-    if ((globalThis as Record<string, unknown>).__aioDev === true) {
+    // Prod says the fact once: the number is the app's (a division by a
+    // total that was 0), and it is real data that produces it.
+    const dev = (globalThis as Record<string, unknown>).__aioDev === true;
+    if (dev || firstTime("Progress")) {
       console.warn(
-        `[aio-dev] <Progress value={${value}}> is not a finite number — ` +
-          `rendering the indeterminate bar. Pass a number, or omit \`value\` ` +
-          `when the work has no measurable end.`,
+        `[aio${dev ? "-dev" : ""}] <Progress value={${value}}> is not a ` +
+          `finite number — rendering the indeterminate bar.` +
+          (dev
+            ? ` Pass a number, or omit \`value\` when the work has no ` +
+              `measurable end.`
+            : ""),
       );
     }
     value = undefined;
@@ -444,13 +451,15 @@ export function Progress(props: ProgressProps): VNode {
   // thing it is labelling is worse than no number.
   const pct = Math.round((value / max) * 100);
   const shown = pct < 0 ? 0 : pct > 100 ? 100 : pct;
-  if (
-    shown !== pct && (globalThis as Record<string, unknown>).__aioDev === true
-  ) {
-    console.warn(
-      `[aio-dev] <Progress value={${value}} max={${max}}> is outside its ` +
-        `range — the bar clamps, so the label shows ${shown}%.`,
-    );
+  // Real data is what leaves the range, so a package says it too, once.
+  if (shown !== pct) {
+    const dev = (globalThis as Record<string, unknown>).__aioDev === true;
+    if (dev || firstTime("Progress.range")) {
+      console.warn(
+        `[aio${dev ? "-dev" : ""}] <Progress value={${value}} max={${max}}> ` +
+          `is outside its range — the bar clamps, so the label shows ${shown}%.`,
+      );
+    }
   }
   return h(
     "span",

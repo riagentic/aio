@@ -53,7 +53,9 @@ makes dev and prod render the same page.
 The app icon is `icon.png` only (512×512 is a good size): every target's icon
 slot — window, taskbar, AppImage, `.icns`, Android launcher — needs a PNG. An
 `icon.svg` is not read, in dev or in the build. Both show the generated monogram
-and say so until `icon.png` exists.
+and say so until `icon.png` exists. A Windows exe icon is cut from it too
+(scaled down to 256 px and smaller); an `icon.ico` beside it replaces that cut —
+see [targets](../build/targets.md#electron-desktop-app).
 
 The consequence that surprises people: **move the entry deeper and you move the
 root with it.**

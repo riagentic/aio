@@ -311,9 +311,16 @@ Deno.test("nativeFetch: the bridge is standalone-only, own-origin-only, http(s)-
     "the listener moved out of the standalone-only block",
   );
   assertEquals(
-    KOTLIN.split("addWebMessageListener(").length,
+    KOTLIN.split("addWebMessageListener(this, FETCH_GLOBAL").length,
     2,
     "one install site",
+  );
+  // The only other listener is the client APK's pairing bridge — a different
+  // object, on the connect page alone; it carries no fetch.
+  assertEquals(KOTLIN.split("addWebMessageListener(").length, 3);
+  assertStringIncludes(
+    KOTLIN,
+    'addWebMessageListener(this, CONNECT_GLOBAL, setOf("https://$ASSET_HOST"), AioConnect(pins))',
   );
   // Removed again when a foreign page ever loads.
   assertStringIncludes(
@@ -333,5 +340,11 @@ Deno.test("nativeFetch: the bridge is standalone-only, own-origin-only, http(s)-
   assertStringIncludes(KOTLIN, "if (body.size > FETCH_MAX_BODY)");
   assertStringIncludes(KOTLIN, "if (out.size() + n > FETCH_MAX_BODY)");
   assertStringIncludes(KOTLIN, 'k.equals("set-cookie", ignoreCase = true)');
-  assert(!/CookieHandler\.setDefault|CookieManager\.getInstance/.test(KOTLIN));
+  // No cookie jar for the app, and none read by the native fetch. (The
+  // WebView's own downloads carry the page's cookies — another listener.)
+  assert(!/CookieHandler\.setDefault/.test(KOTLIN));
+  const from = KOTLIN.indexOf("private object AioNativeFetch");
+  const to = KOTLIN.indexOf("private const val CONNECT_GLOBAL");
+  assert(from >= 0 && to > from, "AioNativeFetch moved");
+  assert(!KOTLIN.slice(from, to).includes("CookieManager"));
 });

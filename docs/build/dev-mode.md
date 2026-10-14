@@ -39,7 +39,8 @@ deno task dev --port=3000 --client=browser --no-persist --title="My App"
 | `--no-data-migrate`   | Skip moving a legacy data layout into `~/.<appId>`                                                                                                                                                                                                 |
 | `--open`              | Open the app in your browser after boot (default: OFF — the URL is printed)                                                                                                                                                                        |
 | `--isolate=a,b`       | Only activate the specified cells                                                                                                                                                                                                                  |
-| `--cdp[=N]`           | Open Chrome DevTools Protocol on the Electron window, `127.0.0.1` only (free port unless N; also `AIO_CDP=1\|N`) — enables `am shot`                                                                                                               |
+| `--no-watch`          | No file watcher: a save reloads no page and restarts no app (`--watch=false` is the same; `--watch=src/ui,src/style.css` narrows it) — for a run a script drives                                                                                   |
+| `--cdp[=N]`           | Open Chrome DevTools Protocol on the Electron window, `127.0.0.1` only (free port unless N; also `AIO_CDP=1\|N`, unless the app sets `electron: { ignoreDebugEnv: true }`) — enables `am shot`                                                     |
 | `--aio-data-contract` | Print this build's persisted-schema promise (the data contract `deno task ship` publishes) as JSON and exit — see [updates](../deploy/updates.md)                                                                                                  |
 | `--version`           | Print aio version and exit                                                                                                                                                                                                                         |
 | `--help`              | Show available CLI flags and exit                                                                                                                                                                                                                  |
@@ -104,8 +105,9 @@ communicates over NDJSON on a Unix socket instead of HTTP/WS.
 <-> IPC <-> renderer (`window.__aioIPC`). Static files are served via Electron's
 `protocol.handle('aio', ...)` — no HTTP server needed.
 
-Socket path: `/tmp/aio/{slug}.sock` (or `$XDG_RUNTIME_DIR/aio/{slug}.sock` if
-set).
+Socket path: `$XDG_RUNTIME_DIR/aio/{appId}.sock`, or `/tmp/aio/{appId}.sock`
+where that is unset (macOS included). On Windows it is a named pipe,
+`\\.\pipe\aio-{appId}`.
 
 **Exceptions:** `--expose` always uses WS (needs real HTTP for remote access).
 Browser mode always uses WS. On Windows the socket is a named pipe
@@ -272,11 +274,23 @@ on the same port; open tabs notice the new boot ID and reload themselves. The
 process that started the app becomes a thin supervisor and re-launches it, so
 the process depth stays at two no matter how many times you save.
 
+A save made while the app is still starting — after its files were loaded,
+before its watcher is up — restarts it as well: the watcher looks once, when it
+starts, for server-side files saved since the process began. A file the app's
+own start writes each time (generated code) is recognised by its unchanged bytes
+and restarts nothing; one rewritten with new bytes on every start is given five
+quick restarts, then a warning that names it.
+
 A save that does not load — a syntax error, a bad import — is a _failed
 restart_, not the end of the session: the relaunched child dies at module load,
 the supervisor prints the error, says it is waiting, and relaunches on your next
 save. (A child that ran for a while and then crashed is a crash, and its exit
 code passes through as before.)
+
+A restart ends whatever a script was doing with the app — a UI tour, a
+screenshot pass, a long `am trigger` loop. Start such a run with `--no-watch`:
+no save reloads a page or restarts the app until you start it again. The first
+restart of an app started with `--cdp` or `--client=server-only` says so, once.
 
 It steps aside — warning as before, telling you to restart by hand — when it
 can't relaunch faithfully:

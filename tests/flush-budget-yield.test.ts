@@ -211,3 +211,41 @@ Deno.test("cycle detector: a signal written during render is still caught", asyn
     await cleanup();
   }
 });
+
+// A mount handle's `_flush()` says "synchronously execute any pending
+// re-render". It stopped at the budget like a scheduled flush does, so on a
+// slow machine the DOM a test read on the next line was half rendered — a
+// randomized differential test went red that way on a loaded Windows VM.
+Deno.test("handle._flush() renders everything that is pending, whatever the budget", async () => {
+  const { doc, root, cleanup } = dom();
+  _setDocument(doc);
+  _setFlushBudget(0); // every budgeted flush stops after ONE component
+  try {
+    const N = 8;
+    const cells = Array.from({ length: N }, (_, i) => signal(i));
+    const Row = (p: { i: number }) =>
+      h("div", { id: "r" + p.i }, `v=${cells[p.i]!.value}`);
+    const App = () =>
+      h(
+        "div",
+        null,
+        cells.map((_, i) => h("div", { key: i }, h(Row as never, { i }))),
+      );
+    const handle = mount(root, App);
+    for (let i = 0; i < N; i++) cells[i]!.set(100 + i);
+    handle._flush();
+    // No await between the flush and the read.
+    const seen = Array.from(
+      { length: N },
+      (_, i) => root.querySelector("#r" + i)?.textContent,
+    );
+    assertEquals(seen, Array.from({ length: N }, (_, i) => `v=${100 + i}`));
+    // The continuation a budget stop would have queued has nothing to do.
+    for (let t = 0; t < 4; t++) await tick();
+    assertEquals(root.querySelector("#r7")?.textContent, "v=107");
+    _unmount(handle);
+  } finally {
+    _setFlushBudget();
+    await cleanup();
+  }
+});

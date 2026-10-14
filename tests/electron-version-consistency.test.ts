@@ -15,6 +15,7 @@
 // checked fact rather than an intention. That check is network-OPTIONAL: it is
 // skipped offline, because a version pin is a fact about the repo and must be
 // testable from a tarball.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { DEFAULT_ELECTRON_VERSION } from "../src/build/electron-runtime.ts";
 import { scaffold } from "../src/am/am-cmd-create.ts";

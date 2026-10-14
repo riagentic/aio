@@ -41,7 +41,8 @@ import {
   record,
   sweepOwned,
 } from "../src/server/updates-owned.ts";
-import { startUpdates } from "../src/server/updates-boot.ts";
+import { MAX_FAILED_SWAPS, startUpdates } from "../src/server/updates-boot.ts";
+import { writeTrust } from "../src/server/updates-check.ts";
 import type { UpdatesSlot } from "../src/state/updates-cell.ts";
 import type { Log } from "../src/diagnostics/logger-api.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
@@ -978,7 +979,7 @@ Deno.test("leftovers: the copy a directory update keeps aside is an intent until
     assertEquals(
       line(said, "left alone"),
       `left alone beside ${install}: not made by this app's updater — ` +
-        `notes.staged-0.1.36`,
+        `notes.staged-0.1.36 (said once: delete by hand what is a leftover)`,
     );
     assertEquals(
       readOwned(data).filter((e) => e.path === old).map((e) => e.is),
@@ -1243,15 +1244,68 @@ for (
       assertEquals(
         said[2],
         `left alone beside ${install}: not made by this app's updater — ` +
-          `notes.zip-backup`,
+          `notes.zip-backup (said once: delete by hand what is a leftover)`,
       );
       assertEquals(names(root), ["notes", "notes.zip-backup"]);
+      // A tree an older updater left half-made is on no record and proves
+      // nothing: it stays, and is not said at every start — only a name
+      // that is new, or back after it went.
+      assertEquals(await boot(where(install), data, null), []);
+      await Deno.mkdir(`${install}.staged-0.0.9`);
+      assertEquals(await boot(where(install), data, "left alone"), [
+        `left alone beside ${install}: not made by this app's updater — ` +
+        `notes.staged-0.0.9 (said once: delete by hand what is a leftover)`,
+      ]);
+      await Deno.remove(`${install}.zip-backup`);
+      assertEquals(await boot(where(install), data, null), []);
+      await Deno.writeTextFile(`${install}.zip-backup`, "mine");
+      const again = await boot(where(install), data, "left alone");
+      assert(again[0]!.includes("— notes.zip-backup (said once"), again[0]);
+      assertEquals(names(root), [
+        "notes",
+        "notes.staged-0.0.9",
+        "notes.zip-backup",
+      ]);
     } finally {
       await dropTempDir(root);
       await dropTempDir(data);
     }
   });
 }
+
+// A swap that could not be made is tried again (up to MAX_FAILED_SWAPS), and
+// the next try uses the archive already downloaded. So that one leftover is
+// not a leftover yet.
+Deno.test("leftovers: the archive of a release whose swap is tried again stays — and goes once that release is given up", async () => {
+  const { root, install, data } = await installed();
+  try {
+    const zip = `${install}.zip-0.1.6`;
+    for (const n of [zip, `${install}.zip-0.1.5`]) {
+      await makeOwn(data, n, "file");
+    }
+    await makeOwn(data, `${install}.staged-0.1.6`, "dir");
+    laterBoot(data, NOBODY);
+    writeTrust(data, { failedSwaps: { to: "0.1.6", count: 1 } });
+    const said = await boot({ installDir: install }, data, "removed what");
+    assert(
+      said.at(-1)!.includes("notes.zip-0.1.5") &&
+        said.at(-1)!.includes("notes.staged-0.1.6") &&
+        !said.at(-1)!.includes("notes.zip-0.1.6"),
+      said.join(" | "),
+    );
+    assertEquals(names(root), ["notes", "notes.zip-0.1.6"]);
+    assert(isOwn(data, zip), "still on the record: the next try may use it");
+    // Given up (the last allowed failure was counted): a leftover like any.
+    writeTrust(data, {
+      failedSwaps: { to: "0.1.6", count: MAX_FAILED_SWAPS },
+    });
+    await boot({ installDir: install }, data, "removed what");
+    assertEquals(names(root), ["notes"]);
+  } finally {
+    await dropTempDir(root);
+    await dropTempDir(data);
+  }
+});
 
 Deno.test("leftovers: while an update is in flight nothing is removed", async () => {
   for (const inFlight of ["pending marker", "first-boot token"]) {

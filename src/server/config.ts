@@ -52,11 +52,9 @@ export const DENO_JSON_READ_KEYS = new Set<string>([
   "entry",
   "build",
   "version",
-  // A BUILD fact: it tells `compile` which directories to embed in the
-  // binary, and `build-compile.ts` reads it from here. The SERVER takes its
-  // mounts from `aio.run({ assets })` instead — so this key is not misplaced,
-  // and scolding it sent the `--template=assets` scaffold chasing a warning
-  // about the one line that was right.
+  // Read by BOTH: `build-compile.ts` embeds each mount in the binary (and the
+  // web and Android builds package it), and the server serves it
+  // (`_servedAssets`), under whatever `aio.run({ assets })` adds.
   "assets",
   // Deno's own
   "name",
@@ -136,6 +134,9 @@ export const VALID_BUILD_KEYS = new Set<string>([
   "platforms", // OS/arch list, e.g. ["linux-x64", "darwin-arm64"]
   "out", // output directory (default: dist/)
   "server", // LAN/remote address a shipped CLIENT defaults to
+  // `true` — read by build-config.ts for build-client.ts: the packaged
+  // Electron client refuses a paired host whose certificate changed.
+  "strictPin",
   "ui", // UI component path override, relative to the app dir
   // Read by `v8FlagsArg` (build-compile.ts documents this as THE place to
   // declare V8 flags, and for a COMPILED binary it is the only channel for a
@@ -168,13 +169,17 @@ export const VALID_BUILD_KEYS = new Set<string>([
   // `declaredGuestPreloads` (server/guest-preloads.ts): the build stages
   // them, the window resolves a `guestPreload()` name against them.
   "guestPreloads",
-  // `true` | `"strict"` — read by build-all.ts through `smokeMode`
-  // (build/smoke.ts): start each built artifact and fail the build when it
-  // does not come up clean. `--smoke` / `--smoke=strict` on the command line.
+  // `true` | `"desktop"` | `"strict"` — read by build-all.ts through
+  // `smokeMode` (build/smoke.ts): start each built artifact and fail the
+  // build when it does not come up clean. `--smoke` / `--smoke=desktop` /
+  // `--smoke=strict` on the command line.
   "smoke",
   // `{ shortcut }` — read by build-config.ts (`resolveWindowsShortcut`):
   // whether the one-click Windows `.exe` adds a Start-menu shortcut.
   "windows",
+  // `{ strict }` — read by build-android.ts (`_androidStrict`): an android/
+  // overlay that drops part of the template's activity fails the build.
+  "android",
   // `{ bundleId, host }` — read by build-config.ts (`resolveMacBundleId`,
   // `resolveMacHost`) and documented in docs/build/targets.md.
   "macos",
@@ -277,6 +282,7 @@ export const VALID_AIO_CONFIG_KEYS = new Set<string>([
   "budgets",
   "watch",
   "renderBudget",
+  "wire",
   "effectTimeoutMs",
   "freezeState",
   "memory",
@@ -375,6 +381,7 @@ export const VALID_FEATURES_CONFIG_KEYS = new Set<string>([
   "budgets",
   "watch",
   "renderBudget",
+  "wire",
   "effectTimeoutMs",
   "freezeState",
   "memory",
@@ -578,7 +585,7 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
   ],
   electron: [
     "{}",
-    "the Electron process's own security decisions — { requireSandbox } refuses to launch rather than fall back to --no-sandbox, { unsandboxedChildWindows } lets openWindow ask for sandbox:false, { webviewTag } enables <webview> without openWindow, { guestDownloads } lets an embedded or child page save files, { permissions } is the app page's exact permission allow-list (guests then get none), { allowLocalPeers } lets other processes of the same OS user open a production app's local socket (off: only the app's own window may); all default to what aio has always done",
+    "the Electron process's own security decisions — { requireSandbox } refuses to launch rather than fall back to --no-sandbox, { unsandboxedChildWindows } lets openWindow ask for sandbox:false, { webviewTag } enables <webview> without openWindow, { guestDownloads } lets an embedded or child page save files, { permissions } is the app page's exact permission allow-list (guests then get none), { allowLocalPeers } lets other processes of the same OS user open a production app's local socket (off: only the app's own window may), { ignoreDebugEnv } makes an Electron client ignore AIO_CDP / AIO_PORT / AIO_DEFAULT_PORT from the environment (--cdp and --port still work); all default to what aio has always done",
   ],
   libraryMode: [
     "false",
@@ -624,6 +631,18 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
   "renderBudget.pendingPatches": [
     "10",
     "max pending patches before warning (sent to browser)",
+  ],
+  wire: [
+    "",
+    "how a method call's arguments are put on the wire (sent to browser) — see sub-keys",
+  ],
+  "wire.omitTrailingUndefined": [
+    "false",
+    "`cell.m(a, undefined)` is sent as `m(a)`, so the method's default parameter applies — unset, a trailing `undefined` arrives as `null`",
+  ],
+  "wire.refuseShortCalls": [
+    "false",
+    "a WS/UDS frame with no `payload.args` array for a method that declares arguments is refused (ACTION_REFUSED) instead of running with `undefined` — the rule `am dispatch` already applies",
   ],
   effectTimeoutMs: [
     "30000",
@@ -776,6 +795,9 @@ export const CONFIG_GROUPS: [string, string[]][] = [
     "renderBudget",
     "renderBudget.staleness",
     "renderBudget.pendingPatches",
+    "wire",
+    "wire.omitTrailingUndefined",
+    "wire.refuseShortCalls",
     "effectTimeoutMs",
     "freezeState",
     "memory",
@@ -1311,6 +1333,8 @@ export function clampTimerDelays<
 export const NESTED_CONFIGS: Record<string, () => Set<string>> = {
   ui: () => VALID_UI_KEYS,
   wsLimits: () => VALID_WS_LIMITS_KEYS,
+  // `wire: { refuseShortCals: true }` would leave the door open in silence.
+  wire: () => VALID_WIRE_KEYS,
   // The SECURITY blocks. A misspelled key here was accepted in silence and
   // the control the author asked for was simply absent: `sessions: { ttlMS }`
   // kept the built-in thirty days for a five-minute session, `auth:
@@ -1337,6 +1361,8 @@ export const VALID_ELECTRON_KEYS: Set<string> = new Set([
   "guestDownloads",
   "permissions",
   "allowLocalPeers",
+  "ignoreDebugEnv",
+  "strictPin",
 ]);
 
 /** Every permission name Electron's session handlers are asked about — the
@@ -1427,6 +1453,12 @@ export const VALID_WS_LIMITS_KEYS: Set<string> = new Set([
   "bytesPerSec",
 ]);
 
+/** Every key of the `wire` object (aio-types.ts). */
+export const VALID_WIRE_KEYS: Set<string> = new Set([
+  "omitTrailingUndefined",
+  "refuseShortCalls",
+]);
+
 /** Every key of `AuthOptions` (aio-types.ts) — both halves of the
  *  `requireVerified`/`sendMail` intersection. */
 export const VALID_AUTH_KEYS: Set<string> = new Set([
@@ -1437,6 +1469,8 @@ export const VALID_AUTH_KEYS: Set<string> = new Set([
   "oidc",
   "requireVerified",
   "sendMail",
+  "maxSessions",
+  "publicDir",
 ]);
 
 /** Every key of the object spelling of `sessions` (aio-types.ts). */
@@ -1528,6 +1562,7 @@ export const SHAPE_VALUES: Record<string, ConfigShape> = {
   perfBudget: "object",
   budgets: "object",
   renderBudget: "object",
+  wire: "object",
   memory: "object",
   circuitBreaker: "object",
   security: "object",
@@ -2043,6 +2078,50 @@ export function configConflicts(
         doc: "docs/auth/auth.md",
       });
     }
+  }
+
+  // `auth.maxSessions` — the store throws on anything but a whole number ≥ 1
+  // (`openSessionStore`); said here with the key's name, before it opens.
+  const maxSessions = obj(cfg.auth)?.maxSessions;
+  if (
+    maxSessions !== undefined &&
+    !(Number.isInteger(maxSessions) && (maxSessions as number) >= 1)
+  ) {
+    out.push({
+      level: "error",
+      keys: ["auth.maxSessions"],
+      what: `auth.maxSessions is ${
+        JSON.stringify(maxSessions)
+      }, which is not a session count`,
+      fix: "use a whole number, at least 1 — e.g. 10 (a user's 11th login " +
+        "then signs out their oldest session)",
+      doc: "docs/auth/auth.md",
+    });
+  }
+
+  // `auth.publicDir` names a directory under the app dir by its URL path. A
+  // value the gate can never match (a leading slash, `..`, a dot-directory —
+  // never served) would close the whole directory to anonymous callers and
+  // say nothing.
+  const publicDir = obj(cfg.auth)?.publicDir;
+  if (
+    publicDir !== undefined &&
+    !(typeof publicDir === "string" &&
+      /^[A-Za-z0-9_-][A-Za-z0-9._-]*(\/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$/.test(
+        publicDir,
+      ) &&
+      !publicDir.startsWith("__"))
+  ) {
+    out.push({
+      level: "error",
+      keys: ["auth.publicDir"],
+      what: `auth.publicDir is ${
+        JSON.stringify(publicDir)
+      }, which is not a directory under the app dir`,
+      fix: 'name it relative to the app dir, without a leading "/" or "." — ' +
+        'e.g. "public" (served at /public/…)',
+      doc: "docs/auth/auth.md",
+    });
   }
 
   // ── 12. two session TTLs, and each is read by a different half ───────

@@ -20,14 +20,27 @@ const UDP = discoverySupported();
  *  found" fifteen seconds later. That was every full run on the Mac: started
  *  detached from its ssh session, the process had no Local Network permission
  *  and macOS refused each broadcast ("No route to host") — which
- *  `discoverAioApps` swallowed until it grew `onNote`. */
+ *  `discoverAioApps` swallowed until it grew `onNote`.
+ *
+ *  MEASURED on macOS 26 (2026-10-12): it is the launch, never the load. The
+ *  same file is 20/20 green beside a busy process while its ssh session is
+ *  open, and 3/3 red (these two tests) once that session has ended — another
+ *  open session of the same user does not help. node:dgram reports the
+ *  refusal as `send UNKNOWN`; the OS error under it is EHOSTUNREACH (65). So
+ *  a red here is the environment, and the remedy is how the run is started:
+ *  attached to a session that stays open. */
 const sweep = async (opts: { timeoutMs: number; nonce?: string }) => {
   const unsent: string[] = [];
   const apps = await discoverAioApps({
     ...opts,
     onNote: (m) => unsent.push(m),
   });
-  assertEquals(unsent, [], "this machine did not let the probe out");
+  assertEquals(
+    unsent,
+    [],
+    "this process may not broadcast — on macOS, start the run from a login " +
+      "or ssh session that stays open (a run that outlives it is refused)",
+  );
   return apps;
 };
 

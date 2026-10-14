@@ -7,6 +7,7 @@
 //
 // So the claims are checked against their sources, not against a memory of
 // them.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { MIN_DENO } from "../src/server/deno-version.ts";
 import { standardTasks } from "../src/am/am-cmd-create.ts";

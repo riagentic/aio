@@ -162,12 +162,39 @@ Deno.test({
     }),
 });
 
+/** An aio checkout whose NEWEST TAG is the version under test. `am fix` links
+ *  a cloned app to the newest tag — which, between the version bump and the
+ *  tag, is the PREVIOUS release: it then built an app scaffolded by this tree
+ *  (keys that release does not know: `electron.ignoreDebugEnv`, 1.0.20) and
+ *  failed its type check. A user never has that pair — their `am` and their
+ *  newest tag are one release. So until the tag exists the checkout is a
+ *  clone of HEAD carrying it; once it does, the repo itself, as before. */
+async function releasedHome(root: string): Promise<string> {
+  const { VERSION } = await import("../src/server/aio-cli.ts");
+  const git = async (cwd: string, ...args: string[]) => {
+    const r = await new Deno.Command("git", {
+      args,
+      cwd,
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    assertEquals(r.code, 0, `git ${args.join(" ")}: ${dec.decode(r.stderr)}`);
+    return dec.decode(r.stdout).trim();
+  };
+  if (await git(REPO_ROOT, "tag", "-l", `v${VERSION}`)) return REPO_ROOT;
+  const home = join(root, "aio-under-test");
+  await git(root, "clone", "-q", REPO_ROOT, home);
+  await git(home, "tag", `v${VERSION}`);
+  return home;
+}
+
 Deno.test({
   name:
     "run.sh --git <local repo> --no-run: clone + fix + build, artifact ready",
   ignore: !GATE,
   fn: async () => {
     const { env, root } = await sandbox();
+    env.AIO_HOME = await releasedHome(root);
     const appDir = await makeApp("counter", "run-sh-git-");
     const work = await Deno.makeTempDir({ prefix: "run-sh-clone-" });
     try {

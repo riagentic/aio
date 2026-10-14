@@ -100,8 +100,12 @@ self-contained cell (the designated-thread idiom).
 
 Before this it returned the peer's _declared default_ forever — never-updated
 data with no error, which is exactly the failure mode this framework refuses to
-have. Calling a cell's method — a peer's or its own — throws too (the
-unbound-runtime guard): nothing is bound inside a worker.
+have. Calling a cell's method — a peer's or its own — throws too: nothing is
+bound inside a worker, and the error says so
+(`[heavy] rebuild() called inside the worker cell "heavy" — no cell's methods
+are bound in a worker thread, its own included …`).
+Share the logic as a plain function, or return and let the main isolate make the
+call.
 
 Every harness refuses both, with the same words, even though it runs the cell
 in-isolate (`testCell`, `bootCells`, `testUI`, `testServer`): while a worker
@@ -204,6 +208,8 @@ A respawn is a new isolate, not a resumed one — know what it keeps:
   against the committed state, not the declared defaults, so write it to be
   repeatable. `onDestroy` did NOT run in the thread that died.
 - **Module state** (caches, connections, handles) starts empty.
+- **The respawn is immediate** — there is no backoff between a crash and the new
+  worker; the cap below is the only brake.
 - **A crash loop ends**: a third crash within 60 s is not respawned. The cell
   then stays dead as with `worker: true`, and the error — in the log, in health
   and in every refused call — says `crash 3 in 60s` and that respawn stopped. A

@@ -472,9 +472,12 @@ Deno.test("sockets: the transport and HTTP listeners never share a path", () => 
   assert(ndjson !== http, "two listeners cannot share one socket path");
   // Windows: pipe NAMES, `…aio-<key>` and `…aio-<key>-http`. Unix: files,
   // with `-<hash8>` when a long runtime dir pushes it into the `/tmp` fallback.
+  // Under `AIO_APPS_DIR` (the sharded suite gives every shard its own) the
+  // name carries that scope: `aio+<scope>+<key>` (`_pipeName`).
   const win = Deno.build.os === "windows";
+  const pipe = String.raw`^\\\\\.\\pipe\\aio(?:-|\+[A-Za-z0-9-]*\+)some-app`;
   const [reNdjson, reHttp] = win
-    ? [/^\\\\\.\\pipe\\aio-some-app$/, /^\\\\\.\\pipe\\aio-some-app-http$/]
+    ? [new RegExp(`${pipe}$`), new RegExp(`${pipe}-http$`)]
     : [
       /\/some-app(-[0-9a-f]{8})?\.sock$/,
       /\/some-app(-[0-9a-f]{8})?\.http\.sock$/,

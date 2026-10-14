@@ -70,7 +70,12 @@ Deno.test("a method that says no prints one info line; a bug prints an error —
   }
   const rejected: string[] = [];
   try {
-    await using _b = await bootCells([bank]);
+    // Speed is not this test's subject: on a loaded machine the 5 ms effect
+    // budget fired on payLater (measured 6.1 ms on a busy Windows VM), and
+    // that warning — which names the method — read as the refusal being loud.
+    await using _b = await bootCells([bank], {
+      perfBudget: { reduce: 10_000, effect: 10_000 },
+    });
     for (const m of ["pay", "payLater", "broken", "brokenLater"] as const) {
       await (bank[m] as () => Promise<unknown>)().then(
         () => rejected.push(`${m}: RESOLVED`),
@@ -98,7 +103,7 @@ Deno.test("a method that says no prints one info line; a bug prints an error —
       !loud.some((o) =>
         o.text.includes(`rejbank:${m}`) || o.text.includes(`${m}()`)
       ),
-      `${m} was loud`,
+      `${m} was loud: ${JSON.stringify(loud)}`,
     );
   }
   // Bugs: still loud.

@@ -4,6 +4,7 @@
 // the starter test. The break has to show up at the gate an agent runs FIRST,
 // so the scaffold's `check` type-checks `tests/` too, and the starter test
 // says what to do with it when the cell it tests is gone.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { scaffold, TEMPLATES } from "../src/am/am-cmd-create.ts";
 import { TARGETS } from "../src/am/am-help-text.ts";

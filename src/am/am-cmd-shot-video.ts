@@ -107,9 +107,13 @@ export function shotVideoOptions(
   return { ok: true, value: { path, format, durationMs } };
 }
 
-/** `Page.startScreencast` sends one frame as it starts (measured ~33 ms in),
- *  whether or not anything painted: the picture the start screenshot already
- *  shows. A frame this early is that one, not a paint. */
+/** `Page.startScreencast` sends one frame as it starts (measured 12–40 ms
+ *  after the call), whether or not anything painted: the picture the start
+ *  screenshot already shows. A frame this early is that one, not a paint.
+ *  Counted from the CALL (`Recording.startedUs`), not from the recording's
+ *  zero: the start screenshot comes first and takes as long as the machine
+ *  lets it — on a loaded one the initial frame was stamped 416 ms in, read as
+ *  a paint, and a window that never changed got no "still" warning. */
 const INITIAL_FRAME_US = 200_000;
 
 /** Pure: did the window send no picture after the first — one still for the
@@ -119,10 +123,11 @@ const INITIAL_FRAME_US = 200_000;
 export function isStillRecording(
   frames: readonly RecordedFrame[],
   endUs: number,
+  startedUs = 0,
 ): boolean {
   if (endUs < 1_500_000) return false;
   const paints = frames.slice(1);
-  if (paints[0] && paints[0].us < INITIAL_FRAME_US) paints.shift();
+  if (paints[0] && paints[0].us < startedUs + INITIAL_FRAME_US) paints.shift();
   return paints.length === 0;
 }
 
@@ -209,7 +214,7 @@ export async function recordShotVideo(
       Deno.exit(1);
     }
     const seconds = rec.endUs / 1e6;
-    const still = isStillRecording(rec.frames, rec.endUs);
+    const still = isStillRecording(rec.frames, rec.endUs, rec.startedUs);
     // Encoding chatter: pretty-only. `--json` already knows recording started
     // and only wants the final document; progress mid-encode is noise there.
     if (mode === "pretty") {

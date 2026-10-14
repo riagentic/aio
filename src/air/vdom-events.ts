@@ -5,7 +5,6 @@ import { devHooks } from "./dev-hooks.ts";
 import { _notifyContained } from "./hook-error.ts";
 import { batch } from "../state/signal.ts";
 import { pendingStarted } from "../protocol/pending-calls.ts";
-import { _afterHandler } from "./control-drift.ts";
 
 // ── Delegated event set ────────────────────────────────────────────
 // Common bubbling events use a single root listener instead of per-element
@@ -273,7 +272,7 @@ export function _wrapHandler(
       _handlerDepth--;
     }
     // Dev: a controlled control left showing text its handler never stored.
-    _afterHandler(e, evt, started, returned);
+    devHooks.afterHandler?.(e, evt, started, returned);
   };
 }
 
@@ -320,111 +319,7 @@ export function _mapEventName(
     return "input";
   }
   if (evt === "doubleclick") return "dblclick"; // AIO-165
-  _warnUnknownEvent(evt, el);
+  // The typo lint over known event names lives in the dev layer.
+  devHooks.unknownEvent?.(evt, el);
   return evt;
-}
-
-// ── AIO-7.2: dev-mode unknown-event guard ───────────────────────────
-// React's common events all lowercase correctly except the aliased ones above;
-// an on* prop whose derived name isn't a known DOM event silently never fires.
-// Warn once per event name in dev so typos surface immediately.
-const _KNOWN_EVENTS = new Set([
-  "click",
-  "dblclick",
-  "mousedown",
-  "mouseup",
-  "mousemove",
-  "mouseenter",
-  "mouseleave",
-  "mouseover",
-  "mouseout",
-  "contextmenu",
-  "wheel",
-  "keydown",
-  "keyup",
-  "keypress",
-  "beforeinput",
-  "input",
-  "change",
-  "submit",
-  "reset",
-  "focus",
-  "blur",
-  "focusin",
-  "focusout",
-  "select",
-  "invalid",
-  "pointerdown",
-  "pointerup",
-  "pointermove",
-  "pointerenter",
-  "pointerleave",
-  "pointerover",
-  "pointerout",
-  "pointercancel",
-  "gotpointercapture",
-  "lostpointercapture",
-  "touchstart",
-  "touchend",
-  "touchmove",
-  "touchcancel",
-  "dragstart",
-  "drag",
-  "dragenter",
-  "dragleave",
-  "dragover",
-  "drop",
-  "dragend",
-  "scroll",
-  "resize",
-  "load",
-  "error",
-  "abort",
-  "transitionend",
-  "transitionstart",
-  "transitionrun",
-  "transitioncancel",
-  "animationstart",
-  "animationend",
-  "animationiteration",
-  "compositionstart",
-  "compositionend",
-  "compositionupdate",
-  "copy",
-  "cut",
-  "paste",
-  "play",
-  "pause",
-  "ended",
-  "timeupdate",
-  "volumechange",
-  "seeked",
-  "seeking",
-  "loadedmetadata",
-  "loadeddata",
-  "canplay",
-  "canplaythrough",
-  "durationchange",
-  "toggle",
-  "close",
-  "cancel",
-  "open",
-]);
-const _warnedEvents = new Set<string>();
-
-function _warnUnknownEvent(evt: string, el: Element): void {
-  if (!(globalThis as Record<string, unknown>).__aioDev) return;
-  if (_KNOWN_EVENTS.has(evt) || _warnedEvents.has(evt)) return;
-  // Custom elements dispatch arbitrary CustomEvents — don't warn for them.
-  if (el.tagName.includes("-")) return;
-  _warnedEvents.add(evt);
-  console.warn(
-    `[air] unknown event "${evt}" — the handler will never fire. ` +
-      `Check the prop name casing (e.g. onDoubleClick → dblclick).`,
-  );
-}
-
-/** Reset unknown-event warnings (for testing). */
-export function _resetEventWarnings(): void {
-  _warnedEvents.clear();
 }

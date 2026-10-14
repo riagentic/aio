@@ -15,6 +15,7 @@
 // So the fix is not a better error. It is that `deno task check` stops being
 // green, and the scaffolded task now runs both halves — the same treatment
 // `lint` already gets, where one task runs `deno lint` AND `aiol`.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { standardTasks } from "../src/am/am-cmd-create.ts";

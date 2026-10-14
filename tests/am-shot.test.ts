@@ -1,6 +1,7 @@
 // `am shot` against a fake CDP endpoint (HTTP /json + WS answering
 // Page.captureScreenshot with a 1×1 PNG), and the refusal when the lock
 // records no cdpPort — the exact flag to add is in the message.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { freePort } from "../src/testing/server-test.ts";
 import { writeLock } from "../src/server/single-instance-lock.ts";
@@ -321,6 +322,12 @@ Deno.test("noCdpMessage: an electron app still gets the --cdp remedy; an old loc
   const old = noCdpMessage("app");
   assertStringIncludes(old, "Restart with the flag");
   assertStringIncludes(old, "no window to shoot at all");
+  // The flag always works; the variable does not for an app that set
+  // `electron.ignoreDebugEnv` (what `am create` writes) — it read "or
+  // AIO_CDP=1" as an equal, and that app's window ignored it.
+  assertStringIncludes(el, "am restart app --cdp");
+  assertStringIncludes(el, "unless the app sets electron: { ignoreDebugEnv");
+  assert(!el.includes("--cdp / AIO_CDP=1"), el);
 });
 
 // ── a screenshot must not be stale pixels reported as success ───────────────

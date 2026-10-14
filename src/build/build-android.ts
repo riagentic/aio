@@ -2,7 +2,7 @@
  * @module
  * Build Android — generates Android project from template, builds APK via Gradle.
  */
-import { dirname, join } from "@std/path";
+import { dirname, join, resolve } from "@std/path";
 import { assetMounts } from "./build-compile.ts";
 import {
   isProtectedPath,
@@ -22,9 +22,21 @@ import {
   resolveSdk,
 } from "./build-helpers.ts";
 import { ANDROID_TEMPLATE } from "./android-template.ts";
-import { androidRunOptionsWarning } from "./android-run-options.ts";
+import {
+  androidRunOptionsWarning,
+  bakedRunOptionsScript,
+  type ProbedRunOptions,
+  probeRunOptions,
+  scanRunOptions,
+} from "./android-run-options.ts";
 import { warn } from "./build-say.ts";
-import { androidLocalHTML, htmlOpen } from "../server/server-html-gen.ts";
+import { copyWorkerBundles } from "./dist-staging.ts";
+import { ESBUILD_SPEC } from "./esbuild-shared.ts";
+import {
+  androidLocalHTML,
+  htmlOpen,
+  oldEngineNotice,
+} from "../server/server-html-gen.ts";
 import type { BuildConfig } from "./build-config.ts";
 import { type BuildVersion, stripVersionToken } from "./build-version.ts";
 import { appIconLabel, appIconPng } from "./app-icon.ts";
@@ -202,6 +214,7 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
         // the manifest's declaration and the WebView's refusal message.
         "{{CAMERA_PERMISSION}}": _cameraPermission(cfg.androidCamera),
         "{{CAMERA_DECLARED}}": String(cfg.androidCamera === true),
+        "{{APP_THEME}}": _appTheme(cfg.androidColorScheme),
       }),
     );
   }
@@ -209,12 +222,30 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
   // An app's own MainActivity.kt replaces the template's WHOLE — including the
   // durable store and the SDK-35 insets frame. Say what it dropped, loudly:
   // the store's loss is a change lost on the next kill, with nothing said.
+  // With deno.json `build.android.strict` each loss is an error and no APK is
+  // built — see `_androidStrict`.
+  const strict = _androidStrict((await readDenoJson(cfg.root))?.config);
+  if (strict === null) {
+    console.error(
+      `${NO} deno.json build.android.strict must be true or false — it ` +
+        `decides whether an android/ overlay that drops part of the ` +
+        `template's MainActivity.kt fails the build`,
+    );
+    Deno.exit(1);
+  }
   if (overlaid.includes(MAIN_ACTIVITY)) {
-    for (
-      const w of await ownActivityWarnings(androidDir, overlaid, {
-        standalone: !talksToServer(serverOpts),
-      })
-    ) console.warn(`${HEY} ${w}`);
+    const losses = await ownActivityWarnings(androidDir, overlaid, {
+      standalone: !talksToServer(serverOpts),
+    });
+    const refusal = ownActivityRefusal(losses, strict);
+    for (const w of losses) {
+      if (refusal) console.error(`${NO} ${w}`);
+      else console.warn(`${HEY} ${w}`);
+    }
+    if (refusal) {
+      console.error(`${NO} ${refusal}`);
+      Deno.exit(1);
+    }
   }
 
   // Pin Gradle to the resolved JDK so its toolchain resolver can't wander off to
@@ -261,6 +292,21 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     console.log(`${OK} default icon for "${label}"`);
   }
 
+  // The release key is the user's: named by the environment, never held here.
+  const signing = androidSigning(Deno.env.toObject(), cfg.root);
+  if (signing && "refused" in signing) {
+    console.error(`${NO} ${signing.refused}`);
+    Deno.exit(1);
+  }
+  if (signing && !doRelease) {
+    console.warn(
+      `${HEY} ${KEYSTORE_ENV} is set, but this is a debug build — it is ` +
+        `signed with Android's debug key. Add --release to sign with yours.`,
+    );
+  }
+  const signed = signing && doRelease ? signing : null;
+  if (signed) await _declareSigning(androidDir);
+
   await _runGradle(
     cfg,
     androidDir,
@@ -268,8 +314,83 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     jdk.home,
     appNameKotlin,
     doRelease,
+    signed,
   );
   Deno.exit(0);
+}
+
+/** The environment a signed release build reads. Passwords are read from the
+ *  environment by Gradle itself (`_declareSigning`) — never written to a file,
+ *  a log, or deno.json. */
+export const KEYSTORE_ENV = "AIO_ANDROID_KEYSTORE";
+const KEYSTORE_PASSWORD_ENV = "AIO_ANDROID_KEYSTORE_PASSWORD";
+const KEY_ALIAS_ENV = "AIO_ANDROID_KEY_ALIAS";
+const KEY_PASSWORD_ENV = "AIO_ANDROID_KEY_PASSWORD";
+
+/** The user's release keystore, as the environment names it: `null` when no
+ *  keystore is named (the build then signs nothing, exactly as before),
+ *  `refused` when one is named but cannot be used — said before Gradle runs,
+ *  not as a stack trace from inside it. A relative path is the app root's. */
+export function androidSigning(
+  env: Record<string, string | undefined>,
+  root: string,
+  isFile = (p: string): boolean => {
+    try {
+      return Deno.statSync(p).isFile;
+    } catch {
+      // aio-ok: absent or unreadable is the answer — the caller refuses by name.
+      return false;
+    }
+  },
+): { keystore: string } | { refused: string } | null {
+  const named = env[KEYSTORE_ENV];
+  if (!named) return null;
+  const keystore = resolve(root, named);
+  if (!isFile(keystore)) {
+    return {
+      refused: `${KEYSTORE_ENV}=${named} — no keystore file at ${keystore}`,
+    };
+  }
+  const missing = [KEYSTORE_PASSWORD_ENV, KEY_ALIAS_ENV].filter((k) => !env[k]);
+  if (missing.length) {
+    return {
+      refused: `${KEYSTORE_ENV} is set but ${missing.join(" and ")} ` +
+        `${missing.length > 1 ? "are" : "is"} not — a release is signed with ` +
+        `the keystore, its password and the key's alias ` +
+        `(${KEY_PASSWORD_ENV} when the key has its own password)`,
+    };
+  }
+  return { keystore };
+}
+
+/** Give the generated project's release variant a signing config that reads
+ *  the keystore from the environment at Gradle time. Appended like `_pinJdk`'s
+ *  toolchain block, so an app's own `android/app/build.gradle.kts` is signed
+ *  the same way. A signed release is not debuggable (AGP's release default). */
+async function _declareSigning(androidDir: string): Promise<void> {
+  const gradlePath = join(androidDir, "app", "build.gradle.kts");
+  await Deno.writeTextFile(
+    gradlePath,
+    `
+android {
+    signingConfigs {
+        create("aioRelease") {
+            storeFile = file(System.getenv("${KEYSTORE_ENV}"))
+            storePassword = System.getenv("${KEYSTORE_PASSWORD_ENV}")
+            keyAlias = System.getenv("${KEY_ALIAS_ENV}")
+            keyPassword = System.getenv("${KEY_PASSWORD_ENV}")
+                ?: System.getenv("${KEYSTORE_PASSWORD_ENV}")
+        }
+    }
+    buildTypes {
+        getByName("release") {
+            signingConfig = signingConfigs.getByName("aioRelease")
+        }
+    }
+}
+`,
+    { append: true },
+  );
 }
 
 /** Does this APK need to talk to a plaintext `http://` / `ws://` server?
@@ -294,6 +415,16 @@ export function _cleartextAttr(
   opts: { devUrl?: string | null; remote?: boolean },
 ): string {
   return talksToServer(opts) ? 'android:usesCleartextTraffic="true"' : "";
+}
+
+/** The activity theme for deno.json `android.colorScheme` — it is what a
+ *  WebView reads `prefers-color-scheme` from. Pure. */
+export function _appTheme(scheme: "system" | "dark" | "light"): string {
+  return {
+    system: "Theme.AppCompat.DayNight.NoActionBar",
+    dark: "Theme.AppCompat.NoActionBar",
+    light: "Theme.AppCompat.Light.NoActionBar",
+  }[scheme];
 }
 
 /** The manifest's camera declaration — deno.json `android: { "camera": true }`,
@@ -399,7 +530,13 @@ export async function _writeConnectPage(
    *  asking its user to type a server the build already recorded is the gap
    *  `build.server` was supposed to close. */
   bakedServer?: string | null,
+  /** Which shell opens the page. The texts differ because the shells do: the
+   *  Android one pairs by code (the `AioConnect` bridge) and can pin a
+   *  self-signed certificate; the iOS one has no bridge — a share link is its
+   *  only way to a keyed server, and it trusts what iOS trusts. */
+  shell: "android" | "ios" = "android",
 ): Promise<void> {
+  const ios = shell === "ios";
   const connectHtml = `<!DOCTYPE html>
 ${htmlOpen()}
 <head>
@@ -424,13 +561,24 @@ ${htmlOpen()}
     <h1>aio</h1>
     <form id="f">
       <input id="addr" type="text" placeholder="server address or share link" autofocus spellcheck="false" />
-      <button type="submit">Connect</button>
+${
+    ios
+      ? ""
+      : `      <input id="pin" type="text" inputmode="numeric" autocomplete="off" placeholder="pairing code (a keyed server)" />\n`
+  }      <button type="submit">Connect</button>
     </form>
     <div id="err"></div>
+    <div id="warn" style="margin-top:.8rem;font-size:.85rem;color:#fa3"></div>
     <div style="margin-top:.8rem;font-size:.8rem;color:#888">
-      A keyed server needs its full share link (the <code>?token=…</code> URL
-      the server prints at boot / <code>am pair</code>) — a bare address will
-      be refused.
+${
+    ios
+      ? `      A keyed server needs its full share link (the
+      <code>?token=…</code> URL the server prints at boot) — a bare address
+      will be refused.`
+      : `      A keyed server needs its pairing code (the server prints one at boot;
+      <code>am pair</code> mints a new one) or its full share link (the
+      <code>?token=…</code> URL) — a bare address will be refused.`
+  }
     </div>
   </div>
   <script>
@@ -443,16 +591,115 @@ ${htmlOpen()}
     // later launch of an installed client stopped on this form. \`#change\`
     // (what Back from the server opens) stays on the form, to change it.
     if(baked&&!localStorage.getItem('aio_server'))localStorage.setItem('aio_server',baked);
-    if(location.hash==='#unreachable')document.getElementById('err').textContent='Could not reach '+s+' — is the server running? Change the address, or Connect to retry.';
-    else if(s&&location.hash!=='#change')location.href=s;
+    // What a failed connect says. The shell sends it here by HASH — and when
+    // this form is already the page showing, that is no reload: a tap on
+    // Connect to a dead server changed nothing on screen. Said on load and
+    // on every hash change.
+    function why(){
+      var a=localStorage.getItem('aio_server')||baked;
+      try{a=new URL(a).origin}catch(x){}
+      if(location.hash==='#unreachable')return 'Could not reach '+a+' — is the server running? Change the address, or Connect to retry.';
+${
+    ios
+      ? `      if(location.hash==='#keyed')return a+' needs its key. Paste its share link (the ?token=… URL the server prints at boot).';
+      if(location.hash==='#untrusted')return 'This device does not trust the certificate of '+a+' — a server run with --expose signs its own, and this app cannot pin it. Give the server a real certificate (tls: { cert, key }), or serve it with --no-tls on a network you trust.';`
+      : `      if(location.hash==='#keyed')return a+' needs its key. Enter the pairing code the server shows (am pair mints a new one), or paste its share link.';
+      if(location.hash==='#untrusted')return 'This device does not trust the certificate of '+a+' — a server run with --expose signs its own. Enter its pairing code or paste its share link (either one pins that certificate), or give the server a real certificate (tls: { cert, key }).';
+      if(location.hash==='#changed')return 'The certificate of '+a+' is not the one this device paired with. If the server was reinstalled, pair again: its pairing code, or its share link. Otherwise something else is answering at that address.';`
+  }
+      return '';
+    }
+    var err=document.getElementById('err');
+    window.onhashchange=function(){err.textContent=why()};
+    // The native side of pairing (AioConnect in MainActivity.kt): one
+    // question, one answer, matched by id.
+    var seq=0,waiting={},native=typeof AioConnect==='object'?AioConnect:null;
+    if(native)native.onmessage=function(e){var r=JSON.parse(e.data),f=waiting[r.id];delete waiting[r.id];if(f)f(r)};
+    function ask(m){return new Promise(function(done){
+      if(!native){done({error:${
+    ios
+      ? "'this app pairs by share link only — paste the ?token=… URL'"
+      : "'this WebView cannot pair — update Android System WebView'"
+  }});return}
+      m.id=++seq;waiting[m.id]=done;native.postMessage(JSON.stringify(m));
+    })}
+    if(why())err.textContent=why();
+    function enter(){
+      if(why())err.textContent=why();
+      else if(s&&location.hash!=='#change')location.href=s;
+    }
+    // localStorage reaches the disk when the WebView gets to it: a kill
+    // within a second of pairing brought the app back WITHOUT the pairing
+    // (and a pairing code works once). So the shell keeps the address too,
+    // durably — asked first on every load, and what it holds wins. A shell
+    // without the answer (no bridge, an older MainActivity.kt) changes
+    // nothing: the stored address, as before. An answer that arrives after
+    // a Connect is dropped: the form has already gone somewhere newer.
+    var gone=0;
+    if(native)ask({recall:1}).then(function(r){
+      if(gone)return;
+      if(r.server){s=r.server;localStorage.setItem('aio_server',s);document.getElementById('addr').value=s;warn()}
+      enter();
+    });else enter();
+    // The hash is dropped first: a refusal comes back as a hash, and the one
+    // already showing would be no change — the form kept its old line. The
+    // server is opened once the shell holds the address (see above).
+    function go(v){
+      gone=1;localStorage.setItem('aio_server',v);history.replaceState(null,'',location.pathname);
+      if(native)ask({remember:v}).then(function(){location.href=v});else location.href=v;
+    }
+    // A pairing code: the server answers it with its key (and, over TLS, the
+    // certificate this device then trusts for it). An address typed without
+    // a scheme is tried over https first — what --expose serves — then http.
+    function pair(bases,pin,i){
+      if(i>=bases.length){err.textContent='Could not reach '+bases[0]+' — is the server running?';return}
+      ask({base:bases[i],pin:pin}).then(function(r){
+        if(r.key)go(bases[i]+'/?token='+encodeURIComponent(r.key));
+        else if(r.status===401)err.textContent='Invalid or expired pairing code — a code works once, for a few minutes. Run am pair on the server for a new one.';
+        else if(r.status===429)err.textContent='Too many wrong codes from this device — wait a minute, then pair with a new code.';
+        else if(r.status)err.textContent='Pairing failed: '+bases[i]+' answered HTTP '+r.status+' — is it a keyed aio server?';
+        else if(i+1<bases.length)pair(bases,pin,i+1);
+        else err.textContent='Pairing failed: '+r.error;
+      });
+    }
+    // The address as it will be opened. Typed without a scheme it is http —
+    // unless it carries a key (?token=): a share link is https unless it
+    // says otherwise, and a key must not leave in clear text by default.
+    function parse(v){
+      var bare=v.indexOf('http://')!==0&&v.indexOf('https://')!==0,u=null;
+      try{u=new URL(bare?'http://'+v:v);if(bare&&u.searchParams.get('token'))u=new URL('https://'+v)}catch(x){u=null}
+      return {bare:bare,u:u};
+    }
+    // A keyed link over plain http to another machine: allowed (a keyed LAN
+    // app served with --no-tls must keep working), and SAID — whoever shares
+    // the network can read the key. Shown whenever such an address is in the
+    // field: before Connect, and each time the form comes back.
+    function warn(){
+      var u=parse(document.getElementById('addr').value.trim()).u;
+      var local=u&&/^(localhost|127\\.\\d+\\.\\d+\\.\\d+|\\[::1\\])$/.test(u.hostname);
+      document.getElementById('warn').textContent=u&&u.protocol==='http:'&&u.searchParams.get('token')&&!local
+        ?'This link sends the server\\'s key over plain http: anyone on the same network can read it. Use the https:// link if the server has one.':'';
+    }
+    document.getElementById('addr').oninput=warn;
+    warn();
     document.getElementById('f').onsubmit=function(e){
       e.preventDefault();
-      var v=document.getElementById('addr').value.trim();
+      var v=document.getElementById('addr').value.trim(),pin=${
+    ios ? "''" : "document.getElementById('pin').value.trim()"
+  };
       if(!v)return;
-      if(v.indexOf('http://')!==0&&v.indexOf('https://')!==0)v='http://'+v;
-      try{new URL(v)}catch(x){document.getElementById('err').textContent='Invalid URL';return}
-      localStorage.setItem('aio_server',v);
-      location.href=v;
+      var p=parse(v),bare=p.bare,u=p.u;
+      if(!u){err.textContent='Invalid URL';return}
+      err.textContent='';
+      if(pin){pair(bare?['https://'+u.host,'http://'+u.host]:[u.origin],pin,0);return}
+      // A share link over TLS: before the WebView meets the certificate, the
+      // server proves it holds this link's key ON that certificate — which
+      // is then the one trusted. No proof changes nothing: the load goes on
+      // and a certificate Android does not trust is refused, as before.
+      var key=u.searchParams.get('token');
+      v=bare?u.protocol+'//'+v:v;
+      if(u.protocol==='https:'&&key&&native)ask({base:u.origin,key:key}).then(function(){go(v)});
+      else go(v);
     };
   </script>
 </body>
@@ -461,22 +708,84 @@ ${htmlOpen()}
   console.log(`${OK} connect page`);
 }
 
-/** Warn, naming each `aio.run()` option the app's entry sets that a local APK
- *  never sees (see android-run-options.ts). An unreadable entry is not a build
- *  failure — the bundle step already resolved it — so it only skips the scan. */
-export async function _warnRunOptions(
+/** Read what the app's entry passes to `aio.run()` (see
+ *  android-run-options.ts) and warn, naming each option that still cannot
+ *  reach a local APK. Returns what the build bakes into the shell — nothing
+ *  when the entry could not be probed (the warning then says why). */
+export async function _readRunOptions(
   cfg: Pick<BuildConfig, "root" | "configEntry">,
   shell: "apk" | "web" = "apk",
-): Promise<void> {
+): Promise<{ ui: ProbedRunOptions["ui"]; script: string }> {
   let src: string;
   try {
     src = await Deno.readTextFile(join(cfg.root, cfg.configEntry));
   } catch {
     // aio-ok: no readable entry → nothing to scan; the bundle step owns that error.
-    return;
+    return { ui: {}, script: "" };
   }
-  const w = androidRunOptionsWarning(src, cfg.configEntry, shell);
+  // An entry that passes nothing has nothing to bake: it is not run.
+  const scan = scanRunOptions(src);
+  if (!scan.found || (scan.keys.length === 0 && !scan.opaque)) {
+    return { ui: {}, script: "" };
+  }
+  const probed = await probeRunOptions(cfg.root, cfg.configEntry);
+  const w = androidRunOptionsWarning(src, cfg.configEntry, shell, probed);
   if (w) warn(w.headline, w.body, w.fix);
+  if (typeof probed === "string") return { ui: {}, script: "" };
+  const baked = [
+    ...Object.keys(probed.options),
+    ...Object.keys(probed.ui).map((k) => `ui.${k}`),
+  ];
+  if (baked.length) {
+    console.log(`${OK} aio.run() options baked in: ${baked.join(", ")}`);
+  }
+  return { ui: probed.ui, script: bakedRunOptionsScript(probed.options) };
+}
+
+/** Where a standalone APK's page and its files live — MainActivity.kt's
+ *  `ASSET_HOST`, served by its `shouldInterceptRequest` and by nothing else. */
+export const APK_ASSETS = "https://appassets.androidplatform.net/assets/";
+
+/** What a worker bundle starts with in an APK. Forced by the platform:
+ *  WebView 133 and later fetches the script of a worker STARTED BY A WORKER
+ *  in its browser process, past `shouldInterceptRequest` — the asset origin's
+ *  only server — so that worker never starts (measured: `net::ERR_ABORTED`,
+ *  for every script URL). A worker's own `import` / `importScripts` are still
+ *  intercepted, so a worker a worker starts is a same-origin Blob that loads
+ *  the real script. Its `self.location` is then the Blob's; `import.meta.url`
+ *  is the script's (see `_apkWorkers` for a classic one). A `blob:`/`data:`
+ *  script starts as it always did. `url` is the bundle's own. Pure. */
+export function _apkWorkerPrelude(url: string): string {
+  return `(()=>{const W=self.Worker;if(!W)return;` +
+    `self.Worker=class extends W{constructor(u,o){` +
+    `const h=new URL(u,${JSON.stringify(url)}).href,s=JSON.stringify(h);` +
+    `super(/^https?:/.test(h)?URL.createObjectURL(new Blob([` +
+    `o&&o.type==="module"?"import "+s:"importScripts("+s+")"` +
+    `],{type:"text/javascript"})):u,o)}}})();`;
+}
+
+/** Give each worker bundle staged in `assetsDir` its `_apkWorkerPrelude`, and
+ *  its own URL where it reads `self.location.href` — which is what
+ *  `import.meta.url` is in a classic worker's bundle, and a Blob's in a worker
+ *  a worker started. Exported for its test. */
+export async function _apkWorkers(
+  assetsDir: string,
+  names: string[],
+): Promise<void> {
+  if (names.length === 0) return;
+  const esbuild = await import(ESBUILD_SPEC);
+  for (const name of names) {
+    const file = join(assetsDir, name);
+    const url = APK_ASSETS + name;
+    const r = await esbuild.transform(await Deno.readTextFile(file), {
+      loader: "js",
+      target: "esnext",
+      minifyWhitespace: true,
+      define: { "self.location.href": JSON.stringify(url) },
+      banner: _apkWorkerPrelude(url),
+    });
+    await Deno.writeTextFile(file, r.code);
+  }
 }
 
 /** Exported for its test only (the warning below). */
@@ -495,21 +804,24 @@ export async function _writeLocalAssets(
   // Raw title: androidLocalHTML escapes it itself (escHtml in headContent).
   // The packaged APK's shell renders the same default dev does, keyed on the
   // same identity — an app that is one colour on the desktop and another on
-  // the phone is not one app. The shell carries BOTH the inert tokens (active)
-  // and the full look (disabled) so a runtime that knows `ui.theme` can enable
-  // the second — but see below: today nothing on the phone knows it.
+  // the phone is not one app.
+  // Never a silent drop (.katana/core.md). The APK's bundle entry imports
+  // only App.tsx (`makeEntryCode`) — the app's entry module never runs on the
+  // phone — so the build reads its `aio.run()` options here and bakes them:
+  // `ui.*` into this shell, the rest for the runtime's boot. This used to
+  // claim "ui.theme, ui.layout, ui.dir and ui.lang do [reach it], applied at
+  // boot" — false for every APK built before the options were baked. What
+  // still cannot travel is named. With no `ui.theme` known the shell carries
+  // BOTH the inert tokens (active) and the full look (disabled).
+  const run = await _readRunOptions(cfg);
   const androidHtml = androidLocalHTML(appTitle ?? binaryName, hasCSS, {
     themeName: binaryName,
+    ...run.ui,
+    head: (run.ui.head ?? "") + run.script + oldEngineNotice("apk"),
   });
-  // Never a silent drop (.katana/core.md). The shell is written before
-  // `aio.run()` exists, AND the APK's bundle entry imports only App.tsx
-  // (`makeEntryCode`) — the app's entry module never runs on the phone, so
-  // every `aio.run()` option (ui.*, hooks, persist, cellDefaults, localFirst…)
-  // is lost, however much of it the standalone runtime could honour. This used
-  // to claim "ui.theme, ui.layout, ui.dir and ui.lang do [reach it], applied
-  // at boot" — false for every APK ever built. Name what THIS app loses.
-  await _warnRunOptions(cfg);
   await Deno.copyFile(join(dist, BUNDLE_JS), join(assetsDir, BUNDLE_JS));
+  // …and the browser workers it starts, beside it (same origin, same path).
+  await _apkWorkers(assetsDir, await copyWorkerBundles(dist, assetsDir));
   await Deno.writeTextFile(join(assetsDir, "index.html"), androidHtml);
   if (hasCSS) {
     await Deno.copyFile(
@@ -895,6 +1207,34 @@ export function ownActivityLosses(
   return out;
 }
 
+/** deno.json `build.android.strict`, validated — `null` for a value that is
+ *  not a boolean (refused by name). Opt-in, off when absent: with it, an
+ *  `android/` overlay whose MainActivity.kt drops anything
+ *  {@link ownActivityLosses} names (the keyed store, the fetch bridge, the
+ *  insets frame, Back) FAILS the build instead of warning — a release can no
+ *  longer ship with a third-party frame able to read its state because a
+ *  warning scrolled past. Pure. */
+export function _androidStrict(config: unknown): boolean | null {
+  const raw = (config as
+    | { build?: { android?: { strict?: unknown } } }
+    | null
+    | undefined)?.build?.android?.strict;
+  return raw === undefined ? false : typeof raw === "boolean" ? raw : null;
+}
+
+/** Why the build stops on an overlaid activity's `losses` — or null when it
+ *  goes on (nothing lost, or not `strict`: each loss is then a warning). Pure. */
+export function ownActivityRefusal(
+  losses: readonly string[],
+  strict: boolean,
+): string | null {
+  if (!strict || !losses.length) return null;
+  return `build.android.strict: no APK was built — your ` +
+    `android/…/MainActivity.kt drops ${count(losses.length, "thing")} the ` +
+    `template's activity does (above). Fix the overlay; without "strict" ` +
+    `the same build only warns.`;
+}
+
 /** `fitsSystemWindows` turned ON in XML — the layout attribute
  *  (`android:fitsSystemWindows="true"`) or a theme item
  *  (`<item name="android:fitsSystemWindows">true</item>`). `"false"` is not
@@ -1002,6 +1342,8 @@ async function _runGradle(
   jdkHome: string,
   appNameKotlin: string,
   doRelease: boolean,
+  /** The user's keystore, for a release it signs (see `androidSigning`). */
+  signed: { keystore: string } | null = null,
 ): Promise<void> {
   void appNameKotlin;
   const gradleBin = findGradle();
@@ -1019,6 +1361,7 @@ async function _runGradle(
     ...Deno.env.toObject(),
     ANDROID_HOME: androidHome,
     JAVA_HOME: jdkHome, // resolved + compile-verified by findJdk()
+    ...(signed ? { [KEYSTORE_ENV]: signed.keystore } : {}), // absolute
   };
 
   // Generate gradle wrapper — pins version for reproducible builds. 8.14.3
@@ -1042,11 +1385,14 @@ async function _runGradle(
   console.log(`${OK} gradle wrapper (pinned 8.14.3)`);
 
   // Build APK using wrapper
-  const gradleTask = doRelease ? "assembleRelease" : "assembleDebug";
-  console.log(`./gradlew ${gradleTask}...`);
+  // A signed release also writes the bundle (.aab) a store upload takes.
+  const gradleTasks = doRelease
+    ? ["assembleRelease", ...(signed ? ["bundleRelease"] : [])]
+    : ["assembleDebug"];
+  console.log(`./gradlew ${gradleTasks.join(" ")}...`);
   const gradlew = gradlewPath(Deno.build.os, androidDir);
   const gradleResult = await new Deno.Command(gradlew, {
-    args: [gradleTask],
+    args: gradleTasks,
     cwd: androidDir,
     stdout: "inherit",
     stderr: "inherit",
@@ -1090,7 +1436,38 @@ async function _runGradle(
       `\n  This APK is UNSIGNED \u2014 Android will refuse to install it as is.\n` +
         `  aio does not hold your release key. Sign it yourself:\n` +
         `    zipalign -p -f 4 ${label}-unsigned.apk ${label}.apk\n` +
-        `    apksigner sign --ks <your.keystore> ${label}.apk\n`,
+        `    apksigner sign --ks <your.keystore> ${label}.apk\n` +
+        `  or let the build sign it (and write ${label}.aab for a store):\n` +
+        `    ${KEYSTORE_ENV}=<your.keystore> ${KEYSTORE_PASSWORD_ENV}=\u2026 ` +
+        `${KEY_ALIAS_ENV}=\u2026 <this build> --release\n`,
+    );
+  } else if (!doRelease) {
+    // Said, not assumed: this file installs and runs, and no store takes it.
+    console.log(
+      `  debug build \u2014 signed with Android's debug key and debuggable: ` +
+        `for your own devices, not store-ready. A store build is --release ` +
+        `with ${KEYSTORE_ENV} (docs/build/targets.md).`,
+    );
+  }
+  if (signed) {
+    const aab = join(
+      androidDir,
+      "app/build/outputs/bundle/release/app-release.aab",
+    );
+    const aabDst = join(cfg.outDir ?? cfg.root, `${label}.aab`);
+    try {
+      await Deno.copyFile(aab, aabDst);
+    } catch (e) {
+      console.error(
+        `${NO} gradle reported success but wrote no bundle at ${aab} ` +
+          `(${e instanceof Error ? e.message : e})`,
+      );
+      Deno.exit(1);
+    }
+    const aabMb = ((await Deno.stat(aabDst)).size / 1024 / 1024).toFixed(1);
+    console.log(
+      `${OK} ${label}.aab (${aabMb} MB) \u2014 the bundle a store upload takes; ` +
+        `both are signed with your key and not debuggable`,
     );
   }
 }

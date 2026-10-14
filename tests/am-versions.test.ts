@@ -1,4 +1,5 @@
 // Release ordering — which tag is newer, and who gets to decide.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { compareVersions, parseVersion } from "../src/am/am-versions.ts";
 import { compareVersions as compareRaw } from "../src/server/updates-core.ts";

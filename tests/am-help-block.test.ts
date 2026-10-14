@@ -1,5 +1,6 @@
 // `am <cmd> --help` / `am help <cmd>` print THAT command's block, not all ~170
 // lines. Every --help used to route to the full text, whatever came before.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { cmdHelp, HELP_TEXT, helpBlock } from "../src/am/am-cmd-meta.ts";
 import type { GlobalFlags } from "../src/am/am-types.ts";

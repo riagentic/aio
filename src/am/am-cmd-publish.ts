@@ -18,6 +18,7 @@
  *   am publish --key=~/keys/app.json  # …signed (what users' clients require)
  *   am publish --dir=/srv/releases --channel=test --notes="fixes the sync bug"
  *   am publish --no-build             # ship what dist/ already holds
+ *   am publish --patch-from=release   # …plus a patch from the release there
  */
 
 import { join, resolve, SEPARATOR } from "@std/path";
@@ -38,13 +39,20 @@ import {
   kindManifestFileName,
   manifestFileName,
   probeArtifact,
+  type ReleasePatch,
   resolveSigningKey,
   type ShipManifest,
   shipRelease,
 } from "../build/ship.ts";
+import { fileSha256, MB } from "../server/updates-check.ts";
 import { appIdFromConfig } from "../server/single-instance-lock.ts";
 import { readSfxTrailerOfFile } from "../build/sfx-trailer.ts";
 import { count } from "../diagnostics/fmt.ts";
+import { resolveEntryPath } from "../server/paths.ts";
+import {
+  firstUseKeyWarning,
+  updatesKeyOnFirstUse,
+} from "../build/capabilities.ts";
 
 /** What `dist/manifest.json` records — the fleet build's own report. */
 type BuildManifest = {
@@ -175,6 +183,7 @@ const PUBLISH_VALUE_FLAGS: readonly string[] = [
   "--notes",
   "--version",
   "--min-from",
+  "--patch-from",
 ];
 
 /** Ask a Mac-built `.app.tar.gz` its data contract: unpack it and run the
@@ -247,6 +256,116 @@ export function notProbedHere(a: {
   return `the build recorded it as not runnable on the machine that built it`;
 }
 
+/** The patches that turn the release published earlier in each of `dirs`
+ *  into `file` — for the manifest named `manifestName` there (`<dir>/` or
+ *  `<dir>/<channel>/`), written beside where `file` is published as
+ *  `<file>.<digest it starts from>-<digest it makes>.zst`.
+ *
+ *  Made with the `zstd` tool (`--patch-from`, zstd ≥ 1.4.5): publishing may
+ *  need a tool, updating never does. `notes` says, per directory, what was
+ *  made or why nothing was. Throws when a directory given holds no such
+ *  release, when its artifact is not the one its manifest names, or when
+ *  zstd cannot be run — a `--patch-from` that silently made nothing would
+ *  only be noticed as a bandwidth bill.
+ *
+ *  Run BEFORE the new manifest is written: `dirs` may name the very
+ *  directory being published into.
+ *  @internal exported for tests. */
+export async function makePatches(o: {
+  dirs: string[];
+  channel: string;
+  manifestName: string;
+  /** The new artifact, and the directory it is published into. */
+  file: string;
+  into: string;
+}): Promise<{ patches: ReleasePatch[]; notes: string[] }> {
+  const patches: ReleasePatch[] = [];
+  const notes: string[] = [];
+  if (o.dirs.length === 0) return { patches, notes };
+  const name = o.file.split(SEPARATOR).at(-1)!;
+  const size = Deno.statSync(o.file).size;
+  const sha256 = await fileSha256(o.file);
+  for (const dir of o.dirs) {
+    const at = [join(dir, o.manifestName), join(dir, o.channel, o.manifestName)]
+      .find((p) => isFile(p));
+    if (!at) {
+      throw new Error(
+        `--patch-from=${dir}: no ${o.manifestName} in it or in its ` +
+          `${o.channel}/ — give the directory a release of this app was ` +
+          `published into (the --dir= of that publish).`,
+      );
+    }
+    const prev = JSON.parse(await Deno.readTextFile(at)) as Partial<
+      ShipManifest
+    >;
+    const from = String(prev.sha256).toLowerCase();
+    if (["electron-zip", "electron-app", "android"].includes(prev.target!)) {
+      notes.push(
+        `${name}: no patch — a ${prev.target} install is an unpacked ` +
+          `folder with no file to patch; it downloads every release whole`,
+      );
+      continue;
+    }
+    if (from === sha256 || patches.some((p) => p.from === from)) continue;
+    const old = join(at, "..", prev.url ?? "");
+    if (!isFile(old) || await fileSha256(old) !== from) {
+      throw new Error(
+        `--patch-from=${dir}: ${at} names ${prev.url} (sha256 ` +
+          `${from.slice(0, 12)}…), and ${old} is not that file — a patch ` +
+          `from anything else fits no install.`,
+      );
+    }
+    const file = `${name}.${from.slice(0, 12)}-${sha256.slice(0, 12)}.zst`;
+    const out = join(o.into, file);
+    let run: Deno.CommandOutput;
+    try {
+      run = await new Deno.Command("zstd", {
+        args: ["-19", `--patch-from=${old}`, o.file, "-o", out, "-f", "-q"],
+        stdout: "null",
+        stderr: "piped",
+      }).output();
+    } catch (e) {
+      throw new Error(
+        `--patch-from needs the zstd command line tool (1.4.5 or newer) on ` +
+          `PATH, and it could not be started: ${e}`,
+      );
+    }
+    if (!run.success) {
+      throw new Error(
+        `zstd could not make the patch for ${name} (exit ${run.code}): ${
+          new TextDecoder().decode(run.stderr).trim()
+        }`,
+      );
+    }
+    const made = Deno.statSync(out).size;
+    const v = prev.version ?? from.slice(0, 12);
+    if (made * 2 > size) {
+      await Deno.remove(out);
+      notes.push(
+        `${name}: no patch from ${v} — it would be ${MB(made)}, over half ` +
+          `of the whole ${MB(size)}, and an install would not use it`,
+      );
+      continue;
+    }
+    patches.push({
+      from,
+      url: file,
+      size: made,
+      sha256: await fileSha256(out),
+    });
+    notes.push(`${file}  (${MB(made)} instead of ${MB(size)}, from ${v})`);
+  }
+  return { patches, notes };
+}
+
+function isFile(path: string): boolean {
+  try {
+    return Deno.statSync(path).isFile;
+  } catch {
+    return false; // aio-ok: absent — the caller says what is missing
+  }
+}
+
 /** `am publish`. `deps.hostPlatform` is a test seam (a Mac publish on
  *  Linux); every real call takes the default. @internal */
 export async function cmdPublish(
@@ -271,8 +390,8 @@ export async function cmdPublish(
       `am publish takes no arguments (got ${
         stray.map((a) => JSON.stringify(a)).join(" ")
       }) — every setting is a --flag=value: --channel= --dir= --targets= ` +
-        `--target= --key= --notes= --version= --min-from= --data= --no-data ` +
-        `--no-zip`,
+        `--target= --key= --notes= --version= --min-from= --patch-from= --data= ` +
+        `--no-data --no-zip`,
       mode,
     );
   }
@@ -350,7 +469,7 @@ export async function cmdPublish(
   const key = await resolveSigningKey(
     flag("key"),
     build!.app ?? appIdFromConfig(cfg) ?? "app",
-  );
+  ).catch((e) => fail(e instanceof Error ? e.message : String(e), mode));
   const built = (build!.targets ?? []).filter((t) =>
     t.ok !== false && (t.artifacts?.length ?? 0) > 0
   );
@@ -394,6 +513,11 @@ export async function cmdPublish(
   const noData = args.includes("--no-data");
   /** Publish a one-click Windows `.exe` without its `.zip` on purpose. */
   const noZip = args.includes("--no-zip");
+  /** Earlier releases to make patches from — see {@link makePatches}. */
+  const patchFrom = args.filter((a) => a.startsWith("--patch-from=")).map((a) =>
+    resolve(root, a.slice("--patch-from=".length))
+  );
+  const patchNotes: string[] = [];
   for (const t of built) {
     if (only && t.target !== only) continue;
     // A fleet entry can produce COMPANION files beside its program — the
@@ -600,7 +724,18 @@ export async function cmdPublish(
       const probed = p.probe === "app" && !dataFlag && !noData
         ? await probeMacApp(binaryPath)
         : undefined;
+      const patched = await makePatches({
+        dirs: patchFrom,
+        channel,
+        manifestName: p.manifestName ?? manifestFileName(
+          p.platform ?? { os: Deno.build.os, arch: Deno.build.arch },
+        ),
+        file: binaryPath,
+        into: join(outDir, channel),
+      });
+      patchNotes.push(...patched.notes);
       m = await shipRelease({
+        patches: patched.patches,
         binaryPath,
         // The version the BUILD resolved (dist/manifest.json), so the manifest
         // says what the artifact says. A pre-versioning dist/ has none; ship
@@ -684,6 +819,16 @@ export async function cmdPublish(
       `am publish: ✓ signed with ${key.path} (the ship keygen default; --key=<path> picks another)`,
     );
   }
+  // Signed, and the app leaves the key to first use: the one moment the
+  // exact key is in hand, so it is printed ready to paste.
+  const pub = manifests[0]!.publicKey;
+  if (!unsigned && pub) {
+    const entry = resolveEntryPath(cfg);
+    const src = await Deno.readTextFile(join(root, entry)).catch(() => null);
+    if (src !== null && updatesKeyOnFirstUse(src)) {
+      sayErr(`am publish: ⚠ ${firstUseKeyWarning(entry, pub)}`);
+    }
+  }
   // A platform whose installs can never update is said on stderr in every
   // mode — never only inside the JSON.
   if (stranded.length > 0) sayErr(strandedWarning(stranded));
@@ -706,6 +851,10 @@ export async function cmdPublish(
       skipped,
       /** Directory artifacts (a `web` build): deployed as they are. */
       directories,
+      /** `--patch-from`: per manifest, the patches it carries. */
+      patches: shipped.flatMap((x) =>
+        (x.m.patches ?? []).map((p) => join(channel, p.url))
+      ),
       /** Copied beside the manifests for download only — no manifest names
        *  them (a `.dmg`, the Windows `.zip`). */
       downloads: downloads.map((d) => d.file),
@@ -762,6 +911,9 @@ export async function cmdPublish(
     // everything".
     // Say which manifests carry a contract they did not probe for themselves,
     // and — the one that matters — which carry none at all.
+    ...(patchNotes.length > 0
+      ? [`  patches:`, ...patchNotes.map((n) => `    ${n}`), ``]
+      : []),
     ...(stamped.length > 0
       ? [
         `  data contract derived from the host artifact and stamped into: ` +

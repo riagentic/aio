@@ -7,6 +7,7 @@
 // generator's test asserted the wrong specifier as a string. A string match
 // cannot tell a right import from a wrong one; resolving it against the real
 // `exports` map can.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { fromFileUrl, toFileUrl } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";

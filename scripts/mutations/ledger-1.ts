@@ -125,6 +125,37 @@ export const LEDGER_1: readonly Mutation[] = [
   },
   {
     what:
+      'the Android client opens a paired server before its shell holds the address — a kill within a second of pairing brings the app back to "needs its key", and the pairing code is spent',
+    file: "src/build/build-android.ts",
+    find:
+      "      if(native)ask({remember:v}).then(function(){location.href=v});else location.href=v;",
+    replace: "      location.href=v;",
+    test: "tests/baked-server-url.test.ts",
+    filter:
+      "client connect page: the shell holds the address before the server is opened, and what it holds wins at the next launch",
+  },
+  {
+    what:
+      "the Android client ignores the address its shell kept — after a kill the WebView's stale localStorage wins and the pairing is gone",
+    file: "src/build/build-android.ts",
+    find: "      if(r.server){s=r.server;",
+    replace: "      if(0){s=r.server;",
+    test: "tests/baked-server-url.test.ts",
+    filter:
+      "client connect page: the shell holds the address before the server is opened, and what it holds wins at the next launch",
+  },
+  {
+    what:
+      "build.android.strict is set and an own MainActivity.kt that drops the keyed store still builds an APK — the opt-in refusal is only a warning again",
+    file: "src/build/build-android.ts",
+    find: "  if (!strict || !losses.length) return null;",
+    replace: "  if (!losses.length || losses.length) return null;",
+    test: "tests/build-android-own-activity.test.ts",
+    filter:
+      "build.android.strict: off by default the losses only warn; on, any loss refuses the build; a non-boolean is refused by name",
+  },
+  {
+    what:
       "an own MainActivity.kt without the native fetch bridge builds in silence, and nativeFetch() rejects in the shipped APK",
     file: "src/build/build-android.ts",
     find: "    !(/addWebMessageListener\\s*\\(/.test(sources) &&",
@@ -242,6 +273,100 @@ export const LEDGER_1: readonly Mutation[] = [
     test: "tests/pairing-per-app.test.ts",
     filter:
       "pairing: two apps in one process each pair with their OWN code only",
+  },
+  {
+    what:
+      "aio client: a key withheld from a certificate that could not prove is sent by the NEXT connect — the keyless decision lets a keyed request through",
+    file: "src/electron/electron-client-script.ts",
+    find: "(_pinKeyless.get(host) === der && !hasToken(url))",
+    replace: "(_pinKeyless.get(host) === der)",
+    test: "tests/electron-client-generated-eval.test.ts",
+    filter:
+      "aio-client: a key that was withheld is withheld from the NEXT connect too — it asks again, and connects once the server proves",
+  },
+  {
+    what:
+      "aio client, window open: a certificate the pin does not cover is accepted on an answer that is not a proof for it",
+    file: "src/electron/electron-client-script.ts",
+    find:
+      "      if (p.valid && p.der === der) { repin(host, key, p.cert); return true; }",
+    replace:
+      "      if (p.der === der) { repin(host, key, p.cert); return true; }",
+    test: "tests/electron-client-generated-eval.test.ts",
+    filter:
+      "aio-client: a certificate that changes while the window is open is accepted once the server proves — and only then",
+  },
+  {
+    what:
+      "aio client: a changed certificate that did not prove leaves nothing with the pairing — the connect page has no mark to show",
+    file: "src/electron/electron-client-script.ts",
+    find:
+      "  patchRecents(pinnedHost, appKey, { changed: new Date().toISOString() });",
+    replace: "",
+    test: "tests/electron-client-generated-eval.test.ts",
+    filter:
+      "aio-client: a changed certificate that did not prove is kept with the pairing, and the connect page shows it on that recent",
+  },
+  {
+    what:
+      "aio client: an address opened WITHOUT the key (the certificate changed and did not prove) is sent the key by the window's cookie jar",
+    file: "src/electron/electron-client-script.ts",
+    find: "    if (withheld && !hasToken(url)) await dropKeyCookies(win, url);",
+    replace: "",
+    test: "tests/electron-client-generated-eval.test.ts",
+    filter:
+      "aio-client: an address opened WITHOUT the key is not sent it by the window's cookie jar either",
+  },
+  {
+    what:
+      "aio client: the connect page prints a paired recent's address with its ?token=<key>",
+    file: "src/electron/electron-shared.ts",
+    find: "const sub = esc(a.shown || a.host + ':' + a.port);",
+    replace: "const sub = esc(a.url || a.host + ':' + a.port);",
+    test: "tests/electron-client-generated-eval.test.ts",
+    filter:
+      "aio-client: a changed certificate that did not prove is kept with the pairing, and the connect page shows it on that recent",
+  },
+  {
+    what:
+      "aio client, window open: a proof question that got NO answer counts as 'cannot prove' until the client is restarted",
+    file: "src/electron/electron-client-script.ts",
+    find: "    if (unanswered) _pinProving.delete(id);",
+    replace: "",
+    test: "tests/electron-client-generated-eval.test.ts",
+    filter:
+      "aio-client: a certificate that changes while the window is open is accepted once the server proves — and only then",
+  },
+  {
+    what:
+      "aio client: the LAN search probes the limited broadcast only — with a VPN up the LAN is never asked",
+    file: "src/electron/electron-client-script.ts",
+    find: "    for (const to of targets) {",
+    replace: "    for (const to of targets.slice(0, 1)) {",
+    test: "tests/discovery-broadcast-targets.test.ts",
+    filter:
+      "aio-client: a sweep probes every target, and is 'unsent' only when NONE took the probe",
+  },
+  {
+    what:
+      "aio client: an app on this machine is listed once per interface that carried a probe",
+    file: "src/electron/electron-client-script.ts",
+    find: "    const at = (own.has(host) ? '' : host) + ':' + ad.port;",
+    replace: "    const at = host + ':' + ad.port;",
+    test: "tests/discovery-broadcast-targets.test.ts",
+    filter:
+      "aio-client: an app on THIS machine, answering from each of its addresses, is listed once; another machine's is its own",
+  },
+  {
+    what:
+      "discovery: a /31 or /32 interface (a tunnel end) is given a broadcast address — its peer, or itself",
+    file: "src/server/discovery.ts",
+    find:
+      "    if (m[0] === 255 && m[1] === 255 && m[2] === 255 && m[3]! >= 254) continue;",
+    replace: "",
+    test: "tests/discovery-broadcast-targets.test.ts",
+    filter:
+      "discovery targets: no broadcast address is invented for /31, /32, point-to-point or a missing netmask",
   },
   {
     what:
@@ -404,10 +529,11 @@ export const LEDGER_1: readonly Mutation[] = [
     what:
       "a control SOCKET is bound in a directory another local user owns \u2014 chmod on someone else's directory fails with EPERM, and whoever can reach the socket can dispatch methods into the app",
     file: "src/server/single-instance-lock.ts",
-    find: "  return privateDirRefusal(dir, st.mode, st.uid);",
+    find: "  return privateDirRefusal(dir, at.mode, at.uid);",
     replace: "  return null;",
     test: "tests/lock-dir-private.test.ts",
     filter: "a directory we cannot narrow is refused, not used",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -1032,6 +1158,16 @@ export const LEDGER_1: readonly Mutation[] = [
   },
   {
     what:
+      "a sync op its cell's validate REFUSED gets a journal commit like an accepted one — a kill before the row's delete makes the next boot keep it as accepted and ack its author's resend, for an op that is in no state",
+    file: "src/server/aio.ts",
+    find: "    if (hasRejectionFor(action, c)) return;",
+    replace: '    if (hasRejectionFor(action, "")) return;',
+    test: "tests/sync-op-killed-at-settle.test.ts",
+    filter:
+      "sync op REFUSED by validate, killed at its delete (journal 1): the next boot removes it, and the resend is refused — never acked",
+  },
+  {
+    what:
       "the store's reactions stamp stops counting as 'this build's data' — once the journal compacts empty, every boot after the first 1.0.10 boot over 1.0.9 data warns 'last run by an older aio build' again, forever",
     file: "src/server/aio.ts",
     find: "    const ours = await reactionsFormat(asyncDb) !== undefined ||",
@@ -1247,6 +1383,7 @@ export const LEDGER_1: readonly Mutation[] = [
     replace: "if (plan.stop) stopProcess(0);",
     test: "tests/electron-crash-exit.test.ts",
     filter: "electron window dies of SIGTRAP → app exit 1, state saved",
+    os: "linux",
   },
   {
     what:
@@ -1256,6 +1393,7 @@ export const LEDGER_1: readonly Mutation[] = [
     replace: "            if (!plan.crashed && plan.crashed) {",
     test: "tests/electron-crash-exit.test.ts",
     filter: "electron window dies of SIGTRAP → app exit 1, state saved",
+    os: "linux",
   },
   {
     what:
@@ -1289,6 +1427,26 @@ export const LEDGER_1: readonly Mutation[] = [
     test: "tests/journal-owed-saves-all-callers.test.ts",
     filter:
       "owed saves: a stand-in save that failed is `unsaved` at every door, alike",
+  },
+  {
+    what:
+      "a plain client action's failed save is owed to every open async call — a call whose work was saved is told it was not",
+    file: "src/server/aio.ts",
+    find: "        _sureOf.add(action as object);",
+    replace: "        void action;",
+    test: "tests/journal-owed-saves-plain-action.test.ts",
+    filter:
+      "owed saves: a plain client action's failed save is its own — an async call open beside it is not told `unsaved`",
+  },
+  {
+    what:
+      "the CLI client ignores the hello's word that no cfg follows — a call ending in undefined waits and spends a resync (a whole state) to prove it",
+    file: "src/server/cli-client.ts",
+    find: "            if (theirs.cfg === false) {",
+    replace: "            if (theirs.cfg === null) {",
+    test: "tests/wire-cli-client-follows-option.test.ts",
+    filter:
+      "wire option (CLI client): the hello says whether a cfg follows — none follows: nothing waits, nothing is asked",
   },
   {
     what:
@@ -1451,9 +1609,9 @@ export const LEDGER_1: readonly Mutation[] = [
     find:
       // aio-ok: ledger text is SOURCE, matched verbatim — never interpolated
       // aio-ok: ledger text is SOURCE, matched verbatim — never interpolated
-      "    `server is up meanwhile at ${redactUrlToken(electronUrl)} — open it ` +",
+      "      servedWhere(redactUrlToken(electronUrl), socketPath)",
     // aio-ok: ledger text is SOURCE, matched verbatim — never interpolated
-    replace: "    `server is up meanwhile at ${electronUrl} — open it ` +",
+    replace: "      servedWhere(electronUrl, socketPath)",
     test: "tests/no-token-in-logs.test.ts",
     filter:
       "no-token-in-logs: 'Electron not installed' shows the URL without its key",
@@ -2286,6 +2444,7 @@ export const LEDGER_1: readonly Mutation[] = [
     test: "tests/lock-dir-removed-under-create.test.ts",
     filter:
       "lock dir: it is never there wider than 0700, even before the chmod",
+    os: ["darwin", "linux"],
   },
   {
     what: "the lock file is world-readable on filesystems without hard links",
@@ -2294,6 +2453,7 @@ export const LEDGER_1: readonly Mutation[] = [
     replace: "    Deno.openSync(path, { ...how }),",
     test: "tests/single-instance-lock-file-mode.test.ts",
     filter: "lock file mode: 0600 on the no-hard-link fallback",
+    os: ["darwin", "linux"],
   },
   {
     what: "the lock file is world-readable on the normal path",
@@ -2302,6 +2462,7 @@ export const LEDGER_1: readonly Mutation[] = [
     replace: "    Deno.openSync(path, { ...how }),",
     test: "tests/single-instance-lock-file-mode.test.ts",
     filter: "lock file mode: 0600 on the hard-link path",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -2312,6 +2473,7 @@ export const LEDGER_1: readonly Mutation[] = [
     test: "tests/lock-start-epoch-tz.test.ts",
     filter:
       "processStartEpoch: lstart is asked for in UTC — exact to the second from any reader's zone",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -2406,6 +2568,7 @@ export const LEDGER_1: readonly Mutation[] = [
     test: "tests/am-exit-code-sweep.test.ts",
     filter:
       "am exit-code sweep: on a terminal, nothing reads as success after the error (one verb per class)",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -2486,11 +2649,12 @@ export const LEDGER_1: readonly Mutation[] = [
     what:
       "a lock folder of ours that is already there wider than 0700 is refused as not owner-only instead of narrowed — every start warns, and the lock and control socket leave the shared folder for the uid sibling",
     file: "src/server/single-instance-lock.ts",
-    find: 'if (Deno.build.os !== "windows") chmod(dir, 0o700);',
-    replace: "void chmod;",
+    find: "      (ops.chmod ?? Deno.chmodSync)(dir, 0o700);",
+    replace: "      void ops.chmod;",
     test: "tests/lock-dir-choose.test.ts",
     filter:
       "_chooseLockDir: the shared dir when private, the uid sibling when not, a refusal when neither",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -2501,6 +2665,7 @@ export const LEDGER_1: readonly Mutation[] = [
     replace: "Deno.writeTextFileSync(tmp, text, { createNew: true });",
     test: "tests/journal-compaction-perms.test.ts",
     filter: "journal: compaction keeps the file owner-only (0600)",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -2920,6 +3085,7 @@ export const LEDGER_1: readonly Mutation[] = [
     filter:
       'hosts: electron (packaged AppImage) — persist:"none" never kept, last write drained',
     env: { AIO_BUILD_E2E: "1", AIO_BUILD_ELECTRON: "1" },
+    os: "linux",
   },
   {
     what:
@@ -2933,6 +3099,7 @@ export const LEDGER_1: readonly Mutation[] = [
     filter:
       'hosts: electron (packaged AppImage) — persist:"none" never kept, last write drained',
     env: { AIO_BUILD_E2E: "1", AIO_BUILD_ELECTRON: "1" },
+    os: "linux",
   },
   {
     what:
@@ -2944,6 +3111,7 @@ export const LEDGER_1: readonly Mutation[] = [
     filter:
       'hosts: electron (packaged AppImage) — persist:"none" never kept, last write drained',
     env: { AIO_BUILD_E2E: "1", AIO_BUILD_ELECTRON: "1" },
+    os: "linux",
   },
   {
     what:
@@ -3201,6 +3369,7 @@ export const LEDGER_1: readonly Mutation[] = [
     test: "tests/dev-restart-race-one-process.test.ts",
     filter:
       "dev restart: a relaunched child killed by SIGKILL leaves its lock, so the next run says it did not shut down cleanly",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -3711,6 +3880,36 @@ export const LEDGER_1: readonly Mutation[] = [
     test: "tests/uds-unmatched-subs-sends-nothing.test.ts",
     filter:
       "uds: a round with no patch in a client's subscriptions sends it nothing",
+  },
+  {
+    what:
+      "a socket whose network went away without a close event is never treated as lost: no Reconnecting, calls written into the void",
+    file: "src/browser/browser-air-transport.ts",
+    find: "{ reach: _serverAnswersHttp, onDead },",
+    replace: "undefined,",
+    test: "tests/air-transport-silent-socket.test.ts",
+    filter:
+      "silent socket: the network is gone → the close path runs; no call lost, none sent twice",
+  },
+  {
+    what:
+      "a connection that never answered a ping (vitals off, an older peer) is judged dead for its silence and closed",
+    file: "src/browser/browser-vitals.ts",
+    find: "  if (!_ponged) return null;\n",
+    replace: "",
+    test: "tests/air-transport-silent-socket.test.ts",
+    filter:
+      "silent socket: a connection that never answered a ping is never judged",
+  },
+  {
+    what:
+      "heartbeat pings still held by the send pacer count as unanswered, so a paced burst closes a healthy socket",
+    file: "src/browser/browser-air-transport.ts",
+    find: "(raw) => _sendRaw(raw) && _openPacer()?.length === 0,",
+    replace: "(raw) => _sendRaw(raw),",
+    test: "tests/air-transport-silent-socket.test.ts",
+    filter:
+      "silent socket: a ping the pacer still holds is no evidence of silence",
   },
   {
     what:
@@ -4256,10 +4455,8 @@ export const LEDGER_1: readonly Mutation[] = [
     what:
       "am fix is ungated again so a mistyped flag like --dry runs the real mutating repair",
     file: "src/am/am-flags.ts",
-    find:
-      '  fix: ["--dry-run", "--check", "--no-download", "--migrate-tasks", "--aio"],',
-    replace:
-      '  fixUngated: ["--dry-run", "--check", "--no-download", "--migrate-tasks", "--aio"],',
+    find: '  fix: [\n    "--dry-run",',
+    replace: '  fixUngated: [\n    "--dry-run",',
     test: "tests/am-dropped-input-r2.test.ts",
     filter: "am fix: a mistyped flag is refused, never a real repair",
   },
@@ -4545,8 +4742,9 @@ export const LEDGER_1: readonly Mutation[] = [
     find: "      if (c !== d || seen.has(c)) return false;",
     replace: "      if (seen.has(c)) return false;",
     test: "tests/air-lifecycle-differential.test.ts",
-    filter:
-      "lifecycle differential: mount + self re-renders keep the document, the instances and the subscriptions true",
+    // Since the fuzzer learnt to reparent and re-kind (1.0.20), the default
+    // seed meets this one through SSR + hydrate, not through a plain mount.
+    filter: "lifecycle differential: the same through SSR + hydrate",
   },
   {
     what:
@@ -4944,6 +5142,7 @@ export const LEDGER_1: readonly Mutation[] = [
     test: "tests/spawn-survivor-group-reaped.test.ts",
     filter:
       "spawn: a grandchild outliving its exited parent stays tracked and killAllSpawned reaps it",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -4954,6 +5153,7 @@ export const LEDGER_1: readonly Mutation[] = [
     test: "tests/spawn-survivor-group-reaped.test.ts",
     filter:
       "spawn: kill() escalates to SIGKILL for a TERM-ignoring grandchild even after the parent died",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -5482,6 +5682,7 @@ export const LEDGER_1: readonly Mutation[] = [
     test: "tests/spawn-group-gone.test.ts",
     filter:
       "spawn group gone: a group holding only a zombie is forgotten and kill() is prompt",
+    os: "linux",
   },
   {
     what:
@@ -6391,11 +6592,33 @@ export const LEDGER_1: readonly Mutation[] = [
     what:
       "the android local-assets step stops warning that a packaged APK never runs app.ts so its aio.run options are silently dropped",
     file: "src/build/build-android.ts",
-    find: "  await _warnRunOptions(cfg);\n",
-    replace: "  await Promise.resolve(cfg);\n",
+    find: "  if (w) warn(w.headline, w.body, w.fix);\n",
+    replace: "  void w;\n",
     test: "tests/android-run-options-warning.test.ts",
     filter:
       "android build: the local-assets step warns about the scaffold's ui.theme",
+  },
+  {
+    what:
+      "the standalone boot ignores the run options the build baked — persist:false in app.ts is restored and saved on the phone anyway",
+    file: "src/standalone-air.ts",
+    find: "    const baked = _bakedRunOptions() ?? {};",
+    replace:
+      "    const baked: ReturnType<typeof _bakedRunOptions> & object = {};",
+    test: "tests/android-bake-run-options.test.ts",
+    filter:
+      "bake: the standalone boot honours the baked options — and never at the price of state an install already holds",
+  },
+  {
+    what:
+      "the baked run options reach the boot whole — a persistKey or appId in them moves a shipped app's store and its saved data is never read",
+    file: "src/standalone-air.ts",
+    find: '  if (!o || typeof o !== "object") return {};\n  return {\n',
+    replace:
+      '  if (!o || typeof o !== "object") return {};\n  return {\n    ...(o as object),\n',
+    test: "tests/android-bake-run-options.test.ts",
+    filter:
+      "bake: the standalone boot honours the baked options — and never at the price of state an install already holds",
   },
   {
     what:
@@ -6511,6 +6734,7 @@ export const LEDGER_1: readonly Mutation[] = [
     test: "tests/am-creds-follow-instance-home.test.ts",
     filter:
       "amui by pid: a zero-port profile instance is shown ITS OWN keys over its socket",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -6521,6 +6745,7 @@ export const LEDGER_1: readonly Mutation[] = [
     test: "tests/am-creds-follow-instance-home.test.ts",
     filter:
       "amui by pid: a zero-port profile instance is shown ITS OWN keys over its socket",
+    os: ["darwin", "linux"],
   },
   {
     what:
@@ -6571,5 +6796,787 @@ export const LEDGER_1: readonly Mutation[] = [
     test: "tests/am-instances-listening-both-wires.test.ts",
     filter:
       "am instances: LISTENING shows the TCP port AND the socket when an app has both",
+  },
+  // the lock dir: one look, a chosen path, a sentinel per watcher
+  {
+    what:
+      "a lock dir planted as somebody else's symbolic link is followed — the app's lock and control socket go where another local user points them",
+    file: "src/server/single-instance-lock.ts",
+    find: "    if (me !== null && known(entry.uid) && entry.uid !== me) {",
+    replace: "    if (me === null) {",
+    test: "tests/lock-dir-one-look.test.ts",
+    filter:
+      "lock dir: a planted link is refused WITHOUT its target being chmodded",
+    os: ["darwin", "linux"],
+  },
+  {
+    what:
+      "the lock dir is looked at a second time by path — a directory swapped for a link after the first look is followed to a private directory of ours and accepted",
+    file: "src/server/single-instance-lock.ts",
+    find: "  return privateDirRefusal(dir, at.mode, at.uid);",
+    replace:
+      "  return privateDirRefusal(\n    dir,\n    Deno.statSync(dir).mode,\n    Deno.statSync(dir).uid,\n  );",
+    test: "tests/lock-dir-one-look.test.ts",
+    filter:
+      "lock dir: a directory swapped for a link after the look is not looked at again",
+    os: ["darwin", "linux"],
+  },
+  {
+    what:
+      "a lock dir replaced while a file is created in it is kept — the app's record or control socket stays in a directory another local user owns",
+    file: "src/server/single-instance-lock.ts",
+    find: "  const why = lockDirMoved(dirname(path));",
+    replace: "  const why = null as string | null;",
+    test: "tests/lock-dir-one-look.test.ts",
+    filter:
+      "create in the lock dir: a dir replaced under the create is refused and what was made removed; one a sibling made again is kept",
+    os: ["darwin", "linux"],
+  },
+  {
+    what:
+      "any directory named aio gets the lock dir's rules — a caller's socket directory is chmodded 0700 and the reverse proxy that reached it through the group is cut off",
+    file: "src/server/single-instance-lock.ts",
+    find: "  return _lockDeps.chosen.has(dir) || dir === lockDir();",
+    replace:
+      "  return _lockDeps.chosen.has(dir) || dir === lockDir() ||\n    /^aio(-u\\d+)?$/.test(basename(dir));",
+    test: "tests/lock-dir-is-a-chosen-path.test.ts",
+    filter:
+      "a caller's directory named aio: made 0700 when it is missing, never chmodded when it is there",
+    os: ["darwin", "linux"],
+  },
+  {
+    what:
+      "a create whose lock dir a sibling's exit pruned is not tried again — an app's start fails because another app quit",
+    file: "src/server/single-instance-lock.ts",
+    find:
+      "  const gone = dirGone(e) || (_lockDeps.windows() && isHeldOpenError(e));",
+    replace: "  const gone = dirGone(e) && e === null;",
+    test: "tests/lock-dir-stress.test.ts",
+    filter:
+      "lock dir: processes making and pruning one scoped dir — no create fails",
+  },
+  {
+    what:
+      "the lock dir of an apps root is not named as 1.0.19 named it — an app pinned to it and an `am` on this build look in two dirs: no single-instance refusal, `am` says not running",
+    file: "src/server/single-instance-lock.ts",
+    find: '      .slice(-48)\n    : "";',
+    replace: '      .slice(-40)\n    : "";',
+    test: "tests/lock-dir-scope-of-a-root.test.ts",
+    filter: "lock dir scope: every root has the name 1.0.19 gave it",
+  },
+  {
+    what:
+      "the peer listener's lock dir is looked at before its socket is bound — a dir replaced before the bind keeps the app's control socket where another local user put it",
+    file: "src/server/single-instance-lock.ts",
+    find: "        bound: () => holdLockDir(path, () => removeIfSocket(path)),",
+    replace: "        bound: () => {},",
+    test: "tests/lock-dir-held-after-bind.test.ts",
+    filter:
+      "socket in the lock dir: the peer listener's dir is looked at once its socket IS bound — replaced before the bind, it is refused",
+    os: ["darwin", "linux"],
+  },
+  {
+    what:
+      "a lock dir that is gone right after a file was created in it reads as pruned — the name was taken away with the app's record or socket behind it, and nothing is said",
+    file: "src/server/single-instance-lock.ts",
+    find:
+      // aio-ok: the enforcing line's own source text, template and all
+      "    if (e instanceof Deno.errors.NotFound) return `${dir} is no longer there`;",
+    replace: "    if (e instanceof Deno.errors.NotFound) return null;",
+    test: "tests/lock-dir-held-after-bind.test.ts",
+    filter:
+      "create in the lock dir: a dir that is GONE right after a successful create was replaced, not pruned",
+    os: ["darwin", "linux"],
+  },
+  {
+    what:
+      "with no uid to read, a lock dir that is a symbolic link is chmodded — through the link, narrowing whatever directory it was pointed at",
+    file: "src/server/single-instance-lock.ts",
+    find: "  const blind = me === null && !entry.isSymlink;",
+    replace: "  const blind = me === null;",
+    test: "tests/lock-dir-no-uid.test.ts",
+    filter:
+      "lock dir: with no uid (no --allow-sys) a wide directory is narrowed and used; a link is not chmodded; a swapped entry is refused",
+    os: ["darwin", "linux"],
+  },
+  {
+    what:
+      "a lock with no start token whose live pid cannot be identified passes check:orphans with one printed line — an app left running goes through the gate",
+    file: "scripts/check-orphans.ts",
+    find:
+      '              (who.is === "stranger" ? unverified : unidentified).push(',
+    replace: "              unverified.push(",
+    test: "tests/check-orphans-unidentified.test.ts",
+    filter:
+      "check-orphans: a tokenless lock naming a live pid that cannot be identified fails the gate, unsignalled",
+    os: ["darwin", "linux"],
+  },
+  {
+    what:
+      "the log of a one-file run is recorded as proof that the whole suite passed on another OS",
+    file: "scripts/proof-record.ts",
+    find: '  if (suite !== "full") {',
+    replace: '  if (suite === "") {',
+    test: "tests/proof-record-binding.test.ts",
+    filter:
+      "update:proof — a partial run, a headerless log, another OS or another commit is refused",
+  },
+  {
+    what:
+      "a waiter that locked an unlinked mutex file takes the new file at the path for it when their numbers collide (Windows) — two processes inside the lock mutex, and two apps on one state.db",
+    file: "src/server/single-instance-lock.ts",
+    find: "  if (mine.nlink === 0 && at.nlink !== 0) return false;",
+    replace: "  if (mine.nlink === 0 && at.nlink === -1) return false;",
+    test: "tests/lock-mutex-same-file.test.ts",
+    filter:
+      "lock mutex: a locked file with no name left is not the mutex, whatever its number says",
+  },
+  {
+    what:
+      "on a filesystem that counts no links every live mutex file reads as unlinked — taking a project's pid lock loops forever",
+    file: "src/server/single-instance-lock.ts",
+    find: "  if (mine.nlink === 0 && at.nlink !== 0) return false;",
+    replace: "  if (mine.nlink === 0) return false;",
+    test: "tests/lock-mutex-same-file.test.ts",
+    filter:
+      "lock mutex: on a filesystem that counts no links a live mutex file is still the mutex",
+  },
+  {
+    what:
+      "two watchers in one process share one sentinel — the first's stop removes the file the second still touches, and live reload dies a minute later",
+    file: "src/server/server-watcher.ts",
+    find:
+      "      for (sentinelNo = 0; _sentinels.has(sentinelNo);) sentinelNo++;",
+    replace: "      sentinelNo = 0;",
+    test: "tests/watcher-two-in-one-process.test.ts",
+    filter:
+      "watcher sentinel: two watchers in one process each keep their own, and one's stop leaves the other's",
+  },
+  {
+    what:
+      "a record's temp is judged by a pid from another pid namespace — the host removes a container's installed.json write in flight, and its rename fails",
+    file: "src/server/install-record.ts",
+    find:
+      "    if (ours ? m[3] !== undefined : !taggedOwnerGone(file, pid, m[2])) continue;",
+    replace: "    if (ours && m[3] !== undefined) continue;",
+    test: "tests/install-record-written-whole.test.ts",
+    filter:
+      "installed.json: the next write removes a dead writer's temp, and no live one's",
+  },
+  {
+    what:
+      "an installed.json that is a symbolic link is replaced by a regular file — the file it named goes stale and whatever reads that one sees the old version",
+    file: "src/server/install-record.ts",
+    find: "  const file = await throughLink(path);",
+    replace: "  const file = await Promise.resolve(path);",
+    test: "tests/install-record-written-whole.test.ts",
+    filter:
+      "installed.json: a record that is a symbolic link is written through it",
+  },
+  {
+    what:
+      "a write of installed.json takes the temp's mode — a record the user kept owner-only becomes readable by every local user",
+    file: "src/server/install-record.ts",
+    find: "    if (mode !== null) await Deno.chmod(tmp, mode);",
+    replace: "    void mode;",
+    test: "tests/install-record-written-whole.test.ts",
+    filter: "installed.json: the record keeps its mode across a write",
+    os: ["darwin", "linux"],
+  },
+  {
+    what:
+      "an installed.json another program holds open on Windows fails the write — an update that worked reports the old version until fixed by hand",
+    file: "src/server/install-record.ts",
+    find: "      await Deno.writeTextFile(file, text);",
+    replace: "      await Deno.writeTextFile(tmp, text);",
+    test: "tests/install-record-written-whole.test.ts",
+    filter:
+      "installed.json: a record held open on Windows is written in place, said once, and no temp is left",
+  },
+  {
+    what:
+      "a session that expires mid-burst is closed from inside the frame's handler — the peer never receives 1008 'session revoked', so the tab says Reconnecting… for ever instead of signed out",
+    file: "src/server/server-ws.ts",
+    find: '    _closeAfterRead(socket, meta, 1008, "session revoked");',
+    replace:
+      '    try { socket.close(1008, "session revoked"); } catch { /* closed */ }',
+    test: "tests/ws-session-dies-mid-burst.test.ts",
+    filter:
+      "session expiry mid-burst: the peer hears 1008 'session revoked', the server says it once, and nothing sent after it runs",
+  },
+  {
+    what:
+      "frames already read behind the one that found the session dead are dispatched — as the user whose session had just ended",
+    file: "src/server/server-ws.ts",
+    find: "    if (meta.closing) {",
+    replace: "    if (meta.closing && Number.isNaN(0)) {",
+    test: "tests/ws-session-dies-mid-burst.test.ts",
+    filter:
+      "session expiry mid-burst: the peer hears 1008 'session revoked', the server says it once, and nothing sent after it runs",
+  },
+  {
+    what:
+      "an archive kept from an earlier try of an update is unpacked and installed without being verified again against the signed manifest",
+    file: "src/server/updates-runtime.ts",
+    find: "      (await verifyDownload(download, m, expectations())).ok;",
+    replace: "      true;",
+    test: "tests/updates-e2e.test.ts",
+    filter:
+      "updates e2e: a second try of a .zip release uses the archive kept from the first — verified again, never trusted",
+  },
+  {
+    what:
+      "an async body's write is named by the scope it was dispatched in — a write a shared queue runs from another call's continuation is owed to that call, and its author is acked as saved",
+    file: "src/server/aio.ts",
+    find: "            _callBorn.set(a as object, call);",
+    replace: "            void call;",
+    test: "tests/journal-owed-saves-whose-write.test.ts",
+    filter:
+      "owed saves: an async body's write is its own call's, whoever's continuation runs it — no call whose write's save failed is told it was saved",
+  },
+  {
+    what:
+      "a failed save of a nested call a shared queue ran from another call's continuation is owed only to that other call — the author is acked as saved",
+    file: "src/server/aio.ts",
+    find:
+      "      const calls = _sureOf.has(a) ? [call] : new Set([call, ..._openCalls]);",
+    replace: "      const calls = [call];",
+    test: "tests/journal-owed-saves-whose-write.test.ts",
+    filter:
+      "owed saves: under any interleaving, no call whose write's save failed is told it was saved — a write, or a nested call, a shared queue runs from another call's continuation included",
+  },
+  {
+    what:
+      "am stop under one AIO_APPS_DIR stops the app of another root that shares its lock folder name",
+    file: "src/am/am-cmd-process.ts",
+    find: "  if (otherRoot) return { ok: false, appId, error: otherRoot };",
+    replace:
+      "  if (otherRoot && Number.isNaN(0)) return { ok: false, appId, error: otherRoot };",
+    test: "tests/am-other-apps-root.test.ts",
+    filter:
+      "other apps root: am under one root lists the other root's app marked, and refuses to stop, kill, restart or write to it — its own root does all of it",
+  },
+  {
+    what:
+      "am kill under one AIO_APPS_DIR kills the app of another root that shares its lock folder name",
+    file: "src/am/am-cmd-process.ts",
+    find:
+      '    const foreign = foreignOwnerRefusal(pf) ?? otherRootRefusal("kill", pf);',
+    replace: "    const foreign = foreignOwnerRefusal(pf);",
+    test: "tests/am-other-apps-root.test.ts",
+    filter:
+      "other apps root: am under one root lists the other root's app marked, and refuses to stop, kill, restart or write to it — its own root does all of it",
+  },
+  {
+    what:
+      "am dispatch under one AIO_APPS_DIR writes into the app of another root that shares its lock folder name",
+    file: "src/am/am-http.ts",
+    find: "  if (other) return { ok: false, error: other };",
+    replace:
+      "  if (other && Number.isNaN(0)) return { ok: false, error: other };",
+    test: "tests/am-other-apps-root.test.ts",
+    filter:
+      "other apps root: am under one root lists the other root's app marked, and refuses to stop, kill, restart or write to it — its own root does all of it",
+  },
+  {
+    what:
+      "am state, surface and timeline under one AIO_APPS_DIR answer about another root's app without saying whose answer it is",
+    file: "src/am/am-http.ts",
+    find: "  sayOtherRoot(lockForPort(appId, port, pid));",
+    replace: "  void lockForPort(appId, port, pid);",
+    test: "tests/am-other-apps-root.test.ts",
+    filter:
+      "other apps root: am under one root lists the other root's app marked, and refuses to stop, kill, restart or write to it — its own root does all of it",
+  },
+  {
+    what:
+      "testUI handle form: a rejection that lost its class on the wire is never said — a failing check on it names nothing",
+    file: "src/testing/ui-test.ts",
+    find: "    _handleForm = name === undefined;",
+    replace: "    _handleForm = false;",
+    test: "tests/wire-harness-differential.test.tsx",
+    filter:
+      "wire differential: the handle form says what a rejection lost on the wire, once — the wrapper form keeps it for the failure",
+  },
+  {
+    what:
+      "a package the compile itself installs (a linked framework's own pinned happy-dom) is in the FIRST binary and in no later one — the build is not compiled again once it is on disk",
+    file: "src/build/build-compile.ts",
+    find: "    if (late.length === 0) return true;",
+    replace: "    if (late.length >= 0) return true;",
+    test: "tests/build-e2e.test.ts",
+    filter:
+      "artifact: a cross build carries the target's native package only, and the SECOND build carries what the first did",
+    env: { AIO_BUILD_E2E: "1" },
+  },
+  {
+    what:
+      "icon: the one-click Windows exe is packed from the bare stub — the download shows Windows' blank default icon",
+    file: "src/build/build-windows-exe.ts",
+    find: "      stubPath: ico ? iconStubPath : stubPath,",
+    replace: "      stubPath,",
+    test: "tests/pe-icon.test.ts",
+    filter:
+      "the one-click exe wears the staged app.ico, and its payload is found as before — signed too",
+  },
+  {
+    what:
+      "icon: a stub that refused the icon is not packed as it is — the build reads a copy that was never written and stops",
+    file: "src/build/build-windows-exe.ts",
+    find: "  if (noIcon) {\n    ico = null;",
+    replace: "  if (noIcon) {",
+    test: "tests/pe-icon.test.ts",
+    filter:
+      "a stub that cannot take an icon is packed untouched, and the build says so in one line",
+  },
+  {
+    what:
+      "icon: an exe that already has resources gets a second resource section — a broken PE instead of a refusal",
+    file: "src/build/pe-icon.ts",
+    find: "  if (v.getUint32(dirs + RESOURCE * 8, true) !== 0) {",
+    replace: "  if (false) {",
+    test: "tests/pe-icon.test.ts",
+    filter:
+      "peWithIcon refuses, with the reason, every exe it could break — and never throws",
+  },
+  {
+    what:
+      "icon: a 1024 px icon.png is not scaled down — the Windows exe shows the generated monogram instead of the app's icon",
+    file: "src/build/build-helpers.ts",
+    find: '    const cut = square ? await icoFromLargePng(png) : "";',
+    replace: '    const cut = "";',
+    test: "tests/png-scale.test.ts",
+    filter:
+      "a 1024 px icon.png becomes the Windows icon, scaled down — not the monogram, and no warning",
+  },
+  {
+    what:
+      "updates: a kept download whose bytes changed is REMOVED instead of moved aside — on NTFS it can be somebody's file under the same identity",
+    file: "src/server/updates-owned.ts",
+    find: "  Deno.renameSync(path, at);\n  forget(dataDir, path);",
+    replace: "  Deno.removeSync(path);\n  forget(dataDir, path);",
+    test: "tests/updates-abandoned-downloads.test.ts",
+    filter:
+      "downloads: a download of ours with other bytes is moved aside, whole — and nothing else under its name is touched",
+  },
+  {
+    what:
+      "updates: a changed kept download is moved onto a name that is taken — whatever was there is replaced",
+    file: "src/server/updates-owned.ts",
+    find: "  for (let n = 2; exists(at); n++) at = `${path}~damaged-${n}`;", // aio-ok: the literal SOURCE line this mutation patches in and out
+    replace: "  for (let n = 2; n < 2; n++) at = `${path}~damaged-${n}`;", // aio-ok: the literal SOURCE line this mutation patches in and out
+    test: "tests/updates-abandoned-downloads.test.ts",
+    filter:
+      "downloads: a download of ours with other bytes is moved aside, whole — and nothing else under its name is touched",
+  },
+  {
+    what:
+      "updates: somebody's file under a kept download's name is moved aside as if it were the updater's own",
+    file: "src/server/updates-owned.ts",
+    find:
+      "  if (!e || identity(path) !== e.is || sumOf(path) === e.sum) return null;",
+    replace: "  if (!e || sumOf(path) === e.sum) return null;",
+    test: "tests/updates-abandoned-downloads.test.ts",
+    filter:
+      "downloads: a download of ours with other bytes is moved aside, whole — and nothing else under its name is touched",
+    os: ["linux", "darwin"],
+  },
+  {
+    what:
+      "updates: a kept archive damaged where it lies refuses its release as in the way until it is removed by hand",
+    file: "src/server/updates-runtime.ts",
+    find: "    const damaged = setAsideChanged(deps.dataDir, download);",
+    replace: "    const damaged = null as ReturnType<typeof setAsideChanged>;",
+    test: "tests/updates-e2e.test.ts",
+    filter:
+      "updates e2e: a second try of a .zip release uses the archive kept from the first — verified again, never trusted",
+  },
+  {
+    what:
+      "updates: a download renamed onto a name removed seconds ago (NTFS hands it that name's creation time) is no longer the updater's — in the way of its own release for good",
+    file: "src/server/updates-check.ts",
+    find: "    if (opts.owner) moved(opts.owner, opts.dest);",
+    replace: "",
+    test: "tests/updates-abandoned-downloads.test.ts",
+    filter:
+      "downloads: a download whose creation time changes in the rename to its name is still the updater's — by its bytes, and only by them",
+  },
+  {
+    what:
+      "updates: whatever is at a download's name after its rename goes on the record as the updater's — other bytes too",
+    file: "src/server/updates-owned.ts",
+    find: "    e.sum === undefined || sumOf(path) !== e.sum\n  ) return;",
+    replace: "    e.sum === undefined\n  ) return;",
+    test: "tests/updates-abandoned-downloads.test.ts",
+    filter:
+      "downloads: a download whose creation time changes in the rename to its name is still the updater's — by its bytes, and only by them",
+  },
+  {
+    what:
+      "updates: a single-file install's failed swap is not counted — its verified download is removed at the next start and fetched again",
+    file: "src/server/updates-runtime.ts",
+    find: "        if (isOwn(deps.dataDir, staged)) {",
+    replace: "        if (!isOwn(deps.dataDir, staged)) {",
+    test: "tests/updates-patch.test.ts",
+    filter:
+      "updates e2e: a single-file release whose swap failed is not fetched again after a restart either — up to MAX_FAILED_SWAPS failures",
+    os: ["linux", "darwin"],
+  },
+  {
+    what:
+      "updates: a start keeps only a directory install's archive — a single-file install's kept download is swept as a leftover",
+    file: "src/server/updates-boot.ts",
+    find: '        keep = `${install}.${here ? "zip" : "new"}-${again.to}`;', // aio-ok: the literal SOURCE line this mutation patches in and out
+    replace: "        keep = `${install}.zip-${again.to}`;", // aio-ok: the literal SOURCE line this mutation patches in and out
+    test: "tests/updates-patch.test.ts",
+    filter:
+      "updates e2e: a single-file release whose swap failed is not fetched again after a restart either — up to MAX_FAILED_SWAPS failures",
+    os: ["linux", "darwin"],
+  },
+  {
+    what:
+      "assets: a mount deno.json alone declares takes its prefix over — the app's own file at that path is no longer the bytes 1.0.19 served",
+    file: "src/server/server-static.ts",
+    find: "      if (appHas) break;",
+    replace: "",
+    test: "tests/assets-denojson-mount-order.test.ts",
+    filter:
+      "assets order (dev): a deno.json-only mount fills in — the app's own file at that path is still the app's, and \"/\" takes nothing over",
+  },
+  {
+    what:
+      'assets: the server hands deno.json\'s mounts to the static handler as claiming ones — `"/": "./public"` answers every path and the dev page loads none of its modules',
+    file: "src/server/server.ts",
+    find: "    assetsFill: _mountsDenoJsonOnly(config.assets, _served),",
+    replace: "",
+    test: "tests/assets-denojson-mount-order.test.ts",
+    filter:
+      "assets order: a real server — a route answers before a deno.json-only mount, the app's file before it, the mount where both were 404",
+  },
+  {
+    what:
+      "served worker: the build finds a worker script no artifact carries and does not say it — the Worker's error event in the binary is the first word",
+    file: "src/build/build-bundle.ts",
+    find:
+      "      for (const [headline, fix] of notes) warn(headline, undefined, fix);",
+    replace: "",
+    test: "tests/browser-worker-served.test.ts",
+    filter:
+      "build: a worker script of the app's folder is named by the build that will not carry it — a warning, exit 0; the tree build and the mounted script say nothing",
+  },
+  {
+    what:
+      "served worker: a script compile.include carries is still reported missing from the binary — a warning on correct code, which gets muted",
+    file: "src/build/build-bundle.ts",
+    find: '        return rel === inc || rel.startsWith(inc + "/");',
+    replace: "        return false;",
+    test: "tests/browser-worker-served.test.ts",
+    filter:
+      "servedWorkerNotes: says what THIS artifact does not carry — and nothing about what it carries or cannot see",
+  },
+  {
+    what:
+      "unmanaged worker: a `.js` named from a module in another folder than the bundle's is no longer reported — dev asks for one file, the build for another, silently",
+    file: "src/server/graph-validator.ts",
+    find: "      resolve(hostPath.dirname(file)) === resolve(appDir)",
+    replace: "      true",
+    test: "tests/browser-worker-served.test.ts",
+    filter:
+      "unmanagedWorkers: a `.js` named beside the bundle is the same request in dev and in a build — not reported; from another folder it is",
+  },
+  {
+    what:
+      "the login endpoint's refusal code and the sign-in form's wording drift apart — a wrong password typed into the mounted form shows a raw code",
+    file: "src/server/auth-flows.ts",
+    find:
+      '        // budget may refuse.\n        if (authFailBudgetExceeded(clientKey)) {\n          return json(429, { error: "too_many_attempts" });\n        }\n        return json(401, { error: "invalid_credentials" });',
+    replace:
+      '        // budget may refuse.\n        if (authFailBudgetExceeded(clientKey)) {\n          return json(429, { error: "too_many_attempts" });\n        }\n        return json(401, { error: "bad_credentials" });',
+    test: "tests/auth-login-joined.test.tsx",
+    filter:
+      "login, joined: the form signs up, in and out against the real endpoints — cookie carried, each side reading what the other sent",
+  },
+  {
+    what:
+      "testUI: a form whose submit handler reads it with new FormData(form) cannot be submitted — a sign-in form has no in-process driver",
+    file: "src/testing/ui-test.ts",
+    find: "      globalThis.FormData = TestFormData;\n",
+    replace: "      void TestFormData;\n",
+    test: "tests/auth-login-joined.test.tsx",
+    filter:
+      "login, joined: the form signs up, in and out against the real endpoints — cookie carried, each side reading what the other sent",
+  },
+  {
+    what:
+      "testPageFetch drops the cookie the server sets — the mount after a sign-in is anonymous",
+    file: "src/testing/server-test.ts",
+    find: "      } else cookies.set(name, value);",
+    replace: "      }",
+    test: "tests/auth-login-joined.test.tsx",
+    filter:
+      "login, joined: the form signs up, in and out against the real endpoints — cookie carried, each side reading what the other sent",
+  },
+  {
+    what:
+      "testPageFetch sends the session cookie to every origin a component fetches",
+    file: "src/testing/server-test.ts",
+    find: "    if (target.origin !== origin) return await real(url, init);",
+    replace: '    if (target.origin === "") return await real(url, init);',
+    test: "tests/auth-login-joined.test.tsx",
+    filter:
+      "testPageFetch: cookies go to their own server only, and the fetch it replaced comes back",
+  },
+  {
+    what:
+      "a ref of an element that was never built is told null at teardown — a detach nothing preceded, and a shared ref loses a node still on the page",
+    file: "src/air/vdom-remove.ts",
+    find:
+      '  if (typeof vnode.tag === "string" && vnode.props.ref && vnode._dom) {',
+    replace: '  if (typeof vnode.tag === "string" && vnode.props.ref) {',
+    test: "tests/air-portal-teardown-one-decider.test.ts",
+    filter:
+      "portal teardown: a portal that never mounted takes nothing out of its target — unmount",
+  },
+  {
+    what:
+      "a boundary that is its parent's last child reports a correct fallback as a text that will stay on the page forever",
+    file: "src/air/vdom-diff-boundary.ts",
+    find: "    if (at ? at === end : swept) {",
+    replace: "    if (at && at === end) {",
+    test: "tests/renderer-differential.test.ts",
+    filter:
+      "differential: a boundary that falls back removes its own region and nothing else",
+  },
+  {
+    what:
+      "in one process a page forwards its server's own log lines back up the socket — a frame behind a close for cause costs the close its code",
+    file: "src/browser/console-intercept.ts",
+    find: "  if (_isServerLogLine()) return;",
+    replace: "  if (false) return;",
+    test: "tests/console-intercept.test.ts",
+    filter:
+      "console intercept: a server's own log line is not sent back to it — a page with no server beside it forwards as ever",
+  },
+  {
+    what:
+      "the dev restart's carried port is read from any shell that still has the variable — an app binds a port its supervisor never gave it",
+    file: "src/server/dev-restart.ts",
+    find: '  if (get(CHILD_ENV) !== "1") return undefined;',
+    replace: "  if (false) return undefined;",
+    test: "tests/dev-cell-restart.test.ts",
+    filter:
+      "dev-restart: the carried port is read by a supervised child only, and only as a port",
+  },
+  {
+    what:
+      "am start holds its 180 s download wait for an app whose download ended long ago — a hung boot takes three minutes to be reported",
+    file: "src/am/am-cmd-process.ts",
+    find:
+      "  return was ? Math.ceil((elapsedMs + defaultMs) / 1000) * 1000 : waitMs;",
+    replace: "  return waitMs;",
+    test: "tests/am-start-slow-start.test.ts",
+    filter:
+      "startWaitMs: the long wait holds while the reason does; after it, the default wait from then",
+  },
+  {
+    what:
+      "a CLI client keeps the last connection's wire answer: a server restarted without the option gets f(x) where it always got f(x, null)",
+    file: "src/server/cli-client.ts",
+    find: "      wireOmit = undefined;\n      wireKnown = false;",
+    replace: "      wireKnown = false;",
+    test: "tests/wire-cli-client-follows-option.test.ts",
+    filter:
+      "wire option (CLI client): a server that restarts WITHOUT the option gets the calls it always got",
+  },
+  {
+    what:
+      "a local-socket CLI client keeps the last connection's wire answer across a listener restart",
+    file: "src/server/cli-client.ts",
+    find: "        wireOmit = undefined; // a new connection is a new answer",
+    replace: "        // a new connection is a new answer",
+    test: "tests/wire-cli-client-follows-option.test.ts",
+    filter:
+      "wire option (CLI client, local socket): a listener that restarts WITHOUT the option gets the calls it always got",
+  },
+  {
+    what:
+      "a cell file saved while the dev app was still starting (before its watcher was up) is never applied, and nothing says so",
+    file: "src/server/server-watcher.ts",
+    find:
+      "    for (const path of deps.savedBeforeWatch?.(watchRoots()) ?? []) {",
+    replace: "    for (const path of [] as string[]) {",
+    test: "tests/dev-restart-saved-before-watch.test.ts",
+    filter:
+      "dev-restart e2e: a cell file saved before the watcher was up restarts the app; a file the start itself writes does not",
+  },
+  {
+    what:
+      "a source file the app's own start writes each time restarts the dev app on every start",
+    file: "src/server/dev-restart.ts",
+    find:
+      "  const fresh = [...saved].filter(([p, s]) => !known.has(savedKey(p, s)))",
+    replace: "  const fresh = [...saved].filter(() => true)",
+    test: "tests/dev-restart-saved-before-watch.test.ts",
+    filter:
+      "dev-restart e2e: a cell file saved before the watcher was up restarts the app; a file the start itself writes does not",
+  },
+  {
+    what:
+      "a start that rewrites a source file with new bytes each time restarts the dev app without end",
+    file: "src/server/dev-restart.ts",
+    find:
+      "  if (first !== undefined && Number(streak) >= RESTART_STORM_LIMIT) {",
+    replace: "  if (first !== undefined && Number(streak) >= Infinity) {",
+    test: "tests/dev-restart-saved-before-watch.test.ts",
+    filter:
+      "savedWhileStarting: fresh saves are named; the carry's are not; the streak ends it; the carry is a supervised child's only",
+  },
+  {
+    what:
+      "a --server-url launch to a server that is down says nothing anywhere — a blank window and no line naming the address or the cause",
+    file: "src/electron/electron-client-script.ts",
+    find:
+      "    console.error('[aio-client] cannot open ' + __aioRedact(url + ': ' + msg));",
+    replace: "    void 0;",
+    test: "tests/electron-client-generated-eval.test.ts",
+    filter:
+      "aio-client strict pin: a refused --server-url launch opens the connect page with the reason; a server that is merely down does not",
+  },
+  {
+    what:
+      "run.ps1 reports a stale $LASTEXITCODE as the one-click .exe's — a stub that refused reads as started, or git's exit code as the app's",
+    file: "run.ps1",
+    find: "  return $p.ExitCode",
+    replace: "  return $LASTEXITCODE",
+    test: "tests/windows-sfx-stub-run.test.ts",
+    filter:
+      "run.ps1 Start-OneClickExe: returns the stub's exit code once the app is started — while the app still runs",
+    os: "windows",
+  },
+  {
+    what:
+      "check-orphans takes a test runner that owns a fixture lock for an app — a suite in flight reads as orphans, and --clean signals the runner",
+    file: "scripts/check-orphans.ts",
+    find:
+      "          if (pid === Deno.pid || /\\bdeno(\\S*)? test\\b/.test(cmdlineOf(pid))) {",
+    replace: "          if (pid === Deno.pid) {",
+    test: "tests/check-orphans-tokenless.test.ts",
+    filter:
+      "check-orphans: an old lock whose owner is a test runner is a fixture, never an ORPHAN",
+  },
+  {
+    what:
+      "an install record 1.0.19's run.ps1 damaged is read as it is — `am installed` shows a dump of the app's deno.json as its aio version",
+    file: "src/server/install-record.ts",
+    find: "      ? repairedRecord(parsed)",
+    replace: "      ? parsed",
+    test: "tests/install-record-written-whole.test.ts",
+    filter:
+      "installed.json: the aio version a 1.0.19 run.ps1 damaged is read as the pin inside it, and the next write puts it right",
+  },
+  {
+    what:
+      "a Windows Electron app with a named port and no --allow-ffi no longer starts — it came up on its port through 1.0.19",
+    file: "src/server/aio-server.ts",
+    find: 'Deno.permissions.querySync({ name: "ffi" }).state === "granted"',
+    replace: 'Deno.permissions.querySync({ name: "ffi" }).state.length > 0',
+    test: "tests/win-pipe-no-ffi-named-port.test.ts",
+    filter:
+      "windows, no --allow-ffi, a port named: the app comes up on the port and says its window has no pipe",
+    os: "windows",
+  },
+  {
+    what:
+      "the e2e harness's kill() ends only the shell on Windows — the app under it outlives its test, holding its port and its lock",
+    file: "tests/e2e-app-harness.ts",
+    find: '      args: ["/T", "/F", "/PID", String(proc.pid)],',
+    replace: '      args: ["/F", "/PID", String(proc.pid)],',
+    test: "tests/e2e-harness-kill-tree.test.ts",
+    filter:
+      "e2e harness kill(): the process a shell started goes with the shell",
+    os: "windows",
+  },
+  {
+    what:
+      "the Electron window's offline queue is full and the page's next send is discarded with no line anywhere \u2014 a click that did nothing, and nothing to say why",
+    file: "src/electron/electron-uds.ts",
+    find: "    } else if (_ipcDropped++ === 0) {",
+    replace: "    } else if (_ipcDropped++ < 0) {",
+    test: "tests/electron-main-relay.test.ts",
+    filter:
+      "electron main: sends dropped by the full offline queue are said once, and counted on reconnect",
+  },
+  {
+    what:
+      "an app that leaves its update signing key to first use is no longer told \u2014 `am doctor`, `am fix --harden`, the build and `am publish` all go quiet about the one unauthenticated moment of the update path",
+    file: "src/build/capabilities.ts",
+    find: '    return classifySource(source, kind) === "manifest";',
+    replace: '    return classifySource(source, kind) === "git";',
+    test: "tests/am-harden.test.ts",
+    filter:
+      "hardenFindings: updates with no key in the entry is told `updates.key` \u2014 and only a signed-manifest source the text settles",
+  },
+  {
+    what:
+      "a deno.json assets mount that points outside the project is served from the tree \u2014 files beside the app, readable in dev, that the build refuses to carry",
+    file: "src/server/server.ts",
+    find:
+      '    if (typeof dir === "string" && mountLeavesProject(root, dir.trim())) {',
+    replace: "    if (false) {",
+    test: "tests/assets-denojson-mount-gates.test.ts",
+    filter:
+      "assets: a deno.json mount outside the project is not served, in the sentence the build refuses it with \u2014 aio.run's own mount of that prefix stays",
+  },
+  {
+    what:
+      "a build that reuses the bundle no longer says which worker could not be bundled \u2014 the warning is printed once and then hidden behind `cached`",
+    file: "src/build/build-bundle.ts",
+    find: "    for (const msg of rec?.skipped ?? []) warn(msg);",
+    replace: "",
+    test: "tests/browser-worker-served.test.ts",
+    filter:
+      "build: a cached bundle says the worker warnings again \u2014 the same lines as the build that ran esbuild",
+  },
+  {
+    what:
+      "a server target's .plist / .ps1 is not collected \u2014 left in the project root, where it marks the next build -dirty",
+    file: "src/build-all.ts",
+    find: "  if (SUPERVISOR_EXTS.has(ext)) {",
+    replace: "  if (SUPERVISOR_EXTS.has(ext) && false) {",
+    test: "tests/build-platforms.test.ts",
+    filter:
+      "build-all: a server target's .plist / .ps1 is collected like its .service \u2014 by the name the writer gives it, placed name included; the project's own scripts are not",
+  },
+  {
+    what:
+      "an app with its own MainActivity.kt is no longer told build.android.strict \u2014 `am doctor` and `am fix --harden` go quiet about an overlay that only warns",
+    file: "src/am/am-harden.ts",
+    find: "    ownActivity &&",
+    replace: "    !ownActivity &&",
+    test: "tests/am-harden.test.ts",
+    filter:
+      "am doctor / am fix --harden: an app with its own MainActivity.kt and no build.android.strict is told the key, and --harden writes it beside what build.android already holds",
+  },
+  {
+    what:
+      "electron main: a page send made while a reconnect attempt is in flight is written into the connecting socket and dies with it — not queued, not counted, no line",
+    file: "src/electron/electron-uds.ts",
+    find: "    if (s && !s.destroyed && !s.connecting) {",
+    replace: "    if (s && !s.destroyed) {",
+    test: "tests/electron-main-relay.test.ts",
+    filter:
+      "electron main: a send made while a connect attempt is in flight is queued, not lost",
+  },
+  {
+    what:
+      "dev: a file whose stamp has no milliseconds by chance is read as a whole-second filesystem's — an app file written just before the start restarts the dev app once for nothing",
+    file: "src/server/dev-restart.ts",
+    find:
+      "  return stamps.length > 0 && stamps.every((at) => at % 1000 === 0);",
+    replace:
+      "  return stamps.length > 0 && stamps.some((at) => at % 1000 === 0);",
+    test: "tests/dev-restart-typo.test.ts",
+    filter:
+      "sourcesChangedSince: the source files saved at or after the mark; an older one, a non-source file, a dot-dir and node_modules are not",
   },
 ];

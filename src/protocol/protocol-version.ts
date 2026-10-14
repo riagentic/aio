@@ -92,6 +92,13 @@ export type ProtoHello = {
    *  1 MB default an app may have lowered. Advisory like `rate`: the server
    *  enforces its own limit whatever a client does. Additive within v3. */
   maxMessageBytes?: number;
+  /** Does the SERVER send a `cfg` frame on this connection? `true`: one
+   *  follows the connect burst; `false`: none will. A client that encodes
+   *  calls by what `cfg` says (`wire.omitTrailingUndefined`, the CLI client)
+   *  then knows at the hello whether there is anything to wait for, instead
+   *  of proving a negative with a `resync`. A server built before it omits
+   *  it, and the client falls back to that proof. Additive within v3. */
+  cfg?: boolean;
 };
 
 /** This build's announcement. Pass the build's aio version when known (the
@@ -166,6 +173,7 @@ export function parseProtoHello(input: unknown): ProtoHello | null {
         ...(app ? { app } : {}),
         ...(rate ? { rate } : {}),
         ...(maxMessageBytes ? { maxMessageBytes } : {}),
+        ...(typeof p.cfg === "boolean" ? { cfg: p.cfg } : {}),
       };
     }
     return null;

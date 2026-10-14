@@ -11,6 +11,7 @@
 // packages the app itself never does — versions this repo already uses, so the
 // global Deno cache has them and the test needs no network. A cold cache is a
 // loud failure below, never a silent pass.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import {

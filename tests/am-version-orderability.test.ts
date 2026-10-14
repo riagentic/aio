@@ -16,6 +16,7 @@
 // older release, and `am upgrade` says the app is current while the app's own
 // updater offers the newer one. Two deciders for one question, and the one that
 // said less said nothing about it.
+import "./store-sandbox.ts";
 import { assert, assertEquals } from "@std/assert";
 import { newestVersion, parseVersion } from "../src/am/am-versions.ts";
 import { isComparableVersion } from "../src/server/updates-core.ts";

@@ -17,6 +17,7 @@
 // a typo and that. `am create` had validated its name since the day it was
 // written; the other two never did. One fact, three deciders, one of them
 // correct.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertMatch } from "@std/assert";
 import { basename, fromFileUrl, join } from "@std/path";
 import { APP_NAME_RE, appNameError, dirLinkType } from "../src/am/am-utils.ts";

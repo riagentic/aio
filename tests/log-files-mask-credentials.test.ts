@@ -6,6 +6,7 @@
 // into bug reports and backups — 0600 bounded who could read it, not where it
 // went. Browser/renderer lines forwarded to client.log carried the page URL,
 // `?token=` included. Every file sink now masks them; the console does not.
+import "./store-sandbox.ts";
 import { assert, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";

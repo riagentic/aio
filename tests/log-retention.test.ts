@@ -12,6 +12,7 @@
 //   1. the default keeps history (and `--no-backup-logs` still wipes),
 //   2. the budget evicts the OLDEST RUN first, across kinds, never live files,
 //   3. `stdout.log` — the one log the app cannot rotate — is under the policy.
+import "./store-sandbox.ts";
 import { assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import { AioLogger } from "../src/diagnostics/logger.ts";

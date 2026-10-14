@@ -11,6 +11,7 @@
 // Pinned against the runtime's own answer: each fixture entry calls the
 // server's `resolveAppId()` exactly as `aio.run()` does, launched the way
 // `am start` launches it (cwd = the project root).
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import {

@@ -30,9 +30,28 @@ import { setDevModeOverride } from "../src/state/dev-flag.ts";
  *  which file in the suite imported that module first — the cross-file leak
  *  this repo keeps paying for. What the overlay owns is the HOOK, so the hook
  *  is what is driven; that `_deliverDiag` calls it is that module's contract
- *  and its own tests' business. */
+ *  and its own tests' business. (One case below joins the two ends anyway —
+ *  see `loadDiag`.) */
 const deliver = (ev: Record<string, unknown>) =>
   (globalThis as D)._aioDiag?.(ev);
+
+/** A FRESH instance of the real `_deliverDiag`, imported while a `window`
+ *  exists — so its `_w` is this global, where the overlay puts its hook. The
+ *  `window` is there for that instant only (the same fixture, and the same
+ *  reason, as tests/diag-sink.test.ts). */
+async function loadDiag(): Promise<
+  { _deliverDiag: (ev: Record<string, unknown>) => void }
+> {
+  const had = "window" in globalThis;
+  if (!had) (globalThis as D).window = globalThis;
+  try {
+    return await import(
+      `../src/protocol/protocol-diagnostics.ts#${crypto.randomUUID()}`
+    );
+  } finally {
+    if (!had) delete (globalThis as D).window;
+  }
+}
 
 // deno-lint-ignore no-explicit-any
 type D = any;
@@ -87,6 +106,34 @@ Deno.test("a diagnostic reaches the page through the seam that already existed",
     assert(text.includes("a key vanished"), text);
     assert(text.includes("add a migration"), `the hint travels too: ${text}`);
   });
+});
+
+Deno.test("the real _deliverDiag ends in the overlay — both ends of the seam in one run", async () => {
+  // Every other case calls the hook; this one calls the CALLER of the hook.
+  // A renamed global, or a `_deliverDiag` that stops preferring the hook,
+  // leaves each half green on its own and the page with no overlay row.
+  const { _deliverDiag } = await loadDiag();
+  const said: string[] = [];
+  const orig = console.warn;
+  console.warn = (...a: unknown[]) => void said.push(a.join(" "));
+  try {
+    await withPage((doc) => {
+      setDevModeOverride(true);
+      installDevOverlay();
+      _deliverDiag({
+        type: "seam-joined",
+        severity: "warning",
+        message: "through the real caller",
+      });
+      const text = doc.getElementById("aio-dev-overlay")?.textContent ?? "";
+      assert(text.includes("seam-joined"), `not on the page: ${text}`);
+      assert(text.includes("through the real caller"), text);
+    });
+  } finally {
+    console.warn = orig;
+  }
+  // "Overlay when the page has one, console otherwise" — not both.
+  assertEquals(said.filter((l) => l.includes("seam-joined")), []);
 });
 
 Deno.test("the SAME problem twice is one row and a count", async () => {

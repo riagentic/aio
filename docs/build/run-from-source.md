@@ -44,19 +44,30 @@ irm https://raw.githubusercontent.com/riagentic/aio/main/run.ps1 | iex
 5. **Build** — `deno task compile` (what `am compile` runs too): the app's
    DEFAULT target, production build. (An app without the scaffolded task gets
    the builder invoked directly.)
-6. **Run** — the artifact the build produced is found **by timestamp, never by
-   name** (so this script can't drift from the framework's naming rules) and
-   executed. AppImages run with `APPIMAGE_EXTRACT_AND_RUN=1`, so no FUSE is
-   needed — containers included.
+6. **Install** — the artifact the build produced is found **by timestamp, never
+   by name** (so this script can't drift from the framework's naming rules) and
+   copied to where it outlives the checkout: `~/app/<name>/` with a menu entry
+   on Linux, `%LOCALAPPDATA%\Programs\<name>\` with a Start-menu shortcut on
+   Windows
+   ([the layout](../persistence/where-files-live.md#the-program-vs-its-data)).
+7. **Run** — the installed artifact is executed. AppImages run with
+   `APPIMAGE_EXTRACT_AND_RUN=1`, so no FUSE is needed — containers included.
+
+**macOS:** a desktop (Electron) app is installed as its bundle —
+`~/app/<name>/versions/<version>/<Title>.app`, linked from
+`~/app/<name>/<Title>.app` — and opened with `open`. `run.sh` writes no
+`.desktop` entry there and does not touch `/Applications`; the app offers that
+move itself once it is up.
 
 ## Flags
 
-| flag          | effect                                            |
-| ------------- | ------------------------------------------------- |
-| `--dev`       | run the dev server (`deno task dev`) instead      |
-| `--git <url>` | clone first (also accepted as a bare argument)    |
-| `--no-run`    | build only; print the artifact path               |
-| `-- <args…>`  | everything after `--` is passed to the app itself |
+| `run.sh`       | `run.ps1`    | effect                                          |
+| -------------- | ------------ | ----------------------------------------------- |
+| `--dev`        | `-Dev`       | run the dev server (`deno task dev`) instead    |
+| `--git <url>`  | `-Git <url>` | clone first (`run.sh`: also a bare argument)    |
+| `--no-run`     | `-NoRun`     | build and install only; print the artifact path |
+| `--no-install` | `-NoInstall` | run it from `dist/`, install nothing            |
+| `-- <args…>`   | `<args…>`    | passed to the app itself                        |
 
 Environment: `AIO_HOME` / `AIO_REPO` / `AIO_BRANCH` work exactly as they do for
 `install.sh`; `AIO_RAW` overrides where `install.sh` itself is fetched from;
@@ -69,6 +80,8 @@ Environment: `AIO_HOME` / `AIO_REPO` / `AIO_BRANCH` work exactly as they do for
 - The e2e for this flow lives in `tests/run-sh-e2e.test.ts` (part of
   `deno task test:onboard`): a real scaffold, a real `git clone`, a real
   compile, and a health-checked run of the produced binary.
-- `run.ps1` mirrors the contract on Windows; it is shipped alongside the
-  physical-platform validation matrix (see `todo.md`) and not yet exercised by
-  CI on a real Windows machine.
+- `run.ps1` mirrors the contract on Windows. No gate executes it: its text is
+  checked (`tests/run-sh.test.ts`) and its pure logic runs under PowerShell 7 on
+  Linux; what it does on a real Windows — installing Deno, shortcuts, replacing
+  a running `.exe` — is unverified. See
+  [aio on Windows and macOS](../basics/windows-macos.md).

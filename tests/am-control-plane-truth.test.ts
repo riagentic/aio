@@ -13,6 +13,7 @@
 //   3. `--json` means JSON on stdout, on the success path AND the miss path.
 //
 // Each test below fails on the pre-fix tree.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { cmdLog, cmdTrigger } from "../src/am/am-cmd-inspect.ts";

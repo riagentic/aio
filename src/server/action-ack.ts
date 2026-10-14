@@ -78,6 +78,20 @@ export function shortCallSentence(
     `alone does not (it is erased; only a default is).`;
 }
 
+/** `wire: { refuseShortCalls }` — the sentence for a call that states NO
+ *  argument list for a method that declares arguments. The trojan door has
+ *  always refused that frame (its own, CLI-flavoured sentence); with the
+ *  option on, the WS and UDS doors refuse it with this one. */
+export function noArgsRefusal(type: string, required: number): string {
+  return `${type} takes ${required} argument${
+    required === 1 ? "" : "s"
+  } and this call passes none (no \`payload.args\` array). They would be ` +
+    `\`undefined\` inside the method, which writes a broken row rather than ` +
+    `failing — so this is refused (wire.refuseShortCalls). Nothing ran. ` +
+    `Send { type: "${type}", payload: { args: [...] } }; if the method ` +
+    `fills in its own defaults, say so with an explicit \`args: []\`.`;
+}
+
 /** Record that `action` is a short call. @internal */
 export function _noteShortCall(action: unknown, sentence: string): void {
   if (action && typeof action === "object") _shortNotes.set(action, sentence);

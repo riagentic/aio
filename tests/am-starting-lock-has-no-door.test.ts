@@ -12,6 +12,7 @@
 // verb that asks the app anything), `stop`, `profile`, `shot` and `eval`.
 // `stop` keeps its meaning for a booting app: it stops it (SIGTERM to the
 // owner), it just no longer asks `:0` for a graceful shutdown first.
+import "./store-sandbox.ts";
 import { exits0, SLEEP_ARGS } from "./proc-helper.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";

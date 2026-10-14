@@ -5,6 +5,7 @@
 // is a `schedule.poll()` option object — and also any retry policy an app
 // writes. Each refused a compatible pin with `--force` as the only way past
 // (h8 F1). The canonical removals still hit, from the registry's own examples.
+import "./store-sandbox.ts";
 import { assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { removalsInFile } from "../src/state/removals.ts";

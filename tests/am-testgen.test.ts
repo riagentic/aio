@@ -9,6 +9,7 @@
 // document, importing the App and its cells, and remembering to re-run. That
 // ceremony is why an app which HAD the feature available kept using string
 // keys, which is this round's meta-finding for the tenth time.
+import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { DEFAULT_TESTGEN_OUT } from "../src/am/am-cmd-testgen.ts";
