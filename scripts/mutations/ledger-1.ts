@@ -3444,7 +3444,7 @@ export const LEDGER_1: readonly Mutation[] = [
   },
   {
     what:
-      "am restart during the dev watcher's relaunch leaves two processes and moves the app to a new port",
+      "the relaunched dev child is not filed in the lock slot — while it boots the slot names only the supervisor, so `am restart` / `am status` do not see the process about to bind",
     file: "src/server/dev-restart.ts",
     find:
       "    const placed = self ? fileChildPlaceholder(self, child.pid, port) : null;",
@@ -7727,5 +7727,15 @@ export const LEDGER_1: readonly Mutation[] = [
     test: "tests/air-boot-reload-waits-for-queue.test.ts",
     filter:
       "boot reload after a server restart waits until the replayed offline queue has landed",
+  },
+  {
+    what:
+      "a dev restart vacates the lock slot instead of handing it to the supervisor — for ~100 ms per save nothing names the app, and `am restart` in that gap starts a second instance",
+    file: "src/server/dev-restart.ts",
+    find: "    AppLock.live().find((l) => l.key === slotOf(self))?.handOver(",
+    replace: '    AppLock.live().find((l) => l.key === "")?.handOver(',
+    test: "tests/dev-restart-race-one-process.test.ts",
+    filter:
+      "dev restart: the lock slot names a live process through every relaunch — no gap between the old app's release and the next child's placeholder",
   },
 ];

@@ -123,6 +123,7 @@ await aio.run({ cells: [c], appId: "dr", persist: false, client: "server-only" }
     }
     assert(relaunched(now), `no relaunch happened: ${[...before]} → ${now}`);
     await sleep(300);
+    return now.find((p) => !before.has(p))!;
   };
   /** The processes once the slow child has booted (or been refused). */
   const settled = async () => {
@@ -221,7 +222,14 @@ Deno.test({
       const s = await w.am("start", "--json");
       assertEquals(s.code, 0, s.out);
       const first = s.json as { pid: number; port: number };
-      await w.saveAndAwaitRelaunch();
+      const child = await w.saveAndAwaitRelaunch();
+      // While the relaunch boots, the slot names THAT child (its placeholder),
+      // not only the supervisor's hand-over — so `am restart` stops the one
+      // that is about to bind, and `am status` reads it as starting.
+      const held = JSON.parse(w.lockRecord() || "null") as
+        | { pid: number }
+        | null;
+      assertEquals(held?.pid, child, `the slot names ${held?.pid}`);
       const r = await w.am("restart", "--json");
       assertEquals(r.code, 0, r.out);
       const left = await w.settled();

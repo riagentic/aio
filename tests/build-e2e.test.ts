@@ -1011,6 +1011,12 @@ Deno.test({
   fn: async () => {
     const dir = await makeApp("counter", "build-e2e-electron-");
     try {
+      // The COMPLETE package: Electron inside. `am create` writes "online"
+      // (Electron fetched at first start, tests/updates-shared-electron-e2e).
+      const cfgPath = join(dir, "deno.json");
+      const cfg = JSON.parse(await Deno.readTextFile(cfgPath));
+      cfg.build = { ...cfg.build, electronRuntime: "offline" };
+      await Deno.writeTextFile(cfgPath, JSON.stringify(cfg, null, 2));
       const r = await buildFlags(dir, "--compile", "--electron");
       assertEquals(r.code, 0, `electron build failed:\n${r.out}\n${r.err}`);
 
