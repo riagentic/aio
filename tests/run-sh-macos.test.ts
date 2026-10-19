@@ -10,7 +10,12 @@
 // `deno` (so the REAL `--print-install-name` / install-record rules answer),
 // and stand-ins for what must not really happen here — `uname` (so both OSes
 // are tested on either host), the build, `am`, and `open`.
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertMatch,
+  assertStringIncludes,
+} from "@std/assert";
 import { dirname, join } from "@std/path";
 import { ownHome } from "./deno-dir-helper.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
@@ -58,6 +63,12 @@ async function runSh(
     /** The version about to be built is installed already, with this file
      *  in its bundle. */
     installed?: string;
+    /** Extra environment for run.sh. */
+    env?: Record<string, string>;
+    /** A copy of the user's own at `~/Applications/Demo App.app`. */
+    ownCopy?: boolean;
+    /** What the app's log holds, written where an app run here keeps it. */
+    log?: string;
   } = {},
 ) {
   const tmp = await tempDir("run-sh-macos-");
@@ -109,6 +120,21 @@ async function runSh(
     await Deno.mkdir(dirname(at), { recursive: true });
     await Deno.writeTextFile(at, "");
   }
+  if (opts.ownCopy) {
+    const copy = join(home.HOME!, "Applications", "Demo App.app");
+    await Deno.mkdir(copy, { recursive: true });
+    await Deno.writeTextFile(join(copy, "mine"), "");
+  }
+  if (opts.log !== undefined) {
+    const logs = join(
+      opts.env?.AIO_APPS_DIR
+        ? join(opts.env.AIO_APPS_DIR, "demo")
+        : join(home.HOME!, ".demo"),
+      "logs",
+    );
+    await Deno.mkdir(logs, { recursive: true });
+    await Deno.writeTextFile(join(logs, "app.log"), opts.log);
+  }
   for (const [i, v] of (opts.older ?? []).entries()) {
     const dir = join(home.AIO_INSTALL_ROOT!, "demo", "versions", v);
     await Deno.mkdir(dir, { recursive: true });
@@ -122,10 +148,22 @@ async function runSh(
     AIO_HOME: REPO_ROOT,
     AIO_INSTALL: join(bin, "install.sh"),
     NO_COLOR: "1",
+    // The stand-in `open` returns at once: not an early exit unless a test
+    // asks for the real threshold.
+    AIO_OPEN_EARLY_EXIT_S: "0",
+    ...opts.env,
   };
-  // Nothing the host's own session says may steer the run.
-  for (const k of ["DISPLAY", "WAYLAND_DISPLAY", "AIO_BUILD_COMMIT"]) {
-    delete env[k];
+  // Nothing the host's own session says may steer the run — the shard runner
+  // exports an AIO_APPS_DIR of its own, which moved the app's home.
+  for (
+    const k of [
+      "DISPLAY",
+      "WAYLAND_DISPLAY",
+      "AIO_BUILD_COMMIT",
+      "AIO_APPS_DIR",
+    ]
+  ) {
+    if (!opts.env || !(k in opts.env)) delete env[k];
   }
   const p = await new Deno.Command("sh", {
     args: [join(REPO_ROOT, "run.sh"), ...args],
@@ -174,7 +212,7 @@ Deno.test(
       const stable = join(r.root, "demo", "Demo App.app");
       assert(Deno.lstatSync(stable).isSymlink, "no stable link");
       assertEquals(Deno.realPathSync(stable), Deno.realPathSync(bundle));
-      assertEquals(r.opened, [stable, "--args", "--port=4321"]);
+      assertEquals(r.opened, ["-W", stable, "--args", "--port=4321"]);
       // Nothing half-unpacked is left for a launcher to find.
       assertEquals(
         [...Deno.readDirSync(join(r.root, "demo", "versions"))].map((e) =>
@@ -220,6 +258,7 @@ Deno.test(
       );
       // Still opened: that is what brings the running window forward.
       assertEquals(up.opened, [
+        "-W",
         join(up.root, "demo", "Demo App.app"),
         "--args",
       ]);
@@ -308,6 +347,101 @@ Deno.test(
 );
 
 Deno.test(
+  "run.sh on macOS: it waits for the app (`open -W`), and an app gone at once is a failure, said with its log — `open` answers 0 whatever the app did",
+  NEEDS_SH,
+  async () => {
+    const r = await runSh("Darwin", "macBundle", [], {
+      env: { AIO_OPEN_EARLY_EXIT_S: "3" },
+      log: "boot: the port is taken\n",
+    });
+    try {
+      assertEquals(r.code, 1, r.out);
+      assertEquals(r.opened?.[0], "-W");
+      // run.sh reads whole seconds (`date +%s`): an instant exit that straddles
+      // a second boundary, or a loaded machine, reads 1s or 2s — any count
+      // under AIO_OPEN_EARLY_EXIT_S (3) is the early-exit verdict.
+      assertMatch(r.out, /Demo App exited [0-2]s after it was opened/);
+      assertStringIncludes(r.out, "boot: the port is taken");
+      assertStringIncludes(r.out, join(r.home, ".demo", "logs", "app.log"));
+    } finally {
+      await r.done();
+    }
+  },
+);
+
+// The log is where the app keeps it — `$AIO_APPS_DIR/<id>` when that is set —
+// and a guessed path that holds no log is no pointer: an app with a data dir of
+// its own (`aio.run({ appDir })`, a profile) or in library mode logs elsewhere,
+// and "Its log: <a file that does not exist>" sent the user to nothing.
+Deno.test(
+  "run.sh on macOS: an app gone at once points at its log only where one is — AIO_APPS_DIR followed, a missing file never named",
+  NEEDS_SH,
+  async () => {
+    const tmp = await tempDir("run-sh-macos-apps-");
+    const apps = join(tmp, "apps");
+    const moved = await runSh("Darwin", "macBundle", [], {
+      env: { AIO_OPEN_EARLY_EXIT_S: "3", AIO_APPS_DIR: apps },
+      log: "boot: moved home\n",
+    });
+    const none = await runSh("Darwin", "macBundle", [], {
+      env: { AIO_OPEN_EARLY_EXIT_S: "3" },
+    });
+    try {
+      assertEquals(moved.code, 1, moved.out);
+      assertStringIncludes(moved.out, "boot: moved home");
+      assertStringIncludes(
+        moved.out,
+        `Its log: ${join(apps, "demo", "logs", "app.log")}`,
+      );
+      assertEquals(none.code, 1, none.out);
+      assertStringIncludes(none.out, "it stopped at start");
+      assertEquals(none.out.includes("Its log"), false, none.out);
+      assertEquals(none.out.includes("app.log"), false, none.out);
+    } finally {
+      await moved.done();
+      await none.done();
+      await dropTempDir(tmp);
+    }
+  },
+);
+
+Deno.test(
+  "run.sh on macOS: AIO_APPLICATIONS_LINK=1 links the stable bundle into ~/Applications (Launchpad) — never over what is not its own link",
+  NEEDS_SH,
+  async () => {
+    const link = (home: string) => join(home, "Applications", "Demo App.app");
+    const r = await runSh("Darwin", "macBundle", ["--no-run"], {
+      env: { AIO_APPLICATIONS_LINK: "1" },
+    });
+    try {
+      assertEquals(r.code, 0, r.out);
+      assert(Deno.lstatSync(link(r.home)).isSymlink, r.out);
+      assertEquals(
+        Deno.readLinkSync(link(r.home)),
+        join(r.root, "demo", "Demo App.app"),
+      );
+      assertStringIncludes(r.out, "Launchpad");
+    } finally {
+      await r.done();
+    }
+    // Something of the user's at that name (the app's own "Move to
+    // Applications" copy): left alone, and said.
+    const own = await runSh("Darwin", "macBundle", ["--no-run"], {
+      env: { AIO_APPLICATIONS_LINK: "1" },
+      ownCopy: true,
+    });
+    try {
+      assertEquals(own.code, 0, own.out);
+      assert(!Deno.lstatSync(link(own.home)).isSymlink, own.out);
+      assert(exists(join(link(own.home), "mine")), "the user's copy changed");
+      assertStringIncludes(own.out, "not linked into ~/Applications");
+    } finally {
+      await own.done();
+    }
+  },
+);
+
+Deno.test(
   "run.sh on macOS: --no-run installs the bundle and opens nothing",
   NEEDS_SH,
   async () => {
@@ -331,8 +465,8 @@ Deno.test(
     const r = await runSh("Darwin", "macBundle", ["--no-install"]);
     try {
       assertEquals(r.code, 0, r.out);
-      assertEquals(r.opened?.length, 2, r.out);
-      assert(r.opened![0]!.endsWith("/dist/Demo App.app"), r.opened![0]);
+      assertEquals(r.opened?.length, 3, r.out);
+      assert(r.opened![1]!.endsWith("/dist/Demo App.app"), r.opened![1]);
       assert(!exists(join(r.root, "demo")), "installed under --no-install");
     } finally {
       await r.done();

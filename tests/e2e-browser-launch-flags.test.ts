@@ -40,6 +40,6 @@ Deno.test("every real-browser launch in tests/ carries the per-OS flags", () => 
 Deno.test("browserOsFlags: a guest window on Windows, nothing elsewhere", () => {
   assertEquals(
     [...browserOsFlags],
-    Deno.build.os === "windows" ? ["--guest"] : [],
+    Deno.build.os === "windows" ? ["--guest", "--do-not-de-elevate"] : [],
   );
 });

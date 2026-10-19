@@ -212,6 +212,9 @@ function headContent(
   /** `wire` — see `CellsConfig.wire`. In the shell as well as the `cfg`
    *  frame: a call made before the socket opens is encoded by this page. */
   wire?: { omitTrailingUndefined?: boolean },
+  /** The app's resolved version — what `appVersion()` (`aio/air`) reads, so
+   *  a page with no server (a standalone APK, the web target) knows it too. */
+  appVersion?: string,
 ): string {
   // THE baseline, on every target, always — before the app's stylesheet so
   // any of it can be overridden by a single rule.
@@ -324,6 +327,7 @@ function headContent(
   // server is still happily running.
   const clientConfig = {
     ...(appId ? { appId } : {}),
+    ...(appVersion ? { appVersion } : {}),
     ...(renderBudget ? { renderBudget } : {}),
     ...(wire ? { wire } : {}),
     ...(syncCells && syncCells.length ? { syncCells } : {}),
@@ -426,6 +430,8 @@ export interface HtmlShellOptions {
    *  a shell that is not served through the HTTP handler — see
    *  `headContent`'s `csp` parameter. */
   csp?: string;
+  /** The app's resolved version (`window.__aioConfig.appVersion`). */
+  appVersion?: string;
 }
 
 /** A shell's answer to an engine too old for the bundle: a line on the page
@@ -471,6 +477,7 @@ export function generateHTML(o: HtmlShellOptions): string {
     o.layout,
     o.csp,
     o.wire,
+    o.appVersion,
   ) + "\n  " + oldEngineNotice();
 
   // `o.dir` was DECLARED on this options type, PASSED by `server-static.ts`,
@@ -540,6 +547,9 @@ export function androidLocalHTML(
     /** The web target's app id — its standalone store is `aio:<appId>`. The
      *  APK passes none: its store stays `aio:app`, where shipped APKs saved. */
     appId?: string;
+    /** The build's resolved version — `appVersion()` on a page with no
+     *  server to ask. */
+    appVersion?: string;
   },
 ): string {
   const head = headContent(
@@ -563,6 +573,9 @@ export function androidLocalHTML(
     shell?.theme === undefined,
     shell?.appId,
     shell?.layout,
+    undefined, // csp
+    undefined, // wire
+    shell?.appVersion,
   );
   return `<!DOCTYPE html>
 ${htmlOpen(shell?.lang, shell?.dir)}

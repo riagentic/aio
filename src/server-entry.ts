@@ -58,7 +58,12 @@ export {
 // tree. Two field reports wrote this by hand; one of them shipped a
 // kill-the-tree that had never worked (procps `kill -STOP -<pid>` exits 0 and
 // signals nothing) and orphaned GPU workers until reboot.
+// …and the shorter shape most calls want: run it to the end, get its output,
+// with a timeout that kills the tree on time and keeps what it wrote.
 export {
+  runCommand,
+  type RunCommandOptions,
+  type RunCommandResult,
   spawn,
   type SpawnHandle,
   type SpawnOptions,

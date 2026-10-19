@@ -118,8 +118,22 @@ export async function migrateLegacyKv(
     | ((path?: string) => Promise<Deno.Kv>)
     | undefined;
   if (typeof openKv !== "function") return;
+  // openKv CREATES a store at a missing path: a compiled app with no legacy
+  // store would get an empty data.kv on every boot. Nothing there, nothing
+  // to migrate. Only NotFound means that — a path that cannot be looked at
+  // (permission, I/O) may hold the store, and reaches the warning below.
   let kv: Deno.Kv | null = null;
   try {
+    if (kvPath) {
+      const missing = await Deno.stat(kvPath).then(
+        () => false,
+        (e) => {
+          if (e instanceof Deno.errors.NotFound) return true;
+          throw e;
+        },
+      );
+      if (missing) return;
+    }
     kv = await openKv(kvPath);
     let copied = 0;
     const stmts: { sql: string; params?: unknown[] }[] = [];

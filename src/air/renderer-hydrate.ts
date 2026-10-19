@@ -12,7 +12,11 @@ import {
   _RESERVED_PROPS,
   _writeProp,
 } from "./prop-write.ts";
-import { attrNameOf as _attrName, TEXT_CONTENT_ELEMENTS } from "./ssr-utils.ts";
+import {
+  attrNameOf as _attrName,
+  camelToKebab,
+  TEXT_CONTENT_ELEMENTS,
+} from "./ssr-utils.ts";
 import { _DOM_PROPS } from "./vdom-types.ts";
 import type { ComponentFn, RenderCtx, VNode } from "./vdom.ts";
 import {
@@ -871,6 +875,11 @@ function _impliedAttrs(
   // disagreement, in the framework's loudest dev warning. Same shape as the
   // `readOnly` and `style` cases this file already carries.
   if (tag === "option") out.add("selected");
+  // The renderer's own dev stamp (`_stampDevComponent`), never the server's.
+  // Inside a boundary's attempt the props pass is QUEUED and runs after the
+  // component already stamped its root — so the sweep stripped the stamp and
+  // reported correct markup as a server/client divergence.
+  out.add("data-component");
   for (const k of Object.keys(props)) {
     if (_RESERVED_PROPS.has(k) || k.startsWith("on")) continue;
     if (k === "dangerouslySetInnerHTML") continue;
@@ -944,6 +953,17 @@ function _hydrateProps(el: HTMLElement, props: Record<string, unknown>): void {
     // and runs after the children are hydrated.
     if (k === "value" && el.tagName === "SELECT") continue;
     if (_DOM_PROPS.has(k) && !(k in el)) continue; // not a property here
+    // A style OBJECT writes only its own declarations; the server's other ones
+    // would survive forever (no later diff knows them) — drop them, keeping
+    // the ones it names in place (no reorder, no false divergence report).
+    if (k === "style" && v && typeof v === "object") {
+      const named = new Set(Object.keys(v).map(camelToKebab));
+      for (let i = el.style.length - 1; i >= 0; i--) {
+        const d = el.style.item(i);
+        if (!named.has(d)) el.style.removeProperty(d);
+      }
+      if (!el.style.length) el.removeAttribute("style");
+    }
     _writeProp(el, k, v);
   }
   // The other half of the same divergence: an attribute the server markup has

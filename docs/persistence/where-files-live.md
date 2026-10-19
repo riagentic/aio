@@ -18,6 +18,9 @@ none of it is state.
     app.key         the persisted access token (key: true)  🔒 secret
     backups/        pre-update store snapshots (3 kept) — see updates
     update-*.json   the updater's own records (a self-updating app) — see below
+  electron/ ← ①b the desktop window's Chromium profile: cookies, Local Storage,
+              IndexedDB, window size and position, Chromium's caches. Not
+              vital, but nothing recreates it (a sign-in, a stored setting) 🔒
   logs/     ← ② regenerable: app.log, error.log, client.log, stdout.log …
   cache/    ← ② regenerable BULK your app writes: downloads, build trees, thumbnails
   app/      ← ② the unpacked binaries a packaged app RUNS from (AppImage) 🔒 0700
@@ -47,12 +50,13 @@ user, a private `aio-u<uid>` sibling is used and boot says so.
 Four tiers, and the only question that separates them is **what a backup
 contains**:
 
-| Tier         | Lose it and…                          | Where                                    |
-| ------------ | ------------------------------------- | ---------------------------------------- |
-| ① critical   | the data is gone                      | `~/.<appId>/data/`                       |
-| ② expendable | the app recreates it                  | `~/.<appId>/logs⎪cache/`, `launch.json`  |
-| ②b payload   | it re-unpacks — but not while it runs | `~/.<appId>/app/`                        |
-| ③ temporary  | it must not survive a reboot at all   | `$XDG_RUNTIME_DIR/aio/` (or `/tmp/aio/`) |
+| Tier         | Lose it and…                                                             | Where                                    |
+| ------------ | ------------------------------------------------------------------------ | ---------------------------------------- |
+| ① critical   | the data is gone                                                         | `~/.<appId>/data/`                       |
+| ①b personal  | the window starts as new: signed out, default size, stored web data gone | `~/.<appId>/electron/`                   |
+| ② expendable | the app recreates it                                                     | `~/.<appId>/logs⎪cache/`, `launch.json`  |
+| ②b payload   | it re-unpacks — but not while it runs                                    | `~/.<appId>/app/`                        |
+| ③ temporary  | it must not survive a reboot at all                                      | `$XDG_RUNTIME_DIR/aio/` (or `/tmp/aio/`) |
 
 **Why tier ③ isn't in the app directory** — it's the one deliberate split, and
 it buys three things: a `.sock`/`.lock` must NOT survive a reboot (in `$HOME`
@@ -137,13 +141,19 @@ files instead of archiving them.
 
 ## Outside the app directory
 
-| What                                  | Where                                                                                                               | Lose it and…                                                           |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| The desktop window's profile          | `~/.config/<title-slug>/` · macOS `~/Library/Application Support/<title-slug>/` · Windows `%APPDATA%\<title-slug>\` | window size and position, Chromium's cache and web storage start empty |
-| A Windows one-click `.exe`'s install  | `%LOCALAPPDATA%\aio-sfx\<name>\` + a Start-menu shortcut                                                            | open the `.exe` again                                                  |
-| aio's local root certificate + key 🔒 | `~/.aio/ca/` — one per user, shared by every app                                                                    | a new root is made; devices that trusted the old one warn again        |
-| Release signing keys 🔒               | `~/.aio/keys/` (`ship keygen`)                                                                                      | **you can no longer publish an update your installs accept**           |
-| Build tool cache                      | `$XDG_CACHE_HOME/aio/tools`, else `~/.cache/aio/tools` (Electron runtimes, `appimagetool`)                          | it is downloaded again                                                 |
+| What                                  | Where                                                                                      | Lose it and…                                                    |
+| ------------------------------------- | ------------------------------------------------------------------------------------------ | --------------------------------------------------------------- |
+| A Windows one-click `.exe`'s install  | `%LOCALAPPDATA%\aio-sfx\<name>\` + a Start-menu shortcut                                   | open the `.exe` again                                           |
+| aio's local root certificate + key 🔒 | `~/.aio/ca/` — one per user, shared by every app                                           | a new root is made; devices that trusted the old one warn again |
+| Release signing keys 🔒               | `~/.aio/keys/` (`ship keygen`)                                                             | **you can no longer publish an update your installs accept**    |
+| Build tool cache                      | `$XDG_CACHE_HOME/aio/tools`, else `~/.cache/aio/tools` (Electron runtimes, `appimagetool`) | it is downloaded again                                          |
+
+A desktop window's profile used to live at Electron's per-OS place
+(`~/.config/<title-slug>/`, macOS `~/Library/Application Support/<title-slug>/`,
+Windows `%APPDATA%\<title-slug>\`). The first start of a newer build moves it
+into `~/.<appId>/electron/` and says so in `app.log`; if both exist, the home's
+is used and the old one is left as it was; a move that fails (another volume)
+keeps using the old place, and the next start tries again.
 
 `am backup` copies `data/` and none of these. The signing key is the one to keep
 a copy of yourself. Every location, per OS, in one table:

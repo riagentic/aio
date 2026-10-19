@@ -195,6 +195,7 @@ export type {
 // ── Virtual scrolling ────────────────────────────────────────────────
 export { useVirtualList } from "./air/virtual-list.ts";
 export { onBackButton } from "./air/back-button.ts";
+export { appVersion } from "./browser-air.ts";
 export type {
   VirtualListConfig,
   VirtualListState,

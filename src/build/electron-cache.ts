@@ -28,7 +28,11 @@
  * a plan a human reads BEFORE anything is removed — `am prune` prints it and
  * deletes only with `--yes`.
  */
-import { join } from "@std/path";
+import { basename, join } from "@std/path";
+import {
+  readSharedUses,
+  sharedElectronRoot,
+} from "../electron/shared-runtime.ts";
 import {
   DEFAULT_ELECTRON_VERSION,
   runtimeLastUsed,
@@ -334,6 +338,138 @@ export async function applyElectronPrune(
     }
   }
   return { removed, failed };
+}
+
+/** One entry of the SHARED runtime store (electron/shared-runtime.ts) and
+ *  what prune decided about it. */
+export type SharedPruneDecision = {
+  name: string;
+  path: string;
+  kind: "runtime" | "window" | "record" | "other";
+  bytes: number;
+  keep: boolean;
+  why: string;
+};
+
+/** How long a shared runtime an app just started from is kept even with no
+ *  record naming it: the record may be on its way. */
+export const SHARED_PRUNE_GRACE_MS = 10 * 60_000;
+
+/** What of the shared store may go. Unlike the cache, AGE decides nothing
+ *  here: a shared-runtime app starts from nothing else, so a runtime an
+ *  installed app still names is kept however long it sat unused (an app
+ *  opened once a year must still open offline). What goes is what no
+ *  installed app names — a runtime, a macOS window bundle — and the records
+ *  of apps that are no longer there. One record that cannot be read keeps
+ *  every runtime and window: prune cannot tell what it protected. */
+export async function planSharedPrune(
+  root: string = sharedElectronRoot(),
+  now: Date = new Date(),
+): Promise<{ root: string; decisions: SharedPruneDecision[] }> {
+  const decisions: SharedPruneDecision[] = [];
+  let entries: Deno.DirEntry[];
+  try {
+    entries = await Array.fromAsync(Deno.readDir(root));
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) return { root, decisions };
+    throw e;
+  }
+  const uses = await readSharedUses(root);
+  const unreadable = uses.filter((u) => u.use === null).map((u) =>
+    basename(u.file)
+  );
+  const runtimes = new Map<string, string>(); // name → the app that needs it
+  const windows = new Map<string, string>(); // path → the app that needs it
+  for (const u of uses) {
+    if (!u.use || !u.live) continue;
+    const v = u.use.version.replace(/^v/, "");
+    runtimes.set(`${v}-${u.use.slug}`, u.use.exe);
+    if (u.use.window) windows.set(u.use.window, u.use.exe);
+  }
+  const blanket = unreadable.length > 0
+    ? `kept: app record(s) ${
+      unreadable.map((n) => `apps/${n}`).join(", ")
+    } cannot be read, so what they protect is unknown — fix or delete ` +
+      `them to prune`
+    : null;
+  for (const e of entries) {
+    const path = join(root, e.name);
+    if (e.name === "apps" || e.name === "windows") continue;
+    if (!e.isDirectory) continue; // locks, stray files: never touched here
+    if (e.name.includes(".incoming.")) continue; // a download in flight
+    const bytes = await treeBytes(path);
+    const by = runtimes.get(e.name);
+    // A start that found it a moment ago may not have written its record
+    // when the records above were read: recent use keeps it.
+    const used = await runtimeLastUsed(path);
+    const fresh = used !== null &&
+      now.getTime() - used.at.getTime() < SHARED_PRUNE_GRACE_MS;
+    decisions.push({
+      name: e.name,
+      path,
+      kind: "runtime",
+      bytes,
+      keep: !!by || fresh || !!blanket,
+      why: by
+        ? `an installed app starts from it (${by})`
+        : fresh
+        ? `an app started from it in the last ${
+          SHARED_PRUNE_GRACE_MS / 60_000
+        } minutes`
+        : blanket ?? "no installed app names it",
+    });
+  }
+  for (
+    const w of await Array.fromAsync(Deno.readDir(join(root, "windows")))
+      .catch(() => [] as Deno.DirEntry[])
+  ) {
+    if (!w.isDirectory) continue;
+    const path = join(root, "windows", w.name);
+    const by = windows.get(path);
+    // A start is making this window right now (a fresh stage is there): its
+    // record follows once the window is ready. A stage left by a start that
+    // was killed goes stale, and stops protecting anything.
+    let making = false;
+    for (
+      const x of await Array.fromAsync(Deno.readDir(path)).catch(() =>
+        [] as Deno.DirEntry[]
+      )
+    ) {
+      if (!x.name.startsWith(".stage-")) continue;
+      const m = (await Deno.stat(join(path, x.name)).catch(() => null))?.mtime;
+      if (m && now.getTime() - m.getTime() < SHARED_PRUNE_GRACE_MS) {
+        making = true;
+      }
+    }
+    decisions.push({
+      name: `windows/${w.name}`,
+      path,
+      kind: "window",
+      bytes: await treeBytes(path),
+      keep: !!by || making || !!blanket,
+      why: by
+        ? `the window of ${by}`
+        : making
+        ? "an app is making this window right now"
+        // What is known is only that no record names it: an app removed, or
+        // one still installed whose window was never finished (a start that
+        // crashed). That one makes it again at its next start.
+        : blanket ??
+          "no installed app's record names this window (an installed app makes it again at its next start)",
+    });
+  }
+  for (const u of uses) {
+    if (u.use === null || u.live) continue;
+    decisions.push({
+      name: `apps/${basename(u.file)}`,
+      path: u.file,
+      kind: "record",
+      bytes: (await Deno.stat(u.file).catch(() => ({ size: 0 }))).size,
+      keep: false,
+      why: `the record of ${u.use.exe}, which is no longer there`,
+    });
+  }
+  return { root, decisions };
 }
 
 /** `7.7 GB`, `251 MB`, `0 B` — sizes a person reads, not bytes they count. */

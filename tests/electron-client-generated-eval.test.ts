@@ -42,6 +42,8 @@ type Client = {
   handlers: Record<string, (...a: unknown[]) => void>;
   errors: string[];
   windows: Win[];
+  /** What `shell.openExternal` was handed (the system browser). */
+  external: string[];
 };
 
 /** Runs the generated main with `electron` replaced by recorders. Everything
@@ -63,6 +65,7 @@ function boot(
   const handlers: Client["handlers"] = {};
   const errors: string[] = [];
   const windows: Win[] = [];
+  const external: string[] = [];
   const jar = opts.jar ?? [];
   class BrowserWindow {
     w: Win = {
@@ -139,6 +142,7 @@ function boot(
     BrowserWindow,
     Menu: { setApplicationMenu() {} },
     nativeImage: { createFromBuffer: () => ({}) },
+    shell: { openExternal: (u: string) => external.push(u) },
     session: {
       defaultSession: {
         setCertificateVerifyProc(f: (...a: unknown[]) => void) {
@@ -183,9 +187,9 @@ function boot(
     "setInterval",
     electronClientScript(null, { strictPin: opts.strictPin }) +
       "\nreturn { DISCOVERY_PORT, pinCert, _trustedHosts, fetchPage, " +
-      "fetchBuffer, discoverApps, _pinDecided, _pinKeyless, forPage };",
+      "fetchBuffer, discoverApps, _pinDecided, _pinKeyless, _seenCerts, forPage };",
   )(req, proc, con, () => 0);
-  return { api, handlers, errors, windows };
+  return { api, handlers, errors, windows, external };
 }
 
 // ── a discovery probe that could not be sent ─────────────────────────────
@@ -793,13 +797,15 @@ Deno.test("aio-client: a key that was withheld is withheld from the NEXT connect
   }
 });
 
-Deno.test("aio-client: an address opened WITHOUT the key is not sent it by the window's cookie jar either", async () => {
+Deno.test("aio-client: an address opened WITHOUT the key is not sent it by the window's cookie jar either — nor any other cookie of that host", async () => {
   // This run connected with the key (the connect page, a recent): the server
   // handed the window `aio_key_<app>` for its follow-up requests. Then the
   // certificate changes, what answers cannot prove, and the address is opened
   // keyless — by a window that sent the cookie along. Two ways in: the
   // address carried the key (it is withheld), or it carried none ("nothing to
-  // withhold" — the jar had it).
+  // withhold" — the jar had it). A login session is as good as the key to
+  // what answers there: it went along too, until every cookie of the host
+  // was taken out.
   const { rootA, rootB, a1, b1 } = await pki();
   const fileA = a1.certPem + rootA.certPem;
   const fileB = b1.certPem + rootB.certPem;
@@ -828,7 +834,7 @@ Deno.test("aio-client: an address opened WITHOUT the key is not sent it by the w
         cookie("aio_key_myapp", "127.0.0.1"),
         cookie("aio_key_other", "127.0.0.1", false), // cookies ignore the port
         cookie("aio_key_myapp", "192.168.1.9"), // another machine's app
-        cookie("theme", "127.0.0.1"), // not a key
+        cookie("aio_session", "127.0.0.1"), // a login, not a key
       ];
       const bare = s.url.replace("?token=k", "");
       const url = how === "key withheld" ? s.url : bare;
@@ -841,16 +847,93 @@ Deno.test("aio-client: an address opened WITHOUT the key is not sent it by the w
       }
       assertEquals(win.loaded, [bare], `${how}: ${c.errors.join("\n")}`);
       assertEquals(withKey(s.seen), [], how);
-      // Gone BEFORE the page was loaded; nothing else was touched.
-      assertEquals(win.jarAtLoad, [[
-        "aio_key_myapp@192.168.1.9",
-        "theme@127.0.0.1",
-      ]], how);
+      // Gone BEFORE the page was loaded; another host's are not touched.
+      assertEquals(win.jarAtLoad, [["aio_key_myapp@192.168.1.9"]], how);
     } finally {
       await s.close();
       await dropTempDir(dir);
     }
   }
+});
+
+Deno.test("aio-client: a host with no pin keeps the certificate it was first seen with — another one does not get its cookies (a login)", async () => {
+  // A manual connect (no pairing, no key: a login app) had no pin, so the
+  // window's jar went to whatever certificate answered there later.
+  const { rootA, rootB, a1, a2, b1 } = await pki();
+  const fileA = a1.certPem + rootA.certPem;
+  const served = (l: { certPem: string; keyPem: string }, root: string) => ({
+    certPem: l.certPem + root,
+    keyPem: l.keyPem,
+  });
+  const run = async (
+    leaf: { certPem: string; keyPem: string },
+    seen: string | undefined,
+  ) => {
+    const s = await standIn(leaf);
+    const dir = await tempDir("aio-client-seen-");
+    const url = s.url.replace("?token=k", "");
+    try {
+      await Deno.writeTextFile(
+        dir + "/recents.json",
+        JSON.stringify([{ url, name: "myapp", ...(seen ? { seen } : {}) }]),
+      );
+      const jar: Cookie[] = [
+        { name: "aio_session", domain: "127.0.0.1", path: "/", secure: true },
+        { name: "aio_session", domain: "10.0.0.9", path: "/", secure: true },
+      ];
+      const c = boot({ argv: [`--server-url=${url}`], userData: dir, jar });
+      c.handlers["ready"]!();
+      const win = c.windows[0]!;
+      const deadline = Date.now() + 10_000;
+      while (win.loaded.length === 0 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      assertEquals(win.loaded, [url], c.errors.join("\n"));
+      const rec = JSON.parse(Deno.readTextFileSync(dir + "/recents.json"))[0];
+      return { c, url, jarAtLoad: win.jarAtLoad![0], seen: rec.seen as string };
+    } finally {
+      await s.close();
+      await dropTempDir(dir);
+    }
+  };
+  const der = (pem: string) =>
+    pem.replace(/-----[A-Z ]+-----/g, "").replace(/\s+/g, "");
+  const both = ["aio_session@127.0.0.1", "aio_session@10.0.0.9"];
+
+  // First sight: trusted, and the chain it presented is kept — root and all.
+  const first = await run(served(a1, rootA.certPem), undefined);
+  assertEquals(first.jarAtLoad, both);
+  assertEquals(der(first.seen ?? ""), der(fileA));
+
+  // The same server with a leaf re-issued under its root (its addresses
+  // changed): the same server — the session goes, nobody is warned.
+  const again = await run(served(a2, rootA.certPem), fileA);
+  assertEquals(again.jarAtLoad, both);
+  assertEquals(der(again.seen), der(fileA));
+  assertEquals(again.c.errors.filter((e) => /CHANGED/.test(e)), []);
+
+  // Another root: the host's cookies are out of the jar BEFORE the load,
+  // it is said, and the new chain is what is seen from now on.
+  const other = await run(served(b1, rootB.certPem), fileA);
+  assertEquals(other.jarAtLoad, ["aio_session@10.0.0.9"]);
+  assertMatch(other.c.errors.join("\n"), /has CHANGED[\s\S]*NOT sent/);
+  assertEquals(der(other.seen), der(b1.certPem + rootB.certPem));
+  // The window: the decided chain loads; the old one is now the stranger.
+  const c = other.c;
+  c.api._trustedHosts.add(new URL(other.url).host);
+  assertEquals(present(c, other.url, b1.certPem), true);
+  assertEquals(present(c, other.url, a1.certPem), false);
+
+  // While the app is open (no connect to decide), a certificate the seen
+  // chain does not cover is refused, though the host is on the validated
+  // list; an unseen host is the ordinary manual connect.
+  const w = boot();
+  w.api._trustedHosts.add("10.0.0.5:8443");
+  w.api._trustedHosts.add("10.0.0.9:8443");
+  w.api._seenCerts.set("10.0.0.5:8443", fileA);
+  assertEquals(present(w, "https://10.0.0.5:8443/", a2.certPem), true);
+  assertEquals(present(w, "https://10.0.0.5:8443/", b1.certPem), false);
+  assertEquals(present(w, "https://10.0.0.9:8443/", b1.certPem), true);
 });
 
 Deno.test("aio-client: a connect that carries the key, or meets its pin, leaves the cookie jar alone", async () => {
@@ -1235,5 +1318,65 @@ Deno.test("aio-client strict pin: a refused --server-url launch opens the connec
     if (server.listening) {
       await new Promise<void>((r) => server.close(() => r()));
     }
+  }
+});
+
+// ── the app's own navigations, once it is on screen ─────────────────────
+
+Deno.test("aio-client: once the app is on screen its navigations are its own — a same-app link loads (no 401, no reconnect), another site goes to the system browser", async () => {
+  // The connect page's will-navigate handler outlived the connect page: every
+  // link the APP followed was vetoed and re-entered connectTo, whose fetch has
+  // no cookie jar — so a keyed app's tokenless link answered 401 and the
+  // window stayed where it was, saying it only to the log.
+  const seen: string[] = [];
+  const server = Deno.serve(
+    { port: 0, hostname: "127.0.0.1", onListen() {} },
+    (req) => {
+      const u = new URL(req.url);
+      seen.push(u.pathname + u.search);
+      if (u.pathname === "/__aio/icon") {
+        return new Response(null, { status: 404 });
+      }
+      if (!u.searchParams.has("token")) {
+        return new Response("no", { status: 401 });
+      }
+      return new Response('<title>myapp</title><div id="root"></div>');
+    },
+  );
+  const base = `http://127.0.0.1:${server.addr.port}`;
+  const dir = await tempDir("aio-client-nav-");
+  try {
+    const c = boot({ userData: dir });
+    c.handlers["ready"]!(); // the connect page
+    const win = c.windows[0]!;
+    const nav = (url: string) => {
+      let vetoed = false;
+      for (const f of win.listeners["will-navigate"] ?? []) {
+        f({ preventDefault: () => vetoed = true }, url);
+      }
+      return vetoed;
+    };
+    // The connect page's click: vetoed, and connected to.
+    assert(nav(`${base}/?token=k`));
+    const deadline = Date.now() + 10_000;
+    while (win.loaded.at(-1) !== `${base}/?token=k` && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    assertEquals(win.loaded.at(-1), `${base}/?token=k`, c.errors.join("\n"));
+    const asked = seen.length;
+    // The app's own link: Chromium loads it (with the window's cookies).
+    assertEquals(nav(`${base}/other`), false);
+    assertEquals(nav(`${base}/__aio/auth/oidc/start`), false);
+    // Another site: never in the app's window.
+    assertEquals(nav("https://example.com/docs"), true);
+    assertEquals(nav("file:///etc/passwd"), true);
+    await new Promise((r) => setTimeout(r, 200));
+    assertEquals(seen.slice(asked), [], "the client fetched it itself");
+    assertEquals(c.external, ["https://example.com/docs"]);
+    assertEquals(win.loaded.length, 2, "the window was reloaded by the client");
+    assertEquals(c.errors.filter((e) => e.includes("cannot open")), []);
+  } finally {
+    await server.shutdown();
+    await dropTempDir(dir);
   }
 });

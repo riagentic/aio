@@ -17,8 +17,10 @@ import {
   resultLine,
   STUB_REBUILD_TEST,
   stubRebuildAdvisory,
+  stubRebuildNow,
   verdictLine,
 } from "../scripts/release-check.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const LAB_SKIPPED: Result = {
   name: "lab (fresh ubuntu)",
@@ -162,4 +164,18 @@ Deno.test("release check: a Windows stub that was not rebuilt here is an ADVISOR
     ),
     `\`${STUB_REBUILD_TEST} (`,
   );
+});
+
+// The spawn itself — its file, its filter, its preload — was never run by a
+// test: a renamed file or a preload that moved read as "not rebuilt here".
+// With no toolchain on PATH the one test it runs is IGNORED, never filtered
+// out or failed.
+Deno.test("release check: the stub rebuild's own run finds its one test — shown ignored with no toolchain", async () => {
+  const empty = await tempDir("aio-no-toolchain-");
+  try {
+    const r = await stubRebuildNow({ PATH: empty });
+    assertEquals([r.ok, r.skipped], [true, true], r.detail);
+  } finally {
+    await dropTempDir(empty);
+  }
 });

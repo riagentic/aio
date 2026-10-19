@@ -264,6 +264,86 @@ export async function spawn(
   );
 }
 
+/** How to run a command to its end: {@link SpawnOptions} (no stdin) plus a
+ *  timeout. */
+export type RunCommandOptions = Omit<SpawnOptions, "stdin"> & {
+  /** Kill the whole tree after this many ms; what it wrote is kept. */
+  timeoutMs?: number;
+};
+
+/** What a {@link runCommand} child wrote, and how it ended. */
+export type RunCommandResult = SpawnStatus & {
+  /** Its stdout lines (`\n`, `\r\n` or `\r` ended), joined by `\n` —
+   *  everything written before it ended, timed out or was aborted. */
+  stdout: string;
+  /** Its stderr lines, the same way. */
+  stderr: string;
+  /** True when `timeoutMs` ran out and the tree was killed. */
+  timedOut: boolean;
+};
+
+/**
+ * Run a command to its end and get its output — with a timeout that kills the
+ * whole tree ON TIME and keeps what was written before it.
+ *
+ * ```ts
+ * const r = await runCommand("avahi-browse", {
+ *   args: ["-atrp"],
+ *   timeoutMs: 3000,     // a browse that never ends on its own
+ *   signal: s.$signal,
+ * });
+ * r.stdout; r.timedOut; r.success;
+ * ```
+ *
+ * `Deno.Command(…, { signal }).output()` kills the command and then waits for
+ * any child of it that still holds the pipe (`mtr` → `mtr-packet`, a shell
+ * script's `sleep`): measured, a 500 ms timeout returned after 5 s. This is
+ * {@link spawn} — the child's own process group, killed as one — collecting
+ * its lines. Rejects as `spawn` does (a missing command); a command that
+ * fails is a result (`success: false`), never a throw.
+ */
+export async function runCommand(
+  cmd: string,
+  opts: RunCommandOptions = {},
+): Promise<RunCommandResult> {
+  const { timeoutMs } = opts;
+  if (timeoutMs !== undefined && !(timeoutMs >= 0 && timeoutMs < Infinity)) {
+    throw new Error(
+      `runCommand("${cmd}"): timeoutMs must be a finite number of ms ≥ 0 — ` +
+        `got ${timeoutMs}`,
+    );
+  }
+  const out: string[] = [], err: string[] = [];
+  const timer = new AbortController();
+  const signal = opts.signal
+    ? AbortSignal.any([opts.signal, timer.signal])
+    : timer.signal;
+  const id = timeoutMs === undefined
+    ? undefined
+    : setTimeout(() => timer.abort(), timeoutMs);
+  try {
+    const job = await spawn(cmd, {
+      ...opts,
+      signal,
+      onLine: (line, stream) => {
+        (stream === "stdout" ? out : err).push(line);
+        opts.onLine?.(line, stream);
+      },
+    });
+    const status = await job.status;
+    return {
+      ...status,
+      stdout: out.join("\n"),
+      stderr: err.join("\n"),
+      // The timer fired before the process settled — whatever it then
+      // exited with: a child that traps the kill and exits 0 still ran out.
+      timedOut: timer.signal.aborted,
+    };
+  } finally {
+    clearTimeout(id);
+  }
+}
+
 // ── The live-child registry ─────────────────────────────────────────────────
 //
 // EVERY child here is in a process group OF ITS OWN. That is what makes

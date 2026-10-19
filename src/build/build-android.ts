@@ -29,7 +29,9 @@ import {
   probeRunOptions,
   scanRunOptions,
 } from "./android-run-options.ts";
-import { warn } from "./build-say.ts";
+import { summaryNote, warn } from "./build-say.ts";
+import { checkOverlayDrift } from "./android-overlay-drift.ts";
+import { VERSION } from "../server/aio-cli.ts";
 import { copyWorkerBundles } from "./dist-staging.ts";
 import { ESBUILD_SPEC } from "./esbuild-shared.ts";
 import {
@@ -144,6 +146,15 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
       `${OK} overlay: ${count(overlaid.length, "file")} from android/`,
     );
     for (const f of overlaid) console.log(`  \u00b7 ${f}`);
+    // \u2026and whether a template file it replaces moved on since it was copied.
+    for (
+      const w of await checkOverlayDrift(
+        cfg.root,
+        overlaid,
+        ANDROID_TEMPLATE,
+        VERSION,
+      )
+    ) summaryNote(w);
   }
 
   // Derive application ID from THE APK label (see apkLabel /
@@ -199,24 +210,32 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
   for (const f of templateFiles) {
     const path = join(androidDir, f);
     const content = await Deno.readTextFile(path);
-    await Deno.writeTextFile(
-      path,
-      _fillTemplate(content, {
-        "{{APPLICATION_ID}}": applicationId,
-        "{{VERSION_CODE}}": String(appVersion.code),
-        "{{VERSION_NAME}}": appVersion.name,
-        "{{APP_NAME}}": xmlFiles.has(f) ? appNameXml : appNameKotlin,
-        "{{ICON_ATTR}}": 'android:icon="@mipmap/ic_launcher"',
-        "{{CLEARTEXT_ATTR}}": _cleartextAttr(serverOpts),
-        "{{TALKS_TO_SERVER}}": String(talksToServer(serverOpts)),
-        "{{IS_CLIENT}}": String(doRemote && !cfg.androidDevUrl),
-        // ONE decider for the camera, spent in both places it has to agree:
-        // the manifest's declaration and the WebView's refusal message.
-        "{{CAMERA_PERMISSION}}": _cameraPermission(cfg.androidCamera),
-        "{{CAMERA_DECLARED}}": String(cfg.androidCamera === true),
-        "{{APP_THEME}}": _appTheme(cfg.androidColorScheme),
-      }),
-    );
+    const filled = _fillTemplate(content, {
+      "{{APPLICATION_ID}}": applicationId,
+      "{{VERSION_CODE}}": String(appVersion.code),
+      "{{VERSION_NAME}}": appVersion.name,
+      "{{APP_NAME}}": xmlFiles.has(f) ? appNameXml : appNameKotlin,
+      "{{ICON_ATTR}}": 'android:icon="@mipmap/ic_launcher"',
+      "{{CLEARTEXT_ATTR}}": _cleartextAttr(serverOpts),
+      "{{TALKS_TO_SERVER}}": String(talksToServer(serverOpts)),
+      "{{IS_CLIENT}}": String(doRemote && !cfg.androidDevUrl),
+      // ONE decider for the camera, spent in both places it has to agree:
+      // the manifest's declaration and the WebView's refusal message.
+      "{{CAMERA_PERMISSION}}": _cameraPermission(cfg.androidCamera),
+      "{{CAMERA_DECLARED}}": String(cfg.androidCamera === true),
+      "{{APP_THEME}}": _appTheme(cfg.androidColorScheme),
+    });
+    // A token no substitution knows (an overlay's typo, a template key from
+    // another aio version) reaches gradle as text and fails it opaquely, or
+    // ships as text — said here, by name. A warning, not a stop: a token in a
+    // Kotlin comment built before and still does.
+    for (const t of _leftoverTokens(filled)) {
+      console.warn(
+        `${HEY} ${f}: ${t} is not a placeholder aio fills — it is left as ` +
+          `written (a typo, or a key from another aio version?)`,
+      );
+    }
+    await Deno.writeTextFile(path, filled);
   }
 
   // An app's own MainActivity.kt replaces the template's WHOLE — including the
@@ -268,7 +287,13 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     await Deno.mkdir(assetsDir, { recursive: true });
 
     if (doRemote) {
-      await _writeConnectPage(assetsDir, appNameXml, cfg.bakedServer);
+      await _writeConnectPage(
+        assetsDir,
+        appNameXml,
+        cfg.bakedServer,
+        "android",
+        cfg.strictPin,
+      );
     } else {
       await _writeLocalAssets(cfg, assetsDir);
     }
@@ -292,19 +317,29 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     console.log(`${OK} default icon for "${label}"`);
   }
 
-  // The release key is the user's: named by the environment, never held here.
-  const signing = androidSigning(Deno.env.toObject(), cfg.root);
-  if (signing && "refused" in signing) {
-    console.error(`${NO} ${signing.refused}`);
+  // The release key is the user's: named by the environment or deno.json,
+  // its password by the environment only — never held here.
+  const release = _androidRelease((await readDenoJson(cfg.root))?.config);
+  if ("problem" in release) {
+    console.error(`${NO} ${release.problem}`);
     Deno.exit(1);
   }
-  if (signing && !doRelease) {
-    console.warn(
-      `${HEY} ${KEYSTORE_ENV} is set, but this is a debug build — it is ` +
-        `signed with Android's debug key. Add --release to sign with yours.`,
-    );
+  const signing = androidSigning(
+    Deno.env.toObject(),
+    cfg.root,
+    undefined,
+    release,
+  );
+  const { signed, refused, warn } = _signingForBuild(
+    signing,
+    doRelease,
+    !!Deno.env.get(KEYSTORE_ENV),
+  );
+  if (refused) {
+    console.error(`${NO} ${refused}`);
+    Deno.exit(1);
   }
-  const signed = signing && doRelease ? signing : null;
+  if (warn) console.warn(`${HEY} ${warn}`);
   if (signed) await _declareSigning(androidDir);
 
   await _runGradle(
@@ -315,6 +350,7 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     appNameKotlin,
     doRelease,
     signed,
+    release.aab,
   );
   Deno.exit(0);
 }
@@ -327,10 +363,57 @@ const KEYSTORE_PASSWORD_ENV = "AIO_ANDROID_KEYSTORE_PASSWORD";
 const KEY_ALIAS_ENV = "AIO_ANDROID_KEY_ALIAS";
 const KEY_PASSWORD_ENV = "AIO_ANDROID_KEY_PASSWORD";
 
-/** The user's release keystore, as the environment names it: `null` when no
- *  keystore is named (the build then signs nothing, exactly as before),
- *  `refused` when one is named but cannot be used — said before Gradle runs,
- *  not as a stack trace from inside it. A relative path is the app root's. */
+/** deno.json `build.android`'s release keys: `keystore` (a path, the app
+ *  root's when relative) and `keyAlias` name the release key once instead of
+ *  on every command line; `aab: true` also writes the bundle (`.aab`) for an
+ *  UNSIGNED release. A password is never one of them: deno.json is committed.
+ *  `{ problem }` for a value aio cannot use — checked on every build, like
+ *  `strict`. A key naming a password is never read and only warned about
+ *  (`secretWarning`): it did nothing before these keys existed, so a build
+ *  that passed still passes. Pure. */
+export type AndroidRelease = {
+  keystore?: string;
+  keyAlias?: string;
+  aab: boolean;
+  secretWarning?: string;
+};
+export function _androidRelease(
+  config: unknown,
+): AndroidRelease | { problem: string } {
+  const a = (config as { build?: { android?: unknown } } | null | undefined)
+    ?.build?.android;
+  if (!a || typeof a !== "object") return { aab: false };
+  const o = a as Record<string, unknown>;
+  const secret = Object.keys(o).find((k) => /pass/i.test(k));
+  const secretWarning = secret
+    ? `deno.json build.android.${secret}: a password is never read from ` +
+      `deno.json (a file you commit) — remove it, change that password, and ` +
+      `set ${KEYSTORE_PASSWORD_ENV} (and ${KEY_PASSWORD_ENV} when the key ` +
+      `has its own) in the environment`
+    : undefined;
+  for (const k of ["keystore", "keyAlias"]) {
+    if (o[k] !== undefined && (typeof o[k] !== "string" || !o[k])) {
+      return {
+        problem: `deno.json build.android.${k} must be a non-empty string`,
+      };
+    }
+  }
+  if (o.aab !== undefined && typeof o.aab !== "boolean") {
+    return { problem: `deno.json build.android.aab must be true or false` };
+  }
+  return {
+    ...(o.keystore ? { keystore: o.keystore as string } : {}),
+    ...(o.keyAlias ? { keyAlias: o.keyAlias as string } : {}),
+    aab: o.aab === true,
+    ...(secretWarning ? { secretWarning } : {}),
+  };
+}
+
+/** The user's release keystore, as the environment (first) or deno.json
+ *  `build.android` names it: `null` when no keystore is named (the build then
+ *  signs nothing, exactly as before), `refused` when one is named but cannot
+ *  be used — said before Gradle runs, not as a stack trace from inside it. A
+ *  relative path is the app root's. The password is the environment's only. */
 export function androidSigning(
   env: Record<string, string | undefined>,
   root: string,
@@ -342,25 +425,61 @@ export function androidSigning(
       return false;
     }
   },
-): { keystore: string } | { refused: string } | null {
-  const named = env[KEYSTORE_ENV];
+  declared: AndroidRelease = { aab: false },
+): { keystore: string; keyAlias: string } | { refused: string } | null {
+  const named = env[KEYSTORE_ENV] || declared.keystore;
   if (!named) return null;
+  const from = env[KEYSTORE_ENV]
+    ? `${KEYSTORE_ENV}=${named}`
+    : `deno.json build.android.keystore "${named}"`;
   const keystore = resolve(root, named);
   if (!isFile(keystore)) {
-    return {
-      refused: `${KEYSTORE_ENV}=${named} — no keystore file at ${keystore}`,
-    };
+    return { refused: `${from} — no keystore file at ${keystore}` };
   }
-  const missing = [KEYSTORE_PASSWORD_ENV, KEY_ALIAS_ENV].filter((k) => !env[k]);
+  const keyAlias = env[KEY_ALIAS_ENV] || declared.keyAlias;
+  const missing = [
+    ...(env[KEYSTORE_PASSWORD_ENV] ? [] : [KEYSTORE_PASSWORD_ENV]),
+    ...(keyAlias ? [] : [`${KEY_ALIAS_ENV} (or build.android.keyAlias)`]),
+  ];
   if (missing.length) {
     return {
-      refused: `${KEYSTORE_ENV} is set but ${missing.join(" and ")} ` +
-        `${missing.length > 1 ? "are" : "is"} not — a release is signed with ` +
-        `the keystore, its password and the key's alias ` +
+      refused: `${from} names a keystore, but ${missing.join(" and ")} ` +
+        `${missing.length > 1 ? "are" : "is"} not set — a release is signed ` +
+        `with the keystore, its password and the key's alias ` +
         `(${KEY_PASSWORD_ENV} when the key has its own password)`,
     };
   }
-  return { keystore };
+  return { keystore, keyAlias: keyAlias! };
+}
+
+/** What `androidSigning`'s answer means for THIS build. Only a `--release`
+ *  build uses the key, so only it is refused over an unusable one: a keystore
+ *  committed to deno.json is there on every teammate's and CI's debug build
+ *  and `dev:android`, where its password or file may rightly be absent. A
+ *  debug build warns only for a key the environment named for this run — one
+ *  in deno.json is there every time, and a warning every time is noise. Pure. */
+export function _signingForBuild(
+  signing: ReturnType<typeof androidSigning>,
+  doRelease: boolean,
+  namedForRun: boolean,
+): {
+  signed: { keystore: string; keyAlias: string } | null;
+  refused?: string;
+  warn?: string;
+} {
+  if (!signing) return { signed: null };
+  if (doRelease) {
+    return "refused" in signing
+      ? { signed: null, refused: signing.refused }
+      : { signed: signing };
+  }
+  return namedForRun
+    ? {
+      signed: null,
+      warn: `${KEYSTORE_ENV} is set, but this is a debug build — it is ` +
+        `signed with Android's debug key. Add --release to sign with yours.`,
+    }
+    : { signed: null };
 }
 
 /** Give the generated project's release variant a signing config that reads
@@ -535,6 +654,11 @@ export async function _writeConnectPage(
    *  self-signed certificate; the iOS one has no bridge — a share link is its
    *  only way to a keyed server, and it trusts what iOS trusts. */
   shell: "android" | "ios" = "android",
+  /** deno.json `build.strictPin`: the page never sends a key over plain
+   *  http to another machine — a keyed `http://` link is refused, and so is
+   *  pairing over http (its answer IS the key); a pairing typed without a
+   *  scheme is tried over https only. Loopback (`adb reverse`) stays open. */
+  strict = false,
 ): Promise<void> {
   const ios = shell === "ios";
   const connectHtml = `<!DOCTYPE html>
@@ -582,7 +706,7 @@ ${
     </div>
   </div>
   <script>
-    var baked=${JSON.stringify(bakedServer ?? "")};
+    var baked=${JSON.stringify(bakedServer ?? "")},strict=${strict};
     var s=localStorage.getItem('aio_server')||baked;
     if(s)document.getElementById('addr').value=s;
     // Straight in on EVERY launch that has an address — the baked one on a
@@ -626,7 +750,7 @@ ${
     if(why())err.textContent=why();
     function enter(){
       if(why())err.textContent=why();
-      else if(s&&location.hash!=='#change')location.href=s;
+      else if(s&&location.hash!=='#change'&&!refused(parse(s).u))location.href=s;
     }
     // localStorage reaches the disk when the WebView gets to it: a kill
     // within a second of pairing brought the app back WITHOUT the pairing
@@ -653,13 +777,14 @@ ${
     // a scheme is tried over https first — what --expose serves — then http.
     function pair(bases,pin,i){
       if(i>=bases.length){err.textContent='Could not reach '+bases[0]+' — is the server running?';return}
+      if(strict&&clear(new URL(bases[i]))){err.textContent='Refused (build.strictPin): pairing over plain http hands the server\\'s key to anyone on the same network. Pair over https.';return}
       ask({base:bases[i],pin:pin}).then(function(r){
         if(r.key)go(bases[i]+'/?token='+encodeURIComponent(r.key));
         else if(r.status===401)err.textContent='Invalid or expired pairing code — a code works once, for a few minutes. Run am pair on the server for a new one.';
         else if(r.status===429)err.textContent='Too many wrong codes from this device — wait a minute, then pair with a new code.';
         else if(r.status)err.textContent='Pairing failed: '+bases[i]+' answered HTTP '+r.status+' — is it a keyed aio server?';
         else if(i+1<bases.length)pair(bases,pin,i+1);
-        else err.textContent='Pairing failed: '+r.error;
+        else err.textContent='Pairing failed: '+r.error+(strict?' (build.strictPin: tried over https only)':'');
       });
     }
     // The address as it will be opened. Typed without a scheme it is http —
@@ -674,10 +799,16 @@ ${
     // app served with --no-tls must keep working), and SAID — whoever shares
     // the network can read the key. Shown whenever such an address is in the
     // field: before Connect, and each time the form comes back.
+    function clear(u){return u.protocol==='http:'&&!/^(localhost|127\\.\\d+\\.\\d+\\.\\d+|\\[::1\\])$/.test(u.hostname)}
+    // build.strictPin: such a link is not opened at all — said on the form.
+    function refused(u){
+      if(!strict||!u||!u.searchParams.get('token')||!clear(u))return false;
+      err.textContent='Refused (build.strictPin): this link sends the server\\'s key over plain http to another machine. Use the https:// link.';
+      return true;
+    }
     function warn(){
       var u=parse(document.getElementById('addr').value.trim()).u;
-      var local=u&&/^(localhost|127\\.\\d+\\.\\d+\\.\\d+|\\[::1\\])$/.test(u.hostname);
-      document.getElementById('warn').textContent=u&&u.protocol==='http:'&&u.searchParams.get('token')&&!local
+      document.getElementById('warn').textContent=u&&u.searchParams.get('token')&&clear(u)
         ?'This link sends the server\\'s key over plain http: anyone on the same network can read it. Use the https:// link if the server has one.':'';
     }
     document.getElementById('addr').oninput=warn;
@@ -691,12 +822,13 @@ ${
       var p=parse(v),bare=p.bare,u=p.u;
       if(!u){err.textContent='Invalid URL';return}
       err.textContent='';
-      if(pin){pair(bare?['https://'+u.host,'http://'+u.host]:[u.origin],pin,0);return}
+      if(pin){pair(bare?['https://'+u.host].concat(strict&&clear(u)?[]:['http://'+u.host]):[u.origin],pin,0);return}
       // A share link over TLS: before the WebView meets the certificate, the
       // server proves it holds this link's key ON that certificate — which
       // is then the one trusted. No proof changes nothing: the load goes on
       // and a certificate Android does not trust is refused, as before.
       var key=u.searchParams.get('token');
+      if(refused(u))return;
       v=bare?u.protocol+'//'+v:v;
       if(u.protocol==='https:'&&key&&native)ask({base:u.origin,key:key}).then(function(){go(v)});
       else go(v);
@@ -816,6 +948,7 @@ export async function _writeLocalAssets(
   const run = await _readRunOptions(cfg);
   const androidHtml = androidLocalHTML(appTitle ?? binaryName, hasCSS, {
     themeName: binaryName,
+    appVersion: cfg.version?.version,
     ...run.ui,
     head: (run.ui.head ?? "") + run.script + oldEngineNotice("apk"),
   });
@@ -1031,6 +1164,12 @@ export function _fillTemplate(
     out = out.replaceAll(token, () => value);
   }
   return out;
+}
+
+/** The `{{UPPER_CASE}}` tokens left after {@link _fillTemplate}, once each.
+ *  Pure. @internal */
+export function _leftoverTokens(filled: string): string[] {
+  return [...new Set(filled.match(/\{\{[A-Z_]+\}\}/g) ?? [])];
 }
 
 const MAIN_ACTIVITY = "app/src/main/java/aio/app/MainActivity.kt";
@@ -1343,7 +1482,9 @@ async function _runGradle(
   appNameKotlin: string,
   doRelease: boolean,
   /** The user's keystore, for a release it signs (see `androidSigning`). */
-  signed: { keystore: string } | null = null,
+  signed: { keystore: string; keyAlias: string } | null = null,
+  /** deno.json `build.android.aab`: an unsigned release writes its bundle too. */
+  aab = false,
 ): Promise<void> {
   void appNameKotlin;
   const gradleBin = findGradle();
@@ -1361,7 +1502,9 @@ async function _runGradle(
     ...Deno.env.toObject(),
     ANDROID_HOME: androidHome,
     JAVA_HOME: jdkHome, // resolved + compile-verified by findJdk()
-    ...(signed ? { [KEYSTORE_ENV]: signed.keystore } : {}), // absolute
+    ...(signed
+      ? { [KEYSTORE_ENV]: signed.keystore, [KEY_ALIAS_ENV]: signed.keyAlias }
+      : {}), // absolute; the alias may be deno.json's
   };
 
   // Generate gradle wrapper — pins version for reproducible builds. 8.14.3
@@ -1385,9 +1528,11 @@ async function _runGradle(
   console.log(`${OK} gradle wrapper (pinned 8.14.3)`);
 
   // Build APK using wrapper
-  // A signed release also writes the bundle (.aab) a store upload takes.
+  // A signed release also writes the bundle (.aab) a store upload takes; an
+  // unsigned one only when deno.json asks (`build.android.aab`).
+  const bundle = doRelease && (signed !== null || aab);
   const gradleTasks = doRelease
-    ? ["assembleRelease", ...(signed ? ["bundleRelease"] : [])]
+    ? ["assembleRelease", ...(bundle ? ["bundleRelease"] : [])]
     : ["assembleDebug"];
   console.log(`./gradlew ${gradleTasks.join(" ")}...`);
   const gradlew = gradlewPath(Deno.build.os, androidDir);
@@ -1449,12 +1594,17 @@ async function _runGradle(
         `with ${KEYSTORE_ENV} (docs/build/targets.md).`,
     );
   }
-  if (signed) {
+  if (bundle) {
+    // AGP names the bundle app-release.aab signed or not; the artifact's
+    // name says which, as the APK's does.
     const aab = join(
       androidDir,
       "app/build/outputs/bundle/release/app-release.aab",
     );
-    const aabDst = join(cfg.outDir ?? cfg.root, `${label}.aab`);
+    const aabDst = join(
+      cfg.outDir ?? cfg.root,
+      `${label}${signed ? "" : "-unsigned"}.aab`,
+    );
     try {
       await Deno.copyFile(aab, aabDst);
     } catch (e) {
@@ -1466,8 +1616,12 @@ async function _runGradle(
     }
     const aabMb = ((await Deno.stat(aabDst)).size / 1024 / 1024).toFixed(1);
     console.log(
-      `${OK} ${label}.aab (${aabMb} MB) \u2014 the bundle a store upload takes; ` +
-        `both are signed with your key and not debuggable`,
+      signed
+        ? `${OK} ${label}.aab (${aabMb} MB) \u2014 the bundle a store upload ` +
+          `takes; both are signed with your key and not debuggable`
+        : `${OK} ${label}-unsigned.aab (${aabMb} MB) \u2014 UNSIGNED: sign it ` +
+          `before an upload (jarsigner -keystore <your.keystore> ` +
+          `${label}-unsigned.aab <alias>)`,
     );
   }
 }

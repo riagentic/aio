@@ -367,6 +367,11 @@ export { MAX_TIMER_DELAY };
 
 /** How often a beyond-ceiling timer re-checks how far away its deadline is. */
 const RECHECK_MS = 86_400_000; // 24h
+/** How often an `at`/`cron` wait re-reads the WALL clock. Timers run on the
+ *  monotonic clock, which stops while Linux/macOS/Android is suspended — a
+ *  09:00 cron armed at 08:00 on a laptop that slept 08:10–09:00 ran at 09:50.
+ *  So a wall-anchored deadline is due when EITHER clock reaches it. */
+const WALL_RECHECK_MS = 60_000;
 
 /** Why `every` REFUSES the ceiling that `after`/`at`/`cron` clamp — the same
  *  words at config time (`validateSchedules`) and at the call site
@@ -1229,6 +1234,10 @@ export type ScheduleTimers = {
   clearInterval: (h: TimerHandle) => void;
   /** Wall clock, in ms — used by `at`/`cron` and by every delay computation. */
   now: () => number;
+  /** A timer that only re-reads the clock (`at`/`cron`'s wall re-check) —
+   *  bookkeeping, not app work. The virtual clock leaves it out of its
+   *  runaway guard; omitted, `setTimeout` is used. */
+  setRecheck?: (fn: () => void, ms: number) => TimerHandle;
 };
 
 const realTimers: ScheduleTimers = {
@@ -1433,11 +1442,18 @@ export function createScheduleManager(
   ): void {
     let warned = false;
     let first = true;
+    // `at`/`cron` name an instant on the wall clock; `after` is a duration.
+    const wallAnchored = kind === "at" || kind === "cron";
+    // Monotonic time still owed. Due at whichever clock arrives first: the
+    // wall leg catches a suspend or a forward step, the monotonic leg keeps a
+    // backward step's documented cron behaviour (see `handleCron`).
+    let owed = Infinity;
     const arm = (): void => {
       const quiet = internal || !first; // a 24h re-check is never a collision
       first = false;
-      const delay = Math.max(0, deadline - clock.now());
+      const delay = Math.min(owed, Math.max(0, deadline - clock.now()));
       if (delay > MAX_TIMER_DELAY) {
+        owed = delay - RECHECK_MS;
         if (!warned) {
           warned = true;
           log.warn(
@@ -1452,6 +1468,12 @@ export function createScheduleManager(
         }
         setTimer(id, kind, clock.setTimeout(arm, RECHECK_MS), quiet);
         log.debug(`schedule: ${kind} '${id}' re-check in 24h (${delay}ms)`);
+        return;
+      }
+      if (wallAnchored && delay > WALL_RECHECK_MS) {
+        owed = delay - WALL_RECHECK_MS;
+        const recheck = clock.setRecheck ?? clock.setTimeout;
+        setTimer(id, kind, recheck(arm, WALL_RECHECK_MS), quiet);
         return;
       }
       setTimer(id, kind, clock.setTimeout(onDue, delay), quiet);
@@ -1555,7 +1577,8 @@ export function createScheduleManager(
       // into four, and a deliberate refusal into a possible late success —
       // while the same method written `async` ran once. The retry is for a
       // tick the door refused, where nothing ran.
-      if (code === "REDUCE_ERROR") {
+      // A write its reduce REFUSED (validate, disabled cell) is the same answer.
+      if (code === "REDUCE_ERROR" || code === "ACTION_REFUSED") {
         cancelTimer(id);
         return;
       }
@@ -2120,6 +2143,8 @@ export function createVirtualTimers(
     fn: () => void | Promise<void>;
     every: number;
     awaited?: boolean;
+    /** A clock re-read: not counted by the runaway guard. */
+    recheck?: boolean;
   };
   let now = start;
   let seq = 0;
@@ -2133,6 +2158,7 @@ export function createVirtualTimers(
     ms: number,
     every: number,
     awaited = false,
+    recheck = false,
   ): TimerHandle => {
     const id = ++seq;
     // FAITHFUL to the platform, deliberately: V8 stores a timeout's delay in an
@@ -2141,7 +2167,7 @@ export function createVirtualTimers(
     // hide the exact defect it exists to expose, and every test written on it
     // would be green about a timer that fires 35 days early in production.
     const delay = ms > MAX_TIMER_DELAY ? 1 : Math.max(0, ms);
-    q.set(id, { id, due: now + delay, fn, every, awaited });
+    q.set(id, { id, due: now + delay, fn, every, awaited, recheck });
     return id as unknown as TimerHandle;
   };
   const clear = (h: TimerHandle): void => {
@@ -2151,6 +2177,7 @@ export function createVirtualTimers(
   return {
     setTimeout: (fn, ms) => arm(fn, ms, 0),
     setTimeoutAwaited: (fn, ms) => arm(fn, ms, 0, true),
+    setRecheck: (fn, ms) => arm(fn, ms, 0, false, true),
     clearTimeout: clear,
     // The truncation applies to the PERIOD too: a real setInterval past the
     // ceiling fires every 1ms, not once now and then monthly. Only the first
@@ -2172,7 +2199,10 @@ export function createVirtualTimers(
       // A guard, but a LOUD one: a runaway re-arming schedule (an interval of
       // 0, an `after` that re-schedules itself with no delay) would otherwise
       // make advance() return quietly having done a million dispatches.
-      for (let guard = 0;; guard++) {
+      // A clock re-read (`at`/`cron`'s minute re-check) is not app work: a
+      // daily cron advanced a year is ~525k re-reads, and counting them
+      // blamed a runaway that was not there.
+      for (let guard = 0;;) {
         if (guard > 1_000_000) {
           throw new Error(
             `virtual clock: over 1e6 timer fires while advancing ${ms}ms — a ` +
@@ -2184,6 +2214,7 @@ export function createVirtualTimers(
           if (t.due <= target && (!next || t.due < next.due)) next = t;
         }
         if (!next) break;
+        if (!next.recheck) guard++;
         now = next.due;
         // An interval's repeat is RE-QUEUED, not moved in place, and only
         // once its callback has RETURNED. A real setInterval re-arms in a

@@ -23,6 +23,7 @@ import {
   _appNameKotlin,
   _appNameXml,
   _fillTemplate,
+  _leftoverTokens,
 } from "../src/build/build-android.ts";
 
 const MANIFEST = `<?xml version="1.0" encoding="utf-8"?>
@@ -117,4 +118,19 @@ Deno.test("android: the XML spelling still escapes what XML needs escaped", () =
   );
   // …and leaves ordinary text alone, including unicode and emoji.
   assertEquals(_appNameXml("日本語 アプリ 🚀"), "日本語 アプリ 🚀");
+});
+
+Deno.test("android: a token no substitution knows is named, once — it would reach gradle as text", () => {
+  const out = _fillTemplate(
+    `<a l="{{ APP_NAME }}" t="{{APP_TITLE}}" u="{{APP_TITLE}}" k="{{lower}}"/>`,
+    { "{{APP_NAME}}": "Notes" },
+  );
+  assertEquals(_leftoverTokens(out), ["{{APP_TITLE}}"]);
+  assertEquals(
+    _leftoverTokens(_fillTemplate(MANIFEST, {
+      "{{APP_NAME}}": "N",
+      "{{ICON_ATTR}}": "",
+    })),
+    [],
+  );
 });

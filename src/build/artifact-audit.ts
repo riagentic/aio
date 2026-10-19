@@ -683,10 +683,28 @@ export async function warnBuildToolsIn(
         `only make it larger. This is a packaging bug.`,
     );
   }
-  const leaks = hits.filter((h) =>
-    !foreign.includes(h) && !keepPackages.includes(h) &&
-    !keepPackages.includes(needlePackage(h))
-  );
+  const kept = (h: string) =>
+    keepPackages.includes(h) || keepPackages.includes(needlePackage(h));
+  // Measured 2026-10-12: a Windows binary carrying esbuild.exe whole was
+  // refused at start by Defender's cloud verdict in 15 of 20 builds; the same
+  // build without it never was.
+  if (
+    PLATFORMS[platform]?.os === "windows" &&
+    hits.some((h) =>
+      !foreign.includes(h) && needlePackage(h) === "esbuild" && kept(h)
+    )
+  ) {
+    console.warn(
+      `${HEY} ${basename(bin)} embeds esbuild's own executable, kept by ` +
+        `deno.json "build": { "keepPackages" } — Windows Defender has ` +
+        `refused such a binary at start as Trojan:Win32/Cloxer (a cloud ` +
+        `verdict on a new file: most builds, not all). Unless the app runs ` +
+        `esbuild while it runs, drop it from keepPackages; if it must, sign ` +
+        `the binary with a code-signing certificate, or report the false ` +
+        `positive to Microsoft (https://www.microsoft.com/wdsi/filesubmission).`,
+    );
+  }
+  const leaks = hits.filter((h) => !foreign.includes(h) && !kept(h));
   if (!leaks.length) return;
   console.warn(
     `${HEY} ${basename(bin)} still embeds build-tool files (${

@@ -21,7 +21,11 @@ import {
   type CallFailureLedger,
 } from "./test-strict.ts";
 import { closeWindow } from "./close-window.ts";
-import { acceptHostEvents, repairProxiedSiblings } from "./happy-dom-repair.ts";
+import {
+  acceptHostEvents,
+  repairLabelActivation,
+  repairProxiedSiblings,
+} from "./happy-dom-repair.ts";
 // Server-touching, so NOT in test-strict.ts — see boot-refusals.ts.
 import {
   _armBootScope,
@@ -2312,6 +2316,7 @@ async function _buildTestUI(
       // fixed happy-dom is left untouched.
       repairProxiedSiblings(ownedWindow);
       acceptHostEvents(ownedWindow);
+      repairLabelActivation(ownedWindow);
       _installViewport(ownedWindow, vw, vh);
       _installSameDocumentHistory(
         ownedWindow,
@@ -2373,6 +2378,7 @@ async function _buildTestUI(
     // defect first, so a browser-faithful DOM is left untouched.
     repairProxiedSiblings(doc.defaultView);
     acceptHostEvents(doc.defaultView);
+    repairLabelActivation(doc.defaultView);
     // Another mount's window (see `_windowHolds`): held until this one is done.
     const held = _windowHolds.get(doc.defaultView);
     if (held) {
@@ -2733,6 +2739,7 @@ async function _buildTestUI(
     // cells' declared initials — no cross-test leaks. Skipped when the test
     // opts into persistence (it wants continuity across runs).
     if (!opts.persist) {
+      standalone._warnResetOfLiveBoot("testUI");
       standalone._resetState();
       // …and the PROCESS-GLOBAL half of the runtime, which `_resetState()` does
       // not own: `_pending` (in-flight calls), the degraded registry, the

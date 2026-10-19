@@ -57,6 +57,12 @@ export interface SyncEngineDeps {
    *  host kept it — so a local call that throws rejects with the method's own
    *  error rather than a generic one. */
   lastReducerError?: () => unknown;
+  /** This device's wall clock (default `Date.now`) — a test seam for a
+   *  device whose clock is wrong. */
+  now?: () => number;
+  /** A monotonic clock (default `performance.now`) — what the server's time
+   *  is carried forward on; a test seam. */
+  mono?: () => number;
   log?: {
     warn: (msg: string) => void;
     /** Observe-only dedup visibility — a dropped duplicate hints at a cursor
@@ -85,10 +91,18 @@ export interface SyncEngine {
     opId: string,
     serverHlc: HLC,
     serverTs?: number,
+    /** The server's wall clock when it sent the ack (`AckMessage.serverNow`). */
+    serverNow?: number,
   ): Promise<void>;
   /** D11: the server refused this op — drop it, rebase (optimistic view
    *  snaps back), log loudly, surface via the cell's sync.onRejected. */
-  handleRejection(cell: string, opId: string, reason: string): Promise<void>;
+  handleRejection(
+    cell: string,
+    opId: string,
+    reason: string,
+    /** The server's wall clock when it refused (`OpRejectedMessage.serverNow`). */
+    serverNow?: number,
+  ): Promise<void>;
   handleRemoteOp(op: SyncOp): Promise<void>;
   handleSyncResponse(response: {
     mode: string;
@@ -107,6 +121,8 @@ export interface SyncEngine {
     push?: boolean;
     /** A server-origin write as a patch — see `PushPatch`. */
     patch?: Record<string, PushPatch>;
+    /** The server's wall clock when it answered (`SyncResponse.serverNow`). */
+    serverNow?: number;
   }): Promise<void>;
   setOnline(online: boolean): void;
   getStatus(cell: string): SyncStatus;
@@ -156,7 +172,153 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
    *  invisible, forever, with nothing said. The session nonce already in every
    *  op id is the identity that is actually per client instance. */
   const isOwnSessionOp = (opId: string): boolean => opId.startsWith(_ownPrefix);
-  const clock: HLClock = createHLC(deps.clientId);
+  const deviceNow = deps.now ?? Date.now;
+  const mono = deps.mono ?? (() => performance.now());
+  // ── A device clock the server disagrees with ───────────────────────────
+  // `clock.receive` ignores a remote clock more than `maxDrift` away, so a
+  // device far BEHIND stamped every op with its own wrong time: past 60 s it
+  // lost last-write-wins with edits it made after a peer's, and past the 24 h
+  // tombstone window (a board with no RTC before NTP) every fresh edit was
+  // refused as a stale resend. The server sends its wall clock (`serverNow`)
+  // with each ack, catch-up and drift refusal; off by more than `maxDrift`,
+  // this engine's HLC runs on the server's time instead, and says so — once
+  // per change.
+  //
+  // The server's time is carried forward on the MONOTONIC clock (`anchor`),
+  // never as an offset over the device clock: an offset turned the OS
+  // correcting the device clock later (NTP reaching the board) into a jump
+  // ahead by the whole offset — every edit refused as drift, and the HLC,
+  // which never runs back, locked out for that long.
+  //
+  // A sample counts only when its round trip is known and short on BOTH
+  // clocks (the request it answers was sent at most `RTT_MAX` ago): a frame
+  // read late — a frozen tab's backlog, a huge catch-up on a slow link, an
+  // answer read after a system suspend (which pauses the monotonic clock, not
+  // the device's) — carries an old `serverNow` and would read as a clock that
+  // is off. Leaving server time needs the device back within HALF the limit,
+  // so a device hovering near it does not flip-flop. Every good sample
+  // re-anchors, and every one checks the HLC (see `ranAhead`).
+  //
+  // The monotonic clock does not advance during a suspend (macOS, Linux
+  // CLOCK_MONOTONIC), so each read checks it against the device clock since
+  // the anchor: they part by more than `JUMP` only when one of them jumped,
+  // and which one is a guess until the next good sample decides — nothing is
+  // said before then. The op stamped with the guess is sent, and its ack (or
+  // refusal) IS that sample; offline, the reconnect's catch-up is.
+  //  - The device clock now agrees with the carried time to within what a
+  //    sample can measure (`STEP`): it was stepped to the right time (NTP).
+  //  - Otherwise the LATER of the two readings: a device clock that moved
+  //    back is a step (a suspend only ever moves it AHEAD of the monotonic
+  //    one), so the carried time stands; one that moved ahead is a suspend,
+  //    and the server's time moves on with it. Guessing late fails loud — a
+  //    stamp past the limit is refused, with the server's time — where
+  //    guessing early loses last-write-wins in silence.
+  // A guess the sample shows was off by more than `JUMP` is said then (a
+  // suspend as long as the offset, to within `STEP`, reads as a step).
+  const RTT_MAX = SYNC_DEFAULTS.maxDrift / 4;
+  const JUMP = SYNC_DEFAULTS.maxDrift / 2;
+  const STEP = RTT_MAX / 2;
+  let anchor: {
+    server: number;
+    mono: number;
+    device: number;
+    /** A jump was seen since this sample: "device" = taken for an NTP step. */
+    jumped?: "device" | "later";
+  } | null = null;
+  function wallClock(): number {
+    const d = deviceNow();
+    if (anchor === null) return d;
+    const m = mono();
+    const carried = anchor.server + (m - anchor.mono);
+    const viaDevice = anchor.server + (d - anchor.device);
+    if (!anchor.jumped && Math.abs(viaDevice - carried) > JUMP) {
+      anchor.jumped = Math.abs(d - carried) <= STEP ? "device" : "later";
+    }
+    if (anchor.jumped === "device") return d;
+    return Math.floor(anchor.jumped ? Math.max(carried, viaDevice) : carried);
+  }
+  let clock: HLClock = createHLC(deps.clientId, wallClock);
+  /** The newest stamp this clock took from the server or a peer — what a
+   *  replacement clock must still order after. */
+  let _heard: HLC | null = null;
+  const receive = (h: HLC): void => {
+    clock.receive(h);
+    if (_heard === null || compareHLC(h, _heard) > 0) _heard = h;
+  };
+  /** When (on both clocks) each frame in flight was sent, for its round trip. */
+  type Sent = { mono: number; device: number };
+  const _sent = new Map<string, Sent>();
+  let _reqSent: Sent | undefined;
+  const sentNow = (): Sent => ({ mono: mono(), device: deviceNow() });
+  /** Say a change of the clock this engine stamps with. `off` is server minus
+   *  device. */
+  function announce(off: number, on: boolean, ranAhead = false): void {
+    const s = Math.round(Math.abs(off) / 1000);
+    log.warn(
+      "sync",
+      (on
+        ? `this device's clock is ${s}s ${
+          off > 0 ? "behind" : "ahead of"
+        } the server's (limit ${SYNC_DEFAULTS.maxDrift / 1000}s) — sync ` +
+          `stamps changes with the server's time from now on, so they order ` +
+          `correctly against other devices.`
+        : `this device's clock agrees with the server's (within ${s}s) — ` +
+          `sync stamps changes with the device clock.`) +
+        (ranAhead
+          ? ` Changes stamped earlier, while this device's clock ran ahead, ` +
+            `carry that time and the server REFUSES them as clock drift — ` +
+            `make them again.`
+          : "") +
+        (on
+          ? ` Correct this device's system clock (turn on automatic time sync).`
+          : ""),
+    );
+  }
+  function noteServerClock(serverNow: unknown, sent: Sent | undefined): void {
+    if (typeof serverNow !== "number" || !Number.isFinite(serverNow)) return;
+    if (sent === undefined) return;
+    const m = mono();
+    const d = deviceNow();
+    const rtt = m - sent.mono;
+    if (
+      !(rtt >= 0 && rtt <= RTT_MAX &&
+        Math.abs(d - sent.device - rtt) <= RTT_MAX)
+    ) return;
+    const server = serverNow + rtt / 2;
+    const off = server - d;
+    const drift = SYNC_DEFAULTS.maxDrift;
+    const wasOn = anchor !== null;
+    const guessed = anchor?.jumped ? wallClock() - server : 0;
+    const on = Math.abs(off) > (wasOn ? drift / 2 : drift);
+    anchor = on ? { server, mono: m, device: d } : null;
+    if (Math.abs(guessed) > JUMP) {
+      log.warn(
+        "sync",
+        `this device's clock jumped (a sleep or a clock change) and changes ` +
+          `made since were stamped ${Math.round(Math.abs(guessed) / 1000)}s ` +
+          `${guessed > 0 ? "ahead of" : "behind"} the server's time — ` +
+          (guessed > 0
+            ? `past the limit the server refuses them as clock drift; `
+            : `they may lose last-write-wins against other devices; `) +
+          `changes from now on are stamped right.`,
+      );
+    }
+    // An HLC never runs backwards, so one that ran past what the server takes
+    // (stamped while the device clock was ahead — at creation, or before the
+    // server was heard) is replaced — after everything it heard, so no order
+    // already agreed moves (an own op the server took is heard: its ack, or
+    // the catch-up's ops, which are read right after this sample). The ops
+    // it stamped past that keep their stamp (an op id has one ordering),
+    // and the server refuses those as clock drift. Checked on EVERY good
+    // sample: a device clock corrected before the first one agrees with the
+    // server, while the HLC it seeded still runs hours ahead.
+    const ranAhead = clock.now()[0] > wallClock() + drift;
+    if (ranAhead) {
+      clock = createHLC(deps.clientId, wallClock);
+      if (_heard) clock.receive(_heard);
+    }
+    if (on !== wasOn || ranAhead) announce(off, on, ranAhead);
+  }
   let online = true;
 
   // ── outbound op pacing ─────────────────────────────────────────────────
@@ -214,7 +376,8 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
   /** Send an op frame, immediately when there is room and in order when there
    *  is not. Ordering is preserved: once anything is queued, everything queues
    *  behind it. */
-  const sendOpPaced = (msg: string): void => {
+  const sendOpPaced = (msg: string, opId: string): void => {
+    _sent.set(opId, sentNow());
     _pacer.push({ frame: msg, seq: _pacerSeq++ });
   };
 
@@ -938,7 +1101,7 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     serverHlc: HLC,
     serverTs?: number,
   ): Promise<void> {
-    clock.receive(serverHlc);
+    receive(serverHlc);
     // Apply the acked op to confirmed state BEFORE marking it confirmed.
     // Otherwise rebaseCell(confirmed, unconfirmed-without-acked) drops the
     // op's effect from optimistic state — UI snaps back to pre-op value.
@@ -1193,7 +1356,7 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
     // the same path (see `handleRemoteOp`).
     const queued = op.hlc[2] === deps.clientId &&
       (await deps.buffer.getUnconfirmed(op.cell)).some((o) => o.id === op.id);
-    clock.receive(op.hlc);
+    receive(op.hlc);
     const meta = await deps.buffer.getMeta(op.cell);
     // Op-id dedup: same op delivered twice (duplicated broadcast, or a
     // broadcast racing a catch-up response that also contains it).
@@ -1687,12 +1850,15 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
         // would reach the server — and be applied — ahead of changes the user
         // made before it. It is in the buffer, so the flush carries it.
         if (online && !_flushing) {
-          sendOpPaced(enc("op", { id, hlc, cell, action, payload }));
+          sendOpPaced(enc("op", { id, hlc, cell, action, payload }), id);
         }
       });
     },
 
-    handleAck(cell, opId, serverHlc, serverTs) {
+    handleAck(cell, opId, serverHlc, serverTs, serverNow) {
+      // Measured on arrival, never held.
+      noteServerClock(serverNow, _sent.get(opId));
+      _sent.delete(opId);
       // Held while a catch-up is outstanding — the op it confirms was applied
       // by the server AFTER the log that response carries (see `hold`). The op
       // stays unconfirmed meanwhile, so the optimistic view is unchanged and a
@@ -1703,7 +1869,9 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       return withLock(cell, () => foldAck(cell, opId, serverHlc, serverTs));
     },
 
-    handleRejection(cell, opId, reason) {
+    handleRejection(cell, opId, reason, serverNow) {
+      noteServerClock(serverNow, _sent.get(opId));
+      _sent.delete(opId);
       return withLock(cell, async () => {
         // Said once. A repeat is the server re-refusing an op this client
         // already dropped (see `_reportedRefusals`), and the app was told.
@@ -1781,9 +1949,13 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       // being pushed. It must not drain the held queue, open the gate, move a
       // cursor or fire `onSync`, all of which belong to a real catch-up.
       if (response.push === true) return foldPushed(response);
+      noteServerClock(
+        response.serverNow,
+        response.reqId === _reqSeq ? _reqSent : undefined,
+      );
       // Receive HLCs into global clock (safe outside per-cell lock)
       if (response.ops) {
-        for (const op of response.ops) clock.receive(op.hlc);
+        for (const op of response.ops) receive(op.hlc);
       }
 
       // Collect snapshot work per cell
@@ -2197,6 +2369,7 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       // Frames queued for a socket that is gone are duplicates of what the
       // durable buffer will re-send; drop them with the connection.
       if (!v) resetPacing();
+      if (!v) _sent.clear(); // nothing in flight answers on a new socket
       // …and so does a flush in progress: the reconnect starts it over from
       // the buffer.
       if (!v) stopFlush();
@@ -2295,6 +2468,8 @@ export function createSyncEngine(deps: SyncEngineDeps): SyncEngine {
       _clearCatchupTimer();
       const reqId = ++_reqSeq;
       _reqSentAt = Date.now();
+      _reqSent = sentNow();
+      for (const o of slice) _sent.set(o.id, _reqSent);
       try {
         deps.send(enc("sync-req", {
           clientId: deps.clientId,

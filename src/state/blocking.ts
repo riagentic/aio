@@ -33,6 +33,15 @@ type Task = {
 type WorkerRes =
   | { n: number; ok: true; data: unknown }
   | { n: number; ok: false; error: string; stack?: string };
+/** An uncaught error on a worker's loop and the task it belongs to (see
+ *  blocking-worker.ts); `id` is absent when it ran outside every task. */
+type WorkerStray = {
+  stray: true;
+  n: number;
+  id?: string;
+  error: string;
+  stack?: string;
+};
 
 export type BlockingPool = {
   /** Run a self-contained fn — or a module's default export, given its URL —
@@ -127,14 +136,45 @@ export function createBlockingPool(opts?: { size?: number }): BlockingPool {
   const all = new Set<Worker>();
   const active = new Map<Worker, Task>();
   const queue: Task[] = [];
+  /** Workers a settled task's stray landed on: retired once their running
+   *  task settles, never reused (their loop may hold more of it). */
+  const tainted = new WeakSet<Worker>();
   let seq = 0;
   let disposed = false;
 
   function spawn(): Worker {
     const w = new Worker(workerUrl(), { type: "module" });
     all.add(w);
-    w.onmessage = ({ data }: MessageEvent<WorkerRes>) => {
+    w.onmessage = ({ data }: MessageEvent<WorkerRes | WorkerStray>) => {
       const task = active.get(w);
+      if ("stray" in data) {
+        if (task && task.n === data.n) {
+          // The running task's own: its crash, as an uncaught error always
+          // was — a task that never settles would otherwise hang its caller.
+          active.delete(w);
+          const err = new Error(`blocking worker crashed: ${data.error}`);
+          if (data.stack) err.stack = `${err.message}\n${data.stack}`;
+          task.reject(err);
+          retire(w);
+          pump();
+          return;
+        }
+        // A settled task's leftover (or nobody's): reported under its own id,
+        // and the task running now goes on. The worker is not reused after it.
+        log.error(
+          "blocking",
+          (data.id !== undefined
+            ? `blocking task '${data.id}' left an uncaught error behind ` +
+              `after it settled: `
+            : `an idle blocking worker crashed: `) + (data.stack ?? data.error),
+        );
+        if (task) tainted.add(w);
+        else {
+          retire(w);
+          pump();
+        }
+        return;
+      }
       if (!task || task.n !== data.n) return; // stale (cancelled) — ignore
       active.delete(w);
       if (data.ok) task.resolve(data.data);
@@ -177,8 +217,9 @@ export function createBlockingPool(opts?: { size?: number }): BlockingPool {
 
   // A finished worker becomes available again; feed it the next queued task.
   function release(w: Worker): void {
-    if (disposed) {
+    if (disposed || tainted.has(w)) {
       retire(w);
+      pump();
       return;
     }
     idle.push(w);
@@ -203,6 +244,7 @@ export function createBlockingPool(opts?: { size?: number }): BlockingPool {
     try {
       w.postMessage({
         n: task.n,
+        id: task.id,
         src: task.src,
         name: task.name,
         url: task.url,

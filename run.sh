@@ -25,7 +25,10 @@
 #        ~/app/<name>/versions/<version>/<Title>.app, linked from
 #        ~/app/<name>/<Title>.app — and opened with `open`. Never into
 #        /Applications (the app offers that move itself), and no .desktop
-#        entry: that is a Linux convention.
+#        entry: that is a Linux convention. AIO_APPLICATIONS_LINK=1 also
+#        links it into ~/Applications, where Launchpad lists it (`am remove`
+#        deletes the link). It waits for the app (`open -W`); an app gone
+#        within AIO_OPEN_EARLY_EXIT_S seconds (3) is a failure, with its log.
 #
 # `set -u`: with $HOME unset every `$HOME/...` path below silently becomes a
 # path under the filesystem root. Fail instead.
@@ -490,6 +493,22 @@ else
     versioned="$version_dir/$bundle"
     installed="$target_dir/$bundle"
     ln -sfn "$versioned" "$installed" || fail "could not link $installed"
+    # Opt-in: Launchpad lists only what is in an Applications folder. A link
+    # to the STABLE path, so an update needs no relink; `am remove` deletes
+    # it. Never over anything but this link — a bundle there may be the
+    # user's own copy (the app's "Move to Applications" makes one).
+    if [ "${AIO_APPLICATIONS_LINK:-}" = 1 ]; then
+      _link="$HOME/Applications/$bundle"
+      if [ -L "$_link" ] && [ "$(readlink "$_link")" = "$installed" ]; then
+        :
+      elif [ -e "$_link" ] || [ -L "$_link" ]; then
+        warn "not linked into ~/Applications: $_link is there and is not this install's link — it may be your own copy"
+      elif mkdir -p "$HOME/Applications" && ln -s "$installed" "$_link"; then
+        ok "linked $_link (Launchpad lists it)"
+      else
+        warn "could not link $_link — Launchpad will not list ${bundle%.app}"
+      fi
+    fi
   else
     mkdir -p "$version_dir" || fail "cannot create $version_dir"
     versioned="$version_dir/$app_base$app_ext"
@@ -616,7 +635,26 @@ if [ -n "$mac_app" ]; then
   else
     set -- --args "$@"
   fi
-  exec open "$installed" "$@"
+  # -W: wait for the app, as the other OSes do (they exec it). `open` answers
+  # 0 for any app it could launch, whatever the app did next — so one that is
+  # gone at once is said, with its log, instead of a silent exit 0.
+  _t0=$(date +%s)
+  open -W "$installed" "$@" || fail "open could not start $installed"
+  _ran=$(( $(date +%s) - _t0 ))
+  if [ "$_ran" -lt "${AIO_OPEN_EARLY_EXIT_S:-3}" ]; then
+    _name=$(basename "$installed" .app)
+    _home=$(deno run -A "$AIO_HOME/src/build.ts" --print-app-tmpdir 2>/dev/null || true)
+    # Where an app with no data dir of its own logs. One with its own
+    # (`aio.run({ appDir })`, a profile) or in library mode logs elsewhere, and
+    # nothing outside the app can ask it — so only a log that IS there is named.
+    _log=""
+    if [ -n "$_home" ] && [ -f "${_home%/app}/logs/app.log" ]; then
+      _log="${_home%/app}/logs/app.log"
+      tail -n 20 "$_log" >&2
+    fi
+    fail "$_name exited ${_ran}s after it was opened — if you did not quit it, it stopped at start.${_log:+ Its log: $_log}"
+  fi
+  exit 0
 fi
 info "running $installed $*"
 artifact="$installed"

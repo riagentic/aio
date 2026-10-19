@@ -19,7 +19,7 @@ import { assert, assertEquals } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { processList } from "./proc-helper.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
-import { lockPath } from "../src/server/single-instance-lock.ts";
+import { lockPath, readLock } from "../src/server/single-instance-lock.ts";
 import { spec } from "./module-spec-helper.ts";
 
 const REPO = fromFileUrl(new URL("..", import.meta.url)).replace(/[\\/]$/, "");
@@ -103,17 +103,25 @@ await aio.run({ cells: [c], appId: "dr", persist: false, client: "server-only" }
     };
   };
   /** Save a cell file, and wait until the old app has become the supervisor
-   *  and its relaunched child exists (two processes run the entry). */
+   *  and its relaunched child exists: two processes run the entry, one of
+   *  them NEW. From a supervised child, supervisor + old child are already
+   *  two — counting alone returned before the save was acted on, and a
+   *  re-read in the kill→spawn gap saw one (macOS, where `ps` is slow). */
   const saveAndAwaitRelaunch = async () => {
+    const before = new Set(await procs(entry));
+    const relaunched = (ps: number[]) =>
+      ps.length === 2 && ps.some((p) => !before.has(p));
     await Deno.writeTextFile(
       join(proj, "src", "cell.ts"),
       `// saved ${Date.now()}\n`,
       { append: true },
     );
-    for (let i = 0; i < 150 && (await procs(entry)).length < 2; i++) {
+    let now = await procs(entry);
+    for (let i = 0; i < 150 && !relaunched(now); i++) {
       await sleep(100);
+      now = await procs(entry);
     }
-    assertEquals((await procs(entry)).length, 2, "no relaunch happened");
+    assert(relaunched(now), `no relaunch happened: ${[...before]} → ${now}`);
     await sleep(300);
   };
   /** The processes once the slow child has booted (or been refused). */
@@ -139,7 +147,15 @@ await aio.run({ cells: [c], appId: "dr", persist: false, client: "server-only" }
     await dropTempDir(dir);
   };
   /** The raw lock file of the app's home ("" when there is none). */
-  const lockRaw = () => {
+  const lockRaw = () => inEnv(() => Deno.readTextFileSync(lockPath("dr")));
+  /** The lock RECORD as aio's readers see it (`readLock` reads a file caught
+   *  mid-rewrite again), as JSON ("" when there is none). */
+  const lockRecord = () =>
+    inEnv(() => {
+      const rec = readLock("dr");
+      return rec ? JSON.stringify(rec) : "";
+    });
+  const inEnv = (read: () => string) => {
     const prev = [
       Deno.env.get("AIO_APPS_DIR"),
       Deno.env.get("XDG_RUNTIME_DIR"),
@@ -147,7 +163,7 @@ await aio.run({ cells: [c], appId: "dr", persist: false, client: "server-only" }
     Deno.env.set("AIO_APPS_DIR", apps);
     Deno.env.set("XDG_RUNTIME_DIR", rt);
     try {
-      return Deno.readTextFileSync(lockPath("dr"));
+      return read();
     } catch {
       return "";
     } finally {
@@ -180,6 +196,7 @@ await aio.run({ cells: [c], appId: "dr", persist: false, client: "server-only" }
   };
   return {
     lockRaw,
+    lockRecord,
     runDirect,
     dir,
     apps,
@@ -306,6 +323,55 @@ Deno.test({
       const said = await w.runDirect(6_000);
       assert(said.includes("shut down cleanly"), said);
     } finally {
+      await w.cleanup();
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "dev restart: the lock slot names a live process through every relaunch — no gap between the old app's release and the next child's placeholder",
+  sanitizeOps: false, // aio-ok: every process is stopped, then reaped, below
+  sanitizeResources: false, // aio-ok: same
+  async fn() {
+    const w = await world();
+    let sampling = true;
+    const gaps: number[] = [];
+    try {
+      const s = await w.am("start", "--json");
+      assertEquals(s.code, 0, s.out);
+      // Every few ms: is there a lock? `am restart` / `am status` in a gap
+      // read "not running" and started a second instance.
+      const sampler = (async () => {
+        let since = 0;
+        while (sampling) {
+          // As `am status` reads it: a record rewritten in place (emptied,
+          // then written) is read again, never taken for no lock.
+          const raw = w.lockRecord();
+          if (!raw && !since) since = performance.now();
+          if (raw && since) {
+            gaps.push(Math.round(performance.now() - since));
+            since = 0;
+          }
+          await sleep(2);
+        }
+      })();
+      // Twice: the first save turns the app into the supervisor, the second
+      // relaunches from a supervised child — both hand-overs.
+      await w.saveAndAwaitRelaunch();
+      await w.settled();
+      await w.saveAndAwaitRelaunch();
+      await w.settled();
+      sampling = false;
+      await sampler;
+      assertEquals(gaps, [], `ms with no lock in the slot: ${gaps}`);
+      const stop = await w.am("stop", "--wait", "--json");
+      assertEquals(stop.code, 0, stop.out);
+      await sleep(500);
+      assertEquals(await procs(w.entry), [], "am stop left a process");
+      assertEquals(w.lockRaw(), "", "am stop left a lock behind");
+    } finally {
+      sampling = false;
       await w.cleanup();
     }
   },

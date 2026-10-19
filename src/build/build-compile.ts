@@ -2929,10 +2929,12 @@ export async function runDenoCompile(
     }
     : undefined;
 
-  let hasDist = false;
-  try {
-    hasDist = (await Deno.stat(dist)).isDirectory;
-  } catch { /* no dist */ }
+  // A headless target builds no bundle: its dist/ is worth embedding only
+  // when it HOLDS one (a fleet with a browser target beside it). The empty
+  // dist/ a rebuild leaves behind was embedded too, and the binary then warned
+  // on every boot that it was "packaged with nothing to serve".
+  const hasDist = await Deno.stat(cfg.doHeadless ? join(dist, BUNDLE_JS) : dist)
+    .then((s) => cfg.doHeadless ? s.isFile : s.isDirectory, () => false); // aio-ok: absent = nothing to embed
 
   const workerInclude = dbWorkerInclude();
   // Embed the app's runtime data assets (.wasm + declared compile.include) —

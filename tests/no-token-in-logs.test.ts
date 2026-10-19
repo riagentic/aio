@@ -39,8 +39,9 @@ const SECRET = "s3cr3t-KEY-9f2a";
  *  Electron main scripts are source that logs, just not source Deno runs. */
 const CALL =
   /\b(?:console|log|logger|globalLog)\.(?:log|warn|error|info|debug|fatal)\(|(?<![\w.])log\(/g;
-/** A token VALUE spliced into text: `token=${…}` or `token=' + …`. */
-const TOKEN_VALUE = /token=(?:\$\{|["'`]\s*\+)/;
+/** A token VALUE spliced into text: `token=${…}` or `token=' + …` — or
+ *  through `withToken(…)` (aio-lifecycle.ts), which splices it encoded. */
+const TOKEN_VALUE = /token=(?:\$\{|["'`]\s*\+)|\bwithToken\(/;
 
 /** Every .ts/.tsx under `dir`, recursively. */
 async function* sources(dir: string): AsyncGenerator<string> {
@@ -84,8 +85,11 @@ function tokenLogFindings(file: string, src: string): string[] {
     // the socket built from `new WebSocket(wsUrl)` does not print its URL.
     const id = idRe(carriers).source;
     const copy = new RegExp(`(?<![(,]\\s*)${id}`);
+    // …but `new URL(u).host` (or .hostname/.origin/.port/.protocol) is the
+    // address without its query: the token is not in it.
     const kept = new RegExp(
-      `(?:new\\s+URL|String|encodeURI(?:Component)?)\\(\\s*${id}`,
+      `(?:new\\s+URL|String|encodeURI(?:Component)?)\\(\\s*${id}` +
+        `(?!\\s*\\)\\.(?:host|hostname|origin|port|protocol)\\b)`,
     );
     const more = decls.filter((d) =>
       !carriers.includes(d.name) && (copy.test(d.init) || kept.test(d.init))
@@ -146,6 +150,7 @@ Deno.test("no-token-in-logs: no log/console call in src/ prints a token", async 
 Deno.test("no-token-in-logs: the gate goes red on each leak shape it guards", () => {
   const leaks = [
     "log.info(`at ${url}?token=${token}`);",
+    "log.info(`share: ${withToken(url, token)}`);",
     "console.warn('[aio] at ' + base + '?token=' + tok);",
     "const u = `${base}?token=${t}`;\nlog.error(\n  `server is up at ${u}`,\n);",
     "const u = `${base}?token=${t}`;\nconst shown = u;\nlog.warn(`cannot reach ${shown}`);",

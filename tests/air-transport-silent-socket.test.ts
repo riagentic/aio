@@ -222,6 +222,48 @@ Deno.test("silent socket: a connection that never answered a ping is never judge
   }, { ponged: false });
 });
 
+Deno.test("silent socket: a reconnect that dies before its own first pong is still judged", async () => {
+  // A flapping network: the page's server has answered pings, the socket
+  // drops, the reconnect opens — and the network goes again inside the first
+  // heartbeat. Measured in headless Chromium: that socket sat "connected"
+  // through a 70 s black hole, every call timing out, no reconnect.
+  await scenario("hang", async ({ time, ws }) => {
+    ws.onclose?.();
+    for (let i = 0; i < 100 && FakeWS.instances.length < 2; i++) {
+      await time.tickAsync(BEAT);
+    }
+    const ws2 = FakeWS.instances[1]!;
+    ws2.open(); // …and never answers anything
+    await time.tickAsync(BEAT * (SILENT_BEATS_DEAD + 2));
+    assertEquals(ws2.closeCalls, 1, "judged dead at the ceiling");
+  });
+});
+
+Deno.test("silent socket: a network that flaps twice — each dead reconnect is judged", async () => {
+  // Every server answers pings (vitals off sends a bare pong — server-ws.ts),
+  // so the page's trust in pongs is never spent: the second flap is judged
+  // like the first. A "spend it once" rule left the second reconnect
+  // "connected" through the black hole for good.
+  await scenario("hang", async ({ time, ws }) => {
+    ws.onclose?.();
+    const next = async (n: number) => {
+      for (let i = 0; i < 100 && FakeWS.instances.length < n; i++) {
+        await time.tickAsync(BEAT);
+      }
+      return FakeWS.instances[n - 1]!;
+    };
+    const ws2 = await next(2);
+    ws2.open();
+    await time.tickAsync(BEAT * (SILENT_BEATS_DEAD + 2));
+    assertEquals(ws2.closeCalls, 1, "the first dead reconnect is judged");
+    ws2.onclose?.();
+    const ws3 = await next(3);
+    ws3.open();
+    await time.tickAsync(BEAT * (SILENT_BEATS_DEAD + 2));
+    assertEquals(ws3.closeCalls, 1, "and so is the second");
+  });
+});
+
 Deno.test("silent socket: a ping the pacer still holds is no evidence of silence", async () => {
   await scenario("down", async ({ time, ws, asked }) => {
     // A budget of one frame a second: at this test's 100 ms beat nearly every

@@ -104,14 +104,15 @@ async function devAndroid(
       stderr: "piped",
     }).output();
     const dec = new TextDecoder();
-    const starts = (await Deno.readTextFile(log)).split("\n")
+    const out = dec.decode(p.stdout) + dec.decode(p.stderr);
+    // No log: the fake adb never ran — said with what the run printed.
+    const adbLog = await Deno.readTextFile(log).catch((e) => {
+      throw new Error(`no adb.log (${e}) — the run said:\n${out}`);
+    });
+    const starts = adbLog.split("\n")
       .filter((l) => l.includes("shell am start"))
       .map((l) => l.replace(/^-s \S+ /, ""));
-    return {
-      code: p.code,
-      out: dec.decode(p.stdout) + dec.decode(p.stderr),
-      starts,
-    };
+    return { code: p.code, out, starts };
   } finally {
     await dropTempDir(dir);
   }

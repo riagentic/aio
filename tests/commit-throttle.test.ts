@@ -97,3 +97,46 @@ Deno.test({
     }
   },
 });
+
+const stepped = cell("throttledStepBack", {
+  transaction: true,
+  state: { done: 0 },
+  methods: {
+    async run(s, steps: number, minMs: number, stepBackAt: number) {
+      for (let i = 0; i < steps; i++) {
+        s.done = i + 1;
+        s.$commit(minMs);
+        if (i === stepBackAt) {
+          const real = Date.now;
+          Date.now = () => real() - 3_600_000; // NTP steps the clock back an hour
+        }
+        await new Promise((r) => setTimeout(r, 30));
+      }
+    },
+  },
+});
+
+Deno.test({
+  name: "$commit(ms) keeps publishing after the wall clock steps back",
+  async fn() {
+    // The throttle measured `now - lastCommitAt`, which a backward step makes
+    // negative — `< minMs` for as long as the step: a progress bar froze for
+    // the hour the clock went back, not for the 20ms it asked.
+    const realNow = Date.now;
+    const h = await bootCells([stepped]);
+    try {
+      const p = stepped.run(6, 20, 0);
+      await new Promise((r) => setTimeout(r, 110));
+      assert(
+        stepped.done >= 3,
+        `progress must keep publishing — saw ${stepped.done}`,
+      );
+      await p;
+      await h.settle();
+      assertEquals(stepped.done, 6);
+    } finally {
+      Date.now = realNow;
+      h.dispose();
+    }
+  },
+});

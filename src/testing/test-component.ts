@@ -2,7 +2,11 @@
 // testCell for cells. Wraps the renderer's mount + document wiring so tests no
 // longer reach into the underscore-prefixed internals.
 
-import { acceptHostEvents, repairProxiedSiblings } from "./happy-dom-repair.ts";
+import {
+  acceptHostEvents,
+  repairLabelActivation,
+  repairProxiedSiblings,
+} from "./happy-dom-repair.ts";
 import { _setContrastCascadeProbe } from "../air/contrast-audit.ts";
 import { contrastCascadeNotice } from "../air/contrast-cascade.ts";
 import { _setDocument, _unmount, mount } from "../air/aio-renderer.ts";
@@ -77,6 +81,7 @@ export function testComponent(
   // (it proves the defect first, so a working DOM is left untouched).
   repairProxiedSiblings((doc as { defaultView?: unknown }).defaultView);
   acceptHostEvents((doc as { defaultView?: unknown }).defaultView);
+  repairLabelActivation((doc as { defaultView?: unknown }).defaultView);
   // …and the contrast walk must not believe a cascade that is not a
   // browser's (see contrast-cascade.ts). The same install `testUI` does.
   _setContrastCascadeProbe(contrastCascadeNotice);

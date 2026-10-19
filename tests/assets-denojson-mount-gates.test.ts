@@ -23,7 +23,7 @@ import { _resetAuthFails } from "../src/server/server-auth.ts";
 import { _denoJsonMountsNote, _servedAssets } from "../src/server/server.ts";
 import { resolveZeroPort } from "../src/server/aio-server.ts";
 import { assetMounts } from "../src/build/build-compile.ts";
-import { captureConsole } from "./console-capture.ts";
+import { captureConsole, captureConsoleAsync } from "./console-capture.ts";
 
 const FILES = ["/media/data.json", "/media/secret.bin", "/media/lib.js"];
 const KEY = "k".repeat(32);
@@ -165,6 +165,44 @@ Deno.test("assets: a deno.json mount outside the project is not served, in the s
       served = _servedAssets(run, root);
     });
     assertEquals(served, { "/up": join(dir, "x"), "/in": join(root, "in") });
+  } finally {
+    await dropTempDir(dir);
+  }
+});
+
+// The orchestrator reads the mounts to choose its transport, the HTTP server
+// to serve them: each said what it refused, so a boot printed it twice.
+Deno.test("assets: a boot says a refused deno.json mount once", async () => {
+  const { aio, cell } = await import("../mod.ts");
+  const dir = await tempDir("assets-outside-once-");
+  try {
+    const root = join(dir, "app");
+    await Deno.mkdir(root, { recursive: true });
+    await Deno.writeTextFile(
+      join(root, "deno.json"),
+      JSON.stringify({ assets: { "/up": "../x", "/bad": 7 } }),
+    );
+    const said = await captureConsoleAsync(async () => {
+      const app = await aio.run({
+        cells: [cell("c_assets_once", { state: { n: 0 } })],
+        appId: `test-assets-once-${Deno.pid}`,
+        client: "server-only",
+        persist: false,
+        libraryMode: true,
+        port: freePort(),
+        appDir: join(dir, "home"),
+        watch: false,
+        baseDir: root,
+      });
+      await app.close();
+    });
+    for (const what of ["Nothing is served from it", "not a directory path"]) {
+      assertEquals(
+        said.filter((l) => l.includes(what)).length,
+        1,
+        said.join("\n"),
+      );
+    }
   } finally {
     await dropTempDir(dir);
   }

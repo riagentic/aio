@@ -102,6 +102,16 @@ function cmdlineOf(pid: number): string {
  *  as "?" — not a runner — and a fixture lock a live suite wrote with its own
  *  pid was an ORPHAN: `clean:tmp` on Windows ended the suite. */
 const listed = new Map<number, { parent: number; text: string }>();
+/** Whether `root` is a test process's `apps-<pid>` sandbox
+ *  (src/testing/test-strict.ts) and that process is still a live deno. On
+ *  Windows the process table of the last look says (`listed`); a recycled
+ *  pid there is a deno only by chance. Elsewhere a signal 0 does. */
+function sandboxOwnerLive(root: string): boolean {
+  const pid = Number(/^apps-(\d+)$/.exec(basename(root))?.[1] ?? NaN);
+  if (!(pid > 0)) return false;
+  if (Deno.build.os !== "windows") return alive(pid);
+  return /\bdeno(\.exe)?\b/i.test(listed.get(pid)?.text ?? "");
+}
 /** The process that started `pid` and that it dies with (`AIO_PARENT_PID`):
  *  read from its environment — and on Windows, which shows nobody that, its
  *  OS parent, the same process for an app a test spawned. 0 when unknown. */
@@ -283,6 +293,7 @@ function processRefs(): string[] | null {
       }).outputSync();
       const text = dec.decode(out.stdout);
       if (!out.success || text.trim() === "") return null;
+      listed.clear(); // this look replaces the last: a process gone is gone
       // `<pid> <parent pid> <the rest>` a line.
       for (const line of text.split(/\r?\n/)) {
         const m = /^\s*(\d+)\s+(\d+)\s(.*)$/.exec(line);
@@ -551,6 +562,17 @@ const liveRuns = runOwners();
 const fold = (t: string) =>
   Deno.build.os === "windows" ? t.toLowerCase().replaceAll("/", "\\") : t;
 const foldedRefs = liveRefs.map(fold);
+/** Whether `ref` (a folded environment, command line or `ps` text) names the
+ *  path `p` WHOLE — itself or a path inside it, never one it merely begins
+ *  (`apps-12` is not named by `apps-123`). */
+const namesPath = (ref: string, p: string) => {
+  const f = fold(p);
+  for (let i = ref.indexOf(f); i >= 0; i = ref.indexOf(f, i + 1)) {
+    const next = ref[i + f.length];
+    if (next === undefined || /[\0\s"'/\\:;,=]/.test(next)) return true;
+  }
+  return false;
+};
 
 /** The dirs a LIVE test process wrote down as its own (`LIVE_OWNER`,
  *  src/testing/temp-dir.ts): `<root>/.live-<pid>` — who it is, then a dir a
@@ -605,7 +627,7 @@ for (const { dir: root, requirePrefix } of scratchRoots()) {
       if (e.name.startsWith("aio-preload-")) continue;
       const dir = join(root, e.name);
       if (lockRuled.has(dir) || liveRuns.dirs.has(dir)) continue;
-      if (foldedRefs.some((r) => r.includes(fold(dir)))) continue;
+      if (foldedRefs.some((r) => namesPath(r, dir))) continue;
       if (liveOwned.has(fold(dir))) continue;
       let mtime = 0;
       try {
@@ -792,28 +814,61 @@ if (clean) {
     // LEFT is what nothing would ever clear: an unregistered dir, or one
     // whose root still exists.
     let swept = 0;
-    const fresh = scopedLockDirs().filter((d) => {
-      if (had.has(d) || !leftoverLockDir(d)) return false;
-      let root: string | null = null;
-      try {
-        root = Deno.readTextFileSync(rootRegistryEntry(d));
-      } catch { /* aio-ok: unregistered — cannot be judged, so it counts */ }
-      if (root !== null) {
-        let rootGone = false;
+    /** Each new dir that holds nothing live, with the apps root it serves. */
+    const leftBehind = () =>
+      scopedLockDirs().flatMap((d) => {
+        if (had.has(d) || !leftoverLockDir(d)) return [];
+        let root: string | null = null;
         try {
-          Deno.lstatSync(root);
-        } catch {
-          rootGone = true;
+          root = Deno.readTextFileSync(rootRegistryEntry(d));
+        } catch { /* aio-ok: unregistered — cannot be judged, so it counts */ }
+        if (root !== null) {
+          let rootGone = false;
+          try {
+            Deno.lstatSync(root);
+          } catch {
+            rootGone = true;
+          }
+          // Dead files one by one, then a non-recursive rmdir — anything
+          // live or unknown keeps it, and it is counted below.
+          if (rootGone && pruneDeadLockDirAt(d, true)) {
+            swept++;
+            return [];
+          }
         }
-        // Dead files one by one, then a non-recursive rmdir — anything
-        // live or unknown keeps it, and it is counted below.
-        if (rootGone && pruneDeadLockDirAt(d, true)) {
-          swept++;
-          return false;
-        }
-      }
-      return true;
-    });
+        return [{ d, root }];
+      });
+    // A dir whose apps root a LIVE process still names (its AIO_APPS_DIR — a
+    // test process's `apps-<pid>` sandbox) belongs to a creator that has not
+    // exited, so its exit prune has not had its turn: a test process still in
+    // its unload on a loaded box, or a run beside this one. Judged once those
+    // processes are gone — up to 30 s — and not before. One still running
+    // then is named, and not charged to this run.
+    // Or names by its OWN pid: the sandbox is `apps-<pid>` of the test process
+    // that made it, and Windows shows nobody that process's environment —
+    // there the root was named by no one, and a test still in its unload was
+    // charged with its lock dir (seen on every Windows suite).
+    const named = (root: string | null, refs: string[]) =>
+      root !== null &&
+      (refs.some((r) => namesPath(r, root)) || sandboxOwnerLive(root));
+    let refs = foldedRefs;
+    let left = leftBehind();
+    for (
+      const t0 = Date.now();
+      left.some((x) => named(x.root, refs)) && Date.now() - t0 < 30_000;
+    ) {
+      await new Promise((r) => setTimeout(r, 500));
+      refs = (processRefs() ?? []).map(fold);
+      left = leftBehind();
+    }
+    const inUse = left.filter((x) => named(x.root, refs));
+    for (const { d, root } of inUse) {
+      console.log(
+        `lock dirs: ${d} is still in use by a live process (apps root ` +
+          `${root}) after 30 s — not judged`,
+      );
+    }
+    const fresh = left.filter((x) => !inUse.includes(x)).map((x) => x.d);
     if (swept) {
       console.log(
         `lock dirs: ${swept} orphaned (apps root deleted, nothing live) swept`,

@@ -409,9 +409,34 @@ Deno.test("artifact audit: an artifact it cannot read is UNREADABLE, never clean
     await warnBuildToolsIn(join(tmp, "win"), []);
     assertEquals(warned.length, 1);
     assertStringIncludes(warned[0]!, "still embeds build-tool files");
+    // For linux, named: on a Windows host the default platform is windows,
+    // where a kept esbuild is the Defender warning below.
     warned.length = 0;
-    await warnBuildToolsIn(leaky, ["esbuild"]);
-    await warnBuildToolsIn(leaky, ["@esbuild/linux-x64"]);
+    await warnBuildToolsIn(leaky, ["esbuild"], "linux");
+    await warnBuildToolsIn(leaky, ["@esbuild/linux-x64"], "linux");
+    assertEquals(warned, []);
+
+    // Kept on purpose in a WINDOWS binary: Defender's cloud verdict refused
+    // such a binary at start (Trojan:Win32/Cloxer, 15 of 20 builds) — said at
+    // the build, with what to do. Not for another system, not when not kept.
+    const win = join(tmp, "app.exe");
+    await Deno.writeFile(
+      win,
+      vfs(
+        '[{"Dir":{"n":"node_modules","e":[{"Dir":{"n":".deno","e":[' +
+          '{"Dir":{"n":"@esbuild+win32-x64@0.24.2","e":[' +
+          '{"File":{"n":"esbuild.exe","o":[0,10182808]}}]}}]}}]}}]',
+      ),
+    );
+    for (const keep of [["esbuild"], ["@esbuild/win32-x64"]]) {
+      warned.length = 0;
+      await warnBuildToolsIn(win, keep, "windows");
+      assertEquals(warned.length, 1, `${keep}: ${warned.join("\n")}`);
+      assertStringIncludes(warned[0]!, "Windows Defender");
+      assertStringIncludes(warned[0]!, "keepPackages");
+    }
+    warned.length = 0;
+    await warnBuildToolsIn(leaky, ["esbuild"], "linux");
     assertEquals(warned, []);
   } finally {
     console.warn = realWarn;

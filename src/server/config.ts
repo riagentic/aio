@@ -135,7 +135,9 @@ export const VALID_BUILD_KEYS = new Set<string>([
   "out", // output directory (default: dist/)
   "server", // LAN/remote address a shipped CLIENT defaults to
   // `true` — read by build-config.ts for build-client.ts: the packaged
-  // Electron client refuses a paired host whose certificate changed.
+  // Electron client refuses a paired host whose certificate changed; read by
+  // build-android.ts/build-ios.ts too: the connect page never sends a key
+  // over plain http to another machine (`_writeConnectPage`).
   "strictPin",
   "ui", // UI component path override, relative to the app dir
   // Read by `v8FlagsArg` (build-compile.ts documents this as THE place to
@@ -174,11 +176,16 @@ export const VALID_BUILD_KEYS = new Set<string>([
   // build when it does not come up clean. `--smoke` / `--smoke=desktop` /
   // `--smoke=strict` on the command line.
   "smoke",
+  // "bundled" | "shared" — read by build-config.ts (`resolveElectronRuntime`):
+  // whether a desktop package carries its Electron or starts from the
+  // per-user shared store (electron/shared-runtime.ts).
+  "electronRuntime",
   // `{ shortcut }` — read by build-config.ts (`resolveWindowsShortcut`):
   // whether the one-click Windows `.exe` adds a Start-menu shortcut.
   "windows",
   // `{ strict }` — read by build-android.ts (`_androidStrict`): an android/
   // overlay that drops part of the template's activity fails the build.
+  // `{ keystore, keyAlias, aab }` — read by `_androidRelease` (signing).
   "android",
   // `{ bundleId, host }` — read by build-config.ts (`resolveMacBundleId`,
   // `resolveMacHost`) and documented in docs/build/targets.md.

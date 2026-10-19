@@ -12,9 +12,12 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import {
+  driveRoots,
   installDirs,
   isTestGitdir,
   realStoreDirs,
+  rootAdditions,
+  rootEntries,
   storeChanges,
 } from "../scripts/check-home-clean.ts";
 
@@ -277,4 +280,40 @@ Deno.test("check:home-clean: the install directories watched are every one insta
     installDirs({ USERPROFILE: "C:\\U\\d", APPDATA: "C:\\U\\d\\R" })
       .includes("C:\\U\\d\\R"),
   );
+});
+
+Deno.test("check:home-clean: a Windows run watches its drive roots, and an entry a test ADDS there is named", async () => {
+  // `/tmp/x` on Windows is `C:\tmp\x` on the cwd's drive, and a user may
+  // create folders in `C:\` — tests naming `/tmp/…` or `/nonexistent/path`
+  // made `C:\tmp` and `C:\nonexistent` on the VM (removed by hand 2026-10-12).
+  assertEquals(driveRoots({ SystemDrive: "C:" }, "D:\\src\\aio", "windows"), [
+    "C:\\",
+    "D:\\",
+  ]);
+  assertEquals(driveRoots({ SystemDrive: "c:" }, "C:\\aio", "windows"), [
+    "C:\\",
+  ]);
+  assertEquals(driveRoots({}, "/home/x/aio", "linux"), []);
+  // Only what was ADDED: a system folder whose stamp moves is not a test's.
+  const root = await tempDir("drive-root-");
+  try {
+    await Deno.mkdir(join(root, "Windows"));
+    const before = rootEntries([root, join(root, "missing")]);
+    await Deno.mkdir(join(root, "tmp"));
+    await Deno.writeTextFile(join(root, "Windows", "x.log"), "");
+    assertEquals(rootAdditions(before, rootEntries([root])), [
+      join(root, "tmp"),
+    ]);
+  } finally {
+    await dropTempDir(root);
+  }
+});
+
+Deno.test("the shard runner fails a run that adds an entry to a drive root", async () => {
+  const src = await Deno.readTextFile(
+    new URL("../scripts/test-shards.ts", import.meta.url),
+  );
+  assertStringIncludes(src, "const rootsBefore = rootEntries(roots)");
+  assertStringIncludes(src, "rootAdditions(rootsBefore, rootEntries(roots))");
+  assertStringIncludes(src, "rootLeaks.length === 0");
 });

@@ -23,6 +23,7 @@ import {
   launchElectron,
   SandboxRefusal,
 } from "../electron/electron.ts";
+import { appProfileDir } from "../electron/electron-profile.ts";
 import { appDirs, registeredProfile } from "./app-dirs.ts";
 import type { ServerHandle } from "./server-types.ts";
 import type { UDSHandle } from "./uds.ts";
@@ -311,6 +312,14 @@ function networkInterfaces(): { family: string; address: string }[] {
   } catch {
     return []; // no --allow-sys: the link keeps the wildcard and says so
   }
+}
+
+/** `url` carrying `token` as its `?token=` query, ENCODED. Raw, a token with
+ *  `+` `/` `=` `&` `#` (any `openssl rand -base64` one) parsed back as another
+ *  string — the printed share link and the desktop window's URL answered 401.
+ *  A uuid key encodes to itself, so the usual link reads as before. Pure. */
+export function withToken(url: string, token: string): string {
+  return `${url}?token=${encodeURIComponent(token)}`;
 }
 
 /** The link to hand to another machine, and a note to print AFTER it.
@@ -612,6 +621,14 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     >;
   __aio.appVersion = appVersion;
   __aio.aioVersion = VERSION;
+  // What `appVersion()` (aio/air) returns when a page is rendered HERE (SSR):
+  // its own global, not `__aio.*` — those are the cell-definition keys the
+  // browser stub must mirror, and this is a fact of the server process.
+  // Not cleared on stop, by design: an app process runs one server, and only
+  // a test boots several in one process — there the last one started wins
+  // (as `__aio.appVersion` above), and clearing it on one server's stop would
+  // blank it under another still running.
+  (globalThis as Record<string, unknown>).__aioAppVersion = appVersion;
 
   // onStart hook — error-guarded, for a sync throw AND an async rejection.
   // An `async onStart` used to bypass this whole block: its rejection went to
@@ -891,7 +908,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     for (const [t, u] of Object.entries(users)) {
       // aio-ok(token-log): share link — the operator copies this URL
       log.info(
-        `share (${u.id}/${u.role}): ${share.url}?token=${t}${share.note}`,
+        `share (${u.id}/${u.role}): ${withToken(share.url, t)}${share.note}`,
       );
     }
   } else if (expose && token) {
@@ -899,7 +916,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
       `--expose: ${reach}; the app key is the only thing in front of it`,
     );
     // aio-ok(token-log): share link — the operator copies this URL
-    log.info(`share: ${share.url}?token=${token}${share.note}`);
+    log.info(`share: ${withToken(share.url, token)}${share.note}`);
     log.info(`key file: ${appKeyPath(appId)} (owner-only)`);
     // Friendly pairing: the aio client enters this code once to pull the
     // profile (cert + key) and connect forever — no file to hand over.
@@ -1046,10 +1063,13 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
         appDirs(appId).home,
         registeredProfile(appId),
       ),
+      // …and WHERE it lives: in this run's own home, so it goes with the app
+      // and no other app or instance can open it (electron-profile.ts).
+      profileDir: appProfileDir(appDirs(appId).home),
       // A second launch of this app shows THIS window (acquireSingletonLock).
       showFile: heldShowRequestPath(appId),
     };
-    const electronUrl = token ? `${localUrl}?token=${token}` : localUrl;
+    const electronUrl = token ? withToken(localUrl, token) : localUrl;
     // NOT distDir — that can be the binary's embedded VFS copy, which this
     // (foreign) Electron process cannot open. Undefined ⇒ it loads over HTTP,
     // which aio-server kept alive for exactly this case.
@@ -1113,6 +1133,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
           dir: ui.dir,
           lang: ui.lang,
           themeName: appId,
+          appVersion: deps.appVersion,
           // The policy travels WITH the document, because this shell is
           // returned from the Electron main process and never meets the
           // response-header path that would otherwise attach it. The nonce

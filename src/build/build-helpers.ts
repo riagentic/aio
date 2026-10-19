@@ -97,6 +97,46 @@ export function slugify(s: string): string {
 }
 
 /** Recursively copy a directory (preserves symlinks + executable bits) */
+/** A symlink a bundle is made of (a macOS `.app`'s `Versions/Current`, its
+ *  window link). Windows lets an account create one only with Developer Mode
+ *  on or from an elevated shell; refused, it said a bare "A required
+ *  privilege is not held by the client. (os error 1314)" — it now says which
+ *  of the two to do. */
+export async function bundleSymlink(
+  target: string,
+  link: string,
+  type: "file" | "dir",
+): Promise<void> {
+  try {
+    await Deno.symlink(target, link, { type });
+  } catch (e) {
+    throw symlinkRefusal(e, link, target);
+  }
+}
+
+/** The error for a refused bundle symlink: a Windows privilege refusal says
+ *  what to do; anything else is returned as it was. Pure. @internal */
+export function symlinkRefusal(
+  e: unknown,
+  link: string,
+  target: string,
+  os: typeof Deno.build.os = Deno.build.os,
+): unknown {
+  if (
+    os !== "windows" ||
+    !(e instanceof Deno.errors.PermissionDenied ||
+      /os error 1314/.test(String(e)))
+  ) return e;
+  return new Error(
+    `could not create the symlink ${link} → ${target}: Windows lets this ` +
+      `account make symlinks only with Developer Mode on (Settings → System → ` +
+      `For developers → Developer Mode) or from an elevated (administrator) ` +
+      `shell, and this bundle is made of them. Turn Developer Mode on, or ` +
+      `run the build elevated.`,
+    { cause: e },
+  );
+}
+
 export async function copyDir(src: string, dst: string): Promise<void> {
   await Deno.mkdir(dst, { recursive: true });
   for await (const entry of Deno.readDir(src)) {
@@ -136,7 +176,7 @@ export async function copyDir(src: string, dst: string): Promise<void> {
         (i) => i.isDirectory ? "dir" as const : "file" as const,
         () => "file" as const, // dangling: nothing to ask
       );
-      await Deno.symlink(target, dstPath, { type });
+      await bundleSymlink(target, dstPath, type);
     } else {
       await Deno.copyFile(srcPath, dstPath);
       // Preserve executable bit

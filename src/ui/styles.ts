@@ -29,6 +29,10 @@ import type { VNode } from "../air/vdom.ts";
 export const UI_CSS: string = `
 :root {
   --aio-ui-accent: var(--aio-accent, #2860d8);
+  /* The accent AS TEXT on the page. The fill above can be pale (a light
+     identity hue), so text never uses it — the theme solves this one for AA.
+     With no theme (ui.theme "none"), an app's own --aio-accent is the ink. */
+  --aio-ui-accent-ink: var(--aio-accent-ink, var(--aio-accent, #2860d8));
   --aio-ui-on-accent: var(--aio-on-accent, #ffffff);
   --aio-ui-bg: var(--aio-surface, #ffffff);
   --aio-ui-surface: var(--aio-surface-2, #f6f7f9);
@@ -43,6 +47,7 @@ export const UI_CSS: string = `
 @media (prefers-color-scheme: dark) {
   :root {
     --aio-ui-accent: var(--aio-accent, #5a9bff);
+    --aio-ui-accent-ink: var(--aio-accent-ink, var(--aio-accent, #5a9bff));
     --aio-ui-on-accent: var(--aio-on-accent, #0f121b);
     --aio-ui-bg: var(--aio-surface, #12151f);
     --aio-ui-surface: var(--aio-surface-2, #1a1f2e);
@@ -155,7 +160,7 @@ export const UI_CSS: string = `
 .aio-md { color: var(--aio-ui-ink); font-family: var(--aio-ui-font); line-height: 1.6; }
 .aio-md__p { margin: 0 0 .8em; }
 .aio-md h1, .aio-md h2, .aio-md h3, .aio-md h4, .aio-md h5, .aio-md h6 { margin: 1.2em 0 .5em; line-height: 1.25; }
-.aio-md__a { color: var(--aio-ui-accent); }
+.aio-md__a { color: var(--aio-ui-accent-ink); }
 .aio-md__code { background: var(--aio-ui-surface); border: 1px solid var(--aio-ui-line); border-radius: 4px; padding: .1em .35em; font-size: .9em; }
 .aio-md__pre { background: var(--aio-ui-surface); border: 1px solid var(--aio-ui-line); border-radius: var(--aio-ui-radius); padding: .8em 1em; overflow-x: auto; margin: 0 0 .8em; }
 .aio-md__pre code { background: none; border: none; padding: 0; font-size: .9em; }
@@ -189,7 +194,7 @@ export const UI_CSS: string = `
 .aio-tablist { display: flex; gap: .15em; border-block-end: 1px solid var(--aio-ui-line); overflow-x: auto; }
 .aio-tab { appearance: none; background: none; border: none; border-block-end: 2px solid transparent; padding: .6em .9em; font: inherit; font-family: var(--aio-ui-font); color: var(--aio-ui-ink-soft); cursor: pointer; white-space: nowrap; }
 .aio-tab:hover:not(:disabled) { color: var(--aio-ui-ink); }
-.aio-tab--active { color: var(--aio-ui-accent); border-block-end-color: var(--aio-ui-accent); font-weight: 600; }
+.aio-tab--active { color: var(--aio-ui-accent-ink); border-block-end-color: var(--aio-ui-accent-ink); font-weight: 600; }
 .aio-tab:disabled { opacity: .45; cursor: not-allowed; }
 .aio-tabpanel { padding-block-start: 1em; }
 .aio-tabpanel:focus-visible { outline: 2px solid var(--aio-ui-accent); outline-offset: 2px; }

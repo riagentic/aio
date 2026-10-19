@@ -71,6 +71,34 @@ export function validateWorkerCells(cells: CellDef[]): void {
   }
 }
 
+/** The boot warnings for a cell that `listensTo` a `worker: true` cell's
+ *  method. The worker's calls never enter the main reduce, where the fan-out
+ *  runs, so the listener NEVER fires in the app — while every in-isolate
+ *  harness runs it, green. Refusing it would stop apps that boot today, so it
+ *  is said, once per pair. Pure over the defs; shared with the harnesses
+ *  (testing/boot-refusals.ts) so both say the same line. @internal */
+export function workerListenMismatches(cells: readonly CellDef[]): string[] {
+  const workers = new Set(
+    cells.filter((c) => c.__aio.worker === true).map((c) => c.__aio.id),
+  );
+  const out = new Set<string>();
+  for (const listener of cells) {
+    const l = listener.__aio.id;
+    for (const type of listener.__aio.foreignActions ?? []) {
+      const s = type.slice(0, type.indexOf(":"));
+      if (!workers.has(s) || s === l) continue;
+      out.add(
+        `listensTo: "${l}" listens to "${s}", a worker: true cell — "${s}"'s ` +
+          `calls run in its worker and never reach the main reduce, so ` +
+          `"${l}"'s listener NEVER runs in the app (an in-isolate test runs ` +
+          `it). Have "${s}" return what "${l}" needs and call "${l}" from ` +
+          `the caller, or drop worker: true (said once per pair)`,
+      );
+    }
+  }
+  return [...out];
+}
+
 export type CellWorkerPool = {
   /** Number of worker cells (0 = the feature is entirely inert). */
   readonly size: number;
@@ -200,6 +228,8 @@ export function createCellWorkerPool(opts: {
    *  an in-process caller sees for a REFUSED write, and a worker that never
    *  learned it answered differently from the cell beside it. */
   refusalsReject: boolean;
+  /** The owner's `guardDispatches` (default on), forwarded to every worker. */
+  guardRejections: boolean;
   /** The boot's dev type refusal, per cell (see `ToWorker.init.strictTypes`). */
   strictTypeFilter?: (cell: string) => CellFieldFilter | undefined;
   /** Read a cell's authoritative slice (post-restore) to seed its worker. */
@@ -239,6 +269,7 @@ export function createCellWorkerPool(opts: {
     prod,
     freezeState,
     refusalsReject,
+    guardRejections,
     getSlice,
     dispatch,
     runEffect,
@@ -301,6 +332,7 @@ export function createCellWorkerPool(opts: {
         prod,
         freezeState,
         refusalsReject,
+        guardRejections,
         strictTypes: opts.strictTypeFilter?.(name),
         // `""` (app unknown) is no identity to hand over — the worker then
         // resolves as it always did.

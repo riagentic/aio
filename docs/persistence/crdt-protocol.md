@@ -70,6 +70,16 @@ client diverged by one application. It is optional — omitted when the server
 re-acks a duplicate, and absent from a pre-alpha43 server — and its absence
 simply means "apply as before".
 
+`serverNow` (also on a catch-up `sync-res` and a clock-drift or stale
+`op-rejected`) is the server's wall clock when it sent the frame. A client whose
+clock is off from it by more than `maxDrift` stamps its next ops on the server's
+time instead, carried forward on its monotonic clock, and warns once with the
+measured offset — so a device far behind (no RTC before NTP) neither loses
+last-write-wins with its newer edits nor has them refused as stale resends. A
+sample counts only when the frame answers a request sent at most `maxDrift / 4`
+ago on both the monotonic and the device clock (a late frame, or one read after
+a system suspend, is no offset).
+
 ### op-rejected
 
 Server→client when an optimistic op is refused (access denied, invalid shape).

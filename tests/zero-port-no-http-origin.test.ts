@@ -118,6 +118,7 @@ Deno.test("air transport: http:// page without IPC still opens the WebSocket (un
     ensureConnected();
     assertEquals(page.wsUrls, ["ws://localhost:1234/ws?token=t"]);
   } finally {
+    _teardownNow(); // the handshake's 15 s bound is the client's to clear
     await page.restore();
   }
 });

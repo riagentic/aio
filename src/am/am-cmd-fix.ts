@@ -100,6 +100,10 @@ const UNIVERSAL_TASKS = [
   "ship",
 ] as const;
 
+/** The tasks that build or release a binary — not added for an app that
+ *  declares `"build": { "targets": [] }` (no binary). */
+const NO_BINARY_SKIPS = ["build", "compile", "publish", "ship"] as const;
+
 /** Task keys each declared target needs, keyed by the names accepted in
  *  deno.json `build.targets` (plus the `client` default, which shares the same
  *  vocabulary — `server` is the headless one). After the alpha52 task diet the
@@ -1196,6 +1200,16 @@ export async function cmdFix(
     if (primaryTarget === undefined && taskTargets.length > 0) {
       expected["compile"] = `${all["build"]} --targets=${taskTargets[0]}`;
     }
+    // An EXPLICIT `"build": { "targets": [] }` with nothing else declaring a
+    // target is "no binary" (a field report: a static site got compile/ship back
+    // from every repair). `deno task build` refuses an empty fleet, so the
+    // tasks that build or release one are not added. No `build.targets` at
+    // all keeps the browser fallback — apps rely on its `compile`.
+    const noBinary = Array.isArray(rawFleet) && rawFleet.length === 0 &&
+      declared.length === 0;
+    if (noBinary) {
+      for (const k of NO_BINARY_SKIPS) delete expected[k];
+    }
     // An unrecognized target name is louder than a missing one: `deno task
     // build` fails on it too, and a silent "no tasks added" would read as
     // am fix having nothing to do.
@@ -1204,7 +1218,11 @@ export async function cmdFix(
         ? `unknown target(s): ${unknown.join(", ")} — no standard tasks for ` +
           `them, and \`deno task build\` will fail on them too`
         : "",
-      assumed
+      noBinary
+        ? `\`build.targets\` is [] — no binary: ${
+          NO_BINARY_SKIPS.join("/")
+        } not added`
+        : assumed
         ? "no `target`/`build.targets` declared — repaired the browser + " +
           "universal task set only; declare build.targets to get the rest"
         : "",

@@ -37,6 +37,8 @@ export interface AioWindow {
      *  shared pending CRDT ops for any same-named cell, and one app's first
      *  catch-up flushed the other's unsent mutations into its server. */
     appId?: string;
+    /** The app's resolved version — `appVersion()` (`aio/air`). */
+    appVersion?: string;
     renderBudget?: { staleness?: number; pendingPatches?: number };
     /** `aio.run({ wire })` — how THIS client encodes a call's arguments. Read
      *  by `protocol/wire-value.ts`'s `wireArgs`, the one function every door

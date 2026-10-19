@@ -20,6 +20,7 @@ import {
 import {
   _ownedDeps,
   adoptOlder,
+  assertNotInTheWay,
   identity,
   isOwn,
   moved,
@@ -250,6 +251,31 @@ Deno.test("downloads: a download of ours with other bytes is moved aside, whole 
       "notes.zip-0.1.6~damaged",
       "notes.zip-0.1.6~damaged-2",
     ]);
+  } finally {
+    await w.end();
+  }
+});
+
+// A start before the release was tried again voided the damaged download's
+// entry ("something else has the name now"): with no entry it could not be
+// moved aside, and it refused its release as "not made by this app's
+// updater" for good. A start leaves it — unproven, so named — on the record.
+Deno.test("downloads: a damaged download of ours that a start finds stays on the record — its release moves it aside later, not refused", async () => {
+  const w = await world();
+  try {
+    const dest = `${w.install}.zip-0.1.6`;
+    const got = await w.get(dest, { owner: w.data });
+    assert(got.ok, got.ok ? "" : got.error);
+    await Deno.writeTextFile(dest, "damaged");
+    laterBoot(w.data);
+    const swept = await sweepOwned(w.data, w.install);
+    assertEquals([swept.removed, swept.left], [[], ["notes.zip-0.1.6"]]);
+    assertEquals(await Deno.readTextFile(dest), "damaged");
+    // The update of 0.1.6: moved aside, and its name is free for it.
+    assertEquals(setAsideChanged(w.data, dest), `${dest}~damaged`);
+    assertNotInTheWay(w.data, dest);
+    const again = await w.get(dest, { owner: w.data });
+    assert(again.ok, again.ok ? "" : again.error);
   } finally {
     await w.end();
   }

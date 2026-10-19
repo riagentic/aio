@@ -19,6 +19,7 @@ import {
   REAL_WINDOW,
   rewrittenTracked,
   shardsOf,
+  summaryLine,
   unrunFiles,
   wholeNumber,
 } from "../scripts/test-shards.ts";
@@ -114,6 +115,33 @@ Deno.test("failures: the closing FAILURES list wins — it names every kind", ()
     "bad case => ./tests/a.test.ts:3:6",
     "./tests/b.test.ts (uncaught error)",
   ]);
+});
+
+// A test that runs a CHILD `deno test` (testUI's video runs, a red fixture)
+// prints the child's FAILURES list and summary into the shard's log first:
+// read first-match, a Windows shard with 20 failures was reported as the
+// child's "1 passed | 1 failed (18s)" and its one fixture failure.
+Deno.test("failures + summaryLine: the shard's OWN closing report, never a child run's printed before it", () => {
+  const log = [
+    " FAILURES ",
+    "",
+    "same name => ../../src/testing/ui-test.ts:1839:10",
+    "",
+    "FAILED | 1 passed | 1 failed (18s)",
+    "real case ... FAILED (2ms)",
+    "\x1b[1m FAILURES \x1b[0m",
+    "",
+    "real case => ./tests/a.test.ts:3:6",
+    "other case => ./tests/b.test.ts:9:6",
+    "",
+    "\x1b[31mFAILED\x1b[0m | 40 passed | 2 failed (61m)",
+  ].join("\n");
+  assertEquals(failures(log), [
+    "real case => ./tests/a.test.ts:3:6",
+    "other case => ./tests/b.test.ts:9:6",
+  ]);
+  assertEquals(summaryLine(log, 1), "FAILED | 40 passed | 2 failed (61m)");
+  assertEquals(summaryLine("nothing\n", 3), "exit 3");
 });
 
 Deno.test("failures: a shard where nothing ran reports deno's error line", () => {

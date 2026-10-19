@@ -1087,7 +1087,9 @@ Its connect page does four things:
   presenting — the key never crosses the wire, and a relayed answer names the
   wrong certificate). A server that regenerated its certificate proves it, is
   pinned again and connected to with no prompt. One that cannot is opened
-  **without the key**, and the client says so. The one exception keeps old
+  **without the key**, and the client says so — and the window sends that host
+  none of its cookies either (the key cookie, a login session: each cookie of
+  that host name is taken out of the jar first). The one exception keeps old
   deployments working: a pairing that has never seen its server prove (the
   server runs an aio older than 1.0.20, or was not connected to since) is warned
   about and reached as before, key included — so upgrade the server and connect
@@ -1104,6 +1106,14 @@ Its connect page does four things:
   `deno.json` for a packaged client, `--strict-pin` for one run. A leaf
   re-issued under the pinned root (the machine's addresses changed) still meets
   the pin.
+- **Keeps a host's first certificate, for its cookies.** A host reached without
+  pairing (typed in, a login app with no key) has no pin; the self-signed chain
+  it first presents is kept with its recent. A later connect that meets another
+  one (a leaf re-issued under the same root is the same server) takes that
+  host's cookies out of the jar before the page loads, says so, and keeps the
+  new chain: one sign-in again after a server's root changes (aio's lives ten
+  years). Nothing is refused. A certificate the machine's trust store accepts is
+  left to it.
 - **Remembers where you've been.** Recent servers persist across launches; click
   to reconnect, ✕ to forget.
 - **Validates the target.** Before loading, it checks the page actually looks
@@ -1111,6 +1121,11 @@ Its connect page does four things:
 
 Manual entry always works too (type `192.168.1.100:8000`), and
 `--server-url=<url>` still connects directly for shortcuts.
+
+Once connected, the window is the app's: a link or `location` change within the
+app's origin loads as in a browser (with the window's cookies, so a keyed app's
+own links need no `?token=`), as does the site the app's own flow sends it to (a
+login provider); a link to another site opens in the system browser.
 
 ### Finding apps from the CLI
 
@@ -1133,7 +1148,11 @@ deno run -A jsr:@riagentic/aio/am discover
   IPv4 interface (`192.168.1.255` for `192.168.1.7/24`). The limited one alone
   leaves by a single interface — with a VPN up, usually the VPN — and the LAN
   was never asked. An app on this machine, answering from several of its
-  addresses, is listed once.
+  addresses, is listed once — and so is an app on another machine that shares
+  two subnets with this one: each answer carries the answering machine's own
+  addresses, and two answers for one port are one machine only when each one's
+  source is among the other's (two machines never merge; an aio older than
+  1.0.21 sends no list and is listed per address).
 - A probe that could not be **sent** to any of them is not "no apps":
   `am discover` says why and exits 1. On macOS that is the Local Network
   permission (System Settings → Privacy & Security → Local Network) — the app

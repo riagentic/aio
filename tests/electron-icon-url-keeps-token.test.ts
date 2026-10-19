@@ -40,6 +40,8 @@ Deno.test("aio-client: the window-icon fetch of a ?token= URL keeps the token in
     "__aioIpcBind", // the app-window bind (electron-web-isolation.test.ts)
     "__aioOrigin",
     "learnProof", // the pin proof, after a connect (pin-proof.test.ts)
+    "seenChanged", // a host's first-seen certificate (generated-eval test)
+    "_seenCerts",
     `${connectToSrc}\nreturn connectTo;`,
   );
   const connectTo = make(
@@ -57,6 +59,8 @@ Deno.test("aio-client: the window-icon fetch of a ?token= URL keeps the token in
     () => {},
     (u: string) => new URL(u).origin,
     () => {},
+    () => false,
+    new Map(),
   ) as (win: unknown, url: string) => Promise<void>;
   const win = {
     setIcon() {},

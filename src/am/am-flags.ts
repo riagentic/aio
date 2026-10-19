@@ -149,7 +149,7 @@ export const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
   // structured filters are REAL now (`logFlagError` accepts them), so the
   // table lists them and the two sides agree again.
   logs: ["--level", "--tag", "--since"],
-  errors: [],
+  errors: ["--since"],
   metrics: [],
   cost: ["--keys", "--cell", "--window"],
   top: [],

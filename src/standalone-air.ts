@@ -239,6 +239,8 @@ export type {
 export { useVirtualList } from "./air/virtual-list.ts";
 // Back is an ANDROID concern first: the standalone APK is where it matters.
 export { onBackButton } from "./air/back-button.ts";
+// …and so is a page with no server to ask for its version.
+export { appVersion } from "./air/app-version.ts";
 // React's hook spellings, first-class on `aio/air` since 1.0.6-beta (also on
 // `aio/air/compat`, unchanged). The first thing a React-trained developer or
 // agent writes is `import { useState } from "aio/air"` — it did not compile.
@@ -303,7 +305,7 @@ export {
   useNavigate,
   useRoute,
 } from "./air/router.ts";
-import { count } from "./diagnostics/fmt.ts";
+import { count, HEY } from "./diagnostics/fmt.ts";
 
 // ── Islands — client-side framework interop, no server involved ───────
 //
@@ -611,6 +613,27 @@ export function _retire(app: unknown): void {
 /** Boots not yet retired, oldest first — see `_retire`. */
 const _liveBoots: { app: object; restore: () => void }[] = [];
 
+/** @internal Called by a harness right BEFORE it resets the runtime for a new
+ *  boot. The runtime is one per process, so a harness still live (a testUI
+ *  this one is nested in, or one never disposed) is reset with it: its cells
+ *  go back to their declared state, its onDestroy runs, its timers and owned
+ *  resources are dropped, and its retirement later does not bring them back.
+ *  That used to happen with nothing said — a later assertion on the live
+ *  harness read initial state. */
+export function _warnResetOfLiveBoot(harness: string): void {
+  const live = _liveBoots.at(-1);
+  if (!live) return;
+  const site = _fences.get(live.app)?.site ?? "(unknown)";
+  console.warn(
+    `${HEY} [aio:test] ${harness}: booted while an earlier harness is still live ` +
+      `(booted at ${site}). The in-process runtime is one per process, so ` +
+      `this boot RESET it: the live harness's cells are back at their ` +
+      `declared state, its onDestroy ran, its schedules and owned resources ` +
+      `were dropped — and closing this one does not bring them back. Dispose ` +
+      `the earlier harness first, or render both components in one testUI.`,
+  );
+}
+
 /** Where a handle bound to `app` sends: `app` itself — unless it has been
  *  retired while an OUTER boot still lives (nested harnesses share the cell
  *  handles, and the inner one bound them last). Code a dead boot started is
@@ -663,7 +686,8 @@ function _deadGeneration(type: string, bootSite: string, boot: number): Error {
     `state. Await it (or \`await h.settle()\`) before dispose, or give it an ` +
     `abort path (\`s.$signal\`).`;
   console.error(msg);
-  return new Error(msg);
+  // A stable code, so a gate branches on `errorCode(e)` instead of the prose.
+  return Object.assign(new Error(msg), { code: "DEAD_BOOT" });
 }
 
 // Owned resources (`own.set`) acquired in this runtime. Lazily created so the
@@ -2020,6 +2044,21 @@ export function useAio<S = unknown>(): {
       return getReadySignal().value;
     },
   };
+}
+
+/** Connection status. The cells run in this process — there is no server to
+ *  lose — so it is always connected, as `useAio().ready` is always true here.
+ *  It used to be absent, so an app rendering an offline banner built for
+ *  browser and electron and failed the APK build alone. Its tier is declared
+ *  once, at the browser definition. */
+export function useConnected(): boolean {
+  return true;
+}
+
+/** No offline queue exists on this target (every call dispatches in-process),
+ *  so it is never past 80% full. See `useConnected`. */
+export function isConnectionDegraded(): boolean {
+  return false;
 }
 
 // `useLocal` used to be re-implemented here — see the re-export above. The copy

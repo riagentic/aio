@@ -83,7 +83,9 @@ ${htmlOpen()}
         if (!errs.length) console.error('[aio:graph] the import graph is invalid — not reloading');
         return;
       }
-      if (f.t === 'reload' || f.t === 'graph-clear') location.reload();
+      // No app here to patch or restyle: ANY update is "look again". A server
+      // that booted red sends a fixed UI entry as a patch, never graph-clear.
+      if (f.t === 'reload' || f.t === 'graph-clear' || f.t === 'patch' || f.t === 'css') location.reload();
     };
     ws.onclose = function() { setTimeout(function() { location.reload(); }, 2000); };
   </script>

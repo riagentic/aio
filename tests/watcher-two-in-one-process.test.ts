@@ -61,14 +61,13 @@ Deno.test({
       assertEquals(first, `watch-${ownPidTag()}.tmp`, "the name it always had");
       assert(a.start() && b.start());
       assertEquals(here(), [second, first].sort());
-      const ino = Deno.statSync(join(lockDir(), first)).ino;
       a.shutdown();
       assertEquals(here(), [second], "the first's stop took the second's file");
       // The number is free again: the next watcher has the plain name, a new
-      // file — and the second's is still its own.
+      // file (the one above is gone; an inode number proves nothing, a file
+      // system reuses it) — and the second's is still its own.
       assert(c.start());
       assertEquals(here(), [second, first].sort());
-      assert(Deno.statSync(join(lockDir(), first)).ino !== ino || ino === null);
       b.shutdown();
       assertEquals(here(), [first]);
     } finally {

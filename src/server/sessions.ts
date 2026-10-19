@@ -223,6 +223,24 @@ export function openSessionStore(
   // Hygiene: expired sessions that are never read again would otherwise
   // accumulate forever — one sweep per open keeps auth.db lean.
   sweep.run(Date.now());
+  // The ceiling holds from the open, not from each user's next login: a
+  // ceiling set or lowered across a restart left every account's sessions
+  // past it live for up to the TTL.
+  if (maxPerUser !== undefined) {
+    const gone = Number(
+      db.prepare(
+        "DELETE FROM sessions WHERE rowid IN (SELECT rowid FROM (" +
+          "SELECT rowid, ROW_NUMBER() OVER (PARTITION BY user_id " +
+          "ORDER BY rowid DESC) AS n FROM sessions) WHERE n > ?)",
+      ).run(maxPerUser).changes,
+    );
+    if (gone > 0) {
+      log.warn(
+        `auth: ${gone} session(s) over auth.maxSessions (${maxPerUser}) ` +
+          `revoked at open — each account keeps its newest`,
+      );
+    }
+  }
 
   const listeners = new Set<() => void>();
   const emitRevoked = (): void => {

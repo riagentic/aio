@@ -597,11 +597,16 @@ Deno.test("updates e2e: a missing channel reports the reason, not silence", asyn
 async function publishZip(r: Rig, opts: { version: string; channel: string }) {
   const stage = join(r.root, `stage-${opts.version}`);
   await Deno.mkdir(join(stage, "electron"), { recursive: true });
-  // The launcher `aio build` writes for this OS — the swap smoke-tests it.
+  // What the swap smoke-tests on this OS: the launcher `aio build` writes, or
+  // on Windows the folder's own `.exe` (its `run.bat` hands off and exits 0).
   if (Deno.build.os === "windows") {
     await Deno.writeTextFile(
       join(stage, "run.bat"),
       `@echo ${opts.version}\r\n`,
+    );
+    await writeProgram(
+      join(stage, "app.exe"),
+      `#!/bin/sh\necho ${opts.version}\n`,
     );
   } else {
     await Deno.writeTextFile(

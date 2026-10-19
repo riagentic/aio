@@ -17,7 +17,7 @@ import { fromFileUrl } from "@std/path";
 import { spec } from "./module-spec-helper.ts";
 // THE browser lookup (every OS), never a copy of its path list.
 import { browserOsFlags, findBrowser } from "./e2e-harness.ts";
-import { browserHomeEnv } from "../src/testing/chromium.ts";
+import { browserHomeEnv, dropBrowserProfile } from "../src/testing/chromium.ts";
 
 const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
@@ -328,6 +328,14 @@ Deno.test({
         ].join("|"),
       );
 
+      // 4b. Tab moves focus (a synthetic keydown has no default action, so the
+      // trigger performs it — tests/ui-trigger-tab-radio-arrows.test.tsx).
+      assert((await trigger("Fid", "press", { key: "Tab" })).ok);
+      assertEquals(
+        await js<string>(`document.activeElement?.getAttribute("aria-label")`),
+        "num",
+      );
+
       // 5. number / date.
       assert((await trigger("Num", "type", { text: "1a2" })).ok);
       assertEquals(
@@ -376,7 +384,7 @@ Deno.test({
       await cdp?.close().catch(() => {});
       if (browser) await stopChild(browser, { quiet: true });
       await stopChild(app, { quiet: true });
-      await Deno.remove(profile, { recursive: true }).catch(() => {});
+      await dropBrowserProfile(profile);
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }
   },

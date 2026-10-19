@@ -84,6 +84,7 @@ export type { WatchOptions } from "./state/watch.ts";
 export { bindInput, useFieldArray, useForm } from "./air/form.ts";
 export { useVirtualList } from "./air/virtual-list.ts";
 export { onBackButton } from "./air/back-button.ts";
+export { appVersion } from "./air/app-version.ts";
 export { renderToString } from "./air/vdom.ts";
 
 // ── AIR renderer primitives (AIO-70) ────────────────────────────────

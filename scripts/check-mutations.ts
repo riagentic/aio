@@ -122,11 +122,63 @@ export const LEDGER: readonly Mutation[] = [
       "a suite run that leaves a test app's install or window profile in the developer's real home ends green",
     file: "scripts/test-shards.ts",
     find:
-      "  if (bad.length === 0 && storeWrites.length === 0 && strays.length === 0) {",
-    replace: "  if (bad.length === 0 && storeWrites.length === 0) {",
+      "    bad.length === 0 && storeWrites.length === 0 && strays.length === 0 &&\n",
+    replace: "    bad.length === 0 && storeWrites.length === 0 &&\n",
     test: "tests/test-shards-leftover.test.ts",
     filter:
       "test-shards: a green suite that leaves a test app's profile in the REAL home FAILS the run, named; one that was there before is not charged to it",
+  },
+  {
+    what:
+      "check:orphans judges a new lock dir while the test process that made it is still exiting — a loaded run goes red on a dir its creator prunes a second later",
+    file: "scripts/check-orphans.ts",
+    find:
+      "      left.some((x) => named(x.root, refs)) && Date.now() - t0 < 30_000;",
+    replace: "      false && Date.now() - t0 < 30_000;",
+    test: "tests/check-orphans-fresh-live-root.test.ts",
+    filter:
+      "check-orphans: a new lock dir whose apps root a live process still uses is waited for — pruned at its exit, the run is green (named by pid)",
+  },
+  {
+    what:
+      "a pipe client whose failed open lost its Win32 code (0) throws at once — a busy pipe under load read as a hard failure",
+    file: "src/server/win-pipe.ts",
+    find: "  return code === ERROR_PIPE_BUSY || code === 0;",
+    replace: "  return code === ERROR_PIPE_BUSY;",
+    test: "tests/win-pipe-abi.test.ts",
+    filter:
+      "connectPipe: a busy pipe, or a lost code, is asked again; a real refusal is not",
+  },
+  {
+    what:
+      "a bundle symlink Windows refuses (no Developer Mode, not elevated) is the bare os error 1314 — nothing says to turn Developer Mode on or run elevated",
+    file: "src/build/build-helpers.ts",
+    find: '    os !== "windows" ||',
+    replace: "    true ||",
+    test: "tests/build-helpers.test.ts",
+    filter:
+      "symlinkRefusal: Windows' privilege refusal names Developer Mode and an elevated shell; anything else is left as it was",
+  },
+  {
+    what:
+      'a CSS step stopped on Windows is timed against the grace — its TerminateProcess is the end, and a late exit notice was told as "did not end when asked and was killed"',
+    file: "src/build/build-css.ts",
+    find: '  if (os === "windows") {',
+    replace: "  if (false) {",
+    test: "tests/build-css-step.test.ts",
+    filter:
+      "css step: a stop on Windows is the end, waited for — never told as a kill; elsewhere the grace decides",
+  },
+  {
+    what:
+      "check:orphans knows a live test process's `apps-<pid>` sandbox only from its environment — Windows shows nobody that, so a test still exiting there was charged with its lock dir",
+    file: "scripts/check-orphans.ts",
+    find:
+      "      (refs.some((r) => namesPath(r, root)) || sandboxOwnerLive(root));",
+    replace: "      refs.some((r) => namesPath(r, root));",
+    test: "tests/check-orphans-fresh-live-root.test.ts",
+    filter:
+      "check-orphans: a new lock dir whose apps root a live process still uses is waited for — pruned at its exit, the run is green (named by pid)",
   },
   {
     what:
@@ -837,7 +889,7 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "a one-shot schedule whose sync method throws is re-run by the refusal retry three more times",
     file: "src/state/schedule.ts",
-    find: '      if (code === "REDUCE_ERROR") {',
+    find: '      if (code === "REDUCE_ERROR" || code === "ACTION_REFUSED") {',
     replace: '      if (code === "REDUCE_ERROR_MUTANT") {',
     test: "tests/schedule-oneshot-method-throw.test.ts",
     filter:
@@ -3069,11 +3121,20 @@ export const LEDGER: readonly Mutation[] = [
   {
     what: "the self-contained exe unpacks its Electron with the fuses on",
     file: "src/electron/electron-runtime-fetch.ts",
-    find: "if (opts.embedded) await fuseElectronFile(",
+    find: "if (fuse) await fuseElectronFile(",
     replace: "if (false) await fuseElectronFile(",
     test: "tests/electron-embedded-runtime.test.ts",
     filter:
       "embedded runtime: the carried runtime is unpacked with its fuses off, apart from an unfused one already cached",
+  },
+  {
+    what: "a shared-runtime app starts from an Electron with its fuses on",
+    file: "src/electron/electron-runtime-fetch.ts",
+    find: "const fuse = !!opts.embedded || opts.into !== undefined;",
+    replace: "const fuse = !!opts.embedded;",
+    test: "tests/electron-shared-runtime.test.ts",
+    filter:
+      "shared start: downloads into the store with a progress window, fuses it, records the install, and the next start finds it",
   },
   {
     what:
@@ -3359,8 +3420,8 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "a refused unattended install (bad seal, translocated app) is never logged: the cell swallows it into state",
     file: "src/server/updates-boot.ts",
-    find: '      if (c.status === "error") fail(refused, c.error);',
-    replace: "      if (c.status === null) fail(refused, c.error);",
+    find: '      if (c.status !== "error") return void (failures = 0);',
+    replace: "      if (c.status !== null) return void (failures = 0);",
     test: "tests/updates-boot-check-backoff.test.ts",
     filter:
       "updates: a refused auto-install is logged and backs off like any failure",
@@ -4190,8 +4251,8 @@ export const LEDGER: readonly Mutation[] = [
   {
     what: "release() removes a container's live lock that names our pid",
     file: "src/server/single-instance-lock.ts",
-    find: "    if (now && isOwnLock(now)) {",
-    replace: "    if (now && now.pid === Deno.pid) {",
+    find: "    const ours = !!now && isOwnLock(now);",
+    replace: "    const ours = !!now && now.pid === Deno.pid;",
     test: "tests/lock-foreign-namespace-hold.test.ts",
     filter:
       "app lock, foreign pid namespace, the record naming OUR pid: never taken over, updated or released as ours",
@@ -4538,7 +4599,7 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "updates: the boot never handed the rolled-back release to ready() to dismiss",
     file: "src/server/updates-boot.ts",
-    find: "    void readyUpdates(slot, rolledBack?.to).then((done) => {",
+    find: "    void readyUpdates(slot, rolledBackTo).then((done) => {",
     replace: "    void readyUpdates(slot).then((done) => {",
     test: "tests/updates-first-boot-rollback.test.ts",
     filter:
@@ -4623,9 +4684,9 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "updates: the rolled-back record was deleted before its dismissal landed — a failed dispatch offered it again",
     file: "src/server/updates-boot.ts",
-    find: "    void readyUpdates(slot, rolledBack?.to).then((done) => {",
+    find: "    void readyUpdates(slot, rolledBackTo).then((done) => {",
     replace:
-      "    void (readyUpdates(slot, rolledBack?.to).catch(() => {}), Promise.resolve(true)).then((done) => {",
+      "    void (readyUpdates(slot, rolledBackTo).catch(() => {}), Promise.resolve(true)).then((done) => {",
     test: "tests/updates-first-boot-rollback.test.ts",
     filter:
       "first-boot rollback: a dismissal that fails keeps the rolled-back record — the next boot dismisses it again",
@@ -5681,11 +5742,33 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "a test browser on Windows is launched without --guest — each launch on a fresh profile costs the Windows account one failed logon, and ten lock the account",
     file: "src/testing/chromium.ts",
-    find: '    ...(os === "windows" ? ["--guest"] : []),',
-    replace: '    ...(os === "windows" ? [] : []),',
+    find:
+      '    ...(os === "windows" ? ["--guest", "--do-not-de-elevate"] : []),',
+    replace: '    ...(os === "windows" ? ["--do-not-de-elevate"] : []),',
     test: "tests/chromium-bin.test.ts",
     filter:
       "launchChromium: Windows launches a guest window; other hosts launch what they always did",
+  },
+  {
+    what:
+      "the shard runner reads the FIRST FAILURES list in a shard's log — a child `deno test` a test ran printed its own first, and a shard's 20 failures were reported as the child's one",
+    file: "scripts/test-shards.ts",
+    find: '  const at = lines.findLastIndex((l) => l.trim() === "FAILURES");',
+    replace: '  const at = lines.findIndex((l) => l.trim() === "FAILURES");',
+    test: "tests/test-shards.test.ts",
+    filter:
+      "failures + summaryLine: the shard's OWN closing report, never a child run's printed before it",
+  },
+  {
+    what:
+      "a test browser on Windows is launched without --do-not-de-elevate — from an elevated shell Chromium relaunches itself un-elevated, the spawned process exits 0 and every test browser fails, its relaunch left running",
+    file: "src/testing/chromium.ts",
+    find:
+      '    ...(os === "windows" ? ["--guest", "--do-not-de-elevate"] : []),',
+    replace: '    ...(os === "windows" ? ["--guest"] : []),',
+    test: "tests/chromium-bin.test.ts",
+    filter:
+      "launchChromium: Windows keeps an elevated launch the process aio spawned",
   },
   {
     what:

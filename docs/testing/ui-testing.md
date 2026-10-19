@@ -77,6 +77,12 @@ testUI(App, "add a todo end-to-end", async (ui) => {
     out. In a `<textarea>` Enter inserts `"\n"`; on a button, link or
     `<summary>` it clicks. `press(" ")` on a button or checkbox clicks it.
     `press("Escape")` closes the top modal `<dialog>` (`cancel`, then `close`).
+    `press("Tab")` (and Shift+Tab) moves focus in sequential order — positive
+    `tabindex` first, one stop per radio group, bounded by an open modal — and
+    commits the field it leaves (`change`, `blur`, then `focus`); past the last
+    control focus leaves the page. An arrow key on a radio focuses and chooses
+    the next enabled radio of its group, wrapping. A `preventDefault()` on the
+    keydown cancels both.
   - `click()` moves focus to the clicked control (a non-focusable target blurs)
     and commits the field being edited (`change`) first.
   - `type()` fires `keydown` · `keypress` · `beforeinput` · `input` · `keyup`,
@@ -121,7 +127,9 @@ testUI(App, "add a todo end-to-end", async (ui) => {
 - Reads: `.text`, `.value`, `.checked`, `.pressed`, `.expanded`, `.disabled`,
   `.readonly`, `.required`, `.attr("…")` (live DOM attribute, `null` when absent
   — for `aria-*` / `data-*` / `role` the surface does not promote, except the
-  three ARIA booleans below), `ui.surface()`, `ui.html()`; waits:
+  three ARIA booleans below), `ui.surface()` (its `text` is capped at 80 chars,
+  the cut marked `…`, like `am surface` without `--full` — assert on an
+  element's or component's `.text`, which is never capped), `ui.html()`; waits:
   `ui.waitFor(pred)`. The state booleans **always answer with a boolean**,
   `false` included (`checked` also follows `aria-checked` on
   `role="radio|checkbox|switch"`; `pressed` / `expanded` follow `aria-pressed` /
@@ -374,22 +382,23 @@ Cells are module singletons, so work a mount started can outlive its dispose: an
 async method still awaiting, or a real `setTimeout`/`setInterval` (an idle lock,
 a poll) that fires during a LATER test. Its cell call is refused — never
 committed into the later mount — with
-`"x:y" was dispatched into a torn-down runtime (boot #N, booted at …; K since)`,
-and the message names what started it: `inside "x:load"` for a method's own
-async body, `setTimeout armed at App.tsx:158:12` for a timer, with the method it
-was armed in when there was one. Every real timer app or test code arms while a
-mount is live runs in a mount's fence: the mount that was active when it was
-armed — rendering, running its method, or driven by its handle (its queued
-clicks/types, `settle`/`waitFor`) — and a timer armed inside an attributed timer
-inherits its mount. Only a timer the test body arms with no mount active goes to
-the outermost live mount, so one armed between calls inside a nested `testUI`
-still reaches the outer mount after the inner one closes, while one the inner
-mount's component armed is refused there. A timer that never calls a cell keeps
-running as it would in the app, and nothing is cancelled. From a timer the
-refusal is the call's rejection (`.catch` sees it); left unobserved, it fails
-the live mount's next `settle()` or teardown, so it can fail a later test: the
-named line is the one to fix — clear the timer in `onCleanup`, or await the work
-before dispose.
+`"x:y" was dispatched into a torn-down runtime (boot #N, booted at …; K since)`
+(`errorCode(err) === "DEAD_BOOT"`), and the message names what started it:
+`inside "x:load"` for a method's own async body,
+`setTimeout armed at App.tsx:158:12` for a timer, with the method it was armed
+in when there was one. Every real timer app or test code arms while a mount is
+live runs in a mount's fence: the mount that was active when it was armed —
+rendering, running its method, or driven by its handle (its queued clicks/types,
+`settle`/`waitFor`) — and a timer armed inside an attributed timer inherits its
+mount. Only a timer the test body arms with no mount active goes to the
+outermost live mount, so one armed between calls inside a nested `testUI` still
+reaches the outer mount after the inner one closes, while one the inner mount's
+component armed is refused there. A timer that never calls a cell keeps running
+as it would in the app, and nothing is cancelled. From a timer the refusal is
+the call's rejection (`.catch` sees it); left unobserved, it fails the live
+mount's next `settle()` or teardown, so it can fail a later test: the named line
+is the one to fix — clear the timer in `onCleanup`, or await the work before
+dispose.
 
 ### Testing an authenticated app (`user`)
 

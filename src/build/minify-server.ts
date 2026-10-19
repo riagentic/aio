@@ -36,11 +36,13 @@ import {
   isAbsolute,
   join,
   relative,
+  resolve,
   SEPARATOR,
   toFileUrl,
 } from "@std/path";
 import { BUNDLE_MAP } from "../server/app-files.ts";
 import { readDenoJson } from "../server/deno-json.ts";
+import { realPathInside } from "../server/server-static.ts";
 import { codeMask } from "../diagnostics/code-mask.ts";
 import { HEY, NO } from "../diagnostics/fmt.ts";
 
@@ -357,7 +359,44 @@ async function exists(p: string): Promise<Deno.FileInfo | null> {
   return await Deno.lstat(p).catch(() => null); // aio-ok: absent is the answer
 }
 
-async function copyTree(from: string, to: string): Promise<void> {
+/** Copy an include into the stage. A symlink keeps the shape an unminified
+ *  compile sees: one that leads out of the include (or nowhere) stays a link
+ *  to the same target — `deno compile` embeds what it names, app code reads
+ *  it, and the server's rule (`realPathInside`) still answers 403 for it under
+ *  an `assets` mount (copied as bytes, it was served with 200); a file link
+ *  inside is the file; a directory link inside stays a link (a link to an
+ *  ancestor is a loop no copy ends). */
+async function copyTree(
+  from: string,
+  to: string,
+  top: { from: string; to: string } = { from, to },
+): Promise<void> {
+  if (from !== top.from && (await Deno.lstat(from)).isSymlink) {
+    const inside = await realPathInside(top.from, from).catch(() => false); // aio-ok: a dangling link leads nowhere inside
+    if (!inside) {
+      const target = resolve(dirname(from), await Deno.readLink(from));
+      const dir = await Deno.stat(target).then(
+        (t) => t.isDirectory,
+        () => false,
+      ); // aio-ok: a dangling link is mirrored as it is
+      await Deno.mkdir(dirname(to), { recursive: true });
+      await Deno.symlink(target, to, {
+        type: dir ? (Deno.build.os === "windows" ? "junction" : "dir") : "file",
+      });
+      return;
+    }
+    if ((await Deno.stat(from)).isDirectory) {
+      const real = relative(
+        await Deno.realPath(top.from),
+        await Deno.realPath(from),
+      );
+      await Deno.mkdir(dirname(to), { recursive: true });
+      await Deno.symlink(join(top.to, real), to, {
+        type: Deno.build.os === "windows" ? "junction" : "dir",
+      });
+      return;
+    }
+  }
   const st = await Deno.stat(from);
   if (!st.isDirectory) {
     await Deno.mkdir(dirname(to), { recursive: true });
@@ -368,7 +407,7 @@ async function copyTree(from: string, to: string): Promise<void> {
   for await (const e of Deno.readDir(from)) {
     // The client map carries every original name and path of the UI code.
     if (e.name === BUNDLE_MAP) continue;
-    await copyTree(join(from, e.name), join(to, e.name));
+    await copyTree(join(from, e.name), join(to, e.name), top);
   }
 }
 

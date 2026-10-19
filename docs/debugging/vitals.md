@@ -52,6 +52,12 @@ tab: 83% degraded, 16% warning, 0.7% healthy), which is a field nobody can act
 on. `transport.degraded` / `transport.warning` are the **RTT** tiers, applied
 client-side to the `vitals-ping`/`vitals-pong` round trip.
 
+A hidden page (a background tab, whose timers the browser throttles) is never
+graded `frozen`: on `visibilitychange` the page pings at once, with `h: 1` while
+`document.hidden`, and the server leaves it `healthy` -- it keeps receiving
+every broadcast, so it is current when focused -- until a visible ping resumes
+grading. A hidden tab that dies is dropped when its socket closes.
+
 ## Configuration
 
 ```ts

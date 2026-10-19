@@ -6,9 +6,10 @@ what is OPEN, what is DECIDED (so it is not argued again), and measured facts.
 
 ## 1. State
 
-- Current release: 1.0.19-beta (2026-10-07). The clean-desk round of 2026-10-10
-  and the todo/audit round of 2026-10-12 are prepared locally as 1.0.20-beta
-  (version, `CHANGELOG.md`, upgrade guide); not tagged, not pushed.
+- Current release: 1.0.20-beta (2026-10-14). The rounds after it (hunts of
+  2026-10-14/16, the field reports and the shared Electron runtime of
+  2026-10-18) are prepared locally as 1.0.21-beta (version, `CHANGELOG.md`,
+  upgrade guide); not tagged, not pushed.
 - Surface frozen since 2026-09-04: additive only, bugfix-only through beta.
   1.0.0 = a date, once releases have been boring for several weeks — the owner's
   call.
@@ -64,8 +65,15 @@ Refused (one line each; long form in `feedback/refused.md`):
   keys, child desync, unknown event, control drift).
 - Automatic repair of a sync row left unmarked by 1.0.9–1.0.18: nothing those
   builds wrote proves the row unacknowledged.
-- Builds: `zip -9` / `.7z` · a DMG strip list · a shared or CDN Electron runtime
-  · a custom Electron build · UPX · ICU/Deno trimming.
+- Builds: `zip -9` / `.7z` · a DMG strip list · a custom Electron build · UPX ·
+  ICU/Deno trimming. (A shared Electron runtime, once refused here, is built in
+  1.0.21: `build.electronRuntime: "online"`, which `am create` writes; no key
+  stays `"offline"`; the default flip is v2.)
+- Field asks (2026-10-18): `aiol --safe-fix` rewriting an `onInit` `setTimeout`
+  to `app.dispatch` (measured unsafe: dispatch runs before later cells'
+  `onInit`) · `s.$progress(done, total)` (`s.$commit(minMs)` is it) ·
+  `am dispatch --watch` (`am state <path> --watch` beside it) · graph layout
+  helpers and an inspector example (an app library's job, not aio's core).
 
 Design limits, documented where a user meets them:
 
@@ -107,10 +115,11 @@ The CA decision (2026-09-21): no intermediate; two locks instead.
 
 ## 4. Open work
 
-Triaged on 2026-10-12 (59 boxes + an outside audit): what was real and needed no
-owner is built and in `CHANGELOG.md`; what would break an app is in
-`untracked/v2.md` §65–§73. What is left needs a decision, a person, hardware, or
-is small and known.
+Triaged on 2026-10-12 (59 boxes + an outside audit) and again on 2026-10-18 (the
+field reports and this list against `git log v1.0.20-beta..HEAD`): what was real
+and needed no owner is built and in `CHANGELOG.md`; what would break an app is
+in `untracked/v2.md` §65–§73. What is left needs a decision, a person, hardware,
+or is small and known.
 
 ### Owner decides (each has a recommendation)
 
@@ -123,34 +132,15 @@ is small and known.
       Electron zip; ~80 lines client, 15 publisher, half a day with a VM run).
       `.app.tar.gz` cannot patch without a format change. AppImage and zip patch
       sizes are not measured.
-- [ ] Let `build.strictPin` cover the Android client: refuse a keyed
-      non-loopback `http://` link and the https→http fallback of a pairing typed
-      without a scheme. Recommended: yes (only new or hardened apps change).
-- [ ] The keyless load to a changed, unproved certificate still sends that
-      host's non-key cookies (a login session). Dropping them logs users out
-      whenever a server regenerates its certificate.
-- [ ] Android, each small and additive: unsigned `.aab` for an unsigned release
-      build (~15 lines, adds bundle time — yes, low priority); keystore path +
-      alias in `deno.json` (`build.android.keystore`, `keyAlias`; env wins;
-      passwords never — ~35 lines in `releaseSigning`); deep links as
-      `android.schemes` (~150 lines + a page event; when an app asks).
+- [ ] Android deep links as `android.schemes` (~150 lines + a page event; when
+      an app asks).
 - [ ] `am create` does not write `build.android.strict`: the 1.0.19 linter
       reports any unknown `build.*` key as an ERROR, so a scaffold pinned back
-      would fail `deno task lint`. That holds for every future scaffold key.
-- [ ] macOS: an installed app is not in Launchpad. Design measured on macOS 14
-      (a symlink in `~/Applications` is listed within 5 s): opt-in
-      `AIO_APPLICATIONS_LINK=1` in `run.sh`, and `am remove` deletes the link
-      first. Also: `open -W` so `run.sh` waits for the app as it does on Linux?
+      would fail `deno task lint`. That holds for every future scaffold key
+      (`build.electronRuntime`, written since 1.0.21, included).
 - [ ] `scripts/proof.ts --require-current` as a release gate (report-only
       today). A Windows CI job (YAML in the audit worker's notes; cannot be
       proven without a push; `continue-on-error`).
-- [ ] The one-click stub checks only the stamp, `<name>.exe` and
-      `electron\electron.exe` before its fast path; another damaged file still
-      launches broken. Design: the stub writes `.aio-sfx-files` (path + size) at
-      extract and verifies it when present; `carrySfxStamp` does not carry it.
-      Needs a stub rebuild and a VM run.
-- [ ] v2 §25 promises a subpath export "when asked"; the `aio/media` refusal
-      says no. Pick one.
 - [ ] Windows: taskbar pins after the AppUserModelID change (pin a 1.0.19
       window, upgrade, start: does the window join the pin?). `am kill --json`
       there: 1.0.20 adds `"how"`, asks first (app exit 0, was 1), and can say
@@ -160,117 +150,82 @@ is small and known.
 
 - [ ] Electron zero-port (IPC): the main process holds the socket; no
       silent-socket watchdog there (the page's rule is in
-      `src/browser/browser-vitals.ts`). `src/server/cli-client.ts` has its own
-      ping, not examined. The page watchdog is proven on the Android WebView and
-      by fake-socket tests, not in a desktop browser with a black-holed socket;
-      the 20-beat ceiling is unit-tested only.
-- [ ] Discovery: a remote host on two shared subnets is listed twice (needs a
-      machine id in the ad — an additive wire field). The real-socket test
-      assumes a machine hears its own broadcast (true on Linux; not run
-      elsewhere).
-- [ ] aio client: in a picker-launched window every in-page navigation re-enters
-      `connectTo`; a tokenless link in a keyed app would answer 401 (read, not
-      run). A host with no pin gets the jar's cookies whatever certificate it
-      shows later. Not strict: Chromium's own connections are not checked
-      against the pin (strict / v2 §58 closes it).
-- [ ] Updates: a damaged kept download whose record entry was already swept
-      still refuses its release; a single-file release that keeps failing its
-      swap is never dismissed (dismissal is directory-only). `allowScripts`
-      drift is decided only for exact entry against exact import (a lock-based
-      rule was refused: ~40 lines, low value).
-- [ ] Build: the outside-project mount warning can print twice per boot
-      (`_servedAssets` runs in `aio-server.ts` and `server.ts`); the
-      machine-bound-imports warning says the binary "runs here" where it runs
-      nowhere (the smoke run refuses it); the relative-`importScripts` finding
-      reads the worker's entry file only; no test covers the `stubRebuildNow`
-      spawn or the build-summary key warning wiring (pure parts are tested).
-- [ ] Dev: the catch-up look does not cover `watch: ["file.ts"]` (a file, not a
-      directory); one extra restart at dev start for an app whose start rewrites
-      a cell file with the same bytes. `am start` cannot tell "Deno still
-      fetching" from "fetched, app silent" (it reads the last log line). A
-      local-socket listener re-created on the same path right after `shutdown()`
-      in one process was unreachable for 10 s once (test only, not traced).
+      `src/browser/browser-vitals.ts`, `connectCli`'s in
+      `src/server/cli-client.ts` since 1.0.21). The page watchdog is proven on
+      the Android WebView and by fake-socket tests, not in a desktop browser
+      with a black-holed socket; the 20-beat ceiling is unit-tested only.
+- [ ] Discovery: the real-socket test assumes a machine hears its own broadcast
+      (true on Linux; not run elsewhere).
+- [ ] Dev: one extra restart at dev start for an app whose start rewrites a cell
+      file with the same bytes. `am start` cannot tell "Deno still fetching"
+      from "fetched, app silent" (it reads the last log line). A local-socket
+      listener re-created on the same path right after `shutdown()` in one
+      process was unreachable for 10 s once (test only, not traced).
 - [ ] Sync: a row left by a kill under 1.0.9–1.0.18 still stops the start; the
       message names the file and a tool-free repair. `am sync drop-op` refused.
 - [ ] Android lane: 15/15 on API 35 and API 36, twice each (2026-10-12, load
       11–35). Its taps are not retried. Record the proof at release:
       `AIO_PROOF_RECORD=1 deno task test:android`; WebKit lane green 3/3
       (`AIO_PLAYWRIGHT_DIR`), row not recorded.
-- [ ] Under the mutation gate's load (4 workers, 45 min) two tests were red
-      unmutated once and green alone: `tests/test-shards-leftover.test.ts` (its
-      planted suite was not green) and a lock dir of a test process's
-      `apps-<pid>` sandbox was still there when `check:orphans` looked (gone
-      later; the `test` gate had failed before it, so the suite's own post-check
-      did not run).
+- [ ] Under the mutation gate's load (4 workers, 45 min)
+      `tests/test-shards-leftover.test.ts` was red unmutated once and green
+      alone (its planted suite was not green); it now prints the shard log and
+      stderr, so the next sighting says why.
 - [ ] Linux, seen once (full release check 2026-10-14, loaded box), not
       reproduced 0/42 (12 alone, 30 under 10-way load):
       `shutdown-signal-says-why-e2e` SIGHUP — app.log had a `stopped uptime=`
       line ABOVE the `SIGHUP received` one, outside the 2000-char tail the
       message showed. The message now prints every log file in full; the next
       sighting says whether it was a second boot (a dev restart) or a log order.
-- [ ] Windows VM under suite load (4 cores), alone-green ×3: `workers: "real"`
-      tests miss the 30 s ready deadline because `deno test` type-checks the
-      worker entry's graph when the worker starts (6 s idle, twice in one shard)
-      — let the shard runner check the worker fixtures first, or run the shards
-      `--no-check` (check is its own gate); `retained-bytes`'s timing ratio
-      (estimate ×20 < `JSON.stringify`). Updates: creation-time tunnelling may
-      also touch `record(previous, …, { is: identity(current),
-      moving })`
-      in `updates-apply.ts` (folders did not tunnel when measured).
-- [ ] Windows: tests that name `/tmp/…` or `/nonexistent/path` as a literal make
-      `C:\tmp` (`xdg-int-*`, `xdg-left-*`, `.X11-unix`) and
-      `C:\nonexistent\path` on the VM. Find them with a guard that fails when a
-      suite run leaves a new entry in the drive root (removed by hand
-      2026-10-12).
+- [ ] Windows VM under suite load (4 cores), alone-green ×3: `retained-bytes`'s
+      timing ratio (estimate ×20 < `JSON.stringify`). Updates: creation-time
+      tunnelling may also touch
+      `record(previous, …, { is: identity(current), moving })` in
+      `updates-apply.ts` (folders did not tunnel when measured).
 - [ ] Tests: the chaos fuzz's draws depend on timer order (a `FUZZ_SEED` replay
       is not exact under load); `auth-db-busy-timeout`'s measured unit is not
       confirmed at macOS background priority; own-HOME for test browsers is
       Linux only; `tests/electron-handshake-watch.test.ts` now runs in the
       serialized real-window lane.
+- [ ] Windows stub, next rebuild: a cut-short download's box says "not an aio
+      SFX (missing AIOSFX02 trailer)" — say "this download is incomplete,
+      download it again" (seen on w11pro 2026-10-19; needs a re-pinned stub).
 - [ ] Windows: no ledger row for the stub's Rust (a `cargo test` row made the
       real checkout reuse the mutant's binary); the first `am state` after a
       1.0.19 app boots timed out once (8 s, fixture without `node_modules`). The
       stub's message box for a shortcut it cannot add was never seen.
 - [ ] macOS: Spotlight lists every kept version of an installed app;
       `pruneVersions` knows one `current`, not a running version (guarded in
-      `run.sh` for the bundle only); an app that exits at start under `open` is
-      silent and `run.sh` exits 0. Full runs on the Mac keep their ssh session
+      `run.sh` for the bundle only). Full runs on the Mac keep their ssh session
       open: a detached job cannot send LAN broadcasts there.
-- [ ] Code health (audit): `single-instance-lock.ts` is 196 KB; the smallest
-      safe first cut is "App ID Resolution" (lines 369–686, no lock state) into
-      its own file, re-exported. 294 silent-catch blocks, ratcheted.
+- [ ] Code health (audit): the first cut of `single-instance-lock.ts` is done
+      (App ID resolution → `app-id.ts`, 196 → 183 KB); the lock file and the
+      other 150–280 KB hotspots are uncut. 293 silent-catch blocks, ratcheted.
 - [ ] Deno: a close for cause can lose its code to an unread frame
       (`_closeAfterRead` narrows it; the reconnect's 401 ends it right);
       `node:dgram` reports EHOSTUNREACH as `UNKNOWN`.
 - [ ] Page size: message prose is a fifth of the download; codes would need a
       source convention at ~300 sites (v2 §68).
+- [ ] Refusals: one stable `code` and a one-line summary head on each harness
+      refusal (`DEAD_BOOT` is the first, 1.0.21); the rest carry prose only
+      (field report).
+- [ ] `am errors`: a hot reload's errors are not tagged or superseded by reload
+      number (`--since` filters by time only; field report).
+- [ ] Upgrade test breakage: the shapes that go red are a list in
+      `docs/upgrade/README.md`; no machine-readable index or
+      `am migrate --tests` (field report).
 
 - [ ] Android, from the real-phone round (Saga, Android 14, 2026-10-13):
-  - A `blob:` / `data:` download cannot be saved (a standalone app's "export"
-    button) — refused out loud since 1.0.20. Build: the page reads the blob, a
-    native bridge takes the bytes, the user saves through
-    `ACTION_CREATE_DOCUMENT`. The download listener does not get the
-    `download="name"` attribute.
-  - A download from a client paired to a self-signed `--expose` TLS server: not
-    measured; `DownloadManager` does not know the app's pin, so expect a
-    failure. Fetch natively with the pinned certificate.
-  - The dev overlay says `[transport] frozen … Check network stability` after 90
-    s on Home (1/1): a hidden page's timers stop, the server reads the missing
-    heartbeat as a stalled network. The client should say it is hidden with its
-    last beat; the server then names that, not the network. (`frozen` itself
-    must stay — the broadcast skips frozen clients.)
   - A font-scale or display-size change reloads the page (committed state kept,
     typed text lost). `fontScale|density` in `configChanges` might stop the
     WebView picking up the new scale — measure first.
   - Not done on the phone (battery at 2 %, the port charges at 900 mA): the
     whole lane with the three new steps (they passed there alone, and 17/17 on
     the API 35 emulator), share link and TLS over real Wi-Fi, split screen,
-    picking a real file, keyboard insets on Android 15+.
-- [ ] Windows: `GetLastError()` is a second FFI call and read 0 once after a
-      FALSE `ConnectNamedPipe` (fixed there: `connectCodeFromFacts`). The other
-      sites in `win-pipe.ts` (reads, writes, `GetOverlappedResult`) still trust
-      it; a 0 there closes one connection, not the listener. Take the status
-      from the OVERLAPPED's `Internal` field instead.
+    picking a real file, keyboard insets on Android 15+. New in 1.0.21, never on
+    a phone: a `blob:` export saved into Downloads, a download from a pinned
+    self-signed server, the dev overlay on Home for 90 s (a hidden page is no
+    longer `frozen`), `strictPin` refusals on the client APK.
 - [ ] Windows: `Deno.Command.spawn()` of a program that has never run stops the
       app's event loop while the system checks the file — 1–11 s measured (2–5
       ms the second time). An app that starts its window answers nothing
@@ -286,16 +241,33 @@ is small and known.
       way.
 - [ ] Windows Defender (signatures of 2026-10-12): a compiled binary that
       carries `esbuild.exe` whole in its data was refused at start as
-      Trojan:Win32/Cloxer in 15 of 20 builds — a CLOUD verdict (a file never run
-      scans clean; each `deno compile` is a new file to it). What the build
-      ships leaves esbuild out and was never flagged (cli 0/5, server 0/3); the
-      one test that compiled with no excludes now builds as `buildCli` does.
-      Open: `build.keepPackages: ["esbuild"]` embeds it again — warn there; the
-      Electron-target server exe was not measured. Lasting answers are the
+      Trojan:Win32/Cloxer in 15 of 20 builds — a CLOUD verdict. What the build
+      ships leaves esbuild out and was never flagged (cli 0/5, server 0/3);
+      `build.keepPackages: ["esbuild"]` is warned at build since 1.0.21. Open:
+      the Electron-target server exe was not measured. Lasting answers are the
       owner's: a code-signing certificate, or a false-positive report to
       Microsoft.
-- [ ] `am publish`'s summary line "an install made by the one-click .exe is a
-      zip install too" has no test (needs a publish with both artifacts).
+
+- [ ] Field wish (network, 2026-10-17), deferred: `ZoomPan` for `aio/ui` (wheel
+      zoom at cursor, drag pan, fit).
+
+- [ ] Web target: every deploy re-downloads every asset-mount file (the cache is
+      per build). A content-addressed asset cache was tried (2026-10-18, 4
+      review rounds, each found a 🔴: activation race with the 1.0.20 adopt,
+      quota mid-adopt, integrity fetch buffering whole bodies, `#fragment`
+      misses, byte-rewriting hosts) and reverted to the 1.0.20 design plus an
+      ordered, capped install. Needs a design written and attacked BEFORE code.
+
+- [ ] Windows suite, seen 2 of 4 full runs (2026-10-19), never alone: the first
+      test of `tests/updates-patch.test.ts` fails "An async call to left was
+      started before the test, but completed during the test" — an op an EARLIER
+      file in the shard left running (that file has sanitizers off). 13 targeted
+      runs green; the op name `left` is not one aio or Deno's sources were seen
+      to use. Next time: `--trace-leaks` on the whole shard.
+- [ ] Windows, over SSH only (2026-10-19, once): `lock-zombie-verdict`'s
+      `--takeover (production)` case hung 8+ min with A (`--prod`) and the
+      lock-path `deno eval` both alive; 3 reruns over SSH and every scheduled-
+      task run green.
 
 ### Before the release
 
@@ -305,9 +277,22 @@ is small and known.
       `browserHomeEnv`; a cold stub rebuild (`check:release` now says when it
       was skipped).
 - [ ] Record the proof rows (today: 1 of 16 proven, 5 never recorded, 4 stale,
-      android BEHIND its build path): `deno task update:proof`.
-- [ ] `docs/clients/electron.md` and the doctor hints say "1.0.20" (adjust if
-      the number differs).
+      android BEHIND its build path; the Windows rows are BEHIND the stub
+      rebuilt for `.aio-sfx-files`): `deno task update:proof`.
+- [ ] Real OS, new in 1.0.21 (Linux, the w11pro VM, the Mac):
+  - `electronRuntime: "online"`: first start downloads into the store with the
+    progress window (Cancel, Retry/Quit offline), a second app starts from it
+    with nothing shown, an update that changes Electron fetches it before the
+    swap, `am prune` keeps it; macOS: the window clone signs and opens.
+  - The window profile's one-time move into `~/.<appId>/electron/` from a 1.0.20
+    install (signed-in state and window size kept).
+  - Windows: delete a listed file in a one-click install, double-click → it is
+    extracted again (`.aio-sfx-files`); the todo §5 one-click steps 1–4 on the
+    rebuilt stub; the win-pipe `NtReadFile`/`NtWriteFile` path under the full
+    suite.
+  - macOS: `run.sh` waits (`open -W`), an app that dies at once fails with its
+    log, `AIO_APPLICATIONS_LINK=1` shows in Launchpad and `am remove` deletes
+    it.
 
 ## 5. Needs a human
 

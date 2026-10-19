@@ -33,9 +33,11 @@ import {
   electronCacheRoot,
   humanBytes,
   planElectronPrune,
+  planSharedPrune,
   PRUNE_DEFAULT_MIN_AGE_DAYS,
   type PrunePlan,
   readElectronCache,
+  type SharedPruneDecision,
 } from "../build/electron-cache.ts";
 
 /** The flags this verb reads, parsed out of its own argv. A bad value is a
@@ -120,6 +122,43 @@ export function renderPrunePlan(plan: PrunePlan, _now: number): string {
   return lines.join("\n");
 }
 
+/** The shared-runtime store's section of the plan. Pure. */
+export function renderSharedPlan(
+  root: string,
+  decisions: readonly SharedPruneDecision[],
+): string {
+  const lines = [
+    `Shared Electron store — ${root}`,
+    `What apps built with "build": { "electronRuntime": "online" } start ` +
+    `from. Age decides nothing here: only what no installed app names goes.`,
+    "",
+  ];
+  const w = Math.max(4, ...decisions.map((d) => d.name.length));
+  const row = (d: SharedPruneDecision) =>
+    `  ${d.name.padEnd(w)}  ${humanBytes(d.bytes).padStart(7)}  ${d.why}`;
+  const gone = decisions.filter((d) => !d.keep);
+  const kept = decisions.filter((d) => d.keep);
+  if (gone.length) {
+    lines.push(
+      `WOULD REMOVE (${humanBytes(gone.reduce((n, d) => n + d.bytes, 0))}):`,
+    );
+    for (const d of gone) lines.push(row(d));
+    lines.push("");
+  }
+  if (kept.length) {
+    lines.push("KEEPING:");
+    for (const d of kept) lines.push(row(d));
+    lines.push("");
+  }
+  if (gone.length) {
+    lines.push(
+      `Nothing has been deleted. \`am prune --yes\` removes these ` +
+        `${gone.length} too.`,
+    );
+  }
+  return lines.join("\n");
+}
+
 export async function cmdPrune(
   args: string[],
   flags: GlobalFlags,
@@ -130,6 +169,8 @@ export async function cmdPrune(
 
   const now = Date.now();
   const entries = await readElectronCache();
+  const shared = await planSharedPrune();
+  const sharedGone = shared.decisions.filter((d) => !d.keep);
   const plan = planElectronPrune(entries, {
     // What this aio ships is never on the table: every app on this machine is
     // being moved onto it by `am pin`/`am fix`, so it is the one version that
@@ -146,11 +187,23 @@ export async function cmdPrune(
     removed: string[] | null,
     failed: { path: string; error: string }[] = [],
   ) => {
-    const freed = removed === null ? plan.freed : plan.remove
+    const sharedFreed = sharedGone
+      .filter((d) => removed === null || removed.includes(d.path))
+      .reduce((n, d) => n + d.bytes, 0);
+    const freed = sharedFreed + (removed === null ? plan.freed : plan.remove
       .filter((d) => removed.includes(d.entry.path))
-      .reduce((n, d) => n + d.entry.bytes, 0);
+      .reduce((n, d) => n + d.entry.bytes, 0));
     return {
       root: electronCacheRoot(),
+      // The shared-runtime store: its own rules (planSharedPrune), its own
+      // list, removed by the same `--yes`.
+      shared: {
+        root: shared.root,
+        plan: shared.decisions,
+        removed: removed === null
+          ? []
+          : sharedGone.map((d) => d.path).filter((p) => removed.includes(p)),
+      },
       total: plan.total,
       freed,
       minAgeDays: plan.minAgeDays,
@@ -174,7 +227,8 @@ export async function cmdPrune(
   };
 
   const empty = entries.length === 0;
-  const willApply = parsed.apply && plan.remove.length > 0;
+  const willApply = parsed.apply &&
+    (plan.remove.length > 0 || sharedGone.length > 0);
 
   // HUMAN mode prints the plan BEFORE acting, always — `--yes` says "I have
   // decided", not "do not tell me what you did". JSON mode prints ONE
@@ -189,6 +243,13 @@ export async function cmdPrune(
         ? `No Electron runtime cache yet (${electronCacheRoot()}). Nothing to prune.`
         : () => renderPrunePlan(plan, now),
     );
+    if (shared.decisions.length > 0) {
+      out(
+        null,
+        mode,
+        () => "\n" + renderSharedPlan(shared.root, shared.decisions),
+      );
+    }
   }
   if (!willApply) {
     if (mode === "json") out(asJson(null), mode);
@@ -196,6 +257,17 @@ export async function cmdPrune(
   }
 
   const result = await applyElectronPrune(plan);
+  for (const d of sharedGone) {
+    try {
+      await Deno.remove(d.path, { recursive: d.kind !== "record" });
+      result.removed.push(d.path);
+    } catch (e) {
+      result.failed.push({
+        path: d.path,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
   const doc = asJson(result.removed, result.failed);
   if (result.failed.length > 0) {
     // Same shape as `am remove`: say what went and what did not, then exit 1.

@@ -1,13 +1,13 @@
 # Every option, one page
 
 > Generated from the source by `deno task update:reference` — do not edit by
-> hand; `check:release` fails when it is stale. 191 entries: the signature, what
+> hand; `check:release` fails when it is stale. 192 entries: the signature, what
 > it does, an example when the source has one, and the file it lives in. The
 > guides explain; this page is for looking a name up.
 
 - [cell options](#cell-options) — 25
 - [aio.run options](#aiorun-options) — 81
-- [aio/air](#aioair) — 85
+- [aio/air](#aioair) — 86
 
 ## cell options
 
@@ -1210,6 +1210,21 @@ afterRender(fn: () => void): void
 
 Register a callback to run after the current render cycle commits to the DOM.
 <sub>src/air/renderer-flush.ts</sub>
+
+### `appVersion`
+
+```ts
+appVersion(): string | null
+```
+
+The version of the app this page belongs to — `major.minor.build`, the same
+string `aio/server`'s `appVersion()`, `--version` and the build's artifact names
+carry (`1.2.345`, `1.2.346-dirty.0c7e11aa`). <sub>src/air/app-version.ts</sub>
+
+```tsx
+import { appVersion } from "aio/air";
+const About = () => <p>App version {appVersion() ?? "unknown"}</p>;
+```
 
 ### `batch`
 

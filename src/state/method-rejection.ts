@@ -15,6 +15,19 @@
 // and the log still records it — only the console level and the wording
 // differ (observe-only). Anything that looks like a bug keeps the loud box.
 
+/** A write the REDUCE refused (a `validate` hook, a disabled cell), thrown
+ *  under `refusalsReject`. The wire answers that call ACTION_REFUSED
+ *  (action-ack.ts); an in-process caller — every harness, and an app with the
+ *  flag on — was answered REDUCE_ERROR for the same refusal, so a branch on
+ *  `errorCode(e) === "ACTION_REFUSED"` passed in the browser and not in its
+ *  test. The class carries the classification to whoever wraps the throw. */
+export class RefusedWrite extends Error {}
+
+/** The code an in-process caller gets for what a reduce threw. */
+export function reduceThrowCode(e: unknown): "ACTION_REFUSED" | "REDUCE_ERROR" {
+  return e instanceof RefusedWrite ? "ACTION_REFUSED" : "REDUCE_ERROR";
+}
+
 /** Engine error classes: a method that throws one of these has a bug. */
 const BUG_CLASSES = new Set([
   "TypeError",

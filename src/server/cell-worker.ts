@@ -102,6 +102,8 @@ export type CellWorkerDeps = {
    *  what an in-process `await cell.method()` sees for a REFUSED write the
    *  same way a main-isolate cell does. See `ToWorker.init`. */
   refusalsReject: boolean;
+  /** The owner's `guardDispatches` — see `ToWorker.init.guardRejections`. */
+  guardRejections: boolean;
   /** See `ToWorker.init.strictTypes`. */
   strictTypes?: CellFieldFilter;
   /** The owner's resolved appId, handed to the worker (see cellWorkerName). */
@@ -459,6 +461,15 @@ export function createCellWorker(
         } else entry?.reject(err as Error);
         return;
       }
+      case "stray":
+        // The owner's crash handler's own words for its own stray rejection.
+        log.error(
+          "crash",
+          `[crash-handler] unhandledrejection in cell worker "${name}": ` +
+            msg.message,
+          { stack: msg.stack ?? "no stack" },
+        );
+        return;
       case "boot-error":
         // A respawn that cannot boot is one more crash of this cell.
         if (deps.respawn && everReady) return crashed(msg.message);
@@ -564,6 +575,7 @@ export function createCellWorker(
       freezeState: deps.freezeState,
       dev: devFlag(),
       refusalsReject: deps.refusalsReject,
+      guardRejections: deps.guardRejections,
       gen,
       ...(deps.strictTypes ? { strictTypes: deps.strictTypes } : {}),
     });

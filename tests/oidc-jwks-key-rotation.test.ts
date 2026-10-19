@@ -27,17 +27,19 @@ const rsa = () =>
     ["sign", "verify"],
   ) as Promise<CryptoKeyPair>;
 
+type Kid = "k1" | "k2" | "k3";
+
 async function rotatingIdp() {
-  const keys = { k1: await rsa(), k2: await rsa() };
-  const pub = async (kid: "k1" | "k2") => ({
+  const keys = { k1: await rsa(), k2: await rsa(), k3: await rsa() };
+  const pub = async (kid: Kid) => ({
     ...(await crypto.subtle.exportKey("jwk", keys[kid].publicKey)),
     kid,
     alg: "RS256",
     use: "sig",
   });
   const state = {
-    published: ["k1"] as ("k1" | "k2")[],
-    signWith: "k1" as "k1" | "k2",
+    published: ["k1"] as Kid[],
+    signWith: "k1" as Kid,
     nonce: "",
     jwksFetches: 0,
   };
@@ -160,6 +162,37 @@ Deno.test("oidc: an unknown kid re-reads the JWKS at most once per throttle wind
       `an unknown kid must not force a JWKS fetch per login (${idp.state.jwksFetches})`,
     );
   } finally {
+    await idp.close();
+  }
+});
+
+Deno.test("oidc: a wall clock stepped back does not hold a rotated key out", async () => {
+  // The re-read throttle and the cache age were `now - then < window`: after
+  // a step back (NTP correcting a fast clock, a VM restored) the gap is
+  // negative — "too soon" for as long as the step — so a key rotated in that
+  // time failed every SSO login.
+  _resetOidcCaches();
+  const idp = await rotatingIdp();
+  const realNow = Date.now;
+  try {
+    await using srv = await testServer({
+      cells: [
+        cell("oidc_rot3", { state: { n: 0 }, visible: "all", methods: {} }),
+      ],
+      auth: { oidc: { issuer: idp.issuer, clientId: "app1" } },
+    });
+    assertEquals(await ssoLogin(srv.url, idp), 302, "k1 login");
+    idp.state.published = ["k1", "k2"];
+    idp.state.signWith = "k2";
+    assertEquals(await ssoLogin(srv.url, idp), 302, "k2 (one re-read)");
+    const fetches = idp.state.jwksFetches;
+    Date.now = () => realNow() - 3_600_000;
+    idp.state.published = ["k2", "k3"];
+    idp.state.signWith = "k3";
+    assertEquals(await ssoLogin(srv.url, idp), 302, "k3 after the step back");
+    assertEquals(idp.state.jwksFetches, fetches + 1);
+  } finally {
+    Date.now = realNow;
     await idp.close();
   }
 });

@@ -119,6 +119,11 @@ export interface AioAppAd {
   tls: boolean;
   /** Echo of the probe's nonce, present only when the probe carried one. */
   nonce?: string;
+  /** The answering machine's own IPv4 addresses (loopback excluded), so a
+   *  prober that hears it from two of them lists it once — see
+   *  {@link oneMachine}. Absent from a responder older than 1.0.21 or without
+   *  the interface list (`--allow-sys`); the prober then keys by address. */
+  addrs?: string[];
 }
 
 /** A discovered app, resolved to a reachable URL (host from the datagram). */
@@ -224,6 +229,45 @@ export function broadcastTargets(
   return out;
 }
 
+/** True when two replies are ONE machine heard from two of its addresses:
+ *  each one's source is among the other's own addresses. Pure.
+ *
+ *  Both directions, and the sources only: two machines DO share addresses —
+ *  every Docker host has 172.17.0.1 — but never the one each answered from on
+ *  a segment the prober shares with it, so no two machines can merge. And the
+ *  list is the machine's own, read by whichever of its apps answered, so one
+ *  machine always merges with itself (a random or file-kept id would collide
+ *  on a cloned VM or a copied home, and hide an app). @decider */
+export function oneMachine(
+  a: { host: string; addrs?: readonly string[] },
+  b: { host: string; addrs?: readonly string[] },
+): boolean {
+  return a.host !== b.host && !!a.addrs?.includes(b.host) &&
+    !!b.addrs?.includes(a.host);
+}
+
+/** Bounds the address list a reply carries (a datagram, one per app). */
+const MAX_ADDRS = 32;
+
+/** This machine's non-loopback IPv4 addresses, or none without permission. */
+function ownAddrs(): string[] {
+  try {
+    const out = Deno.networkInterfaces()
+      .filter((i) => i.family === "IPv4" && !i.address.startsWith("127."))
+      .map((i) => i.address);
+    return [...new Set(out)].slice(0, MAX_ADDRS);
+  } catch {
+    return []; // aio-ok: not permitted to list them — replies carry none
+  }
+}
+
+/** The string entries of a wire field that should be a string list. */
+function strings(v: unknown): string[] | undefined {
+  return Array.isArray(v)
+    ? v.filter((x): x is string => typeof x === "string")
+    : undefined;
+}
+
 /** True when this runtime can do UDP discovery. `node:dgram` is stable, so
  *  this is always true in Deno — kept for API stability / call-site clarity. */
 export function discoverySupported(): boolean {
@@ -275,10 +319,15 @@ export function startDiscoveryResponder(
     // scan target and a spoofable reflector.
     if (!isPrivateSource(rinfo.address)) return;
     if (!allow(rinfo.address, Date.now())) return;
+    const addrs = ownAddrs();
     // One datagram per app — the client collects and dedups by host:port.
     for (const ad of listApps()) {
       try {
-        const body = nonce === null ? ad : { ...ad, nonce };
+        const body = {
+          ...ad,
+          ...(addrs.length > 0 ? { addrs } : {}),
+          ...(nonce === null ? {} : { nonce }),
+        };
         const reply = Buffer.from(REPLY_PREFIX + JSON.stringify(body));
         socket.send(reply, rinfo.port, rinfo.address);
       } catch { /* client vanished */ }
@@ -330,6 +379,12 @@ export function discoverAioApps(
   const port = opts.port ?? AIO_DISCOVERY_PORT;
   const probe = encodeProbe(opts.nonce); // throws on a malformed nonce — loud
   const found = new Map<string, DiscoveredApp>();
+  const heard: {
+    host: string;
+    port: number;
+    name: string;
+    addrs?: string[];
+  }[] = [];
   const own = new Set<string>(); // this machine's addresses
 
   return new Promise<DiscoveredApp[]>((resolve) => {
@@ -367,12 +422,22 @@ export function discoverAioApps(
       }
       if (typeof ad?.name !== "string" || typeof ad?.port !== "number") return;
       if (opts.nonce !== undefined && ad.nonce !== opts.nonce) return;
-      const { nonce: _echo, ...bare } = ad;
+      const { nonce: _echo, addrs, ...bare } = ad;
       const host = rinfo.address;
       // This machine answers each target from the address of the interface
-      // the probe left by: one app, several hosts. They are one host.
-      const key = `${own.has(host) ? "" : host}:${ad.port}`;
+      // the probe left by: one app, several hosts. They are one host. So is
+      // another machine on two subnets this one shares (`oneMachine`). One
+      // APP, by its name: one port on two interfaces can be two apps, each
+      // bound to one address.
+      const key = `${own.has(host) ? "" : host}:${ad.port}:${ad.name}`;
       if (found.has(key)) return;
+      const me = { host, port: ad.port, name: ad.name, addrs: strings(addrs) };
+      if (
+        heard.some((h) =>
+          h.port === me.port && h.name === me.name && oneMachine(h, me)
+        )
+      ) return;
+      heard.push(me);
       found.set(key, {
         ...bare,
         host,

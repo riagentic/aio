@@ -67,7 +67,7 @@ Deno.test({
   );
 });
 
-Deno.test("still there: Linux waits for each service named; Windows, told none, for any one to leave", () => {
+Deno.test("still there: Linux waits for each service named; Windows and macOS, told none, for any one to leave", () => {
   const listed = (left: number[]) => (pid: number) => left.includes(pid);
   assertEquals(_stillThere([1, 2], "linux", listed([1, 2])), [1, 2]);
   assertEquals(_stillThere([1, 2], "linux", listed([2])), [2]);
@@ -77,12 +77,14 @@ Deno.test("still there: Linux waits for each service named; Windows, told none, 
   assertEquals(_stillThere([1, 2], "windows", listed([1, 2])), [1, 2]);
   assertEquals(_stillThere([1, 2], "windows", listed([2])), []);
   assertEquals(_stillThere([], "windows", listed([])), []);
+  // macOS cannot read a service's pipes either: the same rule.
+  assertEquals(_stillThere([1, 2], "darwin", listed([1, 2])), [1, 2]);
+  assertEquals(_stillThere([1, 2], "darwin", listed([2])), []);
 });
 
 Deno.test({
   name:
     "esbuild stop: the service is a listed child while it runs, and gone when the stop returns",
-  ignore: Deno.build.os === "darwin", // macOS has no child listing (see `stopEsbuildService`): nothing to ask
   sanitizeOps: true,
   sanitizeResources: true,
   fn: async () => {
@@ -103,11 +105,11 @@ Deno.test({
 
 Deno.test({
   name:
-    "esbuild stop (Windows): another instance's live service costs one reap, once — later stops neither wait for it nor name it, and still wait for their own",
+    "esbuild stop (Windows, macOS): another instance's live service costs one reap, once — later stops neither wait for it nor name it, and still wait for their own",
   // The rule exists only where the services cannot be told apart; Linux can
   // (esbuild-stop-in-flight.test.ts: "a service another esbuild instance
   // owns is neither waited for nor named").
-  ignore: Deno.build.os !== "windows", // the rule exists only where services cannot be told apart
+  ignore: Deno.build.os !== "windows" && Deno.build.os !== "darwin", // the rule exists only where services cannot be told apart
   sanitizeOps: true,
   sanitizeResources: true,
   fn: async () => {

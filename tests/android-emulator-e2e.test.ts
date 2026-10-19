@@ -1120,7 +1120,7 @@ Deno.test({
       );
 
       await step(
-        "standalone: <input type=file> opens the system's picker; backing out answers the page, and it opens again; a blob: download is refused out loud",
+        "standalone: <input type=file> opens the system's picker; backing out answers the page, and it opens again; a blob: download is saved into Downloads under its name",
         async () => {
           // Measured on a phone before the shell answered `onShowFileChooser`
           // and set a download listener: a tap on a file input did nothing,
@@ -1153,23 +1153,28 @@ Deno.test({
             );
           }
           assertEquals(await ev("__aioE2eSaw.join()"), "cancel,cancel");
-          // A file the page made: nothing outside the page can fetch it.
-          await adb("logcat", "-c");
+          // A file the page made (an "export" button): nothing outside the
+          // page can fetch it, so the page hands it over (AioSave) and it is
+          // saved into Downloads under its `download` name — from a link
+          // never put in the document, whose URL is revoked at once (the
+          // common shape: it must not be gone before the shell asks).
+          const blobName = `aio-e2e-blob-${Date.now()}.txt`;
+          const blobSaved = `/sdcard/Download/${blobName}`;
+          takeBack.push(["shell", "rm", "-f", blobSaved]);
           await onPage(
             pkg,
             `(() => { const a = Object.assign(document.createElement("a"), { ` +
-              `href: URL.createObjectURL(new Blob(["x"])), download: "x.txt" }); ` +
-              `document.body.appendChild(a); a.click(); })(), 1`,
+              `href: URL.createObjectURL(new Blob(["aio-e2e blob"], { type: "text/plain" })), ` +
+              `download: ${JSON.stringify(blobName)} }); a.click(); ` +
+              `URL.revokeObjectURL(a.href); })(), 1`,
             true,
           );
-          await until(
-            "the shell to say the download was not saved",
-            async () =>
-              (await adb("logcat", "-d", "-s", "aio:E")).out.includes(
-                  "download NOT saved: a blob: link",
-                )
-                ? true
-                : null,
+          assertEquals(
+            await until("the blob to land in Downloads", async () => {
+              const r = await adb("shell", "cat", blobSaved);
+              return r.ok ? r.out : null;
+            }),
+            "aio-e2e blob",
           );
         },
       );

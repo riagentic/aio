@@ -895,6 +895,31 @@ function serveOnFreePort(
   }
 }
 
+/** Every `urls` page, 100 requests in flight at a time — not all at once.
+ *
+ *  A burst of 400 connects to one listener is not something any OS promises
+ *  to queue: macOS answers a connect past the listen queue
+ *  (`kern.ipc.somaxconn`, 128) with a RESET — "Connection reset by peer" at
+ *  connect, for any server (measured on macOS 14 under the suite's load),
+ *  where Linux drops the SYN and the client retries. 100 handlers, each
+ *  awaiting around its render, still overlap as these tests need. */
+async function fetchOverlapping(
+  port: number,
+  urls: string[],
+): Promise<string[]> {
+  const got: string[] = [];
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: 100 }, async () => {
+      for (let i = next++; i < urls.length; i = next++) {
+        const res = await fetch(`http://127.0.0.1:${port}${urls[i]}`);
+        got[i] = await res.text();
+      }
+    }),
+  );
+  return got;
+}
+
 Deno.test("SSR soak over HTTP: a client that disconnects mid-body leaves no render behind", async () => {
   setDevMode(true);
   _resetHead();
@@ -1647,11 +1672,7 @@ Deno.test("SSR route contract over HTTP: correct handlers and pages that never r
           const q = `w=${r.n(4)}${r.n(2) ? "&s" : ""}`;
           return i % 4 === 3 ? `/plain?${q}` : `/page${round}-${i}?${q}`;
         });
-        const got = await Promise.all(
-          urls.map((u) =>
-            fetch(`http://127.0.0.1:${port}${u}`).then((res) => res.text())
-          ),
-        );
+        const got = await fetchOverlapping(port, urls);
         assertEquals(got.length, urls.length);
         assertEquals(urls.length, 400);
         urls.forEach((u, i) => {
@@ -2079,11 +2100,7 @@ Deno.test("SSR explicit route over HTTP: 400 overlapping requests x3, awaits any
           (_, i) =>
             `/p${round}-${i}?q=${i}&w=${r.n(4)}.${r.n(4)}${r.n(2) ? "&s" : ""}`,
         );
-        const got = await Promise.all(
-          urls.map((u) =>
-            fetch(`http://127.0.0.1:${port}${u}`).then((res) => res.text())
-          ),
-        );
+        const got = await fetchOverlapping(port, urls);
         assertEquals(urls.length, 400);
         assertEquals(got.length, urls.length);
         urls.forEach((u, i) => {

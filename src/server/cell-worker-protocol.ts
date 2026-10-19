@@ -128,6 +128,12 @@ export type ToWorker =
      *  with a `refused` note does not. Without it `worker: true` answered a
      *  refused write differently from the identical cell on the main isolate. */
     refusalsReject: boolean;
+    /** The owner's `guardDispatches` (default on): an unhandled rejection is
+     *  logged and survived. The main isolate's crash handler decides that for
+     *  its own cells; a worker has none, so one floating `void poll()` killed
+     *  the thread and the cell with it for the life of the process. Sent so
+     *  the worker survives exactly what the owner survives (`stray`). */
+    guardRejections: boolean;
     /** The slice's GENERATION: 0 at spawn, +1 on every re-seed. The worker
      *  stamps it on each `patches` batch, and the owner drops a batch from an
      *  older generation — see `gen` on FromWorker["patches"]. */
@@ -284,6 +290,9 @@ export type FromWorker =
     /** A thrown NON-Error value, carried as itself. */
     thrown?: { value: unknown };
   }
+  /** An unhandled rejection the worker survived (`init.guardRejections`) —
+   *  logged by the owner as its crash handler logs its own. */
+  | { t: "stray"; message: string; stack?: string }
   /** The host could not start (bad cell name, unsupported config). Fatal. */
   | { t: "boot-error"; message: string }
   /** Close is complete: in-flight methods were aborted and their final

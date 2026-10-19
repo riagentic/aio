@@ -112,6 +112,10 @@ function guardPin(req, mod, url, refuse) {
   req.on('socket', (sock) => {
     sock.once('secureConnect', () => {
       const host = new URL(url).host;
+      if (!_pinnedCerts.has(host)) {
+        try { _presented.set(host, { chain: chainPem(sock), authorized: sock.authorized === true }); } catch {}
+        return;
+      }
       try {
         const peer = sock.getPeerCertificate();
         const der = peer && peer.raw ? Buffer.from(peer.raw).toString('base64') : '';
@@ -131,6 +135,51 @@ function guardPin(req, mod, url, refuse) {
       }
     });
   });
+}
+
+// ── A host with no pin: the certificate it was first seen with ──
+// A manual connect (no pairing, no profile, often no key at all: a login
+// app) has no pin, and the window's cookie jar — a login session — went to
+// whatever certificate answered at that address later. So the chain such a
+// host presents is kept with its recent ('seen', trust on first use) and held
+// to like a pin, for its COOKIES: a connect that meets another certificate
+// (one 'seen' does not cover — a leaf re-issued under the same root does)
+// takes that host's cookies out of the jar before the page loads, says so,
+// and keeps the new chain. The price is one sign-in per server root change
+// (aio's root lives ten years, src/server/tls.ts). Not a pin: nothing is
+// refused, strict or not. A certificate the machine's trust store accepts is
+// first seen as nothing — the public PKI vouches for it, and its intermediate
+// rotates.
+// host -> the chain PEM the latest https request to an unpinned host met.
+const _presented = new Map();
+// host -> the chain PEM first seen there (from the recents at start).
+const _seenCerts = new Map();
+function chainPem(sock) {
+  let out = '', c = sock.getPeerCertificate(true);
+  for (let n = 0; c && c.raw && n < 8; n++) {
+    out += '-----BEGIN CERTIFICATE-----' + Buffer.from(c.raw).toString('base64') + '-----END CERTIFICATE-----';
+    if (!c.issuerCertificate || c.issuerCertificate === c) break;
+    c = c.issuerCertificate;
+  }
+  return out;
+}
+// The fetch of url met its host's certificate: true when it is not the one
+// first seen there (its cookies must not go). Updates the seen chain.
+function seenChanged(url) {
+  const host = new URL(url).host;
+  const now = url.startsWith('https:') && !_pinnedCerts.has(host) ? _presented.get(host) : null;
+  if (!now || !now.chain) return false;
+  const was = _seenCerts.get(host);
+  if (!was) {
+    if (!now.authorized) _seenCerts.set(host, now.chain);
+    return false;
+  }
+  if (pinMatches(was, now.chain)) return false;
+  if (now.authorized) _seenCerts.delete(host); else _seenCerts.set(host, now.chain);
+  const note = 'The certificate of ' + host + ' has CHANGED since this client first met it, and nothing can prove it is the same server (it is not paired) — so its cookies (a login) were NOT sent. ' +
+    'If the server was reinstalled or regenerated its certificate, sign in again. If it was not, something between this client and the app is answering in its place — do not enter anything you would not hand to a stranger.';
+  console.error('[aio-client] WARNING: ' + note);
+  return true;
 }
 
 // ── A changed certificate, not strict: may this server be sent the key? ──
@@ -295,17 +344,19 @@ function provePin(host, der) {
 // hands the page 'aio_key_<app>' for its follow-up requests, for as long as
 // this run lasts) — so an address opened WITHOUT the key, because what
 // answers there did not prove it holds it, was sent the key all the same, by
-// the window. It is taken out of the jar first. Nothing is lost: the keyless
-// page was fetched (by this script, with no cookie) before it is loaded, so
-// whatever served it asks for no key. A jar that cannot be read throws, and
-// the page is not loaded.
-async function dropKeyCookies(win, url) {
+// the window. And every other cookie of that host: a login session is as good
+// as the key to whatever answers in the server's place. So EVERY cookie the
+// window would send that host is taken out of the jar first (cookies ignore
+// the port: another app's at that host name too — it would be sent as well).
+// The page was fetched (by this script, with no cookie) before it is loaded.
+// A genuine server never comes here: it proves, and is re-pinned. A jar that
+// cannot be read throws, and the page is not loaded.
+async function dropHostCookies(win, url) {
   const name = new URL(url).hostname.replace(/^[[]|[\]]$/g, '');
   const jar = win.webContents.session.cookies;
   for (const c of await jar.get({})) {
-    if (!c.name.startsWith('aio_key_')) continue;
     const domain = String(c.domain || '').replace(/^[.]/, '').replace(/^[[]|[\]]$/g, '');
-    if (domain !== name) continue;
+    if (domain !== name && (c.hostOnly !== false || !name.endsWith('.' + domain))) continue;
     await jar.remove((c.secure ? 'https://' : 'http://') + (domain.includes(':') ? '[' + domain + ']' : domain) + (c.path || '/'), c.name);
   }
 }
@@ -438,6 +489,7 @@ function broadcastTargets(ifaces) {
 function discoverApps(timeoutMs, cb) {
   let sock;
   const found = new Map();
+  const heard = []; // { host, port, name, addrs } of every reply kept
   const own = new Set(); // this machine's addresses
   _discoveryNote = '';
   // A sweep answers ONCE. A socket that failed used to answer [] at the error
@@ -461,8 +513,18 @@ function discoverApps(timeoutMs, cb) {
     const host = rinfo.address;
     // This machine answers each target from the address of the interface the
     // probe left by: one app, several hosts. They are one host.
-    const at = (own.has(host) ? '' : host) + ':' + ad.port;
+    // So is another machine on two subnets this one shares: each reply names
+    // the other's source among its own addresses (the twin of oneMachine in
+    // src/server/discovery.ts). One APP, by its name: one port on two
+    // interfaces can be two apps, each bound to one address.
+    const at = (own.has(host) ? '' : host) + ':' + ad.port + ':' + ad.name;
     if (found.has(at)) return;
+    const addrs = Array.isArray(ad.addrs) ? ad.addrs.filter((x) => typeof x === 'string') : [];
+    delete ad.addrs;
+    const me = { host, port: ad.port, name: ad.name, addrs };
+    if (heard.some((h) => h.port === me.port && h.name === me.name && h.host !== host &&
+      h.addrs.includes(host) && addrs.includes(h.host))) return;
+    heard.push(me);
     ad.host = host;
     ad.url = (ad.tls ? 'https': 'http') + '://' + host + ':' + ad.port;
     found.set(at, ad);
@@ -690,11 +752,12 @@ async function connectTo(win, url, withheld) {
       throw new Error("This doesn't look like an aio app (no aio markers on the page). Check the address, or that the server is running with --expose.");
     }
     const meta = parseMeta(html);
+    const dropCookies = (withheld && !hasToken(url)) || seenChanged(url);
     // A connect made WITHOUT the saved key is not a place that was been to.
     if (!withheld || withheld === 'decided') try {
       // Preserve a pinned cert/key from a prior profile import for this URL.
       const prev = loadRecents().find((r) => r.url === url) || {};
-      saveRecent({ url, name: meta.title || new URL(url).host, title: meta.title, host: new URL(url).hostname, port: Number(new URL(url).port) || (url.startsWith('https') ? 443: 80), tls: url.startsWith('https'), needsAuth: /[?&]token=/.test(url), cert: prev.cert || null, key: prev.key || null, proves: prev.proves || undefined, changed: prev.changed || undefined });
+      saveRecent({ url, name: meta.title || new URL(url).host, title: meta.title, host: new URL(url).hostname, port: Number(new URL(url).port) || (url.startsWith('https') ? 443: 80), tls: url.startsWith('https'), needsAuth: /[?&]token=/.test(url), cert: prev.cert || null, key: prev.key || null, seen: _seenCerts.get(new URL(url).host) || undefined, proves: prev.proves || undefined, changed: prev.changed || undefined });
     } catch {}
     if (!withheld) learnProof(url);
 
@@ -726,9 +789,10 @@ async function connectTo(win, url, withheld) {
     // site a redirect lands it on, or any other window, holds no permission
     // (tmplPermissionGuard). Re-bound per connect: the app may be another one.
     __aioIpcBind(win, __aioOrigin(url));
-    // A changed certificate that did not prove, opened without the key: the
-    // window must not send it either (dropKeyCookies).
-    if (withheld && !hasToken(url)) await dropKeyCookies(win, url);
+    // A changed certificate that did not prove, opened without the key, or a
+    // host's first-seen certificate changed: the window must not send that
+    // host its cookies either (dropHostCookies).
+    if (dropCookies) await dropHostCookies(win, url);
     win.loadURL(url);
   } catch (e) {
     const msg = e.message || String(e);
@@ -798,6 +862,14 @@ app.on('certificate-error', (event, _webContents, url, _error, cert, callback) =
         warnPinChanged(host); callback(false); return;
       }
     }
+    // No pin, but a certificate first seen there: another one is refused
+    // until a connect decides (seenChanged) — the window would send it the
+    // host's cookies.
+    const seen = !pinned && _seenCerts.get(host);
+    if (seen && !(cert && pinMatches(seen, cert.data))) {
+      console.error('[aio-client] WARNING: the certificate of ' + host + ' changed while the app was open — refused; reconnect to decide.');
+      callback(false); return;
+    }
     // Fallback: a host we fetched + validated as an aio app (manual connects
     // without a profile). Looser than pinning, but the user chose the address.
     if (_trustedHosts.has(host)) { event.preventDefault(); callback(true); return; }
@@ -842,8 +914,12 @@ app.on('ready', () => {
     // unpinned — the strict pin silently downgraded to the looser TOFU list for
     // all of them. One bad entry skips only itself.
     for (const r of loadRecents()) {
-      if (!r.url || !r.cert) continue;
-      try { pinCert(new URL(r.url).host, r.cert); } catch { /* unusable url: skip it */ }
+      try {
+        const h = new URL(r.url).host;
+        if (r.cert) pinCert(h, r.cert);
+        // Newest first: the latest chain seen at a host is the one kept.
+        if (r.seen && !_seenCerts.has(h)) _seenCerts.set(h, String(r.seen));
+      } catch { /* unusable url: skip it */ }
     }
   } catch {}
 
@@ -953,6 +1029,22 @@ app.on('ready', () => {
   });
 
   win.webContents.on('will-navigate', (event, url) => {
+    // The connect page's links only. Once the app is on screen its navigations
+    // are its own: re-entering connectTo fetched each one without the window's
+    // cookies (a keyed app's tokenless link: 401, the window stayed put) and
+    // re-sized the window and saved a recent per link. Like the app shells
+    // (tmplWillNavigate): the app's origin — or the site its own flow sent it
+    // to (an identity provider) — loads; another site goes to the system
+    // browser, anything else is blocked.
+    if (!String(win.webContents.getURL()).startsWith('data:')) {
+      const app = __aioAppOrigin;
+      const cur = __aioOrigin(win.webContents.getURL());
+      if (app && (__aioOrigin(url) === app || cur !== app) && /^https?:/.test(url)) return;
+      event.preventDefault();
+      if (/^https?:/.test(url)) require('electron').shell.openExternal(url);
+      else console.warn('[aio-client] navigation blocked (not this app, not http)');
+      return;
+    }
     event.preventDefault();
     // Recents "forget" action from the page (aio-forget:<encoded-url>)
     if (url.startsWith('aio-forget:')) {

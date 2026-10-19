@@ -55,9 +55,14 @@ irm https://raw.githubusercontent.com/riagentic/aio/main/run.ps1 | iex
 
 **macOS:** a desktop (Electron) app is installed as its bundle —
 `~/app/<name>/versions/<version>/<Title>.app`, linked from
-`~/app/<name>/<Title>.app` — and opened with `open`. `run.sh` writes no
-`.desktop` entry there and does not touch `/Applications`; the app offers that
-move itself once it is up.
+`~/app/<name>/<Title>.app` — and opened with `open -W`: `run.sh` waits for the
+app, as it does on Linux, and an app gone within `AIO_OPEN_EARLY_EXIT_S` seconds
+(default 3) is a failure, said with the tail of its `app.log` (`open` itself
+answers 0 whatever the app did). `run.sh` writes no `.desktop` entry there and
+does not touch `/Applications`; the app offers that move itself once it is up.
+`AIO_APPLICATIONS_LINK=1` also links the bundle into `~/Applications`, where
+Launchpad lists it — never over a bundle of your own there — and
+`am remove <name>` deletes that link first.
 
 ## Flags
 

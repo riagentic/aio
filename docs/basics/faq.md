@@ -209,3 +209,20 @@ Ids like `schedule.after('prices:refresh', …)` and
 They must match `/^[\w\-:.]+$/`; beyond that, enforcing naming rules (lint,
 template literal types) would add friction to the fast path for a cosmetic
 concern. Prefix them with the cell name — your future self will thank you.
+
+---
+
+### UDP / multicast (SSDP, mDNS) — which API?
+
+`node:dgram`: it is stable in Deno and needs no flag (aio's own LAN discovery,
+`src/server/discovery.ts`, uses it). `Deno.listenDatagram` is `undefined` unless
+the process runs with `--unstable-net` (or `"unstable": ["net"]` in the app's
+`deno.json`) — and because a scaffolded app type-checks against the
+`deno.unstable` lib, the missing flag shows up only at runtime, as
+`Deno.listenDatagram is not a function`.
+
+```ts
+import dgram from "node:dgram";
+const sock = dgram.createSocket({ type: "udp4", reuseAddr: true });
+sock.bind(1900, () => sock.addMembership("239.255.255.250"));
+```

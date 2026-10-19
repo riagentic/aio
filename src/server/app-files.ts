@@ -92,7 +92,7 @@ export function workerBundlesIn(code: string): string[] {
   return [
     ...new Set(
       [...code.matchAll(
-        /(["'`])\.\/(worker-[A-Za-z0-9_-]+-[0-9a-f]{8}\.js)\1/g,
+        /(["'`])\.\/(worker-[A-Za-z0-9_-]+-[0-9a-f]{8}\.js)(?:[?#][^"'`]*)?\1/g,
       )].map((m) => m[2]!),
     ),
   ];

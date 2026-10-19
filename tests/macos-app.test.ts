@@ -513,6 +513,17 @@ Deno.test("dmg: the code seal is built deepest-first", () => {
   assertStringIncludes(s, "codesign -v --deep --strict");
 });
 
+Deno.test("dmg: a shared-runtime bundle signs only its own binary and itself — said by the build, never guessed", () => {
+  const shared = codesignScript("/out/Counter.app", "counter", true);
+  assert(!shared.includes("Electron.app"), shared);
+  assertStringIncludes(shared, "MacOS/'counter'");
+  // A bundled app whose runtime is missing still FAILS under `set -e`: no
+  // condition skips its signing.
+  const bundled = codesignScript("/out/Counter.app", "counter");
+  assert(!/if \[ -d/.test(bundled), "no silent skip of the runtime");
+  assertStringIncludes(bundled, "Electron.app/Contents'/..");
+});
+
 Deno.test("dmg: signing a path with a quote cannot break out of the shell", () => {
   const s = codesignScript("/tmp/it's/Counter.app", "counter");
   // The value is single-quoted with the standard `'\''` escape, so the quote

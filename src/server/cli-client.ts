@@ -72,6 +72,12 @@ import { createLineReader } from "../protocol/line-reader.ts";
  *  comfortably inside it. */
 const CLI_HEARTBEAT_MS = 1000;
 
+/** Written heartbeats with no frame back after which a connection that has
+ *  answered a ping before is dead — the page's ceiling (`SILENT_BEATS_DEAD`
+ *  in browser-vitals.ts). A socket over a network that went away closes only
+ *  when TCP gives up, minutes later; `watch()` sat stale on it until then. */
+const CLI_SILENT_BEATS_DEAD = 20;
+
 /** How many times one call is re-sent after the server answers "dropped,
  *  retry after N ms" before its caller gets that refusal — the browser
  *  transport's bound (`MAX_BUDGET_RETRIES` in browser-air-transport.ts). A
@@ -916,6 +922,17 @@ export function connectCli<S>(
     // grades a client that has never pinged, and this makes THIS client one
     // that does, so a real drop is still detected.
     let heartbeat: ReturnType<typeof setInterval> | undefined;
+    // The silent-socket rule (CLI_SILENT_BEATS_DEAD): judged only once this
+    // connection has answered a ping; any frame resets the count.
+    // Not judged while a call is in flight whose own ceiling outlives the
+    // window (`ackTimeoutMs` 0 = for ever, or past 20 s): that caller said the
+    // server may be busy that long — inside a long sync method it answers no
+    // ping — and giving the socket up rejected a call the server then
+    // committed. Its ack (any frame) or its own ceiling ends the wait.
+    let ponged = false, silent = 0;
+    const longCallOut = () =>
+      (_ack <= 0 || _ack > CLI_SILENT_BEATS_DEAD * CLI_HEARTBEAT_MS) &&
+      _pending.size() > 0;
     const stopHeartbeat = () => {
       if (heartbeat !== undefined) clearInterval(heartbeat);
       heartbeat = undefined;
@@ -945,12 +962,33 @@ export function connectCli<S>(
         // refreshes it on ANY frame); a ping queued behind a burst would only
         // spend budget the burst is waiting for.
         if (paced.length > 0) return;
+        if (ponged && silent >= CLI_SILENT_BEATS_DEAD && !longCallOut()) {
+          log.warn(
+            "cli",
+            `no frame from ${shownUrl} for ${CLI_SILENT_BEATS_DEAD} ` +
+              `heartbeats — the connection is dead, reconnecting`,
+          );
+          // Its close may never come back over a dead network: the close
+          // path runs now, and the socket is told to close on its own time —
+          // and has nothing more to say: a late frame is not this client's.
+          const onclose = socket.onclose;
+          socket.onclose = socket.onmessage = socket.onerror = null;
+          try {
+            socket.close();
+          } catch { /* aio-ok: already closing — the path below runs anyway */ }
+          onclose?.call(
+            socket,
+            new CloseEvent("close", { code: 1006, reason: "silent" }),
+          );
+          return;
+        }
         // No render meter on a CLI client, so nothing is ever "unpainted".
         try {
           paced.push({
             frame: enc("vitals-ping", { t1: Date.now(), ms: 0 }),
             seq: _seq++,
           });
+          silent++;
         } catch {
           /* aio-ok: the socket closed between the check and the send */
         }
@@ -973,10 +1011,12 @@ export function connectCli<S>(
     };
 
     socket.onmessage = (e: MessageEvent) => {
+      silent = 0;
       const raw = e.data;
       if (typeof raw !== "string") return;
 
       const frame = dec(raw);
+      if (frame?.t === "vitals-pong") ponged = true;
       if (!frame) {
         // The one v1 shim: a v1 server's hello/refusal is still readable.
         const v1 = v1PeerReason(raw);
@@ -1455,6 +1495,48 @@ export function connectCliUDS<S>(
   ready.catch(() => {}); // see connectCli — an unawaited ready must not crash
 
   let _udsQueueNoted = false;
+  /** Written actions by cid — what a door refusal (`retryAfterMs`) re-sends. */
+  const _udsWritten = new Map<string, { type: string; payload?: unknown }>();
+  const _udsTries = new WeakMap<object, number>();
+  /** Nothing is written before this (ms epoch): the server said when it
+   *  takes calls again, and a newer call must not overtake a held one. */
+  let _udsHoldUntil = 0;
+  let _udsHoldTimer: ReturnType<typeof setTimeout> | undefined;
+  let _udsRetryNoted = false;
+  /** The WS client's `_retryRefusedCall`, on this transport: the server
+   *  refused the frame before running it and said when to re-send — hold the
+   *  call and send it again, instead of failing a write never attempted. */
+  function _udsRetryRefused(d: AckPayload): boolean {
+    const { cid, ok, retryAfterMs } = d;
+    if (typeof cid !== "string") return false;
+    const action = _udsWritten.get(cid);
+    _udsWritten.delete(cid);
+    if (
+      ok !== false || !action || typeof retryAfterMs !== "number" ||
+      !Number.isFinite(retryAfterMs) || retryAfterMs < 0 ||
+      !_udsPending.isWritten(cid)
+    ) return false;
+    const tries = _udsTries.get(action) ?? 0;
+    if (tries >= CLI_MAX_BUDGET_RETRIES) return false;
+    _udsTries.set(action, tries + 1);
+    _udsPending.unwrite(cid);
+    if (!_udsRetryNoted) {
+      _udsRetryNoted = true;
+      log.warn(
+        "cli",
+        `the server refused "${action.type}" before running it and asked ` +
+          `for a re-send in ${Math.round(retryAfterMs)}ms (${
+            d.error ?? "no reason given"
+          }) — held and re-sent, not failed. Further re-sends are not ` +
+          `repeated here.`,
+      );
+    }
+    queue.push(action);
+    _udsHoldUntil = Date.now() + Math.min(retryAfterMs, 10_000);
+    clearTimeout(_udsHoldTimer);
+    _udsHoldTimer = setTimeout(_udsDrainQueue, _udsHoldUntil - Date.now());
+    return true;
+  }
   /** Write an action, or queue it while the socket is down — the ONE writer,
    *  and it reports which happened.
    *
@@ -1492,7 +1574,10 @@ export function connectCliUDS<S>(
   ): { written: boolean; queued: boolean } {
     // Encoded before the branch, for the reason `_trySend` gives.
     const frame = encodeAction(action, wireOmit);
-    if (writer && !_wireWaits(action)) {
+    const held = Date.now() < _udsHoldUntil;
+    if (writer && !held && !_wireWaits(action)) {
+      const cid = (action as { cid?: string }).cid;
+      if (cid) _udsWritten.set(cid, action);
       writer.write(encoder.encode(frame + "\n")).catch((e) => {
         // A refused write is not a delivered action. The caller's ack clock is
         // already running, so it heard "the server never confirmed the call"
@@ -1507,8 +1592,8 @@ export function connectCliUDS<S>(
       return { written: true, queued: false };
     }
     _pushDroppingOldest(queue, _udsPending, "UDS offline", action);
-    // Waiting for `cfg` on an open socket is not "offline".
-    if (!_udsQueueNoted && !(writer && wireHeld)) {
+    // Waiting for `cfg` (or a re-send hold) on an open socket is not "offline".
+    if (!_udsQueueNoted && !(writer && (wireHeld || held))) {
       _udsQueueNoted = true;
       log.warn(
         "cli",
@@ -1523,7 +1608,7 @@ export function connectCliUDS<S>(
   /** Flush the queue into the open connection, in order. */
   function _udsDrainQueue(): void {
     const w = writer;
-    if (!w) return;
+    if (!w || Date.now() < _udsHoldUntil) return;
     // Drain queued actions. The ack clock starts HERE — at the write —
     // not at dispatch time (see connectCli's drain).
     const q = [...queue];
@@ -1552,6 +1637,7 @@ export function connectCliUDS<S>(
         }
         continue;
       }
+      if (cid) _udsWritten.set(cid, a);
       w.write(encoder.encode(frame + "\n")).catch((e) => {
         log.warn(
           "cli",
@@ -1630,6 +1716,8 @@ export function connectCliUDS<S>(
                     const d = (frame.d ?? {}) as AckPayload;
                     const { cid, ok, value } = d;
                     if (typeof cid !== "string") continue;
+                    // Refused at the door, never ran: re-sent, not failed.
+                    if (_udsRetryRefused(d)) continue;
                     if (ok === false) {
                       // Carries `code` through — see the WS twin above.
                       _udsPending.reject(
@@ -1722,6 +1810,7 @@ export function connectCliUDS<S>(
             // Reject, never resolve — an unconfirmed action did not succeed
             // just because the socket died (see connectCli's onclose).
             // IN-FLIGHT ONLY: `queue` survives and is drained on reconnect.
+            _udsWritten.clear();
             const lost = _udsPending.rejectInFlight(
               new Error(
                 "connection lost before the server confirmed this action — " +
@@ -1826,6 +1915,7 @@ export function connectCliUDS<S>(
         clearTimeout(reconnectTimer);
         reconnectTimer = undefined;
       }
+      clearTimeout(_udsHoldTimer);
       // See connectCli.close — the deadline must not outlive the client.
       _readyAbandon?.();
       _readyResolve = _readyAbandon = null;

@@ -282,6 +282,12 @@ included — never runs the same slot twice, however far the clock went back, so
 non-idempotent job (billing, a digest mail) cannot repeat. A step of under a
 minute is skew and fires nothing twice, for any pattern.
 
+**When the wall clock jumps forward** (a laptop or phone waking from sleep, a VM
+resumed), `at` and `cron` fire within a minute of the wall clock reaching their
+time — timers alone count only awake time, so they used to run late by the whole
+sleep. A run missed while asleep fires once on wake, not once per missed slot.
+`after` and `every` are durations: they count awake time.
+
 ### `schedule.backoff(id, attempt, action, opts)` — exponential retry delay
 
 A one-shot `after` whose delay grows exponentially with `attempt`:

@@ -60,7 +60,8 @@ it.
 | -------------------------------------- | -------------------------------------------- | ----------------------------------------------------- | ---------------------------------------------------------- |
 | App data, logs                         | `~/.<appId>/`                                | `~/.<appId>/`                                         | `%USERPROFILE%\.<appId>\`                                  |
 | Lock, sockets                          | `$XDG_RUNTIME_DIR/aio/`, else `/tmp/aio/`    | `/tmp/aio/`                                           | `%TEMP%\aio\`; pipes `\\.\pipe\aio-<appId>` (and `…-http`) |
-| The window's profile (Electron)        | `~/.config/<title-slug>/`                    | `~/Library/Application Support/<title-slug>/`         | `%APPDATA%\<title-slug>\`                                  |
+| The window's profile (Electron)        | `~/.<appId>/electron/`                       | `~/.<appId>/electron/`                                | `%USERPROFILE%\.<appId>\electron\`                         |
+| Electron itself (`"online"` apps)      | `~/.local/share/aio/electron/`               | `~/Library/Application Support/aio/electron/`         | `%LOCALAPPDATA%\aio\electron\` — shared by every aio app   |
 | A desktop app installed by its package | where the AppImage was put                   | `/Applications/<Title>.app`                           | `%LOCALAPPDATA%\aio-sfx\<name>\` + a Start-menu shortcut   |
 | An app installed by `run.sh`/`run.ps1` | `~/app/<name>/` + a `.desktop` entry         | `~/app/<name>/` ([below](#macos-what-runsh-installs)) | `%LOCALAPPDATA%\Programs\<name>\` + a Start-menu shortcut  |
 | aio's local root certificate           | `~/.aio/ca/`                                 | `~/.aio/ca/`                                          | `%USERPROFILE%\.aio\ca\`                                   |
@@ -274,11 +275,14 @@ loads it.
 
 aio ships no uninstaller for a packaged desktop app. These are the places:
 
-| OS      | The program                                                                                        | Its data (deleting it cannot be undone) | The window's profile                         |
-| ------- | -------------------------------------------------------------------------------------------------- | --------------------------------------- | -------------------------------------------- |
-| Windows | `%LOCALAPPDATA%\aio-sfx\<name>\` and `%APPDATA%\Microsoft\Windows\Start Menu\Programs\<title>.lnk` | `%USERPROFILE%\.<appId>\`               | `%APPDATA%\<title-slug>\`                    |
-| macOS   | `/Applications/<Title>.app` (or `~/Applications`)                                                  | `~/.<appId>/`                           | `~/Library/Application Support/<title-slug>` |
-| Linux   | the `.AppImage` file                                                                               | `~/.<appId>/`                           | `~/.config/<title-slug>/`                    |
+| OS      | The program                                                                                        | Its data and window profile (deleting it cannot be undone) |
+| ------- | -------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| Windows | `%LOCALAPPDATA%\aio-sfx\<name>\` and `%APPDATA%\Microsoft\Windows\Start Menu\Programs\<title>.lnk` | `%USERPROFILE%\.<appId>\`                                  |
+| macOS   | `/Applications/<Title>.app` (or `~/Applications`)                                                  | `~/.<appId>/`                                              |
+| Linux   | the `.AppImage` file                                                                               | `~/.<appId>/`                                              |
+
+An `"online"` app's Electron is in the per-user store every aio app shares
+(table above): `am prune --yes` removes what no installed app needs any more.
 
 Close the app first: Windows refuses to delete a running program's folder. The
 Windows zip has no install step — delete the folder it was extracted to. An app

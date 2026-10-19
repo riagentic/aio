@@ -251,6 +251,78 @@ Deno.test("aio-client: an app on THIS machine, answering from each of its addres
   );
 });
 
+Deno.test("aio-client: another machine on two subnets this one shares is listed once; two machines are never merged", async () => {
+  const c = client([v4("192.168.9.2", "255.255.255.0")]);
+  const apps = c.sweep();
+  const reply = (address: string, addrs: string[]) =>
+    c.on.message!(
+      Buffer.from(
+        "AIO1 " +
+          JSON.stringify({
+            name: "x",
+            port: 8000,
+            needsAuth: false,
+            tls: false,
+            addrs,
+          }),
+      ),
+      { address, port: 8099 },
+    );
+  const A = ["192.168.1.5", "10.0.0.5", "172.17.0.1"];
+  reply("192.168.1.5", A);
+  reply("10.0.0.5", A); // the same machine on the second subnet
+  reply("192.168.1.6", ["192.168.1.6", "172.17.0.1"]); // another docker host
+  reply("10.0.0.6", ["10.0.0.6", "172.17.0.1"]);
+  reply("10.0.0.7", ["10.0.0.7", "192.168.1.5"]); // claims A's address alone
+  const got = (await apps) as { host: string }[];
+  assertEquals(got.map((a) => a.host), [
+    "192.168.1.5",
+    "192.168.1.6",
+    "10.0.0.6",
+    "10.0.0.7",
+  ]);
+  assert(got.every((a) => !("addrs" in a)), JSON.stringify(got));
+});
+
+// One port on two interfaces can be two apps: bound to one address each, a
+// machine runs both. The merge (this machine's own addresses, and
+// another machine's two subnets) is for ONE app heard twice — never two.
+Deno.test("aio-client: two apps on one port of one machine, one per interface, are both listed", async () => {
+  const c = client([
+    v4("192.168.88.7", "255.255.255.0"),
+    v4("172.17.0.1", "255.255.0.0"),
+  ]);
+  const apps = c.sweep() as Promise<{ host: string; name: string }[]>;
+  const reply = (address: string, name: string, addrs?: string[]) =>
+    c.on.message!(
+      Buffer.from(
+        "AIO1 " +
+          JSON.stringify({
+            name,
+            port: 8000,
+            needsAuth: false,
+            tls: false,
+            ...(addrs ? { addrs } : {}),
+          }),
+      ),
+      { address, port: 8099 },
+    );
+  reply("192.168.88.7", "notes"); // this machine
+  reply("172.17.0.1", "wiki");
+  const A = ["192.168.1.5", "10.0.0.5"];
+  reply("192.168.1.5", "notes", A); // another machine on two shared subnets
+  reply("10.0.0.5", "wiki", A);
+  assertEquals(
+    (await apps).map((a) => `${a.name}@${a.host}`).sort(),
+    [
+      "notes@192.168.1.5",
+      "notes@192.168.88.7",
+      "wiki@10.0.0.5",
+      "wiki@172.17.0.1",
+    ],
+  );
+});
+
 // ── the server-side sender, on the real network stack ────────────────────
 
 Deno.test("discovery: discoverAioApps sends one probe per target, and lists an app that heard several ONCE", async () => {

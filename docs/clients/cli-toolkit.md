@@ -34,7 +34,7 @@ const a = args({
     format: { type: "string", default: "table", help: "table | plain" },
     watch: { type: "boolean", short: "w", help: "redraw on change" },
     json: { type: "boolean", help: "machine-readable output" },
-    n: { type: "number", required: true },
+    n: { type: "number", short: "n", required: true },
     tag: { type: "string[]" }, // repeatable: --tag a --tag b
   },
 });

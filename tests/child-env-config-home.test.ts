@@ -219,10 +219,12 @@ Deno.writeTextFileSync(Deno.env.get("READY")!, "1");
       assert(st, `the app never exited after its window ended:\n${log}`);
       const args = await Deno.readTextFile(argv).catch(() => "");
       assert(args, `the stub was never launched — nothing was tested:\n${log}`);
-      const cfg = env.XDG_CONFIG_HOME!;
+      // The window's profile — and its main script — live in the app's
+      // own home now (electron-profile.ts), inside the sandboxed apps root.
+      const profile = join(dir, "apps", "cfghome", "electron");
       assert(
-        args.includes(join(cfg, "aio-app@")),
-        `the window's main script is not under ${cfg}:\n${args}`,
+        args.includes(profile),
+        `the window's main script is not under ${profile}:\n${args}`,
       );
       assert(!args.includes(join(home, ".config")), args);
       assertEquals(

@@ -32,6 +32,19 @@ pub const VERSION_NAME: &str = ".aio-sfx-version";
 /// (`SFX_SHORTCUT_RECORD`, src/server/sfx-shortcut.ts). One line: the path.
 pub const SHORTCUT_RECORD: &str = ".shortcut";
 
+/// The file that lists every file an extraction wrote, one `<size> <path>`
+/// line each (`/`-separated, relative to the install). An install whose stamp
+/// matches is launched only when every listed file is there at its size — a
+/// file deleted or cut short since (a scanner's quarantine, a disk error) gets
+/// the app extracted again, not launched broken. The app's updater does NOT
+/// carry it (`carrySfxStamp`): a tree it swaps in is not this extraction, so
+/// it is checked as before, by the stamp and the two executables.
+pub const FILES_NAME: &str = ".aio-sfx-files";
+
+/// What the stub itself writes into an install, so never in the list: the
+/// app rewrites the version at every start.
+const OWN_FILES: [&str; 3] = [STAMP_NAME, VERSION_NAME, FILES_NAME];
+
 #[derive(Debug)]
 pub enum InstallError {
     /// The installed copy could not be moved aside, which on Windows means a
@@ -51,11 +64,73 @@ pub fn installed(install_dir: &Path, sha: &str, binary: &str) -> bool {
     fs::read_to_string(install_dir.join(STAMP_NAME))
         .is_ok_and(|prev| prev.trim().eq_ignore_ascii_case(sha))
         && complete(install_dir, binary)
+        && files_intact(install_dir)
 }
+
+/// Every file [`FILES_NAME`] lists is there at its size. True when there is
+/// no list (an older stub's install, or one the updater swapped in); false
+/// when it cannot be read or parsed — that is no proof the install is whole.
+fn files_intact(install_dir: &Path) -> bool {
+    let list = match fs::read_to_string(install_dir.join(FILES_NAME)) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return true,
+        Err(_) => return false,
+        Ok(list) => list,
+    };
+    list.lines().all(|line| {
+        let Some((size, rel)) = line.split_once(' ') else {
+            return false;
+        };
+        let path = rel
+            .split('/')
+            .fold(install_dir.to_path_buf(), |p, c| p.join(c));
+        size.parse::<u64>()
+            .is_ok_and(|size| fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() == size))
+    })
+}
+
+/// Writes [`FILES_NAME`] for the tree at `stage`: every regular file in it,
+/// sorted by path, except the stub's own.
+fn write_files_list(stage: &Path) -> io::Result<()> {
+    fn walk(dir: &Path, rel: &str, out: &mut Vec<(String, u64)>) -> io::Result<()> {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_str().ok_or_else(|| {
+                io::Error::other(format!("{}: not a UTF-8 name", entry.path().display()))
+            })?;
+            let path = if rel.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{rel}/{name}")
+            };
+            let meta = entry.metadata()?;
+            if meta.is_dir() {
+                walk(&entry.path(), &path, out)?;
+            } else if !(rel.is_empty() && OWN_FILES.contains(&name)) {
+                out.push((path, meta.len()));
+            }
+        }
+        Ok(())
+    }
+    let mut files = Vec::new();
+    walk(stage, "", &mut files)?;
+    files.sort();
+    let list: String = files
+        .iter()
+        .map(|(path, size)| format!("{size} {path}\n"))
+        .collect();
+    fs::write(stage.join(FILES_NAME), list)
+}
+
+/// The marker a shared-runtime package carries where a bundled one has
+/// `electron\` (`SHARED_RUNTIME_MARKER`, ../../../electron/shared-runtime.ts):
+/// its Electron is in the per-user store, not in the install.
+const SHARED_RUNTIME_MARKER: &str = "electron-shared.json";
 
 fn complete(install_dir: &Path, binary: &str) -> bool {
     file_exists(&install_dir.join(format!("{binary}.exe")))
-        && file_exists(&install_dir.join("electron").join("electron.exe"))
+        && (file_exists(&install_dir.join("electron").join("electron.exe"))
+            || file_exists(&install_dir.join(SHARED_RUNTIME_MARKER)))
 }
 
 /// The version of the complete install at `install_dir` when it is NEWER than
@@ -136,6 +211,7 @@ pub fn ensure_installed(
     };
     fs::create_dir_all(&stage).map_err(|e| restore(e.to_string()))?;
     extract(&stage).map_err(|e| restore(format!("extract: {e}")))?;
+    write_files_list(&stage).map_err(|e| restore(format!("list the extracted files: {e}")))?;
     fs::write(stage.join(STAMP_NAME), format!("{sha}\n")).map_err(|e| restore(e.to_string()))?;
     if !version.is_empty() {
         fs::write(stage.join(VERSION_NAME), format!("{version}\n"))
@@ -255,6 +331,20 @@ mod tests {
         }
     }
 
+    /// A shared-runtime payload: the app and the marker, no `electron\`.
+    fn shared_tree(ver: &str) -> impl FnOnce(&Path) -> Result<(), String> + '_ {
+        move |stage| {
+            for (name, body) in [
+                ("myapp.exe", "inner"),
+                (SHARED_RUNTIME_MARKER, "{\"runtime\":\"shared\"}"),
+                ("version.txt", ver),
+            ] {
+                fs::write(stage.join(name), body).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        }
+    }
+
     fn never(what: &'static str) -> impl FnOnce(&Path) -> Result<(), String> {
         move |_| panic!("{what}")
     }
@@ -290,6 +380,27 @@ mod tests {
             "",
             false,
             never("a stamped install was extracted again"),
+        )
+        .unwrap();
+        only_install(&dir);
+    }
+
+    /// A shared-runtime install has no `electron\` and is complete: a second
+    /// launch extracts nothing (it used to re-extract on every double-click,
+    /// and fail while the app was running).
+    #[test]
+    fn shared_runtime_install_is_complete() {
+        let t = Tmp::new("shared");
+        let dir = t.install();
+        ensure_installed(&dir, "sha1", "myapp", "", false, shared_tree("v1")).unwrap();
+        assert!(installed(&dir, "sha1", "myapp"));
+        ensure_installed(
+            &dir,
+            "sha1",
+            "myapp",
+            "",
+            false,
+            never("a stamped shared install was extracted again"),
         )
         .unwrap();
         only_install(&dir);
@@ -437,6 +548,44 @@ mod tests {
         fs::remove_file(dir.join("myapp.exe")).unwrap();
         assert!(ensure_installed(&dir, "sha-e", "myapp", "1.0.0", false, tree("v5")).unwrap());
         only_install(&dir);
+    }
+
+    /// A file of a stamped install damaged or deleted after the extraction (a
+    /// scanner's quarantine, a disk error, a user's cleanup): the stamp still
+    /// matches, but the next open extracts again instead of launching a
+    /// broken app.
+    #[test]
+    fn re_extracts_a_damaged_install() {
+        let t = Tmp::new("damaged");
+        let dir = t.install();
+        ensure_installed(&dir, "sha1", "myapp", "", false, tree("v1")).unwrap();
+        assert_eq!(
+            read(dir.join(FILES_NAME)),
+            "7 electron/electron.exe\n5 myapp.exe\n2 version.txt\n"
+        );
+        // What the app itself writes into its install keeps the fast path:
+        // its version at every start, and a file no extraction wrote.
+        fs::write(dir.join(VERSION_NAME), "9.9.9\n").unwrap();
+        fs::write(dir.join("added-later.log"), "x").unwrap();
+        let skip = never("an intact install was extracted again");
+        assert!(!ensure_installed(&dir, "sha1", "myapp", "", false, skip).unwrap());
+        fs::remove_file(dir.join(VERSION_NAME)).unwrap();
+        // A file cut short, then a file gone.
+        fs::write(dir.join("version.txt"), "v").unwrap();
+        assert!(ensure_installed(&dir, "sha1", "myapp", "", false, tree("v1")).unwrap());
+        assert_eq!(read(dir.join("version.txt")), "v1");
+        fs::remove_file(dir.join("version.txt")).unwrap();
+        assert!(ensure_installed(&dir, "sha1", "myapp", "", false, tree("v1")).unwrap());
+        only_install(&dir);
+        // A list that cannot be read is no proof the install is whole.
+        fs::write(dir.join(FILES_NAME), "garbage").unwrap();
+        assert!(ensure_installed(&dir, "sha1", "myapp", "", false, tree("v1")).unwrap());
+        // No list — an older stub's install, or a tree the app's updater
+        // swapped in (the stamp is carried, the list is not): as before.
+        fs::remove_file(dir.join(FILES_NAME)).unwrap();
+        fs::write(dir.join("version.txt"), "changed by an update").unwrap();
+        let updated = never("an updated install was extracted over");
+        assert!(!ensure_installed(&dir, "sha1", "myapp", "", false, updated).unwrap());
     }
 
     /// A stub killed after renaming the new tree in: the old install (a full

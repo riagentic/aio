@@ -1,5 +1,6 @@
 // WebSocket connection handler — extracted from server.ts
 // Manages WS upgrades, per-client state, message routing, rate limiting, backpressure
+import { doorRetryAfterMs } from "./door-refusal.ts";
 import type { AioUser } from "./aio.ts";
 import { invokeServerFn } from "./server-fns.ts";
 import {
@@ -46,6 +47,7 @@ import {
 import type { ClientLogEntry } from "../air/dom-inspector-types.ts";
 import { isMacPlatform } from "../air/key-chord.ts";
 import type { VitalsSystem } from "../vitals/mod.ts";
+import type { VitalsPing } from "../vitals/transport-probe.ts";
 import { VERSION } from "./aio-cli.ts";
 import {
   negotiateProtocol,
@@ -1546,6 +1548,11 @@ export function createWsManager(deps: WsDeps): WsManager {
             // Whether the `cfg` frame below is sent: a client that waits for
             // it knows here that there is nothing to wait for.
             cfg: _sendsCfg,
+            // Which app, and who this socket is — the reload carry's check.
+            ...(typeof deps.clientConfig?.appId === "string"
+              ? { appId: deps.clientConfig.appId }
+              : {}),
+            user: meta.user?.id ?? null,
           }),
         );
       } catch { /* socket closing during onopen (AIO-155) */ }
@@ -2369,9 +2376,10 @@ export function createWsManager(deps: WsDeps): WsManager {
       Promise.resolve(result).then(
         (value) => _sendAck(socket, cid, parsed, actionType, value),
         // A refusal at the shutdown door says when to re-send: the call
-        // never ran (aio-server `closing`).
+        // never ran (aio-server `closing`). Only that one — a method's own
+        // error carrying `retryAfterMs` ran already (door-refusal.ts).
         (err) => {
-          const r = (err as { retryAfterMs?: unknown } | null)?.retryAfterMs;
+          const r = doorRetryAfterMs(err);
           _sendAckErr(
             socket,
             cid,
@@ -2481,7 +2489,7 @@ export function createWsManager(deps: WsDeps): WsManager {
     data: unknown,
   ): void {
     try {
-      const ping = data as { t1: number; ms?: number };
+      const ping = data as VitalsPing;
       if (!ping || typeof ping.t1 !== "number") throw new Error("malformed");
       const vmeta = connections.get(socket);
       if (vmeta && deps.vitalsSystem) {
@@ -2489,7 +2497,7 @@ export function createWsManager(deps: WsDeps): WsManager {
         // is the browser's `Date.now()` and is echoed back in the pong for the
         // client to compute its own RTT — it is never used as a server-side
         // timestamp (see the one-clock invariant in transport-probe.ts).
-        deps.vitalsSystem.serverTransport.onClientPing(vmeta.id);
+        deps.vitalsSystem.serverTransport.onClientPing(vmeta.id, ping.h === 1);
         const staleness = typeof ping.ms === "number" ? ping.ms : 0;
         const prevMul = vmeta.bpMultiplier;
         // `vitals.backpressure: false` turns the per-client throttle off. The
@@ -2536,6 +2544,12 @@ export function createWsManager(deps: WsDeps): WsManager {
           loop: deps.vitalsSystem.getLoopVitalsForPong(),
         };
         socket.send(enc("vitals-pong", pong));
+      } else if (vmeta) {
+        // Vitals off still answers: the pong is the client's proof that this
+        // server speaks, which its silent-socket watchdog judges a connection
+        // by. Unanswered, a page that had talked to a vitals server could not
+        // tell "vitals off" from "network gone" (browser-vitals.ts).
+        socket.send(enc("vitals-pong", { t1: ping.t1, t2: Date.now() }));
       }
     } catch (err) {
       log.warn("vitals", `bad ping: ${err}`);

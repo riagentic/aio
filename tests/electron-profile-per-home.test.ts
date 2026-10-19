@@ -111,14 +111,18 @@ Deno.test({
         `app.name = ${JSON.stringify(want)}`,
         "the window must open the profile this HOME owns, not the title's",
       );
-      // …and that profile is this RUN's, on every OS: the main script is
-      // written into it, so where the script was says where the profile is.
-      // (`childEnv()` — without it this was `~/.config/<profile>`, 178 of
-      // which sat in one developer's home.)
+      // …and that profile is in THIS HOME, on every OS: the window is told
+      // so before anything opens it, and the main script is written into
+      // it, so where the script was says where the profile is.
+      const profile = join(otherHome, "electron");
+      assertStringIncludes(
+        script,
+        `app.setPath('userData', ${JSON.stringify(profile)})`,
+      );
       const at = await Deno.readTextFile(captured + ".path");
       assert(
-        at.startsWith(aioTestRoot()) && at.includes(want),
-        `the window's profile is outside the test root: ${at}`,
+        at.startsWith(aioTestRoot()) && at.startsWith(profile),
+        `the window's profile is not this home's (${profile}): ${at}`,
       );
     } finally {
       try {

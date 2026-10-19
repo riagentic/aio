@@ -64,9 +64,13 @@ export const BROWSER: string | null = findBrowser();
  *  locked the machine's user out (and with it every ssh session) for ten
  *  minutes, twice. A guest window has no profile identity to sign in:
  *  0 failed logons, measured; `--inprivate`, `--no-first-run` and
- *  `--disable-sync` each still cost one. */
+ *  `--disable-sync` each still cost one.
+ *
+ *  And `--do-not-de-elevate`: from an elevated shell Chromium relaunches
+ *  itself un-elevated and the spawned process exits 0 at once (see
+ *  `_launchFlags` in src/testing/chromium.ts). */
 export const browserOsFlags: readonly string[] = Deno.build.os === "windows"
-  ? ["--guest"]
+  ? ["--guest", "--do-not-de-elevate"]
   : [];
 
 // THE one `freePort` (src/testing): it draws from this run's port slice when

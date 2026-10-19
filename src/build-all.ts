@@ -39,9 +39,17 @@ import { moveArtifact, slugify } from "./build/build-helpers.ts";
 import {
   emptyDir,
   foreignDistRefusal,
+  keepInDistStaging,
   moveDirContents,
   previousReleaseNote,
 } from "./build/dist-staging.ts";
+import {
+  applicationIdChangeNotes,
+  readBuildManifest,
+  strayOutEntries,
+  versionRegressionNote,
+} from "./build/build-manifest.ts";
+import { apkApplicationId } from "./build/build-android.ts";
 import {
   flagVocabulary,
   FLEET_BOOL_FLAGS,
@@ -225,8 +233,10 @@ export interface TargetOverride {
   name?: string;
   /** The name a person SEES for this target's artifact — the macOS `.app`
    *  and DMG volume, the Linux `.desktop` `Name=`, the icon monogram, the
-   *  Android label — overriding deno.json `title`. `name` names the FILES
-   *  only. Two desktop targets that show one title install over each other
+   *  Android label — overriding deno.json `title`. `name` names the files,
+   *  the macOS bundle id and the derived Android applicationId (a renamed
+   *  APK is a second app unless `android.applicationId` is pinned; the build
+   *  warns), never what a person sees. Two desktop targets that show one title install over each other
    *  in /Applications; the build warns and names this key. The running app's
    *  window title still comes from `aio.run({ ui: { title } })`. */
   title?: string;
@@ -1252,6 +1262,11 @@ export async function buildAll(): Promise<number> {
   // `emptyDir` in src/build/dist-staging.ts.
   let preserved = false;
   const outIsStaging = outDir === resolve(join(root, DIST_DIR));
+  // What the release being replaced recorded — read before anything moves:
+  // the only record of the version and the applicationId out there.
+  const prevManifest = await readBuildManifest(outDir);
+  const androidPin = (denoJson as { android?: { applicationId?: string } })
+    .android?.applicationId;
   try {
     preserved = await moveDirContents(outDir, preservedOut);
   } catch (e) {
@@ -1588,6 +1603,13 @@ export async function buildAll(): Promise<number> {
         // (`✓ cli → notes`) while the file it had just written was `notes-cli`.
         r.artifacts = placed;
       }
+      // The id the APK installs as — recorded, so the next build can say
+      // when it changes (a second app on the phone, the first one's data
+      // left behind).
+      const apk = placed.find((p) => p.file.endsWith(".apk"))?.file;
+      const applicationId = apk
+        ? apkApplicationId(apk, androidPin) ?? undefined
+        : undefined;
       manifestTargets.push({
         target: r.target,
         role: r.role,
@@ -1601,6 +1623,10 @@ export async function buildAll(): Promise<number> {
         ok: r.ok,
         ...(r.skipped ? { skipped: r.skipped } : {}),
         ...(r.error ? { error: r.error } : {}),
+        ...(applicationId ? { applicationId } : {}),
+        // A dev APK is its own app (`app.aio.<x>dev`): recorded, so the next
+        // release build does not compare its id with this one.
+        ...(applicationId && flag("android-dev-url") ? { dev: true } : {}),
         artifacts: placed,
       });
     }
@@ -1656,6 +1682,37 @@ export async function buildAll(): Promise<number> {
       );
     }
     summaryNotes = readSummaryNotes(notesFile);
+    // …and what the release it replaced says about this one.
+    const relOut = outDir.replace(root + SEPARATOR, "");
+    const regression = versionRegressionNote(
+      prevManifest,
+      version.version,
+      relOut,
+    );
+    if (regression) summaryNotes.push(regression);
+    if (androidPin === undefined) {
+      summaryNotes.push(
+        ...applicationIdChangeNotes(
+          prevManifest,
+          manifestTargets,
+          (f) => apkApplicationId(f),
+          relOut,
+        ),
+      );
+    }
+    if (preserved) {
+      const names: string[] = [];
+      for await (const e of Deno.readDir(preservedOut)) names.push(e.name);
+      const stray = strayOutEntries(prevManifest, names, keepInDistStaging);
+      if (stray.length > 0) {
+        summaryNotes.push(
+          `${relOut}/ is rebuilt clean on every build — it removed ` +
+            `${count(stray.length, "entry", "entries")} no build put there: ` +
+            `${stray.join(", ")}.\n  fix: write them outside ${relOut}/ ` +
+            `(it is the build's own directory).`,
+        );
+      }
+    }
   } finally {
     await Deno.remove(staging, { recursive: true }).catch(() => {});
   }

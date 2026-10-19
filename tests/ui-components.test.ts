@@ -82,6 +82,7 @@ Deno.test("ui: every kit token falls back to the theme's equivalent", () => {
   // components in ITS colour, and an app that did not keep the kit's own look.
   const THEME: Record<string, string> = {
     "--aio-ui-accent": "--aio-accent",
+    "--aio-ui-accent-ink": "--aio-accent-ink",
     "--aio-ui-on-accent": "--aio-on-accent",
     "--aio-ui-bg": "--aio-surface",
     "--aio-ui-surface": "--aio-surface-2",
@@ -109,7 +110,10 @@ Deno.test("ui: every kit token falls back to the theme's equivalent", () => {
       assert(
         r === theme || r!.startsWith("--aio-ui-") ||
           ["--aio-ink", "--aio-ink-soft", "--aio-line", "--aio-radius"]
-            .includes(r!),
+            .includes(r!) ||
+          // The accent as text falls back to the accent itself — what the
+          // kit drew before it had an ink token (ui.theme "none" rebrands).
+          (name === "--aio-ui-accent-ink" && r === "--aio-accent"),
         `${name} reads ${r}, which is neither its theme token nor its legacy alias`,
       );
     }
@@ -318,4 +322,17 @@ Deno.test("ui: Card renders title, body, and footer", async () => {
   assertStringIncludes(html, "Stats");
   assertStringIncludes(html, "the body");
   assertStringIncludes(html, "aio-card__footer");
+});
+
+Deno.test("ui: with no theme ink, the accent text is the app's own accent", () => {
+  // An app on ui.theme "none" that set --aio-accent (the kit.md rebrand)
+  // saw its active tab and links fall to the kit's stock blue once they drew
+  // --aio-accent-ink, which nothing defined there.
+  const inks = [
+    ...UI_CSS.matchAll(/--aio-ui-accent-ink:\s*([^;]+);/g),
+  ].map((m) => m[1]!);
+  assert(inks.length >= 2, "light and dark");
+  for (const v of inks) {
+    assert(v.startsWith("var(--aio-accent-ink, var(--aio-accent,"), v);
+  }
 });

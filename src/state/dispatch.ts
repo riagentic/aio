@@ -18,7 +18,11 @@ import {
 } from "../diagnostics/error.ts";
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
 import { REDACTED } from "../diagnostics/redact.ts";
-import { isDeliberateRejection, rejectionLine } from "./method-rejection.ts";
+import {
+  isDeliberateRejection,
+  reduceThrowCode,
+  rejectionLine,
+} from "./method-rejection.ts";
 export type { AioError } from "../diagnostics/error.ts";
 
 /** Performance check — warn on violations, or stay silent.
@@ -847,7 +851,7 @@ export function createDispatch<S, A, E>(
             // A refusal (`throw new Error("insufficient")`) is reported as one
             // info line, a bug as the error box — method-rejection.ts.
             const refusal = isDeliberateRejection(e);
-            const err = createAioError("REDUCE_ERROR", e, {
+            const err = createAioError(reduceThrowCode(e), e, {
               cellName: actionType?.split(":")[0],
               actionType,
               ...(refusal

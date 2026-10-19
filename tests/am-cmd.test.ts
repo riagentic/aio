@@ -217,10 +217,28 @@ Deno.test("am: ensureSingleton — stale lock (dead pid) is reclaimed", async ()
 
 Deno.test("am: ensureSingleton — waits out a stopping instance", async () => {
   const app = `am-cmd-stopping-${Deno.pid}`;
-  const child = spawnChild(600); // exits on its own while we wait
+  // Ends when the wait is SAID, not after a fixed 600 ms: under a loaded
+  // Windows suite the child was gone before the first look, and the lock
+  // read as plain stale — no wait to report.
+  const child = new Deno.Command(Deno.execPath(), {
+    args: ["eval", "for await (const _ of Deno.stdin.readable) break;"],
+    stdin: "piped",
+    stdout: "null",
+    stderr: "null",
+  }).spawn();
+  const writer = child.stdin.getWriter();
+  let ended: Promise<void> | undefined;
+  const end = () => ended ??= writer.close();
   writePid(makePf(app, { pid: child.pid, port: 59999, status: "stopping" }));
   try {
-    const { logs } = await capture(() => ensureSingleton(app, "json"));
+    const { logs } = await capture(() => {
+      const log = console.log;
+      console.log = (...a: unknown[]) => {
+        log(...a);
+        if (a.join(" ").includes("stopping")) void end();
+      };
+      return ensureSingleton(app, "json");
+    });
     assertEquals(readPid(app), null, "lock removed after instance stopped");
     assert(
       logs.some((l) => l.includes("stopping")),
@@ -228,6 +246,7 @@ Deno.test("am: ensureSingleton — waits out a stopping instance", async () => {
     );
   } finally {
     dropFixtureLock(app);
+    await end();
     await child.status;
   }
 });

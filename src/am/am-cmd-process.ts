@@ -2573,6 +2573,30 @@ export function hardStopNote(
   return os === "windows" && how === "killed" ? `\n  ⚠ ${ENDED_HARD}` : "";
 }
 
+/** How long an app's log may stay still before "no lock" means stopped. */
+export const RESTART_QUIET_MS = 3000;
+
+/** The lock a dev restart is about to file, or null (network §3). A restart
+ *  releases the old child's lock early in its shutdown, and the next child's
+ *  appears only after that one exits — `am stop` in the gap said "not
+ *  running". The log moving is the restart: wait for the lock while it moves
+ *  (bounded), and answer at once when it is quiet or missing. */
+export async function relockAfterRestart(
+  lock: () => LockData | null,
+  logMoved: () => number | null,
+  limitMs = 30_000,
+): Promise<LockData | null> {
+  const end = Date.now() + limitMs;
+  while (Date.now() < end) {
+    const m = logMoved();
+    if (m === null || Date.now() - m >= RESTART_QUIET_MS) return lock();
+    const l = lock();
+    if (l) return l;
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+  }
+  return lock();
+}
+
 export async function cmdStop(
   _args: string[],
   flags: GlobalFlags,
@@ -2702,7 +2726,21 @@ export async function cmdStop(
     return;
   }
 
-  const resolved = await resolveStopTarget(flags);
+  let resolved = await resolveStopTarget(flags);
+  if (!resolved.ok && flags.port === undefined && waited) {
+    const appId = resolveAmAppId(flags.app);
+    const pf = await relockAfterRestart(
+      () => {
+        const t = resolveLockTarget(flags);
+        return t.kind === "target" ? t.target.pf : null;
+      },
+      () => logMtime(stdoutLogPath(appId)),
+    );
+    if (pf) {
+      sayErr(`am: note: ${appId} was restarting — stopping its new process`);
+      resolved = { ok: true, target: { appId, port: pf.port, pf } };
+    }
+  }
   if (!resolved.ok) {
     outError(resolved.error, mode);
     Deno.exit(1);

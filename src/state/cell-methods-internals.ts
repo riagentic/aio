@@ -1218,7 +1218,10 @@ export function buildMethodsExecutor(
               const now = Date.now();
               // The first call always publishes: a progress bar that waits one
               // interval before its first frame looks like a hang.
-              if (lastCommitAt !== 0 && now - lastCommitAt < minMs) return;
+              // A negative gap is a wall clock stepped back, not "too soon":
+              // read as one, it froze progress for the length of the step.
+              const gap = now - lastCommitAt;
+              if (lastCommitAt !== 0 && gap >= 0 && gap < minMs) return;
               lastCommitAt = now;
             } else {
               lastCommitAt = Date.now();

@@ -149,6 +149,33 @@ bug:
 Windows has no process groups or `SIGSTOP`: `kill()` uses `taskkill /T`, and
 `pause()` / `resume()` **throw** rather than pretend.
 
+### Just the output — `runCommand`
+
+For a command you run to its end and read (`avahi-browse`, `mtr`, `git`),
+`runCommand` is `spawn` collecting its lines, with a timeout:
+
+```ts
+import { runCommand } from "aio/server";
+
+const r = await runCommand("mtr", {
+  args: ["-r", "-c", "3", "192.168.1.1"],
+  timeoutMs: 10_000, //  then the tree is killed, ON TIME
+  // signal: s.$signal — in a method, a cancelOn kills it too
+});
+r.stdout; //  its lines joined by "\n" — what it wrote before a timeout too
+r.stderr;
+r.timedOut; //  true when timeoutMs ran out
+r.success; //  and code, signal — as spawn's status
+```
+
+A command that fails is a result (`success: false`), not a throw; a missing
+command rejects, as `spawn` does. Why not
+`new Deno.Command(cmd, { signal: AbortSignal.timeout(ms) }).output()`: it kills
+the command, then waits for any child of it that still holds the pipe (`mtr`
+runs `mtr-packet`; a script runs `sleep`) — a 500 ms timeout measured at 5 s.
+Output is kept in memory: for a stream that never ends, use `spawn` with
+`onLine`.
+
 ### Talking to it — `stdin: true`
 
 By default the child's stdin is closed (EOF at once), because a child that reads

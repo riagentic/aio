@@ -85,6 +85,14 @@ Deno.test("am create: every template with a window writes ignoreDebugEnv, strict
         true,
         where,
       );
+      // A new app's desktop package downloads its Electron once into the
+      // shared store; aio's own default stays "offline" (a rebuilt app keeps
+      // the package it had).
+      assertEquals(
+        JSON.parse(files["deno.json"]!).build.electronRuntime,
+        "online",
+        where,
+      );
       // An Android build follows the phone's light/dark setting. aio's own
       // default stays the dark theme of 1.0.19 (a rebuilt app looks as it
       // did); a new app has no look to keep.
@@ -106,6 +114,10 @@ Deno.test("am create --template=cli: no window, so the wire key only", () => {
   assert(!codeOf(entry).includes("ignoreDebugEnv"));
   assertEquals("strictPin" in JSON.parse(files["deno.json"]!).build, false);
   assertEquals("android" in JSON.parse(files["deno.json"]!), false);
+  assertEquals(
+    "electronRuntime" in JSON.parse(files["deno.json"]!).build,
+    false,
+  );
 });
 
 // The keys are LIVE in a booted scaffold, and aio's own clients are not what

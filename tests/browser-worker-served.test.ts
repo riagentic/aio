@@ -129,6 +129,39 @@ Deno.test("unmanagedWorkers: a bundled classic worker in a sub-folder that hands
   }
 });
 
+// Bundled, the worker is one script: an importScripts in a module it imports
+// resolves from the worker's own URL as well — and was never read.
+Deno.test("unmanagedWorkers: a relative importScripts in a module the classic worker imports is named too", async () => {
+  const dir = await tempDir("aio-import-scripts-deep-");
+  try {
+    await Deno.mkdir(join(dir, "src/sub/lib"), { recursive: true });
+    await Deno.writeTextFile(
+      join(dir, "src/sub/w.ts"),
+      `import "./lib/a.ts";\nimport { b } from "./b.ts";\nb();`,
+    );
+    await Deno.writeTextFile(
+      join(dir, "src/sub/b.ts"),
+      `export const b = () => {};\nimport "./w.ts";`,
+    );
+    await Deno.writeTextFile(
+      join(dir, "src/sub/lib/a.ts"),
+      `importScripts("./x.js");`,
+    );
+    const [one, ...rest] = unmanagedWorkers(
+      `new Worker(new URL("./sub/w.ts", import.meta.url))`,
+      join(dir, "src/App.tsx"),
+      undefined,
+      join(dir, "src"),
+    );
+    assertEquals(rest, []);
+    assertStringIncludes(one!.message, `calls importScripts("./x.js")`);
+    // From the WORKER's URL (/sub/w.ts), not the module's folder.
+    assertStringIncludes(one!.fix!, `importScripts("/sub/x.js")`);
+  } finally {
+    await dropTempDir(dir);
+  }
+});
+
 Deno.test("servedWorkerNotes: says what THIS artifact does not carry — and nothing about what it carries or cannot see", () => {
   const root = abs("/app");
   const files = new Set(

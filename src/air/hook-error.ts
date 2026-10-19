@@ -60,6 +60,11 @@ export function _setContainedErrorSink(
   _containedSink = fn;
 }
 
+/** @internal The sink in place — so a temporary listener can chain to it. */
+export function _containedErrorSink(): typeof _containedSink {
+  return _containedSink;
+}
+
 /** @internal Tell the harness, if one is listening. Never throws: a sink that
  *  fails must not take the render with it, which is the whole point of
  *  containing the error in the first place. */

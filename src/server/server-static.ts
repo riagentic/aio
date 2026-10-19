@@ -999,6 +999,8 @@ export interface StaticDeps {
    *  browser's offline sync queue scopes its per-origin `localStorage` key by
    *  it. */
   appId?: string;
+  /** The app's resolved version — `window.__aioConfig.appVersion`. */
+  appVersion?: string;
   // Graph validation state — mutable ref from server.ts (dev only)
   getGraphResult: () => GraphResult | null;
   // Snapshot support
@@ -1273,11 +1275,26 @@ export function createStaticHandler(deps: StaticDeps): {
     }
   }
 
-  /** Returns errors from the last 30 seconds */
+  /** The build errors: the import-graph verdict that turns `/` into the
+   *  Module Errors page (until fixed — it has no age), then the transpile
+   *  failures a browser hit in the last 30 seconds. */
   function getRecentErrors() {
+    const g = deps.prod ? null : deps.getGraphResult();
+    const blocking = g && !g.valid
+      ? g.errors.filter((e) => !e.deferred).map((e) => ({
+        text: e.message,
+        file: e.file,
+        line: e.line,
+        col: e.col,
+        lineText: e.lineText,
+      }))
+      : [];
     const cutoff = Date.now() - 30_000;
-    return [...errorMap.values()].filter((e) => e.ts > cutoff)
-      .flatMap((e) => e.errors);
+    return [
+      ...blocking,
+      ...[...errorMap.values()].filter((e) => e.ts > cutoff)
+        .flatMap((e) => e.errors),
+    ];
   }
 
   /** THE app shell — served at `/` and by the SPA deep-link fallback. Two
@@ -1371,6 +1388,7 @@ export function createStaticHandler(deps: StaticDeps): {
         lang: deps.lang,
         dir: deps.dir,
         appId: deps.appId,
+        appVersion: deps.appVersion,
       }),
       {
         headers: {

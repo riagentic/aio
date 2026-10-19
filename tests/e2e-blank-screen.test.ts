@@ -13,7 +13,7 @@ import { fromFileUrl } from "@std/path";
 import { spec } from "./module-spec-helper.ts";
 // THE browser lookup (every OS), never a copy of its path list.
 import { browserOsFlags, findBrowser } from "./e2e-harness.ts";
-import { browserHomeEnv } from "../src/testing/chromium.ts";
+import { browserHomeEnv, dropBrowserProfile } from "../src/testing/chromium.ts";
 const _childCovDir = childCoverageDir();
 
 const ROOT = fromFileUrl(new URL("..", import.meta.url));
@@ -199,7 +199,7 @@ async function renderBroken(appTsx: string): Promise<{
     const dom = Deno.build.os === "windows"
       ? await liveDom(profile, port)
       : await dumpDom(profile, port);
-    await Deno.remove(profile, { recursive: true }).catch(() => {});
+    await dropBrowserProfile(profile);
     // give the client-error POST a beat to land in the server log
     await new Promise((r) => setTimeout(r, 500));
     return { dom, log: logRef.buf };
@@ -297,7 +297,7 @@ Deno.test({
       );
     } finally {
       await stopChild(chrome, { quiet: true });
-      await Deno.remove(profile, { recursive: true }).catch(() => {});
+      await dropBrowserProfile(profile);
       await stopChild(proc, { quiet: true });
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }
@@ -354,7 +354,7 @@ Deno.test({
       assert(!logRef.buf.includes("BLANK SCREEN"), "no warning when healthy");
     } finally {
       await stopChild(chrome, { quiet: true });
-      await Deno.remove(profile, { recursive: true }).catch(() => {});
+      await dropBrowserProfile(profile);
       await stopChild(proc, { quiet: true });
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }

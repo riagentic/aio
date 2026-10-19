@@ -323,7 +323,7 @@ rather than a variable.
 
 | Bundle                                                      | gzip      | brotli |
 | ----------------------------------------------------------- | --------- | ------ |
-| aio: render a component                                     | 81 KB     | 71 KB  |
+| aio: render a component                                     | 83 KB     | 72 KB  |
 | aio: + one cell (the counter app)                           | 84 KB     | 73 KB  |
 | React + Redux Toolkit + Router + a WS client + a sync layer | ~75-90 KB | —      |
 

@@ -173,7 +173,9 @@ export function shasumFor(shasums: string, file: string): string | null {
 // does not allow `electron -> build`. Widening it for a hash is the wrong
 // trade — a red gate loosened to save four lines. If a third copy ever wants
 // this, move it somewhere both may reach instead of adding another.
-async function sha256Hex(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
+export async function sha256Hex(
+  bytes: Uint8Array<ArrayBuffer>,
+): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return Array.from(new Uint8Array(digest))
     .map((b) => b.toString(16).padStart(2, "0"))
@@ -242,6 +244,109 @@ export async function bakedElectronVersion(
       : null;
   } catch {
     return null;
+  }
+}
+
+/** How a compiled desktop app gets its Electron, from `<distDir>/electron.json`
+ *  (`"runtime"`, written by the build from `"build": { "electronRuntime" }`):
+ *  `"bundled"` (the default, and every build before the key existed) carries
+ *  it; `"shared"` starts from the per-user store of shared runtimes
+ *  (shared-runtime.ts) and downloads into it on first start. */
+export async function bakedElectronRuntime(
+  distDir: string | undefined,
+): Promise<"bundled" | "shared"> {
+  if (!distDir) return "bundled";
+  try {
+    const rec = JSON.parse(
+      await Deno.readTextFile(join(distDir, ELECTRON_VERSION_FILE)),
+    ) as { runtime?: unknown };
+    return rec.runtime === "shared" ? "shared" : "bundled";
+  } catch {
+    return "bundled"; // aio-ok: no record is the bundled default
+  }
+}
+
+/** Every platform's zip in a release's `SHASUMS256.txt`, by slug
+ *  (`linux-x64` → its SHA-256). Pure. Symbol, dSYM and other assets are not
+ *  runtimes and are left out. */
+export function runtimeShasBySlug(
+  shasums: string,
+  version: string,
+): Record<string, string> {
+  const v = version.startsWith("v") ? version.slice(1) : version;
+  const esc = v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(
+    `^electron-v${esc}-((?:linux|darwin|win32)-(?:x64|arm64|ia32|armv7l))\\.zip$`,
+  );
+  const out: Record<string, string> = {};
+  for (const line of shasums.split("\n")) {
+    const m = /^([0-9a-fA-F]{64})\s+\*?(.+?)\s*$/.exec(line);
+    const slug = m && re.exec(m[2]!)?.[1];
+    if (slug) out[slug] = m![1]!.toLowerCase();
+  }
+  return out;
+}
+
+/** The checksums an online build pins: the release's `SHASUMS256.txt`,
+ *  fetched on the BUILD machine (over HTTPS from the release host, or the
+ *  developer's own `$ELECTRON_MIRROR`) and kept in the tool cache, so a
+ *  rebuild needs no network. The user's machine never decides what is real:
+ *  the binary carries the answer. */
+export async function pinnedRuntimeShas(
+  version: string,
+  opts: { fetch?: typeof fetch; mirror?: string } = {},
+): Promise<Record<string, string>> {
+  const v = version.startsWith("v") ? version.slice(1) : version;
+  const mirror = opts.mirror ?? Deno.env.get("ELECTRON_MIRROR") ?? undefined;
+  const url = electronShasumsUrlFor(v, mirror);
+  // Kept per SOURCE: a list from one mirror never answers for another, nor
+  // for the release host itself.
+  const source = (await sha256Hex(new TextEncoder().encode(url))).slice(0, 12);
+  const cached = join(
+    toolCacheDir(),
+    "electron",
+    `SHASUMS256-${v}-${source}.txt`,
+  );
+  let text: string | null = await Deno.readTextFile(cached).catch(() => null);
+  if (text === null || Object.keys(runtimeShasBySlug(text, v)).length === 0) {
+    const res = await (opts.fetch ?? fetch)(url, {
+      signal: AbortSignal.timeout(DOWNLOAD_STALL_MS),
+    }).catch((e) => {
+      throw new Error(
+        `could not fetch ${url} (${e instanceof Error ? e.message : e})`,
+      );
+    });
+    if (!res.ok) {
+      throw new Error(
+        `could not fetch ${url} (${res.status} ${res.statusText})`,
+      );
+    }
+    text = await res.text();
+    await Deno.mkdir(dirname(cached), { recursive: true });
+    await Deno.writeTextFile(cached, text);
+  }
+  const shas = runtimeShasBySlug(text, v);
+  if (Object.keys(shas).length === 0) {
+    throw new Error(`the checksum list of Electron ${v} names no runtime zip`);
+  }
+  return shas;
+}
+
+/** The SHA-256 an online build pinned for `slug`'s runtime zip, from
+ *  `<distDir>/electron.json` — or null when it pinned none. */
+export async function bakedRuntimeSha(
+  distDir: string | undefined,
+  slug: string,
+): Promise<string | null> {
+  if (!distDir) return null;
+  try {
+    const rec = JSON.parse(
+      await Deno.readTextFile(join(distDir, ELECTRON_VERSION_FILE)),
+    ) as { sha256?: Record<string, unknown> };
+    const v = rec.sha256?.[slug];
+    return typeof v === "string" && /^[0-9a-f]{64}$/.test(v) ? v : null;
+  } catch {
+    return null; // aio-ok: no record — the caller refuses an online start
   }
 }
 
@@ -362,7 +467,10 @@ export async function runtimeLastUsed(
  *  written even when the tree underneath had been deleted out from under the
  *  unpack — after which every launch for the rest of that machine's life said
  *  "cached" and opened nothing. */
-async function runtimeUsable(dir: string, slug: string): Promise<boolean> {
+export async function runtimeUsable(
+  dir: string,
+  slug: string,
+): Promise<boolean> {
   try {
     await Deno.stat(join(dir, STAMP));
   } catch {
@@ -507,6 +615,10 @@ async function readWithProgress(
   log: (msg: string) => void,
   abort: AbortController,
   stallMs: number,
+  onBytes?: (got: number, total: number) => void,
+  /** The CALLER's cancel — never `abort`, which the stall timer fires too and
+   *  whose own message must win then. */
+  cancel?: AbortSignal,
 ): Promise<Uint8Array<ArrayBuffer>> {
   const total = Number(res.headers.get("content-length")) || 0;
   const reader = res.body?.getReader();
@@ -529,13 +641,26 @@ async function readWithProgress(
         );
       }, stallMs);
     });
+  // Aborted from outside (the user closed the progress window): the read in
+  // flight ends now, whatever the server is doing.
+  const aborted = new Promise<never>((_, reject) => {
+    const stop = () => reject(new DOMException("aborted", "AbortError"));
+    if (cancel?.aborted) stop();
+    else cancel?.addEventListener("abort", stop, { once: true });
+  });
+  aborted.catch(() => {}); // only ever raced
   try {
     while (true) {
-      const { done, value } = await Promise.race([reader.read(), stalled()]);
+      const { done, value } = await Promise.race([
+        reader.read(),
+        stalled(),
+        aborted,
+      ]);
       clearTimeout(timer);
       if (done) break;
       chunks.push(value);
       got += value.length;
+      onBytes?.(got, total);
       if (total > 0 && (got * 100) / total >= nextPct) {
         log(
           `  ${label}: ${Math.floor((got * 100) / total)}% ` +
@@ -557,10 +682,17 @@ async function readWithProgress(
   return out;
 }
 
+/** A failure to GET the runtime — the network, the release host, a mirror, a
+ *  stalled or tampered transfer — as opposed to one to install what arrived.
+ *  A person is told "check the connection" for this one only. */
+export class DownloadError extends Error {
+  override name = "DownloadError";
+}
+
 /** Electron's published zip for `version`+`slug`, downloaded and checked
  *  against the release's `SHASUMS256.txt`. Refuses, never warns: these bytes
  *  become the process the app runs as. */
-export async function fetchVerifiedZip(
+async function fetchVerifiedZipInner(
   version: string,
   slug: string,
   opts: {
@@ -570,6 +702,16 @@ export async function fetchVerifiedZip(
     stallMs?: number;
     /** What to say first; the default names a download. */
     announce?: string;
+    /** The SHA-256 the BUILD pinned for this zip (an online build bakes it
+     *  into the binary). When given, it alone decides: the release's
+     *  `SHASUMS256.txt` is not fetched, so a mirror or a network that serves
+     *  a different zip with a matching checksum list cannot pass. */
+    sha256?: string;
+    /** Bytes received so far and the response's length (0 when unknown) —
+     *  what a progress bar draws. */
+    onBytes?: (got: number, total: number) => void;
+    /** Ends the download (the user cancelled it). */
+    signal?: AbortSignal;
   },
 ): Promise<{ bytes: Uint8Array<ArrayBuffer>; sha256: string; name: string }> {
   const { log, mirror } = opts;
@@ -580,6 +722,8 @@ export async function fetchVerifiedZip(
       `downloading runtime ${version} for ${slug} (~100 MB, once per machine)…`,
   );
   const abort = new AbortController();
+  if (opts.signal?.aborted) abort.abort();
+  opts.signal?.addEventListener("abort", () => abort.abort(), { once: true });
   const res = await opts.fetch(url, { signal: abort.signal });
   if (!res.ok) {
     throw new Error(
@@ -597,8 +741,26 @@ export async function fetchVerifiedZip(
     log,
     abort,
     opts.stallMs ?? DOWNLOAD_STALL_MS,
+    opts.onBytes,
+    opts.signal,
   );
 
+  if (opts.sha256) {
+    const got = await sha256Hex(bytes);
+    const pinned = opts.sha256.toLowerCase();
+    if (got !== pinned) {
+      throw new Error(
+        `integrity check FAILED for ${name}: this app's build pinned ` +
+          `${pinned}, the download hashes to ${got}. It is not the ` +
+          `Electron the app was built with — corrupted, or replaced on the ` +
+          `way by a mirror, a proxy or the network. It is NOT being unpacked.`,
+      );
+    }
+    log(
+      `${OK} integrity check passed (${name}, the checksum the build pinned)`,
+    );
+    return { bytes, sha256: got, name };
+  }
   const sumsUrl = electronShasumsUrlFor(version, mirror);
   const sumsRes = await opts.fetch(sumsUrl, {
     signal: AbortSignal.timeout(opts.stallMs ?? DOWNLOAD_STALL_MS),
@@ -632,6 +794,37 @@ export async function fetchVerifiedZip(
   }
   log(`${OK} integrity check passed (${name})`);
   return { bytes, sha256: actual, name };
+}
+
+/** Electron's published zip for `version`+`slug`, downloaded and checked
+ *  against the release's `SHASUMS256.txt`. Every failure is a
+ *  {@linkcode DownloadError}. */
+export async function fetchVerifiedZip(
+  ...a: Parameters<typeof fetchVerifiedZipInner>
+): ReturnType<typeof fetchVerifiedZipInner> {
+  try {
+    return await fetchVerifiedZipInner(...a);
+  } catch (e) {
+    if (e instanceof DownloadError) throw e;
+    // A cancel is the caller's, not the network's: passed through as it is.
+    if (e instanceof DOMException && e.name === "AbortError") throw e;
+    // Since Deno 2.9 a failed fetch is a bare "fetch failed" with the reason
+    // (refused, DNS, TLS) in `e.cause` — the user's Retry / Quit dialog and
+    // the log said only "fetch failed". Name the cause.
+    const msg = e instanceof Error ? e.message : String(e);
+    const c = e instanceof Error ? e.cause : undefined;
+    const why = c instanceof Error
+      ? c.message
+      : c === undefined
+      ? ""
+      : String(c);
+    throw new DownloadError(
+      why && !msg.includes(why) ? `${msg}: ${why}` : msg,
+      {
+        cause: e,
+      },
+    );
+  }
 }
 
 /** A runtime zip carried INSIDE a compiled binary, and its baked checksum. */
@@ -732,6 +925,21 @@ export async function ensureElectronRuntime(
     mirror?: string;
     /** Install from the zip this binary CARRIES instead of the network. */
     embedded?: EmbeddedRuntime;
+    /** Install into THIS directory instead of the cache's — the shared
+     *  runtime store of `"build": { "electronRuntime": "online" }` apps
+     *  (shared-runtime.ts). Always fused, like an embedded runtime. */
+    into?: string;
+    /** Download progress, for a progress bar (see `fetchVerifiedZip`). */
+    onBytes?: (got: number, total: number) => void;
+    /** Ends a download in flight; the stage is removed, nothing installed. */
+    signal?: AbortSignal;
+    /** Runs on the complete, fused stage before it is renamed into place —
+     *  the shared store signs a macOS runtime here (shared-runtime.ts). A
+     *  throw refuses the install, like a failed integrity check. */
+    finish?: (stage: string) => Promise<void>;
+    /** The zip's SHA-256 as the app's build pinned it (see
+     *  `fetchVerifiedZip`'s `sha256`). */
+    sha256?: string;
   } = {},
 ): Promise<string> {
   const log = opts.log ?? ((m: string) => flog.info(m));
@@ -742,14 +950,39 @@ export async function ensureElectronRuntime(
   // A runtime from the zip a self-contained app CARRIES ships with its fuses
   // off (electron-fuses.ts), so it lives apart: an unfused runtime a download
   // or an older app left under the plain name must never stand in for it.
-  const dir = electronRuntimeDir(version, slug) +
-    (opts.embedded ? FUSED_SUFFIX : "");
+  const dir = opts.into ??
+    (electronRuntimeDir(version, slug) + (opts.embedded ? FUSED_SUFFIX : ""));
+  // What a shipped app starts from is fused, whichever way it arrived.
+  const fuse = !!opts.embedded || opts.into !== undefined;
   if (await runtimeUsable(dir, slug)) {
     log(`${OK} runtime ${version} (${slug}) — cached`);
     await touchRuntimeUse(dir);
     return dir;
   }
 
+  // A store that cannot be written says so NOW — not after the lock wait
+  // below, which reads "cannot create the lock" as "someone else holds it"
+  // and blamed a downloader that does not exist, 15 minutes later.
+  {
+    const parent = dirname(dir);
+    try {
+      await Deno.mkdir(parent, { recursive: true });
+      const probe = join(parent, `.aio-write-probe.${stageTag()}`);
+      await Deno.writeTextFile(probe, "");
+      await Deno.remove(probe);
+    } catch (e) {
+      throw new Error(
+        `cannot write to ${parent} (${
+          e instanceof Error ? e.message : e
+        }), so the Electron runtime cannot be installed there. Make it ` +
+          `writable` +
+          (opts.into
+            ? `, or point $AIO_SHARED_ELECTRON_DIR at a folder that is.`
+            : `, or set $XDG_CACHE_HOME to a folder that is.`),
+        { cause: e },
+      );
+    }
+  }
   const waitMs = opts.lockWaitMs ?? LOCK_WAIT_MS;
   return await withRuntimeLock(`${dir}.lock`, async (held) => {
     // Whoever we waited for may have finished it for us.
@@ -777,7 +1010,9 @@ export async function ensureElectronRuntime(
     // unpacks, so people kill it) left its ~250 MB stage behind, named by a
     // pid nobody will ever have again. We hold the lock, so clear them.
     await removeDeadStages(dir);
-    await Deno.remove(stage, { recursive: true }).catch(() => {});
+    await Deno.remove(stage, { recursive: true }).catch(() => {
+      // aio-ok: absent normally; a real failure surfaces in the mkdir
+    });
     await Deno.mkdir(stage, { recursive: true });
     const stopFresh = keepFresh(stage);
     try {
@@ -788,6 +1023,9 @@ export async function ensureElectronRuntime(
           log,
           fetch: doFetch,
           mirror,
+          onBytes: opts.onBytes,
+          signal: opts.signal,
+          sha256: opts.sha256,
           announce: opts.embedded
             ? `unpacking the Electron ${version} this app carries ` +
               `(once per machine)…`
@@ -798,7 +1036,9 @@ export async function ensureElectronRuntime(
       const zip = join(stage, "electron.zip");
       await Deno.writeFile(zip, bytes);
       await unzipInto(zip, stage, opts.warn, slug);
-      await Deno.remove(zip).catch(() => {});
+      await Deno.remove(zip).catch(() => {
+        // aio-ok: a leftover temp folder is all this costs; never the real outcome
+      });
       // The executable has to be there BEFORE the stamp says the tree is good
       // — and WHICH executable is decided by the slug, never by this host: a
       // `win32-x64` runtime holds `electron.exe` however the build machine is
@@ -814,7 +1054,8 @@ export async function ensureElectronRuntime(
           { cause: e },
         );
       }
-      if (opts.embedded) await fuseElectronFile(electronFuseBinary(stage, os));
+      if (fuse) await fuseElectronFile(electronFuseBinary(stage, os));
+      await opts.finish?.(stage);
       await Deno.writeTextFile(
         join(stage, STAMP),
         `${url}\nsha256:${actual}\n`,
@@ -830,14 +1071,18 @@ export async function ensureElectronRuntime(
         await touchRuntimeUse(dir);
         return dir;
       }
-      await Deno.remove(dir, { recursive: true }).catch(() => {});
+      await Deno.remove(dir, { recursive: true }).catch(() => {
+        // aio-ok: absent normally; a real failure surfaces in the rename
+      });
       await renameWithRetry(stage, dir);
       log(`${OK} runtime ${version} (${slug}) ready`);
       await touchRuntimeUse(dir);
       return dir;
     } finally {
       stopFresh();
-      await Deno.remove(stage, { recursive: true }).catch(() => {});
+      await Deno.remove(stage, { recursive: true }).catch(() => {
+        // aio-ok: a leftover temp folder is all this costs; never the real outcome
+      });
     }
   }, waitMs);
 }

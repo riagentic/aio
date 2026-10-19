@@ -248,6 +248,14 @@ export function pinTarget(
   };
 }
 
+/** The tag a typed ref names: `1.0.20-beta` is `v1.0.20-beta` when that is a
+ *  known tag and the bare name is not (a field report — the upgrade guides wrote
+ *  it bare, and the refusal listed the right tag itself). Any other ref is
+ *  itself, so an unknown name still fails loudly at provisioning. Pure. */
+export function tagForRef(ref: string, known: readonly string[]): string {
+  return !known.includes(ref) && known.includes(`v${ref}`) ? `v${ref}` : ref;
+}
+
 /** One reason a target version would break this app. */
 export interface Blocker {
   where: string; // file:line, relative to the app
@@ -484,7 +492,7 @@ export async function cmdPin(
         `(git-ignored), deno.json untouched. Return to a release with ` +
         `"am pin latest".`,
     );
-  }
+  } else if (ref !== "") ref = tagForRef(ref, await knownTags(root));
   if (wantLatest) {
     // "Latest" means latest WITHIN THE APP'S MAJOR. Crossing a major is a
     // breaking upgrade and has to be asked for — a command called `--latest`

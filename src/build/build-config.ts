@@ -8,7 +8,7 @@ import { BUNDLE_JS, DIST_DIR, UI_ENTRY } from "../server/app-files.ts";
 import { dirname, join, resolve, SEPARATOR } from "@std/path";
 import { slugify } from "./build-helpers.ts";
 import { bad, step, warn } from "./build-say.ts";
-import { NO } from "../diagnostics/fmt.ts";
+import { HEY, NO } from "../diagnostics/fmt.ts";
 import {
   type BuildVersion,
   buildVersionFor,
@@ -61,6 +61,31 @@ export function resolveWindowsShortcut(
     );
   }
   return shortcut !== false;
+}
+
+/** How a desktop package gets its Electron — see `BuildConfig.electronRuntime`. */
+export type ElectronRuntimeMode = "offline" | "online";
+
+/** `build.electronRuntime`, or why it is refused. Absent → `"offline"` (what
+ *  every build did before the key existed; `am create` writes `"online"` into
+ *  a new app). Pure. A value that is neither is REFUSED in every build, not
+ *  only an Electron one: the setting decides whether the package carries
+ *  ~250 MB, and a typo that quietly meant "offline" would ship the size the
+ *  app chose not to. */
+export function resolveElectronRuntime(
+  mainConfig: { build?: unknown },
+): { mode: ElectronRuntimeMode } | { error: string } {
+  const v = (mainConfig.build as { electronRuntime?: unknown } | undefined)
+    ?.electronRuntime;
+  if (v === undefined || v === "offline") return { mode: "offline" };
+  if (v === "online") return { mode: "online" };
+  return {
+    error: `deno.json build.electronRuntime is ${JSON.stringify(v)} — it ` +
+      `must be "online" (the package carries no Electron; the app downloads ` +
+      `it once into the per-user store every aio app shares, on first ` +
+      `start) or "offline" (the default: the package carries its Electron ` +
+      `and opens with no internet).`,
+  };
 }
 
 /** What to say about a `build.chromiumExtras` that is neither "keep" nor
@@ -214,7 +239,9 @@ export interface BuildConfig {
    *  to. Null when the app declares none (see `bakedServerUrl`). */
   bakedServer: string | null;
   /** deno.json `build.strictPin` — the packaged Electron client refuses a
-   *  paired host whose certificate changed (see `electronClientScript`). */
+   *  paired host whose certificate changed (see `electronClientScript`); the
+   *  Android/iOS connect page never sends a key over plain http to another
+   *  machine (see `_writeConnectPage`). */
   strictPin: boolean;
 
   // App identity
@@ -229,6 +256,12 @@ export interface BuildConfig {
    *  installs the app. On unless deno.json says
    *  `build.windows.shortcut: false`. */
   windowsShortcut: boolean;
+  /** How a desktop package gets its Electron: `"offline"` carries it (the
+   *  default), `"online"` carries none and starts from the per-user store of
+   *  shared runtimes (`electron/shared-runtime.ts`). deno.json
+   *  `build.electronRuntime`. Optional so a config built by hand (tests)
+   *  means the default. */
+  electronRuntime?: ElectronRuntimeMode;
   /** The macOS bundle identifier (`CFBundleIdentifier`) — the app's permanent
    *  OS-level identity, shown as the Dock entry's reverse-DNS name and used by
    *  macOS to merge the Deno server and its Electron child into ONE app.
@@ -473,6 +506,11 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
   // "refused" — the same rule `android.applicationId` follows.
   const macBundleId = resolveMacBundleId(mainConfig, binaryName);
   const windowsShortcut = resolveWindowsShortcut(mainConfig);
+  const runtimeDecl = resolveElectronRuntime(mainConfig);
+  if ("error" in runtimeDecl) {
+    console.error(`${NO} ${runtimeDecl.error}`);
+    Deno.exit(1);
+  }
   const extrasNote = chromiumExtrasNote(mainConfig, doElectron);
   if (extrasNote) warn(extrasNote);
   // THE app version. The fleet resolves it once and hands it down
@@ -607,6 +645,23 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
       Deno.exit(1);
     }
   }
+  // …and its release keys (`keystore`, `keyAlias`, `aab` — and a password,
+  // which is never read and warned about): the same rule, the same decider
+  // (`_androidRelease`).
+  const androidBuild = (mainConfig.build as { android?: unknown } | undefined)
+    ?.android;
+  if (
+    androidBuild && typeof androidBuild === "object" &&
+    Object.keys(androidBuild).some((k) => k !== "strict")
+  ) {
+    const { _androidRelease } = await import("./build-android.ts");
+    const release = _androidRelease(mainConfig);
+    if ("problem" in release) {
+      console.error(`${NO} ${release.problem}`);
+      Deno.exit(1);
+    }
+    if (release.secretWarning) console.warn(`${HEY} ${release.secretWarning}`);
+  }
   const androidDevUrl = Deno.args.find((a) =>
     a.startsWith("--android-dev-url=")
   )?.slice("--android-dev-url=".length);
@@ -690,6 +745,7 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
     appTitle,
     macosHost,
     windowsShortcut,
+    electronRuntime: runtimeDecl.mode,
     macBundleId,
     version,
     configEntry,

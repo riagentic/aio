@@ -20,7 +20,7 @@ import {
 } from "./shutdown-budget.ts";
 import { log as rootLog } from "../diagnostics/logger-api.ts";
 import { pruneLockDir } from "./single-instance-lock.ts";
-import { count } from "../diagnostics/fmt.ts";
+import { count, describeThrown } from "../diagnostics/fmt.ts";
 
 /** How long everything AFTER the drain gets, IN TOTAL — persist, diagnostics,
  *  the user's `onStop`, the lock, the server and the databases share this one
@@ -323,6 +323,31 @@ export function stopProcess(code = 0, reason?: string): Promise<never> {
   const started = Date.now();
   let done = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  // A stray error WHILE stopping (an `onStop` that leaves a rejection or a
+  // throwing timer — the crash handler is gone after Phase 3) took Deno's
+  // default exit 1 mid-teardown: the remaining phases never ran, and a stop
+  // that chose 143 (`AIO_STOP_STAYS_DOWN=1`) came back under
+  // `Restart=always`. It is logged, the teardown finishes, and the exit code
+  // is the stop's own — a stop that chose 0 still reports 1, as before.
+  let stray = false;
+  const onStray = (e: Event) => {
+    e.preventDefault();
+    stray = true;
+    const err = (e as PromiseRejectionEvent).reason ??
+      (e as ErrorEvent).error ?? (e as ErrorEvent).message;
+    rootLog.error(
+      `shutdown: ${e.type} while stopping — ${describeThrown(err)}`,
+    );
+  };
+  globalThis.addEventListener("unhandledrejection", onStray);
+  globalThis.addEventListener("error", onStray);
+  const exit = (exitCode: number) => {
+    done = true;
+    if (timer !== undefined) clearTimeout(timer);
+    globalThis.removeEventListener("unhandledrejection", onStray);
+    globalThis.removeEventListener("error", onStray);
+    return _exitFn(exitCode);
+  };
   try {
     timer = setTimeout(() => {
       if (done) return;
@@ -335,7 +360,7 @@ export function stopProcess(code = 0, reason?: string): Promise<never> {
           `unref'd. Data written before this line is safe; anything after it ` +
           `is not. Report it with the lines above.`,
       );
-      _exitFn(code === 0 ? 75 : code);
+      exit(code === 0 ? 75 : code);
     }, _watchdogMs);
     // Never the reason a finished process stays alive.
     (Deno as { unrefTimer?: (id: unknown) => void }).unrefTimer?.(timer);
@@ -345,16 +370,12 @@ export function stopProcess(code = 0, reason?: string): Promise<never> {
   }
   _exiting = shutdownAllRuntimes().then(
     () => {
-      done = true;
-      if (timer !== undefined) clearTimeout(timer);
       rootLog.debug(`shutdown: complete in ${Date.now() - started}ms`);
-      return _exitFn(code);
+      return exit(code === 0 && stray ? 1 : code);
     },
     (e) => {
-      done = true;
-      if (timer !== undefined) clearTimeout(timer);
       rootLog.error(`shutdown: failed — ${e}`);
-      return _exitFn(code === 0 ? 1 : code);
+      return exit(code === 0 ? 1 : code);
     },
   );
   return _exiting;

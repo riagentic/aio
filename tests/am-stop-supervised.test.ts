@@ -35,6 +35,8 @@ Deno.test("control-door stop: the exit-code table", () => {
 async function stopThroughDoor(
   supervised: boolean,
   staysDown = false,
+  /** Extra `aio.run` options, spliced in as source. */
+  extra = "",
 ): Promise<number> {
   const dir = await tempDir("stop-sup-");
   try {
@@ -44,7 +46,7 @@ async function stopThroughDoor(
       join(dir, "app.ts"),
       `import { aio, cell } from ${JSON.stringify(MOD)};
 const c = cell("c", { state: { n: 0 }, methods: { inc(s) { s.n++; } } });
-await aio.run({ appId: "stopsup", cells: [c] });
+await aio.run({ appId: "stopsup", cells: [c]${extra} });
 `,
     );
     const env: Record<string, string> = {
@@ -134,4 +136,20 @@ Deno.test("am stop under AIO_SUPERVISED=1 with AIO_STOP_STAYS_DOWN=1 exits 143 �
 
 Deno.test("am stop with no supervisor still exits 0", async () => {
   assertEquals(await stopThroughDoor(false), 0);
+});
+
+// A stray error WHILE stopping — an `onStop` that leaves a rejection or a
+// timer that throws, after the crash handler is uninstalled in Phase 3 — went
+// to Deno's default: exit 1. Under `Restart=always` with
+// `RestartPreventExitStatus=143`, that brought back the app `am stop` was told
+// would stay down, and cut the remaining phases short. The stop's own exit
+// code stands (a stray error is logged); a stop that chose 0 still reports 1.
+Deno.test("AIO_STOP_STAYS_DOWN=1: a stray rejection or throw during the stop keeps exit 143; without it the stop still exits 1", async () => {
+  const reject = `, onStop() { Promise.reject(new Error("late-reject")); }`;
+  const thrown =
+    `, onStop() { setTimeout(() => { throw new Error("late-throw"); }, 0); ` +
+    `return new Promise((r) => setTimeout(r, 50)); }`;
+  assertEquals(await stopThroughDoor(true, true, reject), STOP_EXIT_CODE);
+  assertEquals(await stopThroughDoor(true, true, thrown), STOP_EXIT_CODE);
+  assertEquals(await stopThroughDoor(true, false, reject), 1);
 });

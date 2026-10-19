@@ -6,6 +6,7 @@ import {
   gradlewPath,
   resolveSdk,
   slugify,
+  symlinkRefusal,
   writeDefaultIcon,
 } from "../src/build/build-helpers.ts";
 import { join } from "@std/path";
@@ -336,4 +337,22 @@ Deno.test("resolveSdk: the default location on a Windows host hangs off USERPROF
   } finally {
     await dropTempDir(home);
   }
+});
+
+// A macOS bundle built on Windows without Developer Mode or elevation: the
+// refusal was a bare "A required privilege is not held by the client. (os
+// error 1314): symlink …" (measured, Windows 11). It says what to do.
+Deno.test("symlinkRefusal: Windows' privilege refusal names Developer Mode and an elevated shell; anything else is left as it was", () => {
+  const refused = new Deno.errors.PermissionDenied(
+    "A required privilege is not held by the client. (os error 1314): symlink",
+  );
+  const said = symlinkRefusal(refused, "L", "T", "windows") as Error;
+  assert(said instanceof Error && said !== refused);
+  assert(said.message.includes("Developer Mode"), said.message);
+  assert(said.message.includes("elevated"), said.message);
+  assert(said.message.includes("L → T"), said.message);
+  assertEquals(said.cause, refused);
+  assertEquals(symlinkRefusal(refused, "L", "T", "linux"), refused);
+  const other = new Deno.errors.NotFound("x");
+  assertEquals(symlinkRefusal(other, "L", "T", "windows"), other);
 });

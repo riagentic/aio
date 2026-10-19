@@ -29,6 +29,7 @@ import {
   triggerSetChecked,
 } from "./ui-trigger.ts";
 import { count } from "../diagnostics/fmt.ts";
+import { _containedErrorSink, _setContainedErrorSink } from "./hook-error.ts";
 
 /** A trigger request from the server (a "ui-trigger" frame payload). */
 export type UITriggerRequest = {
@@ -264,8 +265,54 @@ function windowTarget(): any | null {
 
 /** Execute a trigger request against the live surface — same event sequences
  *  as `testUI` (shared `ui-trigger`), re-resolving between typed characters so
- *  controlled inputs behave. Resolves after the app had time to re-render. */
-export async function runUITrigger(
+ *  controlled inputs behave. Resolves after the app had time to re-render.
+ *
+ *  A handler (or hook) that throws is CONTAINED — the page keeps rendering —
+ *  so the reply said `ok: true` over a TypeError in the app's onClick. The
+ *  throw is the answer: `ok: false`, named, the surface still attached.
+ *  testUI fails on the same throw. */
+export function runUITrigger(
+  req: UITriggerRequest,
+): Promise<UITriggerResult> {
+  // One at a time: triggers to one page can overlap (the server supersedes
+  // or times one out and sends the next), and a throw is attributed by the
+  // sink in place while it runs — swapped per trigger, overlapping ones
+  // restored the wrong sink and named each other's throws.
+  const run = _triggerChain.then(() => _runCollectingThrows(req));
+  _triggerChain = run.then(() => {}, () => {});
+  return run;
+}
+
+let _triggerChain: Promise<void> = Promise.resolve();
+
+async function _runCollectingThrows(
+  req: UITriggerRequest,
+): Promise<UITriggerResult> {
+  const thrown: string[] = [];
+  const prev = _containedErrorSink();
+  _setContainedErrorSink((kind, e, component) => {
+    thrown.push(
+      `${kind}${component ? ` in <${component}>` : ""} threw: ${
+        e instanceof Error ? e.message : String(e)
+      }`,
+    );
+    prev?.(kind, e, component);
+  });
+  try {
+    const r = await _runUITrigger(req);
+    return r.ok && thrown.length > 0
+      ? {
+        ...r,
+        ok: false,
+        error: `the ${r.action} was delivered, but ${thrown.join("; ")}`,
+      }
+      : r;
+  } finally {
+    _setContainedErrorSink(prev);
+  }
+}
+
+async function _runUITrigger(
   req: UITriggerRequest,
 ): Promise<UITriggerResult> {
   const base = { path: req.path, action: req.action };

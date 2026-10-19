@@ -393,7 +393,9 @@ function workerSites(
       if (url) sites.push({ index: m.index, spec: "", kind: "computed" });
       continue;
     }
-    const spec = lit[2]!;
+    // The script is the path: a query or hash (`./w.ts?v=1`) stays on the
+    // URL (`rewriteWorkers` keeps it), and never hides the extension.
+    const spec = lit[2]!.replace(/[?#].*$/s, "");
     // A remote or in-memory URL is not a file of this app.
     if (/^(?:https?:|blob:|data:)/.test(spec)) continue;
     const meta = url ? sticky(WORKER_META_RE, at + lit[0].length) : null;
@@ -473,7 +475,11 @@ export function rewriteWorkers(
   const entries = workerEntries(code, file);
   let out = code;
   for (const e of entries.reverse()) {
-    out = out.slice(0, e.start) + to(e) + out.slice(e.end);
+    const url = to(e);
+    // The literal's own query joins one `url` already carries.
+    const amp = url !== e.spec && url.includes("?") && code[e.end] === "?";
+    out = out.slice(0, e.start) + url + (amp ? "&" : "") +
+      out.slice(amp ? e.end + 1 : e.end);
   }
   return out;
 }
@@ -512,20 +518,35 @@ export function servedWorkers(code: string, file: string): ServedWorker[] {
 const IMPORT_SCRIPTS_RE =
   /\bimportScripts\s*\(\s*(['"`])(\.\.?\/[^'"`$\n]*)\1/g;
 
-/** The first RELATIVE literal a worker's script hands `importScripts` in
+/** The first RELATIVE literal a worker's script — or a module it imports by
+ *  a relative path: bundled, they are one script — hands `importScripts` in
  *  real code (never one in a comment or a string); `undefined` when there is
  *  none or the script cannot be read. */
-function relativeImportScripts(abs: string): string | undefined {
+function relativeImportScripts(
+  abs: string,
+  seen = new Set<string>(),
+): string | undefined {
+  if (seen.has(abs)) return undefined;
+  seen.add(abs);
   let code: string;
   try {
     code = Deno.readTextFileSync(abs);
   } catch {
     return undefined; // aio-ok: unreadable — the bundler names that itself
   }
-  if (!code.includes("importScripts")) return undefined;
-  const mask = codeMask(code, /x$/i.test(abs));
-  for (const m of code.matchAll(IMPORT_SCRIPTS_RE)) {
-    if (mask[m.index]) return m[2];
+  if (code.includes("importScripts")) {
+    const mask = codeMask(code, /x$/i.test(abs));
+    for (const m of code.matchAll(IMPORT_SCRIPTS_RE)) {
+      if (mask[m.index]) return m[2];
+    }
+  }
+  for (const { spec } of scanImports(code)) {
+    if (!/^\.\.?\//.test(spec)) continue;
+    const found = relativeImportScripts(
+      resolve(hostPath.dirname(abs), spec),
+      seen,
+    );
+    if (found) return found;
   }
   return undefined;
 }

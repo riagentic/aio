@@ -4,6 +4,7 @@ import { notifyMethodCancel } from "./method-cancel.ts";
 import { isDevMode } from "./dev-flag.ts";
 import { isFrozenWriteError } from "./immutable.ts";
 import { recordRejection } from "./rejection-tracker.ts";
+import { RefusedWrite } from "./method-rejection.ts";
 import {
   current,
   type Draft,
@@ -279,7 +280,7 @@ function refuseValidation(
   // action: the handler reads it after an await, and a global slot would be
   // cleared or overwritten by any dispatch that interleaves.
   recordRejection(action, { cell: cellName, reason: String(result) });
-  if (ctx.refusalsReject) throw new Error(reason);
+  if (ctx.refusalsReject) throw new RefusedWrite(reason);
   if (isDevMode()) _warnSwallowedRefusal(action.type, reason);
   return { state: fullState, effects: [], refusal: reason };
 }
@@ -871,7 +872,7 @@ export function buildRootReducer(
           // sync call has no _callId to reject through, so under
           // refusalsReject it resolved as if applied while the async twin
           // rejected — a dropped write, reported as success.
-          if (ctx.refusalsReject) throw new Error(ownerRefusal);
+          if (ctx.refusalsReject) throw new RefusedWrite(ownerRefusal);
           if (isDevMode()) _warnSwallowedRefusal(action.type, ownerRefusal);
         } else if (owner) {
           // A cell's reducer only ever handles its OWN action types by prefix

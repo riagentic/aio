@@ -54,7 +54,7 @@ import { fromFileUrl } from "@std/path";
 // fixes (ratcheted to the measured count).
 // 308 → 306 measured when the bug-class ratchets (check-proto-in and
 // friends) joined check:ratchets: the round's fixes had already removed two.
-const CEILING = 294;
+const CEILING = 290;
 
 /** The budget for the PROMISE spelling, counted separately.
  *
@@ -64,7 +64,7 @@ const CEILING = 294;
 // 74 → 73 when the dev server's close stopped awaiting the boot's graph
 // validation behind a `.catch(() => {})`: the stop that waits for it is the
 // bounded one, and it reports what it gives up on.
-const HANDLER_CEILING = 68;
+const HANDLER_CEILING = 67;
 
 const ROOT = fromFileUrl(new URL("../src/", import.meta.url));
 

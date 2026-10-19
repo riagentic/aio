@@ -1006,6 +1006,25 @@ Deno.test("am publish: Windows electron's exe + zip: the exe is the platform's u
     ) as { target: string };
     assertEquals(distWin.target, "binary");
     await Deno.stat(join(dir, "release", "test", "notes-win-x64.zip"));
+    // …and the human summary names the zip's manifest as where every zip
+    // install — the one-click .exe's included — updates from.
+    const real = Deno.stdout.isTerminal;
+    Deno.stdout.isTerminal = () => true;
+    try {
+      const human = (await withHome(() =>
+        capture(() =>
+          cmdPublish(["--no-build", "--dir=release2", "--channel=test"], {})
+        )
+      )).join("\n").replace(/\s+/g, " ");
+      assertStringIncludes(
+        human,
+        "zip installs update from windows-x86_64.electron-zip.json (an " +
+          "install made by the one-click .exe is a zip install too) — a zip " +
+          "install running aio older than 1.0.13-beta",
+      );
+    } finally {
+      Deno.stdout.isTerminal = real;
+    }
   } finally {
     Deno.chdir(orig);
     await dropTempDir(dir);

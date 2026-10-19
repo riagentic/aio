@@ -127,25 +127,26 @@ nothing is silently overwritten.
 The whole deno.json `build` block. A key that is not in this table is named in a
 build warning (`deno.json build block: aio never reads …`) and does nothing.
 
-| Key              | Value                                               | Default          | What it decides                                                                                                                                  |
-| ---------------- | --------------------------------------------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `targets`        | list of target names, or `{ label: { … } }` (below) | —                | what `deno task build` builds                                                                                                                    |
-| `platforms`      | list of platform names                              | `["host"]`       | which OS/CPU each target is built for — [platforms](#build-for-other-operating-systems----platforms)                                             |
-| `out`            | directory                                           | `"dist"`         | where the artifacts land                                                                                                                         |
-| `server`         | `host:port` or a URL                                | none             | the address baked into client artifacts — [build.server](#buildserver--the-address-a-shipped-client-starts-with)                                 |
-| `strictPin`      | `true`                                              | `false`          | the packaged Electron client refuses a paired host whose certificate changed — [Electron client](../clients/electron.md)                         |
-| `ui`             | path, relative to the app dir                       | `App.tsx`        | the component every target bundles                                                                                                               |
-| `css`            | command string, or an argv list                     | none             | the app's own CSS step — [CSS toolchain](../ui/css-toolchain.md)                                                                                 |
-| `channel`        | a channel name: `"dev"`, `"test"`, `"prod"`, …      | `"prod"`         | the release channel a build is stamped with — [updates](../deploy/updates.md#channels)                                                           |
-| `v8Flags`        | list of `--…` flags                                 | none             | V8 flags of a compiled binary — [memory](#memory-buildv8flags)                                                                                   |
-| `keepPackages`   | list of npm package names                           | none             | packages the dev-only exclusion must leave in — [keepPackages](#keep-a-build-only-package-buildkeeppackages)                                     |
-| `minify`         | `true` \| `false`                                   | `true`           | minify the embedded server modules — [minify](#hide-the-server-source-buildminify-on-by-default)                                                 |
-| `chromiumExtras` | `"keep"` \| `"strip"`                               | `"keep"`         | drop Chromium's optional graphics libraries — [extras](#optional-chromium-extras-buildchromiumextras)                                            |
-| `guestPreloads`  | list of file paths, relative to deno.json           | none             | `<webview>` preloads an Electron package ships — [guest preloads](#webview-guest-preloads-buildguestpreloads)                                    |
-| `smoke`          | `true` \| `"desktop"` \| `"strict"`                 | off              | start each built artifact and fail the build when it does not come up — [smoke](#start-what-you-built---smoke)                                   |
-| `windows`        | `{ "shortcut": true \| false }`                     | `shortcut: true` | whether the one-click `.exe` adds a Start-menu shortcut — [electron](#electron-desktop-app)                                                      |
-| `macos`          | `{ "bundleId": "…", "host": "[user@]mac" }`         | `app.aio.<name>` | the bundle identifier, and the Mac that packs the `.dmg` — [macOS](#macos-the-app-and-the-dmg)                                                   |
-| `android`        | `{ "strict": true }`                                | `strict: false`  | an `android/` overlay that drops part of the template's activity fails the build — [native code](#adding-native-android-code-the-android-folder) |
+| Key               | Value                                               | Default                                     | What it decides                                                                                                                                                                                                          |
+| ----------------- | --------------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `targets`         | list of target names, or `{ label: { … } }` (below) | —                                           | what `deno task build` builds                                                                                                                                                                                            |
+| `platforms`       | list of platform names                              | `["host"]`                                  | which OS/CPU each target is built for — [platforms](#build-for-other-operating-systems----platforms)                                                                                                                     |
+| `out`             | directory                                           | `"dist"`                                    | where the artifacts land                                                                                                                                                                                                 |
+| `server`          | `host:port` or a URL                                | none                                        | the address baked into client artifacts — [build.server](#buildserver--the-address-a-shipped-client-starts-with)                                                                                                         |
+| `strictPin`       | `true`                                              | `false`                                     | the packaged Electron client refuses a paired host whose certificate changed — [Electron client](../clients/electron.md); the Android client never sends a key over plain http (below)                                   |
+| `ui`              | path, relative to the app dir                       | `App.tsx`                                   | the component every target bundles                                                                                                                                                                                       |
+| `css`             | command string, or an argv list                     | none                                        | the app's own CSS step — [CSS toolchain](../ui/css-toolchain.md)                                                                                                                                                         |
+| `channel`         | a channel name: `"dev"`, `"test"`, `"prod"`, …      | `"prod"`                                    | the release channel a build is stamped with — [updates](../deploy/updates.md#channels)                                                                                                                                   |
+| `v8Flags`         | list of `--…` flags                                 | none                                        | V8 flags of a compiled binary — [memory](#memory-buildv8flags)                                                                                                                                                           |
+| `keepPackages`    | list of npm package names                           | none                                        | packages the dev-only exclusion must leave in — [keepPackages](#keep-a-build-only-package-buildkeeppackages)                                                                                                             |
+| `minify`          | `true` \| `false`                                   | `true`                                      | minify the embedded server modules — [minify](#hide-the-server-source-buildminify-on-by-default)                                                                                                                         |
+| `chromiumExtras`  | `"keep"` \| `"strip"`                               | `"keep"`                                    | drop Chromium's optional graphics libraries — [extras](#optional-chromium-extras-buildchromiumextras)                                                                                                                    |
+| `guestPreloads`   | list of file paths, relative to deno.json           | none                                        | `<webview>` preloads an Electron package ships — [guest preloads](#webview-guest-preloads-buildguestpreloads)                                                                                                            |
+| `smoke`           | `true` \| `"desktop"` \| `"strict"`                 | off                                         | start each built artifact and fail the build when it does not come up — [smoke](#start-what-you-built---smoke)                                                                                                           |
+| `electronRuntime` | `"online"` \| `"offline"`                           | `"offline"` (`am create` writes `"online"`) | a desktop package downloads its Electron once into a per-user store every online app starts from, or carries its own — [shared runtime](#shared-electron-runtime-buildelectronruntime)                                   |
+| `windows`         | `{ "shortcut": true \| false }`                     | `shortcut: true`                            | whether the one-click `.exe` adds a Start-menu shortcut — [electron](#electron-desktop-app)                                                                                                                              |
+| `macos`           | `{ "bundleId": "…", "host": "[user@]mac" }`         | `app.aio.<name>`                            | the bundle identifier, and the Mac that packs the `.dmg` — [macOS](#macos-the-app-and-the-dmg)                                                                                                                           |
+| `android`         | `{ "strict": true }`                                | `strict: false`                             | an `android/` overlay that drops part of the template's activity fails the build — [native code](#adding-native-android-code-the-android-folder); `keystore`, `keyAlias`, `aab` — [signing](#signing-a-release-apk--aab) |
 
 A target in the object form of `targets` takes `kind`, `entry`, `ui`, `name`,
 `title` and `platforms`.
@@ -179,9 +180,16 @@ dist/
   entry follows it, including the app dir (`dirname(entry)`) that the bundler
   reads `App.tsx`, `style.css` and `icon.png` from.
 - **`name`** — this target's binary/APK name (the file names, `notes-pro-…`, the
-  macOS bundle id `app.aio.<slug>`, the systemd `Description=`), overriding
-  `title`. Two different apps must not share one name; without it they collide
-  and the second is suffixed as if it were another build of the first.
+  macOS bundle id `app.aio.<slug>`, the Android applicationId `app.aio.<slug>`,
+  the systemd `Description=`), overriding `title`. Two different apps must not
+  share one name; without it they collide and the second is suffixed as if it
+  were another build of the first. ⚠ On Android a new name is a new
+  applicationId — a SECOND app on the phone, the installed one keeping its data.
+  Pin `"android": { "applicationId": "…" }` in deno.json before renaming a
+  shipped APK; the build warns when the derived id differs from the last build's
+  (`dist/manifest.json` records it as `applicationId`; a dev APK,
+  `--android-dev-url`, is recorded as `dev: true` and never compared with a
+  release one).
 - **`title`** — this target's display name: what a person sees — the macOS
   `.app` and DMG volume, the Linux `.desktop` `Name=`, the Windows README, the
   generated icon monogram, the Android label — overriding deno.json `title`.
@@ -217,10 +225,10 @@ target freely and name its `kind`:
 }
 ```
 
-`name` renames the **artifact** (files, display name, macOS bundle id), not the
-running app. A compiled binary takes its RUNTIME identity (its lock, its data
-directory) and its window title from the project's deno.json, which every target
-embeds — so give each entry its own:
+`name` renames the **artifact** (files, display name, macOS bundle id, Android
+applicationId), not the running app. A compiled binary takes its RUNTIME
+identity (its lock, its data directory) and its window title from the project's
+deno.json, which every target embeds — so give each entry its own:
 
 ```ts
 // src/agent/app.ts
@@ -602,6 +610,11 @@ the something was unshippable and looked fine.
 units, and `manifest.json`. Flat — no nested directories. The build's own
 scaffolding (the AppImage `AppDir`, the generated Gradle project) lives in
 `.aio/build/`, where it is kept between runs so Gradle stays incremental.
+Anything else in `dist/` (a file an app's own task wrote there) is removed by
+the next build, and the summary names it:
+`⚠ dist/ is rebuilt clean on every build — it removed 1 entry no build put
+there: export`
+— write such files outside `dist/`.
 
 File modes: everything INSIDE a package — the `.dmg`, the `.app.tar.gz`, a zip,
 an AppImage, the Windows exe's payload, the `<bin>-web/` folder, the iOS project
@@ -1103,6 +1116,13 @@ stays out unless you name it too, and the warning above says so with the line to
 add — `"keepPackages": ["tsx", "esbuild"]`. On the machine that builds, a binary
 that cannot start is refused; a cross-built one is not run, so read the warning.
 
+**`esbuild` kept in a Windows binary**: Windows Defender has refused such a
+binary at start as `Trojan:Win32/Cloxer` (a cloud verdict on a new file — most
+builds, not all; a binary without esbuild was never flagged). The build warns
+when a Windows binary embeds a kept esbuild. Keep it only if the app runs
+esbuild while it runs; then sign the binary with a code-signing certificate, or
+report the false positive to Microsoft.
+
 A name in `keepPackages` also exempts that package from the source-map / docs /
 test-fixture trim described above. Only the named package: the packages kept
 because it needs them are trimmed like any other embedded package.
@@ -1366,6 +1386,127 @@ has a workflow that does. `deno task ship github --channel=prod` writes one
 (`.github/workflows/release.yml`: Linux, macOS and Windows runners, on a `v*`
 tag) — see [signing](../deploy/signing.md); [CI](ci.md) has the plain matrix.
 
+### Shared Electron runtime: `build.electronRuntime`
+
+```jsonc
+// deno.json
+{ "build": { "targets": ["electron"], "electronRuntime": "online" } }
+```
+
+- **`"online"`** — what `am create` writes into a new app. The package carries
+  no Electron: it is the app alone (~75% smaller), and on its first start the
+  app downloads the Electron its build pinned into one **per-user store** that
+  every online app on the machine starts from. An update downloads only the app.
+- **`"offline"`** — the package carries its own Electron and opens with no
+  internet. It is what an app with no `electronRuntime` gets, as every app built
+  before the key did. Its Electron is not shared: it is trimmed for that one app
+  (unused translations, optional GPU files, on macOS its name and icon), so it
+  is not a copy another app could start from.
+
+| OS      | The store                                         |
+| ------- | ------------------------------------------------- |
+| Linux   | `~/.local/share/aio/electron/` (`$XDG_DATA_HOME`) |
+| macOS   | `~/Library/Application Support/aio/electron/`     |
+| Windows | `%LOCALAPPDATA%\aio\electron\` (never roams)      |
+
+`$AIO_SHARED_ELECTRON_DIR` moves it. It is app data, not a cache: an app cannot
+open without it, so nothing deletes from it on its own.
+
+**The Electron it downloads is the one the app was built with — byte for byte.**
+The build reads Electron's published `SHASUMS256.txt` once, on the build machine
+(over HTTPS from Electron's GitHub release, or from the developer's own
+`$ELECTRON_MIRROR`; kept in the tool cache for later builds), and writes each
+platform's SHA-256 into the app's binary. On the user's machine the download
+must hash to that number; nothing the network sends decides it, so a mirror, a
+proxy or a man in the middle that serves a different zip — even with a matching
+checksum list — is refused, nothing is unpacked, and the user is asked Retry /
+Quit. An update fetches the new version's Electron against the number the NEW
+build carries. A build that cannot get the list fails, never ships unpinned.
+
+**Shared: the program files. Never shared: anything an app writes.** The store
+holds Electron's files (and on macOS each app's window, stamped with that app's
+name), and one record per app saying which Electron it needs — nothing else.
+Each app runs its own Electron process, with its own Chromium profile (cookies,
+Local Storage, IndexedDB, cache) in the app's own home, `~/.<appId>/electron/`
+on every OS — exactly as when the package carried Electron. Two instances of one
+app with different data homes get two profiles. The app's own data (`state.db`,
+logs) stays beside it, in the same home. The store is the user's own (other
+users of the machine have their own), so one app can read no other app's files
+through it.
+
+**What a user sees.**
+
+- **Electron is already in the store** (another app put it there, or this one
+  did before): the app opens as fast as a bundled one. Nothing is shown.
+- **It is not**: a window named after the app says _Resolving dependencies_ with
+  a progress bar while Electron (~110–130 MB) downloads, is checked against the
+  release's `SHASUMS256.txt`, and unpacks; then the app opens. Closing that
+  window cancels the start — nothing is installed, and the next start downloads
+  again.
+- **The download fails** (offline, a proxy): a dialog names the reason and
+  offers **Retry** or **Quit** (Windows' own box labels Quit **Cancel**). A
+  store that cannot be written (a read-only or full disk) says so at once, with
+  the folder's name, before anything is downloaded. Started with no desktop (a
+  service, ssh) there is nothing to ask on: the reason is logged and the start
+  ends.
+- **Two apps start at once** without it: one downloads, the other waits for that
+  download instead of making a second one. Closing either window ends that start
+  at once.
+
+The window is drawn with what each OS has: Windows Forms (PowerShell) on
+Windows, a Cocoa window (`osascript`) on macOS, `zenity` or `yad` on Linux — and
+with neither, a page in the default browser. A window that cannot be shown at
+all (no interactive desktop, a browser that does not open) is not a cancel: the
+download goes on and the log carries the progress. If the app dies while the
+window is up, the window closes itself within half a minute. `$AIO_DIALOG=none`
+turns it off (log only).
+
+**Updates.** A shared-runtime update downloads only the app. When the new
+version pins a different Electron, the updater fetches that Electron into the
+store **before** it installs the update, while the running version still works —
+so the new version never waits on a download at its first start, and a download
+that fails leaves the update not installed. The old Electron stays: the rollback
+copy starts from it. The updater asks the new build which Electron it needs
+(`--aio-electron-runtime`); a build that cannot answer refuses the update rather
+than being guessed at.
+
+**Cleaning up.** Every start, and every update before its swap, records which
+Electron the installed app needs (`<store>/apps/`, one record per app and
+Electron version; each app keeps its newest two — the one it runs and the one
+before or after it). [`am prune`](../clients/app-manager.md) lists the store
+with the cache and removes, with `--yes`, only what no installed app names — an
+Electron no app needs anymore, the window of an app that is gone, and the
+records of uninstalled apps. Age decides nothing there: an app opened once a
+year still opens offline. An Electron an app started from in the last 10
+minutes, a window being made right now, and everything while any record cannot
+be read (it is named) are kept.
+
+**What it costs.**
+
+- The first start needs the internet, once per Electron version per machine. For
+  an app that must open offline on a fresh machine, use `"offline"`.
+- The process is called `electron` (Linux, Windows) — the window, its title and
+  icon are the app's.
+- macOS: the window is the app's own bundle inside the store
+  (`windows/<bundle id>/`), stamped with the app's name and icon and signed ad
+  hoc on that Mac. (A signed `.app` cannot point outside itself, so the window
+  cannot run from inside the installed app.) The runtime is signed once in the
+  store; each window is an APFS clone of it, re-signing only its own small
+  parts, so a window adds almost no disk (measured: two apps' store, 308 MB in
+  all).
+- Options that change Electron's own files do nothing in a shared build:
+  `build.chromiumExtras` strips nothing (the shared copy stays whole for every
+  app), and a warning says so.
+- Measured on the `todo` example (Electron 44):
+
+  | Package          | Bundled  | Shared  |
+  | ---------------- | -------- | ------- |
+  | Linux AppImage   | 141.9 MB | 34.9 MB |
+  | Windows `.exe`   | 134.6 MB | 26.4 MB |
+  | Windows `.zip`   | 173.7 MB | 34.6 MB |
+  | macOS `.dmg`     | 169.0 MB | 40.8 MB |
+  | macOS `.app.tar` | 152.5 MB | 35.2 MB |
+
 ## electron-client (thin client AppImage)
 
 ```sh
@@ -1537,8 +1678,14 @@ sw.js                  the offline cache
   a host may rewrite those — an injected snippet, an image optimizer): a CDN
   edge still serving the previous build fails the update, the previous build
   keeps serving whole, and the browser tries again later — never the new version
-  holding the old bytes. A browser that refuses the worker (plain `http` off
-  localhost, `file://`) logs
+  holding the old bytes. The page's own files are fetched first, all at once;
+  the `assets` mounts' files after them, two at a time — a first visit's page
+  (not yet controlled by the worker) keeps most of the bandwidth for its own
+  requests. The update is still all or nothing: any file that fails fails it.
+  Each build is cached whole: a deploy downloads every file again, the `assets`
+  too, and the version in the page (`appVersion()`, which moves with every
+  commit) makes each commit's build a new one. A browser that refuses the worker
+  (plain `http` off localhost, `file://`) logs
   `[aio] offline cache (service worker) not registered` in the console; the app
   still runs online.
 - **Deploy it as it is** — copy the directory to the host, at the origin's root
@@ -1671,6 +1818,23 @@ a keystore once with
 `keytool -genkeypair -keystore keys/release.jks -alias upload -keyalg RSA -keysize 2048 -validity 10000`,
 keep it out of the repository, and back it up: an app can only ever be updated
 by the key that first signed it.
+
+The path and the alias can live in `deno.json` instead, so a release needs only
+the password from the environment (a variable that is set wins over the file):
+
+```json
+{
+  "build": {
+    "android": { "keystore": "keys/release.jks", "keyAlias": "upload" }
+  }
+}
+```
+
+A password is never read from `deno.json` — a `build.android` key naming one
+(`keyPassword`, `storePassword`, …) stops the build. `"aab": true` there makes
+an **unsigned** `--release` write `<name>-unsigned.aab` beside the unsigned APK
+(Gradle's `bundleRelease`, which adds to the build time), for a bundle you sign
+yourself. A signed release always writes its `.aab`.
 
 ### State survives a kill
 
@@ -1897,13 +2061,15 @@ template does them, for a standalone APK and for one that talks to a server:
   user picked. Backing out answers the page with nothing (its `cancel` event).
 - **A download** from the network (`<a download>`, a response sent as an
   attachment) goes to Android's `DownloadManager`: into `Downloads`, with the
-  system's notification, carrying the page's cookies. `DownloadManager` knows
-  nothing of the certificate a client APK pinned, so a server on the certificate
-  `--expose` signs itself needs a real one (`tls: { cert, key }`) for its
-  downloads. A `blob:` or `data:` link — a file the page made — is **not
-  saved**: nothing outside the page can read it. The tap is logged
-  (`adb logcat -s aio`: `download NOT saved`), and saving one takes native code
-  in [the android/ folder](#adding-native-android-code-the-android-folder).
+  system's notification, carrying the page's cookies. From a server whose
+  certificate a client APK **pinned** (the one `--expose` signs itself), which
+  `DownloadManager` does not know, the app fetches the file itself — the
+  system's trust first, then exactly that pin — into `Downloads`, with a toast.
+  A `blob:` or `data:` link — a file the page made, an "export" button — is
+  handed over by the page and saved into `Downloads` under its
+  `download="name"`, with a toast (up to 32 MB; the page may revoke its object
+  URL right after the click). Each outcome is logged (`adb logcat -s aio`:
+  `download saved` / `download NOT saved`).
 - **The renderer process**: a WebView's page runs in a process of its own, and
   Android takes it back when memory is short. The app stays; the page is loaded
   again and reads its state from the store (a client: from its server). Text
@@ -2031,6 +2197,17 @@ myapp/
 Every overlaid path is printed by the build — a silent overlay is a build that
 quietly stopped being the app the template describes.
 
+A file that replaces a template file freezes it at the day it was copied: what
+aio later fixes in that file never reaches the APK. So the first build that sees
+the overlay records the template's hash in `.aio/android-overlay.json`, and
+every later build whose template differs warns (and repeats it in the summary):
+`⚠ android/app/src/main/java/aio/app/MainActivity.kt overlays a template that
+changed since it was copied (aio 1.0.21-beta → 1.0.22-beta) … fix: re-base it
+on aio's android-template/…`.
+The warning stops once the overlay itself changes (re-based), or when it is
+deleted. The record is per checkout (`.aio/` is the build's own and never part
+of the version), so a fresh clone starts recording from its first build.
+
 Overlaid files still go through placeholder substitution, and `dev:android`
 rewrites two exact strings in `MainActivity.kt`. So a replacement must keep what
 the build reaches for, or that step quietly does nothing:
@@ -2149,6 +2326,13 @@ writes the address to disk before the server is opened, so a kill right after
 pairing does not lose it. A share link typed without a scheme is opened over
 `https://`. One that says `http://` and names another machine is opened too,
 with a warning on the form: its key crosses the network in clear text.
+
+`"build": { "strictPin": true }` closes that: the form refuses a keyed `http://`
+address to another machine (typed, pasted or remembered) and pairing over
+`http://` (its answer is the key), and a pairing address typed without a scheme
+is tried over `https://` only. Loopback (`adb reverse`) and keyless addresses
+are opened as before. A pinned certificate that changed is refused in either
+mode — before any request, so no cookie is sent with it.
 
 `--expose` serves a certificate the server **signed itself** unless told
 otherwise, and Android trusts no such certificate. Pairing is what makes this

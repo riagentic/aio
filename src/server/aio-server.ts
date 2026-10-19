@@ -1,6 +1,7 @@
 // Server & transport setup — TLS, HTTP server, UDS listener, signal handlers
 // Extracted from aio.ts _run() to keep the orchestrator lean.
 
+import { doorRefusal } from "./door-refusal.ts";
 import { hostOf } from "./config-sources.ts";
 import { enc } from "../protocol/envelope.ts";
 import { installProcessSignals, stopProcess } from "./shutdown.ts";
@@ -731,7 +732,14 @@ async function setupTransportInner<S, A>(
   // An `assets` mount is a path only the handler answers, exactly like a
   // route: with the handler skipped, a packaged window got 404 for every
   // file of a mount that dev, `--prod` and the plain binary all served.
-  const _mounts = _servedAssets(config.assets, baseDir);
+  // `createServer` reads them again and says what it refuses; with no HTTP
+  // server (`skipHttp`) this read is the only one, and says it below.
+  const mountRefusals: string[] = [];
+  const _mounts = _servedAssets(
+    config.assets,
+    baseDir,
+    (m) => mountRefusals.push(m),
+  );
   const mountCount = Object.keys(_mounts ?? {}).length;
   const _mountsNote = _denoJsonMountsNote(
     config.assets,
@@ -748,6 +756,7 @@ async function setupTransportInner<S, A>(
     routeCount: routeCount + mountCount,
   });
   const { zeroPort, skipHttp } = zp;
+  if (skipHttp) { for (const m of mountRefusals) log.warn("server", m); }
   if (zeroPort && routeCount > 0) {
     log.info(
       `${routeCount} custom route(s) served over the socket ` +
@@ -829,14 +838,14 @@ async function setupTransportInner<S, A>(
     const type = typeof a?.type === "string" ? a.type as string : "";
     if (deps.closing?.()) {
       return Promise.reject(
-        Object.assign(
+        doorRefusal(
           createAioError(
             "DISPATCH_DRAINING",
             "the server is shutting down — this call was refused before it " +
               "ran (not applied); re-send it once the server is back",
             { actionType: type },
           ),
-          { retryAfterMs: SHUTDOWN_RETRY_MS },
+          SHUTDOWN_RETRY_MS,
         ),
       );
     }

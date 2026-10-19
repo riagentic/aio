@@ -96,7 +96,7 @@ export {
  *  built from `windows-sfx-stub/` by the command in its README — update this
  *  line with every rebuild. */
 export const SFX_STUB_SHA256 =
-  "91fb1d0b7368cb70f5e3b9172678f38d1e540ab3bb5f33803517e07d4bc4a2e2";
+  "e42bab2fbc298159b7b85ffa92b74f0418008013dd93b82fe40ff8743d49c7da";
 
 /** SHA-256 over the stub's SOURCES (`src/*.rs`, `Cargo.toml`, `Cargo.lock`) as
  *  they were when {@link SFX_STUB_SHA256} was built. Rebuilding needs Rust,
@@ -105,7 +105,7 @@ export const SFX_STUB_SHA256 =
  *  (`tests/build-windows-sfx-stub.test.ts` prints the value to put here). */
 // aio-ok: a test-only seam — the pin a gate without Rust compares the sources with.
 export const SFX_STUB_SOURCE_SHA256 =
-  "2f06ef0ead5c18074f2feb24aa8e097c62827d64838faf440f00be634a34afcd";
+  "3593c77447f9c465bf10cc92e4d510f66eed518d342cbd9f33e4054b469c2852";
 
 /** The self-contained exe's file name — the zip's name with `.exe`, so the
  *  two Windows desktop artifacts sort together and neither is mistaken for
@@ -620,8 +620,28 @@ export async function buildSelfContainedWindowsExe(
     stub?: () => Promise<{ path: string; temp: boolean }>;
   } = {},
 ): Promise<void> {
-  const fat = deps.fat ?? buildFatEmbeddedWindowsExe;
-  if (Deno.env.get("AIO_WINDOWS_FAT_EXE") === "1") {
+  // A shared-runtime package carries no Electron, so the fat exe — Electron's
+  // zip inside the PE — is the one thing it can never fall back to.
+  const shared = cfg.electronRuntime === "online";
+  const fat = shared
+    ? () => {
+      console.error(
+        `${NO} build.electronRuntime is "online", and the one-click .exe ` +
+          `needs the SFX stub for that (the legacy fat exe embeds Electron). ` +
+          `The .zip is built; fix the stub (the message above) to get the ` +
+          `.exe.`,
+      );
+      Deno.exit(1);
+    }
+    : deps.fat ?? buildFatEmbeddedWindowsExe;
+  if (shared && Deno.env.get("AIO_WINDOWS_FAT_EXE") === "1") {
+    console.warn(
+      `${NO} AIO_WINDOWS_FAT_EXE=1 is ignored: the legacy fat exe embeds ` +
+        `Electron, and build.electronRuntime is "online" — building the SFX ` +
+        `.exe`,
+    );
+  }
+  if (!shared && Deno.env.get("AIO_WINDOWS_FAT_EXE") === "1") {
     console.warn(
       `${NO} AIO_WINDOWS_FAT_EXE=1 — building the legacy fat PE (embedded ` +
         `electron-runtime.zip). Prefer the default SFX path.`,
@@ -823,8 +843,12 @@ async function buildWindowsSfxExe(
         formatMb(
           result.payloadSize,
         )
-      } MB vs zip ${formatMb(zipSize)} MB — offline double-click; extract ` +
-      `once to %LOCALAPPDATA%\\aio-sfx)`,
+      } MB vs zip ${formatMb(zipSize)} MB — ${
+        cfg.electronRuntime === "online"
+          ? "double-click; Electron is downloaded into the shared store on " +
+            "first start"
+          : "offline double-click"
+      }; extract once to %LOCALAPPDATA%\\aio-sfx)`,
   );
   return null;
 }

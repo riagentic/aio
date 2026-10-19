@@ -34,6 +34,10 @@ export type BuildManifest = {
     /** True when this artifact runs on the machine that built it. */
     host?: boolean;
     platform?: string;
+    /** Android targets: the applicationId the APK was built with. */
+    applicationId?: string;
+    /** Android targets: built with `--android-dev-url` (a dev APK). */
+    dev?: boolean;
     artifacts?: { file: string; bytes?: number }[];
   }[];
 };
@@ -104,4 +108,98 @@ export async function soleArtifact(
     };
   }
   return { path: hits[0]! };
+}
+
+// ── what the PREVIOUS release says about this one ──────────────────────────
+//
+// The out dir is rebuilt clean, so the last build's manifest is read before
+// it goes — the only record of what is installed out there.
+
+/** `major.minor.build` of a version string (`1.2.345-beta` → [1, 2, 345]). */
+function versionTriple(v: unknown): [number, number, number] | null {
+  const m = typeof v === "string" ? /^(\d+)\.(\d+)\.(\d+)/.exec(v) : null;
+  return m ? [+m[1]!, +m[2]!, +m[3]!] : null;
+}
+
+/** The warning for a build whose version is LOWER than the previous build's
+ *  (`prev`, the manifest it replaces), else null. The build number is the
+ *  commit count, so a squash or a history rewrite lowers it — and Android
+ *  refuses an APK whose versionCode is lower than the installed one (the only
+ *  way past is an uninstall, which deletes the app's data), while the update
+ *  check never offers it. Pure. */
+export function versionRegressionNote(
+  prev: BuildManifest | null,
+  next: string,
+  rel: string,
+): string | null {
+  const a = versionTriple(prev?.version);
+  const b = versionTriple(next);
+  if (!a || !b) return null;
+  const i = b.findIndex((n, k) => n !== a[k]);
+  if (i < 0 || b[i]! > a[i]!) return null;
+  return `version ${next} is LOWER than the last build's ${prev!.version} ` +
+    `(${rel}/manifest.json): Android refuses it as an update (lower ` +
+    `versionCode — only an uninstall gets past, and that deletes the app's ` +
+    `data), and the update check never offers it. The build number is the ` +
+    `git commit count, so a squash or history rewrite lowers it.\n  fix: ` +
+    `raise deno.json "version" (e.g. "${a[0]}.${a[1] + 1}"), or hand this ` +
+    `build its version through AIO_BUILD_VERSION ` +
+    `(docs/build/versioning.md).`;
+}
+
+/** Entries of the previous out dir (`entries`, its top-level names) that no
+ *  build put there: not its `manifest.json`, not an artifact `prev` lists,
+ *  not a file every build stages (`staged`), not a dotfile. The clean
+ *  rebuild removes them — said, by name. Sorted. Pure. */
+export function strayOutEntries(
+  prev: BuildManifest | null,
+  entries: readonly string[],
+  staged: (name: string) => boolean,
+): string[] {
+  const listed = new Set(
+    (prev?.targets ?? []).flatMap((t) =>
+      (t.artifacts ?? []).map((a) => a.file)
+    ),
+  );
+  return entries.filter((e) =>
+    !e.startsWith(".") && e !== "manifest.json" && !listed.has(e) && !staged(e)
+  ).sort();
+}
+
+/** The warnings for android targets whose applicationId differs from the one
+ *  the previous build recorded for the same target. Only for a DERIVED id —
+ *  the caller passes none when deno.json pins `android.applicationId`. A new
+ *  id installs as a SECOND app beside the first, whose data stays behind.
+ *  `prevId` derives the id of an older manifest that did not record one,
+ *  from its APK's file name. Pure. */
+export function applicationIdChangeNotes(
+  prev: BuildManifest | null,
+  next: readonly { target: string; applicationId?: string; dev?: boolean }[],
+  prevId: (apkFile: string) => string | null,
+  rel: string,
+): string[] {
+  const notes: string[] = [];
+  for (const n of next) {
+    if (!n.applicationId) continue;
+    const p = (prev?.targets ?? []).find((t) =>
+      t.target === n.target && t.ok !== false
+    );
+    const apk = p?.artifacts?.find((a) => a.file.endsWith(".apk"))?.file;
+    // A dev APK (`--android-dev-url`) is its own app by design
+    // (`app.aio.<x>dev`): never compared with a release one. An older
+    // manifest did not record it; its file name says so.
+    const prevDev = p?.dev ?? /-dev\.apk$/.test(apk ?? "");
+    if (prevDev !== !!n.dev) continue;
+    const was = p?.applicationId ?? (apk ? prevId(apk) : null);
+    if (!was || was === n.applicationId) continue;
+    notes.push(
+      `${n.target}: the applicationId is now ${n.applicationId} — the last ` +
+        `build (${rel}/manifest.json) was ${was}. Android installs it as a ` +
+        `SECOND app; the installed one keeps its data. It is derived from ` +
+        `the target's "name" (else the title).\n  fix: pin it in deno.json: ` +
+        `"android": { "applicationId": "${was}" } (or pin the new one, if ` +
+        `the change is meant).`,
+    );
+  }
+  return notes;
 }

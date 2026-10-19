@@ -372,7 +372,14 @@ constants (`SYNC_DEFAULTS` from `aio/sync`), not per-cell options:
 - `maxDrift` — 60 s. An op stamped further **ahead** than this is refused by the
   server with an `op-rejected` naming the skew — it would win every
   last-write-wins comparison until the clocks meet. Ops stamped in the **past**
-  are always accepted: that is the offline queue.
+  are always accepted: that is the offline queue. A client whose own clock is
+  off from the server's by more than this stamps new ops on the server's time
+  once it has heard it (an ack, a catch-up, or a drift or stale refusal),
+  carried forward on the monotonic clock, so a later correction of the device
+  clock changes nothing and a system suspend (which pauses the monotonic clock)
+  does not leave it behind; it warns once with the offset. A clock that ran
+  ahead — the device was ahead when the client started, or before the server was
+  heard — is replaced at the first sample of the server's time.
 - `compactOps` — the server compacts after 1000 ops.
 
 ## Sync Status

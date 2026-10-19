@@ -22,6 +22,7 @@
 import { basename, dirname, fromFileUrl, join } from "@std/path";
 import { log } from "../diagnostics/logger-api.ts";
 import {
+  AppLock,
   instances,
   isLockOwnerAlive,
   isOwnLock,
@@ -30,6 +31,7 @@ import {
   ownerIdentity,
   readLock,
   removeLockIf,
+  removeLockIfOwner,
   replaceLockIf,
   resolveAppId,
 } from "./single-instance-lock.ts";
@@ -406,6 +408,17 @@ export async function restartForCellChange(
   // (appId, home, profile — the lock key) is what the supervisor needs to
   // hand the lock slot to its child and to recognise a rival start.
   const self = ownLock();
+  // Hand the slot over rather than vacate it: the shutdown's release writes a
+  // record naming the supervisor (the parent, or this process when it becomes
+  // one), which files the next child over it. It used to remove the lock, and
+  // until that filing (~100 ms on every save) nothing named the app.
+  if (self) {
+    const parent = Number(env("AIO_PARENT_PID"));
+    const supervisor = isSupervisedChild() && parent > 0 ? parent : Deno.pid;
+    AppLock.live().find((l) => l.key === slotOf(self))?.handOver(
+      placeholderFor(self, supervisor, port),
+    );
+  }
   try {
     await shutdown();
   } catch (e) {
@@ -450,37 +463,77 @@ function fileChildPlaceholder(
   waiting?: LockData["waiting"],
 ): string | null {
   try {
-    const data: LockData = {
-      ...self,
+    const data = placeholderFor(
+      self,
+      child,
+      port,
+      child === Deno.pid ? undefined : Deno.pid,
       waiting,
-      pid: child,
-      // Whose child it is — `am` reads it (see `LockData.supervisor`).
-      supervisor: child === Deno.pid ? undefined : Deno.pid,
-      port: port ?? self.port,
-      status: "starting",
-      startedAt: Date.now(),
-      startToken: undefined,
-      startEpoch: undefined,
-      socketPath: undefined,
-      trojanPort: undefined,
-      // The previous instance's hold file proves nothing about the child.
-      hold: undefined,
-      ...ownerIdentity(child),
-    };
+    );
     const seen = readLock(slotOf(self));
-    const wrote = !seen
-      ? replaceLockIf(null, data)
-      : !isOwnLock(seen, child) && !isLockOwnerAlive(seen) &&
-        replaceLockIf(seen, data);
+    // A record naming THIS supervisor is the old app's hand-over (see
+    // `restartForCellChange`) — replaced, like a dead owner's.
+    const wrote = !seen ? replaceLockIf(null, data) : !isOwnLock(seen, child) &&
+      (isOwnLock(seen) || !isLockOwnerAlive(seen)) &&
+      replaceLockIf(seen, data);
     // The BYTES written — what `replaceLockIf` stores — so only this exact
     // placeholder is ever taken back (see the removal after the child exits).
-    return wrote ? JSON.stringify(data) : null;
+    if (wrote) return JSON.stringify(data);
   } catch (e) {
     // aio-ok: the child still takes the slot itself when it boots — only the
     // window stays open; said, not swallowed.
     log.warn("watch", `could not file the relaunch's lock placeholder: ${e}`);
-    return null;
   }
+  // Not filed: a record still naming THIS supervisor (the old app's
+  // hand-over, or the wait for a fix) would meet the child as a live owner —
+  // "already running", or a zombie listener to kill. Removed, the child
+  // takes the empty slot itself; only the window it was meant to close
+  // stays open. Never a throw: it would end the supervisor loop with the
+  // child spawned.
+  if (child !== Deno.pid) {
+    try {
+      const seen = readLock(slotOf(self));
+      if (seen && isOwnLock(seen)) removeLockIfOwner(slotOf(self), seen);
+    } catch (e) {
+      log.warn(
+        "watch",
+        `could not free the slot this supervisor holds for the relaunch: ${e}` +
+          ` — the child may meet it as "already running"`,
+      );
+    }
+  }
+  return null;
+}
+
+/** @internal test seam — {@linkcode fileChildPlaceholder}. */
+// aio-ok: a test seam — tests/lock-handover-failure.test.ts files a child over a slot it cannot write
+export const _fileChildPlaceholder = fileChildPlaceholder;
+
+/** The "starting" record naming `pid` in `self`'s slot, on the port it is
+ *  about to bind; `supervisor` is whose child it is (`LockData.supervisor`). */
+function placeholderFor(
+  self: LockData,
+  pid: number,
+  port: number | undefined,
+  supervisor?: number,
+  waiting?: LockData["waiting"],
+): LockData {
+  return {
+    ...self,
+    waiting,
+    pid,
+    supervisor,
+    port: port ?? self.port,
+    status: "starting",
+    startedAt: Date.now(),
+    startToken: undefined,
+    startEpoch: undefined,
+    socketPath: undefined,
+    trojanPort: undefined,
+    // The previous instance's hold file proves nothing about the next one.
+    hold: undefined,
+    ...ownerIdentity(pid),
+  };
 }
 
 /** A LIVE instance of `self`'s app home that is neither this supervisor nor
@@ -529,6 +582,9 @@ async function superviseForever(
   const dropWaiting = () => {
     if (self && stop.waiting !== null) removeLockIf(slotOf(self), stop.waiting);
     stop.waiting = null;
+    // …and the old app's hand-over, when no child was filed over it yet.
+    const own = self ? readLock(slotOf(self)) : null;
+    if (self && own && isOwnLock(own)) removeLockIfOwner(slotOf(self), own);
   };
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
     try {
@@ -665,6 +721,7 @@ async function superviseForever(
       status.signal || status.code === 0 ||
       Date.now() - spawnedAt > FAILED_RESTART_WINDOW_MS
     ) {
+      dropWaiting();
       Deno.exit(status.code);
     }
     // It died right after the relaunch because ANOTHER start of this app
@@ -919,9 +976,20 @@ function _walkSources(
     if (info.birthtime) stamps.push(info.birthtime.getTime());
     return at;
   };
+  const isSource = (name: string): boolean => {
+    const dot = name.lastIndexOf(".");
+    return dot >= 0 && SOURCE_EXT.has(name.slice(dot));
+  };
   let entries: Deno.DirEntry[];
   try {
-    seen(Deno.statSync(dir));
+    const info = Deno.statSync(dir);
+    const at = seen(info);
+    // A watch root that is a FILE (`watch: ["cell.ts"]`) is its own entry:
+    // listing it threw, and a save to it before the watcher was up was lost.
+    if (info.isFile) {
+      if (isSource(basename(dir))) sources.push([dir, at]);
+      return;
+    }
     entries = [...Deno.readDirSync(dir)];
   } catch {
     return; // aio-ok: gone or unreadable — the watcher is what is left
@@ -935,10 +1003,7 @@ function _walkSources(
     }
     try {
       const at = seen(Deno.statSync(path));
-      const dot = e.name.lastIndexOf(".");
-      if (dot >= 0 && SOURCE_EXT.has(e.name.slice(dot))) {
-        sources.push([path, at]);
-      }
+      if (isSource(e.name)) sources.push([path, at]);
     } catch { /* aio-ok: removed between the listing and the look */ }
   }
 }

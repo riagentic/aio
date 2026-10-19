@@ -286,13 +286,20 @@ function dropBrowserProfileSync(profile: string): void {
  *  `--no-first-run` and `--disable-sync` each still cost one. Since
  *  `findChromium` finds Edge on Windows, a launch without this flag is a
  *  test suite that locks its own user out.
+ *
+ *  Windows also adds `--do-not-de-elevate`: started from an elevated
+ *  (administrator) shell, Chromium relaunches itself as the un-elevated user
+ *  and the process aio spawned exits 0 at once — measured, Edge 155: every
+ *  launch failed "exited (code 0) before it opened its DevTools port", and
+ *  the relaunched browser ran on as an orphan nothing closes. The flag is the
+ *  one Chromium appends to that relaunch itself, so it does not loop.
  *  @internal exported for its test */
 export function _launchFlags(
   profile: string,
   os: string = Deno.build.os,
 ): string[] {
   return [
-    ...(os === "windows" ? ["--guest"] : []),
+    ...(os === "windows" ? ["--guest", "--do-not-de-elevate"] : []),
     "--headless=new",
     "--no-sandbox",
     "--disable-gpu",
@@ -444,10 +451,15 @@ export async function launchChromium(
 /** Connect to the first page of a Chromium launched with
  *  `--remote-debugging-port=0`. The port the browser picked is read from the
  *  profile's `DevToolsActivePort` file — asking for port 0 is what keeps two
- *  parallel test files from racing for one fixed port. */
+ *  parallel test files from racing for one fixed port.
+ *
+ *  The loop returns the moment the page is up; `timeoutMs` only bounds a
+ *  browser that never comes up. 10 s was missed by a cold start on a loaded
+ *  machine (a full parallel suite beside an APK build: no DevToolsActivePort
+ *  yet at 10 s), which is a slow start, not a hung one. */
 export async function chromiumPage(
   browser: LaunchedChromium,
-  timeoutMs = 10_000,
+  timeoutMs = 30_000,
 ): Promise<CdpSession> {
   const deadline = Date.now() + timeoutMs;
   let port = 0;

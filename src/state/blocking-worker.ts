@@ -4,8 +4,12 @@
 // One task at a time — a blocking FFI/CPU call occupies the whole worker, which
 // is the point: it can't freeze the main event loop / rendering.
 
+import { AsyncLocalStorage } from "node:async_hooks";
+
 type Req = {
   n: number;
+  /** The task's id, named when a stray it left behind lands later. */
+  id?: string;
   src: string;
   name?: string;
   url?: string;
@@ -14,6 +18,15 @@ type Req = {
 type Res =
   | { n: number; ok: true; data: unknown }
   | { n: number; ok: false; error: string; stack?: string };
+/** An uncaught error on this worker's loop, with the task it belongs to
+ *  (`n` 0: no task — it ran outside every task while none was running). */
+type Stray = {
+  stray: true;
+  n: number;
+  id?: string;
+  error: string;
+  stack?: string;
+};
 
 // A compiled build's minifier (`build.minify`, build/minify-server.ts) keeps
 // every function and class name by calling ONE global, `__aioName(fn, "name")`
@@ -45,7 +58,114 @@ function selfContainedHint(e: unknown): string | null {
     `name above is the minified one.)`;
 }
 
-self.onmessage = async ({ data }: MessageEvent<Req>) => {
+/** The function back from its source. An arrow or `function …` is an
+ *  expression once parenthesised. A METHOD SHORTHAND (`const jobs = { hash(a)
+ *  {…} }`, then `blocking("h", jobs.hash, x)`) is just as self-contained, but
+ *  its source (`hash(a) {…}`, `async hash(a) {…}`) is a method definition —
+ *  bare, it failed with "Unexpected token '{'". It is rebuilt inside an object
+ *  literal, as it was written. */
+function rebuild(src: string): (a: unknown) => unknown {
+  try {
+    return (0, eval)("(" + src + ")");
+  } catch (e) {
+    if (!(e instanceof SyntaxError)) throw e;
+    let obj: Record<string, unknown>;
+    try {
+      obj = (0, eval)("({" + src + "})");
+    } catch {
+      throw e; // not a method either — the expression's own error
+    }
+    const [fn] = Object.values(obj);
+    if (typeof fn !== "function") throw e;
+    return fn as (a: unknown) => unknown;
+  }
+}
+
+// ── Whose is a stray error ────────────────────────────────────────────────
+// A task that settled can leave work behind (a timer that throws, a promise
+// it never awaited). Under load the next task is already running here when
+// that error lands, and the worker's uncaught error used to be taken as THAT
+// task's crash. Each task now runs in its own async context, so a stray says
+// whose it is: a rejection carries the context it was made in, and a timer's
+// throw is tagged by the wrapped timer it ran in (an error EVENT runs outside
+// every context, measured on Deno 2.9).
+const owner = new AsyncLocalStorage<{ n: number; id?: string }>();
+const OWNER = Symbol("aio.blockingTask");
+let running: { n: number; id?: string } | null = null;
+
+function tagged<A extends unknown[], R>(
+  fn: (...a: A) => R,
+): (...a: A) => R {
+  return function (this: unknown, ...a: A): R {
+    try {
+      return fn.apply(this, a);
+    } catch (e) {
+      if (e !== null && typeof e === "object" && !Object.hasOwn(e, OWNER)) {
+        try {
+          Object.defineProperty(e, OWNER, { value: owner.getStore() });
+        } catch {
+          // aio-ok: a frozen thrown object stays untagged — its stray is
+          // taken as the running task's, the pre-1.0.21 rule.
+        }
+      }
+      throw e;
+    }
+  };
+}
+const g = globalThis as unknown as Record<string, unknown>;
+for (const k of ["setTimeout", "setInterval", "queueMicrotask"]) {
+  const orig = g[k] as (cb: unknown, ...rest: unknown[]) => unknown;
+  g[k] = (cb: unknown, ...rest: unknown[]) =>
+    orig(
+      typeof cb === "function" ? tagged(cb as () => unknown) : cb,
+      ...rest,
+    );
+}
+
+function stray(
+  e: Event,
+  error: unknown,
+  ctx: { n: number; id?: string } | undefined,
+  text: string,
+): void {
+  e.preventDefault(); // reported below; never re-raised in the parent
+  const who = ctx ?? running; // untagged: the running task's, as before
+  const res: Stray = {
+    stray: true,
+    n: who?.n ?? 0,
+    id: who?.id,
+    error: text,
+    stack: error instanceof Error ? error.stack : undefined,
+  };
+  self.postMessage(res);
+}
+self.addEventListener("error", (e: ErrorEvent) => {
+  const ctx = e.error !== null && typeof e.error === "object"
+    ? (e.error as Record<symbol, { n: number; id?: string }>)[OWNER]
+    : undefined;
+  stray(e, e.error, ctx, e.message);
+});
+self.addEventListener("unhandledrejection", (e: PromiseRejectionEvent) => {
+  const r = e.reason;
+  stray(
+    e,
+    r,
+    owner.getStore(),
+    `Uncaught (in promise) ${
+      r instanceof Error ? `${r.name}: ${r.message}` : String(r)
+    }`,
+  );
+});
+
+self.onmessage = ({ data }: MessageEvent<Req>) => {
+  const ctx = { n: data.n, id: data.id };
+  running = ctx;
+  owner.run(ctx, () => runTask(data)).finally(() => {
+    if (running === ctx) running = null;
+  });
+};
+
+async function runTask(data: Req): Promise<void> {
   const { n, src, name, url, arg } = data;
   try {
     // The module form (`pool.run(id, new URL(…), arg)`): a real module, with
@@ -73,9 +193,7 @@ self.onmessage = async ({ data }: MessageEvent<Req>) => {
       self.postMessage(res);
       return;
     }
-    // The function stringifies to a valid expression (arrow or `function …`);
-    // wrap in parens so it parses as an expression, not a declaration.
-    const fn = (0, eval)("(" + src + ")") as (a: unknown) => unknown;
+    const fn = rebuild(src);
     // The name it had where it was written: a minified source carries the
     // minifier's (`function e(){…}`), and a function may read its own `.name`.
     if (name) Object.defineProperty(fn, "name", { value: name });
@@ -92,4 +210,4 @@ self.onmessage = async ({ data }: MessageEvent<Req>) => {
     };
     self.postMessage(res);
   }
-};
+}

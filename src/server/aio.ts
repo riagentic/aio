@@ -1,4 +1,10 @@
 import { produce } from "immer";
+import {
+  bakedElectronRuntime,
+  bakedElectronVersion,
+  bakedRuntimeSha,
+  electronSlug,
+} from "../electron/electron-runtime-fetch.ts";
 import { validateMemoryConfig } from "../diagnostics/memory-monitor.ts";
 import { refuseRetired } from "../state/removals.ts";
 import { installBundleSourceMap } from "./sourcemap-boot.ts";
@@ -874,6 +880,13 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
         await _appVersion(),
       ),
     );
+    Deno.exit(0);
+  }
+  // …and `--aio-electron-runtime` (aio-cli.ts): the same cost-nothing rule,
+  // because an updater asks it of a build it has not installed yet.
+  if (parseCli().electronRuntime) {
+    // aio-ok: the machine-readable answer itself (read by updates-runtime.ts).
+    console.log(JSON.stringify(await electronRuntimeAnswer()));
     Deno.exit(0);
   }
   // Fail fast on an unsupported Deno — aio uses ≥2.9 behavior directly.
@@ -2927,6 +2940,31 @@ async function _runPhases<S, A, E>(
     ];
   }
 
+  /** A copy of the journal as boot read it, taken once, when boot names lines
+   *  it could not judge or replay. The live file is no record of them: the
+   *  first save compacts every line at or below its watermark, those included
+   *  — and they are the only copy of what those acked writes were. Named like
+   *  a journal set aside (`moveJournalAside`), so every scrub that reaches one
+   *  reaches this. A copy that cannot be taken is said in the warning, not
+   *  thrown: refusing to boot would make recovery the reason the app is down. */
+  let _keptJournal: string | undefined;
+  function _keepJournalCopy(): string {
+    if (_keptJournal !== undefined) return _keptJournal;
+    if (!journal) return (_keptJournal = "");
+    const to = `${journal.path}.unreplayed-${
+      new Date().toISOString().replace(/[:.]/g, "-")
+    }`;
+    try {
+      Deno.copyFileSync(journal.path, to);
+      return (_keptJournal = `A copy of the journal as boot read it is kept ` +
+        `at ${to} — the live file drops these lines at its next save.`);
+    } catch (e) {
+      return (_keptJournal = `Keeping a copy of the journal at ${to} FAILED ` +
+        `(${e}) — the live file drops these lines at its next save; copy ` +
+        `${journal.path} by hand before writing to this app.`);
+    }
+  }
+
   function _warnUnstampedAcrossMigration(tail: JournalEntry[]): void {
     const moved = new Map<string, { from: number; to: number }>();
     for (const r of migrationSummary?.report ?? []) {
@@ -2971,8 +3009,8 @@ async function _runPhases<S, A, E>(
               `REPLAYED through this build's methods on the migrated state, ` +
               `as before; if they ran under v${m.from}, the recovered ` +
               `"${cell}" may be wrong (a v${m.from} argument read with ` +
-              `v${m.to} meaning). Check it, and compare against ` +
-              `\`am timeline --from=${journal?.path ?? "<journal>"}\`.`,
+              `v${m.to} meaning). Check it against the journal with ` +
+              `\`am timeline --from=<file>\`. ${_keepJournalCopy()}`,
           ),
           { cellName: cell },
         ),
@@ -3436,9 +3474,9 @@ async function _runPhases<S, A, E>(
               Math.max(...seqs)
             }). ` +
             `Whatever those actions wrote after the last snapshot is NOT in ` +
-            `the recovered state. Skipping is deliberate: an entry that cannot ` +
-            `be replayed is still in the file at the next boot, so failing on ` +
-            `it would make recovery the reason this app can never start.`,
+            `the recovered state. Skipping is deliberate: failing on an entry ` +
+            `that cannot be replayed would make recovery the reason this app ` +
+            `can never start. ${_keepJournalCopy()}`,
         );
       }
     }
@@ -5003,6 +5041,9 @@ async function _runPhases<S, A, E>(
     // when the reduce refuses the write, and a worker that never learned it
     // answered its callers differently from the cell sitting next to it.
     refusalsReject: config._refusalsReject === true,
+    // …and the SAME supervision of a stray rejection (see initDiagAndVitals
+    // above): a worker cell survives what the main isolate survives.
+    guardRejections: config.guardDispatches ?? true,
     // …and the dev refusal of a declared-type change, which a worker cell's
     // reduce must run itself (the owner sees only its committed patches).
     ...(boot.strictTypeFilter
@@ -6102,3 +6143,32 @@ export const aio = {
   stop: (): Promise<void> => requestStop(),
   restart: (): Promise<RestartPlan> => requestRestart(),
 };
+
+/** What `--aio-electron-runtime` prints: the `electron.json` the build baked
+ *  into the binary's dist/, read where boot reads its dist from. */
+async function electronRuntimeAnswer(): Promise<
+  | { runtime: "bundled" | "shared"; version: string; sha256?: string }
+  | { runtime: "none" }
+> {
+  for (
+    const dir of distCandidates({
+      mainModule: Deno.mainModule,
+      cwd: Deno.cwd(),
+      execDir: dirname(Deno.execPath()),
+      moduleDir: import.meta.dirname ?? null,
+    })
+  ) {
+    const version = await bakedElectronVersion(dir);
+    if (version) {
+      // The checksum this build pinned for THIS machine's runtime zip: the
+      // updater downloads the new version's Electron against it.
+      const sha256 = await bakedRuntimeSha(dir, electronSlug());
+      return {
+        runtime: await bakedElectronRuntime(dir),
+        version,
+        ...(sha256 ? { sha256 } : {}),
+      };
+    }
+  }
+  return { runtime: "none" };
+}

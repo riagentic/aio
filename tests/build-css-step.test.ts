@@ -13,7 +13,11 @@
 // spawned names itself — never a skip.
 import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
 import { join } from "@std/path";
-import { cssBuildStep, runCssBuild } from "../src/build/build-css.ts";
+import {
+  _endChild,
+  cssBuildStep,
+  runCssBuild,
+} from "../src/build/build-css.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { SLEEP_ARGS } from "./proc-helper.ts";
 
@@ -214,4 +218,26 @@ Deno.test({
       await dropTempDir(dir);
     }
   },
+});
+
+// Windows: a SIGTERM IS the end (TerminateProcess) — a step whose exit was
+// noticed late (a loaded box) was told as "did not end when asked and was
+// killed after 1762ms". Elsewhere a step that outlives the grace is killed.
+Deno.test("css step: a stop on Windows is the end, waited for — never told as a kill; elsewhere the grace decides", async () => {
+  const fake = () => {
+    const sent: string[] = [];
+    const status = new Promise<Deno.CommandStatus>((r) =>
+      setTimeout(() => r({ success: false, code: 1, signal: null }), 700)
+    );
+    return {
+      sent,
+      child: { kill: (s?: Deno.Signal) => void sent.push(s!), status },
+    };
+  };
+  const win = fake();
+  assertEquals(await _endChild(win.child, "windows"), false);
+  assertEquals(win.sent, ["SIGTERM"]);
+  const linux = fake();
+  assertEquals(await _endChild(linux.child, "linux"), true);
+  assertEquals(linux.sent, ["SIGTERM", "SIGKILL"]);
 });

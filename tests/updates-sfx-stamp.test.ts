@@ -45,6 +45,10 @@ Deno.test("a directory swap carries the SFX stamp into the tree going in", async
   const tmp = await tempDir("sfx-stamp-");
   try {
     const current = await install(join(tmp, "win-x64"), "sha-of-v1-exe\n");
+    // The stub's list of the files it extracted (`FILES_NAME` in
+    // windows-sfx-stub/src/install.rs) describes THAT tree: carried into the
+    // new one it would read as damaged, and the old exe would extract over it.
+    await Deno.writeTextFile(join(current, ".aio-sfx-files"), "0 run.bat\n");
     const staged = await install(join(tmp, "win-x64.staged-2.0.0"));
     swapDirectoryDetached({
       current,
@@ -54,6 +58,10 @@ Deno.test("a directory swap carries the SFX stamp into the tree going in", async
     });
     // Before the helper moves anything: the new tree answers to the old exe.
     assertEquals(await stampOf(staged), "sha-of-v1-exe\n");
+    assertEquals(
+      [...Deno.readDirSync(staged)].map((e) => e.name).sort(),
+      [SFX_STAMP_FILE, "run.bat"],
+    );
   } finally {
     await dropTempDir(tmp);
   }

@@ -139,6 +139,12 @@ honoured across a thread boundary. Every test harness (`testCell`, `bootCells`,
 | `machine`         | transitions are evaluated in the main reduce                            | model states in plain fields                 |
 | `selectors`       | computed against the main isolate's state                               | read fields directly, or compute in a method |
 
+The other direction is a warning, not a refusal: a MAIN cell whose `listensTo`
+names a worker cell's method never hears it in a running app — the worker cell's
+calls do not pass through the main reduce — while every in-isolate harness does
+run the listener. aio says so once per pair, at boot and in every harness. Have
+the worker cell's method call the listener's method instead.
+
 ## Where it stays in-isolate — and how to ask for the real thing
 
 **`libraryMode`** (tests, embedded hosts): the entry module is a test file, not

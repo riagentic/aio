@@ -110,7 +110,10 @@ async function within(work: Promise<unknown>, ms: number): Promise<boolean> {
 }
 
 /** Signal a child that may already have exited. */
-function signalChild(child: Deno.ChildProcess, sig: Deno.Signal): void {
+function signalChild(
+  child: Pick<Deno.ChildProcess, "kill">,
+  sig: Deno.Signal,
+): void {
   try {
     child.kill(sig);
   } catch {
@@ -121,9 +124,21 @@ function signalChild(child: Deno.ChildProcess, sig: Deno.Signal): void {
 
 /** End a running step: ask, wait for its EXIT a short grace, then kill.
  *  Returns whether it had to be killed. Waits for the exit only, never for
- *  the pipes — a child of the step can hold those for as long as it likes. */
-async function endChild(child: Deno.ChildProcess): Promise<boolean> {
+ *  the pipes — a child of the step can hold those for as long as it likes.
+ *  @internal exported for its test */
+export async function _endChild(
+  child: Pick<Deno.ChildProcess, "kill" | "status">,
+  os: typeof Deno.build.os = Deno.build.os,
+): Promise<boolean> {
   signalChild(child, "SIGTERM");
+  // Windows has no SIGTERM to ask with: it is a TerminateProcess, the step is
+  // ended by it, and its exit is only waited for. Timed against the grace, a
+  // loaded box's late exit notice was told as "did not end when asked and
+  // was killed after 1762ms" (measured, Windows 11 under the suite).
+  if (os === "windows") {
+    await child.status;
+    return false;
+  }
   if (await within(child.status, STOP_GRACE_MS)) return false;
   signalChild(child, "SIGKILL");
   await child.status;
@@ -223,7 +238,7 @@ export async function runCssBuild(
       aborted,
     ]);
     if (ended === "aborted") {
-      const killed = await endChild(child);
+      const killed = await _endChild(child);
       // The step's own process is gone. Its pipes are at their end too —
       // unless a process IT started still holds them: the stop reaches the
       // step's process only, and whatever a wrapper left behind runs on.

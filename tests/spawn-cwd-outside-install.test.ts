@@ -258,9 +258,7 @@ Deno.test("spawn sites: every child takes neutralCwd(), or says why it keeps the
 Deno.test("spawn sites: the update's probe worker is handed neutralCwd() and uses it", () => {
   const src = Deno.readTextFileSync("src/server/updates-apply.ts");
   assert(
-    src.includes(
-      "w.postMessage({ path, args, timeoutMs, cwd: neutralCwd() });",
-    ),
+    /w\.postMessage\(\{[^}]*\bcwd: neutralCwd\(\),?[^}]*\}\);/.test(src),
     "probeOffThread no longer posts the neutral working directory",
   );
   assert(
@@ -357,8 +355,9 @@ Deno.test("the window: what it opens starts from the window's own working direct
     }
   }
   assertEquals(Object.fromEntries(opens), {
-    // The connect-mode window: an http(s) link a page opens, nothing else.
-    "src/electron/electron-client-script.ts": 1,
+    // The connect-mode window: an http(s) pop-up a page opens, and a link to
+    // another site the app navigates to — nothing else.
+    "src/electron/electron-client-script.ts": 2,
     "src/electron/electron-shared.ts": 3,
     "src/electron/electron-uds.ts": 1,
   });

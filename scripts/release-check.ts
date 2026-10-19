@@ -584,7 +584,11 @@ export function stubRebuildAdvisory(success: boolean, output: string): Result {
   };
 }
 
-async function stubRebuildNow(): Promise<Result> {
+/** Run that one test and read what it did. `env` — added to this process's
+ *  (a test hides the toolchain with `PATH`). */
+export async function stubRebuildNow(
+  env: Record<string, string> = {},
+): Promise<Result> {
   const [bin, ...args] = [
     ...FENCE,
     Deno.execPath(),
@@ -597,7 +601,7 @@ async function stubRebuildNow(): Promise<Result> {
   const o = await new Deno.Command(bin!, {
     args,
     cwd: root,
-    env: { NO_COLOR: "1" },
+    env: { NO_COLOR: "1", ...env },
     stdout: "piped",
     stderr: "piped",
   }).output();

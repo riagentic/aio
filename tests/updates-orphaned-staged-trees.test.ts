@@ -850,6 +850,44 @@ Deno.test("kept copies: one cut off while it was being written is no version —
   }
 });
 
+// The order `swapArtifact` writes it in: made EMPTY and recorded filling,
+// THEN filled. Cut off mid-fill, its bytes are not the recorded (empty) ones
+// — the next start left it as "not provably ours", and every later update
+// refused it as "in the way … not made by this app's updater".
+Deno.test("kept copies: one cut off mid-fill, in the order the swap writes it (empty, recorded, filled), is removed by the next start", async () => {
+  const root = await tempDir("aio-owned-");
+  const data = await tempDir("aio-owned-data-");
+  try {
+    const artifact = join(root, "notes");
+    await Deno.writeTextFile(artifact, "\x7fELF notes 0.1.4");
+    const cut = `${artifact}.old-0.1.4`;
+    record(data, cut, "file", { role: "kept" });
+    Deno.writeFileSync(cut, new Uint8Array());
+    made(data, cut, { filling: true });
+    await Deno.writeTextFile(cut, "\x7fELF no", { append: true });
+    // Never rolled back to: it is not a whole build.
+    await assertRejects(
+      () => restoreArtifact(artifact, cut, data),
+      Error,
+      "was cut off while it was being written",
+    );
+    assertEquals(await Deno.readTextFile(artifact), "\x7fELF notes 0.1.4");
+    laterBoot(data, NOBODY);
+    const said = await boot({ installDir: null, artifact }, data, "removed");
+    assertEquals(
+      line(said, "removed"),
+      `removed what an unfinished update left beside ${artifact}: ` +
+        `notes.old-0.1.4`,
+    );
+    assertEquals(names(root), ["notes"]);
+    assert(!readOwned(data).some((e) => e.path === cut), "still on record");
+    assertNotInTheWay(data, cut);
+  } finally {
+    await dropTempDir(root);
+    await dropTempDir(data);
+  }
+});
+
 Deno.test("leftovers: a file with the same identity but other bytes is not ours — NTFS gives a file made again under a deleted one's name its creation time, and Deno rounds its file number", async () => {
   const { root, install, data } = await installed();
   const real = _ownedDeps.lstat;

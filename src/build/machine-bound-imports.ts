@@ -89,8 +89,9 @@ export function machineBoundWarning(
     `${file}: ${found.length} import-map value(s) bind the binary to THIS machine`,
     found.map((f) => `${f.key} = ${JSON.stringify(f.value)}`).join("\n") +
     `\nAn absolute path or file: URL is embedded but still loaded from that ` +
-    `disk path at run time: the artifact runs here and dies with ` +
-    `"Module not found" once that folder moves or on any other machine.`,
+    `disk path at run time: at best the artifact runs on this machine only, ` +
+    `and it dies with "Module not found" once that folder moves or on any ` +
+    `other machine.`,
     `use a relative path — ${
       found.map((f) => `${f.key}: ${JSON.stringify(f.suggest)}`).join(", ")
     } (or the ./dep/aio/… layout \`am create\` writes; \`am link\` makes dep/aio)`,

@@ -146,6 +146,27 @@ export const LEDGER_1: readonly Mutation[] = [
   },
   {
     what:
+      "build.strictPin on the Android client opens a keyed http:// link to another machine after all — the key crosses the network in clear text",
+    file: "src/build/build-android.ts",
+    find:
+      "      if(!strict||!u||!u.searchParams.get('token')||!clear(u))return false;",
+    replace: "      return false;",
+    test: "tests/baked-server-url.test.ts",
+    filter:
+      "client connect page: build.strictPin refuses a keyed non-loopback http:// link and pairing over plain http",
+  },
+  {
+    what:
+      "a page that revokes its blob URL right after a.click() loses its export on Android — the Blob is gone before the shell asks for it",
+    file: "src/build/android-template.ts",
+    find: "if(kept.has(u))setTimeout(()=>kept.delete(u),2000)",
+    replace: "if(kept.has(u))kept.delete(u)",
+    test: "tests/android-webview-gaps.test.ts",
+    filter:
+      "android webview gaps: the save hook hands a revoked blob over under its download name",
+  },
+  {
+    what:
       "build.android.strict is set and an own MainActivity.kt that drops the keyed store still builds an APK — the opt-in refusal is only a warning again",
     file: "src/build/build-android.ts",
     find: "  if (!strict || !losses.length) return null;",
@@ -311,11 +332,21 @@ export const LEDGER_1: readonly Mutation[] = [
     what:
       "aio client: an address opened WITHOUT the key (the certificate changed and did not prove) is sent the key by the window's cookie jar",
     file: "src/electron/electron-client-script.ts",
-    find: "    if (withheld && !hasToken(url)) await dropKeyCookies(win, url);",
+    find: "    if (dropCookies) await dropHostCookies(win, url);",
     replace: "",
     test: "tests/electron-client-generated-eval.test.ts",
     filter:
-      "aio-client: an address opened WITHOUT the key is not sent it by the window's cookie jar either",
+      "aio-client: an address opened WITHOUT the key is not sent it by the window's cookie jar either — nor any other cookie of that host",
+  },
+  {
+    what:
+      "aio client: a host with no pin sends its cookies (a login) to whatever certificate answers there later",
+    file: "src/electron/electron-client-script.ts",
+    find: "  if (pinMatches(was, now.chain)) return false;",
+    replace: "  return false;",
+    test: "tests/electron-client-generated-eval.test.ts",
+    filter:
+      "aio-client: a host with no pin keeps the certificate it was first seen with — another one does not get its cookies (a login)",
   },
   {
     what:
@@ -351,11 +382,79 @@ export const LEDGER_1: readonly Mutation[] = [
     what:
       "aio client: an app on this machine is listed once per interface that carried a probe",
     file: "src/electron/electron-client-script.ts",
-    find: "    const at = (own.has(host) ? '' : host) + ':' + ad.port;",
-    replace: "    const at = host + ':' + ad.port;",
+    find:
+      "    const at = (own.has(host) ? '' : host) + ':' + ad.port + ':' + ad.name;",
+    replace: "    const at = host + ':' + ad.port + ':' + ad.name;",
     test: "tests/discovery-broadcast-targets.test.ts",
     filter:
       "aio-client: an app on THIS machine, answering from each of its addresses, is listed once; another machine's is its own",
+  },
+  {
+    what:
+      "discovery: a machine on two subnets the prober shares is listed twice — once per address it answered from",
+    file: "src/server/discovery.ts",
+    find:
+      "          h.port === me.port && h.name === me.name && oneMachine(h, me)",
+    replace: "          false",
+    test: "tests/discovery-one-machine.test.ts",
+    filter: "discovery sweep: one machine on two shared subnets is listed once",
+    os: "linux",
+  },
+  {
+    what:
+      "discovery: two apps on one port of one machine, one per interface, are listed as one — an app is hidden",
+    file: "src/server/discovery.ts",
+    find:
+      "          h.port === me.port && h.name === me.name && oneMachine(h, me)",
+    replace: "          h.port === me.port && oneMachine(h, me)",
+    test: "tests/discovery-one-machine.test.ts",
+    filter:
+      "discovery sweep: two apps on one port of one machine, one per interface, are both listed",
+    os: "linux",
+  },
+  {
+    what:
+      "discovery: two machines that share an off-segment address (two Docker hosts, 172.17.0.1) are merged into one — an app is hidden",
+    file: "src/server/discovery.ts",
+    find: "  return a.host !== b.host && !!a.addrs?.includes(b.host) &&\n" +
+      "    !!b.addrs?.includes(a.host);",
+    replace:
+      "  return a.host !== b.host && (a.addrs ?? []).some((x) => b.addrs?.includes(x));",
+    test: "tests/discovery-one-machine.test.ts",
+    filter:
+      "discovery sweep: two machines that only share an address off the segment are both listed",
+    os: "linux",
+  },
+  {
+    what:
+      "aio client: a machine on two subnets the client shares is listed twice on the connect page",
+    file: "src/electron/electron-client-script.ts",
+    find: "    heard.push(me);\n",
+    replace: "",
+    test: "tests/discovery-broadcast-targets.test.ts",
+    filter:
+      "aio-client: another machine on two subnets this one shares is listed once; two machines are never merged",
+  },
+  {
+    what:
+      "aio client: once the app is on screen every link it follows is vetoed and re-enters connectTo — a keyed app's tokenless link answers 401 and the window stays put",
+    file: "src/electron/electron-client-script.ts",
+    find: "    if (!String(win.webContents.getURL()).startsWith('data:')) {",
+    replace: "    if (false) {",
+    test: "tests/electron-client-generated-eval.test.ts",
+    filter:
+      "aio-client: once the app is on screen its navigations are its own — a same-app link loads (no 401, no reconnect), another site goes to the system browser",
+  },
+  {
+    what:
+      "runCommand: a timeout never fires — the call waits for the command, however long",
+    file: "src/server/spawn.ts",
+    find: "    : setTimeout(() => timer.abort(), timeoutMs);",
+    replace: "    : undefined;",
+    test: "tests/run-command.test.ts",
+    filter:
+      "runCommand: the timeout kills the whole tree on time, and keeps what it wrote",
+    os: "linux",
   },
   {
     what:
@@ -668,6 +767,16 @@ export const LEDGER_1: readonly Mutation[] = [
     test: "tests/electron-runtime-fetch.test.ts",
     filter:
       "ensureElectronRuntime: a tampered zip is REFUSED, and nothing is cached",
+  },
+  {
+    what:
+      "an online app's Electron download stops being held to the checksum its build pinned \u2014 a mirror or network that serves a forged zip with a matching checksum list gets native code run as the user's desktop app",
+    file: "src/electron/electron-runtime-fetch.ts",
+    find: "    if (got !== pinned) {",
+    replace: "    if (false) {",
+    test: "tests/electron-shared-runtime.test.ts",
+    filter:
+      "pinned checksum: a download is held to the build's pin alone \u2014 a forged zip WITH a forged checksum list fails, and the network's list is never needed",
   },
   {
     what:
@@ -3895,7 +4004,7 @@ export const LEDGER_1: readonly Mutation[] = [
     what:
       "a connection that never answered a ping (vitals off, an older peer) is judged dead for its silence and closed",
     file: "src/browser/browser-vitals.ts",
-    find: "  if (!_ponged) return null;\n",
+    find: "  if (!_ponged && !_serverPongs) return null;\n",
     replace: "",
     test: "tests/air-transport-silent-socket.test.ts",
     filter:
@@ -3915,8 +4024,8 @@ export const LEDGER_1: readonly Mutation[] = [
     what:
       "an IPC cell call made while the bridge is still opening is written ahead of older offline-queued calls, reordering intent and risking reject-plus-apply",
     file: "src/browser/browser-air-transport.ts",
-    find: "} else if (_ipc && _ipcOpen) {",
-    replace: "} else if (_ipc && _ipcConnected) {",
+    find: "} else if (!_held && _ipc && _ipcOpen) {",
+    replace: "} else if (!_held && _ipc && _ipcConnected) {",
     test: "tests/ipc-connecting-send-order.test.ts",
     filter:
       "air transport: an IPC call made before the bridge opens queues behind older offline calls",
@@ -4623,7 +4732,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "a compiled deno.jsonc app or commented deno.json takes its appId from the binary file name, so every versioned install starts from empty state",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/app-id.ts",
     find:
       "return locateDenoJsonAbove(new URL(Deno.mainModule))?.config ?? null;",
     replace:
@@ -7380,6 +7489,17 @@ export const LEDGER_1: readonly Mutation[] = [
   },
   {
     what:
+      "a CLI client gives up a silent socket while a call with ackTimeoutMs 0 is in flight — the server, busy in a long method, commits a call its caller was told was lost",
+    file: "src/server/cli-client.ts",
+    find:
+      "        if (ponged && silent >= CLI_SILENT_BEATS_DEAD && !longCallOut()) {",
+    replace: "        if (ponged && silent >= CLI_SILENT_BEATS_DEAD) {",
+    test: "tests/cli-client-silent-socket.test.ts",
+    filter:
+      "connectCli: a call with ackTimeoutMs 0 outlives a server silent past the heartbeat ceiling",
+  },
+  {
+    what:
       "a CLI client keeps the last connection's wire answer: a server restarted without the option gets f(x) where it always got f(x, null)",
     file: "src/server/cli-client.ts",
     find: "      wireOmit = undefined;\n      wireKnown = false;",
@@ -7578,5 +7698,24 @@ export const LEDGER_1: readonly Mutation[] = [
     test: "tests/dev-restart-typo.test.ts",
     filter:
       "sourcesChangedSince: the source files saved at or after the mark; an older one, a non-source file, a dot-dir and node_modules are not",
+  },
+  {
+    what:
+      'am create commits its seeded deno.lock — the first build fills the lock and is "-dirty" on a scaffold nobody touched',
+    file: "src/am/am-cmd-create.ts",
+    find: '    await run(["add", "-A", "--", ".", ":(exclude)deno.lock"]);',
+    replace: '    await run(["add", "-A"]);',
+    test: "tests/am-create-journey.test.ts",
+    filter:
+      "am create --json: absolute dir, and git as a reason — never a bare false",
+  },
+  {
+    what:
+      "a cancelled shared-runtime start returns while its download still removes the stage and releases the lock — an app exiting on the cancel leaves both behind",
+    file: "src/electron/shared-runtime.ts",
+    find: "            await settledWithin(pending, CANCEL_CLEANUP_MS);",
+    replace: "",
+    test: "tests/electron-shared-runtime.test.ts",
+    filter: "shared start: closing the progress window cancels the start",
   },
 ];

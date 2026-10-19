@@ -7,6 +7,7 @@ import { assert, assertEquals } from "@std/assert";
 // @ts-ignore node:sqlite types unavailable when an old @types/node shadows them
 import { DatabaseSync } from "node:sqlite";
 import type { DB, QueryResult, Tx } from "../src/db/types.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import {
   migrateLegacyKv,
   SKV_SCHEMA,
@@ -115,14 +116,58 @@ Deno.test("sqliteKv: a key written by setMulti can always be read back", async (
   assertEquals(await kv.getMulti("p"), written);
 });
 
+Deno.test("migrateLegacyKv: a legacy path with no store there is never opened (opening one creates it)", async () => {
+  // Deno.openKv(path) CREATES an empty store at a missing path, so a boot of
+  // a compiled app with no legacy store would leave a stray data.kv behind.
+  const d = Deno as unknown as { openKv?: unknown };
+  const real = d.openKv;
+  const opened: (string | undefined)[] = [];
+  d.openKv = (path?: string) => {
+    opened.push(path);
+    return Promise.reject(new Error("must not open"));
+  };
+  try {
+    const log = { info: () => {}, warn: () => {} };
+    await migrateLegacyKv(testDb(), "/nonexistent/aio-legacy/data.kv", log);
+    assertEquals(opened, []);
+  } finally {
+    d.openKv = real;
+  }
+});
+
+Deno.test("migrateLegacyKv: a legacy path that cannot be looked at (permission) is said, not taken as no store", async () => {
+  const d = Deno as unknown as { openKv?: unknown };
+  const real = d.openKv;
+  d.openKv = () => Promise.reject(new Error("must not open"));
+  const dir = await tempDir("skv-locked-");
+  await Deno.mkdir(`${dir}/locked`);
+  await Deno.writeTextFile(`${dir}/locked/data.kv`, "");
+  await Deno.chmod(`${dir}/locked`, 0o000);
+  try {
+    const warns: string[] = [];
+    const log = { info: () => {}, warn: (m: string) => void warns.push(m) };
+    await migrateLegacyKv(testDb(), `${dir}/locked/data.kv`, log);
+    assertEquals(warns.length, 1, JSON.stringify(warns));
+    assert(/could not be migrated/.test(warns[0]!), warns[0]);
+  } finally {
+    d.openKv = real;
+    await Deno.chmod(`${dir}/locked`, 0o755);
+    await dropTempDir(dir);
+  }
+});
+
 Deno.test("migrateLegacyKv: idempotent + silent when no legacy store", async () => {
   const db = testDb();
   const logs: string[] = [];
   const log = { info: (m: string) => logs.push(m), warn: () => {} };
-  await migrateLegacyKv(db, "/nonexistent/path.kv", log);
+  // Under a FILE, where no store can be opened. A `/nonexistent/…` literal is
+  // `C:\nonexistent\…` on Windows, a folder a user may create.
+  const file = Deno.makeTempFileSync();
+  await migrateLegacyKv(db, `${file}/path.kv`, log);
   const kv = sqliteKv(db);
   await kv.set("k", 1);
-  await migrateLegacyKv(db, "/nonexistent/path.kv", log);
+  await migrateLegacyKv(db, `${file}/path.kv`, log);
+  Deno.removeSync(file);
   assertEquals(await kv.get("k"), 1);
   assert(
     logs.every((l) => !l.includes("migrated")),

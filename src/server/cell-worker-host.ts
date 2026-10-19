@@ -58,6 +58,7 @@ import {
 import type { AioUser } from "./aio-types.ts";
 import { _setCallTimeouts, registerCall } from "../state/cell-impl.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { describeThrown } from "../diagnostics/fmt.ts";
 import { _setHostedCell } from "../state/cell-catalog.ts";
 
 /** The cell name this worker hosts, or null when this isn't a cell worker. */
@@ -241,6 +242,20 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
   /** The owner's `refusalsReject`, as `init` reports it. Until it arrives no
    *  call has been served, so the default is only ever the 1.x one. */
   let refusalsReject = false;
+  /** The owner's `guardDispatches`, as `init` reports it: survive (and report
+   *  home) an unhandled rejection, as the owner's crash handler does. Off
+   *  until `init` — a rejection during boot stays a boot failure. */
+  let guardRejections = false;
+  self.addEventListener("unhandledrejection", (e: PromiseRejectionEvent) => {
+    if (!guardRejections) return;
+    e.preventDefault();
+    const r = e.reason;
+    post({
+      t: "stray",
+      message: describeThrown(r),
+      stack: r instanceof Error ? r.stack : undefined,
+    });
+  });
   /** Has the authoritative slice arrived? Until it does, this isolate holds
    *  its DEFAULTS, and anything it commits is not a change to ship home.
    *
@@ -440,6 +455,7 @@ export function startCellWorkerHost(cell: CellDef): Promise<never> {
       // before any message arrives), so the reply decides what the in-process
       // caller sees. See the `refused` note below.
       refusalsReject = msg.refusalsReject === true;
+      guardRejections = msg.guardRejections === true;
       // The owner's dev refusal of a declared-type change, run HERE: the
       // owner only sees committed patches. Refuse-only — every warning the
       // guard says is said by the owner's guard over those patches.

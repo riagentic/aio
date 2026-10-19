@@ -18,6 +18,15 @@ export function isFrameTooLarge(message: string): boolean {
 export const BACKOFF_BASE_MS = 1000;
 export const BACKOFF_MAX_MS = 8000;
 
+/** Longest a WebSocket handshake may take before the attempt counts as lost.
+ *  A browser puts no bound on it: an upgrade whose TCP connection was
+ *  accepted and then black-holed stays CONNECTING forever — and Chromium
+ *  opens one handshake per host at a time, so every later socket to the app
+ *  queues behind it. Measured in headless Chromium: a page mid-reconnect when
+ *  its network dropped said "Reconnecting…" for minutes after the network was
+ *  back. Shared by the bundle's transport and the generated dev socket. */
+export const WS_OPEN_TIMEOUT_MS = 15_000;
+
 /** Exponential reconnect delay with ±`jitter` randomization (default 20%).
  *  Jitter prevents a thundering herd when many clients lose one server.
  *

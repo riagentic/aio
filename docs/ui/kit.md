@@ -37,8 +37,11 @@ Reskin at whichever level you mean:
 
 ```css
 :root {
-  /* theme-wide: the kit follows, and so does everything else */
+  /* theme-wide: the kit follows, and so does everything else. A rebrand sets
+     the fill AND its text colour: the active tab and links draw the accent
+     as text (--aio-accent-ink), which must read on the page (AA). */
   --aio-accent: #7c3aed;
+  --aio-accent-ink: #6d28d9;
   --aio-r-2: 12px;
 
   /* kit-only: overrides the component kit and nothing else */
@@ -47,19 +50,20 @@ Reskin at whichever level you mean:
 }
 ```
 
-| kit token            | defaults to       | what it colours                                                           |
-| -------------------- | ----------------- | ------------------------------------------------------------------------- |
-| `--aio-ui-accent`    | `--aio-accent`    | primary fill, focus ring                                                  |
-| `--aio-ui-on-accent` | `--aio-on-accent` | the ink ON that fill                                                      |
-| `--aio-ui-ink`       | `--aio-text`      | body text in components                                                   |
-| `--aio-ui-ink-soft`  | `--aio-muted`     | secondary text                                                            |
-| `--aio-ui-bg`        | `--aio-surface`   | input/field background                                                    |
-| `--aio-ui-surface`   | `--aio-surface-2` | secondary button background                                               |
-| `--aio-ui-line`      | `--aio-border`    | borders and hairlines                                                     |
-| `--aio-ui-danger`    | `--aio-danger`    | destructive actions                                                       |
-| `--aio-ui-on-danger` | `--aio-on-danger` | the ink ON the danger fill, solved from the fill unless the theme sets it |
-| `--aio-ui-radius`    | `--aio-r-2`       | corner radius                                                             |
-| `--aio-ui-font`      | `--aio-font`      | component typeface                                                        |
+| kit token             | defaults to        | what it colours                                                           |
+| --------------------- | ------------------ | ------------------------------------------------------------------------- |
+| `--aio-ui-accent`     | `--aio-accent`     | primary fill, focus ring                                                  |
+| `--aio-ui-on-accent`  | `--aio-on-accent`  | the ink ON that fill                                                      |
+| `--aio-ui-accent-ink` | `--aio-accent-ink` | the accent as TEXT on the page (active tab, Markdown link)                |
+| `--aio-ui-ink`        | `--aio-text`       | body text in components                                                   |
+| `--aio-ui-ink-soft`   | `--aio-muted`      | secondary text                                                            |
+| `--aio-ui-bg`         | `--aio-surface`    | input/field background                                                    |
+| `--aio-ui-surface`    | `--aio-surface-2`  | secondary button background                                               |
+| `--aio-ui-line`       | `--aio-border`     | borders and hairlines                                                     |
+| `--aio-ui-danger`     | `--aio-danger`     | destructive actions                                                       |
+| `--aio-ui-on-danger`  | `--aio-on-danger`  | the ink ON the danger fill, solved from the fill unless the theme sets it |
+| `--aio-ui-radius`     | `--aio-r-2`        | corner radius                                                             |
+| `--aio-ui-font`       | `--aio-font`       | component typeface                                                        |
 
 > Before alpha64 the kit defined bare `--aio-*` names of its own, two of which
 > collided with the theme's under the same spelling — `--aio-accent-ink` meant

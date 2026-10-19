@@ -19,6 +19,11 @@ export type VitalsPing = {
    *  server's per-client backpressure input. Absent from a probe that has no
    *  meter. */
   ms?: number;
+  /** 1 when the page is hidden (`document.hidden`): a background tab's
+   *  timers are throttled, so its beat gap is not a liveness signal and the
+   *  server stops grading it until a ping without `h`. Absent from an older
+   *  client, which is graded as before. */
+  h?: 1;
 };
 
 /** "vitals-pong" payload — timestamps and optional loop health. */
@@ -203,6 +208,10 @@ export function createTransportProbeServer(config: TransportProbeServerConfig) {
   /** Clients that have sent at least one `vitals-ping`, and can therefore be
    *  judged by the age of the last one. */
   const heartbeats = new Set<string>();
+  /** Clients whose last ping said the page is hidden — not graded (a
+   *  throttled background tab beats late but is healthy). A hidden tab that
+   *  dies is still dropped by its socket closing (`removeClient`). */
+  const hidden = new Set<string>();
 
   function ensureClient(clientId: string, at: number): ClientLiveness {
     let c = clients.get(clientId);
@@ -240,11 +249,13 @@ export function createTransportProbeServer(config: TransportProbeServerConfig) {
 
     /** A ping ARRIVED. Stamped with the server's clock — the frame's own `t1`
      *  belongs to the client and must never be stored here. */
-    onClientPing(clientId: string) {
+    onClientPing(clientId: string, isHidden = false) {
       const at = now();
       const c = ensureClient(clientId, at);
       c.lastPing = at;
       heartbeats.add(clientId);
+      if (isHidden) hidden.add(clientId);
+      else hidden.delete(clientId);
     },
 
     /** A frame of ANY kind arrived. A client that speaks is alive, so this
@@ -277,7 +288,11 @@ export function createTransportProbeServer(config: TransportProbeServerConfig) {
         const prev = c.status;
         // A heartbeat age, graded as liveness — NOT through the RTT tiers.
         // See `evaluateLiveness` for the measurement that says why.
-        const next = evaluateLiveness(gap, t.frozen);
+        // A hidden page is healthy whatever its gap — and a frozen one that
+        // reports hidden recovers here, so it is never stuck skipped.
+        const next = hidden.has(c.clientId)
+          ? "healthy"
+          : evaluateLiveness(gap, t.frozen);
         c.status = next;
 
         if (next === "frozen" && prev !== "frozen") {
@@ -307,11 +322,13 @@ export function createTransportProbeServer(config: TransportProbeServerConfig) {
     removeClient(clientId: string) {
       clients.delete(clientId);
       heartbeats.delete(clientId);
+      hidden.delete(clientId);
     },
 
     destroy() {
       clients.clear();
       heartbeats.clear();
+      hidden.clear();
     },
   };
 }

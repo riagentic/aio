@@ -315,12 +315,17 @@ Deno.test("nativeFetch: the bridge is standalone-only, own-origin-only, http(s)-
     2,
     "one install site",
   );
-  // The only other listener is the client APK's pairing bridge — a different
-  // object, on the connect page alone; it carries no fetch.
-  assertEquals(KOTLIN.split("addWebMessageListener(").length, 3);
+  // The only other listeners are the client APK's pairing bridge — on the
+  // connect page alone — and the download save bridge (bytes IN, to a file
+  // in Downloads); different objects, neither carries a fetch.
+  assertEquals(KOTLIN.split("addWebMessageListener(").length, 4);
   assertStringIncludes(
     KOTLIN,
     'addWebMessageListener(this, CONNECT_GLOBAL, setOf("https://$ASSET_HOST"), AioConnect(pins))',
+  );
+  assertStringIncludes(
+    KOTLIN,
+    "addWebMessageListener(this, SAVE_GLOBAL, saveOrigins, AioSave(this@MainActivity))",
   );
   // Removed again when a foreign page ever loads.
   assertStringIncludes(

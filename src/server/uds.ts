@@ -5,6 +5,7 @@
 // (tt-state out, tt-cmd in — the Electron panel needs it); vitals stay
 // WS-only and are rejected loudly.
 
+import { doorRetryAfterMs } from "./door-refusal.ts";
 import { compactPatches } from "../state/patch-compact.ts";
 import { LARGE_STATE_DOC } from "../state/budgets.ts";
 import { writeClientLog } from "./client-log.ts";
@@ -447,7 +448,18 @@ export function createUDSListener(
           );
 
           // A3: version handshake — server speaks first, before any state.
-          sendTo(conn, enc("proto", protoHello(VERSION)));
+          // A trusted local peer has no user; the appId is the reload
+          // carry's check (protocol-version.ts `ProtoHello.appId`).
+          sendTo(
+            conn,
+            enc("proto", {
+              ...protoHello(VERSION),
+              ...(typeof clientConfig?.appId === "string"
+                ? { appId: clientConfig.appId }
+                : {}),
+              user: null,
+            }),
+          );
           if (clientConfig && Object.keys(clientConfig).length > 0) {
             sendTo(conn, enc("cfg", clientConfig));
           }
@@ -1637,12 +1649,21 @@ function _handleUDSConn(
                     } catch { /* client gone */ }
                   },
                   (err) => {
+                    // A refusal at the shutdown door says when to re-send:
+                    // the call never ran (aio-server `closing`) — the WS
+                    // twin's rule, read by cli-client `_retryRefusedCall`.
+                    const r = doorRetryAfterMs(err);
                     try {
                       sendTo(
                         conn,
                         // Message + CODE, never `String(err)` — see the WS
                         // twin in server-ws.ts `_sendAckErr`.
-                        enc("ack", { cid, ok: false, ...errorFields(err) }),
+                        enc("ack", {
+                          cid,
+                          ok: false,
+                          ...errorFields(err),
+                          ...(typeof r === "number" ? { retryAfterMs: r } : {}),
+                        }),
                       );
                     } catch { /* client gone */ }
                   },

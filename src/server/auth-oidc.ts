@@ -128,15 +128,22 @@ async function jwksKeys(
   reread = false,
 ): Promise<JsonWebKey[]> {
   const hit = _jwks.get(jwksUri);
-  if (hit && Date.now() - hit.at < CACHE_MS) {
+  // A NEGATIVE age (the wall clock stepped back) is not fresh: read as
+  // "too soon", it held a rotated key out for as long as the step.
+  const within = (then: number, ms: number) => {
+    const age = Date.now() - then;
+    return age >= 0 && age < ms;
+  };
+  if (hit && within(hit.at, CACHE_MS)) {
     // A KEY ROTATION IS NOT A CACHE HIT. A token naming a kid the cached set
     // lacks is the first sign the provider published a new key — refusing it
     // until the hour runs out failed every SSO login after a rotation.
     // Throttled per JWKS: a stream of foreign kids must not turn the callback
     // into a fetch pump against the provider.
     if (!reread) return hit.keys;
-    const last = _jwksReread.get(jwksUri) ?? 0;
-    if (Date.now() - last < JWKS_REREAD_MIN_MS) return hit.keys;
+    if (within(_jwksReread.get(jwksUri) ?? 0, JWKS_REREAD_MIN_MS)) {
+      return hit.keys;
+    }
     _jwksReread.set(jwksUri, Date.now());
   }
   const resp = await fetch(jwksUri);

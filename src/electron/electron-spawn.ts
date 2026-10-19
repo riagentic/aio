@@ -1,6 +1,7 @@
 // Electron binary resolution and process spawning
 
-import { basename, dirname, fromFileUrl, join } from "@std/path";
+import { basename, dirname, fromFileUrl, isAbsolute, join } from "@std/path";
+import { moveOldProfile } from "./electron-profile.ts";
 import {
   type AioMeta,
   type Log,
@@ -21,9 +22,13 @@ import { DENO_JSON_NAMES, parseDenoJson } from "../server/deno-json.ts";
 import { HEY } from "../diagnostics/fmt.ts";
 import { redactUrlToken } from "../diagnostics/redact.ts";
 import { neutralCwd, spawnInheritingOrNull } from "../server/no-console.ts";
+import { sharedRuntimeForStart } from "./shared-runtime.ts";
+import { launchArtifactPath } from "../server/updates-apply.ts";
 import {
+  bakedElectronRuntime,
   bakedElectronVersion,
   bakedEmbeddedRuntime,
+  bakedRuntimeSha,
   DEFAULT_ELECTRON_VERSION,
   electronBinIn,
   electronSlug,
@@ -118,6 +123,11 @@ export type FindElectronOpts = {
   /** Aborted when the app starts shutting down: an installer still running
    *  is killed (its whole process group) instead of outliving the app. */
   signal?: AbortSignal;
+  /** The app's title — what a shared-runtime download's window is called. */
+  title?: string;
+  /** A shared-runtime start (`"build": { "electronRuntime": "online" }`):
+   *  injected in tests; the default is `sharedRuntimeForStart`. */
+  sharedRuntime?: typeof sharedRuntimeForStart;
 };
 
 /** Resolves an Electron binary — $ELECTRON_PATH > packaged dist > node_modules
@@ -135,8 +145,25 @@ export async function findElectronBin(
   log: Log,
   opts: FindElectronOpts = {},
 ): Promise<string | null> {
+  const compiledApp = opts.compiled ?? isCompiled();
+  // A shared-runtime app carries no runtime of its own, so its package
+  // layout's ELECTRON_PATH (the Windows exe's launcher sets it at the
+  // install's `electron\`, which this build leaves empty) points at nothing
+  // by design — that is not the "set but not found" this rung warns about.
+  const shared = compiledApp &&
+    await bakedElectronRuntime(opts.distDir) === "shared";
   // 1. ELECTRON_PATH env var (AppImage / custom deployment)
   let envPath = Deno.env.get("ELECTRON_PATH");
+  if (
+    shared && envPath &&
+    packagedElectronCandidates(opts.execPath, opts.os).includes(envPath)
+  ) {
+    try {
+      await Deno.stat(envPath);
+    } catch {
+      envPath = undefined;
+    }
+  }
   // An Electron AppImage's AppRun exports it into its own mount, and every
   // child inherits it: an app started from that AppImage's terminal would run
   // the HOST's Electron, from a mount that vanishes when the host exits.
@@ -192,6 +219,29 @@ export async function findElectronBin(
     try {
       if ((await Deno.stat(cand)).isFile) return cand;
     } catch { /* not this layout */ }
+  }
+
+  // 2b. A shared-runtime app: the per-user store, downloaded into on first
+  //     start with a progress window (shared-runtime.ts). Never the cache's
+  //     unfused runtime below, and never node_modules: what a shared app
+  //     starts from is fused exactly like a bundled one.
+  if (shared) {
+    const version = (await bakedElectronVersion(opts.distDir)) ??
+      DEFAULT_ELECTRON_VERSION;
+    return await (opts.sharedRuntime ?? sharedRuntimeForStart)({
+      version,
+      slug: electronSlug(),
+      execPath: opts.execPath ?? Deno.execPath(),
+      // The record names what is INSTALLED — the .AppImage file, not the
+      // mount it runs from, which is gone the moment the app exits.
+      installed: opts.execPath ?? launchArtifactPath(),
+      title: opts.title ?? basename(opts.execPath ?? Deno.execPath()),
+      log: { info: (m) => log.info(m), error: (m) => log.error(m) },
+      signal: opts.signal,
+      // What the download must hash to — pinned by the build, carried in
+      // this binary, never taken from the network.
+      sha256: await bakedRuntimeSha(opts.distDir, electronSlug()),
+    });
   }
 
   // 3. node_modules dev binary
@@ -250,7 +300,13 @@ export async function findElectronBin(
 
   const fetchRuntime = opts.fetchRuntime ??
     ((v: string, slug: string, l: Log) =>
-      ensureElectronRuntime(v, slug, { log: l.info, warn: l.error }));
+      ensureElectronRuntime(v, slug, {
+        log: l.info,
+        warn: l.error,
+        // A stop mid-download ends it: without this, close() returned with
+        // the ~100 MB fetch and its stall/progress timers still running.
+        signal: opts.signal,
+      }));
 
   // 4. Dev only — auto-install on first run: `deno install` FORCE-adds
   //    electron (positional `npm:electron`) so `deno task dev` works no matter
@@ -1488,10 +1544,15 @@ export const MAIN_SCRIPT_DIR = "aio-main";
  *  APPDATA, a read-only home), the temp directory is used as before, and that
  *  is said: there the residual stands. */
 export async function writeMainScript(
+  /** The profile's name (Electron's per-OS place) or its absolute path. */
   profile: string | undefined,
   text: string,
 ): Promise<string> {
-  const dir = profile ? electronProfileDir(profile) : null;
+  const dir = !profile
+    ? null
+    : isAbsolute(profile)
+    ? profile
+    : electronProfileDir(profile);
   // Twice: another launch on this profile may prune the directory (below)
   // between this one's mkdir and its write.
   for (let attempt = 0; dir !== null && attempt < 2; attempt++) {
@@ -1534,6 +1595,8 @@ async function spawnElectron(
     requireSandbox?: boolean;
     /** The window's `app.name` — where its main script is written. */
     profile?: string;
+    /** The profile's directory, when the app's home decides it. */
+    profileDir?: string;
     /** The app's display title — its AppUserModelID on Windows. */
     title?: string;
   } = {},
@@ -1552,7 +1615,7 @@ async function spawnElectron(
   if (sandbox.warn) log.warn(sandbox.warn);
   const sandboxArgs = sandbox.args;
   const tmpFile = await writeMainScript(
-    opts.profile,
+    opts.profileDir ?? opts.profile,
     MAIN_SCRIPT_SELF_REMOVE + mainScriptAumid(opts.title) + script,
   );
   // The caller's switches go LAST: Chromium takes the last occurrence of a
@@ -1713,7 +1776,11 @@ export async function launchElectron(
   signal?: AbortSignal,
 ): Promise<Deno.ChildProcess | null> {
   if (signal?.aborted) return null;
-  const bin = await findElectronBin(log, { distDir, signal });
+  const bin = await findElectronBin(log, {
+    distDir,
+    signal,
+    title: meta?.title ?? uds?.title,
+  });
   if (!bin || signal?.aborted) return null;
   // The cache holds both a downloaded runtime and one unpacked from the exe
   // itself (under a `-fused` name); whether this binary CARRIES one is the
@@ -1725,6 +1792,8 @@ export async function launchElectron(
   );
   const mode = source !== "cache"
     ? source
+    : await bakedElectronRuntime(distDir) === "shared"
+    ? "shared runtime"
     : await bakedEmbeddedRuntime(distDir).catch(() => null)
     ? "runtime carried by this app"
     : "fetched runtime";
@@ -1736,6 +1805,32 @@ export async function launchElectron(
       cdpPort ? `, cdp 127.0.0.1:${cdpPort}` : ""
     })`,
   );
+  // The profile lives in the app's home (electron-profile.ts); one still at
+  // Electron's old per-OS place moves there once, before Electron opens it.
+  if (meta?.profileDir) {
+    const old = electronProfileDir(shellProfileName(meta, uds?.title));
+    const moved = await moveOldProfile(old, meta.profileDir);
+    if (moved.kind === "moved") {
+      log.info(
+        `electron: the window's profile (cookies, storage, window size) ` +
+          `moved from ${moved.from} into the app's home: ${meta.profileDir}`,
+      );
+    } else if (moved.kind === "kept-both") {
+      log.error(
+        `electron: the window's profile is in the app's home ` +
+          `(${meta.profileDir}) AND at its old place (${moved.from}) — ` +
+          `starting from the home's; the old one is left as it was (delete ` +
+          `it once nothing is missing)`,
+      );
+    } else if (moved.kind === "failed") {
+      log.error(
+        `electron: could not move the window's profile from ${moved.from} ` +
+          `to ${meta.profileDir} (${moved.why}) — starting from the old ` +
+          `place, so nothing is lost; the next start tries again`,
+      );
+      meta = { ...meta, profileDir: moved.from };
+    }
+  }
   // `childWindows` is served by the UDS shell's PRELOAD (`__aioIPC.openWindow`,
   // and the `<webview>` gate that rides with it). The WebSocket shell — taken
   // whenever the app has a TCP port (`--expose`, `--port=N`, `transport:
@@ -1763,6 +1858,7 @@ export async function launchElectron(
   return spawnElectron(bin, script, cdpSwitches(cdpPort), {
     requireSandbox: meta?.requireSandbox,
     profile: shellProfileName(meta, uds?.title),
+    profileDir: meta?.profileDir,
     title: meta?.title ?? uds?.title,
   });
 }

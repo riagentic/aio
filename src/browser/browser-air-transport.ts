@@ -62,13 +62,17 @@ import {
 import {
   _armAckTimer,
   _isAckWritten,
+  _registerAck,
   _rejectAck,
   _rejectAllPending,
   _rejectInFlight,
   _unwriteAck,
   ARMS_ACK_TIMER,
 } from "./browser-ack.ts";
-import { backoffDelay } from "../protocol/transport-shared.ts";
+import {
+  backoffDelay,
+  WS_OPEN_TIMEOUT_MS,
+} from "../protocol/transport-shared.ts";
 import { _showStatus } from "../protocol/protocol-status.ts";
 import { _setDegradedRelay, degradedReport } from "../diagnostics/degraded.ts";
 import {
@@ -267,6 +271,17 @@ function _coreAction(frame: string): QueuedAction | null {
   if (f?.t !== "action") return null;
   const a = f.d as QueuedAction | null;
   return a && typeof a.type === "string" ? a : null;
+}
+
+/** A core-transport frame (`useCell().send`) while a reload carry is held: an
+ *  action queues behind the carry, as `_send` does — it used to go straight
+ *  to the socket and land ahead of the carried calls. Anything else goes now.
+ *  True when it was queued. */
+function _queuedBehindCarry(frame: string): boolean {
+  if (!_held) return false;
+  const a = _coreAction(frame);
+  if (a) _queue.push(a);
+  return a !== null;
 }
 
 /** The server dropped a call's frame before running it and said when a re-send
@@ -593,6 +608,9 @@ function _route(line: string): void {
     return;
   }
   if (handleControlFrame(f, _bootId, _protoMismatch, _reloadWhenDrained)) {
+    // The hello says which app and user this connection is — the reload
+    // carry's check, made on the connection itself.
+    if (f.t === "proto" && !_terminal) _releaseHeld();
     return;
   }
   if (f.t === "ack" && _retryRefusedCall(f.d)) return;
@@ -672,15 +690,299 @@ function _reloadWhenDrained(): void {
       return;
     }
     if (left > 0) {
+      // Two different things, named apart: calls never written are carried;
+      // bytes written but not yet flushed are past carrying.
+      const unsent = _carry.length + _queue.length + (_pacer?.length ?? 0);
+      const buffered = _ws?.bufferedAmount ?? 0;
       console.warn(
-        `[aio:air] reloading with calls still unsent after ` +
-          `${RELOAD_DRAIN_MAX_MS}ms (the connection did not stay up) — the ` +
-          `page reload discards them; they did not reach the server.`,
+        `[aio:air] reloading after ${RELOAD_DRAIN_MAX_MS}ms with ` +
+          `${count(unsent, "call")} still unsent${
+            _coreOfflineQueueFullness() > 0 ? " (plus queued send() calls)" : ""
+          } — carried across the reload and sent by the next page.` +
+          (buffered > 0
+            ? ` ${buffered} bytes already written to the socket were not ` +
+              `flushed yet: those are NOT carried and may not reach the server.`
+            : ""),
       );
     }
+    // On `pagehide`, not here: the page keeps running (and calling) until it
+    // is actually gone, and every call up to that moment is carried.
+    _reloadAt = Date.now();
     location.reload();
   };
   tick();
+}
+
+/** Where a framework reload leaves the calls it could not send — per tab, so
+ *  only the page that made them sends them — and the marker a carry that
+ *  could not be stored leaves for the next page to report. */
+const RELOAD_CARRY_KEY = "aio:reload-carry";
+const RELOAD_CARRY_DROPPED_KEY = "aio:reload-carry-dropped";
+/** A carry older than this is not this reload's: a cancelled reload's page
+ *  closed later, or a tab that sat on an error page while the server was down. */
+const RELOAD_CARRY_MAX_AGE_MS = 60_000;
+let _reloadAt = 0;
+
+type CarriedCall = { a: QueuedAction; tries?: number };
+/** A carry: the calls, plus which app and which user the CONNECTION said it
+ *  was (the server's `proto` hello — `ProtoHello.appId`/`.user`), and when. */
+type Carry = {
+  app: string | undefined;
+  user: string | null | undefined;
+  at: number;
+  calls: CarriedCall[];
+};
+
+/** Which app the current connection is: the hello's appId plus the origin. */
+function _helloApp(): string | undefined {
+  const id = peerHello()?.appId;
+  return typeof id === "string" ? `${id}@${location.origin}` : undefined;
+}
+
+const _types = (calls: CarriedCall[]): string =>
+  [...new Set(calls.map((c) => c.a.type))].join(", ");
+
+/** The page is going. Carry what it owes when a framework reload is under
+ *  way, and re-save a carry it is still holding either way — losing it here
+ *  would be the silent drop the carry exists to prevent. */
+function _onPageHide(ev: Event): void {
+  // A bfcache entry keeps this page's memory, queue and callers intact.
+  if ((ev as Event & { persisted?: boolean }).persisted) return;
+  // A reload cancelled long ago (a beforeunload prompt) is no reload now.
+  const reloading = _reloadAt > 0 &&
+    Date.now() - _reloadAt <= RELOAD_CARRY_MAX_AGE_MS;
+  if (reloading || _held) _carryAcrossReload(reloading);
+}
+
+/** Hand every call this page has not written to the next page.
+ *
+ *  MEASURED before this (real dev app, headless Chromium, server restarted
+ *  while the UI kept calling): the drain bound above ran out on ~200 calls a
+ *  restart — the dev reload socket saw the new boot id seconds before the
+ *  transport's backoff reconnected, and a UI calling steadily kept the pacer
+ *  from ever emptying. Every one of them died with the page. Never-written
+ *  only, so nothing here can have reached the server. Stored in wire shape
+ *  (the frame this page would have sent), with each call's refusal count,
+ *  minus the `cid`: no caller survives the reload to hear its ack. A carry
+ *  still held goes first, under its own stamp. */
+function _carryAcrossReload(withOwn: boolean): void {
+  let own: CarriedCall[] = [];
+  if (withOwn) {
+    _requeuePaced(_takePacer());
+    own = _takePending().map(({ action, tries }) => {
+      const { cid: _cid, ...a } = wireAction(action) as QueuedAction & {
+        cid?: unknown;
+      };
+      return tries ? { a, tries } : { a };
+    });
+  }
+  const h = _held;
+  _clearHeld();
+  const calls = [...(h?.calls ?? []), ...own];
+  if (calls.length === 0) return;
+  const rec: Carry = h
+    ? { app: h.app, user: h.user, at: h.at, calls }
+    : { app: _helloApp(), user: peerHello()?.user, at: Date.now(), calls };
+  try {
+    sessionStorage.setItem(RELOAD_CARRY_KEY, JSON.stringify(rec));
+  } catch (e) {
+    const why = e instanceof Error ? e.message : String(e);
+    console.error(
+      `[aio:air] ${count(calls.length, "unsent call")} DROPPED by the reload ` +
+        `— they could not be kept across it (${why}): ${_types(calls)}`,
+    );
+    // Said to a page about to vanish, so said again by the next one.
+    try {
+      sessionStorage.setItem(
+        RELOAD_CARRY_DROPPED_KEY,
+        JSON.stringify({ n: calls.length, types: _types(calls), why }),
+      );
+    } catch {
+      // aio-ok: storage refuses even the marker — the error above stands.
+    }
+  }
+}
+
+/** The carry this page took over, held until the first server hello says it
+ *  is the same app and user; `seq`s taken at load, so it replays ahead of
+ *  anything this page calls itself. While held, this page's own calls queue
+ *  behind it (`_send`, the opens) — order across the reload is kept. */
+let _held: (Carry & { seqs: number[] }) | null = null;
+let _heldTimer: ReturnType<typeof setTimeout> | null = null;
+
+function _carryDropped(n: number, types: string, why: string): void {
+  console.error(
+    `[aio:air] ${count(n, "call")} carried from the previous page DROPPED — ` +
+      `${why}; never sent: ${types}`,
+  );
+}
+
+function _clearHeld(): void {
+  _held = null;
+  if (_heldTimer !== null) clearTimeout(_heldTimer);
+  _heldTimer = null;
+  globalThis.removeEventListener?.(SIGNED_IN_EVENT, _onAuthChange);
+  globalThis.removeEventListener?.(SIGNED_OUT_EVENT, _onAuthChange);
+}
+
+function _dropHeld(why: string): void {
+  const h = _held;
+  _clearHeld();
+  if (h) _carryDropped(h.calls.length, _types(h.calls), why);
+  _flushQueued(); // what queued behind the carry goes now
+}
+
+const _onAuthChange = () =>
+  _dropHeld("the user signed in or out before the server said who this is");
+
+/** …and take them up on the next page: refused loudly when unreadable or
+ *  stale; otherwise held until the first server hello (`_releaseHeld`) — or
+ *  for what is left of the age window, then dropped loudly. */
+function _takeReloadCarry(): void {
+  globalThis.addEventListener?.("pagehide", _onPageHide);
+  let raw: string | null;
+  let dropped: string | null;
+  try {
+    raw = sessionStorage.getItem(RELOAD_CARRY_KEY);
+    dropped = sessionStorage.getItem(RELOAD_CARRY_DROPPED_KEY);
+    sessionStorage.removeItem(RELOAD_CARRY_KEY);
+    sessionStorage.removeItem(RELOAD_CARRY_DROPPED_KEY);
+  } catch {
+    return; // aio-ok: no sessionStorage → nothing was carried into it
+  }
+  // `typeof`: the build's graph evaluator runs this module against a stub
+  // storage whose reads are not strings — that is no carry.
+  if (typeof dropped === "string") {
+    console.error(
+      `[aio:air] the previous page's reload DROPPED calls it could not ` +
+        `carry over: ${dropped}`,
+    );
+  }
+  if (typeof raw !== "string") return;
+  let rec: { app?: unknown; user?: unknown; at?: unknown; calls?: unknown } =
+    {};
+  try {
+    const v = JSON.parse(raw);
+    if (v && typeof v === "object" && !Array.isArray(v)) rec = v;
+  } catch {
+    // aio-ok: unreadable — refused loudly just below
+  }
+  if (!Array.isArray(rec.calls)) {
+    _carryDropped(0, "?", `the carry is unreadable (${raw.slice(0, 60)})`);
+    return;
+  }
+  const all = rec.calls as unknown[];
+  const calls = all.filter((c): c is CarriedCall => {
+    const a = (c as { a?: { type?: unknown } } | null)?.a;
+    return !!a && typeof a === "object" && typeof a.type === "string";
+  });
+  if (calls.length < all.length) {
+    _carryDropped(all.length - calls.length, "?", "malformed entries");
+  }
+  if (calls.length === 0) return;
+  const at = typeof rec.at === "number" ? rec.at : 0;
+  const left = at + RELOAD_CARRY_MAX_AGE_MS - Date.now();
+  if (left <= 0) {
+    _carryDropped(
+      calls.length,
+      _types(calls),
+      `older than ${RELOAD_CARRY_MAX_AGE_MS / 1000}s`,
+    );
+    return;
+  }
+  _held = {
+    app: typeof rec.app === "string" ? rec.app : undefined,
+    user: typeof rec.user === "string" || rec.user === null
+      ? rec.user
+      : undefined,
+    at,
+    calls,
+    seqs: calls.map(() => _nextSeq()),
+  };
+  _heldTimer = setTimeout(
+    () =>
+      _dropHeld(
+        `no server hello within ${
+          RELOAD_CARRY_MAX_AGE_MS / 1000
+        }s of the reload, so nothing could say this is the same app and user`,
+      ),
+    left,
+  );
+  globalThis.addEventListener?.(SIGNED_IN_EVENT, _onAuthChange);
+  globalThis.addEventListener?.(SIGNED_OUT_EVENT, _onAuthChange);
+  console.warn(
+    `[aio:air] ${count(calls.length, "call")} the previous page could not ` +
+      `send before its reload — carried over, sent once the server says this ` +
+      `is the same app and user.`,
+  );
+}
+
+/** The server's hello arrived: send the held carry if the CONNECTION is the
+ *  app and the user that made it, drop it loudly if not — then whatever this
+ *  page queued behind it. Each carried call gets a fresh cid with an ack
+ *  nobody awaits but which reports a failure, so the server can refuse,
+ *  re-send and fail it like any call. */
+function _releaseHeld(): void {
+  const h = _held;
+  if (!h) return;
+  const app = _helloApp();
+  const user = peerHello()?.user;
+  const why = h.app !== app
+    ? `made by a different app (${h.app ?? "unnamed"}; this is ${
+      app ?? "unnamed"
+    })`
+    : Date.now() - h.at > RELOAD_CARRY_MAX_AGE_MS
+    ? `older than ${RELOAD_CARRY_MAX_AGE_MS / 1000}s`
+    : h.user !== user
+    ? `made as ${h.user ?? "anonymous"}, and this connection is ${
+      user ?? "anonymous"
+    }`
+    : null;
+  if (why) return _dropHeld(why);
+  _clearHeld();
+  h.calls.forEach(({ a, tries }, i) => {
+    const cid = crypto.randomUUID();
+    _registerAck(cid, { deferTimer: true }).catch((e) =>
+      console.error(
+        `[aio:air] a call carried across the reload failed — ${a.type}: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      )
+    );
+    _carryPush({ ...a, cid } as QueuedAction, h.seqs[i]!, tries);
+  });
+  _flushQueued();
+}
+
+/** Write every queued call to the open transport, in order (or keep it
+ *  queued when there is none). */
+function _flushQueued(): void {
+  const pending = _takePending();
+  if (pending.length === 0) return;
+  const pacer = _openPacer();
+  if (pacer) _flushPending(pending, (e) => void pacer.push(_actionFrame(e)));
+  else if (_ipc && _ipcOpen) _flushPending(pending, _ipcWriteQueued);
+  else for (const e of pending) _carryPush(e.action, e.seq, e.tries);
+}
+
+/** A queued call as the pacer takes it. */
+function _actionFrame(e: QueuedEntry): OutFrame {
+  return {
+    frame: enc("action", wireAction(e.action)),
+    action: e.action,
+    seq: e.seq,
+    ...(e.tries ? { tries: e.tries } : {}),
+  };
+}
+
+/** A queued call written to the IPC bridge. */
+function _ipcWriteQueued(e: QueuedEntry): void {
+  // `wireAction`: the queue holds the action as it was CALLED, and the wire
+  // shape (`wire.omitTrailingUndefined`) is decided when the frame is built —
+  // the one moment the page is sure to know its config.
+  _ipc!.send(enc("action", wireAction(e.action)));
+  // The frame is out now — this is when a queued call's ack clock starts.
+  if (e.action.cid) _armAckTimer(e.action.cid);
 }
 
 /** Was the upgrade refused because this page's credential is dead?
@@ -695,17 +997,33 @@ function _reloadWhenDrained(): void {
  *  and is answered 401 for a dead credential (426 for a live one: /ws speaks
  *  WebSocket only), and a fetch CAN read that. */
 async function _upgradeRefusedAsSignedOut(): Promise<boolean | null> {
+  // Bounded: the reconnect waits on this answer, so a request the network
+  // swallows (a black hole — a dead NAT entry, a changed wifi) must not stop
+  // the loop for good.
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), WS_OPEN_TIMEOUT_MS);
   try {
     const r = await fetch(buildWsUrl().replace(/^ws/, "http"), {
       credentials: "same-origin",
+      signal: ac.signal,
     });
     await r.body?.cancel();
     return r.status === 401;
   } catch {
-    // aio-ok: null = unreachable — the server is down, which the reconnect
-    // loop owns; it is no answer about the credential either way.
+    // aio-ok: null = unreachable (or no answer in time) — the server is down,
+    // which the reconnect loop owns; it is no answer about the credential.
     return null;
+  } finally {
+    clearTimeout(t);
   }
+}
+
+/** The pending handshake's bound (WS_OPEN_TIMEOUT_MS) — tracked so a
+ *  teardown cancels it. */
+let _openTimer: ReturnType<typeof setTimeout> | null = null;
+function _clearOpenTimer(): void {
+  if (_openTimer !== null) clearTimeout(_openTimer);
+  _openTimer = null;
 }
 
 /** Does the server answer HTTP at all? The silent-socket watchdog's question:
@@ -1018,18 +1336,17 @@ function _connectIPC() {
     _wasConnected = true;
     // Before _coreSetTransport — installing it flushes the core's queue.
     const pending = _takePending();
-    _coreSetTransport({ send: (d: string) => _ipc!.send(d), close: () => {} });
+    _coreSetTransport({
+      send: (d: string) => void (_queuedBehindCarry(d) || _ipc!.send(d)),
+      close: () => {},
+    });
     _coreSetConnected(true);
     _setSyncUp(true);
     _coreResendSubs();
-    _flushPending(pending, (e) => {
-      // `wireAction`: the queue holds the action as it was CALLED, and the
-      // wire shape (`wire.omitTrailingUndefined`) is decided when the frame is
-      // built — the one moment the page is sure to know its config.
-      _ipc!.send(enc("action", wireAction(e.action)));
-      // The frame is out now — this is when a queued call's ack clock starts.
-      if (e.action.cid) _armAckTimer(e.action.cid);
-    });
+    // A held reload carry goes first: the queue waits for the hello.
+    if (_held) {
+      for (const e of pending) _carryPush(e.action, e.seq, e.tries);
+    } else _flushPending(pending, _ipcWriteQueued);
     _wireDegradedRelay();
     if (!_ipcPingTimer) {
       _ipcPingTimer = setInterval(() => {
@@ -1111,7 +1428,24 @@ function _connect() {
   }
   const ws = new WebSocket(buildWsUrl());
   let opened = false;
+  // The handshake is bounded (see WS_OPEN_TIMEOUT_MS): past it the attempt
+  // takes the close path itself — `close()` on a CONNECTING socket whose
+  // network is gone may never fire `onclose` either.
+  _clearOpenTimer();
+  _openTimer = setTimeout(() => {
+    _openTimer = null;
+    if (_ws !== ws || opened) return;
+    const lost = ws.onclose as unknown as () => void;
+    ws.onopen =
+      ws.onmessage =
+      ws.onclose =
+      ws.onerror =
+        null;
+    lost();
+    ws.close();
+  }, WS_OPEN_TIMEOUT_MS);
   ws.onopen = () => {
+    _clearOpenTimer();
     opened = true;
     _connecting = false;
     _retry = 0;
@@ -1120,7 +1454,9 @@ function _connect() {
     // Before _coreSetTransport — installing it flushes the core's queue.
     const pending = _takePending();
     _coreSetTransport({
-      send: (d) => void pacer.push({ frame: d, seq: _nextSeq() }),
+      send: (d) =>
+        void (_queuedBehindCarry(d) ||
+          pacer.push({ frame: d, seq: _nextSeq() })),
       close: () => ws.close(),
     });
     _coreSetConnected(true);
@@ -1140,13 +1476,12 @@ function _connect() {
     if (_wasConnected) _status("Connected", "#2a2", 2000);
     _wasConnected = true;
     _coreResendSubs();
-    _flushPending(pending, (e) =>
-      void pacer.push({
-        frame: enc("action", wireAction(e.action)),
-        action: e.action,
-        seq: e.seq,
-        ...(e.tries ? { tries: e.tries } : {}),
-      }));
+    // A held reload carry goes first: the queue waits for the hello.
+    if (_held) {
+      for (const e of pending) {
+        _carryPush(e.action, e.seq, e.tries);
+      }
+    } else _flushPending(pending, (e) => void pacer.push(_actionFrame(e)));
     _wireDegradedRelay();
     // Client vitals ride the WS only (envelope.ts: `vitals-ping` is refused
     // on UDS/IPC). The heartbeat is per connection; the meter is per page.
@@ -1174,6 +1509,7 @@ function _connect() {
     // twice inserts twice.
     if (_ws !== null && _ws !== ws) return;
     _ws = null;
+    _clearOpenTimer();
     // Frames still waiting on this socket's pacer were never written: actions
     // go back to the offline queue (before the in-flight rejection below, which
     // must not — and does not — touch them) and replay on the next open.
@@ -1309,7 +1645,8 @@ function _send(action: { type: string; payload?: unknown }) {
     _noteTerminalDrop(tagged.type);
     return;
   }
-  const pacer = _openPacer();
+  // While a reload carry is held, this call queues behind it (order kept).
+  const pacer = _held ? null : _openPacer();
   if (pacer) {
     try {
       // The pacer arms the call's clock when the frame actually leaves.
@@ -1320,7 +1657,7 @@ function _send(action: { type: string; payload?: unknown }) {
       // path does.
       _enqueue(tagged);
     }
-  } else if (_ipc && _ipcOpen) {
+  } else if (!_held && _ipc && _ipcOpen) {
     // The SAME rule as the WS branch above, which it did not have: a bridge
     // that refuses the write is offline in every way that matters to this
     // action. Without this the throw propagated synchronously out of the cell
@@ -1333,6 +1670,8 @@ function _send(action: { type: string; payload?: unknown }) {
     } catch {
       _enqueue(tagged);
     }
+  } else if (_held) {
+    _queue.push(tagged); // released with the carry, on the server's hello
   } else {
     _enqueue(tagged);
   }
@@ -1387,6 +1726,7 @@ _setTeardownFn(() => {
   _tornDown = true;
   _closed = true;
   _clearIpcWatchdog();
+  _clearOpenTimer();
   if (_reconnectTimer !== null) {
     clearTimeout(_reconnectTimer);
     _reconnectTimer = null;
@@ -1448,6 +1788,7 @@ installConsoleIntercept(
 // route, which is why it resolves in dev and 404s (loudly, once) in prod. See
 // air/dev-hooks.ts for the dev==prod argument, module by module.
 if (isDevMode()) void loadDevChunk();
+_takeReloadCarry();
 // …and `__aioProfile()`, so `am eval '__aioProfile()'` answers "what is
 // rendering most, and what is each render costing" without anyone having to
 // add up `_dtRenders` by hand. Counts are always collected; only the clock is

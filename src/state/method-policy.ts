@@ -97,6 +97,14 @@ function current(store: PolicyStore): PolicyStore {
  *  never by a shutdown or any production path. */
 const CACHE_MAX = 5_000;
 
+/** Is a result stored at `at` still inside its ttl? An entry from the clock's
+ *  "future" (the wall clock stepped back since) is not: its negative age read
+ *  as fresh for as long as the step, not the ttl. */
+function _fresh(at: number, ttl: number, now: number): boolean {
+  const age = now - at;
+  return age >= 0 && age < ttl;
+}
+
 /** Drop what is EXPIRED, and then the oldest, until the cache is under its
  *  ceiling. Called on write, so the work is proportional to the writes that
  *  caused the growth. */
@@ -104,7 +112,7 @@ function _sweepCache(cache: PolicyStore["cache"]): void {
   if (cache.size <= CACHE_MAX) return;
   const now = Date.now();
   for (const [k, v] of cache) {
-    if (now - v.at >= v.ttl) cache.delete(k);
+    if (!_fresh(v.at, v.ttl, now)) cache.delete(k);
   }
   if (cache.size <= CACHE_MAX) return;
   // Still over: insertion order IS age order (a re-set deletes and re-adds
@@ -409,7 +417,7 @@ export function beginPolicyCall(
   if (ttlMs !== undefined) {
     for (const k of new Set([sharedKey, callerKey])) {
       const hit = k === null ? undefined : cache.get(k);
-      if (hit && Date.now() - hit.at < ttlMs) {
+      if (hit && _fresh(hit.at, ttlMs, Date.now())) {
         return {
           kind: "adopt",
           outcome: Promise.resolve({ value: privateCopy(hit.value) }),

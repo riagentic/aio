@@ -165,6 +165,15 @@ Edit `deno.json`'s `version` and commit. The next build is `1.3.<count>` — the
 count keeps climbing across the bump (it is the repository's, not the minor's),
 so `1.3.346` follows `1.2.345`: still strictly newer under SemVer.
 
+**Squashing or rewriting history lowers the build number** — 66 commits squashed
+to 5 turn `0.1.52` into `0.1.5`, and Android refuses the APK as an update (lower
+`versionCode`; only an uninstall gets past, and it deletes the app's data). Bump
+the minor first (`"0.1"` → `"0.2"`: `0.2.5` > `0.1.52`). The fleet build
+compares its version with the one `dist/manifest.json` recorded (read before
+`dist/` is rebuilt) and warns
+`⚠ version 0.1.5 is LOWER than the
+last build's 0.1.52`, naming that fix.
+
 ## Artifact file names
 
 The fleet build (`deno task build`) places every artifact under
@@ -247,6 +256,23 @@ $ curl -s :8000/__aio/health | jq .appVersion
 $ deno task dev                  # from source: derived the same way
   version  1.2.346-dirty.0c7e11aa
 ```
+
+The page reads it too — with or without a server (a standalone APK, the `web`
+target):
+
+```tsx
+import { appVersion } from "aio/air";
+const About = () => <p>App version {appVersion() ?? "unknown"}</p>;
+```
+
+Every shell aio writes carries the resolved version in
+`window.__aioConfig.appVersion` — the server's page in dev and prod, the
+packaged Electron window, the APK and the web build — and `appVersion()` returns
+it. Rendered on the server (SSR) it returns the version that server runs, so
+both renders say the same. It is `null` when nothing told the page (a shell from
+an older build before its server's hello, an in-process test) and when the
+version is unresolved — `unknown (…)` is a line for the log, not a version to
+show. Server-side, `appVersion()` from `aio/server` is the same string.
 
 `am instances` / `am status` and the updates data contract read the same string.
 The server announces it in the WebSocket hello (`proto` frame, `app` field —

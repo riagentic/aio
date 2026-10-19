@@ -744,7 +744,9 @@ export function createServerSyncHandler(
     rememberRefusal(opId, reason);
     sendTo(
       socket,
-      enc("op-rejected", { opId, cell, reason }),
+      // `serverNow`: the client's clock is the cause, and an HLC that ran
+      // ahead is replaced only once the client has heard the server's time.
+      enc("op-rejected", { opId, cell, reason, serverNow: Date.now() }),
       `op-rejected (${opId}, clock drift)`,
     );
     deps.log.warn(`[sync:server] op ${opId} (${cell}) refused — ${reason}`);
@@ -805,7 +807,9 @@ export function createServerSyncHandler(
       `is wrong, correct it; the change can be made again.`;
     sendTo(
       socket,
-      enc("op-rejected", { opId, cell, reason }),
+      // `serverNow`: a device clock far behind is a cause of this one too —
+      // the client then stamps its next change on the server's time.
+      enc("op-rejected", { opId, cell, reason, serverNow: Date.now() }),
       `op-rejected for ${opId}`,
     );
     deps.log.warn(`[sync:server] op ${opId} (${cell}) refused — ${reason}`);
@@ -1544,6 +1548,7 @@ export function createServerSyncHandler(
             opId: op.id,
             serverHlc,
             ...(ackTs !== null ? { serverTs: ackTs } : {}),
+            serverNow: Date.now(),
             ...(unsaved !== undefined ? { unsaved } : {}),
           }),
           `sync-ack for ${op.id}`,
@@ -1967,6 +1972,7 @@ export function createServerSyncHandler(
                 opId: pending.id,
                 serverHlc,
                 ...(ackTs !== null ? { serverTs: ackTs } : {}), // see handleOp
+                serverNow: Date.now(),
                 ...(pendingUnsaved !== undefined
                   ? { unsaved: pendingUnsaved }
                   : {}),
@@ -2261,7 +2267,11 @@ export function createServerSyncHandler(
             ...reqId,
           };
 
-        sendTo(socket, enc("sync-res", response), "sync-res");
+        sendTo(
+          socket,
+          enc("sync-res", { ...response, serverNow: Date.now() }),
+          "sync-res",
+        );
 
         deps.log.debug(
           `[sync:server] sync response: ${response.mode}, ${responseOps.length} ops`,

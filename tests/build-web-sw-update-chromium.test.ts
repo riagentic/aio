@@ -27,7 +27,7 @@ import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { testDisplayEnv } from "../src/testing/test-display.ts";
 import { stopChild } from "./stop-child.ts";
 import { browserOsFlags, findBrowser, freePort } from "./e2e-harness.ts";
-import { browserHomeEnv } from "../src/testing/chromium.ts";
+import { browserHomeEnv, dropBrowserProfile } from "../src/testing/chromium.ts";
 
 const BROWSER = findBrowser();
 
@@ -256,7 +256,7 @@ Deno.test({
       await stopChild(browser, { quiet: true });
       await server?.shutdown();
       await dropTempDir(site);
-      await dropTempDir(profile);
+      await dropBrowserProfile(profile);
     }
   },
 });

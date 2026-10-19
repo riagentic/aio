@@ -34,6 +34,8 @@ import { MAX_TIMER_DELAY } from "../state/timer-ceiling.ts";
  *  would invite somebody to route around the refusal below. */
 let _aioInstalled: UpdatesRuntime | null = null;
 import {
+  compareVersions,
+  isComparableVersion,
   type LocalData,
   resolveUpdates,
   type UpdatesInput,
@@ -1081,13 +1083,34 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
       }
     }
   }
+  // A single file is swapped in-process: a swap that could not be made is
+  // counted by the run that tried it and leaves no failed record — given up
+  // here at the bound, as a directory's is from its record.
+  // …unless this IS that release or a later one (installed by hand since):
+  // its count is stale, and goes without a word — kept, every start said
+  // "not installing" a version that was running.
+  const counted = trust.failedSwaps;
+  const passed = !failed && !!counted &&
+    isComparableVersion(deps.appVersion) && isComparableVersion(counted.to) &&
+    compareVersions(deps.appVersion, counted.to) >= 0;
+  if (passed) writeTrust(deps.dataDir, { failedSwaps: undefined });
+  const spent = !failed && !passed && counted &&
+      counted.count >= MAX_FAILED_SWAPS
+    ? counted
+    : undefined;
+  const install = here ?? deps.artifact ?? artifactPath();
+  const givenUp = (to: string, count: number) =>
+    `not installing ${to} again — it could not be put in place on this ` +
+    `machine ${count} times in a row. Dismissed. ${
+      swapAdvice({ artifact: install, previous: "" })
+    }; \`undismiss()\` then offers it again, and a newer release is offered ` +
+    `as usual.`;
   // No update in flight: whatever an unfinished one left beside the install
   // is a leftover — a whole copy of the app per failed swap, a download that
   // was cut off — whatever kind of install this is.
   if (
     !isThere(pendingPath(deps.dataDir)) && !isThere(firstBootPath(deps.dataDir))
   ) {
-    const install = here ?? deps.artifact ?? artifactPath();
     // …but for the archive of a release whose swap could not be made and is
     // still on offer: the next try uses it (verified again) instead of
     // downloading it again. It goes when that release is installed, or given
@@ -1172,8 +1195,16 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
         return;
       }
       const c = updatesCell();
-      if (c.status === "error") fail(refused, c.error);
-      else failures = 0;
+      if (c.status !== "error") return void (failures = 0);
+      fail(refused, c.error);
+      // The failure that reaches the bound ends the tries now: an unattended
+      // install of a single file runs on and would retry at every check.
+      const n = readTrust(deps.dataDir).failedSwaps;
+      if (n?.to !== available.version || n.count < MAX_FAILED_SWAPS) return;
+      rolledBackTo = n.to;
+      deps.log.warn("updates", givenUp(n.to, n.count));
+      await updatesCell().dismiss();
+      writeTrust(deps.dataDir, { failedSwaps: undefined });
     };
 
     if (config.auto && available.version === swapRetry) {
@@ -1278,10 +1309,12 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
     // The record goes only once the dismissal is COMMITTED: removed first, a
     // dispatch that failed (or a process that died before it landed) offered
     // the rolled-back release again, with nothing left to say why.
+    if (spent) deps.log.warn("updates", givenUp(spent.to, spent.count));
     const rolledBack = failed;
     failed = null;
-    rolledBackTo = rolledBack?.to;
-    void readyUpdates(slot, rolledBack?.to).then((done) => {
+    rolledBackTo = rolledBack?.to ?? spent?.to;
+    void readyUpdates(slot, rolledBackTo).then((done) => {
+      if (spent && done) writeTrust(deps.dataDir, { failedSwaps: undefined });
       if (!rolledBack || !done) return;
       // The count ends with the dismissal it led to: a release somebody
       // un-dismisses gets its tries afresh, not one more and "4 in a row".
@@ -1302,7 +1335,7 @@ export function startUpdates(deps: StartUpdatesDeps): StartedUpdates {
       deps.log.warn(
         "updates",
         `could not publish the update state${
-          rolledBack ? ` or dismiss the rolled-back ${rolledBack.to}` : ""
+          rolledBackTo ? ` or dismiss the rolled-back ${rolledBackTo}` : ""
         }: ${e}`,
       ));
     // `check: false` is documented as "manual `check()` only" and was not:

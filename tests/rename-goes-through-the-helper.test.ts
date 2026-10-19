@@ -31,6 +31,9 @@ const ALLOWED: Record<string, number | true> = {
   // `renameWithRetry`: a directory move (the unpacked runtime), with its own
   // longer, measured bound and its own tests.
   "src/electron/electron-runtime-fetch.ts": 2,
+  // The window's profile folder moved once into the app's home: a directory,
+  // into a name checked to be free, and a failure keeps the old one in use.
+  "src/electron/electron-profile.ts": 2,
   // A rollback: what moves is a file OR a whole install folder, into a name
   // that was vacated first, and each step has its own undo and its own words.
   "src/server/updates-apply.ts": 3,
@@ -97,6 +100,8 @@ const VERBS: Record<string, { "replace-temp"?: number; "move-data"?: number }> =
     "src/server/journal.ts": { "replace-temp": 1, "move-data": 2 },
     "src/diagnostics/checkpoint.ts": { "replace-temp": 2 },
     "src/diagnostics/action-log.ts": { "replace-temp": 1 },
+    // a shared-runtime use record, written to a temp beside it
+    "src/electron/shared-runtime.ts": { "replace-temp": 1 },
     "src/am/am-cmd-state.ts": { "replace-temp": 1 },
     "src/server/app-dirs.ts": { "replace-temp": 1 },
     // the legacy database itself is moved; its cross-device copy is a temp

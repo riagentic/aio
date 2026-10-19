@@ -262,7 +262,31 @@ const CEILING_GZ = {
   // Since then, in the same number: the state layer's production lines,
   // `wire.omitTrailingUndefined` (+~120 B), a text line that names a page
   // translator.
-  air: 81,
+  //
+  // Raised 81 → 83 after 1.0.20-beta (measured 84,569 B = 83 KB; 1.0.20 was
+  // 83,112 B). Three hunt rounds of client fixes cost +97 B together; the
+  // rest, +1,360 B gz, is ONE fix, itemised because it is a real trade: a
+  // framework reload whose 10 s drain bound ran out THREW AWAY every call the
+  // page had not sent yet — ~200 per dev restart, measured in Chromium, no
+  // rejection, no line the reload did not wipe. They now cross the reload
+  // in sessionStorage (browser-air-transport.ts `_carryAcrossReload`), with
+  // the guards a persisted user action needs: sent only as the same user,
+  // app and minute, fresh cids so a refusal is loud and a door refusal is
+  // re-sent, a corrupt or foreign entry dropped loudly, a failed save
+  // reported by the next page. Silent loss of acked-looking user input is
+  // the one thing a 1.3 KB budget does not outweigh.
+  //
+  // Raised 83 → 84 for 1.0.21-beta (measured 85,686 B; the round started at
+  // 84,746): +940 B gz, all of it client fixes with a red-without-it test.
+  // Nearly all is ONE trade — a device whose clock is off by more than a
+  // minute (no RTC before NTP, a wrong manual clock) silently lost
+  // last-write-wins to OLDER edits, or had every edit refused as a stale
+  // resend for a day; it now runs on the server's time carried on the
+  // monotonic clock, through sleeps and NTP steps, and says so once
+  // (sync-engine.ts `noteServerClock`/`wallClock`, tests/sync/client-clock-
+  // skew.test.ts). The rest: a useCell().send made before the server's hello
+  // queues behind the reload carry (it overtook the carried calls).
+  air: 84,
   /** The same, plus one cell — measured 2 KB, which is what a cell costs.
    *  84 → 85 for the round after 1.0.12-beta: measured 85.3 (AIR 82.4). Every
    *  byte is a fix with a red-without-it test — SSR/createDom tag-name
@@ -280,7 +304,9 @@ const CEILING_GZ = {
    *  nothing for 25–90 s while taps went nowhere; it is announced in ~5 s. A
    *  failure that was silent, on every production page. Shortening its
    *  message text was tried first: 84 bytes. `air` did not move (81). */
-  app: 84,
+  // 84 → 86 after 1.0.20-beta: the same +2 KB as `air` (the reload carry
+  // of unsent calls, itemised there).
+  app: 86,
 };
 
 const RUN = Deno.env.get("AIO_BUNDLE_SIZE") === "1";

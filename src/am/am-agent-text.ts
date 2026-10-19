@@ -470,6 +470,7 @@ export const BRIEF_API: readonly { entry: string; names: readonly string[] }[] =
         "pickFile",
         "pickDirectory",
         "spawn",
+        "runCommand",
       ],
     },
     { entry: "aio/sync", names: ["MergeStrategy", "SyncConfig"] },
@@ -983,7 +984,8 @@ ${show(APP_TSX)}
   UI state: useLocal · run on mount: onMount · derived: computed · cell test: testCell · UI test:
   testUI. React's useState/useEffect/useMemo/useCallback also work from "aio/air" — same behaviour,
   checked against React 19 (tests/react-patterns.test.ts); write whichever you know.
-- **local state** const [v, setV] = useLocal(init) (≡ useState, useSignal). NO: signal() in a body
+- **local state** const [v, setV] = useLocal(init) (≡ useState, useSignal) — or the object form
+  const { local, set, patch } = useLocal(init); same signal, both work. NO: signal() in a body
   (resets every render). YES: useLocal/useSignal, or signal() at module scope; sig.update(fn)
   (sig.set(fn) is no updater; sig.value is read-only in a component); .peek() reads untracked.
 - **JSX** class="a b" (string) · className={{ on: cond }} or class={cx("a", on && "b")} ·
@@ -991,6 +993,8 @@ ${show(APP_TSX)}
   <form onSubmit> auto-prevents default (data-native-submit opts out) · style={{ fontSize: 14 }} ·
   key on lists · ref callback or useRef · aria-x={false} removes the attribute · t="name" = handle
   for testUI + am surface (stripped)
+- **types** import type { JSX } from "aio" · return JSX.Element · children?: JSX.Children (takes
+  {cond && <Row />}, .map(), text, null) · NO: children: JSX.Element | JSX.Element[] (TS2322/TS2739)
 - **attribute names** React's camelCase: autoComplete readOnly maxLength tabIndex htmlFor (or for)
   onInput · NO: autocomplete= (type error) · class or className · data-x/aria-x stay hyphenated
 - **hooks (aio/air)** useLocal useSignal useRef useId createContext/useContext resource/useResource
@@ -1014,7 +1018,9 @@ ${show(APP_TSX)}
   toast(+<ToastHost />) Modal Confirm ConfirmButton Menu Browser · handlers get the VALUE:
   <Input onInput={(v) => …}> · <Field label="Email"> names its control (ui.EmailInput) · css\`\` cx
 - **style** ui.theme: "tokens" (default: --aio-* vars only) | "auto" (full look until src/style.css
-  exists) | "full" (look + your CSS) | "none" · all aio CSS in @layer aio → your CSS always wins ·
+  exists) | "full" (look + your CSS) | "none" · pick: your own complete style.css → "auto" or
+  "tokens" (same output once style.css exists: vars only) · aio look + your tweaks → "full" (or
+  am theme adopt to own the sheet) · all aio CSS in @layer aio → your CSS always wins ·
   classes .card .row .stack .grid .badge .muted; buttons .primary .ghost .danger · app mounts into
   #root · am theme adopt → own copy · --css=tailwind · ui.chrome (Electron): "standard"|"themed"|"none"
 - **where it runs** component body + handlers = CLIENT (no Deno.*, hidden fields throw) · async
@@ -1089,7 +1095,9 @@ sync: false) → --task=sync
 routes: { "/x/:id": route((ctx) => ctx.json(…)) } (raw HTTP: webhooks, uploads) · assets:
 { "/media": "./media" } in aio.run AND deno.json (to embed) · serverFns/serverFn (above) ·
 notify({ title }) via s.$do · updates: "<channel url>" · feedback: true · plugins:
-[definePlugin({ … })] · connectCli(url) (aio/server) for a remote CLI client
+[definePlugin({ … })] · connectCli(url) (aio/server) for a remote CLI client · UDP/multicast →
+node:dgram (stable, no flag); Deno.listenDatagram type-checks but is undefined at runtime
+unless deno.json has "unstable": ["net"]
 
 ### workers
 
@@ -1110,6 +1118,8 @@ ${show(TEST_TSX)}
   id, ms, action }) — or use bootCells + advance. An unobserved schedule effect fails the test.
 
 ### testUI(App, "name", async (ui) => …) · await using ui = await testUI(App, { seed, user })
+
+- named + options: testUI(App, "name", { seed, user }, async (ui) => …) — opts BEFORE the body
 
 - actions (queued, no await): click dblclick type (appends) setValue (replaces) press "Enter"
   keyDown keyUp hover focus blur select "value" check uncheck clear scroll dragTo

@@ -121,9 +121,18 @@ Deno.test("two apps: the trojan rate limit is counted per app", async () => {
       const get = (app: App) =>
         fetch(`http://127.0.0.1:${app.port}/__aio/trojan/state`)
           .then(async (r) => (await r.body?.cancel(), r.status));
-      let last = 0;
-      for (let i = 0; i < 101; i++) last = await get(A);
-      assertEquals(last, 429, "A is past its own 100/s");
+      // 101 at once, so they land in one second's window: one after another
+      // they spanned more than a second on a loaded box (Windows, measured)
+      // and the window had moved on before the 101st. Again until A says
+      // 429 — the state this test is about — bounded.
+      let limited = false;
+      for (let round = 0; round < 5 && !limited; round++) {
+        const all = await Promise.all(
+          Array.from({ length: 101 }, () => get(A)),
+        );
+        limited = all.includes(429);
+      }
+      assert(limited, "A is past its own 100/s");
       assertEquals(await get(B), 200, "B's FIRST request is not A's 429");
     } finally {
       await B.close();

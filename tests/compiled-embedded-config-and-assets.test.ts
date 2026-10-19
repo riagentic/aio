@@ -2,7 +2,7 @@
 // assets — from any cwd, under any file name, whatever the config's spelling.
 //
 // Two field bugs, one artifact:
-//  1. `_embeddedDenoJson` (single-instance-lock.ts) read only `deno.json`, with
+//  1. `_embeddedDenoJson` (app-id.ts) read only `deno.json`, with
 //     `JSON.parse`. A `deno.jsonc` app — or a `deno.json` with one comment —
 //     found no identity inside its own binary and took the appId from the FILE
 //     NAME: `dist/app-a1-2.3.2` ran as `app-a1-2-3-2`, in `~/.app-a1-2-3-2/`,

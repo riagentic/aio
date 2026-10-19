@@ -145,7 +145,12 @@ export function createNet(opts: {
     },
   });
 
-  function addClient(name: string, storage = createMemoryStorage()): NetClient {
+  function addClient(
+    name: string,
+    storage = createMemoryStorage(),
+    /** Per-client engine deps, over `opts.engine` (e.g. a wrong `now`). */
+    engine?: Partial<SyncEngineDeps>,
+  ): NetClient {
     let confirmed = opts.initial();
     let view = confirmed;
     let confirmedL: State = L ? L.initial() : {};
@@ -194,6 +199,7 @@ export function createNet(opts: {
       },
       log: { warn: () => {}, debug: () => {} },
       ...opts.engine,
+      ...engine,
     });
     c.confirmed = () => confirmed;
     c.view = () => view;
@@ -232,11 +238,17 @@ export function createNet(opts: {
               f.d.opId,
               f.d.serverHlc as HLC,
               f.d.serverTs,
+              f.d.serverNow,
             );
           } else if (f.t === "op") await c.engine.handleRemoteOp(f.d);
           else if (f.t === "sync-res") await c.engine.handleSyncResponse(f.d);
           else if (f.t === "op-rejected") {
-            await c.engine.handleRejection(f.d.cell, f.d.opId, f.d.reason);
+            await c.engine.handleRejection(
+              f.d.cell,
+              f.d.opId,
+              f.d.reason,
+              f.d.serverNow,
+            );
           }
         }
       }

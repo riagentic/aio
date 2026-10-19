@@ -146,7 +146,18 @@ Deno.test("launchChromium: Windows launches a guest window; other hosts launch w
   ];
   assertEquals(_launchFlags("P", "linux"), posix);
   assertEquals(_launchFlags("P", "darwin"), posix);
-  assertEquals(_launchFlags("P", "windows").slice(1), posix);
+  assertEquals(_launchFlags("P", "windows").slice(2), posix);
+});
+
+// From an elevated shell a Chromium relaunches itself un-elevated and the
+// spawned process exits 0 — every test browser failed, and the relaunch ran
+// on as an orphan (measured on Windows 11, Edge 155).
+Deno.test("launchChromium: Windows keeps an elevated launch the process aio spawned", () => {
+  assertEquals(_launchFlags("P", "windows")[1], "--do-not-de-elevate");
+  assertEquals(
+    _launchFlags("P", "linux").includes("--do-not-de-elevate"),
+    false,
+  );
 });
 
 // ONE launcher: the guest flag above protects a Windows user only if no other

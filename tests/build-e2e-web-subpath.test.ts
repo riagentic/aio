@@ -17,7 +17,7 @@ import { cdpConnect } from "../src/media/cdp.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { testDisplayEnv } from "../src/testing/test-display.ts";
 import { stopChild } from "./stop-child.ts";
-import { browserHomeEnv } from "../src/testing/chromium.ts";
+import { browserHomeEnv, dropBrowserProfile } from "../src/testing/chromium.ts";
 
 const GATE = Deno.env.get("AIO_BUILD_E2E") === "1";
 const BROWSER = findBrowser();
@@ -258,7 +258,7 @@ Deno.test({
       }
       await Deno.remove(dir, { recursive: true });
       await dropTempDir(foreign);
-      await dropTempDir(profile);
+      await dropBrowserProfile(profile);
     }
   },
 });

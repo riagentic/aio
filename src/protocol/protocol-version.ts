@@ -99,6 +99,17 @@ export type ProtoHello = {
    *  of proving a negative with a `resync`. A server built before it omits
    *  it, and the client falls back to that proof. Additive within v3. */
   cfg?: boolean;
+  /** The SERVER's `appId` — which app this connection is. A page carrying
+   *  unsent calls across a reload sends them only to the same app; the
+   *  hello is the one frame every transport (WS, UDS) sends first, where an
+   *  Electron shell has no `__aioConfig` yet. Additive within v3. */
+  appId?: string;
+  /** Who the SERVER says this connection is: the user id its auth attached,
+   *  `null` for an anonymous one. Read by the reload carry, which sends a
+   *  dead page's calls only as the user who made them — a `users:` token
+   *  page has no cookie a side request could present, the socket does.
+   *  Additive within v3: absent from an older server. */
+  user?: string | null;
 };
 
 /** This build's announcement. Pass the build's aio version when known (the
@@ -174,6 +185,14 @@ export function parseProtoHello(input: unknown): ProtoHello | null {
         ...(rate ? { rate } : {}),
         ...(maxMessageBytes ? { maxMessageBytes } : {}),
         ...(typeof p.cfg === "boolean" ? { cfg: p.cfg } : {}),
+        // Bounded like `ver`: untrusted peer input, compared, logged.
+        ...(typeof p.appId === "string" && p.appId.length <= 256
+          ? { appId: p.appId }
+          : {}),
+        ...(p.user === null ||
+            (typeof p.user === "string" && p.user.length <= 512)
+          ? { user: p.user }
+          : {}),
       };
     }
     return null;

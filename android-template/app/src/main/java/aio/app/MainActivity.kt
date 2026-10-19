@@ -376,6 +376,194 @@ private fun pinMatches(pin: String, der: ByteArray): Boolean {
 /** `host:port` — what a pin is stored under. */
 private fun authority(host: String?, port: Int): String = (host ?: "") + ":" + (if (port > 0) port else 443)
 
+/** A file into the shared Downloads collection, where DownloadManager puts
+ *  one too — through MediaStore (API 29+, this template's minSdk), which
+ *  needs no storage permission for a file the app adds. Pending until
+ *  `write` is done, so no other app sees half of it; removed again when it
+ *  fails, so no torn file stays behind. */
+private fun saveToDownloads(ctx: android.content.Context, name: String, mime: String?, write: (java.io.OutputStream) -> Unit) {
+    val resolver = ctx.contentResolver
+    val values = android.content.ContentValues().apply {
+        put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, name)
+        if (!mime.isNullOrEmpty()) put(android.provider.MediaStore.MediaColumns.MIME_TYPE, mime)
+        put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
+    }
+    val uri = resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+        ?: throw IOException("Downloads refused a new file")
+    try {
+        (resolver.openOutputStream(uri) ?: throw IOException("cannot open $uri")).use(write)
+        resolver.update(uri, android.content.ContentValues().apply {
+            put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0)
+        }, null, null)
+    } catch (e: Exception) {
+        resolver.delete(uri, null, null)
+        throw e
+    }
+}
+
+/** A name a page chose, as one leaf: no separator, no control character. */
+private fun leafName(name: String?): String =
+    (name ?: "").replace(Regex("[/\\\\\\x00-\\x1f\\x7f]"), "_").trim().ifEmpty { "download" }
+
+/** Said where the user is looking: a download has no page of its own. */
+private fun tell(ctx: android.content.Context, view: WebView, what: String) {
+    view.post { android.widget.Toast.makeText(ctx, what, android.widget.Toast.LENGTH_LONG).show() }
+}
+
+/** The largest file a page hands over (`blob:` / `data:`): it crosses as
+ *  base64 in one message, so it is held in memory — twice, briefly. */
+private const val SAVE_MAX = 32 * 1024 * 1024
+/** The JS global the save bridge below is installed as. */
+private const val SAVE_GLOBAL = "AioSave"
+
+/**
+ * A `blob:` or `data:` download — a standalone app's "export" button. Such a
+ * URL lives in the page alone: DownloadManager cannot fetch it, and the
+ * WebView saves nothing by itself (measured on a phone, Android 14: the tap
+ * did nothing). So the page reads it and hands the bytes over:
+ *  - SAVE_HOOK (a document-start script) keeps each Blob a page makes an
+ *    object URL for — an app that revokes it right after `a.click()` would
+ *    otherwise be gone before the download listener runs — and the
+ *    `download="name"` of the link clicked, which the listener is not told;
+ *  - the listener asks the page (`__aioSave`) for that URL's bytes, which
+ *    come back here as base64 and go into Downloads (`saveToDownloads`).
+ * SECURITY — what a page can do with it is write a file the user then sees
+ * in Downloads, named by the page, at most SAVE_MAX: what a browser's
+ * download does. Main frame only; a standalone APK's own origin only.
+ */
+private class AioSave(private val ctx: android.content.Context) : WebViewCompat.WebMessageListener {
+    override fun onPostMessage(
+        view: WebView,
+        message: WebMessageCompat,
+        sourceOrigin: Uri,
+        isMainFrame: Boolean,
+        replyProxy: JavaScriptReplyProxy,
+    ) {
+        if (!isMainFrame) return
+        val raw = message.data ?: return
+        fetchPool.execute {
+            var name = "download"
+            val said = try {
+                val m = org.json.JSONObject(raw)
+                if (m.has("error")) throw IOException("the page could not read it: " + m.getString("error"))
+                name = leafName(m.optString("name"))
+                val data = m.getString("data")
+                if (data.length > (SAVE_MAX / 3 + 1) * 4) throw IOException("over " + SAVE_MAX / 1024 / 1024 + " MB")
+                val bytes = android.util.Base64.decode(data, android.util.Base64.NO_WRAP)
+                saveToDownloads(ctx, name, m.optString("mime"), { it.write(bytes) })
+                android.util.Log.i("aio", "download saved: $name (Downloads)")
+                "Saved $name to Downloads"
+            } catch (e: Throwable) {
+                // Throwable: an OutOfMemoryError (an Error) killed the app.
+                android.util.Log.e("aio", "download NOT saved: $name ($e)")
+                "Not saved: $name — " + e.message
+            }
+            tell(ctx, view, said)
+        }
+    }
+}
+
+/** See AioSave. Plain JS, no `$` (a Kotlin raw string would read it) — so
+ *  SAVE_MAX is spelled out (33554432), and checked BEFORE the blob is read:
+ *  base64'd whole, an oversized one ran the app out of memory. A revoked
+ *  Blob is kept 2 s — the listener's round trip — on EVERY revoke, by its
+ *  URL: a download the hook saw no click for (a detached link's
+ *  dispatchEvent, window.open, location.href) is still handed over, and an
+ *  app that makes and revokes URLs steadily holds each one only 2 s. */
+private const val SAVE_HOOK = """(()=>{if(window.__aioSave)return;
+const kept=new Map(),C=URL.createObjectURL,R=URL.revokeObjectURL,K=HTMLAnchorElement.prototype.click;let named=null;
+URL.createObjectURL=function(o){const u=C.call(URL,o);if(o instanceof Blob)kept.set(u,o);return u};
+URL.revokeObjectURL=function(u){R.call(URL,u);if(kept.has(u))setTimeout(()=>kept.delete(u),2000)};
+const note=(a)=>{if(a&&a.hasAttribute('download'))named={href:a.href,name:a.getAttribute('download')}};
+HTMLAnchorElement.prototype.click=function(){note(this);return K.call(this)};
+addEventListener('click',(e)=>{note(e.target&&e.target.closest&&e.target.closest('a[download]'))},true);
+window.__aioSave=function(url,mime,guess){
+if(typeof AioSave!=='object')return false;
+const b=kept.get(url),name=named&&named.href===url&&named.name?named.name:guess;
+(b?Promise.resolve(b):fetch(url).then((r)=>r.blob())).then((blob)=>{if(blob.size>33554432)throw new Error('over 32 MB');return new Promise((ok,no)=>{const f=new FileReader();f.onload=()=>ok(String(f.result));f.onerror=()=>no(f.error);f.readAsDataURL(blob)})})
+.then((d)=>AioSave.postMessage(JSON.stringify({name:name,mime:mime||'',data:d.slice(d.indexOf(',')+1)})))
+.catch((e)=>AioSave.postMessage(JSON.stringify({name:name,error:String(e&&e.message||e)})));
+return true};})();"""
+
+/** An `https://` download from a server this client PINNED (a self-signed
+ *  `--expose` certificate): DownloadManager knows only the system's trust
+ *  and would refuse it, so this app fetches it — the system's trust first,
+ *  then exactly the pin `onReceivedSslError` accepts — and streams it into
+ *  Downloads. With the page's cookies (a signed-in server), as
+ *  DownloadManager would send them. */
+private fun pinnedDownload(ctx: android.content.Context, view: WebView, url: String, pin: String, name: String, mime: String?, userAgent: String?) {
+    fetchPool.execute {
+        val said = try {
+            val tmf = javax.net.ssl.TrustManagerFactory.getInstance(javax.net.ssl.TrustManagerFactory.getDefaultAlgorithm())
+            tmf.init(null as java.security.KeyStore?)
+            val sys = tmf.trustManagers.filterIsInstance<javax.net.ssl.X509TrustManager>().first()
+            var byPin = false
+            val tls = javax.net.ssl.SSLContext.getInstance("TLS")
+            tls.init(null, arrayOf<javax.net.ssl.TrustManager>(@android.annotation.SuppressLint("CustomX509TrustManager") object : javax.net.ssl.X509TrustManager {
+                override fun checkClientTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) =
+                    sys.checkClientTrusted(chain, authType)
+                override fun checkServerTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {
+                    try {
+                        sys.checkServerTrusted(chain, authType)
+                    } catch (e: java.security.cert.CertificateException) {
+                        if (chain.isEmpty() || !pinMatches(pin, chain[0].encoded)) throw e
+                        byPin = true
+                    }
+                }
+                override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = sys.acceptedIssuers
+            }), null)
+            val hosts = javax.net.ssl.HttpsURLConnection.getDefaultHostnameVerifier()
+            fun hostPort(u: java.net.URL) = u.host.lowercase() + ":" + (if (u.port < 0) u.defaultPort else u.port)
+            val pinned = hostPort(java.net.URL(url))
+            // Redirects are followed here, hop by hop: followed by the
+            // connection, a 302 to another host kept `byPin` (no hostname
+            // check) and the pinned host's Cookie header. The pin is the
+            // pinned host:port's alone; any other host gets the system's
+            // trust and its own cookies.
+            fun open(u: java.net.URL): javax.net.ssl.HttpsURLConnection {
+                if (u.protocol != "https") throw IOException("redirected to $u — not https, not followed")
+                val c = u.openConnection() as javax.net.ssl.HttpsURLConnection
+                c.instanceFollowRedirects = false
+                if (hostPort(u) == pinned) {
+                    c.sslSocketFactory = tls.socketFactory
+                    // The pin IS the certificate: a self-signed one names whatever it
+                    // names, as `onReceivedSslError`'s `proceed` takes it.
+                    c.hostnameVerifier = javax.net.ssl.HostnameVerifier { h, s -> byPin || hosts.verify(h, s) }
+                }
+                c.connectTimeout = FETCH_CONNECT_TIMEOUT_MS
+                c.readTimeout = FETCH_READ_TIMEOUT_MS
+                if (userAgent != null) c.setRequestProperty("User-Agent", userAgent)
+                android.webkit.CookieManager.getInstance().getCookie(u.toString())?.let { c.setRequestProperty("Cookie", it) }
+                return c
+            }
+            var at = java.net.URL(url)
+            var conn = open(at)
+            try {
+                var status = conn.responseCode
+                var hops = 0
+                while (status in 300..399 && status != 304) {
+                    val to = conn.getHeaderField("Location") ?: break
+                    if (++hops > 5) throw IOException("more than 5 redirects")
+                    at = java.net.URL(at, to)
+                    conn.disconnect()
+                    conn = open(at)
+                    status = conn.responseCode
+                }
+                if (status !in 200..299) throw IOException("the server answered HTTP $status")
+                saveToDownloads(ctx, name, mime) { out -> conn.inputStream.use { it.copyTo(out) } }
+            } finally {
+                conn.disconnect()
+            }
+            android.util.Log.i("aio", "download saved: $name (Downloads, pinned certificate)")
+            "Saved $name to Downloads"
+        } catch (e: Exception) {
+            android.util.Log.e("aio", "download NOT saved: $name ($e)")
+            "Not saved: $name — " + e.message
+        }
+        tell(ctx, view, said)
+    }
+}
+
 /**
  * A client APK and a server whose certificate Android does not trust — every
  * server run with `--expose` signs its own. The WebView alone can only refuse
@@ -608,6 +796,16 @@ class MainActivity : AppCompatActivity() {
             if (IS_CLIENT && WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
                 WebViewCompat.addWebMessageListener(this, CONNECT_GLOBAL, setOf("https://$ASSET_HOST"), AioConnect(pins))
             }
+            // Saving a `blob:` / `data:` download — see AioSave. The app's
+            // page is its own origin in a standalone APK, the server's (any)
+            // in one that talks to a server.
+            val saveOrigins = if (TALKS_TO_SERVER) setOf("*") else setOf("https://$ASSET_HOST")
+            val canSave = WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER) &&
+                WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
+            if (canSave) {
+                WebViewCompat.addWebMessageListener(this, SAVE_GLOBAL, saveOrigins, AioSave(this@MainActivity))
+                WebViewCompat.addDocumentStartJavaScript(this, SAVE_HOOK, saveOrigins)
+            }
             webViewClient = object : WebViewClient() {
                 // The bridge belongs to the app's own bundle and to nothing
                 // else. A standalone APK cannot navigate away from it, so this
@@ -726,13 +924,18 @@ class MainActivity : AppCompatActivity() {
             // nothing (measured on a phone, Android 14). A link on the network
             // goes to Android's DownloadManager — into Downloads, with the
             // system's own notification, carrying this page's cookies (a
-            // signed-in server). A `blob:` or `data:` URL lives in this page
-            // only, so nothing outside it can fetch it — refused, saying so.
+            // signed-in server) — unless its server's certificate is one this
+            // client PINNED, which DownloadManager cannot know: then this app
+            // fetches it (`pinnedDownload`). A `blob:` or `data:` URL lives in
+            // this page only: the page hands its bytes over (AioSave).
             setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
                 val uri = Uri.parse(url ?: "")
-                if (uri.scheme == "http" || uri.scheme == "https") {
+                val name = android.webkit.URLUtil.guessFileName(url, contentDisposition, mimeType)
+                val pin = if (IS_CLIENT && uri.scheme == "https") pins.getString(authority(uri.host, uri.port), null) else null
+                if (pin != null) {
+                    pinnedDownload(this@MainActivity, this, url, pin, name, mimeType, userAgent)
+                } else if (uri.scheme == "http" || uri.scheme == "https") {
                     try {
-                        val name = android.webkit.URLUtil.guessFileName(url, contentDisposition, mimeType)
                         val req = android.app.DownloadManager.Request(uri)
                             .setMimeType(mimeType)
                             .addRequestHeader("User-Agent", userAgent)
@@ -746,10 +949,15 @@ class MainActivity : AppCompatActivity() {
                         android.util.Log.e("aio", "download NOT started: $uri ($e)")
                     }
                 } else {
-                    android.util.Log.e("aio", "download NOT saved: a " + (uri.scheme ?: "?") + ": link (" + mimeType +
-                        ") — this APK's WebView cannot write a file the page made. " +
-                        "Saving one needs native code: add it under <app>/android/ " +
-                        "(docs/build/targets.md).")
+                    val refused = {
+                        android.util.Log.e("aio", "download NOT saved: a " + (uri.scheme ?: "?") + ": link (" + mimeType +
+                            ") — " + (if (canSave) "the page did not hand it over (a frame, not the page?)"
+                            else "this WebView has no WEB_MESSAGE_LISTENER / DOCUMENT_START_SCRIPT. Update Android System WebView."))
+                    }
+                    if (!canSave) refused()
+                    else evaluateJavascript("typeof __aioSave=='function'&&__aioSave(" +
+                        org.json.JSONObject.quote(url) + "," + org.json.JSONObject.quote(mimeType ?: "") + "," +
+                        org.json.JSONObject.quote(name) + ")") { started -> if (started != "true") refused() }
                 }
             }
             webChromeClient = object : WebChromeClient() {

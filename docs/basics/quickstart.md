@@ -143,7 +143,8 @@ This is the file it writes for `am create my-app` (browser target):
     "targets": ["browser"],
     "platforms": ["host"],
     "out": "dist",
-    "strictPin": true
+    "strictPin": true,
+    "electronRuntime": "online"
   },
   "android": {
     "colorScheme": "system"
@@ -319,9 +320,12 @@ styles nothing you did not ask it to.
 The generated `src/app.ts` also writes three **safe values**, each with a
 comment saying what it closes: `electron: { ignoreDebugEnv, strictPin }` and
 `wire: { refuseShortCalls }` (plus `"strictPin": true` under `build` in
-`deno.json`). Two more in `deno.json` are not about security but follow the same
-rule: `"android": { "colorScheme": "system" }` (an Android build follows the
-phone's light/dark setting) and `AIO_TEST_WIRE=strict` in the `test` task
+`deno.json`). Three more in `deno.json` are not about security but follow the
+same rule: `"electronRuntime": "online"` (a desktop package downloads its
+Electron once into a store all aio apps share —
+[shared runtime](../build/targets.md#shared-electron-runtime-buildelectronruntime)),
+`"android": { "colorScheme": "system" }` (an Android build follows the phone's
+light/dark setting) and `AIO_TEST_WIRE=strict` in the `test` task
 ([UI tests cross the wire](../testing/ui-testing.md#calls-cross-the-wire)).
 aio's own defaults for them stay as they were, so an older app upgrades with no
 change in behaviour; a new app starts with the door closed. See

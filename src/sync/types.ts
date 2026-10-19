@@ -118,6 +118,8 @@ export interface OpRejectedMessage {
   opId: string;
   cell: string;
   reason: string;
+  /** See `AckMessage.serverNow` — sent with a clock-drift or stale refusal. */
+  serverNow?: number;
 }
 
 /**
@@ -137,6 +139,10 @@ export interface AckMessage {
    *  tombstone written before the column existed; the client then falls back
    *  to its previous behaviour. */
   serverTs?: number;
+  /** The server's wall clock (ms) when it sent the frame. A client whose
+   *  clock is off by more than `maxDrift` runs its HLC on it (sync-engine's
+   *  `noteServerClock`). Absent from a server built before it. */
+  serverNow?: number;
 }
 
 /**
@@ -216,6 +222,8 @@ export type SyncResponse =
     /** Per-cell server_ts cursor — reserved under each cell's lock, so ops
      *  the client hasn't seen are strictly above it (no re-delivery). */
     lastServerTs?: Record<string, number>;
+    /** See `AckMessage.serverNow`. */
+    serverNow?: number;
   }
   | {
     mode: "snapshot";
@@ -236,6 +244,8 @@ export type SyncResponse =
      *  the field; a client built before it ignores it (and stays divergent,
      *  which the server logs). */
     reset?: string[];
+    /** See `AckMessage.serverNow`. */
+    serverNow?: number;
     /** An UNSOLICITED snapshot: a server-origin write (an effect, cron, a
      *  serverFn, `am dispatch`, an async method) committed to these cells, and
      *  no op exists for a client to fold. `lastServerTs[cell]` is the position

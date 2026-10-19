@@ -270,3 +270,55 @@ Deno.test("a COMPILED app never takes node_modules' Electron — even inside a d
     );
   });
 });
+
+Deno.test("a stop during the runtime DOWNLOAD ends it — findElectronBin's signal reaches the fetch", async () => {
+  // The cache rung used to drop `signal`: an app closed while its first-run
+  // Electron download ran (a dev app, a test on macOS) returned from close()
+  // with the ~100 MB fetch and its timers still going.
+  await inTmp(async (tmp) => {
+    let asked!: () => void;
+    const reached = new Promise<void>((r) => asked = r);
+    let release!: () => void;
+    const hold = new Promise<void>((r) => release = r);
+    const server = Deno.serve(
+      { hostname: "127.0.0.1", port: 0, onListen: () => {} },
+      async () => {
+        asked();
+        await hold;
+        return new Response("gone", { status: 503 });
+      },
+    );
+    const env = ["ELECTRON_MIRROR", "XDG_CACHE_HOME"].map(
+      (k) => [k, Deno.env.get(k)] as const,
+    );
+    Deno.env.set("ELECTRON_MIRROR", `http://127.0.0.1:${server.addr.port}/`);
+    Deno.env.set("XDG_CACHE_HOME", join(tmp, "cache"));
+    const stop = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const found = findElectronBin(
+        { info: () => {}, error: () => {} },
+        { compiled: true, signal: stop.signal },
+      );
+      await reached;
+      stop.abort();
+      const r = await Promise.race([
+        found,
+        new Promise<"still running">((r) =>
+          timer = setTimeout(() => r("still running"), 5_000)
+        ),
+      ]);
+      release();
+      await found;
+      assertEquals(r, null, "the abort ended the download");
+    } finally {
+      clearTimeout(timer);
+      release();
+      await server.shutdown();
+      for (const [k, v] of env) {
+        if (v === undefined) Deno.env.delete(k);
+        else Deno.env.set(k, v);
+      }
+    }
+  });
+});

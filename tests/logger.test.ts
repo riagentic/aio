@@ -327,7 +327,10 @@ Deno.test("logger: flush() writes buffered lines immediately", async () => {
 });
 
 Deno.test("logger: write failure logs to console (first 3 only)", async () => {
-  const dir = "/nonexistent/path/that/should/fail";
+  // Under a FILE, where no OS can make a directory. A `/nonexistent/…` literal
+  // is made on Windows: it is `C:\nonexistent\…`, and a user may create that.
+  const file = Deno.makeTempFileSync();
+  const dir = `${file}/should/fail`;
   const l = mkLogger({ dir });
   // Force ready = true to exercise write path
   // @ts-ignore private access for testing
@@ -342,6 +345,7 @@ Deno.test("logger: write failure logs to console (first 3 only)", async () => {
   await new Promise((r) => setTimeout(r, 200));
   await l.flush().catch(() => {}); // the 4th line's flush timer — it fails too
   console.error = origError;
+  Deno.removeSync(file);
   assertEquals(
     errors.filter((e) => e.includes("[logger] write failed")).length <= 3,
     true,

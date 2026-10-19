@@ -24,8 +24,9 @@ export const GIT_NO_PROMPT_ENV: Record<string, string> = {
 
 /** The variables that make git address a repo OTHER than the one its cwd is
  *  in: git's own `git rev-parse --local-env-vars` list (what git itself clears
- *  before it runs in a submodule), plus `GIT_NAMESPACE` and
- *  `GIT_QUARANTINE_PATH`. `tests/am-git-env.test.ts` pins it as a superset of
+ *  before it runs in a submodule) across versions — gits up to 2.39 also list
+ *  `GIT_INTERNAL_SUPER_PREFIX` (Apple's git 2.39 still ships it) — plus
+ *  `GIT_NAMESPACE` and `GIT_QUARANTINE_PATH`. `tests/am-git-env.test.ts` pins it as a superset of
  *  the installed git's list. */
 export const GIT_REPO_ENV_VARS: readonly string[] = [
   "GIT_ALTERNATE_OBJECT_DIRECTORIES",
@@ -41,6 +42,7 @@ export const GIT_REPO_ENV_VARS: readonly string[] = [
   "GIT_NO_REPLACE_OBJECTS",
   "GIT_REPLACE_REF_BASE",
   "GIT_PREFIX",
+  "GIT_INTERNAL_SUPER_PREFIX",
   "GIT_SHALLOW_FILE",
   "GIT_COMMON_DIR",
   "GIT_NAMESPACE",

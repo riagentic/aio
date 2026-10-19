@@ -22,6 +22,13 @@ Deno.test("shutdown: a door refusal says re-send (retryAfterMs), a refusal insid
       inc(s: Any) {
         s.n++;
       },
+      // A method's OWN error with a `retryAfterMs` field: it ran and wrote,
+      // so its ack must not ask for a re-send (a client applied it 9×).
+      async rated(s: Any) {
+        s.n++;
+        await 0;
+        throw Object.assign(new Error("rate limited"), { retryAfterMs: 50 });
+      },
     },
   } as Any) as Any;
   const main = cell("drMain", {
@@ -76,6 +83,15 @@ Deno.test("shutdown: a door refusal says re-send (retryAfterMs), a refusal insid
 
     send("drMain:slow", "inside");
     await new Promise((r) => setTimeout(r, 100));
+    await send("drOther:rated", "rated");
+    await until(() => acks.has("rated"), "the method's own error");
+    assertEquals(acks.get("rated")!.ok, false);
+    assertEquals(
+      acks.get("rated")!.retryAfterMs,
+      undefined,
+      "a method's own retryAfterMs is not the door's word that it never ran",
+    );
+
     closing = app.close();
     await new Promise((r) => setTimeout(r, 50));
 

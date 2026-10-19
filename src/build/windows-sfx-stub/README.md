@@ -28,9 +28,12 @@ unchanged, so an `.exe` built with either stub opens an install the other made.
    during the first extraction waits, then only launches. A Windows mutex
    belongs to the thread that waited for it; the stub takes and releases it on
    its main thread (the payload is decoded on a second one).
-4. Stamp (`.aio-sfx-stamp`) equal to the payload hash: removes a leftover
-   `win-<arch>.replaced` / `win-<arch>.incoming` (a stub that was killed) and
-   launches. Otherwise it moves the existing install aside
+4. Stamp (`.aio-sfx-stamp`) equal to the payload hash, and every file the
+   extraction listed in `.aio-sfx-files` (`<size> <path>` per line, written when
+   it extracts; the updater does not carry it, so a tree it swapped in is
+   checked by the stamp and the executables only) there at its size: removes a
+   leftover `win-<arch>.replaced` / `win-<arch>.incoming` (a stub that was
+   killed) and launches. Otherwise it moves the existing install aside
    (`win-<arch>.replaced` — this is the step that fails while the app is
    running, and then nothing is changed and the message says to close the app;
    it is tried for 3 seconds first, because a virus scanner or an app on its way
@@ -167,8 +170,8 @@ committed file. A new toolchain or dependency changes the bytes: update the
 pins, this README and `THIRD_PARTY_NOTICES` together.
 
 Current build: `rustc 1.98.0`, SHA-256
-`91fb1d0b7368cb70f5e3b9172678f38d1e540ab3bb5f33803517e07d4bc4a2e2`; sources
-`2f06ef0ead5c18074f2feb24aa8e097c62827d64838faf440f00be634a34afcd`.
+`e42bab2fbc298159b7b85ffa92b74f0418008013dd93b82fe40ff8743d49c7da`; sources
+`3593c77447f9c465bf10cc92e4d510f66eed518d342cbd9f33e4054b469c2852`.
 
 The trailer format is shared with `build-windows-exe.ts`:
 `[stub][payload][JSON header][u32 hdrLen][u64 payloadLen][AIOSFX02]`.

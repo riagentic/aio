@@ -12,6 +12,8 @@ import { openSessionStore } from "../src/server/sessions.ts";
 import { openUserStore } from "../src/server/auth-users.ts";
 import { _resetAuthFails } from "../src/server/server-auth.ts";
 import { configConflicts } from "../src/server/config.ts";
+import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { join } from "@std/path";
 
 const PW = "correct horse battery";
 
@@ -111,5 +113,29 @@ Deno.test("auth.maxSessions: a value that is not a count is refused at the store
   assertEquals(said(10), []);
   for (const bad of [0, 1.5, "10", null]) {
     assertEquals(said(bad).map((c) => c.level), ["error"], String(bad));
+  }
+});
+
+// The ceiling held only at `issue`: an app that set (or lowered) it and
+// restarted kept every account's sessions past it live until that account's
+// next login — up to the 30-day TTL. The store opens to the ceiling.
+Deno.test("auth.maxSessions: a store opened under a ceiling prunes sessions already past it, newest kept", async () => {
+  const dir = await tempDir("max-sessions-open-");
+  const path = join(dir, "auth.db");
+  try {
+    const before = openSessionStore(path);
+    const ann = [1, 2, 3].map(() => before.issue({ id: "ann", role: "user" }));
+    const bob = before.issue({ id: "bob", role: "user" });
+    before.close();
+    const after = openSessionStore(path, undefined, { maxPerUser: 2 });
+    try {
+      assertEquals(ann.map((t) => !!after.get(t)), [false, true, true]);
+      assert(after.get(bob), "another account under the ceiling is untouched");
+      assertEquals(after.count(), 3);
+    } finally {
+      after.close();
+    }
+  } finally {
+    await dropTempDir(dir);
   }
 });

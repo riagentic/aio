@@ -134,6 +134,7 @@ export const EVERYDAY: readonly string[] = [
   "dispatch",
   "surface",
   "trigger",
+  "shot",
   "timeline",
   "doctor",
   "build",
@@ -326,7 +327,7 @@ Inspect:
   surface --rects         MEASURE the layout — x/y/w/h per element, so "it looks fine" becomes "the Stage is 6886px tall". Needs a real client; a server render refuses rather than report 0x0
   trigger <idx> <path> <action> [text]  Drive the live UI (click/type/setValue/press/keyDown/keyUp/hover/focus/blur/scroll) — same engine as testUI; path "window" drives an onGlobalKey binding
                           type APPENDS to the field, setValue REPLACES it (as in testUI)
-  shot [n] [--out=F.png] [--full]  PNG of the live Electron window via CDP — the app
+  shot [n] [--out=F.png] [--full]  SCREENSHOT (PNG) of the live Electron window via CDP — the app
                           must run with --cdp (AIO_CDP=1 does the same unless the app
                           sets electron: { ignoreDebugEnv: true }); --json → {file,bytes,url}
   shot --selector='<css>'  CROP the shot to one element (measured in the page,
@@ -382,7 +383,7 @@ Inspect:
                           --lines=N counts EVENTS; --json .matched is the
                           health-check count (.total keeps unreadable lines)
   errors                  What went wrong: the build error (if any) first,
-                          then the tail of error.log (--lines=N)
+                          then the tail of error.log (--lines=N --since=15m)
   metrics                 Uptime, connections, schedules
   cost                    Bytes pushed/s, per cell and per key, + reduce p95
   cost --keys             …every key, not just the top three
@@ -478,4 +479,4 @@ Flags: --app=X  --port=N  --entry=<path>  --wait[=N]  --no-wait  --json  --quiet
 --wait: start/stop block until complete (start 10s, stop 11s) — both do this by
         default; --no-wait returns the moment the child is spawned / the
         shutdown is asked for.
-        state polls every Ns.`;
+        state polls every Ns. dispatch waits N s for the method's reply (8).`;

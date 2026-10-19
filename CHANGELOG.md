@@ -1,5 +1,268 @@
 # Changelog
 
+## v1.0.21-beta — one Electron per machine, the device clock follows the server, nothing a page sent is lost on a reload (2026-10-19)
+
+> **Nothing is removed or renamed, and no default moves.** An app without the
+> new key builds and runs as on 1.0.20; `am create` writes
+> `"electronRuntime": "online"` into a **new** app. **Added:**
+> `build.electronRuntime` (`"online"` | `"offline"`), `runCommand()`
+> (`aio/server`), `appVersion()` (`aio/air`), `build.android.keystore` /
+> `keyAlias` / `aab`, `am dispatch --wait=N`, `am errors --since=`,
+> `AIO_APPLICATIONS_LINK`, `AIO_OPEN_EARLY_EXIT_S`, `AIO_SHARED_ELECTRON_DIR`,
+> `AIO_DIALOG=none`, the code `DEAD_BOOT`, and optional wire fields an older
+> peer ignores (`serverNow` on sync frames, `addrs` on discovery answers,
+> `appId`/`user` on the hello, a hidden page's `h:1` ping, `retryAfterMs` over
+> the local socket). An app upgrades with `am pin` and `am fix` and no edit by
+> hand. What an existing app can notice: the desktop window's profile moves once
+> into `~/.<appId>/electron/`; an in-process refused write rejects
+> `ACTION_REFUSED` (was `REDUCE_ERROR`); `am trigger` answers `ok:false` when
+> the handler throws; a label-text click in `testUI` focuses its control; an aio
+> client user may sign in again once when a server's root certificate really
+> changes; on macOS `run.sh` waits for the app. See
+> [the upgrade guide](docs/upgrade/from-1.0.20-beta-to-1.0.21-beta.md).
+
+### Desktop: one Electron per machine
+
+- **`"build": { "electronRuntime": "online" }`**: the desktop package carries no
+  Electron (~75% smaller). The first start downloads the Electron its build
+  pinned, once, into a per-user store every online aio app shares
+  (`~/.local/share/aio/electron/`,
+  `~/Library/Application Support/aio/electron/`, `%LOCALAPPDATA%\aio\electron\`;
+  `AIO_SHARED_ELECTRON_DIR` moves it), with a progress window, Retry/Quit and
+  Cancel. `"offline"` — and no key — carries its own Electron, as before.
+  `docs/build/targets.md#shared-electron-runtime-buildelectronruntime`.
+- **The download is held to the SHA-256 its build pinned**: the build reads
+  Electron's checksum list once and writes every platform's hash into the
+  binary; a mirror or network serving another zip, a matching list included, is
+  refused. A build that cannot get the list fails.
+- **An update fetches a new Electron before the swap**, verified; a failure
+  leaves the old version running. `am prune` keeps every runtime an installed
+  app names, one started from in the last 10 minutes, and a window being made.
+- Closing the download window ends the start only once the download has removed
+  its stage and released the store's lock (at most 5 s); an app that exited on
+  the cancel could leave both behind.
+- **A failed Electron download names its reason** (refused, DNS, TLS) in the
+  Retry/Quit dialog, the log and an update's refusal: Deno 2.9 keeps it in the
+  fetch error's cause, and the dialog said only "fetch failed". An update's
+  Electron download reports progress once per whole percent; per chunk it was a
+  `DISPATCH_STORM` (~440 a second, measured on Windows).
+- macOS signs the runtime once in the store and each app's window is an APFS
+  clone of it; the `.dmg` seals a bundle without Electron. A store that cannot
+  be written says so at once; a window that cannot be shown is not a cancel;
+  `AIO_DIALOG=none` logs only.
+- **The window's Chromium profile lives in the app's home**,
+  `~/.<appId>/electron/` (cookies, web storage, window state, caches): it goes
+  with `am remove --data`, a `--profile` home has its own, two apps of one title
+  no longer share one, and on Windows it is out of the roaming profile. An
+  existing profile is moved there once at the window's start; one in both places
+  or that cannot move is kept, never lost.
+
+### Sync and the page's connection
+
+- **A device clock off by more than `maxDrift` runs its HLC on the server's
+  time.** The server sends `serverNow` with every ack, catch-up and drift
+  refusal; the client carries it forward on its monotonic clock (an NTP step
+  later does not jump it), samples only a short round trip, and warns once with
+  the offset. A device minutes behind no longer loses last-write-wins with its
+  newer edits; one a day behind (no RTC before NTP) no longer has every fresh
+  edit refused as a stale resend. Every good sample is checked (a clock that ran
+  ahead at boot and was corrected recovers), a system sleep does not leave the
+  carried time behind, and a stale-resend refusal carries `serverNow` too, so a
+  device far behind loses one edit, not every one. A clock jump (a sleep, an NTP
+  step) is a guess until the next sample decides it, and a wrong guess is
+  reported, never kept silently.
+- **A framework reload carries its unsent calls to the next page** — the 10 s
+  drain bound ran out on ~200 calls per dev restart and they died with the page.
+  The carry is sent only as the same user and app (checked on the connection's
+  own hello) within a minute; corrupt, foreign, stale or unstorable carries are
+  refused loudly; a `useCell().send` made before the hello queues behind it.
+- **A black-holed WebSocket handshake is bounded (15 s)**, the dev reload socket
+  too: the page reconnects once the network is back instead of saying
+  "Reconnecting…" for ever.
+- **A hidden page is not graded frozen**: it pings on `visibilitychange` with
+  `h:1`, and the server keeps it healthy until a visible ping.
+- A server with vitals off still answers a ping, so every dead reconnect is
+  judged; another connection's pongs judge one reconnect, not every one.
+- **`connectCli()`**: a WebSocket that answered a ping and then hears nothing
+  for 20 heartbeats is dead and reconnects, said — not while a call whose
+  `ackTimeoutMs` outlives that window is in flight.
+- **Only a call refused at the shutdown door carries `retryAfterMs`** — a
+  method's own error with that field was re-sent up to 8 times. Over the local
+  socket (desktop, CLI) such a call is now held and re-sent, as over WS.
+- Android standalone: `useConnected()` and `isConnectionDegraded()` exist
+  (always connected) — an app with an offline banner no longer fails the APK
+  build.
+
+### The aio client and discovery
+
+- **Once an app is open, its links load in its window** (a keyed app's links
+  answered 401); its login provider loads; another site opens in the system
+  browser.
+- **A server whose certificate changed and did not prove it holds the app's key
+  is sent none of that host's cookies** (it got the login session). An unpaired
+  host keeps the certificate it was first seen with; another one gets its
+  cookies removed before the load, with a warning. A leaf re-issued under the
+  same root still matches.
+- **A machine on two subnets you share is listed once** (answers carry the
+  machine's own addresses, `addrs`); two machines are never merged, and two apps
+  on one port of two interfaces are both listed.
+- A share link's `?token=` is URL-encoded — a base64 key or a `users:` token
+  printed a link that answered 401.
+
+### Android
+
+- **`build.strictPin` covers the client APK**: a keyed `http://` link to another
+  machine and pairing over http are refused; a pairing typed without a scheme is
+  tried over https only.
+- **`build.android.keystore` / `keyAlias`** name the release key in deno.json
+  (the environment wins; only a `--release` build needs it). A key there that
+  names a password is never read and is warned about.
+  **`build.android.aab: true`**: an unsigned `--release` also writes
+  `<name>-unsigned.aab`.
+- **A `blob:` / `data:` download (an export button) is saved** into Downloads
+  under its download name (up to 32 MB; larger is refused in the page), also
+  when the page revokes its URL at once or opens it without a click. A download
+  from a server whose certificate the client pinned works; a redirect to another
+  host gets system trust and that host's cookies, never the pin.
+- A template token no substitution knows is named at build, by file (it reached
+  gradle as text). A warning: a token in a Kotlin comment still builds.
+
+### Windows and macOS
+
+- **Windows: the one-click `.exe` re-extracts an install with a missing or
+  cut-short file** (`.aio-sfx-files`, path + size), instead of starting it
+  broken. Stub rebuilt and re-pinned.
+- **Windows: a pipe read, write or connect no longer fails with "Win32 error
+  0"** — the status comes from the OVERLAPPED (`NtReadFile`/`NtWriteFile`); a
+  big write that failed at once no longer waits for ever. A client whose open
+  failed under load with its code lost asks again, as for a busy pipe.
+- Windows: stopping a dev server while its `build.css` step runs no longer
+  reports "did not end when asked and was killed".
+- Windows: a macOS bundle built without the symlink privilege says to turn on
+  Developer Mode or build elevated, instead of a bare "os error 1314".
+- `check:orphans` on Windows knows a test process that is still exiting by its
+  `apps-<pid>` root.
+- **macOS: `run.sh` waits for the app (`open -W`)**, as on Linux; an app gone
+  within `AIO_OPEN_EARLY_EXIT_S` seconds (3; `0` turns it off) fails the run
+  with the tail of its log. `AIO_APPLICATIONS_LINK=1` links the bundle into
+  `~/Applications` (Launchpad); `am remove` deletes that link.
+- A Windows binary that embeds esbuild kept by `build.keepPackages` is warned
+  about at build (Defender has refused such binaries).
+
+### Updates and builds
+
+- **A kept download damaged on disk no longer blocks its release**: moved aside
+  and fetched again. A single-file release whose install fails 3 times is
+  dismissed (`undismiss()` offers it again); the count clears once that release
+  is installed or passed. A kept copy cut off mid-fill is removed at the next
+  start.
+- **The build compares with the release it replaces**: a lower version, a
+  changed derived Android `applicationId` (`manifest.json` records it; a dev APK
+  is not compared) and removed non-build files in `dist/` are each a named ⚠
+  with the fix.
+- **An `android/` overlay file whose template changed since it was first seen**
+  is a ⚠ naming both aio versions (`.aio/android-overlay.json`).
+- **Web: `sw.js` precaches the page's own files first**, then the assets mounts'
+  files 2 at a time — a first visit's page keeps the bandwidth.
+- `build.minify`: a symlink out of an assets dir is not staged (the binary
+  served it where dev answers 403); a link out of `compile.include` stays
+  readable.
+- A browser worker URL with a query or hash is bundled (it failed silently in
+  every build) and fetched by `--smoke`. An assets mount written without its
+  leading slash is served. A headless target embeds `dist/` only when it holds
+  the bundle.
+- A refused deno.json mount is warned once per start; the machine-bound
+  import-map warning no longer claims the binary runs here; the relative
+  `importScripts` check follows a classic worker's imports.
+
+### Server, calls and persistence
+
+- **`runCommand(cmd, { args, timeoutMs, signal, onLine })`** (`aio/server`) →
+  `{ code, signal, success, stdout, stderr, timedOut }`: the timeout kills the
+  whole tree on time and keeps what was written before it.
+  `docs/clients/desktop-jobs.md`.
+- **`appVersion()`** (`aio/air`): the page reads the app's resolved version in
+  every shell — server, packaged Electron, APK, web, and under SSR.
+- **`refusalsReject`: an in-process refused write** (validate, disabled cell)
+  rejects `ACTION_REFUSED`, as the wire answers it — `bootCells`, `testUI` and
+  `testCell` answered `REDUCE_ERROR`.
+- **Journal lines boot could not replay** (a version bump, a redaction, a
+  refusal) are kept in a copy the warning names — the first save compacted them
+  away.
+- **Clocks stepped back**: `at`/cron fire when the wall clock reaches them (a
+  suspended laptop ran a 09:00 job late by the whole sleep); method `ttl`,
+  `$commit(ms)` and the OIDC key cache are no longer held "too soon".
+- **Worker cells and `blocking()`**: a stray rejection no longer kills a worker
+  cell or fails a task that did not cause it — it is logged under the task that
+  left it; a method-shorthand job function runs; a main cell that `listensTo` a
+  worker cell is warned at boot (it never hears it).
+- `auth.maxSessions` holds from the store's open. A stray error while stopping
+  keeps the stop's exit code. The legacy Deno.Kv migration never creates an
+  empty `data.kv`, and a permission error looking for one is warned, not
+  skipped.
+
+### Dev, `am` and testing
+
+- An app closed while its first-run Electron download is in progress stops the
+  download; `close()` returned with the ~100 MB fetch still running.
+- macOS: stopping esbuild's service waits for its process to exit, as on Linux
+  and Windows.
+- macOS: the shared-runtime update e2e test passes on a Mac. Its stand-in
+  Electron had no bundle layout, the store's `codesign --deep` refused it, and
+  the update never installed; both store tests now share one stand-in.
+- Windows: a test browser (`testBrowser`, `testUI` video, `chromiumPage`)
+  started from an administrator shell opens. Chromium relaunched itself
+  un-elevated, so every launch failed "exited (code 0) before it opened its
+  DevTools port" and the relaunch kept running.
+- The repo checks out LF under any `core.autocrlf`, so a Windows clone no longer
+  fails its byte-wise template and script tests.
+- `deno task test` reports each shard's own failures; a child `deno test`'s list
+  printed first used to hide them.
+- `am create` leaves its seeded `deno.lock` out of the first commit: the first
+  build fills the lock, and a fresh app's first build was `-dirty`.
+- `am prune` says "no installed app's record names this window" for a window it
+  removes; it said "an app that is no longer installed" also of an installed app
+  whose window a crashed start never finished (made again at its next start).
+- `am`'s git calls also clear `GIT_INTERNAL_SUPER_PREFIX` (git up to 2.39,
+  Apple's git included), so a hook's environment cannot aim them at another
+  repo.
+- **Dev: the app's lock never goes missing during a restart on save** —
+  `am status` / `am restart` no longer read "not running"; `am stop` waits for
+  the next process; a hand-over that fails part-way (a full disk) leaves no
+  empty lock file and never ends the dev supervisor. A save to a
+  `watch: ["file.ts"]` file while the app starts restarts it.
+- Dev: `/__aio/error` carries the import-graph error (`am errors` said
+  `build: []`); the Module Errors page reloads on a fix.
+- **`am trigger`**: a handler that throws answers `ok:false` and names the
+  throw; triggers to one page run one at a time. `press("Tab")` moves focus
+  (window-level too) and arrow keys move a radio group's choice.
+- **`testUI`: a click on a label's text activates its control as Chromium does**
+  — from the innermost label, not through a link or button inside it or a
+  cancelled click, and the control takes focus.
+- **Every test body starts outside every boot scope** — `bootCells` in an async
+  helper no longer fences later tests to a retired boot. A harness booted over a
+  live one says so. The dead-boot refusal carries `code: "DEAD_BOOT"`.
+- `am dispatch --wait=N`; a reply past the wait says the call may still run.
+  `am errors --since=15m|<time>`. `am pin 1.0.20-beta` (no `v`) names its tag.
+  `am fix` adds no binary steps for `"build": { "targets": [] }`. `am help`
+  lists `shot` as SCREENSHOT.
+- The agent brief names the `testUI` options form, `JSX.Children`, both
+  `useLocal` shapes, one theme decision line and UDP via `node:dgram`.
+
+### Renderer and the UI kit
+
+- Hydrate: a style object over server markup drops the server's declarations it
+  does not name, in place; a boundary attempt keeps the dev stamp.
+- The kit's active tab and Markdown links draw the accent as text,
+  `--aio-accent-ink` (a pale identity hue left them at 1.2–3:1); with no theme
+  ink it falls back to `--aio-accent`.
+
+### Size
+
+- The page bundle grows by 1.4 KB gzipped: the reload carry of unsent calls (a
+  silent loss of ~200 calls per dev restart). `tests/bundle-size.test.ts`
+  itemises it.
+
 ## v1.0.20-beta — the clean-desk round: browser workers run in every build, updates the size of the change, signed Android builds; the safer values are opt-ins (2026-10-13)
 
 > **One floor moves: an Android app built with this release needs Android 10 (it

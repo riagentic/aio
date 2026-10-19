@@ -87,7 +87,7 @@
         },
         "AioMeta": {
           "kind": "typeAlias",
-          "sig": "9027fd9fd126ee92",
+          "sig": "03aca1811b98cfea",
           "members": {
             "title": "opt:2fb40568533c1a6d",
             "width": "opt:f6522636230fa080",
@@ -104,13 +104,14 @@
             "chrome": "opt:0cb8e5493e58cfb7",
             "tray": "opt:bb7b2f54156b6da6",
             "profileName": "opt:2fb40568533c1a6d",
+            "profileDir": "opt:2fb40568533c1a6d",
             "guestPreloads": "opt:object",
             "guestPreloads.dir": "req:2fb40568533c1a6d",
             "guestPreloads.files": "req:1a1f5c423a7cdab2",
             "showFile": "opt:2fb40568533c1a6d"
           },
           "sigs": [
-            "9027fd9fd126ee92"
+            "03aca1811b98cfea"
           ]
         },
         "AioUser": {
@@ -2085,6 +2086,16 @@
           },
           "sigs": [
             "ab8dee5e9b6487f0"
+          ]
+        },
+        "appVersion": {
+          "kind": "function",
+          "sig": "3140c463ae84346b",
+          "members": {
+            "return": "req:cb5114588202887c"
+          },
+          "sigs": [
+            "48e2284d8b32e64e"
           ]
         },
         "AsyncValidationRule": {
@@ -4606,7 +4617,7 @@
         },
         "CliFlags": {
           "kind": "typeAlias",
-          "sig": "fea4e8fca0941376",
+          "sig": "f614f0beafed4ea1",
           "members": {
             "port": "opt:f6522636230fa080",
             "persist": "opt:0ecca0fe3beba89b",
@@ -4619,6 +4630,7 @@
             "expose": "opt:0ecca0fe3beba89b",
             "channel": "opt:2fb40568533c1a6d",
             "dataContract": "opt:0ecca0fe3beba89b",
+            "electronRuntime": "opt:0ecca0fe3beba89b",
             "noTls": "opt:0ecca0fe3beba89b",
             "help": "opt:0ecca0fe3beba89b",
             "serverUrl": "opt:2fb40568533c1a6d",
@@ -4641,7 +4653,7 @@
             "home": "opt:2fb40568533c1a6d"
           },
           "sigs": [
-            "fea4e8fca0941376"
+            "f614f0beafed4ea1"
           ]
         },
         "createSliceSelector": {
@@ -5841,6 +5853,40 @@
           },
           "sigs": [
             "0f8471883432965c"
+          ]
+        },
+        "runCommand": {
+          "kind": "function",
+          "sig": "bbb6833ef15c186e",
+          "members": {
+            "param0": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
+            "param1": "req:d14514cf12d56c1b|",
+            "return": "req:f351bfdb0ce37e48"
+          },
+          "sigs": [
+            "f25610d36d2008f2"
+          ]
+        },
+        "RunCommandOptions": {
+          "kind": "typeAlias",
+          "sig": "487c5b075c9cb17e",
+          "members": {
+            "timeoutMs": "opt:f6522636230fa080"
+          },
+          "sigs": [
+            "487c5b075c9cb17e"
+          ]
+        },
+        "RunCommandResult": {
+          "kind": "typeAlias",
+          "sig": "b5024fda79f00407",
+          "members": {
+            "stdout": "req:2fb40568533c1a6d",
+            "stderr": "req:2fb40568533c1a6d",
+            "timedOut": "req:0ecca0fe3beba89b"
+          },
+          "sigs": [
+            "b5024fda79f00407"
           ]
         },
         "serializeCookie": {

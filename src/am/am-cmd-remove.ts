@@ -38,6 +38,7 @@ import {
   mark,
   out,
   outError,
+  sayErr,
   stack,
   style,
   table,
@@ -269,9 +270,41 @@ export async function installedFootprint(
       }
     }
   }
+  // macOS: the link `run.sh` makes for Launchpad (AIO_APPLICATIONS_LINK=1),
+  // found by what it POINTS AT, as a shortcut is — never by name. FIRST, so
+  // the install is never gone while a link to it is still listed.
+  const home = os === "darwin" ? env("HOME") : undefined;
+  if (home) {
+    const apps = join(home, "Applications");
+    const dir = installedAppPaths(name).dir;
+    for (const path of await linksInto(apps, dir)) {
+      list.unshift({ path, kind: "Applications link", parent: apps });
+    }
+  }
   const out = [];
   for (const f of list) out.push({ ...f, present: await exists(f.path) });
   return out;
+}
+
+/** The symlinks directly in `dir` whose target lies inside `into`. */
+async function linksInto(dir: string, into: string): Promise<string[]> {
+  const out: string[] = [];
+  try {
+    for await (const e of Deno.readDir(dir)) {
+      if (!e.isSymlink) continue;
+      const path = join(dir, e.name);
+      try {
+        if (insideParent(resolve(dir, await Deno.readLink(path)), into)) {
+          out.push(path);
+        }
+      } catch {
+        // aio-ok: unreadable — not provably this app's, so it is left alone
+      }
+    }
+  } catch {
+    // aio-ok: no Applications folder — no link to find
+  }
+  return out.sort();
 }
 
 export async function cmdRemove(
@@ -863,12 +896,25 @@ export async function cmdUpgrade(
     prefix: `aio-upgrade-${name}-`,
   });
   const up = upgradeCommand(runSh, rec.source, local);
-  const p = await new Deno.Command(up.cmd, {
-    args: up.args,
-    cwd: work,
-    stdout: "inherit",
-    stderr: "inherit",
-  }).output();
+  let p: Deno.CommandOutput;
+  try {
+    p = await new Deno.Command(up.cmd, {
+      args: up.args,
+      cwd: work,
+      stdout: "inherit",
+      stderr: "inherit",
+    }).output();
+  } finally {
+    // The clone is a whole build tree, and the artifact outlives it (run.sh
+    // installs to the install root): left, every upgrade kept one in $TMPDIR.
+    if (!local) {
+      // A note on stderr, never `outError`: the upgrade itself may have
+      // worked, and `--json` must not report an error for it.
+      await Deno.remove(work, { recursive: true }).catch((e) =>
+        sayErr(`am upgrade: could not remove the build clone ${work}: ${e}`)
+      );
+    }
+  }
   if (!p.success) {
     outError(`upgrade failed — the output above says why`, mode);
     Deno.exit(1);

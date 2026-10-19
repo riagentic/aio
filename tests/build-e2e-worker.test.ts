@@ -40,7 +40,7 @@ import { testDisplayEnv } from "../src/testing/test-display.ts";
 import { stopChild } from "./stop-child.ts";
 import { fixtureNodeModules } from "./symlink-helper.ts";
 import { WORKER_ANSWERS, writeWorkerApp } from "./worker-app-fixture.ts";
-import { browserHomeEnv } from "../src/testing/chromium.ts";
+import { browserHomeEnv, dropBrowserProfile } from "../src/testing/chromium.ts";
 
 const GATE = Deno.env.get("AIO_BUILD_E2E") === "1";
 const ELECTRON = GATE && Deno.env.get("AIO_BUILD_ELECTRON") === "1";
@@ -111,7 +111,7 @@ async function chromium(foreign: string) {
   const close = async () => {
     await cdp?.close();
     await stopChild(browser, { quiet: true });
-    await dropTempDir(profile);
+    await dropBrowserProfile(profile);
   };
   try {
     const wsUrl = await waitFor(() => "devtools", async () => {

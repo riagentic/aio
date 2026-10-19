@@ -48,9 +48,12 @@ import {
   pickNestedDisplay,
 } from "../src/server/nested-display.ts";
 import {
+  driveRoots,
   homeStrays,
   isTestGitdir,
   realStoreDirs,
+  rootAdditions,
+  rootEntries,
   snapshotStores,
   storeChanges,
 } from "./check-home-clean.ts";
@@ -109,6 +112,48 @@ export async function followShard(
  *  work. */
 export const REAL_WINDOW =
   /testDisplayEnv|Xephyr|ELECTRON_E2E|ffmpeg|\bDISPLAY\b/;
+
+/** A fixture a test file names (`fixtures/worker-x-app.ts`). */
+const FIXTURE_REF = /\bfixtures\/([\w.-]+\.tsx?)\b/g;
+
+/** Type-check every named fixture ONCE, each on its own, before any shard.
+ *
+ *  A `workers: "real"` test starts a Worker on a fixture entry, and `deno
+ *  test` type-checks that entry's graph when the worker starts — inside the
+ *  test's 30 s ready deadline. On the Windows VM under suite load that check
+ *  took 6 s, twice in one shard, and the test missed its deadline. A
+ *  single-root `deno check` fills the same cache entry (measured: the
+ *  worker's check is then skipped), so the shards find it done. One root per
+ *  call: a check of all of them at once is another cache entry. A fixture
+ *  that does not check is said and left to the test that uses it. */
+async function precheckFixtures(paths: string[], width: number): Promise<void> {
+  const todo = paths.filter((p) => {
+    try {
+      return Deno.statSync(resolve(ROOT, p)).isFile;
+    } catch {
+      return false; // aio-ok: a name in a test's text, not a file — nothing to check
+    }
+  }).sort();
+  const failed: string[] = [];
+  const lane = async () => {
+    for (let p = todo.shift(); p !== undefined; p = todo.shift()) {
+      const { success } = await new Deno.Command(Deno.execPath(), {
+        args: ["check", "-q", p],
+        cwd: ROOT,
+        stdout: "null",
+        stderr: "null",
+      }).output();
+      if (!success) failed.push(p);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, width) }, lane));
+  if (failed.length > 0) {
+    console.error(
+      `test-shards: ${failed.length} fixture(s) do not type-check (their ` +
+        `tests will say why): ${failed.join(", ")}`,
+    );
+  }
+}
 
 /** `deno test`'s own discovery rule for a directory argument. */
 const TEST_FILE = /(^|[._])test\.(ts|tsx|mts|js|mjs|jsx)$/;
@@ -393,6 +438,15 @@ export function junitTimes(xml: string): Record<string, number> {
   return out;
 }
 
+/** deno's closing `ok | …` / `FAILED | …` line of one shard's output — the
+ *  LAST one, since a child `deno test` a test runs prints its own first —
+ *  else `exit <code>`. Pure. */
+export function summaryLine(out: string, code: number): string {
+  // deno-lint-ignore no-control-regex
+  return out.replace(/\x1b\[[0-9;]*m/g, "")
+    .match(/^(ok|FAILED) \| .*$/gm)?.at(-1) ?? `exit ${code}`;
+}
+
 /** Every failure one shard's log names, colour stripped. Pure.
  *
  *  Read from deno's closing ` FAILURES ` list (`name => ./file:line`), which
@@ -403,7 +457,9 @@ export function junitTimes(xml: string): Record<string, number> {
 export function failures(log: string): string[] {
   // deno-lint-ignore no-control-regex
   const lines = log.replace(/\x1b\[[0-9;]*m/g, "").split("\n");
-  const at = lines.findIndex((l) => l.trim() === "FAILURES");
+  // The LAST list: a test that runs a child `deno test` prints the child's
+  // list first, and that one hid a shard's own 20 failures (Windows).
+  const at = lines.findLastIndex((l) => l.trim() === "FAILURES");
   if (at >= 0) {
     const out: string[] = [];
     for (const l of lines.slice(at + 1)) {
@@ -1203,10 +1259,15 @@ if (import.meta.main) {
   } catch { /* first run: every file counts as one second */ }
 
   const windowed = new Set<string>();
+  const fixtures = new Set<string>();
   await Promise.all(files.map(async (f) => {
     const src = await Deno.readTextFile(resolve(ROOT, f)).catch(() => "");
     if (REAL_WINDOW.test(src)) windowed.add(f);
+    for (const m of src.matchAll(FIXTURE_REF)) {
+      fixtures.add(join("tests", "fixtures", m[1]!));
+    }
   }));
+  await precheckFixtures([...fixtures], n);
   const shards = planWithin(
     files,
     n,
@@ -1257,6 +1318,9 @@ if (import.meta.main) {
   // …and what was test-shaped in the home already: an earlier run's is the
   // standalone gate's to name (`check:home-clean`), a NEW one is this run's.
   const straysBefore = new Set(homeStrays(Deno.env.toObject()));
+  // …and the drive roots of a Windows run, where a `/tmp/…` literal lands.
+  const roots = driveRoots(Deno.env.toObject(), Deno.cwd(), Deno.build.os);
+  const rootsBefore = rootEntries(roots);
   const trackedBefore = readTracked();
   const started = performance.now();
   const runStarted = Date.now();
@@ -1426,8 +1490,7 @@ if (import.meta.main) {
       await Deno.writeTextFile(log, text);
       const secs = Math.round((performance.now() - t0) / 1000);
       const failed = failures(text);
-      const summary = text.replace(/\x1b\[[0-9;]*m/g, "")
-        .match(/^(ok|FAILED) \| .*$/m)?.[0] ?? `exit ${code}`;
+      const summary = summaryLine(out, code);
       let times: Record<string, number> = {};
       try {
         times = junitTimes(await Deno.readTextFile(junit));
@@ -1489,6 +1552,17 @@ if (import.meta.main) {
         `an installer its HOME. These are yours to remove.`,
     );
   }
+  const rootLeaks = rootAdditions(rootsBefore, rootEntries(roots));
+  if (rootLeaks.length > 0) {
+    console.error(
+      `\n✗ the run added ${rootLeaks.length} entr${
+        rootLeaks.length === 1 ? "y" : "ies"
+      } to a drive root:\n  ${rootLeaks.join("\n  ")}\n  A test named a ` +
+        `\`/\`-rooted path (\`/tmp/…\`, \`/nonexistent/…\`) that Windows ` +
+        `resolves against the drive — give it a \`tempDir()\` path, or skip ` +
+        `it on Windows. These are yours to remove.`,
+    );
+  }
   // Said, not fatal: which test wrote cannot be told from here (the shards
   // ran side by side), and someone editing the tree during the run is not a
   // failed suite. But a silent rewrite is how a lock drifts.
@@ -1508,7 +1582,10 @@ if (import.meta.main) {
         `\`deno\` under the repo's config needs \`--no-lock\`.`,
     );
   }
-  if (bad.length === 0 && storeWrites.length === 0 && strays.length === 0) {
+  if (
+    bad.length === 0 && storeWrites.length === 0 && strays.length === 0 &&
+    rootLeaks.length === 0
+  ) {
     console.log(`\n✓ all ${shards.length} shards passed in ${wall}s`);
     Deno.exit(0);
   }

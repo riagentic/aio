@@ -19,6 +19,9 @@ const READERS: Record<string, string> = {
   callTimeouts: "src/browser/browser-ack.ts",
   // Isomorphic: the one decision every door shares, so it lives in protocol.
   wire: "src/protocol/wire-value.ts",
+  // `appVersion()` from aio/air — the page's reader, shared by the browser
+  // and the standalone runtime, so it lives in air.
+  appVersion: "src/air/app-version.ts",
 };
 
 async function clientConfigKeys(): Promise<string[]> {

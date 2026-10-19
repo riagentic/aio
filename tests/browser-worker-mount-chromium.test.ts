@@ -82,6 +82,9 @@ async function served(
   dir: string,
   prod: boolean,
   keys: string[] = Object.keys(WORKER_ANSWERS),
+  /** Also wait for this: a dev warning lands after the graph check, which
+   *  can come after every probe has answered (Windows, measured). */
+  until: (out: string) => boolean = () => true,
 ): Promise<string> {
   const port = freePort();
   const profile = await tempDir("aio-worker-prof-");
@@ -115,7 +118,7 @@ async function served(
           stderr: "null",
         }).spawn();
       }
-      return keys.every((k) => out.includes(`PROBE ${k}=`));
+      return keys.every((k) => out.includes(`PROBE ${k}=`)) && until(out);
     });
   } finally {
     if (browser) await stopChild(browser, { quiet: true });
@@ -252,7 +255,7 @@ Deno.test({
       };
       const SAID = "the worker src/bad.ts cannot be bundled";
 
-      const dev = await served(dir, false, keys);
+      const dev = await served(dir, false, keys, (o) => o.includes(SAID));
       answered(dev, "dev");
       assertEquals(dev.split(SAID).length - 1, 1, `dev said it:\n${dev}`);
 

@@ -120,11 +120,45 @@ function winEsbuildChildPids(): number[] {
   }
 }
 
+/** macOS: this process's esbuild children, from libproc — the child list
+ *  (`proc_listchildpids`, a reaped child is not in it) and each one's
+ *  executable (`proc_pidpath`). By executable, like Windows: the argv is not
+ *  readable without more privilege, and aio starts no other esbuild. Empty
+ *  when FFI is not granted (the Windows rule). */
+function macEsbuildChildPids(): number[] {
+  if (Deno.permissions.querySync({ name: "ffi" }).state !== "granted") {
+    return [];
+  }
+  const lib = Deno.dlopen("/usr/lib/libSystem.B.dylib", {
+    proc_listchildpids: { parameters: ["i32", "buffer", "i32"], result: "i32" },
+    proc_pidpath: { parameters: ["i32", "buffer", "u32"], result: "i32" },
+  });
+  try {
+    const kids = new Int32Array(1024);
+    const n = lib.symbols.proc_listchildpids(
+      Deno.pid,
+      new Uint8Array(kids.buffer),
+      kids.byteLength,
+    );
+    const path = new Uint8Array(4096); // PROC_PIDPATHINFO_MAXSIZE
+    const td = new TextDecoder();
+    return [...kids.subarray(0, Math.max(0, n))].filter((pid) => {
+      const len = lib.symbols.proc_pidpath(pid, path, path.length);
+      return len > 0 &&
+        /(^|\/)esbuild$/.test(td.decode(path.subarray(0, len)));
+    });
+  } finally {
+    lib.close();
+  }
+}
+
 /** The esbuild service processes this process started (Linux: `/proc`;
- *  Windows: the process table). Empty elsewhere, or when nothing can tell.
+ *  Windows: the process table; macOS: libproc). Empty elsewhere, or when
+ *  nothing can tell.
  *  @internal */
 export function _esbuildChildPids(): number[] {
   if (Deno.build.os === "windows") return winEsbuildChildPids();
+  if (Deno.build.os === "darwin") return macEsbuildChildPids();
   if (Deno.build.os !== "linux") return [];
   try {
     const tasks = [...Deno.readDirSync("/proc/self/task")].map((t) => t.name);
@@ -168,8 +202,10 @@ const STOP_REAP_MS = 2000;
  *     which exit it waits for. Without it the exit was left to "one loop
  *     turn", which is true on an idle machine and false under load (measured
  *     on Windows 11: 4 tests of one file failed for a leaked child process).
- *   - macOS: the kill has been sent and one loop turn has passed. The exit
- *     itself is NOT awaited there; nothing can tell.
+ *   - macOS: the same wait as Windows, on libproc's child list (macOS cannot
+ *     say whose pipe a service holds either). It used to be "the kill was
+ *     sent, one loop turn" there — under the suite's load the next test
+ *     found the child still open (measured on macOS 14, shard 2).
  *
  *  Call it with nothing in flight: a transform still pending when the pipes
  *  are destroyed never settles (measured on 0.24.2 — neither resolved nor
@@ -222,20 +258,23 @@ function heldHere(): Set<string> {
  *
  *  Linux is told which service the stop ended (`_stoppedByUs`), so each of
  *  `pids` is asked for. Windows cannot be told — a process's handles are not
- *  readable there — so `pids` is every service this process had, and a stop
- *  ends at most ONE of them: the wait is over when any one has left. Waiting
- *  for all of them would wait out the whole reap on another isolate's live
- *  service, at every stop. Pure: the table is passed in. @internal */
+ *  readable there, nor on macOS — so `pids` is every service this process
+ *  had, and a stop ends at most ONE of them: the wait is over when any one has
+ *  left. Waiting for all of them would wait out the whole reap on another
+ *  isolate's live service, at every stop. Pure: the table is passed in.
+ *  @internal */
 export function _stillThere(
   pids: number[],
   os: typeof Deno.build.os,
   listed: (pid: number) => boolean,
 ): number[] {
   const left = pids.filter(listed);
-  return os === "windows" && left.length < pids.length ? [] : left;
+  return (os === "windows" || os === "darwin") && left.length < pids.length
+    ? []
+    : left;
 }
 
-/** Windows: the services that were still there when a stop gave up on them —
+/** Windows, macOS: the services that were still there when a stop gave up on them —
  *  another esbuild instance's live one, since this process's own leaves in
  *  milliseconds. Not waited on again: a stop that ends nothing (its instance
  *  never started a service) would otherwise wait out the whole reap on them,
@@ -247,13 +286,14 @@ export async function stopEsbuildService(
   stop: () => void | Promise<void>,
   reapMs: number = STOP_REAP_MS,
 ): Promise<void> {
-  const windows = Deno.build.os === "windows";
+  // Where a service's pipes cannot be read (`_stillThere`): Windows, macOS.
+  const byTable = Deno.build.os === "windows" || Deno.build.os === "darwin";
   const before = _esbuildChildPids();
   // A pid no longer listed is free to be reused — by a service of ours.
   for (const pid of _outlived) if (!before.includes(pid)) _outlived.delete(pid);
   await stop();
   // Only what this stop ended is waited for — see `_stoppedByUs`.
-  const pids = windows
+  const pids = byTable
     ? before.filter((pid) => !_outlived.has(pid))
     : _stoppedByUs(
       before,
@@ -261,9 +301,9 @@ export async function stopEsbuildService(
       heldHere,
     );
   const stillThere = () => {
-    if (!windows) return _stillThere(pids, Deno.build.os, inProcTable);
+    if (!byTable) return _stillThere(pids, Deno.build.os, inProcTable);
     const now = new Set(pids.length > 0 ? _esbuildChildPids() : []);
-    return _stillThere(pids, "windows", (pid) => now.has(pid));
+    return _stillThere(pids, Deno.build.os, (pid) => now.has(pid));
   };
   const asked = Date.now();
   const deadline = asked + reapMs;
@@ -274,10 +314,10 @@ export async function stopEsbuildService(
   if (stuck.length > 0) {
     const waited = ((Date.now() - asked) / 1000).toFixed(1);
     console.warn(
-      // Windows cannot tell whose service a pid is (see `_stillThere`): say
+      // Windows/macOS cannot tell whose service a pid is (`_stillThere`): say
       // what is known — none left — and call no one of them the stopped one
       // (one pid is no different: it was another instance's when measured).
-      windows
+      byTable
         ? `note: a stop of esbuild's service ended none of this process's ` +
           `esbuild services (pid ${stuck.join(", ")}) within ${waited} s — ` +
           `either it had none of its own left to stop, or that one is slow ` +
@@ -286,7 +326,7 @@ export async function stopEsbuildService(
           `told to stop and is still there ${waited} s later — not waiting ` +
           `any longer; it is left to exit by itself.`,
     );
-    if (windows) { for (const pid of stuck) _outlived.add(pid); }
+    if (byTable) { for (const pid of stuck) _outlived.add(pid); }
   }
   // One more turn, so the exit the runtime has just observed is delivered
   // (a turn, not a duration: any timer yields one).

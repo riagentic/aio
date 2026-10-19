@@ -459,11 +459,72 @@ export function triggerClick(
   if (!down.defaultPrevented) moveFocus(el);
   el.dispatchEvent(ptrEv(el, "pointerup", mods, d));
   el.dispatchEvent(mouseEv(el, "mouseup", mods, d));
+  const w = view(el);
+  const own: WeakSet<object> | undefined = w[_OWN_CLICKS];
+  if (!own) return clickOnce(el, mods, d);
+  // The harness DOM leaves this click's label activation to us (see
+  // `labelActivation`): the first click dispatched is the trigger's own.
+  let first: AnyEl = null;
+  const mark = (e: AnyEl) => {
+    if (first) return;
+    first = e;
+    own.add(e);
+  };
+  w.addEventListener("click", mark, true);
+  try {
+    clickOnce(el, mods, d);
+  } finally {
+    w.removeEventListener("click", mark, true);
+  }
+  if (first && !first.defaultPrevented) {
+    labelActivation(first.target ?? el, own, mods, d);
+  }
+}
+
+/** HTML's interactive content: a click on one inside a `<label>` is that
+ *  element's own, and the label does not activate its control. */
+const _INTERACTIVE = "a[href],audio[controls],button,details,embed,iframe," +
+  'img[usemap],input:not([type="hidden"]),label,object[usemap],select,' +
+  "textarea,video[controls]";
+
+/** The window key `repairLabelActivation` (src/testing/happy-dom-repair.ts)
+ *  sets on a DOM whose label activation it hands to the trigger. */
+const _OWN_CLICKS = Symbol.for("aio.harnessLabelClicks");
+
+/** Chromium's label activation, after the click was dispatched and not
+ *  cancelled: the innermost element on the path with an activation behaviour
+ *  decides — a link or button inside the label keeps the click; a label
+ *  focuses its control and clicks it. That click is marked as the trigger's
+ *  too, so an enclosing label does not activate a second time. */
+function labelActivation(
+  target: AnyEl,
+  own: WeakSet<object>,
+  mods: KeyModifiers | undefined,
+  d: { detail: number },
+): void {
+  const hit = target?.closest?.(_INTERACTIVE);
+  if (tagOf(hit) !== "label") return;
+  const control = hit.control;
+  if (!control || control.disabled === true || inDisabledFieldset(control)) {
+    return;
+  }
+  control.focus?.();
+  const click = mouseEv(control, "click", mods, d);
+  own.add(click);
+  control.dispatchEvent(click);
+}
+
+/** The click itself: `el.click()` when nothing is held, else dispatched. */
+function clickOnce(
+  el: AnyEl,
+  mods: KeyModifiers | undefined,
+  d: { detail: number },
+): void {
   const held = mods &&
     (mods.ctrlKey || mods.metaKey || mods.altKey || mods.shiftKey);
   // `el.click()` carries no `detail`: the second click of a double-click is
   // dispatched, like a modified one.
-  if (!held && detail === 1 && typeof el.click === "function") {
+  if (!held && d.detail === 1 && typeof el.click === "function") {
     el.click();
     return;
   }
@@ -1108,6 +1169,131 @@ function escapeDefault(el: AnyEl): void {
   dlg.close();
 }
 
+// ── Keyboard focus moves ──────────────────────────────────────────────
+// Tab and the arrow keys on a radio, measured against real Chromium input
+// (tests/ui-trigger-tab-radio-arrows.test.tsx). Without them both tiers
+// delivered the keydown and then nothing moved: no `change`/`blur` on the
+// field being left (its onBlur validation never ran), and an arrow key left a
+// radio group's choice where it was.
+
+/** Can sequential focus navigation stop on `el`? */
+/** The tab index a browser uses. An explicit `tabindex` wins; a details'
+ *  own `<summary>` and an editing host are stops (0) though the harness DOM
+ *  reports -1 for both (Chromium's `tabIndex` does too for an editing host,
+ *  and still stops on it). */
+function tabIndexOf(el: AnyEl): number {
+  const attr = el.getAttribute?.("tabindex");
+  if (attr !== null && attr !== undefined && attr.trim() !== "") {
+    const n = Number(attr);
+    if (Number.isInteger(n)) return n;
+  }
+  if (tagOf(el) === "summary" && tagOf(el.parentElement) === "details") {
+    return el.parentElement.querySelector(":scope > summary") === el
+      ? 0
+      : Number(el.tabIndex);
+  }
+  const ce = el.getAttribute?.("contenteditable");
+  if (ce !== null && ce !== undefined && ce !== "false") return 0;
+  return Number(el.tabIndex);
+}
+
+/** Inside a CLOSED `<details>`, anything but its own summary is not shown. */
+function inClosedDetails(el: AnyEl): boolean {
+  for (let d = el.parentElement; d; d = d.parentElement) {
+    if (tagOf(d) !== "details" || d.open) continue;
+    const own = d.querySelector(":scope > summary");
+    if (!own || !(own === el || own.contains(el))) return true;
+  }
+  return false;
+}
+
+function tabbable(el: AnyEl): boolean {
+  if (!(tabIndexOf(el) >= 0)) return false;
+  if (el.disabled === true || inDisabledFieldset(el)) return false;
+  if (el.closest?.("[inert]")) return false;
+  if (inClosedDetails(el)) return false;
+  return hiddenReason(el) === null;
+}
+
+/** The radios that share `el`'s group (same `name`, same form owner). */
+function radioGroup(el: AnyEl): AnyEl[] {
+  const name = el.getAttribute?.("name");
+  if (!name) return [el];
+  const owner = el.form ?? null;
+  const root = owner ?? el.ownerDocument;
+  return [...root.querySelectorAll("input[type=radio]")].filter((r: AnyEl) =>
+    r.getAttribute("name") === name && (r.form ?? null) === owner
+  );
+}
+
+/** Tab's default action: focus the next (or, with Shift, previous) control in
+ *  sequential focus order — positive `tabindex` first, then document order; a
+ *  radio group is one stop (its checked radio); an open modal dialog bounds
+ *  the walk. Past the last one focus leaves the page. The field left behind
+ *  commits its `change` first, as in a browser. */
+function tabDefault(at: AnyEl, back: boolean): void {
+  // A window-level press (`ui.window.press("Tab")`) is aimed at the document:
+  // it moves on from whatever has focus, or starts at the page's edge.
+  const isDoc = at.nodeType === 9;
+  const doc = isDoc ? at : at.ownerDocument;
+  const focused = isDoc ? activeOf(doc) : at;
+  const el: AnyEl = focused && focused !== doc.body ? focused : null;
+  const scope = topModal(doc) ?? doc;
+  const all: AnyEl[] = [...scope.querySelectorAll(_FOCUSABLE)].filter(
+    (c: AnyEl) => c === el || tabbable(c),
+  );
+  const order = [
+    ...all.filter((c) => tabIndexOf(c) > 0)
+      .sort((a, b) => tabIndexOf(a) - tabIndexOf(b)),
+    ...all.filter((c) => !(tabIndexOf(c) > 0)),
+  ].filter((c) => {
+    if (c === el || inputTypeOf(c) !== "radio" || tagOf(c) !== "input") {
+      return true;
+    }
+    const group = radioGroup(c).filter((r) => all.includes(r));
+    if (group.includes(el)) return false; // already inside this group
+    const checked = group.find((r) => r.checked);
+    return c === (checked ?? (back ? group.at(-1) : group[0]));
+  });
+  const i = el ? order.indexOf(el) : -1;
+  let next: AnyEl = null;
+  if (!el) next = (back ? order.at(-1) : order[0]) ?? null;
+  else if (i >= 0) next = order[back ? i - 1 : i + 1] ?? null;
+  else {
+    // Not itself a stop: continue from its place in the document.
+    const after = (c: AnyEl) => (el.compareDocumentPosition(c) & 4) !== 0;
+    next = back
+      ? order.filter((c) => !after(c)).at(-1) ?? null
+      : order.find(after) ?? null;
+  }
+  if (el) fireChangeIfEdited(el);
+  if (next) next.focus?.();
+  else el?.blur?.();
+}
+
+/** An arrow key on a radio: the next enabled radio of its group (wrapping) is
+ *  focused and chosen — blur, focus, click, input, change. Left/Right follow
+ *  the writing direction. Returns false when the key is not one of those. */
+function radioArrow(el: AnyEl, key: string): boolean {
+  if (tagOf(el) !== "input" || inputTypeOf(el) !== "radio") return false;
+  const rtl = el.closest?.("[dir]")?.getAttribute("dir") === "rtl";
+  const fwd = key === "ArrowDown" || key === (rtl ? "ArrowLeft" : "ArrowRight");
+  const bwd = key === "ArrowUp" || key === (rtl ? "ArrowRight" : "ArrowLeft");
+  if (!fwd && !bwd) return false;
+  const group = radioGroup(el);
+  const i = group.indexOf(el);
+  for (let step = 1; step < group.length; step++) {
+    const r = group[(i + (fwd ? step : -step) + group.length) % group.length];
+    if (r.disabled === true || inDisabledFieldset(r) || hiddenReason(r)) {
+      continue;
+    }
+    r.focus?.();
+    r.click?.();
+    return true;
+  }
+  return true;
+}
+
 /** Press a key, optionally with modifiers (Ctrl/Cmd/Alt/Shift), with the
  *  browser's default actions: Enter in a text field commits it and runs
  *  implicit submission (see {@link implicitSubmit}); Enter in a `<textarea>`
@@ -1136,11 +1322,19 @@ export function triggerPress(
   const modified = mods
     ? (mods.ctrlKey || mods.metaKey || mods.altKey || mods.shiftKey)
     : false;
-  if (go && !modified) {
+  // Shift+Tab is still Tab; any other modifier makes it someone's shortcut.
+  const tab = go && key === "Tab" && !mods?.ctrlKey && !mods?.metaKey &&
+    !mods?.altKey;
+  let moved = tab;
+  if (tab) tabDefault(el, mods?.shiftKey === true);
+  else if (go && !modified) {
     if (key === "Enter") enterDefault(el);
     else if (key === "Escape") escapeDefault(el);
+    else moved = radioArrow(el, key);
   }
-  el.dispatchEvent(keyEv(el, "keyup", key, mods));
+  // A key that moved focus is released over the element that now has it.
+  const up = moved ? activeOf(el.ownerDocument) ?? el : el;
+  up.dispatchEvent(keyEv(up, "keyup", key, mods));
   if (go && !modified && key === " " && keyClicks(el, true)) el.click?.();
   warnKeySwallowedByInput(el, "press", key, probe);
 }

@@ -30,6 +30,10 @@ import { isProcessAlive } from "./single-instance-lock.ts";
 import { appImageOwner, isCompiled } from "./paths.ts";
 import { locateDenoJsonAbove } from "./deno-json.ts";
 import { readBuildStamp } from "./app-version.ts";
+import {
+  SHARED_RUNTIME_ENV,
+  SHARED_RUNTIME_MARKER,
+} from "../electron/shared-runtime.ts";
 import type { ReleaseTarget, UpdateTarget } from "../build/ship.ts";
 import { type Log, log } from "../diagnostics/logger-api.ts";
 import {
@@ -164,6 +168,14 @@ export type ProcessFacts = {
   appImage?: string | null;
   /** `$ELECTRON_PATH`, exported by the AppRun an Electron AppImage ships. */
   electronPath?: string | null;
+  /** `$AIO_ELECTRON_RUNTIME` — `"shared:<its APPDIR>"` from the AppRun of a
+   *  shared-runtime Electron AppImage, which carries no Electron to point
+   *  ELECTRON_PATH at. */
+  electronRuntime?: string | null;
+  /** `$APPDIR` of the running AppImage. When given, the two variables above
+   *  count only when they name it: both are inherited by anything an app
+   *  starts, and another AppImage started from it must not read as Electron. */
+  appDir?: string | null;
   /** The root of an unpacked Electron release, if this process is inside one. */
   installDir?: string | null;
 };
@@ -208,12 +220,27 @@ export function classifyTarget(f: ProcessFacts): InstalledTarget {
     // ships exports the former, and nothing in this repo has ever set the
     // latter — so this branch was unreachable and every Electron AppImage
     // reported itself as a plain `appimage`.
-    return f.electronPath ? "electron-appimage" : "appimage";
+    const own = (p: string) =>
+      !f.appDir || p.startsWith(f.appDir.replace(/\/+$/, "") + "/");
+    const electron = (!!f.electronPath && own(f.electronPath)) ||
+      (!!f.electronRuntime && f.electronRuntime.startsWith("shared:") &&
+        own(f.electronRuntime.slice("shared:".length) + "/"));
+    return electron ? "electron-appimage" : "appimage";
   }
   // An unpacked Electron release: a launcher and a bundled `electron/` sitting
   // above us. That directory — not the executable — is what an update replaces.
   if (f.installDir) return "electron-zip";
   return "binary";
+}
+
+/** `p` with its symlinks resolved, or as it is when it cannot be. */
+function realOr(p: string | null): string | null {
+  if (!p) return p;
+  try {
+    return Deno.realPathSync(p);
+  } catch {
+    return p; // aio-ok: a path that does not resolve is compared as named
+  }
 }
 
 /** `execPath` is a test seam. */
@@ -224,7 +251,15 @@ export function detectTarget(
   return classifyTarget({
     execPath,
     appImage,
-    electronPath: Deno.env.get("ELECTRON_PATH") ?? null,
+    // Resolved, both sides: the AppRun's `$HERE` is `readlink -f`'d, while
+    // `$APPDIR` is the mount as named — under a symlinked $TMPDIR the two
+    // spell one folder differently.
+    electronPath: realOr(Deno.env.get("ELECTRON_PATH") ?? null),
+    electronRuntime: ((v) =>
+      v?.startsWith("shared:")
+        ? `shared:${realOr(v.slice("shared:".length))}`
+        : v)(Deno.env.get(SHARED_RUNTIME_ENV) ?? null),
+    appDir: realOr(Deno.env.get("APPDIR") ?? null),
     // Only asked when it can matter — it walks the filesystem.
     installDir: appImage ? null : installDir(execPath),
   });
@@ -246,7 +281,9 @@ export function installDir(from: string = Deno.execPath()): string | null {
   let dir = dirname(from);
   for (let i = 0; i < 5; i++) {
     const hasLauncher = existsSync(join(dir, launcher));
-    const hasElectron = existsSync(join(dir, "electron"));
+    // A shared-runtime package has no `electron/` — its marker instead.
+    const hasElectron = existsSync(join(dir, "electron")) ||
+      existsSync(join(dir, SHARED_RUNTIME_MARKER));
     if (hasLauncher && hasElectron) return dir;
     const up = dirname(dir);
     if (up === dir) break;
@@ -1014,10 +1051,17 @@ export async function smokeTestArtifact(
   return { ok: true };
 }
 
-type ProbeResult =
+export type ProbeResult =
   | { spawnError: string }
   | { timedOut: true }
-  | { timedOut: false; success: boolean; code: number; stderr: string };
+  | {
+    timedOut: false;
+    success: boolean;
+    code: number;
+    stderr: string;
+    /** Only when asked for (`stdout: true`). */
+    stdout?: string;
+  };
 
 /** The probe's worker, as plain JS (a Blob module: nothing for `deno compile`
  *  to miss). It posts `{ pid }` once the child exists, then the result. */
@@ -1026,7 +1070,8 @@ self.onmessage = async ({ data: a }) => {
   let child;
   try {
     child = new Deno.Command(a.path, {
-      args: a.args, cwd: a.cwd, stdin: "null", stdout: "null", stderr: "piped",
+      args: a.args, cwd: a.cwd, stdin: "null",
+      stdout: a.stdout ? "piped" : "null", stderr: "piped",
     }).spawn();
   } catch (e) {
     self.postMessage({ spawnError: e instanceof Error ? e.message : String(e) });
@@ -1043,6 +1088,7 @@ self.onmessage = async ({ data: a }) => {
     self.postMessage(timedOut ? { timedOut: true } : {
       timedOut: false, success: out.success, code: out.code,
       stderr: new TextDecoder().decode(out.stderr),
+      ...(a.stdout ? { stdout: new TextDecoder().decode(out.stdout) } : {}),
     });
   } catch (e) {
     self.postMessage({ spawnError: e instanceof Error ? e.message : String(e) });
@@ -1059,10 +1105,11 @@ self.onmessage = async ({ data: a }) => {
  *  render, no dispatch, a loop-stall warning). In a worker only the worker's
  *  thread waits. The worker's own kill timer cannot fire while CreateProcess
  *  holds that thread, so this side keeps one too (plus a grace for the scan). */
-async function probeOffThread(
+export async function probeOffThread(
   path: string,
   args: string[],
   timeoutMs: number,
+  opts: { stdout?: boolean } = {},
 ): Promise<ProbeResult> {
   const url = URL.createObjectURL(
     new Blob([PROBE_WORKER], { type: "application/javascript" }),
@@ -1075,7 +1122,9 @@ async function probeOffThread(
         if (pid !== undefined) {
           try {
             Deno.kill(pid, "SIGKILL");
-          } catch { /* already gone */ }
+          } catch {
+            // aio-ok: already gone
+          }
         }
         resolve({ timedOut: true });
       }, timeoutMs + 30_000);
@@ -1094,7 +1143,13 @@ async function probeOffThread(
       };
       // Outside the install: a probe that hangs must not hold the folder the
       // update is about to move.
-      w.postMessage({ path, args, timeoutMs, cwd: neutralCwd() });
+      w.postMessage({
+        path,
+        args,
+        timeoutMs,
+        cwd: neutralCwd(),
+        stdout: !!opts.stdout,
+      });
     });
   } finally {
     w.terminate();

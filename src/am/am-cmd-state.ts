@@ -29,7 +29,7 @@ import {
   resolvePort,
   runTrojanGet,
 } from "./am-utils.ts";
-import { httpGet, trojanGet, trojanPost } from "./am-http.ts";
+import { FETCH_TIMEOUT, httpGet, trojanGet, trojanPost } from "./am-http.ts";
 
 // ── am expect: e2e assertion over server state ──────────────────
 
@@ -917,7 +917,25 @@ export async function cmdDispatch(
   // The trojan is already dev-only and loopback-only, so this widens nothing —
   // it replaces a bypass through the snapshot file with a named, logged door.
   const route = flags.asServer ? "dispatch?as=server" : "dispatch";
-  const result = await trojanPost(port, route, action, appId);
+  // `--wait=N` (seconds) — how long to wait for the reply. Bare `--wait` is
+  // the default.
+  const timeout = flags.wait ? flags.wait * 1000 : FETCH_TIMEOUT;
+  const t0 = Date.now();
+  const result = await trojanPost(port, route, action, appId, timeout);
+  if (!result.ok && Date.now() - t0 >= timeout) {
+    // A dispatch answers when the method RETURNS, so silence at the deadline
+    // is not "never answered" (network §2: a `long:` method running fine read
+    // as a hung app — over HTTP as "timeout connecting", after it connected).
+    outError(
+      `no reply within ${timeout / 1000}s — the call may still be running: ` +
+        `a dispatch answers when the method returns (a \`long:\` method's ` +
+        `writes still commit when it finishes), or the app is stuck ` +
+        `(${result.error}).`,
+      mode,
+      "am timeline   ·   am state   ·   wait longer: --wait=<seconds>",
+    );
+    Deno.exit(1);
+  }
   if (!result.ok) {
     // A method that threw on the arguments it was handed gets ONE extra line,
     // and only then. `--args` is the ARGUMENT LIST, so `--args='["a","b"]'`

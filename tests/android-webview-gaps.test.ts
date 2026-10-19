@@ -10,7 +10,7 @@
 // Source-level: `deno task test:android` is what runs each on a device (its
 // "renderer process is lost", "<input type=file>" and client download steps),
 // and a real APK build is what proves this Kotlin compiles.
-import { assert, assertStringIncludes } from "@std/assert";
+import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { ANDROID_TEMPLATE } from "../src/build/android-template.ts";
 
 const KOTLIN = ANDROID_TEMPLATE["app/src/main/java/aio/app/MainActivity.kt"]!;
@@ -82,4 +82,187 @@ Deno.test("android webview gaps: a download is started or refused out loud, neve
   // A signed-in server: the page's cookies go with the request.
   assertStringIncludes(fn, "CookieManager.getInstance().getCookie(url)");
   assertStringIncludes(fn, "download NOT started");
+});
+
+Deno.test("android webview gaps: a pinned server's download is fetched by the app; a blob:/data: one is handed over by the page", () => {
+  const fn = block("setDownloadListener {", 12);
+  const pinned = fn.indexOf("pinnedDownload(");
+  const net = fn.indexOf('uri.scheme == "http" || uri.scheme == "https"');
+  assert(pinned >= 0 && pinned < net, "a pinned host before DownloadManager");
+  assertStringIncludes(fn, "__aioSave(");
+  // The pinned fetch: the system's trust first, then exactly the pin.
+  const pd = block("private fun pinnedDownload(", 0);
+  // Redirects are followed HERE, hop by hop: the pin (and its hostname
+  // bypass) and the cookies are the pinned host:port's alone — a 302 to
+  // another host gets the system's trust and that host's own cookies.
+  assertStringIncludes(pd, "instanceFollowRedirects = false");
+  assertStringIncludes(pd, "if (hostPort(u) == pinned)");
+  assertStringIncludes(pd, "getCookie(u.toString())");
+  const sys = pd.indexOf("sys.checkServerTrusted(chain, authType)");
+  const pin = pd.indexOf("pinMatches(pin, chain[0].encoded)");
+  assert(sys >= 0 && pin > sys, "system trust, then the pin");
+  assertStringIncludes(pd, "byPin || hosts.verify(h, s)");
+  assertStringIncludes(pd, "saveToDownloads(");
+  // Saved pending, and removed again on a failure: no torn file.
+  const save = block("private fun saveToDownloads(", 0);
+  assertStringIncludes(save, "IS_PENDING, 1");
+  assertStringIncludes(save, "resolver.delete(uri, null, null)");
+});
+
+Deno.test("android webview gaps: the save hook hands a revoked blob over under its download name", async () => {
+  const hook = KOTLIN.match(/SAVE_HOOK = """([\s\S]*?)"""/)![1]!;
+  assert(!hook.includes("$"), "a Kotlin raw string would read a $");
+  const posted: Record<string, string>[] = [];
+  const win: Record<string, unknown> = {};
+  class Anchor {
+    href = "";
+    attrs: Record<string, string> = {};
+    hasAttribute(n: string) {
+      return n in this.attrs;
+    }
+    getAttribute(n: string) {
+      return this.attrs[n] ?? null;
+    }
+    click() {}
+  }
+  const url = {
+    createObjectURL: (o: Blob) => URL.createObjectURL(o),
+    revokeObjectURL: (u: string) => URL.revokeObjectURL(u),
+  };
+  const timers: ReturnType<typeof setTimeout>[] = [];
+  // Each read's end, awaited before the test ends: Deno's FileReader queues
+  // its events on timers of its own, still pending when the last result was
+  // posted (Windows: 3 timers left, every run).
+  const reads: Promise<void>[] = [];
+  class Reader extends FileReader {
+    constructor() {
+      super();
+      reads.push(
+        new Promise((r) => this.addEventListener("loadend", () => r())),
+      );
+    }
+  }
+  new Function(
+    "window",
+    "URL",
+    "HTMLAnchorElement",
+    "addEventListener",
+    "AioSave",
+    "setTimeout",
+    "FileReader",
+    hook,
+  )(
+    win,
+    url,
+    Anchor,
+    () => {},
+    { postMessage: (m: string) => posted.push(JSON.parse(m)) },
+    (f: () => void, ms: number) => timers.push(setTimeout(f, ms)),
+    Reader,
+  );
+  const save = win.__aioSave as (u: string, m: string, g: string) => boolean;
+  // The common export: a detached link, clicked, its URL revoked at once.
+  const a = new Anchor();
+  a.href = url.createObjectURL(new Blob(["aio blob"], { type: "text/plain" }));
+  a.attrs.download = "report.txt";
+  a.click();
+  url.revokeObjectURL(a.href);
+  assert(save(a.href, "text/plain", "downloadfile.txt"));
+  // A data: URL nobody clicked: the listener's guess names it.
+  assert(save("data:text/plain;base64,aGk=", "text/plain", "guess.txt"));
+  // No click the hook saw (a detached link's dispatchEvent, window.open,
+  // location.href = url), then revoked: still handed over, by the guess.
+  const opened = url.createObjectURL(new Blob(["opened"]));
+  url.revokeObjectURL(opened);
+  assert(save(opened, "", "opened.bin"));
+  while (posted.length < 3) await new Promise((r) => setTimeout(r, 5));
+  timers.forEach(clearTimeout);
+  assertEquals(reads.length, 3, "one read per save");
+  await Promise.all(reads);
+  // …and the turn the reader is ending in: its loadend runs inside a timer.
+  await new Promise((r) => setTimeout(r, 0));
+  const byName = Object.fromEntries(posted.map((p) => [p.name, p]));
+  assertEquals(atob(byName["report.txt"]!.data!), "aio blob");
+  assertEquals(byName["report.txt"]!.mime, "text/plain");
+  assertEquals(atob(byName["guess.txt"]!.data!), "hi");
+  assertEquals(atob(byName["opened.bin"]!.data!), "opened");
+});
+
+Deno.test("android webview gaps: the save hook refuses a blob over SAVE_MAX before reading it, and keeps a revoked blob only briefly", async () => {
+  const hook = KOTLIN.match(/SAVE_HOOK = """([\s\S]*?)"""/)![1]!;
+  const max = Number(
+    /private const val SAVE_MAX = (\d+) \* 1024 \* 1024/.exec(
+      KOTLIN,
+    )![1],
+  ) * 1024 * 1024;
+  // The JS bound IS SAVE_MAX (a raw string cannot say `${SAVE_MAX}`).
+  assertStringIncludes(hook, `size>${max}`);
+  // Kotlin catches the OutOfMemoryError (an Error, not an Exception) too.
+  assertStringIncludes(block("private class AioSave(", 0), "e: Throwable");
+  const posted: Record<string, string>[] = [];
+  const win: Record<string, unknown> = {};
+  class Anchor {
+    href = "";
+    attrs: Record<string, string> = {};
+    hasAttribute(n: string) {
+      return n in this.attrs;
+    }
+    getAttribute(n: string) {
+      return this.attrs[n] ?? null;
+    }
+    click() {}
+  }
+  const url = {
+    createObjectURL: (o: Blob) => URL.createObjectURL(o),
+    revokeObjectURL: (u: string) => URL.revokeObjectURL(u),
+  };
+  const delays: number[] = [];
+  const timers: ReturnType<typeof setTimeout>[] = [];
+  new Function(
+    "window",
+    "URL",
+    "HTMLAnchorElement",
+    "addEventListener",
+    "AioSave",
+    "setTimeout",
+    hook,
+  )(
+    win,
+    url,
+    Anchor,
+    () => {},
+    { postMessage: (m: string) => posted.push(JSON.parse(m)) },
+    (f: () => void, ms: number) => {
+      delays.push(ms);
+      timers.push(setTimeout(f, ms));
+    },
+  );
+  const save = win.__aioSave as (u: string, m: string, g: string) => boolean;
+  try {
+    // Over the bound: an error posted, never a data: read of it.
+    class Big extends Blob {
+      override get size() {
+        return max + 1;
+      }
+    }
+    const big = new Anchor();
+    big.href = url.createObjectURL(new Big(["x"]));
+    big.attrs.download = "huge.bin";
+    big.click();
+    assert(save(big.href, "", "g.bin"));
+    // Every revoked Blob is kept, briefly — the clicked one and one no
+    // download named — and a URL the hook never made, not at all.
+    const quiet = url.createObjectURL(new Blob(["img"]));
+    url.revokeObjectURL(quiet);
+    url.revokeObjectURL(big.href);
+    url.revokeObjectURL("blob:not-made-here");
+    assertEquals(delays.length, 2);
+    assert(delays.every((d) => d <= 2000), `kept ${delays} ms`);
+    while (posted.length < 1) await new Promise((r) => setTimeout(r, 5));
+    assertEquals(posted[0]!.name, "huge.bin");
+    assertStringIncludes(posted[0]!.error ?? "", "over 32 MB");
+    assertEquals(posted[0]!.data, undefined);
+  } finally {
+    timers.forEach(clearTimeout);
+  }
 });

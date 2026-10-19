@@ -1261,6 +1261,12 @@ Deno.test("a refused second launch leaves ONE line in the running app's app.log 
     for (let i = 0; i < 200 && !has("app.log"); i++) {
       await new Promise((r) => setTimeout(r, 50));
     }
+    // …and A's checkpoint, written on its own 5 s debounce: on a slow box
+    // (Windows, measured) it landed while B was still starting and was
+    // counted as a file B created.
+    for (let i = 0; i < 240 && !has("checkpoint.json"); i++) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
     const before = new Set([...Deno.readDirSync(logs)].map((e) => e.name));
     const b = await a.launchB({});
     assertEquals(b.code, 1, b.out);

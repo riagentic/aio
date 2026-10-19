@@ -15,6 +15,7 @@ import {
   tmplPermissionGuard,
   tmplPreloadCleanup,
   tmplPreloadWrite,
+  tmplProfileDir,
   tmplRendererDiagnostics,
   tmplTray,
   tmplWebGuard,
@@ -53,7 +54,7 @@ ${tmplAppMenu(meta?.title)}
 // it must not carry __aioIPC, whose presence would select the IPC transport.
 // The name first: it decides the profile directory the preload is written to.
 app.name = ${JSON.stringify(slug)};
-${
+${tmplProfileDir(meta?.profileDir)}${
     tmplPreloadWrite(
       JSON.stringify(
         shellBridgePreload({ standalone: true }) + udsPreloadDiagnostics(),

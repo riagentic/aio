@@ -36,10 +36,11 @@ Deno.test({
       const repoMap = JSON.parse(
         await Deno.readTextFile(join(REPO_ROOT, "deno.json")),
       ).imports as Record<string, string>;
-      for (
-        const k of ["@std/jsonc", "@std/yaml", ...Object.keys(cfg.imports)]
-      ) {
-        if (!k.startsWith("aio") && repoMap[k]) cfg.imports[k] = repoMap[k];
+      // Every one of them: a list kept here went stale with the first bare
+      // import the framework added (`@std/fs`), and the binary then ran
+      // nowhere — the smoke run refused it.
+      for (const [k, v] of Object.entries(repoMap)) {
+        if (!k.startsWith("aio")) cfg.imports[k] = v;
       }
       await Deno.writeTextFile(path, JSON.stringify(cfg, null, 2));
 
@@ -49,6 +50,10 @@ Deno.test({
       assertEquals(r.code, 0, r.out + r.err);
       assertStringIncludes(err, `imports["aio"] = "${REPO_ROOT}/mod.ts"`);
       assertStringIncludes(err, "bind the binary to THIS machine");
+      assertStringIncludes(
+        err,
+        "at best the artifact runs on this machine only",
+      );
       assertStringIncludes(err, "./dep/aio/");
       assert(/imports\["aio"\]: "(\.\.\/)+/.test(err), r.err);
     } finally {

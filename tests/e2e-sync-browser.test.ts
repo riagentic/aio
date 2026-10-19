@@ -6,17 +6,13 @@
 import { assert, assertEquals } from "@std/assert";
 import { testDisplayEnv } from "../src/testing/test-display.ts";
 import { stopChild } from "./stop-child.ts";
-import {
-  childCoverageDir,
-  dropTempDir,
-  tempDir,
-} from "../src/testing/temp-dir.ts";
+import { childCoverageDir, tempDir } from "../src/testing/temp-dir.ts";
 import { freePort } from "../src/testing/server-test.ts";
 import { fromFileUrl } from "@std/path";
 import { spec } from "./module-spec-helper.ts";
 // THE browser lookup (every OS), never a copy of its path list.
 import { browserOsFlags, findBrowser } from "./e2e-harness.ts";
-import { browserHomeEnv } from "../src/testing/chromium.ts";
+import { browserHomeEnv, dropBrowserProfile } from "../src/testing/chromium.ts";
 const _childCovDir = childCoverageDir();
 
 const ROOT = fromFileUrl(new URL("..", import.meta.url));
@@ -268,7 +264,7 @@ export default function App() {
         await stopChild(t, { quiet: true });
       }
       for (const pr of profiles) {
-        await dropTempDir(pr); // retries: Chromium writes it after the kill
+        await dropBrowserProfile(pr); // its helpers first, then the dir
       }
       await stopChild(proc, { quiet: true });
       // Takes the child's app home with it — it lives at `${dir}/home`.

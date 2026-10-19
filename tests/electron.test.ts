@@ -139,7 +139,7 @@ Deno.test("electron: clientScript — PIN pairing flow wired", () => {
   // every later recent and silently downgraded them to the looser TOFU list.
   assertStringIncludes(
     s,
-    "try { pinCert(new URL(r.url).host, r.cert); } catch",
+    "      try {\n        const h = new URL(r.url).host;\n        if (r.cert) pinCert(h, r.cert);",
   );
   assert(
     !s.includes("loadRecents()) if (r.url && r.cert) pinCert("),

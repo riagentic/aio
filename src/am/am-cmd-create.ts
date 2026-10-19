@@ -555,11 +555,20 @@ export function denoJson(
     // on in a new app, and inert until that target is built. The entry's
     // `electron.strictPin` is the same switch for `--server-url`. The `cli`
     // template has no window to pair, so it carries neither.
+    //
+    // `electronRuntime` — "online": the desktop package carries no Electron
+    // (~75% smaller, and an update downloads only the app); it downloads
+    // Electron once, at first start, into the per-user store every aio app
+    // starts from. "offline" carries it and opens with no internet. Absent,
+    // aio keeps "offline", what every app built before the key had; a new
+    // app has no size to keep. Inert until the electron target is built.
     build: {
       targets: [target],
       platforms: ["host"],
       out: "dist",
-      ...(template === "cli" ? {} : { strictPin: true }),
+      ...(template === "cli"
+        ? {}
+        : { strictPin: true, electronRuntime: "online" }),
     },
     // `colorScheme` — an Android build's page follows the phone's light/dark
     // setting. Absent, aio keeps the dark theme every APK had through 1.0.19
@@ -1755,7 +1764,12 @@ async function tryGitInit(dir: string): Promise<GitInit> {
       })
         .output();
     if (!(await run(["init"])).success) return "skipped: git init failed";
-    await run(["add", "-A"]);
+    // Everything but the seeded deno.lock. It holds aio's JSR side only; the
+    // first build adds the npm graph (esbuild, immer, happy-dom) and the
+    // workspace section, so a COMMITTED seed made that first build "-dirty".
+    // Untracked, it is the toolchain's file (projectVersion's rule) and still
+    // pins what it names; the developer's first commit takes the full lock.
+    await run(["add", "-A", "--", ".", ":(exclude)deno.lock"]);
     // An identity of its own: a machine with no git user (a container, CI, a
     // fresh laptop) used to fail this commit silently, leaving every file
     // untracked — and every build of the scaffold "-dirty". The app's first

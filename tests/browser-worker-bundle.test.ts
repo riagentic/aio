@@ -53,7 +53,7 @@ import {
 } from "../src/server/server-static.ts";
 import { _servedAssets } from "../src/server/server.ts";
 import { stopEsbuild } from "../src/server/server-transpile.ts";
-import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { dropTempDir, tempDir, tempDirSync } from "../src/testing/temp-dir.ts";
 import { fixtureNodeModules } from "./symlink-helper.ts";
 
 const REPO = fromFileUrl(new URL("../", import.meta.url));
@@ -126,6 +126,46 @@ Deno.test("rewriteWorkers: only the specifier changes, and a module that starts 
   }
 });
 
+// `new URL("./w.ts?v=1", import.meta.url)` ran in dev (the dev server
+// transpiled the `.ts` it was asked for) and failed in every build — the
+// Worker's `error` event, nothing said: the query hid the `.ts`, so it was
+// taken for a served `.js` beside the bundle. The script is the path; the
+// query and hash ride along to the bundle, in dev joined to its own query.
+Deno.test("workerEntries/rewriteWorkers: a query or hash on the literal is the same worker, and stays on the URL", async () => {
+  const app = abs("/app/src/App.tsx");
+  const at = (spec: string) =>
+    `new Worker(new URL("${spec}", import.meta.url), { type: "module" })`;
+  for (const spec of ["./w.ts?v=1", "./w.ts#x", "./w.ts?a=1&b=2#x"]) {
+    assertEquals(
+      workerEntries(at(spec), app, there).map((e) => [e.spec, e.abs]),
+      [["./w.ts", abs("/app/src/w.ts")]],
+      spec,
+    );
+    assertEquals(unmanagedWorkers(at(spec), app, there, abs("/app/src")), []);
+  }
+  const dir = tempDirSync("aio-worker-q-");
+  try {
+    Deno.writeTextFileSync(join(dir, "w.ts"), "");
+    const file = join(dir, "App.tsx");
+    const rw = (spec: string, to: string) =>
+      rewriteWorkers(at(spec), file, () => to);
+    assertEquals(rw("./w.ts?v=1", "./worker-w.js"), at("./worker-w.js?v=1"));
+    assertEquals(rw("./w.ts#x", "./worker-w.js"), at("./worker-w.js#x"));
+    // The dev server's URL carries its own query: one query, both params.
+    assertEquals(
+      rw("./w.ts?v=1#x", "/src/w.ts?aio-worker=esm"),
+      at("/src/w.ts?aio-worker=esm&v=1#x"),
+    );
+    // Left as written when the caller hands the specifier back.
+    assertEquals(
+      rewriteWorkers(at("./w.ts?v=1"), file, (e) => e.spec),
+      at("./w.ts?v=1"),
+    );
+  } finally {
+    await dropTempDir(dir);
+  }
+});
+
 Deno.test("unmanagedWorkers: a followed worker is not reported; what no build can follow is, with the way out", () => {
   const found = (code: string, exists = there) =>
     unmanagedWorkers(code, abs("/app/src/App.tsx"), exists);
@@ -181,6 +221,12 @@ Deno.test("worker bundle names: one spelling, recognised by every staging site, 
       "app.js",
     ]
   ) assert(!isWorkerBundle(not), not);
+  // The literal's query stays on the URL (`rewriteWorkers`): still a bundle
+  // `--smoke` must fetch.
+  assertEquals(
+    workerBundlesIn(`new URL("./${name}?v=1",import.meta.url);"./${name}#x"`),
+    [name],
+  );
 });
 
 /** An app whose page starts a module worker and a classic one; the classic
@@ -823,6 +869,16 @@ Deno.test("assets: a mount declared in deno.json alone is served — dev and pro
       assertEquals(r.status, 200, `prod=${prod}`);
       assertEquals(await r.text(), "FROM_DENO_JSON");
     }
+    // A prefix written without its leading slash is the same URL path — the
+    // web build and the APK pack `"media"` at /media; dev and the binary
+    // answered 404 there, without a word.
+    await Deno.writeTextFile(
+      join(root, "deno.json"),
+      JSON.stringify({ assets: { "media": "./media" } }),
+    );
+    assertEquals(_servedAssets(undefined, base), {
+      "/media": join(root, "media"),
+    });
     // No declaration: exactly what aio.run said, the same object.
     const run = { "/x": "./x" };
     await Deno.writeTextFile(join(root, "deno.json"), "{}");

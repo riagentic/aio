@@ -209,6 +209,10 @@ function matches(e: Owned, path: string, deep = true): boolean {
   if (e.is !== undefined) {
     if (e.is !== is) return false; // the kind is part of it
     if (is.startsWith("dir:")) return true;
+    // A copy still filling was recorded EMPTY (`swapArtifact`): cut off
+    // mid-fill, its bytes are never the recorded ones — the identity is all
+    // there is. Only the copy strategy fills, never on Windows (NTFS).
+    if (e.state === "filling") return true;
     if (e.sum === undefined) return false;
     return deep
       ? sumOf(path) === e.sum
@@ -532,6 +536,11 @@ export function sweepOwned(
   const claimed: { name: string; at: string }[] = [];
   const unproven: string[] = [];
   const dropped: string[] = [];
+  // The very download on record, other bytes now: not provably ours, so
+  // left — and kept on the record, so the update that needs its name moves
+  // it aside (`setAsideChanged`). Voided here, it refused its release as
+  // "not made by this app's updater" for good.
+  const changed = new Set<string>();
   // Ours or not, it cannot be told: kept on the record, and said as it is.
   const unreadable = new Map<string, string>();
   let n = 0;
@@ -582,6 +591,10 @@ export function sweepOwned(
       }
       continue;
     } else if (matches(e, e.path)) take(e);
+    else if (
+      e.kind === "file" && e.sum !== undefined &&
+      identity(e.path) === e.is
+    ) changed.add(e.path);
     // Something else has the name now: the record of ours is void.
     else ledger = ledger.filter((x) => x !== e);
   }
@@ -596,10 +609,10 @@ export function sweepOwned(
         continue;
       }
       if (
-        !unproven.includes(path) &&
-        !ledger.some((e) =>
-          e.path === path && (busy(e) || matches(e, path, false))
-        )
+        changed.has(path) || (!unproven.includes(path) &&
+          !ledger.some((e) =>
+            e.path === path && (busy(e) || matches(e, path, false))
+          ))
       ) left.push(d.name);
     }
   } catch {

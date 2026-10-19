@@ -1,6 +1,8 @@
 // Inline JS script builders for dev-mode HTML shells.
 // Each function returns a JS string to embed inside <script type="module">.
 
+import { WS_OPEN_TIMEOUT_MS } from "../protocol/transport-shared.ts";
+
 /** Dev reload WebSocket — live reload on file changes. Shared by AIO + React
  *  dev modes. SKIPPED on a page with no HTTP origin (the aio:// zero-port
  *  shell) or with an IPC bridge: there the bridge already delivers
@@ -71,9 +73,20 @@ export function devWsScript(): string {
           _bootId = id
         }
       }
-      ws.onclose = () => { _devLive = false; if (!_devOut) _devT = setTimeout(_devRetry, 2000) }
+      // A handshake the network black-holes stays CONNECTING forever, and
+      // Chromium opens one handshake per host at a time — the app's own
+      // reconnect queued behind this one for good. Bounded (WS_OPEN_TIMEOUT_MS):
+      // past it the attempt is dropped and takes the close path itself.
+      const _openT = setTimeout(() => {
+        if (ws.readyState !== 0) return
+        const lost = ws.onclose
+        ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null
+        ws.close()
+        lost()
+      }, ${WS_OPEN_TIMEOUT_MS})
+      ws.onclose = () => { clearTimeout(_openT); _devLive = false; if (!_devOut) _devT = setTimeout(_devRetry, 2000) }
       ws.onerror = (e) => console.warn('[aio] reload WS error:', e)
-      ws.onopen = () => console.debug('[aio] reload WS connected')
+      ws.onopen = () => { clearTimeout(_openT); console.debug('[aio] reload WS connected') }
     }
     if (_devWsOk) _devWs()`;
 }

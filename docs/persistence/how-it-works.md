@@ -359,10 +359,12 @@ recovered instead of lost.
   says so
   (`journal: … COULD NOT be replayed — they ran under a cell version
   this build has migrated away from ("w" v1 → v2) …`).
-  A clean stop before an upgrade leaves no tail, so nothing is lost that way. A
-  version bump with no `onMigrate` converts nothing (boot keeps that snapshot as
-  stored), so the tail under it still replays; a line from a NEWER version (a
-  downgrade) never does.
+  The live journal drops those lines at its next save, so boot first copies it
+  to `journal.unreplayed-<time>` and the warning names the copy — the only
+  record of what those writes were. A clean stop before an upgrade leaves no
+  tail, so nothing is lost that way. A version bump with no `onMigrate` converts
+  nothing (boot keeps that snapshot as stored), so the tail under it still
+  replays; a line from a NEWER version (a downgrade) never does.
 - Each append is a synchronous write, so it survives **process** death. It is
   not fsynced, so power loss can still take the tail. (`sync: true` inside the
   journal implementation would fsync every append; it is not reachable from

@@ -27,7 +27,7 @@ import { BUILD_BOOL_FLAGS, BUILD_VALUE_FLAGS } from "../build/build-flags.ts";
  *  annotation is a WIDENING for every consumer — with the literal type,
  *  `VERSION === "1.0.0-alpha76"` was a compile error for having no overlap;
  *  now it is an ordinary comparison. */
-export const VERSION: string = "1.0.20-beta";
+export const VERSION: string = "1.0.21-beta";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *
@@ -63,6 +63,12 @@ export type CliFlags = {
    *  JSON and exit. `aio ship` runs it to publish a contract that is MEASURED
    *  from the cells rather than guessed from the source. */
   dataContract?: boolean;
+  /** `--aio-electron-runtime`: print how this build gets its Electron as one
+   *  JSON line — `{"runtime":"shared","version":"44.7.0"}`, `{"runtime":
+   *  "bundled",…}`, or `{"runtime":"none"}` — and exit, touching nothing. An
+   *  updater asks the verified new build this before the swap, so a shared-
+   *  runtime update's Electron is in the store when it first starts. */
+  electronRuntime?: boolean;
   /** Serve `--expose` over PLAIN HTTP (no TLS). Only sound when the payload is
    *  already end-to-end encrypted or a TLS-terminating proxy sits in front —
    *  boot warns loudly either way. CLI-only on purpose: "ship this app without
@@ -595,6 +601,7 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
     else if (arg === "--expose") r.expose = true;
     else if (arg.startsWith("--channel=")) r.channel = arg.slice(10);
     else if (arg === "--aio-data-contract") r.dataContract = true;
+    else if (arg === "--aio-electron-runtime") r.electronRuntime = true;
     else if (arg === "--no-tls") r.noTls = true;
     else if (arg === "--help") r.help = true;
     // `--connect` opens the connect page (a thin client with no baked-in

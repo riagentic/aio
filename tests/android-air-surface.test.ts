@@ -71,15 +71,23 @@ Deno.test("android aio/air: useLocal is the SAME implementation, not a copy", ()
   );
 });
 
+Deno.test("android aio/air: useConnected / isConnectionDegraded ship — the runtime is local, so always connected", () => {
+  // They were absent, so an app that renders an offline banner (the docs'
+  // own pattern) built for browser and electron and failed the APK build.
+  // The cells run in this process: nothing to lose, no offline queue —
+  // the same answer `useAio().ready` gives here.
+  const a = android as unknown as Record<string, () => boolean>;
+  assertEquals(a.useConnected?.(), true);
+  assertEquals(a.isConnectionDegraded?.(), false);
+});
+
 // ── 2. the android surface gap is enumerated, never discovered ───────────
 
 /** Exports of `aio/air` that the android (standalone) runtime deliberately
  *  does not ship, each because it needs something android has no equivalent
  *  of. Shrinking this list is always allowed; growing it is a decision. */
 const ABSENT_ON_ANDROID: Record<string, string> = {
-  // Server transport: a standalone app has no WS/IPC connection to report on.
-  isConnectionDegraded: "no server transport in a standalone app",
-  useConnected: "no server transport in a standalone app",
+  // (`useConnected`/`isConnectionDegraded` ship since 1.0.21 — see below.)
   useProjection: "built on the transport's reference-sharing projector",
   // Server-side rendering — there is no HTML shell to hydrate into. (Islands
   // and the router SHIP on android since alpha70: client-side interop and

@@ -480,7 +480,7 @@ Deno.test("android signing: the environment names the keystore; a half-named one
       APP,
       isFile,
     ),
-    { keystore: JKS },
+    { keystore: JKS, keyAlias: "a" },
   );
   const gone = androidSigning(
     { AIO_ANDROID_KEYSTORE: "nope.jks" },

@@ -228,6 +228,82 @@ Deno.test("minify: the stage keeps the layout, follows the app's symlinked path,
   }
 });
 
+// An `assets` mount staged for the binary: a symlink that leads OUT of the
+// mount was copied as its target's bytes, so the minified binary (the
+// default) served `/m/env.txt` → `../.env` with 200 where dev, `--prod` and
+// an unminified binary answer 403. It stays a link to the same target, as
+// an unminified compile sees it: the server's rule refuses it, and app code
+// reading a `compile.include` data link (not a served mount) still gets its
+// bytes. A link inside the mount is the file it names.
+Deno.test("minify: a symlink out of an include stays a link to its target; one inside it is the file", async () => {
+  const base = await tempDir("minify-link-");
+  try {
+    const { root } = await project(base);
+    await write(join(root, ".env"), "SECRET=1");
+    await write(join(root, "pub", "ok.txt"), "OK");
+    await Deno.mkdir(join(root, "pub", "sub"));
+    await Deno.symlink(join(root, ".env"), join(root, "pub", "env.txt"));
+    // Typed, and in the host's separators: Windows needs a link's type when
+    // it cannot find the target from the cwd, and resolves only `\` in one.
+    await Deno.symlink(
+      join("..", "ok.txt"),
+      join(root, "pub", "sub", "alias.txt"),
+      {
+        type: "file",
+      },
+    );
+    await Deno.symlink("..", join(root, "pub", "sub", "loop"), { type: "dir" });
+    await Deno.symlink(join(root, "gone"), join(root, "pub", "dangling.txt"), {
+      type: "file",
+    });
+    const st = await stageMinified(esbuild, root, [
+      "compile",
+      "-q",
+      "-A",
+      "--include",
+      "dist/",
+      "--include",
+      "pub",
+      "-o",
+      join(base, "out-bin"),
+      "src/app.ts",
+    ]);
+    try {
+      const pub = join(st.cwd, "pub");
+      assertEquals(await Deno.readTextFile(join(pub, "ok.txt")), "OK");
+      assertEquals(
+        await Deno.readTextFile(join(pub, "sub", "alias.txt")),
+        "OK",
+      );
+      assert((await Deno.lstat(join(pub, "sub", "loop"))).isSymlink);
+      assertEquals(
+        await Deno.readTextFile(join(pub, "sub", "loop", "ok.txt")),
+        "OK",
+      );
+      for (
+        const [name, target] of [
+          ["env.txt", join(root, ".env")],
+          ["dangling.txt", join(root, "gone")],
+        ] as const
+      ) {
+        assert((await Deno.lstat(join(pub, name))).isSymlink, name);
+        assertEquals(await Deno.readLink(join(pub, name)), target, name);
+      }
+      // Readable through the link, as in the unminified binary — the server,
+      // not the stage, is what refuses it under a served mount.
+      assertEquals(
+        await Deno.readTextFile(join(pub, "env.txt")),
+        "SECRET=1",
+      );
+    } finally {
+      await st.dispose();
+    }
+  } finally {
+    await stopEsbuildService(() => esbuild.stop());
+    await dropTempDir(base);
+  }
+});
+
 Deno.test("minify: a type error in the ORIGINAL still fails the build, and no stage is left", async () => {
   const base = await tempDir("minify-typeerr-");
   try {

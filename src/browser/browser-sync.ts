@@ -296,6 +296,7 @@ export function handleSyncMessage(t: string, d: unknown): void {
         opId: string;
         serverHlc: unknown;
         serverTs?: number;
+        serverNow?: number;
         unsaved?: unknown;
       };
       // The op is applied, but what its commit owed could not be saved (a
@@ -317,15 +318,23 @@ export function handleSyncMessage(t: string, d: unknown): void {
           a.opId,
           a.serverHlc as [number, number, string],
           a.serverTs,
+          a.serverNow,
         ).then(armFrameCheck),
       );
       return;
     }
     case "op-rejected": {
-      const r = d as { opId: string; cell: string; reason: string };
+      const r = d as {
+        opId: string;
+        cell: string;
+        reason: string;
+        serverNow?: number;
+      };
       watch(
         "sync:rejection",
-        _engine.handleRejection(r.cell, r.opId, r.reason).then(armFrameCheck),
+        _engine.handleRejection(r.cell, r.opId, r.reason, r.serverNow).then(
+          armFrameCheck,
+        ),
       );
       return;
     }

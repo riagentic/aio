@@ -163,3 +163,19 @@ Deno.test("savedWhileStarting: fresh saves are named; the carry's are not; the s
     await dropTempDir(dir);
   }
 });
+
+Deno.test('savedWhileStarting: a watch root that is a FILE is looked at too (watch: ["cell.ts"])', async () => {
+  const dir = await tempDir("dev-restart-saved-file-");
+  try {
+    const a = join(dir, "cell.ts");
+    await Deno.writeTextFile(a, "1");
+    await Deno.writeTextFile(join(dir, "notes.txt"), "1");
+    const since = Date.now() - 60_000;
+    const none = () => undefined;
+    assertEquals(savedWhileStarting([a], since, none), [a]);
+    assertEquals(savedWhileStarting([a], Date.now() + 60_000, none), []);
+    assertEquals(savedWhileStarting([join(dir, "notes.txt")], since, none), []);
+  } finally {
+    await dropTempDir(dir);
+  }
+});

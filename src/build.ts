@@ -49,7 +49,10 @@ import {
   reportElectronDrift,
   resolveElectronVersion,
 } from "./build/electron-runtime.ts";
-import { ELECTRON_VERSION_FILE } from "./electron/electron-runtime-fetch.ts";
+import {
+  ELECTRON_VERSION_FILE,
+  pinnedRuntimeShas,
+} from "./electron/electron-runtime-fetch.ts";
 import { buildSelfContainedWindowsExe } from "./build/build-windows-exe.ts";
 import {
   BUILD_STAMP_FILE,
@@ -168,11 +171,44 @@ export async function build(cfg?: BuildConfig): Promise<void> {
     const version = await resolveElectronVersion(root);
     await reportElectronDrift(root, (m) => console.warn(`${HEY} ${m}`));
     await Deno.mkdir(dist, { recursive: true });
+    // `runtime: "shared"`: the launcher looks in the per-user shared store
+    // instead of beside itself (electron/shared-runtime.ts). Left out for
+    // the default, so a bundled build's record is byte-for-byte what it was.
+    const shared = cfg.electronRuntime === "online";
+    // An online app downloads its Electron on the user's machine: what that
+    // download must hash to is decided HERE, on the build machine, and
+    // carried in the binary — so no mirror, proxy or network can hand it a
+    // different Electron with a matching checksum list.
+    let sha256: Record<string, string> | undefined;
+    if (shared) {
+      try {
+        sha256 = await pinnedRuntimeShas(version);
+      } catch (e) {
+        console.error(
+          `${NO} build.electronRuntime "online" pins the checksum of the ` +
+            `Electron ${version} its users will download, and the list could ` +
+            `not be had: ${e instanceof Error ? e.message : e}. Connect once ` +
+            `(it is kept for later builds), or build "offline".`,
+        );
+        Deno.exit(1);
+      }
+    }
     await Deno.writeTextFile(
       join(dist, ELECTRON_VERSION_FILE),
-      JSON.stringify({ version }) + "\n",
+      JSON.stringify(
+        shared ? { version, runtime: "shared", sha256 } : { version },
+      ) + "\n",
     );
-    staged(`dist/${ELECTRON_VERSION_FILE}`, `electron ${version}`);
+    staged(
+      `dist/${ELECTRON_VERSION_FILE}`,
+      `electron ${version}${
+        shared
+          ? `, online — checksums pinned for ${
+            Object.keys(sha256!).length
+          } platforms`
+          : ""
+      }`,
+    );
   }
 
   // ── aio-client: standalone Electron connect-page AppImage ───────────────

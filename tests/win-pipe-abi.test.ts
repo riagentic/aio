@@ -9,6 +9,7 @@ import {
   assertStringIncludes,
 } from "@std/assert";
 import {
+  _askAgain,
   connectCodeFromFacts,
   entryOverlapped,
   ERROR_BROKEN_PIPE,
@@ -25,9 +26,11 @@ import {
   GENERIC_WRITE,
   INVALID_HANDLE_VALUE,
   isPeerGoneError,
+  ntStartFailed,
   OVERLAPPED_ENTRY_SIZE,
   overlappedBytes,
   overlappedEvent,
+  overlappedStatus,
   PIPE_ACCESS_DUPLEX,
   PIPE_DRAIN_TIMEOUT_MS,
   PIPE_SDDL,
@@ -274,4 +277,67 @@ Deno.test("win-pipe: a connect whose error code was lost is answered from the in
     "the recovery runs before the code is judged",
   );
   assert(listen.slice(asked).includes("connectCodeFromFacts("));
+});
+
+Deno.test("win-pipe: a finished operation's code is its OVERLAPPED's status, and a start's code is the NTSTATUS ntdll returns", async () => {
+  // `GetLastError()` is a second FFI call; its thread value can be gone by
+  // then (it read 0 after a FALSE once, on a real Windows 11). A finished
+  // operation's NTSTATUS is in its OVERLAPPED's `Internal` (documented: "the
+  // status code for the completed request"), written there by the kernel.
+  const o = overlappedBytes(0n);
+  new DataView(o.buffer).setBigUint64(0, 0xC000014Bn, true); // STATUS_PIPE_BROKEN
+  assertEquals(overlappedStatus(o), 0xC000014B);
+  const src = (await Deno.readTextFile(
+    new URL("../src/server/win-pipe.ts", import.meta.url),
+  )).replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, "");
+  const between = (from: string, to: string) =>
+    src.slice(src.indexOf(from), src.indexOf(to, src.indexOf(from)));
+  const finish = between(
+    "async function finishOverlapped(",
+    "export function ntStartFailed(",
+  );
+  assert(finish.length > 0);
+  assertEquals(finish.includes("GetLastError"), false, finish);
+  assertStringIncludes(finish, "RtlNtStatusToDosError(overlappedStatus(ovl))");
+  // A read or a write is started through ntdll: its status is the RESULT,
+  // never a thread-local code read by a second call — `Internal` cannot
+  // answer for a start (a synchronous failure writes nothing there).
+  for (
+    const [from, to, call] of [
+      ["async #read()", "#readFailed(code: number)", 'startIo("NtReadFile"'],
+      ["async #write(", "close(): void", 'startIo("NtWriteFile"'],
+    ]
+  ) {
+    const body = between(from!, to!);
+    assertStringIncludes(body, call!);
+    assertEquals(body.includes("GetLastError"), false, body);
+  }
+});
+
+// A read/write is started through NtReadFile/NtWriteFile, whose NTSTATUS is
+// RETURNED: kernel32's FALSE needed `GetLastError()`, a second FFI call whose
+// thread-local code was lost once on a real Windows — and a synchronous
+// failure (ERROR_NOT_ENOUGH_QUOTA on a big write) read as "pending" then
+// queued no packet, so the write waited for ever. Only an NT_ERROR status
+// (severity 3) is a start failure; success, a warning and STATUS_PENDING all
+// complete through the port.
+Deno.test("ntStartFailed: only an NT_ERROR status is a synchronous start failure", () => {
+  assertEquals(ntStartFailed(0x00000000), false); // STATUS_SUCCESS: packet queued
+  assertEquals(ntStartFailed(0x00000103), false); // STATUS_PENDING
+  assertEquals(ntStartFailed(0x80000005), false); // STATUS_BUFFER_OVERFLOW (warning)
+  assertEquals(ntStartFailed(0x40000000), false); // informational
+  assertEquals(ntStartFailed(0xC0000044), true); // STATUS_QUOTA_EXCEEDED
+  assertEquals(ntStartFailed(0xC000014B), true); // STATUS_PIPE_BROKEN
+  assertEquals(ntStartFailed(0xC000009A), true); // STATUS_INSUFFICIENT_RESOURCES
+  // Deno FFI hands an `i32` result back signed — the same verdict.
+  assertEquals(ntStartFailed(0xC0000044 | 0), true);
+});
+
+// A client's failed open read code 0 under a full Windows suite (its code
+// lost before `GetLastError()`) and threw "Win32 error 0" at a busy pipe.
+Deno.test("connectPipe: a busy pipe, or a lost code, is asked again; a real refusal is not", () => {
+  assertEquals(_askAgain(ERROR_PIPE_BUSY), true);
+  assertEquals(_askAgain(0), true);
+  assertEquals(_askAgain(ERROR_FILE_NOT_FOUND), false);
+  assertEquals(_askAgain(5), false); // ERROR_ACCESS_DENIED
 });

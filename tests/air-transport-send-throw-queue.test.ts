@@ -10,6 +10,7 @@
 //
 // Driven through the live module (not a source grep): a fake WebSocket whose
 // send throws, and the diagnostic bus as the observer.
+import { _teardownNow } from "../src/browser/protocol-subscription.ts";
 import { assert } from "@std/assert";
 
 class ThrowingWS {
@@ -83,6 +84,7 @@ Deno.test("air transport: a refused UNQUEUED write is reported, not swallowed", 
         `hears of them. Saw: ${JSON.stringify([...new Set(seen)])}`,
     );
   } finally {
+    _teardownNow(); // the handshake's 15 s bound is the client's to clear
     unsub();
     if (prevWS === undefined) delete g.WebSocket;
     else g.WebSocket = prevWS;
@@ -136,6 +138,7 @@ Deno.test("air transport: a throwing socket queues under the SAME cap and diagno
         }`,
     );
   } finally {
+    _teardownNow(); // the handshake's 15 s bound is the client's to clear
     unsub();
     if (prevWS === undefined) delete g.WebSocket;
     else g.WebSocket = prevWS;

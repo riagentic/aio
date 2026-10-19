@@ -27,7 +27,11 @@ import {
   parseShipManifest,
   readTrust,
 } from "../src/server/updates-check.ts";
-import { MAX_FAILED_SWAPS, startUpdates } from "../src/server/updates-boot.ts";
+import {
+  beginUpdates,
+  MAX_FAILED_SWAPS,
+  startUpdates,
+} from "../src/server/updates-boot.ts";
 import type { UpdatesSlot } from "../src/state/updates-cell.ts";
 import {
   _patchDeps,
@@ -890,7 +894,11 @@ function restart(r: Rig): void {
   const rec = JSON.parse(Deno.readTextFileSync(ownedPath(r.dataDir)));
   for (const e of rec.made) e.boot = "an earlier run";
   Deno.writeTextFileSync(ownedPath(r.dataDir), JSON.stringify(rec));
-  startUpdates({
+  const slot = {
+    runtime: null,
+    cell: { ready() {} },
+  } as unknown as UpdatesSlot;
+  const started = startUpdates({
     updates: {
       source: `file://${r.releases}`,
       check: false,
@@ -903,10 +911,13 @@ function restart(r: Rig): void {
     exposed: false,
     log: { info: say, warn: say, error: say, debug() {} } as unknown as Log,
     argv: [],
-    slot: { runtime: null, cell: { ready() {} } } as unknown as UpdatesSlot,
+    slot,
     artifact: r.artifact,
     installDir: null,
-  }).stop();
+  });
+  // …up to the cells being bound: what is dismissed at a start is said there.
+  beginUpdates(slot);
+  started.stop();
 }
 
 Deno.test({
@@ -947,7 +958,14 @@ Deno.test({
         1,
         r.said.join("\n"),
       );
+      // …and that start gives the release up, as a directory's record does.
       restart(r);
+      assert(
+        r.said.some((l) =>
+          l.startsWith("not installing 2.0.0 again") && l.includes("Dismissed")
+        ),
+        r.said.join("\n"),
+      );
       const deadline = Date.now() + 5000;
       while (beside(r).length > 1) {
         assert(Date.now() < deadline, `never removed: ${beside(r)}`);
@@ -955,7 +973,8 @@ Deno.test({
       }
       assertEquals(beside(r), ["app"]);
 
-      // …and a try after that downloads the release, and installs it.
+      // …and a try after that (`undismiss()`) downloads the release, and
+      // installs it.
       const last = runtimeFor(r);
       assertEquals((await last.check({ dismissed: null })).kind, "offer");
       await last.apply();

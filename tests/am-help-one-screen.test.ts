@@ -76,6 +76,14 @@ Deno.test("am help lists every everyday verb, exactly once", () => {
   );
 });
 
+// A field report: an agent searching `am help` for a screenshot found 0 matches —
+// `shot` was only under `am agent --task=windows`. Seeing the UI is part of
+// the loop, beside `surface`.
+Deno.test("am help names the screenshot verb", () => {
+  assert(rowVerbs(bare()).includes("shot"), bare());
+  assert(/screenshot/i.test(bare()), "searchable by the word people type");
+});
+
 Deno.test("every everyday verb is a real command with a help entry", async () => {
   const commands = await registeredCommands();
   // An empty EVERYDAY would make the loop below prove nothing while passing —

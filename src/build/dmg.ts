@@ -72,11 +72,15 @@ export function stageToDmgLines(opts: {
   volumeName: string;
   outPath: string;
   sign: boolean;
+  /** A shared-runtime bundle: it carries no Electron to sign. */
+  shared?: boolean;
   /** Also pack the SIGNED `.app` as the update artifact (`electron-app`). */
   updateOut?: string;
 }): string[] {
   return [
-    ...(opts.sign ? [codesignScript(opts.app, opts.binaryName)] : []),
+    ...(opts.sign
+      ? [codesignScript(opts.app, opts.binaryName, !!opts.shared)]
+      : []),
     ...(opts.sign && opts.updateOut
       ? [updateTarballLine(opts.stage, opts.app, opts.updateOut)]
       : []),
@@ -120,6 +124,12 @@ export function updateTarballLine(
 export function codesignScript(
   appPath: string,
   binaryName = "counter",
+  /** A shared-runtime bundle (`build.electronRuntime: "online"`) carries no
+   *  Electron: its window is signed on the user's Mac when it is made
+   *  (electron/shared-runtime.ts). Said by the build, never guessed from a
+   *  missing folder — a bundled app whose runtime went missing must fail
+   *  here, not ship unsigned. */
+  shared = false,
 ): string {
   // Quote ONCE, at each point of use. Pre-quoting `appPath` and then embedding
   // it in a path that is quoted again produces nested `''\''…'\''` that bash
@@ -137,15 +147,17 @@ export function codesignScript(
     // replaces Electron's upstream signature, which the identity/plist edits
     // already invalidated.
     `sign() { codesign --force -s - "$@" >/dev/null; }`,
-    // 1. helper app binaries, the crashpad handler, and the dylibs
-    `for h in ${e}/Frameworks/*.app; do for b in "$h/Contents/MacOS/"*; do sign "$b"; done; done`,
-    `sign ${fwVers}/Helpers/chrome_crashpad_handler`,
-    `for d in ${fwVers}/Libraries/*.dylib; do sign "$d"; done`,
-    // 2. each framework, then 3. each helper app
-    `for fw in ${e}/Frameworks/*.framework; do sign "$fw"; done`,
-    `for h in ${e}/Frameworks/*.app; do sign "$h"; done`,
-    // 4. the nested Electron.app itself
-    `sign ${e}/..`,
+    ...(shared ? [] : [
+      // 1. helper app binaries, the crashpad handler, and the dylibs
+      `for h in ${e}/Frameworks/*.app; do for b in "$h/Contents/MacOS/"*; do sign "$b"; done; done`,
+      `sign ${fwVers}/Helpers/chrome_crashpad_handler`,
+      `for d in ${fwVers}/Libraries/*.dylib; do sign "$d"; done`,
+      // 2. each framework, then 3. each helper app
+      `for fw in ${e}/Frameworks/*.framework; do sign "$fw"; done`,
+      `for h in ${e}/Frameworks/*.app; do sign "$h"; done`,
+      // 4. the nested Electron.app itself
+      `sign ${e}/..`,
+    ]),
     // 5. the Deno binary — by NAME, not `MacOS/*`: that directory also holds
     //    the `electron/` runtime, and passing a directory to codesign fails
     //    with "bundle format unrecognized".
@@ -175,6 +187,8 @@ export function remoteDmgScript(opts: {
   outFile: string;
   /** Seal the app before imaging it — required for it to RUN. */
   sign: boolean;
+  /** A shared-runtime bundle: it carries no Electron to sign. */
+  shared?: boolean;
   /** File name (in `workDir`) of the signed-bundle update artifact. */
   updateFile?: string;
 }): string {
@@ -195,6 +209,7 @@ export function remoteDmgScript(opts: {
       volumeName: opts.volumeName,
       outPath: `${opts.workDir}/${opts.outFile}`,
       sign: opts.sign,
+      shared: opts.shared,
       updateOut: opts.updateFile && `${opts.workDir}/${opts.updateFile}`,
     }),
   ].join("\n");
@@ -210,6 +225,8 @@ export function localDmgScript(opts: {
   volumeName: string;
   outPath: string;
   sign: boolean;
+  /** A shared-runtime bundle: it carries no Electron to sign. */
+  shared?: boolean;
   updateOut?: string;
 }): string {
   const stage = `${opts.workDir}/stage`;
@@ -229,6 +246,7 @@ export function localDmgScript(opts: {
       volumeName: opts.volumeName,
       outPath: opts.outPath,
       sign: opts.sign,
+      shared: opts.shared,
       updateOut: opts.updateOut,
     }),
   ].join("\n");
@@ -341,6 +359,8 @@ export async function finalizeMacDmg(opts: {
   /** Also write the signed bundle here as `<…>.app.tar.gz` — the update
    *  artifact (`electron-app`). Only a SIGNED bundle is packed. */
   updateOutPath?: string;
+  /** A shared-runtime bundle: no nested Electron to sign. */
+  shared?: boolean;
 }): Promise<string> {
   const os = opts.os ?? Deno.build.os;
   const sign = opts.sign ?? true;
@@ -358,6 +378,7 @@ export async function finalizeMacDmg(opts: {
           volumeName: opts.volumeName,
           outPath: opts.outPath,
           sign,
+          shared: opts.shared,
           updateOut: opts.updateOutPath,
         }),
       ]);
@@ -429,6 +450,7 @@ export async function finalizeMacDmg(opts: {
       volumeName: opts.volumeName,
       outFile: remoteDmg,
       sign,
+      shared: opts.shared,
       updateFile: opts.updateOutPath && remoteUpdate,
     });
     const made = await seams.ssh(script);

@@ -941,6 +941,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     // above. The shell carries it as well as the `cfg` frame because a page
     // can boot sync before the frame lands.
     appId: config.appId,
+    appVersion: config.appVersion,
     width: config.width,
     height: config.height,
     renderBudget: config.renderBudget,
@@ -2372,10 +2373,12 @@ export function _shareRoots(absBaseDir: string) {
  *  relative to that file, as the build resolves it (in a compiled binary:
  *  the embedded copy); a prefix `aio.run` also names is `aio.run`'s, as
  *  before. A mount the build refuses (not a path; outside the project) is
- *  not served either, and says so. @internal */
+ *  not served either, and says so — through `warn`, so a boot that reads the
+ *  mounts twice says it once. @internal */
 export function _servedAssets(
   runAssets: Record<string, string> | undefined,
   absBaseDir: string,
+  warn: (msg: string) => void = (m) => log.warn("server", m),
 ): Record<string, string> | undefined {
   const dj = locateDenoJsonAbove(toFileUrl(join(resolve(absBaseDir), "/")));
   const declared = (dj?.config as { assets?: unknown } | undefined)?.assets;
@@ -2391,16 +2394,18 @@ export function _servedAssets(
     if (typeof dir === "string" && mountLeavesProject(root, dir.trim())) {
       // Dev == build: the build refuses this mount, so the server does not
       // serve it (as before 1.0.20, when no deno.json mount was served).
-      log.warn(
-        "server",
+      warn(
         `${mountOutsideMessage(prefix, dir)} Nothing is served from it, ` +
           `and the build refuses it.`,
       );
     } else if (typeof dir === "string" && dir.trim()) {
-      out[prefix] = resolve(root, dir.trim());
+      // `"media"` is /media, as the web build and the APK pack it.
+      out[prefix.startsWith("/") ? prefix : `/${prefix}`] = resolve(
+        root,
+        dir.trim(),
+      );
     } else {
-      log.warn(
-        "server",
+      warn(
         `deno.json assets["${prefix}"] is ${JSON.stringify(dir)} — not a ` +
           `directory path, so nothing is served there (and the build ` +
           `refuses it).`,

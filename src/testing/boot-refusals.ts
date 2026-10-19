@@ -23,7 +23,10 @@ import { composeCells } from "../state/cell-compose.ts";
 import { refuseUnsafeComposition } from "../server/aio-composition.ts";
 import { syncListensMismatches } from "../server/aio-cells-bridge.ts";
 import { log } from "../diagnostics/logger-api.ts";
-import { validateWorkerCells } from "../server/cell-worker-pool.ts";
+import {
+  validateWorkerCells,
+  workerListenMismatches,
+} from "../server/cell-worker-pool.ts";
 import {
   _crashHostedWorker,
   _workerCrash,
@@ -86,6 +89,7 @@ export function _refuseUnsafeCells(
   // …and the boot WARNINGS decided on the same composition: the same line
   // `aio.run` says (aio-cells-bridge.ts `buildLegacyConfig`).
   for (const line of syncListensMismatches(composed.cells)) log.warn(line);
+  for (const line of workerListenMismatches(composed.cells)) log.warn(line);
 }
 
 /** The worker-cell half of the boot gate, for every harness — including
@@ -399,6 +403,16 @@ export function _shedLeakedScopes(): void {
   _mountAls.enterWith(undefined);
   _workerScope.enterWith(undefined);
 }
+// The harness entry's own shed holds only for its DIRECT caller's frame: a
+// helper that `await`s anything before calling `bootCells` sheds its own
+// continuation, and the test body stayed fenced to a retired boot. A
+// `beforeEach` hook runs in the frame that then starts the body (measured,
+// Deno 2.9.7), so every test body starts outside every scope, however it
+// boots. A file that loads the harness only after its tests start keeps the
+// per-entry shed.
+(Deno.test as { beforeEach?: (fn: () => void) => void }).beforeEach?.(
+  _shedLeakedScopes,
+);
 
 /** Refuse, while a `worker: true` cell's method runs in process, what a real
  *  worker refuses: reading another cell's state, and calling any cell's

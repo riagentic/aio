@@ -205,7 +205,13 @@ export async function buildIos(cfg: BuildConfig): Promise<void> {
   // The connect page — the same one the Android client opens.
   const www = join(dir, "App", "www");
   await Deno.mkdir(www, { recursive: true });
-  await _writeConnectPage(www, plistText(appName), cfg.bakedServer, "ios");
+  await _writeConnectPage(
+    www,
+    plistText(appName),
+    cfg.bakedServer,
+    "ios",
+    cfg.strictPin,
+  );
 
   // Icon: the app's own `icon.png` when it has one (Xcode validates the
   // 1024×1024 requirement at archive time and says so), else the generated

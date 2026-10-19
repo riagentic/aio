@@ -174,10 +174,22 @@ export type SilenceWatch = {
 };
 
 let _ponged = false; // this connection has answered a ping
+/** SOME connection of this page has answered a ping: the server pongs, so a
+ *  new connection that dies before its own first pong (a flapping network —
+ *  open, then gone within the first heartbeat) is judged too. Per connection
+ *  only, that socket was never judged: measured in headless Chromium, it sat
+ *  "connected" through a 70 s black hole, every call timing out, no
+ *  reconnect. Cleared with the page's vitals, not with the connection. */
+let _serverPongs = false;
 let _silent = 0; // pings written since the last inbound frame
 let _reached = false; // HTTP answered while the socket stayed silent
 let _silence = 0; // bumped whenever the silence ends — a late answer is void
 let _asked = -1; // the silence HTTP was asked about (once each)
+/** This connection's beat, for `visibilitychange` to run at once: a hidden
+ *  page's timers are throttled, so its pings say `h: 1` and the server stops
+ *  grading it as frozen until a visible one. */
+let _beatNow: (() => void) | null = null;
+let _onVis = false;
 
 function _heard(): void {
   _silent = 0;
@@ -192,12 +204,12 @@ export function _noteClientFrame(): void {
 
 /** A `vitals-pong` arrived: this connection answers pings. */
 export function _noteClientPong(): void {
-  _ponged = true;
+  _ponged = _serverPongs = true;
 }
 
 /** Before a beat's ping: is the socket dead? Says why, or null. */
 function _judgeSilence(watch: SilenceWatch): string | null {
-  if (!_ponged) return null;
+  if (!_ponged && !_serverPongs) return null;
   if (_silent >= SILENT_BEATS_DEAD) {
     return `no frame for ${SILENT_BEATS_DEAD} heartbeats`;
   }
@@ -243,8 +255,13 @@ export function _startClientVitals(
     }));
   }
   if (_vitalsPingTimer) return;
+  const doc = (globalThis as { document?: Document }).document;
+  if (doc && !_onVis) {
+    _onVis = true;
+    doc.addEventListener("visibilitychange", () => _beatNow?.());
+  }
   _setVitalsPingTimer(
-    setInterval(_beat(sendRaw, isOpen, watch), _heartbeatMs),
+    setInterval(_beatNow = _beat(sendRaw, isOpen, watch), _heartbeatMs),
   );
 }
 
@@ -265,6 +282,9 @@ function _beat(
     const left = sendRaw(enc("vitals-ping", {
       t1: ping.t1,
       ms: Math.round(meter.getStaleness()),
+      ...((globalThis as { document?: Document }).document?.hidden
+        ? { h: 1 }
+        : {}),
     }));
     if (left) _silent++;
   };
@@ -280,6 +300,7 @@ export function _noteClientPatch(): void {
 export function _pauseClientVitals(): void {
   _ponged = false;
   _heard();
+  _beatNow = null;
   if (_vitalsPingTimer) {
     clearInterval(_vitalsPingTimer);
     _setVitalsPingTimer(null);
@@ -289,6 +310,7 @@ export function _pauseClientVitals(): void {
 /** Page teardown: everything goes. */
 export function _stopClientVitals(): void {
   _pauseClientVitals();
+  _serverPongs = false;
   _vitalsRenderMeter?.destroy();
   _setVitalsRenderMeter(null);
   _vitalsTransportProbe?.destroy();

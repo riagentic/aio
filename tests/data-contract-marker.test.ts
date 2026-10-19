@@ -84,9 +84,12 @@ Deno.test("data contract marker: a capture of stderr parses as the contract; a c
   assertStringIncludes(said, "2> contract.json");
 });
 
-/** An executable that answers the probe with these shell lines. */
+/** An executable that answers the probe with these shell lines — a new file
+ *  each call: Windows refuses to rewrite one that just ran while a section of
+ *  it is still mapped (os error 1224, measured). */
+let answers = 0;
 async function answering(dir: string, lines: string): Promise<string> {
-  const bin = join(dir, "app.bin");
+  const bin = join(dir, `app-${answers++}.bin`);
   await writeProgram(bin, `#!/bin/sh\n${lines}\nexit 0\n`);
   return bin;
 }

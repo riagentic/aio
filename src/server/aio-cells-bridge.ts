@@ -66,7 +66,10 @@ import {
 import { setDiagnosticsOptOut } from "../diagnostics/diagnostics-optout.ts";
 import { _serverFnsAppLive } from "./server-fns.ts";
 import { closedWorkerCall } from "./cell-worker.ts";
-import { _hostsWorkerThreads } from "./cell-worker-pool.ts";
+import {
+  _hostsWorkerThreads,
+  workerListenMismatches,
+} from "./cell-worker-pool.ts";
 
 /** Whose app is running this code — for the logger, the diagnostic bus and
  *  the `degraded()` registries.
@@ -290,6 +293,7 @@ export function buildLegacyConfig(
   // A `listensTo` pair across the sync line — supported, said once per boot.
   inAppScope(scope, () => {
     for (const line of syncListensMismatches(composed.cells)) log.warn(line);
+    for (const line of workerListenMismatches(composed.cells)) log.warn(line);
   });
   // `cell({ diagnostics: false })` — this cell's actions stay out of the
   // on-disk dev diagnostics. Registered HERE, beside the other per-cell facts

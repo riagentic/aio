@@ -21,11 +21,51 @@ and every guide from alpha77 on is a `## Retire` section and a list of what got
 better — never a migration you have to perform. If a later upgrade breaks your
 app, that is a bug in aio, not a step you missed.
 
+## Tests that can go red on an upgrade (1.0.9 → 1.0.20)
+
+The app keeps running; the harness got stricter (tests are the strictest
+environment by design). These shapes pass on 1.0.9 and fail later — grep for
+them before the first run:
+
+- **A call made after its boot was disposed is refused** (1.0.11). Typical
+  source: `setTimeout(() => cell.method(), 0)` in `onInit` — the timer fires
+  after the test's boot retired, and the late commit is refused naming the
+  action and the boot site. Replace the timer with
+  `onInit(app) { app.dispatch({ type: "cell:method", payload: { args: [] } }) }`
+  or `aio.run({ onStart })` — see [lifecycle](../state/lifecycle.md).
+- **An `onInit` that throws fails the `bootCells`/`testUI` test** (1.0.11) — it
+  used to be only logged.
+- **`bootCells` inside an async helper** (fence since 1.0.11, fixed after
+  1.0.20-beta). On 1.0.11–1.0.20-beta a boot made after an `await` in a `rig()`
+  helper left later test bodies fenced to the first, retired boot: test one
+  passed, every later test was refused on its first call, naming the helper's
+  line. Fix there: call `bootCells` in the test body. Later versions shed the
+  stale scope at every test body's start, so the helper shape works.
+- **`testUI` sends component/handler/test-body calls through the production wire
+  encode** (1.0.19) and fails on an argument JSON cannot carry intact (`Date`,
+  `Map`, `Set`, a class instance), by path. Pass ISO strings / plain data.
+- **Short calls** — fewer arguments than the method declares — warn once per
+  method and count; with the 1.0.20 opt-in `wire: { refuseShortCalls: true }`, a
+  wire frame with no argument list is refused before it runs.
+- **`ui.present(name)` is `true` for a `hidden={…}` element whose CSS gives it a
+  `display`** (`.mic { display: grid }`) — author CSS beats the UA
+  `[hidden] { display: none }`, so a real browser SHOWS it too. A `hidden`
+  element with no such rule is not present (since alpha77). Fix the app: render
+  nothing (`{ready && <Button …/>}`) or add `[hidden] { display: none }`.
+
 ## restructure (alpha27+)
 
 - **[The aio restructure (alpha27+)](restructure.md)** — every restructure
   breaking change with before → after recipes (methods-only cells, instances,
   SQLite-only persistence, `aio/extras`, wire catalog)
+- [1.0.20-beta → **1.0.21-beta**](from-1.0.20-beta-to-1.0.21-beta.md) — nothing
+  is removed or renamed and no default moves; nothing to change by hand.
+  `build.electronRuntime: "online"` (what `am create` writes) ships a desktop
+  package without Electron, downloaded once per machine and pinned by SHA-256;
+  the window's profile moves once into `~/.<appId>/electron/`; a device clock
+  far off follows the server's; `runCommand`, `appVersion()` and
+  `build.android.keystore`/`keyAlias`/`aab` are new; an in-process refused write
+  rejects `ACTION_REFUSED`
 - [1.0.19-beta → **1.0.20-beta**](from-1.0.19-beta-to-1.0.20-beta.md) — nothing
   is removed or renamed and no default moves; nothing to change by hand. The
   safer values are opt-ins (`electron.strictPin`, `electron.ignoreDebugEnv`,

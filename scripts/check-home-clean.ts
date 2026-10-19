@@ -113,6 +113,42 @@ export function storeChanges(
   return out.sort();
 }
 
+/** The drive roots a Windows run can leak into: a `/`-rooted literal there
+ *  resolves against the cwd's drive (`/tmp/x` is `C:\tmp\x`), and a user may
+ *  create folders in `C:\`. MEASURED 2026-10-12: tests naming `/tmp/…` and
+ *  `/nonexistent/path` left `C:\tmp` and `C:\nonexistent` on the VM. None
+ *  elsewhere: a unix `/` is not a user's to write. Pure. */
+export function driveRoots(env: Env, cwd: string, os: string): string[] {
+  if (os !== "windows") return [];
+  const drive = (p: string) => p.match(/^[A-Za-z]:/)?.[0].toUpperCase();
+  const roots = [drive(env.SystemDrive ?? ""), drive(cwd)]
+    .filter((d): d is string => !!d)
+    .map((d) => `${d}\\`);
+  return [...new Set(roots)];
+}
+
+/** Every `<dir>/<name>` in `dirs` (a missing dir has none). */
+export function rootEntries(dirs: string[]): Set<string> {
+  const out = new Set<string>();
+  for (const dir of dirs) {
+    try {
+      for (const e of Deno.readDirSync(dir)) out.add(join(dir, e.name));
+    } catch (e) {
+      if (!(e instanceof Deno.errors.NotFound)) throw e;
+    }
+  }
+  return out;
+}
+
+/** What `after` has that `before` did not, sorted. Only additions: the
+ *  system's own folders in a drive root change under any run. Pure. */
+export function rootAdditions(
+  before: Set<string>,
+  after: Set<string>,
+): string[] {
+  return [...after].filter((p) => !before.has(p)).sort();
+}
+
 /** Is `gitdir` inside a directory only a TEST makes? Pure. */
 export function isTestGitdir(gitdir: string, env: Env): boolean {
   // Compared `/`-spelled: on Windows the home is `C:\\Users\\x` and git writes

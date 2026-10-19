@@ -177,8 +177,9 @@ Deno.test("L3: the IPC send path guards its write like the WS path does", async 
   );
   // The dispatch-time send: both branches must enqueue rather than escape.
   const branch = src.slice(
-    src.indexOf("} else if (_ipc && _ipcOpen) {"),
+    src.indexOf("} else if (!_held && _ipc && _ipcOpen) {"),
   ).slice(0, 900);
+  assert(branch.length > 0, "the IPC send branch was not found");
   assert(
     branch.includes("try {") && branch.includes("_enqueue(tagged)"),
     `the IPC branch must queue on a refused write, like WS:\n${branch}`,

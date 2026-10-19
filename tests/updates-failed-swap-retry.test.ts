@@ -331,6 +331,92 @@ Deno.test("failed swap (auto): not installed again in the boot that follows the 
   }
 });
 
+// A single file is swapped in-process: a swap that cannot be made leaves the
+// old build running and no failed record — only the count. Only a directory's
+// record ever dismissed, so a single-file release was tried (and downloaded
+// again at every start) for ever.
+Deno.test("failed swap (single file): the count reaching the bound dismisses the release at the next start", async () => {
+  const data = await tempDir("aio-swap-retry-");
+  try {
+    writeTrust(data, { failedSwaps: { to: "2.0.0", count: 2 } });
+    const under = boot(data, { here: null });
+    under.stop();
+    assertEquals(under.slot.rolledBack, undefined, "dismissed under the bound");
+    assertEquals(readTrust(data).failedSwaps, { to: "2.0.0", count: 2 });
+
+    writeTrust(data, { failedSwaps: { to: "2.0.0", count: MAX_FAILED_SWAPS } });
+    const b = boot(data, { here: null });
+    b.stop();
+    assertEquals(b.slot.rolledBack, "2.0.0");
+    assertStringIncludes(
+      b.warns.find((m) => m.includes("Dismissed")) ?? b.warns.join("\n"),
+      `not installing 2.0.0 again — it could not be put in place on this ` +
+        `machine 3 times in a row. Dismissed.`,
+    );
+    await until(
+      () => readTrust(data).failedSwaps === undefined,
+      "the count cleared with the dismissal",
+    );
+  } finally {
+    await dropTempDir(data);
+  }
+});
+
+Deno.test("failed swap: a given-up release since installed by hand (or passed) is not 'not installing' again — its count goes", async () => {
+  for (const to of ["1.0.0", "0.9.0"]) {
+    const data = await tempDir("aio-swap-passed-");
+    try {
+      writeTrust(data, { failedSwaps: { to, count: MAX_FAILED_SWAPS } });
+      const b = boot(data, { here: null }); // runs 1.0.0
+      b.stop();
+      assertEquals(b.slot.rolledBack, undefined, to);
+      assert(
+        !b.warns.some((m) => m.includes("not installing")),
+        b.warns.join("\n"),
+      );
+      assertEquals(readTrust(data).failedSwaps, undefined, to);
+    } finally {
+      await dropTempDir(data);
+    }
+  }
+});
+
+Deno.test("failed swap (single file, auto): the failure that reaches the bound dismisses it at once — no retry at every check", async () => {
+  const data = await tempDir("aio-swap-retry-");
+  try {
+    writeTrust(data, { failedSwaps: { to: "2.0.0", count: 2 } });
+    const b = boot(data, { here: null, auto: true, offer: "2.0.0" });
+    let dismissed = 0;
+    const cell = b.slot.cell as unknown as Record<string, unknown>;
+    let applied = 0;
+    cell.apply = () => {
+      applied++;
+      writeTrust(data, { failedSwaps: { to: "2.0.0", count: 2 + applied } });
+      cell.status = "error";
+      cell.error = "disk says no";
+      return Promise.resolve();
+    };
+    cell.dismiss = () => Promise.resolve(void dismissed++);
+    try {
+      await until(() => dismissed === 1, "the release dismissed");
+      assertEquals(applied, 1);
+      assertStringIncludes(
+        b.warns.find((m) => m.includes("Dismissed")) ?? b.warns.join("\n"),
+        "not installing 2.0.0 again — it could not be put in place on this " +
+          "machine 3 times in a row. Dismissed.",
+      );
+      await until(
+        () => readTrust(data).failedSwaps === undefined,
+        "the count cleared with the dismissal",
+      );
+    } finally {
+      b.stop();
+    }
+  } finally {
+    await dropTempDir(data);
+  }
+});
+
 Deno.test("failed swap: a confirmed update ends the count", async () => {
   const data = await tempDir("aio-swap-retry-");
   try {

@@ -722,6 +722,18 @@ export async function cmdErrors(
   flags: GlobalFlags,
 ): Promise<void> {
   const mode = detectMode(flags);
+  // `--since=` as `am logs` reads it (network §8: an error a later reload
+  // fixed stayed in the list for good). Refused when not a time.
+  const sinceRaw = _args.find((a) => a.startsWith("--since="))?.slice(8);
+  const sinceMs = sinceRaw === undefined ? undefined : parseSince(sinceRaw);
+  if (sinceMs === null) {
+    outError(
+      `--since=${sinceRaw} is not a time — use a duration (15m, 2h, 30s, ` +
+        `1d) or a timestamp (2026-09-08T10:00)`,
+      mode,
+    );
+    Deno.exit(1);
+  }
   const appId = resolveAmAppId(flags.app);
   const port = resolvePort(flags.port, appId, {
     explicit: flags.app !== undefined,
@@ -760,7 +772,11 @@ export async function cmdErrors(
   // app from loading at all — so it comes first when present, but a command
   // called `errors` that stayed silent about error.log was answering a
   // narrower question than it was asked.
-  const runtime = await tailErrorLog(appId, flags.lines ?? 20);
+  const runtime = await tailErrorLog(
+    appId,
+    flags.lines ?? 20,
+    sinceMs ?? undefined,
+  );
 
   if (mode !== "pretty") {
     // `errors` keeps meaning what it always meant — the BUILD errors — because
@@ -790,11 +806,17 @@ export async function cmdErrors(
 /** The tail of the app's own `error.log`. Absent file = no errors yet, which
  *  is different from "the app has no log directory" only in ways this command
  *  cannot act on — either way there is nothing to show. */
-async function tailErrorLog(appId: string, lines: number): Promise<string[]> {
+async function tailErrorLog(
+  appId: string,
+  lines: number,
+  sinceMs?: number,
+): Promise<string[]> {
   try {
     const path = join(appDirs(appId).logs, "error.log");
-    const text = await Deno.readTextFile(path);
-    return text.split("\n").filter((l) => l.trim() !== "").slice(-lines);
+    const all = (await Deno.readTextFile(path)).split("\n");
+    const kept = sinceMs === undefined ? all : groupLogEvents(all)
+      .filter((e) => logEventMatches(e, { sinceMs })).flat();
+    return kept.filter((l) => l.trim() !== "").slice(-lines);
   } catch {
     return [];
   }

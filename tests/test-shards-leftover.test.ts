@@ -888,7 +888,17 @@ Deno.test({
     const env = { HOME: home, USERPROFILE: home, XDG_CONFIG_HOME: "" };
     try {
       const r = await runShards(root, ["tests/zz-profile.test.ts"], env);
-      assertStringIncludes(r.out, "✓ shard 0"); // the suite itself was green
+      // The suite itself was green. When it is not, say WHY: the shard's own
+      // log and the runner's stderr — r.out alone is one summary line (red
+      // once under the mutation gate's load, with nothing else to go on).
+      assertStringIncludes(
+        r.out,
+        "✓ shard 0",
+        `${r.out}\n${r.err}\n${await Deno.readTextFile(
+          join(root, ".aio", "test-shards", "0.log"),
+        )
+          .catch((e) => `(no shard log: ${e})`)}`,
+      );
       assertEquals(r.code, 1, r.out + r.err);
       assert(!r.out.includes("✓ all"), r.out);
       assertStringIncludes(r.err, "left 1 test artefact(s) in the REAL home");

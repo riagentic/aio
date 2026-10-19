@@ -17,7 +17,7 @@ import { fromFileUrl } from "@std/path";
 import { spec } from "./module-spec-helper.ts";
 // THE browser lookup (every OS), never a copy of its path list.
 import { browserOsFlags, findBrowser } from "./e2e-harness.ts";
-import { browserHomeEnv } from "../src/testing/chromium.ts";
+import { browserHomeEnv, dropBrowserProfile } from "../src/testing/chromium.ts";
 const _childCovDir = childCoverageDir();
 const ROOT = fromFileUrl(new URL("..", import.meta.url));
 
@@ -191,7 +191,7 @@ await aio.run({ persist: false, schedules: [{ id: "tick", every: 600, action: da
       } catch { /* exited */ }
       if (browser) await browser.status;
       await stopChild(proc, { quiet: true });
-      await Deno.remove(profile, { recursive: true }).catch(() => {});
+      await dropBrowserProfile(profile);
       await Deno.remove(dir, { recursive: true }).catch(() => {});
     }
   },

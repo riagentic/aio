@@ -42,6 +42,8 @@ export type ShellConfig = {
    *  not asked. This shell is templated at launch, by the process that holds
    *  the answer, so it can simply carry it. */
   wire?: { omitTrailingUndefined?: boolean };
+  /** The app's resolved version — `appVersion()` in `aio/air`. */
+  appVersion?: string;
   showStatus?: boolean;
   width?: number;
   height?: number;
@@ -127,6 +129,11 @@ export type AioMeta = {
    *  this window uses. `electronProfileName`; absent ⇒ the title's slug, which
    *  is what a default-home app has always had. */
   profileName?: string;
+  /** WHERE that profile lives: `~/.<appId>/electron/` — inside the app's own
+   *  home, beside `data/` and `logs/`, so it goes with the app (`am remove
+   *  --data`, a `--profile` home of its own) and no other app can share it.
+   *  Absent ⇒ Electron's per-OS default for `profileName` (`~/.config/…`). */
+  profileDir?: string;
   /** The `<webview>` guest preloads this run may load by name — deno.json
    *  `build.guestPreloads`, resolved by the server (`resolveGuestPreloads`):
    *  the directory they are in and the declared paths inside it. */
@@ -233,6 +240,14 @@ export function electronProfileName(
 }
 
 // ── Reusable CJS template fragments (embedded in generated Electron main.cjs) ──
+
+/** Point Electron's profile (`userData`) at the app's home — right after
+ *  `app.name`, before anything reads `getPath('userData')` (the preload, the
+ *  window state) and before `ready`, which is when Chromium opens it. Empty
+ *  when the window has no home to keep it in. */
+export function tmplProfileDir(dir: string | undefined): string {
+  return dir ? `app.setPath('userData', ${JSON.stringify(dir)});\n` : "";
+}
 
 /** Main-process crash guard. Without a listener, ANY uncaught exception in the
  *  Electron main process pops the native "A JavaScript error occurred in the
@@ -2260,6 +2275,7 @@ export function udsProdHTML(
     csp: shell?.csp,
     nonce: shell?.nonce,
     wire: shell?.wire,
+    appVersion: shell?.appVersion,
   });
 }
 

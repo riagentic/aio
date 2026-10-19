@@ -26,6 +26,7 @@ import {
   tmplPermissionGuard,
   tmplPreloadCleanup,
   tmplPreloadWrite,
+  tmplProfileDir,
   tmplRendererDiagnostics,
   tmplSocketFetch,
   tmplTray,
@@ -99,7 +100,7 @@ const fs = require('fs');
 app.commandLine.appendSwitch('disable-features', 'CloudPrintEnable');
 ${tmplAppMenu(opts.meta?.title ?? opts.title)}
 app.name = ${JSON.stringify(slug)};
-${tmplCrashGuard()}
+${tmplProfileDir(opts.meta?.profileDir)}${tmplCrashGuard()}
 ${tmplPermissionGuard(opts.meta?.permissions)}
 ${tmplWebGuard(opts.meta)}
 ${tmplIpcGuard()}

@@ -26,7 +26,7 @@ import { freePort } from "../src/testing/server-test.ts";
 import { fromFileUrl } from "@std/path";
 // THE browser lookup (every OS), never a copy of its path list.
 import { browserOsFlags, findBrowser } from "./e2e-harness.ts";
-import { browserHomeEnv } from "../src/testing/chromium.ts";
+import { browserHomeEnv, dropBrowserProfile } from "../src/testing/chromium.ts";
 const _childCovDir = childCoverageDir();
 
 const ROOT = fromFileUrl(new URL("..", import.meta.url));
@@ -182,7 +182,7 @@ Deno.test({
     } finally {
       if (browser) await stopChild(browser, { quiet: true });
       await stopChild(app, { quiet: true });
-      await dropTempDir(profile);
+      await dropBrowserProfile(profile);
       await dropTempDir(home);
     }
   },

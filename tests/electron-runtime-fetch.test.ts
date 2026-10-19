@@ -1045,7 +1045,10 @@ Deno.test({
     const tmp = await tempDir("electron-lock-");
     const lock = join(tmp, "rt.lock");
     const was = { ..._lockTiming };
-    Object.assign(_lockTiming, { heartbeatMs: 50, staleMs: 300 });
+    // The window (3 s) outlasts staleMs, so only the heartbeat keeps the
+    // waiter off; staleMs leaves room for a loaded suite's loop stalls (the
+    // "holder" beats on this test's own loop — 300 ms flaked under load).
+    Object.assign(_lockTiming, { heartbeatMs: 50, staleMs: 1_200 });
     const ns = ((ownPidNs()! ^ 1) >>> 0).toString(16).padStart(8, "0");
     let idWas = "";
     const warn = console.warn;
@@ -1058,7 +1061,7 @@ Deno.test({
         await Deno.writeTextFile(lock, "1");
         await Deno.writeTextFile(`${lock}.id`, `1-d${ns}a10`);
         const beat = keepFresh(lock); // that holder's heartbeat, not ours
-        const until = Date.now() + 1_000;
+        const until = Date.now() + 3_000;
         while (Date.now() < until) {
           const r = tryPidLock(lock);
           assertEquals(r.held || r.retry, false, "took a live holder's lock");

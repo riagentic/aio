@@ -8,7 +8,7 @@ by hand: an app that builds and tests on 1.0.19-beta builds and tests on
 Android 7). See [Android](#android).
 
 ```sh
-am pin 1.0.20-beta
+am pin v1.0.20-beta
 am fix
 ```
 
@@ -19,7 +19,7 @@ names — see [What is new](#what-is-new).
 
 ## What to do
 
-Nothing is required. Four things are worth a look:
+Nothing is required. Five things are worth a look:
 
 - **Run `am doctor`.** It names the opt-ins your app has not decided — see
   [What `am doctor` now hints](#what-am-doctor-now-hints). A hint never changes
@@ -33,6 +33,9 @@ Nothing is required. Four things are worth a look:
   `aio.run()`:** read [Android](#android). `ui.*` options are now applied there.
 - **You go back to 1.0.19 after `am create`:** see
   [Pinning back to 1.0.19](#pinning-back-to-1019).
+- **You jump several betas at once:** the test shapes that go red on the way (no
+  API change behind them) are listed in
+  [Tests that can go red on an upgrade](README.md#tests-that-can-go-red-on-an-upgrade-109--1020).
 
 ## New opt-ins
 

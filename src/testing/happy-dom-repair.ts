@@ -190,3 +190,66 @@ export function acceptHostEvents(win: AnyNode): boolean {
   });
   return true;
 }
+
+/** The window property a repaired DOM carries: the trigger's own click events,
+ *  whose label activation the trigger runs itself (`src/air/ui-trigger.ts`
+ *  reads the same `Symbol.for` key — the browser bundle cannot import this). */
+const OWN_CLICKS = Symbol.for("aio.harnessLabelClicks");
+
+/**
+ * Let the trigger run a `<label>`'s activation for its OWN click, the way
+ * Chromium does.
+ *
+ * MEASURED (happy-dom 20.14.5): the label activates its control from inside
+ * its `dispatchEvent` while the click is still bubbling — so it toggles the
+ * checkbox when the click hit a link or button inside the label ("I agree to
+ * the <a>terms</a>"), ignores a `preventDefault()` above the label, never
+ * focuses the control, and a nested label's click toggles the inner checkbox
+ * twice (inner label, then the outer one). Chromium activates after the
+ * dispatch, from the innermost label, only when nothing interactive sits
+ * between the target and the label, and focuses the control.
+ *
+ * The patch only SKIPS happy-dom's activation for an event the trigger marked
+ * (`win[OWN_CLICKS]`); the trigger then runs Chromium's rule. Every other
+ * click — an app's own `label.click()` — keeps the DOM's behaviour. Proven on
+ * a throwaway label first, so a DOM that behaves is left untouched.
+ *
+ * Returns whether anything was patched.
+ */
+export function repairLabelActivation(win: AnyNode): boolean {
+  const doc = win?.document;
+  const Label = win?.HTMLLabelElement;
+  if (!doc?.createElement || typeof Label !== "function") return false;
+  if (win[OWN_CLICKS]) return true;
+  const label = doc.createElement("label");
+  const box = doc.createElement("input");
+  box.type = "checkbox";
+  const inside = doc.createElement("button");
+  label.append(box, inside);
+  inside.dispatchEvent(
+    new win.MouseEvent("click", { bubbles: true, cancelable: true }),
+  );
+  if (!box.checked) return false; // upstream behaves — leave it alone
+  let owner = Label.prototype;
+  while (owner && !Object.hasOwn(owner, "dispatchEvent")) {
+    owner = Object.getPrototypeOf(owner);
+  }
+  const activating = owner?.dispatchEvent;
+  const plain = owner && Object.getPrototypeOf(owner)?.dispatchEvent;
+  if (typeof activating !== "function" || typeof plain !== "function") {
+    return false;
+  }
+  win[OWN_CLICKS] = new WeakSet();
+  if (activating[OWN_CLICKS]) return true; // a class another window shares
+  function dispatchEvent(this: AnyNode, event: AnyNode) {
+    const own = this.ownerDocument?.defaultView?.[OWN_CLICKS];
+    return (own?.has(event) ? plain : activating).call(this, event);
+  }
+  (dispatchEvent as AnyNode)[OWN_CLICKS] = true;
+  Object.defineProperty(Label.prototype, "dispatchEvent", {
+    configurable: true,
+    writable: true,
+    value: dispatchEvent,
+  });
+  return true;
+}

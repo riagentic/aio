@@ -27,10 +27,15 @@ Deno.test({
     const serverDir = await makeApp("counter", "build-e2e-cli-srv-");
     const clientDir = await makeApp("counter", "build-e2e-cli-cli-");
     let server: Deno.ChildProcess | undefined;
+    let serverOut: Promise<Deno.CommandOutput> | undefined;
+    const foreign = await Deno.makeTempDir({ prefix: "foreign-cwd-" });
     try {
       // The fleet's `server` target — the headless service binary. It used to
       // be built without `--remote`, a flag set that names no target and
       // therefore took the old single-target path.
+      // A dist/ left by an earlier build — the second `deno task build` of
+      // every project. The build empties it, and used to embed it anyway.
+      await Deno.mkdir(join(serverDir, "dist"), { recursive: true });
       const s = await buildFlags(
         serverDir,
         "--compile",
@@ -52,7 +57,6 @@ Deno.test({
       await Deno.chmod(clientBin, 0o755);
 
       const port = freePort();
-      const foreign = await Deno.makeTempDir({ prefix: "foreign-cwd-" });
       server = new Deno.Command(serverBin, {
         args: ["--client=server-only", `--port=${port}`],
         cwd: foreign,
@@ -60,6 +64,7 @@ Deno.test({
         stdout: "piped",
         stderr: "piped",
       }).spawn();
+      serverOut = server.output();
       const deadline = Date.now() + 45_000;
       let up = false;
       while (Date.now() < deadline && !up) {
@@ -101,6 +106,19 @@ Deno.test({
         "count",
         `the client's state has no counter slice:\n${out}`,
       );
+      // A headless build packages no bundle ON PURPOSE. Its boot used to warn
+      // that the binary "packaged a bundle directory with nothing to serve" —
+      // a packaging-bug alarm, on every boot of every correct server build,
+      // because the build embedded the empty dist/ it stages into.
+      server.kill("SIGTERM");
+      const so = await serverOut;
+      server = undefined;
+      const serverLog = new TextDecoder().decode(so.stdout) +
+        new TextDecoder().decode(so.stderr);
+      assert(
+        !serverLog.includes("holds no app.js"),
+        `a headless server binary warned it was packaged wrong:\n${serverLog}`,
+      );
       // The physical-proof row for the CLI target. Last line, so a partial
       // run cannot claim it — and written by the gate rather than by hand,
       // because a hand-kept matrix is a claim and a generated one is evidence.
@@ -114,13 +132,10 @@ Deno.test({
       try {
         server?.kill("SIGKILL");
       } catch { /* gone */ }
-      if (server) {
-        await server.status;
-        await server.stdout.cancel().catch(() => {});
-        await server.stderr.cancel().catch(() => {});
-      }
+      if (server) await serverOut?.catch(() => {});
       await Deno.remove(serverDir, { recursive: true }).catch(() => {});
       await Deno.remove(clientDir, { recursive: true }).catch(() => {});
+      await Deno.remove(foreign, { recursive: true }).catch(() => {});
     }
   },
 });

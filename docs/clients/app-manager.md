@@ -99,7 +99,9 @@ tasks (`dev`, `build`, `compile`, `test`, `check`, `fmt`, `am`, `doctor`,
 from `client` (formerly `target`) and `build.targets` (either spelling: the
 array `["browser"]` or the object form with per-target overrides). A task the
 app already has is never rewritten or removed, so a curated task list survives
-every repair.
+every repair. An app that ships no binary (a static site with its own build)
+says so with `"build": { "targets": [] }`: `am fix` then adds none of `build`,
+`compile`, `publish`, `ship`.
 
 `am fix` also renames the deprecated deno.json `target` key to `client`
 (mechanical, value untouched), and when it sees the pre-alpha52 task matrix

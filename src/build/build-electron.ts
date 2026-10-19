@@ -28,6 +28,7 @@ import {
   icnsFromName,
   icnsFromPng,
   setPlistValue,
+  SHARED_RUNTIME_PLIST,
 } from "./macos-app.ts";
 import { trimLocalePaks } from "./electron-locales.ts";
 import {
@@ -56,6 +57,10 @@ import {
   DIST_DIR,
 } from "../server/app-files.ts";
 import { HEY, NO, OK } from "../diagnostics/fmt.ts";
+import {
+  SHARED_RUNTIME_ENV,
+  SHARED_RUNTIME_MARKER,
+} from "../electron/shared-runtime.ts";
 import { copyWorkerBundles } from "./dist-staging.ts";
 import {
   electronFuseBinary,
@@ -101,7 +106,9 @@ export async function zipDir(dir: string, out: string): Promise<boolean> {
           new TextDecoder().decode(r.stderr).trim().split("\n")[0] ?? ""
         }`,
       );
-    } catch { /* not installed — try the next */ }
+    } catch {
+      // aio-ok: not installed — try the next
+    }
   }
   console.error(
     `${NO} neither \`zip\` nor PowerShell could pack it — install zip ` +
@@ -222,7 +229,7 @@ export async function foreignBinaries(
 
 /** Package the Electron app for the current platform. Exits process on completion or error. */
 export async function buildElectron(cfg: BuildConfig): Promise<void> {
-  const { root, dist, binaryName, appTitle, os, arch, archStr } = cfg;
+  const { root, dist, binaryName, os } = cfg;
 
   const appDir = electronStagingDir(root);
 
@@ -281,6 +288,42 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
   // 2026-09-17).
   const version = await resolveElectronVersion(root);
   await reportElectronDrift(root, (m) => console.warn(`${HEY} ${m}`));
+  // `build.electronRuntime: "online"`: the package carries NO Electron — the
+  // app starts from the per-user shared store and downloads Electron
+  // ${version} into it on first start (electron/shared-runtime.ts). A macOS
+  // bundle still reads the runtime's plist (its minimum macOS), so it alone
+  // still needs the runtime at build time; nothing of it is copied.
+  const shared = cfg.electronRuntime === "online";
+  if (shared) {
+    console.log(
+      `${OK} shared runtime: Electron ${version} is not packaged — the app ` +
+        `downloads it into the per-user shared store on first start`,
+    );
+  }
+  // Optional graphics extras (DXIL compiler, Vulkan) — OFF by default
+  // because every one of them is used by SOME app (see electron-strip.ts). An
+  // owner who knows the app renders no GPU content opts in.
+  //
+  // The declaration is read BEFORE the platform is looked at: a typo'd value
+  // is named on a macOS build too (a warning there — nothing is stripped from
+  // a bundle), not only on the day the same app is first built for Windows.
+  // A shared-runtime build reads it too, so a typo is named there as well.
+  const stripExtras = await chromiumExtrasStripped(root, os);
+  if (shared) {
+    // Nothing to strip: the runtime is the store's, shared by every app on
+    // the machine, never one app's copy.
+    if (stripExtras) {
+      console.warn(
+        `${HEY} build.chromiumExtras strips nothing in a shared-runtime ` +
+          `build: Electron is not packaged, and the shared copy stays whole ` +
+          `for every app that starts from it`,
+      );
+    }
+  }
+  if (shared && os !== "darwin") {
+    await packageFor(cfg, appDir, binaryName, root);
+    return;
+  }
   // A local node_modules runtime is used ONLY when it IS that version, so an
   // offline build still works and a stale one cannot slip in beside the baked
   // version. Anything else is fetched for the platform (a download, which the
@@ -304,6 +347,16 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
   if (electronSrc === null) {
     console.error(`${NO} ${electronMissingHint()}`);
     Deno.exit(1);
+  }
+  if (shared) {
+    // macOS, shared: the runtime's plist rides beside the payload (read by
+    // assembleMacApp), the runtime itself does not.
+    await Deno.copyFile(
+      join(electronSrc, "Electron.app", "Contents", "Info.plist"),
+      join(appDir, SHARED_RUNTIME_PLIST),
+    );
+    await packageFor(cfg, appDir, binaryName, root);
+    return;
   }
   console.log(`copying Electron runtime ${version}...`);
   await copyDir(electronSrc, electronDst);
@@ -349,16 +402,28 @@ export async function buildElectron(cfg: BuildConfig): Promise<void> {
     console.log(`${OK} trimmed ${trimmed} unused locale(s) from the runtime`);
   }
 
-  // Optional graphics extras (DXIL compiler, Vulkan) — OFF by default
-  // because every one of them is used by SOME app (see electron-strip.ts). An
-  // owner who knows the app renders no GPU content opts in.
-  //
-  // The declaration is read BEFORE the platform is looked at: a typo'd value
-  // is named on a macOS build too (a warning there — nothing is stripped from
-  // a bundle), not only on the day the same app is first built for Windows.
-  const stripExtras = await chromiumExtrasStripped(root, os);
   if (stripExtras) console.log(applyChromiumExtrasStrip(electronDst, os));
 
+  await packageFor(cfg, appDir, binaryName, root);
+}
+
+/** The icon, the platform check and the platform's package — the part of
+ *  {@linkcode buildElectron} a shared-runtime build runs too. */
+async function packageFor(
+  cfg: BuildConfig,
+  appDir: string,
+  binaryName: string,
+  root: string,
+): Promise<void> {
+  const { appTitle, os, arch, archStr } = cfg;
+  if (cfg.electronRuntime === "online") {
+    // Where a bundled package has `electron/`, this says what it is instead
+    // (the updater's `installDir` looks for one or the other).
+    await Deno.writeTextFile(
+      join(appDir, SHARED_RUNTIME_MARKER),
+      JSON.stringify({ runtime: "shared" }) + "\n",
+    );
+  }
   // Icon \u2014 from THE app-dir decider (cfg.appDir), same place dev reads it
   const { icon: userIcon, misplaced } = await resolveAppIcon(
     cfg.root,
@@ -431,12 +496,7 @@ async function _packageLinux(
   root: string,
   binaryName: string,
 ): Promise<void> {
-  void cfg;
-  const appRun = `#!/bin/bash -p
-HERE="$(dirname "$(readlink -f "$0")")"
-export ELECTRON_PATH="$HERE/electron/electron"
-exec "$HERE/${binaryName}" "$@"
-`;
+  const appRun = _appRun(binaryName, cfg.electronRuntime === "online");
   await Deno.writeTextFile(join(appDir, "AppRun"), appRun);
   await chmodIfSupported(join(appDir, "AppRun"), 0o755);
 
@@ -498,11 +558,27 @@ Categories=Utility;
  *  rest as a command, and the exe never started (measured on Windows 11 with
  *  a directory named `A&md,pwned`). Inside quotes the value is inert.
  *  @internal */
-export function _winLauncherBat(binaryName: string): string {
+export function _winLauncherBat(binaryName: string, shared = false): string {
   return `@echo off
 SET "HERE=%~dp0"
-SET "ELECTRON_PATH=%HERE%electron\\electron.exe"
-start "" "%HERE%${binaryName}.exe" %*
+${
+    shared
+      ? ""
+      : `SET "ELECTRON_PATH=%HERE%electron\\electron.exe"\n`
+  }start "" "%HERE%${binaryName}.exe" %*
+`;
+}
+
+/** The AppImage's `AppRun`. A shared-runtime package carries no `electron/`,
+ *  so it exports no `ELECTRON_PATH` at one. @internal */
+export function _appRun(binaryName: string, shared = false): string {
+  return `#!/bin/bash -p
+HERE="$(dirname "$(readlink -f "$0")")"
+${
+    shared
+      ? `export ${SHARED_RUNTIME_ENV}="shared:$HERE"\n`
+      : `export ELECTRON_PATH="$HERE/electron/electron"\n`
+  }exec "$HERE/${binaryName}" "$@"
 `;
 }
 
@@ -514,8 +590,10 @@ async function _packageWindows(
   root: string,
   binaryName: string,
 ): Promise<void> {
-  void cfg;
-  const launcher = _winLauncherBat(binaryName);
+  const launcher = _winLauncherBat(
+    binaryName,
+    cfg.electronRuntime === "online",
+  );
   await Promise.all([
     Deno.writeTextFile(join(appDir, "run.bat"), launcher),
     Deno.writeTextFile(
@@ -636,6 +714,7 @@ async function _packageMacos(
     identifier: cfg.macBundleId,
     version: bundleVersion,
     iconIcns: icns,
+    shared: cfg.electronRuntime === "online",
   });
   // Before anything signs or packs the bundle: the one privacy sentence the
   // window needs and Electron's own plist does not carry.
@@ -661,6 +740,7 @@ async function _packageMacos(
         volumeName: displayName,
         binaryName,
         declaredHost: cfg.macosHost,
+        shared: cfg.electronRuntime === "online",
       });
     } catch (e) {
       // A configured Mac that fails is a real failure, not a reason to pretend:

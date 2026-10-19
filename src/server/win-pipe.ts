@@ -248,6 +248,14 @@ export function connectCodeFromFacts(
   return hadClient ? ERROR_NO_DATA : ERROR_IO_PENDING;
 }
 
+/** The NTSTATUS a finished operation left in its `OVERLAPPED`'s `Internal`
+ *  (documented: "the status code for the completed request") — written by
+ *  the kernel, so unlike `GetLastError()` it cannot be lost between two FFI
+ *  calls. */
+export function overlappedStatus(buf: Uint8Array): number {
+  return new DataView(buf.buffer, buf.byteOffset).getUint32(0, true);
+}
+
 /** `hEvent` back out of an `OVERLAPPED` (the inverse of the encoder). */
 export function overlappedEvent(buf: Uint8Array): bigint {
   return new DataView(buf.buffer, buf.byteOffset).getBigUint64(24, true);
@@ -290,10 +298,6 @@ const K32_SYMBOLS = {
     result: "pointer",
   },
   ConnectNamedPipe: { parameters: ["pointer", "buffer"], result: "i32" },
-  ReadFile: {
-    parameters: ["pointer", "buffer", "u32", "buffer", "buffer"],
-    result: "i32",
-  },
   WriteFile: {
     parameters: ["pointer", "buffer", "u32", "buffer", "buffer"],
     result: "i32",
@@ -371,6 +375,50 @@ const ADVAPI_SYMBOLS = {
   },
 } as const;
 
+const NTDLL_SYMBOLS = {
+  // A finished operation's NTSTATUS (`overlappedStatus`) as the Win32 code
+  // `GetOverlappedResult` would have set — returned, not thread-local.
+  RtlNtStatusToDosError: { parameters: ["u32"], result: "u32" },
+  // Every overlapped read/write is STARTED here, not through kernel32: the
+  // NTSTATUS comes back as the result (see `startIo`). FileHandle, Event,
+  // ApcRoutine, ApcContext, IoStatusBlock, Buffer, Length, ByteOffset, Key.
+  NtReadFile: {
+    parameters: [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "buffer",
+      "buffer",
+      "u32",
+      "pointer",
+      "pointer",
+    ],
+    result: "u32",
+  },
+  NtWriteFile: {
+    parameters: [
+      "pointer",
+      "pointer",
+      "pointer",
+      "pointer",
+      "buffer",
+      "buffer",
+      "u32",
+      "pointer",
+      "pointer",
+    ],
+    result: "u32",
+  },
+} as const;
+
+let _nt: Deno.DynamicLibrary<typeof NTDLL_SYMBOLS>["symbols"] | null = null;
+
+function ntdll(): Deno.DynamicLibrary<typeof NTDLL_SYMBOLS>["symbols"] {
+  _nt ??= Deno.dlopen("ntdll.dll", NTDLL_SYMBOLS).symbols;
+  return _nt;
+}
+
 let _k32: Deno.DynamicLibrary<typeof K32_SYMBOLS>["symbols"] | null = null;
 let _adv:
   | Deno.DynamicLibrary<typeof ADVAPI_SYMBOLS>["symbols"]
@@ -393,7 +441,7 @@ function advapi(): Deno.DynamicLibrary<typeof ADVAPI_SYMBOLS>["symbols"] {
   return _adv;
 }
 
-// Both libraries are opened when this module LOADS, not at the first call.
+// The libraries are opened when this module LOADS, not at the first call.
 // They are held for the life of the process either way; opened lazily, the
 // first caller is charged with them — and under `deno test` that caller is
 // whichever test first asked who owns a lock or how a directory is protected.
@@ -409,6 +457,7 @@ if (
   try {
     k32();
     advapi();
+    ntdll();
   } catch { /* aio-ok: the first real call opens it again and throws there */ }
 }
 
@@ -649,11 +698,59 @@ async function finishOverlapped(
     return { ok: false, code: ERROR_OPERATION_ABORTED };
   }
   const bytes = new Uint8Array(4);
-  // bWait=FALSE: the port already said it is done, and this runs on the main
-  // thread so the GetLastError below is the one that belongs to this call.
+  // bWait=FALSE: the port already said it is done. A FALSE's code is the one
+  // the operation itself left in the OVERLAPPED — the thread's last error, a
+  // second FFI call later, read 0 once on a real Windows, and a read failing
+  // with "error 0" closed a live connection.
   const ok = k32().GetOverlappedResult(o.h, ovl, bytes, 0);
-  if (!ok) return { ok: false, code: k32().GetLastError() };
+  if (!ok) {
+    return {
+      ok: false,
+      code: ntdll().RtlNtStatusToDosError(overlappedStatus(ovl)),
+    };
+  }
   return { ok: true, bytes: readU32(bytes) };
+}
+
+/** Whether a started read/write's NTSTATUS is a synchronous FAILURE: only an
+ *  NT_ERROR (severity 3). A failure at start queues no completion packet and
+ *  writes nothing into the OVERLAPPED; success, a warning (BUFFER_OVERFLOW)
+ *  and STATUS_PENDING all complete through the port. */
+export function ntStartFailed(status: number): boolean {
+  return (status >>> 30) === 3;
+}
+
+/** Start one overlapped read or write on `ovl`; `null` = its packet will
+ *  come, a number = the Win32 code it failed with at start (nothing to wait
+ *  for).
+ *
+ *  Through ntdll, exactly as kernel32 starts it (the OVERLAPPED is the
+ *  IO_STATUS_BLOCK and the ApcContext the port hands back, its `Offset` the
+ *  ByteOffset), because the status is RETURNED. kernel32's FALSE needed
+ *  `GetLastError()`, a second FFI call whose thread-local code was lost once
+ *  on a real Windows (`connectCodeFromFacts`); a lost code with a live peer
+ *  was read as pending — and a synchronous failure (ERROR_NOT_ENOUGH_QUOTA on
+ *  a big write) queues no packet, so that write waited for ever, silently. */
+function startIo(
+  op: "NtReadFile" | "NtWriteFile",
+  h: Handle,
+  buf: Uint8Array,
+  ovl: Uint8Array,
+): number | null {
+  const p = Deno.UnsafePointer.of(ovl);
+  if (p === null) throw new Error("win-pipe: an OVERLAPPED with no address");
+  const status = ntdll()[op](
+    h,
+    null,
+    null,
+    p,
+    ovl,
+    buf,
+    buf.length,
+    Deno.UnsafePointer.offset(p, 16),
+    null,
+  );
+  return ntStartFailed(status) ? ntdll().RtlNtStatusToDosError(status) : null;
 }
 
 // ── Connection ────────────────────────────────────────────────────────────
@@ -709,25 +806,12 @@ class PipeConn implements LocalConn {
    *  stream's `pull` guarantees it. */
   async #read(): Promise<Uint8Array | null> {
     if (this.#closed) return null;
-    // lpNumberOfBytesRead is NULL for overlapped I/O (the documented shape):
-    // the count is read back through GetOverlappedResult in every case, so
+    // The count is read back through GetOverlappedResult in every case, so
     // the synchronous-completion and the pending path are ONE path — and a
     // handle bound to a completion port queues a packet for BOTH, so both
-    // are also one wait.
-    const ok = k32().ReadFile(
-      this.#o.h,
-      this.#buf,
-      this.#buf.length,
-      null,
-      this.#rovl,
-    );
-    if (!ok) {
-      const code = k32().GetLastError();
-      if (code !== ERROR_IO_PENDING && code !== ERROR_MORE_DATA) {
-        // A hard failure at START queues no packet: nothing to wait for.
-        return this.#readFailed(code);
-      }
-    }
+    // are also one wait. A hard failure at START queues no packet.
+    const code = startIo("NtReadFile", this.#o.h, this.#buf, this.#rovl);
+    if (code !== null) return this.#readFailed(code);
     const r = await finishOverlapped(this.#o, this.#rovl);
     if (!r.ok) return this.#readFailed(r.code);
     if (r.bytes === 0) return null;
@@ -895,19 +979,8 @@ class PipeConn implements LocalConn {
       // A copy: the buffer must stay alive and unmoved until the operation
       // completes, and a caller's view may be a subarray of something reused.
       const data = chunk.slice(off);
-      const ok = k32().WriteFile(
-        this.#o.h,
-        data,
-        data.length,
-        null,
-        this.#wovl,
-      );
-      if (!ok) {
-        const code = k32().GetLastError();
-        if (code !== ERROR_IO_PENDING) {
-          throw winError("WriteFile", code, this.path);
-        }
-      }
+      const code = startIo("NtWriteFile", this.#o.h, data, this.#wovl);
+      if (code !== null) throw winError("WriteFile", code, this.path);
       const r = await finishOverlapped(this.#o, this.#wovl);
       if (!r.ok) throw winError("WriteFile", r.code, this.path);
       if (r.bytes === 0) throw winError("WriteFile", ERROR_NO_DATA, this.path);
@@ -1351,6 +1424,17 @@ export function writeOwnerOnlyFile(path: string, contents: string): string {
 
 // ── Client ────────────────────────────────────────────────────────────────
 
+/** Whether a failed client `CreateFileW` is asked again: the pipe is busy —
+ *  or its code was LOST. `GetLastError()` is a second FFI call and the
+ *  thread's code does not always survive until it (see
+ *  `connectCodeFromFacts`): a client under a full Windows suite read 0, which
+ *  no failed open answers, and threw "Win32 error 0" at a pipe that was only
+ *  busy. Asked again within the same bound, it gets a real answer. Pure.
+ *  @internal exported for its test */
+export function _askAgain(code: number): boolean {
+  return code === ERROR_PIPE_BUSY || code === 0;
+}
+
 /** Open `path` as a client. Throws `Deno.errors.NotFound` when nothing hosts
  *  the pipe (the unix `connect` on a missing socket throws the same), so a
  *  caller's "the app is not running" branch reads the same on both OSs. A
@@ -1393,7 +1477,7 @@ export async function connectPipe(
         `no pipe at ${path} (Win32 error ${code} ERROR_FILE_NOT_FOUND)`,
       );
     }
-    if (code !== ERROR_PIPE_BUSY) throw winError("CreateFileW", code, path);
+    if (!_askAgain(code)) throw winError("CreateFileW", code, path);
     if (performance.now() >= until) {
       throw winError(
         `CreateFileW (every instance of the pipe stayed taken for ${busyWaitMs} ms — its host is not accepting)`,

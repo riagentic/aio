@@ -83,6 +83,8 @@ function launch(
   connect: (url: string) => void;
   /** Every address the page opened, in order. */
   visited: string[];
+  /** The pairing-code field (and the warning line: one stub for both). */
+  pinField: { value: string; textContent: string };
 } {
   const script = html.match(/<script>([\s\S]*?)<\/script>/)![1]!;
   const field = { value: "" };
@@ -150,6 +152,7 @@ function launch(
       err.onsubmit!({ preventDefault: () => {} });
     },
     visited,
+    pinField: other,
   };
 }
 
@@ -282,5 +285,95 @@ Deno.test("android client: no baked address still gives the plain form", async (
     assertEquals(launch(html, new Map()).went, null, "and it stays on it");
   } finally {
     await Deno.remove(dir, { recursive: true });
+  }
+});
+
+// build.strictPin on the Android client: a key never crosses the network in
+// clear text. Off (the default), the same links are opened (and warned
+// about) exactly as before.
+Deno.test("client connect page: build.strictPin refuses a keyed non-loopback http:// link and pairing over plain http", async () => {
+  const dir = await tempDir("aio-connect-strict-");
+  try {
+    const page = async (strict: boolean) => {
+      await _writeConnectPage(dir, "Wallet", null, "android", strict);
+      return Deno.readTextFile(join(dir, "index.html"));
+    };
+    const strictHtml = await page(true);
+    const looseHtml = await page(false);
+    const asked: string[] = [];
+    const shell = (q: Record<string, unknown>) => {
+      if ("recall" in q) return { server: "" };
+      if ("remember" in q) return { remembered: true };
+      asked.push(String(q.base));
+      return { error: "java.net.ConnectException: refused" };
+    };
+    const lan = "http://10.0.0.5:8000/?token=k";
+    // A keyed LAN link over http: refused, nothing opened, the form says why.
+    let err = { textContent: "" };
+    let p = launch(strictHtml, new Map(), "", err, shell);
+    await answered();
+    p.connect(lan);
+    await answered();
+    assertEquals(p.visited, []);
+    assertStringIncludes(err.textContent, "build.strictPin");
+    // Loopback (adb reverse) and https are not "the network": opened.
+    for (
+      const ok of [
+        "http://localhost:8000/?token=k",
+        "https://10.0.0.5:8000/?token=k",
+      ]
+    ) {
+      p = launch(strictHtml, new Map(), "", undefined, shell);
+      await answered();
+      p.connect(ok);
+      await answered();
+      assertEquals(p.visited.at(-1), ok);
+    }
+    // A keyless http address: no key to leak — opened.
+    p = launch(strictHtml, new Map(), "", undefined, shell);
+    await answered();
+    p.connect("http://10.0.0.5:8000");
+    await answered();
+    assertEquals(p.went, "http://10.0.0.5:8000");
+    // A stored keyed http address (paired before strict was on): not opened.
+    err = { textContent: "" };
+    p = launch(strictHtml, new Map([["aio_server", lan]]), "", err, shell);
+    await answered();
+    assertEquals(p.went, null);
+    assertStringIncludes(err.textContent, "build.strictPin");
+    // Pairing typed without a scheme: https only — no http fallback.
+    asked.length = 0; // (the https link above asked its proof)
+    p = launch(strictHtml, new Map(), "", undefined, shell);
+    await answered();
+    p.pinField.value = "123456";
+    p.connect("10.0.0.5:8000");
+    await answered();
+    await answered();
+    assertEquals(asked, ["https://10.0.0.5:8000"]);
+    // Pairing over an explicit http:// LAN address: refused before the code
+    // (and the key it buys) crosses the network.
+    asked.length = 0;
+    err = { textContent: "" };
+    p = launch(strictHtml, new Map(), "", err, shell);
+    await answered();
+    p.pinField.value = "123456";
+    p.connect("http://10.0.0.5:8000");
+    await answered();
+    assertEquals(asked, []);
+    assertStringIncludes(err.textContent, "build.strictPin");
+    // Not strict: the same link opens, and a bare pairing falls back to http.
+    p = launch(looseHtml, new Map(), "", undefined, shell);
+    await answered();
+    p.connect(lan);
+    await answered();
+    assertEquals(p.went, lan);
+    p = launch(looseHtml, new Map(), "", undefined, shell);
+    await answered();
+    p.pinField.value = "123456";
+    p.connect("10.0.0.5:8000");
+    for (let i = 0; i < 4; i++) await answered();
+    assertEquals(asked, ["https://10.0.0.5:8000", "http://10.0.0.5:8000"]);
+  } finally {
+    await dropTempDir(dir);
   }
 });

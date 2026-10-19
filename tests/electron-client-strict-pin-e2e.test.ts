@@ -309,8 +309,12 @@ Deno.test({
         return null; // aio-ok: DevTools not listening yet
       }
     };
-    /** Evaluate in the window's page; the value, by value. */
-    const evalIn = async (c: Client, expression: string): Promise<unknown> => {
+    /** One DevTools call on the window's page; its result. */
+    const cdpCall = async (
+      c: Client,
+      method: string,
+      params: Record<string, unknown>,
+    ): Promise<{ result?: { value?: unknown } } | undefined> => {
       const t = await until("a page target", () => page(c), c.err);
       const ws = new WebSocket(t.webSocketDebuggerUrl);
       try {
@@ -318,22 +322,48 @@ Deno.test({
           ws.onopen = () => res();
           ws.onerror = () => rej(new Error("CDP socket failed"));
         });
-        const reply = new Promise<unknown>((res) => {
+        const reply = new Promise<{ result?: { value?: unknown } }>((res) => {
           ws.onmessage = (ev) => {
             const m = JSON.parse(String(ev.data));
-            if (m.id === 1) res(m.result?.result?.value);
+            if (m.id === 1) res(m.result);
           };
         });
-        ws.send(JSON.stringify({
-          id: 1,
-          method: "Runtime.evaluate",
-          params: { expression, returnByValue: true },
-        }));
+        ws.send(JSON.stringify({ id: 1, method, params }));
         return await reply;
       } finally {
         ws.close();
       }
     };
+    /** Evaluate in the window's page; the value, by value. */
+    const evalIn = async (c: Client, expression: string): Promise<unknown> =>
+      (await cdpCall(c, "Runtime.evaluate", {
+        expression,
+        returnByValue: true,
+      }))?.result?.value;
+    /** A login the window's jar holds for the app's host (persistent, as an
+     *  /__aio/auth session is), and the key cookie a keyed connect leaves. */
+    const LOGIN = "login-" + crypto.randomUUID();
+    const plantJar = async (c: Client) => {
+      for (const [name, value] of [["e2e_login", LOGIN], ["aio_key_x", KEY]]) {
+        const r = await cdpCall(c, "Network.setCookie", {
+          url: `${base}/`,
+          name,
+          value,
+          secure: true,
+          httpOnly: true,
+          expires: Math.floor(Date.now() / 1000) + 3600,
+        });
+        assert(
+          (r as { success?: boolean } | undefined)?.success !== false,
+          `the jar refused ${name}`,
+        );
+      }
+    };
+    const jarLines = () =>
+      read(reqLog).split("\n").filter((l) =>
+        l.includes(" cookie=") &&
+        (l.includes(LOGIN) || l.split(" cookie=")[1]!.includes(KEY))
+      );
     const onApp = (c: Client) =>
       until(
         "the app page in the window",
@@ -525,57 +555,95 @@ Deno.test({
       assertEquals(await arrivedBefore("refused-again"), []);
       await c.close();
 
-      // 5b — the key in the window's cookie jar. A run that connects with
-      // the key (here from the connect page) is handed `aio_key_<app>` for
-      // the page's follow-up requests …
+      // 5b — the window's cookie jar. It holds what a connect of the script
+      // never sends: the key cookie a keyed connect left, and a login (an
+      // /__aio/auth session lives across runs). Both are planted from the
+      // connect page, before the connect. Control: the server that proves is
+      // sent them …
+      const bare = `${base}/`;
+      const connectFromPage = async (to: string) => {
+        c = launch(mains.loose, "--connect");
+        await until(
+          "the connect page",
+          async () =>
+            (await page(c))?.url.startsWith("data:text/html") ? true : null,
+          c.err,
+        );
+        await plantJar(c);
+        await evalIn(c, `location.href = ${JSON.stringify(to)}; 1`);
+        await until(
+          `${to} in the window`,
+          async () =>
+            (await page(c))?.url === to.split("?")[0] ||
+              (await page(c))?.url === to
+              ? true
+              : null,
+          () => `stderr:\n${c.err()}\nrequests:\n${read(reqLog)}`,
+        );
+        // The page is loaded and has asked for more (its socket): those are
+        // the requests a cookie rides on.
+        await until(
+          "a follow-up request of the page",
+          () => /\/ws\b/.test(read(reqLog)) ? true : null,
+          () => `requests:\n${read(reqLog)}`,
+        );
+      };
       await stopServer();
       await Deno.remove(reqLog).catch(() => {});
       await startServer();
-      c = launch(mains.loose, "--connect");
-      await until(
-        "the connect page",
-        async () =>
-          (await page(c))?.url.startsWith("data:text/html") ? true : null,
-        c.err,
+      await connectFromPage(appUrl);
+      await arrivedBefore("jar-control");
+      assert(
+        jarLines().some((l) => l.includes(LOGIN)),
+        `the planted login never reached the server (the control):\n${
+          read(reqLog)
+        }`,
       );
-      await evalIn(c, `location.href = ${JSON.stringify(appUrl)}; 1`);
-      await onApp(c);
-      const cookieLines = () =>
-        read(reqLog).split("\n").filter((l) =>
-          l.includes(` cookie=`) && l.split(" cookie=")[1]!.includes(KEY)
-        );
-      await until(
-        "a request of the window carrying the key cookie (the control)",
-        () => cookieLines().length > 0,
-        () => `stderr:\n${c.err()}\nrequests:\n${read(reqLog)}`,
-      );
+      await c.close();
       // … then the address is taken by something with a new root that serves
-      // its page to anyone and cannot prove it holds the key. The same run
-      // connects again (a navigation in the window): the key is withheld from
-      // the address — and the window must not send it in a cookie.
+      // its page to anyone and cannot prove it holds the key: the key is
+      // withheld from the address — and the window sends that host no
+      // cookie at all, the key's or the login's.
       await forget("root");
       await startServer("");
-      const bare = `${base}/`;
-      await evalIn(c, `location.href = ${JSON.stringify(appUrl)}; 1`);
-      await until(
-        "the keyless page in the window",
-        async () => (await page(c))?.url === bare ? true : null,
-        () => `stderr:\n${c.err()}\nrequests:\n${read(reqLog)}`,
-      );
+      await connectFromPage(appUrl);
+      assertEquals((await page(c))?.url, bare);
       assertMatch(c.err(), /the key was NOT sent/);
-      // The page is loaded and has asked for more (its socket): those are the
-      // requests a cookie rides on.
-      await until(
-        "a follow-up request of the keyless page",
-        () => /\/ws\b/.test(read(reqLog)) ? true : null,
-        () => `requests:\n${read(reqLog)}`,
-      );
       const keyless = await arrivedBefore("keyless");
       assert(
         keyless.some((l) => l.startsWith(`GET ${bare}`)),
         `the page was never asked for:\n${keyless.join("\n")}`,
       );
       assertEquals(tokenLines(keyless), [], "the key reached it");
+      assertEquals(jarLines(), [], "the jar's login reached it");
+      await c.close();
+
+      // 5c — a host with no pin (no key, never paired: a login app typed in
+      // by hand). The certificate it was first seen with is kept …
+      profile = "config-tofu";
+      await forget("root");
+      await startServer("");
+      await connectFromPage(bare);
+      await c.close();
+      const seen = (recents()[0] as { seen?: string } | undefined)?.seen;
+      assert(seen, `no certificate kept for the host:\n${c.err()}`);
+      // … a leaf re-issued under the same root is that server: the login
+      // goes along, nothing is said …
+      await forget("leaf");
+      await startServer("");
+      await connectFromPage(bare);
+      await arrivedBefore("tofu-releaf");
+      assert(jarLines().some((l) => l.includes(LOGIN)), read(reqLog));
+      assert(!c.err().includes("has CHANGED"), c.err());
+      await c.close();
+      // … another root is not: the host's cookies are out of the jar before
+      // the page loads, and it is said.
+      await forget("root");
+      await startServer("");
+      await connectFromPage(bare);
+      await arrivedBefore("tofu-reroot");
+      assertMatch(c.err(), /cookies \(a login\) were NOT sent/);
+      assertEquals(jarLines(), [], "the jar's login reached a new root");
       await c.close();
 
       // ── not strict, and the server cannot prove (aio 1.0.19 or older) ──

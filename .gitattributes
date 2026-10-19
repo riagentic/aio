@@ -1,5 +1,8 @@
-# Auto-detect text files
-* text=auto
+# Auto-detect text files, and check every one out LF whatever the clone's
+# core.autocrlf says: the Android/iOS templates, the journal fixtures, the
+# SFX stub's sources and the .ps1 scripts are compared or hashed byte for byte
+# (tests/repo-checkout-lf.test.ts).
+* text=auto eol=lf
 
 # TypeScript/JavaScript - enforce LF
 *.ts text eol=lf

@@ -13,6 +13,8 @@
 // before verifying is not. Backing up after migrating is useless. Handing over
 // before writing the pending marker loses the ability to roll back.
 import { join } from "@std/path";
+import { existsSync } from "@std/fs";
+import { SHARED_RUNTIME_MARKER } from "../electron/shared-runtime.ts";
 import type { Log } from "../diagnostics/logger-api.ts";
 import {
   keyFingerprint,
@@ -54,6 +56,7 @@ import {
   writeTrust,
 } from "./updates-check.ts";
 import { artifactFromPatch } from "./updates-patch.ts";
+import { prefetchSharedElectron } from "./updates-electron.ts";
 import {
   artifactPath,
   clearPending,
@@ -65,6 +68,7 @@ import {
   installDir,
   type InstalledTarget,
   KEEP_OLD,
+  launchArtifactPath,
   macAppUpdateBlocker,
   macBundleExecutable,
   type PendingMark,
@@ -668,7 +672,9 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
               (deps.cell ?? createUpdatesCell()).setProgress(f),
             )
               .catch(() => {});
-          } catch { /* not bound — the download continues either way */ }
+          } catch {
+            // aio-ok: not bound — the download continues either way
+          }
         },
       });
     if (!dl.ok) throw new Error(dl.error);
@@ -721,13 +727,23 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       const sealed = isMacApp
         ? await (deps.verifyBundle ?? verifyMacBundle)(staged)
         : { ok: true as const };
-      const exe = isMacApp ? macBundleExecutable(staged) : zipLauncher(staged);
+      // On Windows the folder's own `.exe`: `run.bat` hands off with `start ""`
+      // and exits 0 at once, so smoke-testing it proved nothing about the
+      // build it was meant to test.
+      const exe = isMacApp
+        ? macBundleExecutable(staged)
+        : Deno.build.os === "windows"
+        ? await folderExe(staged)
+        : zipLauncher(staged);
       const smoked = !sealed.ok ? sealed : exe === null
         ? {
           ok: false as const,
-          error: `the downloaded app has no readable Contents/Info.plist ` +
-            `CFBundleExecutable — the update was NOT installed; the running ` +
-            `version is untouched.`,
+          error: (isMacApp
+            ? `the downloaded app has no readable Contents/Info.plist ` +
+              `CFBundleExecutable`
+            : `the downloaded package has no .exe at its top level`) +
+            ` — the update was NOT installed; the running version is ` +
+            `untouched.`,
         }
         : await smokeTestArtifact(exe);
       if (!smoked.ok) {
@@ -743,6 +759,58 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
           // message with a cleanup error.
         });
         throw new Error(smoked.error);
+      }
+    }
+
+    // A shared-runtime build may need an Electron the store does not have
+    // yet: fetched now, while this version still runs, so the new one never
+    // waits on a download at its first start (updates-electron.ts). A
+    // single-file artifact is asked as it was downloaded (made executable
+    // first, as its smoke test does); a folder through its launcher.
+    {
+      // Windows' `run.bat` hands off with `start ""` and returns at once, so
+      // it is the folder's own `.exe` that is asked.
+      const runnable = !isDirectory
+        ? staged
+        : isMacApp
+        ? macBundleExecutable(staged)
+        : Deno.build.os === "windows"
+        ? await folderExe(staged)
+        : zipLauncher(staged);
+      if (runnable) {
+        try {
+          await prefetchSharedElectron(runnable, {
+            log: (msg) => log.info("updates", msg),
+            // The name a start records too, so the two are one app's record.
+            installed: launchArtifactPath(),
+            // A folder carries the marker at its top, a .app in Resources/.
+            markedShared: isDirectory &&
+              existsSync(
+                isMacApp
+                  ? join(staged, "Contents", "Resources", SHARED_RUNTIME_MARKER)
+                  : join(staged, SHARED_RUNTIME_MARKER),
+              ),
+            onProgress: (f) => {
+              try {
+                void Promise.resolve(
+                  (deps.cell ?? createUpdatesCell()).setProgress(f),
+                ).catch(() => {});
+              } catch {
+                // aio-ok: not bound — observe-only
+              }
+            },
+          });
+        } catch (e) {
+          // The verified download stays for a retry; the unpacked copy goes —
+          // a retry unpacks again.
+          if (isDirectory) {
+            await Deno.remove(staged, { recursive: true }).catch(() => {
+              // aio-ok: the throw below carries the reason; `pruneOld`
+              // reclaims a staged copy that stays
+            });
+          }
+          throw e;
+        }
       }
     }
 
@@ -1371,4 +1439,16 @@ function isDesktopTarget(): boolean {
   const t = detectTarget();
   return t === "electron-appimage" || t === "electron-zip" ||
     t === "macos-app";
+}
+
+/** The app's executable at the top of an unpacked Windows package (the zip
+ *  holds `<bin>.exe` beside `run.bat`; Electron's sits in `electron\\`), or
+ *  null. */
+async function folderExe(dir: string): Promise<string | null> {
+  for await (const e of Deno.readDir(dir)) {
+    if (e.isFile && e.name.toLowerCase().endsWith(".exe")) {
+      return join(dir, e.name);
+    }
+  }
+  return null;
 }

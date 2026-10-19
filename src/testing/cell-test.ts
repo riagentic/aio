@@ -55,6 +55,7 @@ import {
 import { frameworkEffectInWrongRuntime } from "../state/cell-compose-execute.ts";
 import { AioError, createAioError } from "../diagnostics/error.ts";
 import { log } from "../diagnostics/logger-api.ts";
+import { reduceThrowCode } from "../state/method-rejection.ts";
 
 // Dev-strict arming lives in its own module so every harness can call it
 // without an import cycle (see test-strict.ts). Re-exported here because this
@@ -815,10 +816,12 @@ export function testCell(
             return Promise.resolve(dispatch(msg));
           } catch (e) {
             return Promise.reject(
-              e instanceof AioError ? e : createAioError("REDUCE_ERROR", e, {
-                cellName: f.__aio.id,
-                actionType: msg.type,
-              }),
+              e instanceof AioError
+                ? e
+                : createAioError(reduceThrowCode(e), e, {
+                  cellName: f.__aio.id,
+                  actionType: msg.type,
+                }),
             );
           }
         }
@@ -1264,6 +1267,7 @@ export async function bootCells(
   // Hermetic: reset any prior runtime state so these cells start pristine —
   // including module-level `signal()`s, which are state a test writes just as
   // easily as a cell and which nothing used to restore.
+  standalone._warnResetOfLiveBoot("bootCells");
   standalone._resetState();
   // The PROCESS-GLOBAL half of the runtime, which `_resetState()` does not own:
   // `_pending` (in-flight calls), the degraded registry, the cancel registry,

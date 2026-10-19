@@ -252,6 +252,18 @@ Deno.test("am create --json: absolute dir, and git as a reason — never a bare 
       doc.git === "initialized" || doc.git === "skipped: git not found",
       `git: ${doc.git}`,
     );
+    // The first commit leaves the seeded lock out: the first build fills it,
+    // and a committed seed made that build "-dirty" (seen on a Mac, 1.0.21).
+    if (doc.git === "initialized") {
+      const git = (...args: string[]) =>
+        new TextDecoder().decode(
+          new Deno.Command("git", { args, cwd: doc.dir as string }).outputSync()
+            .stdout,
+        );
+      assertEquals(git("ls-files", "deno.lock"), "", "deno.lock committed");
+      assert(git("ls-files").includes("deno.json"), "nothing committed");
+      assertEquals(git("status", "--porcelain", "--untracked-files=no"), "");
+    }
   } finally {
     await Deno.remove(tmp, { recursive: true });
   }
