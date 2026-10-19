@@ -54,7 +54,6 @@ Deno.test("boot reload after a server restart waits until the replayed offline q
         for (const m of buf.splice(0)) s.send(m);
       };
       c.onmessage = (e) => {
-        if (reloaded) return; // the page is gone: nothing more leaves it
         s.readyState === WebSocket.OPEN ? s.send(e.data) : buf.push(e.data);
       };
       s.onmessage = (e) => {
@@ -78,8 +77,16 @@ Deno.test("boot reload after a server restart waits until the replayed offline q
   );
 
   // A reload ends the page: from that moment nothing more leaves it. What it
-  // had flushed to the socket before then still reaches the server.
+  // had flushed to the socket before then still reaches the server — so the
+  // cut is at the PAGE's send, not where the proxy reads: under load (Windows,
+  // full suite) the proxy had not read 6 frames the page had already written,
+  // and a cut there dropped what a real browser delivers.
   let reloaded = false;
+  const realSend = WebSocket.prototype.send;
+  WebSocket.prototype.send = function (this: WebSocket, data) {
+    if (reloaded && this.url.includes(`127.0.0.1:${port}/`)) return;
+    return realSend.call(this, data);
+  };
   g.location = {
     protocol: "http:",
     host: `127.0.0.1:${port}`,
@@ -133,6 +140,7 @@ Deno.test("boot reload after a server restart waits until the replayed offline q
       "every call queued while the server was down reached it before the page reloaded",
     );
   } finally {
+    WebSocket.prototype.send = realSend;
     unsub();
     await sleep(400);
     await proxy.shutdown();

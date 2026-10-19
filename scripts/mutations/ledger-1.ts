@@ -7718,4 +7718,14 @@ export const LEDGER_1: readonly Mutation[] = [
     test: "tests/electron-shared-runtime.test.ts",
     filter: "shared start: closing the progress window cancels the start",
   },
+  {
+    what:
+      "a new boot id reloads the page before the replayed offline queue has left it — the calls a user made while the server was down die with the page",
+    file: "src/browser/browser-air-transport.ts",
+    find: "    const left = owed();",
+    replace: "    const left = 0;",
+    test: "tests/air-boot-reload-waits-for-queue.test.ts",
+    filter:
+      "boot reload after a server restart waits until the replayed offline queue has landed",
+  },
 ];
