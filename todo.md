@@ -148,6 +148,15 @@ or is small and known.
 
 ### Known and small
 
+- [ ] Boot: every error built while `_runPhases` (`src/server/aio.ts`, ~4400
+      lines in one function) is on the stack costs ~30–40 µs, not ~2: V8
+      resolves each frame's position by scanning that function's whole
+      position table, and `Error.stackTraceLimit` does not change it (measured
+      2026-10-19: 2 µs → 12 → 58 → 237 µs for a 10 / 1k / 5k / 20k-statement
+      function on the stack). A boot's ~12 missing-path checks (each a thrown
+      NotFound) cost ~0.9 ms of ~8. Splitting `_runPhases` into its phases
+      (and `createServer`, ~2000 lines) removes it; 1.0.21 only cut the
+      count (`installDir` checks the launcher first).
 - [ ] Electron zero-port (IPC): the main process holds the socket; no
       silent-socket watchdog there (the page's rule is in
       `src/browser/browser-vitals.ts`, `connectCli`'s in
