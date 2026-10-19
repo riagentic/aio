@@ -280,11 +280,14 @@ export function installDir(from: string = Deno.execPath()): string | null {
   const launcher = Deno.build.os === "windows" ? "run.bat" : "run.sh";
   let dir = dirname(from);
   for (let i = 0; i < 5; i++) {
-    const hasLauncher = existsSync(join(dir, launcher));
+    // The launcher first: every boot runs this, each missing path is a thrown
+    // NotFound, and a tree with no launcher (every dev run) needs no more.
     // A shared-runtime package has no `electron/` — its marker instead.
-    const hasElectron = existsSync(join(dir, "electron")) ||
-      existsSync(join(dir, SHARED_RUNTIME_MARKER));
-    if (hasLauncher && hasElectron) return dir;
+    if (
+      existsSync(join(dir, launcher)) &&
+      (existsSync(join(dir, "electron")) ||
+        existsSync(join(dir, SHARED_RUNTIME_MARKER)))
+    ) return dir;
     const up = dirname(dir);
     if (up === dir) break;
     dir = up;

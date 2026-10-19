@@ -56,6 +56,10 @@
   no longer share one, and on Windows it is out of the roaming profile. An
   existing profile is moved there once at the window's start; one in both places
   or that cannot move is kept, never lost.
+- **Boot checks one path per folder, not three**, when it looks for the
+  installed package it runs from: the launcher first, then `electron/` or the
+  shared-runtime marker. Each missing path was a thrown error, and the marker
+  check had made boot ~0.3 ms slower; it is now ~0.4 ms faster than 1.0.20.
 
 ### Sync and the page's connection
 
