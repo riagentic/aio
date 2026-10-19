@@ -117,12 +117,16 @@ Deno.test("config bridge hop 2: the call site stays a mechanical passthrough", a
   const src = await Deno.readTextFile(REPO + "src/server/aio.ts");
   const start = src.indexOf("setupTransport<S, A>({");
   assert(start > 0, "setupTransport call site not found in aio.ts");
-  const end = src.indexOf("\n  });", start);
+  // The call's own indent (it sits inside a helper): its keys are one level
+  // deeper, its `});` at the same depth.
+  const indent = src.slice(src.lastIndexOf("\n", start) + 1, start)
+    .match(/^ */)![0];
+  const end = src.indexOf(`\n${indent}});`, start);
   assert(end > start, "could not delimit the setupTransport call");
   const call = src.slice(start, end);
 
   assert(
-    /\n    config,\n/.test(call),
+    new RegExp(`\n${indent}  config,\n`).test(call),
     "aio.ts must hand the WHOLE config object to setupTransport " +
       "(`config,`) — a hand-copied literal is the bug: it dropped serveDirs " +
       "and _cellNames in alpha45, silently, after four earlier instances at " +

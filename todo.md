@@ -145,18 +145,35 @@ or is small and known.
       window, upgrade, start: does the window join the pin?). `am kill --json`
       there: 1.0.20 adds `"how"`, asks first (app exit 0, was 1), and can say
       `killed: false` with exit 1 when the process survives.
+- [ ] An `online` app's plain `--compile` binary (target `binary`) answers
+      `--aio-electron-runtime` with "shared", so each update first fetches its
+      Electron (~100 MB) into the store — also for a binary that only ever opens
+      in a browser (since 1.0.21; nothing breaks, it costs bandwidth). The
+      binary cannot tell before boot whether its client will be Electron.
+      Recommended: the build bakes the default client into `electron.json`, and
+      the prefetch skips a browser-default `binary`; its first
+      `--client=
+      electron` start downloads with the progress window, as
+      any online start.
 
 ### Known and small
 
-- [ ] Boot: every error built while `_runPhases` (`src/server/aio.ts`, ~4400
-      lines in one function) is on the stack costs ~30–40 µs, not ~2: V8
-      resolves each frame's position by scanning that function's whole
-      position table, and `Error.stackTraceLimit` does not change it (measured
-      2026-10-19: 2 µs → 12 → 58 → 237 µs for a 10 / 1k / 5k / 20k-statement
-      function on the stack). A boot's ~12 missing-path checks (each a thrown
-      NotFound) cost ~0.9 ms of ~8. Splitting `_runPhases` into its phases
-      (and `createServer`, ~2000 lines) removes it; 1.0.21 only cut the
-      count (`installDir` checks the launcher first).
+- [ ] Tests: run together in ONE `deno test --parallel` process (not the shard
+      runner, which isolates files), `updates-git-ref-exact`, the git-source
+      case of `updates-e2e`, `am-version-pin` and `am-versions-self-heal` fail
+      at `git` — the same on v1.0.21-beta, so a test elsewhere in the update
+      files leaks process-wide state (env or cwd) into them. Found 2026-10-19;
+      the suite runner is green.
+- [ ] Boot: an Error built under a call site deep in one long function costs in
+      step with that depth — V8 scans each frame's position table up to its call
+      site; `Error.stackTraceLimit` does not change it (measured 2026-10-19: 2
+      µs → 12 → 58 → 237 µs for a 10 / 1k / 5k / 20k-statement function on the
+      stack). Done after 1.0.21: `_runPhases`' long blocks and long calls,
+      `_runAsApp`'s body and `setupTransportInner`'s `createServer` call are
+      functions of their own — a boot's missing-path NotFound went ~72 → ~25 µs
+      (12 per boot). Left: call sites deep inside `createServer` (~2000 lines,
+      the watcher and stylesheet checks) and `startLifecycle`; and moving
+      `_runPhases`' phase functions out of the function itself.
 - [ ] Electron zero-port (IPC): the main process holds the socket; no
       silent-socket watchdog there (the page's rule is in
       `src/browser/browser-vitals.ts`, `connectCli`'s in

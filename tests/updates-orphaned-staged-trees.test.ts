@@ -21,9 +21,11 @@ import {
   assertRejects,
   assertThrows,
 } from "@std/assert";
-import { basename, join } from "@std/path";
+import { basename, dirname, join } from "@std/path";
 import {
   firstBootPath,
+  migrateLegacyOld,
+  oldCopyPath,
   pendingPath,
   pruneOld,
   restoreArtifact,
@@ -613,12 +615,13 @@ Deno.test("older builds: what 1.0.16 left beside a directory install is taken on
       ]).sort(([a], [b]) => a! < b! ? -1 : 1),
       kept.map((n) => [n, identity(join(root, n))!]),
     );
-    // Counted now: the oldest goes, a hand copy older still does not.
+    // Moved into old/ (a confirm does that), then counted: the oldest goes,
+    // a hand copy older still does not.
+    const legacy = migrateLegacyOld(data, [install]);
+    assertEquals([legacy.moved.length, legacy.failed], [olds.length, []]);
     await pruneOld(install, 3, data);
-    assertEquals(
-      names(root),
-      ["notes", ...kept.slice(1), ...theirs].sort(),
-    );
+    assertEquals(names(root), ["notes", "old", ...theirs].sort());
+    assertEquals(names(join(root, "old")), olds.slice(1));
 
     // The look was taken. What turns up under those names LATER is on no
     // record: left, named, not counted.
@@ -633,14 +636,10 @@ Deno.test("older builds: what 1.0.16 left beside a directory install is taken on
     await pruneOld(install, 1, data);
     assertEquals(
       names(root),
-      [
-        "notes",
-        "notes.old-0.0.9",
-        "notes.old-0.1.3",
-        "notes.staged-0.1.9",
-        ...theirs,
-      ].sort(),
+      ["notes", "notes.old-0.0.9", "notes.staged-0.1.9", "old", ...theirs]
+        .sort(),
     );
+    assertEquals(names(join(root, "old")), ["0.1.3"]);
   } finally {
     await dropTempDir(root);
     await dropTempDir(data);
@@ -780,10 +779,12 @@ Deno.test("kept copies: one cut off while it was being written is no version —
     // Three whole copies an earlier update kept. An entry with no state is one
     // written after its copy was whole — the shape every older record has.
     const whole = ["0.1.0", "0.1.1", "0.1.2"].map((v) =>
-      `${artifact}.old-${v}`
+      oldCopyPath(artifact, v)
     );
+    const olds = () => names(join(root, "old"));
     for (const [i, p] of whole.entries()) {
       record(data, p, "file", { role: "kept" });
+      await Deno.mkdir(dirname(p), { recursive: true });
       await Deno.writeTextFile(p, `\x7fELF notes ${basename(p)}`);
       // Aged BEFORE it is written down: on macOS setting a file's time to
       // before its creation moves its creation time too — and that is half
@@ -794,8 +795,9 @@ Deno.test("kept copies: one cut off while it was being written is no version —
     assertEquals(readOwned(data).map((e) => e.state), Array(3).fill(undefined));
     // The update to 0.1.4 was killed half-way through copying 0.1.3 aside:
     // recorded as filling, made, never finished.
-    const cut = `${artifact}.old-0.1.3`;
+    const cut = oldCopyPath(artifact, "0.1.3");
     record(data, cut, "file", { role: "kept" });
+    await Deno.mkdir(dirname(cut), { recursive: true });
     await Deno.writeTextFile(cut, "\x7fELF no");
     made(data, cut, { filling: true });
     const entry = readOwned(data).find((e) => e.path === cut)!;
@@ -804,13 +806,7 @@ Deno.test("kept copies: one cut off while it was being written is no version —
     // Not one of the 3 kept: no whole copy goes to make room for it, and
     // pruning does not remove it either (the next start does).
     await pruneOld(artifact, 3, data);
-    assertEquals(names(root), [
-      "notes",
-      "notes.old-0.1.0",
-      "notes.old-0.1.1",
-      "notes.old-0.1.2",
-      "notes.old-0.1.3",
-    ]);
+    assertEquals(olds(), ["0.1.0", "0.1.1", "0.1.2", "0.1.3"]);
     await assertRejects(
       () => restoreArtifact(artifact, cut, data),
       Error,
@@ -825,25 +821,18 @@ Deno.test("kept copies: one cut off while it was being written is no version —
     assertEquals(
       line(said, "removed"),
       `removed what an unfinished update left beside ${artifact}: ` +
-        `notes.old-0.1.3`,
+        join("old", "0.1.3", "notes"),
     );
-    assertEquals(names(root), [
-      "notes",
-      "notes.old-0.1.0",
-      "notes.old-0.1.1",
-      "notes.old-0.1.2",
-    ]);
+    assertEquals(names(root), ["notes", "old"]);
+    assertEquals(olds(), ["0.1.0", "0.1.1", "0.1.2"]);
     assert(!readOwned(data).some((e) => e.path === cut), "still on record");
 
     // A whole copy is unchanged: counted (keep 2 takes the oldest), and
     // rolled back to.
     await pruneOld(artifact, 2, data);
-    assertEquals(names(root), ["notes", "notes.old-0.1.1", "notes.old-0.1.2"]);
+    assertEquals(olds(), ["0.1.1", "0.1.2"]);
     await restoreArtifact(artifact, whole[2]!, data);
-    assertEquals(
-      await Deno.readTextFile(artifact),
-      "\x7fELF notes notes.old-0.1.2",
-    );
+    assertEquals(await Deno.readTextFile(artifact), "\x7fELF notes notes");
   } finally {
     await dropTempDir(root);
     await dropTempDir(data);
@@ -892,8 +881,9 @@ Deno.test("leftovers: a file with the same identity but other bytes is not ours 
   const { root, install, data } = await installed();
   const real = _ownedDeps.lstat;
   try {
-    const zip = `${install}.zip-0.1.6`, old = `${install}.old-0.1.2`;
+    const zip = `${install}.zip-0.1.6`, old = oldCopyPath(install, "0.1.2");
     await makeOwn(data, zip, "file");
+    await Deno.mkdir(dirname(old), { recursive: true });
     await makeOwn(data, old, "file", "kept");
     for (const e of readOwned(data)) assertMatch(e.sum!, /^12:[0-9a-f]{64}$/);
     // Rewritten in place: the same file number and creation time, the same
@@ -935,7 +925,7 @@ Deno.test("leftovers: a file with the same identity but other bytes is not ours 
       said.join("|"),
     );
     await pruneOld(install, 0, data);
-    assertEquals(names(root), ["notes", "notes.old-0.1.2", "notes.zip-0.1.6"]);
+    assertEquals(names(root), ["notes", "notes.zip-0.1.6", "old"]);
     for (const p of [zip, old]) {
       assertEquals(await Deno.readTextFile(p), "the user's!!");
     }
@@ -974,7 +964,9 @@ Deno.test("leftovers: a name the update needs that cannot even be looked at is i
 Deno.test("leftovers: the copy a directory update keeps aside is an intent until it is moved — a held file that stops the helper leaves the old copy ours, and the next try goes ahead", async () => {
   const { root, install, data } = await installed();
   try {
-    const old = `${install}.old-0.1.35`, staged = `${install}.staged-0.1.36`;
+    const old = oldCopyPath(install, "0.1.35");
+    const staged = `${install}.staged-0.1.36`;
+    await Deno.mkdir(dirname(old), { recursive: true });
     await makeOwn(data, old, "dir", "kept");
     await Deno.writeTextFile(join(old, "run.bat"), "held");
     const theOld = identity(old)!, theInstall = identity(install)!;

@@ -25,6 +25,12 @@ import { escHtml } from "../server/server-html-constants.ts";
 import { HEY, NO, OK } from "../diagnostics/fmt.ts";
 import { count } from "../diagnostics/fmt.ts";
 import { VERSION_STAMP } from "../protocol/protocol-version.ts";
+import {
+  iosLaunchImages,
+  webSplash,
+  webSplashColors,
+  webSplashFile,
+} from "./web-splash.ts";
 
 /** The artifact's name — the one spelling the builder writes and the fleet
  *  recognises (a DIRECTORY in the project root, like the iOS project). */
@@ -41,6 +47,8 @@ export function webManifest(
   title: string,
   appId: string,
   icons: readonly { src: string; sizes: string }[],
+  /** With `build.splash`: its colours (`webSplashColors`). */
+  colors?: { background: string; theme: string },
 ): string {
   const hue = appHue(appId);
   return JSON.stringify(
@@ -51,8 +59,8 @@ export function webManifest(
       start_url: "./",
       scope: "./",
       display: "standalone",
-      background_color: hex(hsl(hue, 0.68, 0.96)),
-      theme_color: hex(hsl(hue, 0.62, 0.68)),
+      background_color: colors?.background ?? hex(hsl(hue, 0.68, 0.96)),
+      theme_color: colors?.theme ?? hex(hsl(hue, 0.62, 0.68)),
       icons: icons.map((i) => ({ ...i, type: "image/png" })),
     },
     null,
@@ -329,7 +337,33 @@ export async function buildWeb(cfg: BuildConfig): Promise<void> {
       icons.push({ src, sizes: `${n}x${n}` });
     }
   }
-  const manifest = webManifest(title, binaryName, icons);
+  // `build.splash`: the page's own splash, and iOS's launch images of it.
+  const splash = cfg.splash ?? null;
+  let splashHead = "";
+  let launch: string[] = [];
+  if (splash) {
+    const png = Uint8Array.from(atob(splash.image.png), (c) => c.charCodeAt(0));
+    await Deno.writeFile(join(outDir, webSplashFile(splash)), png);
+    const imgs = await iosLaunchImages(splash, png);
+    if (typeof imgs === "string") {
+      console.warn(
+        `${HEY} build.splash: no iOS launch images — the image is ${imgs} ` +
+          `(8-bit, not interlaced is read); an installed app starts on its ` +
+          `background colour, then the page's splash`,
+      );
+    } else {
+      for (const i of imgs) await Deno.writeFile(join(outDir, i.file), i.png);
+      launch = imgs.map((i) => i.file);
+      splashHead = imgs.map((i) => i.link).join("\n") + "\n";
+    }
+  }
+  const page = splash ? webSplash(splash, title) : null;
+  const manifest = webManifest(
+    title,
+    binaryName,
+    icons,
+    splash ? webSplashColors(binaryName) : undefined,
+  );
   await Deno.writeTextFile(join(outDir, "manifest.webmanifest"), manifest);
   await Deno.writeTextFile(
     join(outDir, "index.html"),
@@ -338,7 +372,8 @@ export async function buildWeb(cfg: BuildConfig): Promise<void> {
       appId: binaryName,
       appVersion: cfg.version?.version,
       ...run.ui,
-      head: webHead(
+      body: page?.body,
+      head: (page ? page.head + splashHead : "") + webHead(
         title,
         icons[0]!.src,
         (JSON.parse(manifest) as { theme_color: string }).theme_color,
@@ -350,8 +385,12 @@ export async function buildWeb(cfg: BuildConfig): Promise<void> {
   const shellFiles = new Set(await listFiles(outDir));
   await _packAssetMounts(root, outDir, "the web build");
 
-  const files = await listFiles(outDir);
-  const version = await contentHash(outDir, files);
+  const all = await listFiles(outDir);
+  const version = await contentHash(outDir, all);
+  // iOS's launch images are fetched by iOS when the app is added to the Home
+  // Screen, never by the page: precached, they were ~20 full-screen PNGs
+  // every visitor's browser downloaded for nothing.
+  const files = all.filter((f) => !launch.includes(f));
   await Deno.writeTextFile(
     join(outDir, "sw.js"),
     serviceWorker(
@@ -370,7 +409,7 @@ export async function buildWeb(cfg: BuildConfig): Promise<void> {
   await normalizeArtifactModes(outDir);
   console.log(
     `${OK} ${webArtifactName(binaryName)}/ — ${
-      count(files.length + 1, "file")
+      count(all.length + 1, "file")
     }, offline cache ${version}. Serve it over https; iPhone: Share → Add to Home Screen`,
   );
 }

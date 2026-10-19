@@ -220,8 +220,8 @@ Deno.test("judge: a Windows directory install is rolled back by the swap helper,
   const dir = await swapped();
   try {
     const current = join(dir, "app");
-    const previous = `${current}.old-1.0.0`;
-    Deno.mkdirSync(previous);
+    const previous = join(dir, "old", "1.0.0", "app");
+    Deno.mkdirSync(previous, { recursive: true });
     Deno.removeSync(firstBootPath(dir));
     writePending(dir, {
       ...readPending(dir)!,

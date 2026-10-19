@@ -12,3 +12,4 @@ export {
   launchElectronClient,
   SandboxRefusal,
 } from "./electron-spawn.ts";
+export type { LaunchHooks } from "./electron-spawn.ts";

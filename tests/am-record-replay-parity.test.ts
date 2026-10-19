@@ -60,6 +60,17 @@ async function deno(args: string[], cwd: string) {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** Waits for the live state to show an event, never for a guessed time: under
+ *  load a 60 ms timer can outlast a 150 ms sleep, and the order the test pins
+ *  is then not the order that ran. */
+async function until(ok: () => boolean, what: string) {
+  const end = Date.now() + 15_000;
+  while (!ok()) {
+    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
+    await sleep(10);
+  }
+}
+
 Deno.test("am record: an onInit dispatch, an overlapping pair and a timer replay to the live state", async () => {
   const dir = await tempDir("am-record-parity-");
   try {
@@ -96,12 +107,15 @@ Deno.test("am record: an onInit dispatch, an overlapping pair and a timer replay
         );
         await r.body?.cancel();
       };
-      await sleep(60); // onInit's scan lands
+      await until(() => rc.scans === 1, "onInit's scan");
       // Two clients, the same instant: both read n = 0.
       await Promise.all([post("rc:raceRead"), post("rc:raceRead")]);
-      await sleep(80); // both write-sets land
+      await until(
+        () => rc.hist.filter((h: string) => h.startsWith("race")).length === 2,
+        "both write-sets",
+      );
       await post("rc:later");
-      await sleep(120); // the scheduled inc lands
+      await until(() => rc.hist.includes("inc"), "the scheduled inc");
       live = JSON.parse(
         JSON.stringify({ n: rc.n, scans: rc.scans, hist: rc.hist }),
       );
@@ -250,7 +264,7 @@ export const nest = cell("nest", {
         body: JSON.stringify({ type: "nest:outer", payload: { args: [] } }),
       });
       await r.body?.cancel();
-      await sleep(80);
+      await until(() => nest.t === 1, "the scheduled tick");
       entries = ((await (await fetch(
         `http://127.0.0.1:${port}/__aio/trojan/timeline`,
       )).json()) as { entries: TimelineEntry[] }).entries;
@@ -314,7 +328,7 @@ export const sc = cell("sc", {
       dbPath: ":memory:",
       schedules: [{
         id: "bump",
-        after: 60,
+        after: 1000,
         action: { type: "sc:bump", payload: { args: [] } },
       }],
     } as never);
@@ -333,7 +347,9 @@ export const sc = cell("sc", {
         await r.body?.cancel();
       };
       await post(3);
-      await sleep(150); // the tick lands
+      // The tick is due 1 s after boot — long after this first call — and the
+      // second call waits for it, so the live order is add, bump, add.
+      await until(() => sc.hist.includes("bump"), "the schedules: tick");
       await post(1);
       live = JSON.parse(JSON.stringify({ n: sc.n, hist: sc.hist }));
       entries = ((await (await fetch(

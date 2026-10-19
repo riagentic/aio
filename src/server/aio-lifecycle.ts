@@ -21,6 +21,7 @@ import {
   electronProfileName,
   electronStderrTail,
   launchElectron,
+  type LaunchHooks,
   SandboxRefusal,
 } from "../electron/electron.ts";
 import { appProfileDir } from "../electron/electron-profile.ts";
@@ -501,6 +502,10 @@ export interface LifecycleDeps<S, A> {
    *  schedule; without this a SIGTERM mid-boot was followed by "launching
    *  Electron" and a window — and installers — that outlived the app. */
   stopSignal?: AbortSignal;
+  /** The update this boot judged: told that this start opens a window
+   *  (`expect`, before the launch), what the window's start did (`hooks`),
+   *  and — `hooks.previous` — asked to start the version it replaced. */
+  window?: { expect(): void; hooks: LaunchHooks };
   /** Register the LAN-discovery responder stopper (called on shutdown). */
   setDiscoveryStop: (stop: (() => void) | null) => void;
   /** App lock — used to stamp discovery metadata for LAN discovery. */
@@ -608,6 +613,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     keepServer: configKeepServer,
     setElectronProc,
     stopSignal,
+    window: updateWindow,
     log,
   } = deps;
   noteLifecycle({ libraryMode: !!libraryMode });
@@ -1070,6 +1076,16 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
       showFile: heldShowRequestPath(appId),
     };
     const electronUrl = token ? withToken(localUrl, token) : localUrl;
+    // A desktop app's update is proven by its WINDOW, not by `onStart`.
+    updateWindow?.expect();
+    // "Start the previous version" chosen and under way: this start ends
+    // cleanly, without the no-window lines.
+    let handedOver = false;
+    const previous = updateWindow?.hooks.previous;
+    const launchHooks: LaunchHooks = {
+      ...updateWindow?.hooks,
+      previous: previous && (async () => (handedOver = await previous())),
+    };
     // NOT distDir — that can be the binary's embedded VFS copy, which this
     // (foreign) Electron process cannot open. Undefined ⇒ it loads over HTTP,
     // which aio-server kept alive for exactly this case.
@@ -1183,6 +1199,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
           distDir,
           cdpPort(),
           stopSignal,
+          launchHooks,
         );
       })
       .then((proc) => {
@@ -1198,6 +1215,11 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
             }
             log.info("shutdown began during boot — Electron not launched");
           }
+          return;
+        }
+        if (!proc && handedOver) {
+          log.info("the previous version is starting in this one's place");
+          stopProcess(0);
           return;
         }
         if (!proc) {

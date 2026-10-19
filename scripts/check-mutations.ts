@@ -2298,8 +2298,10 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "a failed shutdown during an update handover is swallowed and the FAILED line never fires",
     file: "src/server/aio.ts",
-    find: "      shutdown,",
-    replace: "      shutdown: () => shutdown().catch(() => {}),",
+    find:
+      "      // that line unreachable and the failed shutdown silent.\n      shutdown,",
+    replace:
+      "      // that line unreachable and the failed shutdown silent.\n      shutdown: () => shutdown().catch(() => {}),",
     test: "tests/updates-handover-shutdown-fails.test.ts",
     filter:
       "updates handover: aio.ts hands the updates runtime its shutdown unswallowed",
@@ -3431,12 +3433,11 @@ export const LEDGER: readonly Mutation[] = [
       "each directory update (electron-zip, a macOS .app) leaks one whole old install, forever",
     file: "src/server/updates-boot.ts",
     find:
-      "  _confirm.pruned = pruneOld(\n    pending!.artifact ?? artifactPath(),\n    KEEP_OLD,\n    dataDir,\n  ).catch(",
-    replace:
-      "  _confirm.pruned = Promise.resolve(void [KEEP_OLD, pruneOld]).catch(",
+      "  _confirm.pruned = pruneOld(install, keepOld, dataDir, pending!.previous)",
+    replace: "  _confirm.pruned = Promise.resolve({ removed: [], failed: [] })",
     test: "tests/updates-rollback.test.ts",
     filter:
-      "boot: confirming a directory update keeps only the newest KEEP_OLD rollbacks",
+      "boot: confirming a directory update moves what an older aio kept beside it into old/, and keeps only the newest keepOld",
   },
   {
     what:
@@ -4569,8 +4570,10 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "update confirm: a build that dies in the app's onStart was confirmed healthy before it died",
     file: "src/server/aio.ts",
-    find: "    slot.confirm = pendingConfirmer(_dirs.data, log);",
-    replace: "    pendingConfirmer(_dirs.data, log)();",
+    find:
+      "    slot.confirm = pendingConfirmer(\n      _dirs.data,\n      log,\n      resolveKeepOld(config.updates),\n    );",
+    replace:
+      "    pendingConfirmer(_dirs.data, log, resolveKeepOld(config.updates))();",
     test: "tests/update-confirm-after-app-onstart.test.ts",
     filter:
       "update confirm: a build that exits in the app's onStart is NOT confirmed",
@@ -4642,8 +4645,10 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "update confirm: a late confirm (an async onStart settling) confirmed the NEXT update's marker, dropping its rollback",
     file: "src/server/updates-boot.ts",
-    find: "    if (!atExit) return confirmPendingUpdate(dataDir, log, judged);",
-    replace: "    if (!atExit) return confirmPendingUpdate(dataDir, log);",
+    find:
+      "    if (!atExit) return confirmPendingUpdate(dataDir, log, judged, keepOld);",
+    replace:
+      "    if (!atExit) return confirmPendingUpdate(dataDir, log, undefined, keepOld);",
     test: "tests/update-confirm-after-app-onstart.test.ts",
     filter:
       "update confirm: a late confirm leaves the NEXT update's marker alone (an install this build ran)",
@@ -4934,9 +4939,9 @@ export const LEDGER: readonly Mutation[] = [
       "the boot sweep deletes a leftover under its own name — an install staging the same version again finds its tree being deleted",
     file: "src/server/updates-owned.ts",
     find:
-      "      Deno.renameSync(e.path, at);\n      ledger = [...ledger.filter((x) => x !== e), aside];\n      claimed.push({ name: basename(e.path), at });",
+      "      Deno.renameSync(e.path, at);\n      ledger = [...ledger.filter((x) => x !== e), aside];\n      claimed.push({ name: relative(dir, e.path), at });",
     replace:
-      "      ledger = ledger.filter((x) => x !== e);\n      claimed.push({ name: basename(e.path), at: e.path });",
+      "      ledger = ledger.filter((x) => x !== e);\n      claimed.push({ name: relative(dir, e.path), at: e.path });",
     test: "tests/updates-orphaned-staged-trees.test.ts",
     filter:
       "leftovers: one is moved out of its name before anything is deleted — under a name that is on record",
@@ -4956,9 +4961,10 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "a directory update's digest and release time are recorded before the swap — when it fails, the old version runs under the new release's date",
     file: "src/server/updates-runtime.ts",
-    find: "      forgetInstalledDigest(deps.dataDir);\n      deferHandOver(",
+    find:
+      "      forgetInstalledDigest(deps.dataDir);\n      // The helper sets this version aside",
     replace:
-      "      recordInstalledSha256(deps.dataDir, m.sha256, m.releasedAt);\n      deferHandOver(",
+      "      recordInstalledSha256(deps.dataDir, m.sha256, m.releasedAt);\n      // The helper sets this version aside",
     test: "tests/updates-e2e.test.ts",
     filter:
       "updates e2e: a .zip release is verified, unpacked, and handed to the swapper",
@@ -5017,8 +5023,9 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "the window's main script is not told the app's working directory — a child window's preload resolves against C:\\Windows",
     file: "src/electron/electron-spawn.ts",
-    find: "      env: { ...childEnv.env, AIO_APP_CWD: Deno.cwd() },",
-    replace: "      env: childEnv.env,",
+    find:
+      "      env: { ...childEnv.env, ...opts.env, AIO_APP_CWD: Deno.cwd() },",
+    replace: "      env: { ...childEnv.env, ...opts.env },",
     test: "tests/spawn-cwd-outside-install.test.ts",
     filter:
       "the window: it is told the app's working directory, and a source run starts it there",
@@ -5166,19 +5173,20 @@ export const LEDGER: readonly Mutation[] = [
   },
   {
     what:
-      "pruning counts and deletes every `<install>.old-…` beside the app — a folder of the user's with that prefix goes with the old versions",
+      "pruning counts the updater's kept copies wherever they are — one an older aio kept beside the install, not moved into old/, is pruned as one of them",
     file: "src/server/updates-apply.ts",
-    find: '      if (!kept || kept.state === "filling") continue;\n',
-    replace: '      if (kept?.state === "filling") continue;\n',
-    test: "tests/updates-apply.test.ts",
-    filter: "prune: `.old-` DIRECTORIES are pruned too, not just files",
+    find: "    if (dirname(dirname(e.path)) !== old) continue;\n",
+    replace: "",
+    test: "tests/updates-old-layout.test.ts",
+    filter:
+      "legacy: `<install>.old-<version>` copies on the record move into old/<version>/<install's name>; one not on the record is not touched",
   },
   {
     what:
       "a kept copy cut off while it was being written counts as one of the versions kept — a whole one is pruned to make room for half a build",
     file: "src/server/updates-apply.ts",
-    find: '      if (!kept || kept.state === "filling") continue;\n',
-    replace: "      if (!kept) continue;\n",
+    find: '    if (e.role !== "kept" || e.state === "filling") continue;\n',
+    replace: '    if (e.role !== "kept") continue;\n',
     test: "tests/updates-orphaned-staged-trees.test.ts",
     filter:
       "kept copies: one cut off while it was being written is no version — prune does not count it, a rollback refuses it, the next start removes it",
@@ -5259,8 +5267,8 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "pruning leaves what it deleted on the record — the list names an old version that is gone until a later start drops it",
     file: "src/server/updates-apply.ts",
-    find: "      () => forget(dataDir, f.path),\n",
-    replace: "      () => {},\n",
+    find: "    forget(dataDir, e.path);\n    removed.push(e.path);\n",
+    replace: "    removed.push(e.path);\n",
     test: "tests/updates-apply.test.ts",
     filter:
       "prune: what it deletes leaves the record in the same step — one it cannot delete stays on it",
@@ -5271,8 +5279,11 @@ export const LEDGER: readonly Mutation[] = [
       "pruning drops an old version from the record even when it could not delete it — what is left is no longer provably ours",
     file: "src/server/updates-apply.ts",
     find:
-      "      () => {}, // aio-ok: held open — kept, and on record, for a later prune\n",
-    replace: "      () => forget(dataDir, f.path),\n",
+      // aio-ok: the literal SOURCE line this mutation patches in and out
+      "      failed.push(`${e.path} (${err})`);\n      continue;\n",
+    replace:
+      // aio-ok: the literal SOURCE line this mutation patches in and out
+      "      failed.push(`${e.path} (${err})`);\n      forget(dataDir, e.path);\n      continue;\n",
     test: "tests/updates-apply.test.ts",
     filter:
       "prune: what it deletes leaves the record in the same step — one it cannot delete stays on it",
@@ -5302,8 +5313,8 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "pruning deletes an old version on its identity and size, not its bytes",
     file: "src/server/updates-apply.ts",
-    find: "    if (!ownEntry(dataDir, f.path)) continue;\n",
-    replace: "",
+    find: "    if (!ownEntry(dataDir, e.path)) continue;\n    try {\n",
+    replace: "    try {\n",
     test: "tests/updates-orphaned-staged-trees.test.ts",
     filter:
       "leftovers: a file with the same identity but other bytes is not ours — NTFS gives a file made again under a deleted one's name its creation time, and Deno rounds its file number",
@@ -5383,8 +5394,8 @@ export const LEDGER: readonly Mutation[] = [
     file: "src/server/updates-runtime.ts",
     find:
       // aio-ok: the literal SOURCE line this mutation patches in and out
-      "    for (const p of [download, staged, `${current}.old-${deps.appVersion}`]) {",
-    replace: "    for (const p of [download, staged]) {",
+      "        oldCopyPath(current, deps.appVersion),\n        ...(next !== current ? [next] : []),\n",
+    replace: "        ...(next !== current ? [next] : []),\n",
     test: "tests/updates-e2e.test.ts",
     filter:
       "updates e2e: a file of the user's where the old version is kept refuses a single-file update — nothing is downloaded, nothing changes",
@@ -5413,8 +5424,8 @@ export const LEDGER: readonly Mutation[] = [
     what: "the stamp is taken from a copy the updater cannot vouch for",
     file: "src/server/updates-apply.ts",
     find:
-      "      basename(e.path).startsWith(kept) && !!ownEntry(dataDir, e.path) &&",
-    replace: "      basename(e.path).startsWith(kept) &&",
+      "      !!ownEntry(dataDir, e.path) && existsSync(join(e.path, SFX_STAMP_FILE))",
+    replace: "      existsSync(join(e.path, SFX_STAMP_FILE))",
     test: "tests/updates-orphaned-staged-trees.test.ts",
     filter:
       "sfx stamp: an install whose stamp an older updater dropped takes it from the newest kept copy on record that has one — at a start, and at a swap",
@@ -5499,8 +5510,8 @@ export const LEDGER: readonly Mutation[] = [
     what:
       "the updater's own new copy at a kept name is called 'something else has the name now'",
     file: "src/server/updates-owned.ts",
-    find: "        if (!ours) dropped.push(basename(e.path));\n",
-    replace: "        dropped.push(basename(e.path));\n",
+    find: "        if (!ours) dropped.push(relative(dir, e.path));\n",
+    replace: "        dropped.push(relative(dir, e.path));\n",
     test: "tests/updates-orphaned-staged-trees.test.ts",
     filter:
       "leftovers: the copy a directory update keeps aside is an intent until it is moved — a held file that stops the helper leaves the old copy ours, and the next try goes ahead",
@@ -6509,6 +6520,476 @@ export const LEDGER: readonly Mutation[] = [
     test: "tests/check-orphans-live-owner.test.ts",
     filter:
       "clean:tmp: a temp dir whose recorded owner is alive is never swept; once the owner is gone it is, and so is the record",
+  },
+  {
+    what:
+      'a build to another out empties dist/ with the previous release it held (`"out": "dist"`) — the release is deleted without a word',
+    file: "src/build-all.ts",
+    find: "  if (outDir !== distDir) {",
+    replace: "  if (outDir === distDir) {",
+    test: "tests/build-other-out-keeps-dist-release.test.ts",
+    filter:
+      "dist: a build to another out keeps the release dist/ held, and says where",
+  },
+  {
+    what:
+      "an update writes the new version over a file named for the old one — a file NAMED 1.0.0 that IS 2.0.0 (a field report)",
+    file: "src/server/updates-apply.ts",
+    find:
+      // aio-ok: the literal SOURCE line this mutation patches in and out
+      "  return at.test(name) ? name.replace(at, () => `-${to}`) : name;",
+    replace: "  return name;",
+    test: "tests/updates-old-layout.test.ts",
+    filter:
+      "name: a file named with the running version is installed under the new release's own name",
+  },
+  {
+    what:
+      "old/ keeps three versions by default — two more whole copies of the app (each with its own Electron) than a rollback needs",
+    file: "src/server/updates-core.ts",
+    find: "export const DEFAULT_KEEP_OLD = 1;",
+    replace: "export const DEFAULT_KEEP_OLD = 3;",
+    test: "tests/updates-old-layout.test.ts",
+    filter:
+      "keepOld: one by default — the rollback — and an integer >= 1 when an app wants more; anything else refuses to boot",
+  },
+  {
+    what:
+      "the menu entry aio's installer wrote keeps starting the old path after the update moved the install to its new name — the app no longer opens from the menu",
+    file: "src/server/updates-apply.ts",
+    find: "    followed = followMenuEntry(base, opts.current, next);",
+    replace: "    followed = false;",
+    test: "tests/updates-e2e.test.ts",
+    filter:
+      "updates e2e: a versioned file name — the new version goes in under its own name, the old one into old/, the menu entry follows, and a rollback restores the old name",
+    os: ["linux"],
+  },
+  {
+    what:
+      "on macOS the bundle kept in old/ is a live <X>.app — LaunchServices registers it and can open the OLD copy for the app's links and files",
+    file: "src/server/updates-apply.ts",
+    find:
+      // aio-ok: the literal SOURCE line this mutation patches in and out
+      '  return os === "darwin" && name.endsWith(".app") ? `${name}.noindex` : name;',
+    replace: "  return name;",
+    test: "tests/updates-old-layout.test.ts",
+    filter:
+      "name: on macOS a bundle in old/ is `<X>.app.noindex` — no bundle name, skipped by Spotlight — and only there",
+  },
+  {
+    what:
+      "a rollback leaves the shared Electron store's records at the build that failed — `am prune` takes the restored version's Electron for unused",
+    file: "src/server/updates-boot.ts",
+    find:
+      "      await moveSharedUses(current, at, deps.sharedStore).catch((e) =>",
+    replace: "      await Promise.resolve().catch((e) =>",
+    test: "tests/updates-e2e.test.ts",
+    filter:
+      "updates e2e: a versioned file name — the new version goes in under its own name, the old one into old/, the menu entry follows, and a rollback restores the old name",
+    os: ["linux"],
+  },
+  {
+    what:
+      "build.splash: the splash is never opened — a packaged app's start shows nothing until Electron's window",
+    file: "src/electron/electron-spawn.ts",
+    find: "  splash.open();\n",
+    replace: "",
+    test: "tests/splash.test.ts",
+    filter:
+      "launch under the splash: the open is requested before the launch starts",
+  },
+  {
+    what:
+      "build.splash: the launch no longer hands the splash its ready signal — it stays on top of the loaded app for 30 s",
+    file: "src/electron/electron-spawn.ts",
+    find: "    proc = await launch(() => splash.ready());",
+    replace: "    proc = await launch(() => {});",
+    test: "tests/splash.test.ts",
+    filter:
+      "launch under the splash: the spawn is never held for the window, and the window's ready signal closes it",
+  },
+  {
+    what:
+      "build.splash: the window's mount line is not read as the ready signal — the splash outlives the loaded window",
+    file: "src/electron/electron-spawn.ts",
+    find: "            onMounted?.();",
+    replace: "            void onMounted;",
+    test: "tests/splash.test.ts",
+    filter:
+      "launch under the splash: the window's mount line on Electron's stderr is the ready signal — once, and only that line",
+  },
+  {
+    what:
+      "build.splash: the cap never fires — an app whose window never loads keeps the splash on top forever",
+    file: "src/electron/splash.ts",
+    find: "      return !s.downloading && e.at - s.capFrom >= o.capMs",
+    replace: "      return !s.downloading && e.at < 0",
+    test: "tests/splash.test.ts",
+    filter:
+      "splash lifetime: the cap closes it without a ready signal, never during a download, and counts from the download's end",
+  },
+  {
+    what:
+      "build.splash.minMs: the ready signal closes the splash at once and shows the main window — a fast app flashes the splash for a few ms",
+    file: "src/electron/splash.ts",
+    find: "    return n.shownAt !== null && at - n.shownAt >= o.minMs",
+    replace: "    return n.shownAt !== null && at >= 0",
+    test: "tests/splash.test.ts",
+    filter:
+      "splash lifetime: ready before minMs — the main window waits, and shows as the splash goes at minMs after it APPEARED",
+  },
+  {
+    what:
+      "build.splash: a ready app no longer waits for a splash that is not up yet — a warm start shows its window and no splash",
+    file: "src/electron/splash.ts",
+    find: "    return n.shownAt !== null && at - n.shownAt >= o.minMs",
+    replace: "    return n.shownAt === null || at - n.shownAt >= o.minMs",
+    test: "tests/splash.test.ts",
+    filter:
+      "splash lifetime: ready before the splash is visible — it still shows, for minMs, and the main window waits for it",
+  },
+  {
+    what:
+      "build.splash: the main window no longer waits for minMs — it opens over the splash the moment Electron makes it",
+    file: "src/electron/electron-shared.ts",
+    find: "    before: `  if (process.env.AIO_SPLASH_SHOW) b.show = false;`,",
+    replace: '    before: "",',
+    test: "tests/splash.test.ts",
+    filter:
+      "splash hold: the hidden main window shows by itself minMs + 5 s after ready-to-show — a splash that never says so never hides the app",
+  },
+  {
+    what:
+      "build.splash: an online start's download opens the plain progress window on top of the splash",
+    file: "src/electron/shared-runtime.ts",
+    find: "        inSplash = opts.splash?.download() ?? null;",
+    replace: "        inSplash = null;",
+    test: "tests/splash.test.ts",
+    filter:
+      "splash: an online start's download is shown IN the splash (no plain window), and a failure closes it before the plain Retry / Quit",
+  },
+  {
+    what:
+      "build.splash on Linux without yad: the splash falls to zenity text-only without the one line that says what was drawn",
+    file: "src/electron/runtime-dialog.ts",
+    find: "  opts.log?.(pick.note);",
+    replace: "  void pick.note;",
+    test: "tests/splash.test.ts",
+    filter:
+      "splash helpers: Linux without yad — a fake zenity is handed a text-only pulsing window, and the text as it changes",
+    os: "linux",
+  },
+  {
+    what:
+      "build.splash on the web: the page's splash goes at the mount, ignoring minMs — a fast app flashes it",
+    file: "src/build/web-splash.ts",
+    find:
+      // aio-ok: the literal SOURCE text this mutation patches in and out
+      "now=performance.now(),left=(p.length?p[0].startTime:now)+${s.minMs}-now;",
+    replace: "now=performance.now(),left=(p.length?p[0].startTime:now)+0-now;",
+    test: "tests/web-splash.test.ts",
+    filter:
+      "web splash (chromium): visible at first paint, gone after the mount and never before minMs, the app usable after",
+    os: ["linux"],
+  },
+  {
+    what:
+      "build.splash on the web: an app mounted before the first paint is timed from before the paint — the splash is short of minMs",
+    file: "src/build/web-splash.ts",
+    find: "if(left>0&&(p.length||!n))",
+    replace: "if(left>0&&!n)",
+    test: "tests/web-splash.test.ts",
+    filter:
+      "web splash (chromium): visible at first paint, gone after the mount and never before minMs, the app usable after",
+    os: ["linux"],
+  },
+  {
+    what:
+      "build.splash on the web: a shell without a splash carries splash markup anyway",
+    file: "src/server/server-html-gen.ts",
+    find:
+      // aio-ok: the literal SOURCE text this mutation patches in and out
+      '<div id="root"></div>${shell?.body ? `\\n  ${shell.body}` : ""}',
+    replace:
+      // aio-ok: the literal SOURCE text this mutation patches in
+      '<div id="root"></div>\\n  ${shell?.body ?? `<div id="aio-splash"></div>`}',
+    test: "tests/web-splash.test.ts",
+    filter:
+      "web splash: the shell is today's without build.splash, and carries it only when configured",
+  },
+  {
+    what:
+      "build.splash on Android: the splash closes the moment the page loads — a fast app flashes it for a few ms instead of minMs",
+    file: "src/build/android-template.ts",
+    find: "view.postDelayed({ hide() }, maxOf(0L, shownAt + minMs - now()))",
+    replace: "view.postDelayed({ hide() }, 0L)",
+    test: "tests/android-splash.test.ts",
+    filter:
+      "android splash: it closes on the page's load signal, never before minMs from its first frame, and at the cap",
+  },
+  {
+    what:
+      "build.splash on Android: an app without build.splash gets a splash baked into its activity — every APK changes behaviour",
+    file: "src/build/build-android.ts",
+    find: '  if (!spec) return "null";',
+    replace: '  if (!spec) return "AioSplashSpec(minMs = 0L)";',
+    test: "tests/android-splash.test.ts",
+    filter:
+      "android splash: absent, the activity bakes SPLASH = null and the build adds nothing",
+  },
+  {
+    what:
+      "build.splash on Android: an own MainActivity.kt that drops the splash builds an APK without it, with nothing said",
+    file: "src/build/build-android.ts",
+    find: "  if (opts.splash && !/AioSplash\\.show\\s*\\(/.test(sources)) {",
+    replace: "  if (opts.splash && sources === null) {",
+    test: "tests/android-splash.test.ts",
+    filter:
+      "android splash: an own MainActivity.kt without AioSplash is a loss only when build.splash is set",
+  },
+  {
+    what:
+      "macOS: the build a rollback set aside into old/ stays registered with LaunchServices, which can open it for the app's links and files",
+    file: "src/server/updates-boot.ts",
+    find:
+      // aio-ok: the literal SOURCE line this mutation patches in and out
+      '        ...(note ? [] : launchServices("-u", failedTo)),',
+    replace: "        ...(note ? [] : []),",
+    test: "tests/updates-old-layout.test.ts",
+    filter:
+      "rollback (macOS): the build that failed, set aside into old/, is forgotten by LaunchServices — with the Electron.app inside it — and the version put back is registered at the install's path",
+    os: ["darwin", "linux"],
+  },
+  {
+    what:
+      "macOS: only the outer bundle is unregistered — the Electron.app inside it, with the app's own identifier, stays registered",
+    file: "src/server/updates-apply.ts",
+    find: '  if (flag === "-u") walk(path);',
+    replace: "  void walk;",
+    test: "tests/updates-old-layout.test.ts",
+    filter:
+      "launchServices: -u forgets a bundle set aside AND every bundle inside it; -f registers only the one put back; off macOS, or for no bundle, nothing; a failure is said, never thrown — and one with no record (-10814) is no failure of -u",
+  },
+  {
+    what:
+      "macOS: the copy the swap helper sets aside into old/ stays registered with LaunchServices",
+    file: "src/server/updates-apply.ts",
+    find:
+      // aio-ok: the literal SOURCE line this mutation patches in and out
+      '  0) unreg "$prev"; unindex "$prev" ;;',
+    replace: '  0) unindex "$prev" ;;',
+    test: "tests/updates-first-boot-rollback.test.ts",
+    filter:
+      "first-boot rollback: LaunchServices forgets what the helper moves — the staged tree before it goes in, the old copy at the swap (and the bundle inside it, and from Spotlight), the failed build at the rollback — and registers the version put back",
+    os: ["linux", "darwin"],
+  },
+  {
+    what:
+      "a folder install prunes old/ only at the confirm — after the helper's move it holds keepOld + 1",
+    file: "src/server/updates-runtime.ts",
+    find: "        keepOld - 1,",
+    replace: "        keepOld,",
+    test: "tests/updates-e2e.test.ts",
+    filter:
+      "updates e2e: a folder install makes room in old/ at the install — the helper sets this version aside after the process is gone, so keepOld 1 holds at every point",
+  },
+  {
+    what:
+      "macOS: every update warns six times that it could not unregister bundles LaunchServices never had (-10814) — a warning that cries wolf",
+    file: "src/server/updates-apply.ts",
+    find: '      if (flag === "-u" && String(e).includes("-10814")) continue;',
+    replace: "",
+    test: "tests/updates-old-layout.test.ts",
+    filter:
+      "launchServices: -u forgets a bundle set aside AND every bundle inside it; -f registers only the one put back; off macOS, or for no bundle, nothing; a failure is said, never thrown — and one with no record (-10814) is no failure of -u",
+  },
+  {
+    what:
+      "macOS: the staged tree the updater checked stays registered with LaunchServices under the staged path, after it moved to the install's",
+    file: "src/server/updates-apply.ts",
+    find:
+      // aio-ok: the literal SOURCE lines this mutation patches in and out
+      'unreg "$new"\nheld=$(rm -rf "$prev" 2>&1)',
+    replace: 'held=$(rm -rf "$prev" 2>&1)',
+    test: "tests/updates-first-boot-rollback.test.ts",
+    filter:
+      "first-boot rollback: LaunchServices forgets what the helper moves — the staged tree before it goes in, the old copy at the swap (and the bundle inside it, and from Spotlight), the failed build at the rollback — and registers the version put back",
+    os: ["linux", "darwin"],
+  },
+  {
+    what:
+      "macOS: Spotlight keeps listing what it had indexed inside a copy moved into old/ (measured: 12 minutes and counting) — the copy's own Electron.app with the app's identifier",
+    file: "src/server/updates-apply.ts",
+    find: "      _lsDeps.index(path);",
+    replace: "      void path;",
+    test: "tests/updates-old-layout.test.ts",
+    filter:
+      "launchServices: -u forgets a bundle set aside AND every bundle inside it; -f registers only the one put back; off macOS, or for no bundle, nothing; a failure is said, never thrown — and one with no record (-10814) is no failure of -u",
+  },
+  {
+    what:
+      "macOS: the swap helper leaves the copy it set aside listed in Spotlight",
+    file: "src/server/updates-apply.ts",
+    find:
+      // aio-ok: the literal SOURCE line this mutation patches in and out
+      '  0) unreg "$prev"; unindex "$prev" ;;',
+    replace: '  0) unreg "$prev" ;;',
+    test: "tests/updates-first-boot-rollback.test.ts",
+    filter:
+      "first-boot rollback: LaunchServices forgets what the helper moves — the staged tree before it goes in, the old copy at the swap (and the bundle inside it, and from Spotlight), the failed build at the rollback — and registers the version put back",
+    os: ["linux", "darwin"],
+  },
+  {
+    what:
+      "an online AppImage started by a bundled one (an update from a bundled build) inherits its ELECTRON_PATH — another package's Electron, from a mount that can vanish",
+    file: "src/build/build-electron.ts",
+    find:
+      // aio-ok: the literal SOURCE line this mutation patches in and out
+      '      ? `unset ELECTRON_PATH\\nexport ${SHARED_RUNTIME_ENV}="shared:$HERE"\\n`',
+    replace:
+      // aio-ok: the literal SOURCE line this mutation patches in and out
+      '      ? `export ${SHARED_RUNTIME_ENV}="shared:$HERE"\\n`',
+    test: "tests/electron-shared-store-hygiene.test.ts",
+    filter:
+      "AppRun: the shared one unsets an inherited ELECTRON_PATH before its marker; the bundled one clears the marker",
+  },
+  {
+    what:
+      "a shared-runtime app starts an inherited $ELECTRON_PATH that still exists — another version, not the runtime its build pinned and hash-checked",
+    file: "src/electron/electron-spawn.ts",
+    find: "  if (shared && envPath) {",
+    replace: '  if (shared && envPath && !envPath.startsWith("")) {',
+    test: "tests/electron-shared-store-hygiene.test.ts",
+    filter:
+      "findElectronBin: a shared app ignores an inherited, EXISTING $ELECTRON_PATH (said once); a bundled one still takes it",
+  },
+  {
+    what:
+      "an online app's start deletes a runtime nothing names the moment it is unnamed — a moved, not-yet-reopened app re-downloads 100 MB (offline: cannot open)",
+    file: "src/electron/shared-prune.ts",
+    find: "  const minAgeMs = AUTO_PRUNE_MIN_AGE_DAYS * DAY_MS;",
+    replace: "  const minAgeMs = 0;",
+    test: "tests/electron-shared-store-hygiene.test.ts",
+    filter:
+      "auto-prune: only runtimes nothing installed names, unused past the grace, not locked, not the running one — once a day",
+  },
+  {
+    what:
+      "the auto-prune deletes a runtime another process is downloading or installing (its lock held)",
+    file: "src/electron/shared-prune.ts",
+    find:
+      "          if (!held) return; // being downloaded or installed right now",
+    replace: "          void held;",
+    test: "tests/electron-shared-store-hygiene.test.ts",
+    filter:
+      "auto-prune: only runtimes nothing installed names, unused past the grace, not locked, not the running one — once a day",
+  },
+  {
+    what:
+      "an online first start whose splash helper dies before its ack downloads Electron with NO visible window — the plain progress window never takes over",
+    file: "src/electron/splash-session.ts",
+    find:
+      // aio-ok: the literal SOURCE line this mutation patches in and out
+      `          c === "lost" ? "the splash's helper never showed it" : never`,
+    replace: "          never",
+    test: "tests/splash.test.ts",
+    filter:
+      "splash session: a helper that dies before its ack ends the download's handle as LOST (not a cancel)",
+  },
+  {
+    what:
+      "Electron's own cap shows the main window while the TopMost splash is still up (a slow helper, or an ack never written: up to 30 s)",
+    file: "src/electron/splash-session.ts",
+    find: "        if (!state.closed && opts.mainShown?.()) {",
+    replace: "        if (false as boolean) {",
+    test: "tests/splash.test.ts",
+    filter:
+      "splash: the main window showing by itself (Electron's cap) closes the splash at once — never both on screen",
+  },
+  {
+    what:
+      "a desktop app's update is confirmed once onStart came through — before its Electron was even downloaded — so a download that fails or is cancelled leaves a confirmed build that cannot open",
+    file: "src/server/aio.ts",
+    find: "      if (slots.window.holds(atExit, () => confirmOnce())) return;",
+    replace: "      void slots.window;",
+    test: "tests/updates-desktop-confirm.test.ts",
+    filter:
+      "desktop update e2e: a window that never loads is NOT confirmed by a clean exit — counted, and rolled back after the attempts; one that loads is confirmed",
+    os: "linux",
+  },
+  {
+    what:
+      "the boot never tells the update that this start opens a window, so a desktop build whose window never loads is confirmed like a server",
+    file: "src/server/aio-lifecycle.ts",
+    find: "    updateWindow?.expect();",
+    replace: "    void updateWindow;",
+    test: "tests/updates-desktop-confirm.test.ts",
+    filter:
+      "desktop update e2e: a window that never loads is NOT confirmed by a clean exit — counted, and rolled back after the attempts; one that loads is confirmed",
+    os: "linux",
+  },
+  {
+    what:
+      "a start whose Electron could not be had (download failed, cancelled, Quit) and that exits cleanly confirms the update at exit — no failed start is counted, so it is never rolled back",
+    file: "src/server/updates-boot.ts",
+    find: '      if (state !== "awaited") return false;',
+    replace: '      if (state !== "awaited" || atExit) return false;',
+    test: "tests/updates-desktop-confirm.test.ts",
+    filter:
+      "windowGate: a start that opens a window holds the confirm until the window loaded — never at exit before it; no window, no hold",
+  },
+  {
+    what:
+      "a rollback to a build that reads the window profile at Electron's old per-OS place leaves it in the app's home — the restored build starts with an empty profile",
+    file: "src/server/updates-boot.ts",
+    find: "  const back = await moveProfileBack(p.profileMoved);",
+    replace: '  const back = "none" as string;',
+    test: "tests/updates-desktop-confirm.test.ts",
+    filter:
+      "rollback: the shared store's pending record of the version removed goes, a started one stays; a profile the update moved goes back to where the restored build reads it",
+  },
+  {
+    what:
+      "a rollback leaves the removed version's pending record in the shared Electron store, so the runtime it fetched stays named by an app that no longer uses it",
+    file: "src/electron/shared-runtime.ts",
+    find: "    if (use?.exe !== exe || !use.pending) continue;",
+    replace: "    if (use?.exe !== exe || use.pending) continue;",
+    test: "tests/updates-desktop-confirm.test.ts",
+    filter:
+      "rollback: the shared store's pending record of the version removed goes, a started one stays; a profile the update moved goes back to where the restored build reads it",
+  },
+  {
+    what:
+      "a staged file that cannot be made executable leaves a marker naming a file that never came — the next start keeps the version FAILED and it is never offered again",
+    file: "src/server/updates-apply.ts",
+    find:
+      '  if (Deno.build.os !== "windows") await Deno.chmod(opts.staged, 0o755);\n  if (data) {\n    assertNotInTheWay(data, next);\n    record(data, previous, "file", {\n      role: "kept",\n      is: identity(opts.current),\n      sum: sumOf(opts.current),\n    });\n  }\n  mark(previous);\n',
+    replace:
+      '  if (data) {\n    assertNotInTheWay(data, next);\n    record(data, previous, "file", {\n      role: "kept",\n      is: identity(opts.current),\n      sum: sumOf(opts.current),\n    });\n  }\n  mark(previous);\n  if (Deno.build.os !== "windows") await Deno.chmod(opts.staged, 0o755);\n',
+    test: "tests/updates-desktop-confirm.test.ts",
+    filter:
+      "renamed swap: a staged file that cannot be made executable leaves NO marker — the version stays on offer, never judged 'did not take effect'",
+    os: ["linux", "darwin"],
+  },
+  {
+    what:
+      "a shipped invalid updates.keepOld refuses every boot before the judge counts the attempt, so the update is never rolled back",
+    file: "src/server/updates-core.ts",
+    find: "    return DEFAULT_KEEP_OLD;",
+    replace: "    throw e;",
+    test: "tests/updates-desktop-confirm.test.ts",
+    filter:
+      "judgeKeepOld: an invalid keepOld never stops the judge — said, and the default used",
+  },
+  {
+    what:
+      "the confirm of a renamed update claims the menu entry follows on every OS, even where none was written",
+    file: "src/server/updates-boot.ts",
+    find: "      (menuStarts(install)",
+    replace: "      (install",
+    test: "tests/updates-desktop-confirm.test.ts",
+    filter:
+      "renamed update confirmed: a WARNING naming both paths; the menu entry is claimed only where it starts the new one (Linux)",
   },
 ];
 

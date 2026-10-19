@@ -550,6 +550,8 @@ export function androidLocalHTML(
     /** The build's resolved version — `appVersion()` on a page with no
      *  server to ask. */
     appVersion?: string;
+    /** Markup after `#root`, before the bundle (the web splash). */
+    body?: string;
   },
 ): string {
   const head = headContent(
@@ -583,7 +585,7 @@ ${htmlOpen(shell?.lang, shell?.dir)}
 ${head}
 </head>
 <body>
-  <div id="root"></div>
+  <div id="root"></div>${shell?.body ? `\n  ${shell.body}` : ""}
   <script src="./app.js"></script>
 </body>
 </html>`;

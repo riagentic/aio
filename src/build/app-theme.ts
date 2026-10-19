@@ -242,6 +242,54 @@ export function appThemeBaseCss(name: string): string {
   return css;
 }
 
+/** The page's background and text, light and dark, as `[lightness %,
+ *  saturation]` over the app's hue — ONE table read by the stylesheet below
+ *  and by {@linkcode appIdentityColors}, so the two cannot drift apart. */
+const PAGE = {
+  bgLight: [99, 0.4],
+  textLight: [12, 0.14],
+  bgDark: [9, 0.14],
+  textDark: [94, 0.1],
+} as const;
+
+/** One mode's identity colours as `#rrggbb`: the page background and text,
+ *  the accent fill, and a track (the accent's quiet ground: 15% text over
+ *  the background). */
+export type IdentityColors = {
+  background: string;
+  text: string;
+  accent: string;
+  track: string;
+};
+
+/** The app's identity colours, light and dark — the same hue hash as its
+ *  monogram icon and its theme ({@linkcode appHue}), as plain hex for the
+ *  places no stylesheet reaches (the native start window). Pure. */
+export function appIdentityColors(
+  name: string,
+): { light: IdentityColors; dark: IdentityColors } {
+  const hue = appHue(name);
+  const [ah, as, al] = accentFill(hue).fill;
+  const accent = hslHex(ah, as, al);
+  const mode = (
+    bg: readonly [number, number],
+    tx: readonly [number, number],
+  ) => ({
+    background: hslHex(hue, bg[1], bg[0] / 100),
+    text: hslHex(hue, tx[1], tx[0] / 100),
+    accent,
+    track: hslHex(
+      hue,
+      bg[1] * 0.85 + tx[1] * 0.15,
+      (bg[0] * 0.85 + tx[0] * 0.15) / 100,
+    ),
+  });
+  return {
+    light: mode(PAGE.bgLight, PAGE.textLight),
+    dark: mode(PAGE.bgDark, PAGE.textDark),
+  };
+}
+
 export function appThemeCss(name: string): string {
   const hue = appHue(name);
   const { accent, onAccent, fill } = accentFill(hue);
@@ -284,10 +332,10 @@ export function appThemeCss(name: string): string {
   --aio-accent:${accent};
   --aio-on-accent:${onAccent};
   --aio-accent-ink:${inkLight};
-  --aio-bg:${n(99, 0.4)};
+  --aio-bg:${n(...PAGE.bgLight)};
   --aio-surface:#fff;
   --aio-surface-2:${n(97, 0.3)};
-  --aio-text:${n(12, 0.14)};
+  --aio-text:${n(...PAGE.textLight)};
   --aio-muted:${n(42, 0.08)};
   --aio-border:${n(88, 0.12)};
   --aio-danger:hsl(2 72% 45%);
@@ -309,10 +357,10 @@ export function appThemeCss(name: string): string {
 }
 @media (prefers-color-scheme: dark){:root{
   --aio-accent-ink:${inkDark};
-  --aio-bg:${n(9, 0.14)};
+  --aio-bg:${n(...PAGE.bgDark)};
   --aio-surface:${n(13, 0.12)};
   --aio-surface-2:${n(17, 0.1)};
-  --aio-text:${n(94, 0.1)};
+  --aio-text:${n(...PAGE.textDark)};
   --aio-muted:${n(64, 0.08)};
   --aio-border:${n(26, 0.1)};
   --aio-danger:hsl(2 78% 66%);

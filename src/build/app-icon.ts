@@ -455,15 +455,17 @@ export async function appIconPng(
   return await pngFromRgba(appIconPixels(name, size, id), size);
 }
 
-/** `size`×`size` RGBA pixels as a PNG — THE encoder: the monogram and an
- *  app's own icon scaled down for Windows (png-scale.ts) both leave here. */
+/** `size`×`h` RGBA pixels (square unless `h` is given) as a PNG — THE
+ *  encoder: the monogram, an app's own icon scaled down for Windows
+ *  (png-scale.ts) and the web splash's iOS launch images all leave here. */
 export async function pngFromRgba(
   px: Uint8Array,
   size: number,
+  h = size,
 ): Promise<Uint8Array> {
   const stride = size * 4;
-  const raw = new Uint8Array(size * (stride + 1));
-  for (let y = 0; y < size; y++) {
+  const raw = new Uint8Array(h * (stride + 1));
+  for (let y = 0; y < h; y++) {
     raw[y * (stride + 1)] = 0; // filter: none
     raw.set(px.subarray(y * stride, (y + 1) * stride), y * (stride + 1) + 1);
   }
@@ -475,7 +477,7 @@ export async function pngFromRgba(
   const ihdr = new Uint8Array(13);
   const hv = new DataView(ihdr.buffer);
   hv.setUint32(0, size);
-  hv.setUint32(4, size);
+  hv.setUint32(4, h);
   ihdr[8] = 8; // bit depth
   ihdr[9] = 6; // colour type: RGBA
   const parts = [

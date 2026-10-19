@@ -596,14 +596,14 @@ Deno.test("updates patch e2e: 1.0.0 installed + a channel with a patch → 2.0.0
     const to = await publish(r, { full: false });
     await update(r);
     assertEquals(await Deno.readFile(r.artifact), to);
-    assertEquals(await Deno.readFile(`${r.artifact}.old-1.0.0`), old);
+    assertEquals(await Deno.readFile(join(r.root, "old", "1.0.0", "app")), old);
     assertEquals(patchLines(r).length, 1, r.said.join("\n"));
     assert(
       patchLines(r)[0]!.includes("the whole release") &&
         patchLines(r)[0]!.includes("was not downloaded"),
       patchLines(r)[0],
     );
-    assertEquals(beside(r), ["app", "app.old-1.0.0"]);
+    assertEquals(beside(r), ["app", "old"]);
     // …and nothing of the patch download stays on the record.
     assertEquals(
       readOwned(r.dataDir).filter((e) => e.path.includes(".patch-")),
@@ -651,7 +651,7 @@ for (
       assert(line.includes("is not installed from a patch"), line);
       assert(line.includes("downloading the whole release"), line);
       assert(line.includes(why), line);
-      assertEquals(beside(r), ["app", "app.old-1.0.0"]);
+      assertEquals(beside(r), ["app", "old"]);
     } finally {
       undo?.();
       await dropTempDir(r.root);
@@ -846,7 +846,7 @@ Deno.test({
         r.said.some((l) => l.includes("is not downloaded again")),
         r.said.join("\n"),
       );
-      assertEquals(beside(r), ["app", "app.old-1.0.0"]);
+      assertEquals(beside(r), ["app", "old"]);
     } finally {
       _swapDeps.copyFile = real;
       await dropTempDir(r.root);

@@ -26,6 +26,7 @@ import { versionsDir } from "../src/server/framework-pin.ts";
 import { feedbackDir } from "../src/am/am-cmd-feedback.ts";
 import { installRoot } from "../src/server/app-dirs.ts";
 import { shardEnv } from "../scripts/test-shards.ts";
+import { sharedElectronRoot } from "../src/electron/shared-runtime.ts";
 
 const HOME = Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE") ?? "";
 const VARS = [
@@ -33,6 +34,7 @@ const VARS = [
   "AIO_FEEDBACK_DIR",
   "AIO_INSTALL_ROOT",
   "AIO_HOME",
+  "AIO_SHARED_ELECTRON_DIR",
 ] as const;
 
 /** Run `fn` with every store variable UNSET (as a single-file `deno test`
@@ -84,7 +86,9 @@ Deno.test("home stores: every per-user store a test can write is sandboxed, not 
     assertSandboxed(feedbackDir(), "feedbackDir()");
     assertSandboxed(installRoot(), "installRoot()");
     assertSandboxed(Deno.env.get("AIO_HOME")!, "AIO_HOME");
-    // Four DIFFERENT places: a shared one would let `am pin` provision into
+    // `am prune --yes` in a test pruned the REAL shared Electron store.
+    assertSandboxed(sharedElectronRoot(), "sharedElectronRoot()");
+    // Five DIFFERENT places: a shared one would let `am pin` provision into
     // the directory `am update` treats as the install.
     assertEquals(new Set(VARS.map((k) => Deno.env.get(k))).size, VARS.length);
   });

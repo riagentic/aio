@@ -378,11 +378,14 @@ const CATALOG: Row[] = [
       for (const m of src.matchAll(/\.catch\(\(\) => \{\s*\}\)/g)) {
         // What the swallowed promise IS — the call it hangs off, within the
         // 160 characters before it: a `Deno.remove` (cleanup) or a cell
-        // report (`setProgress` / `setPhase` / `setBackupPath`). Anything
-        // else here would be a swap or a marker answering ok while refused.
+        // report (`setProgress[Of]` / `setPhase` / `setRuntimeBytes` /
+        // `setBackupPath`, or the one `report()` helper they go through, which
+        // calls the updates cell itself). Anything else here would be a swap
+        // or a marker answering ok while refused.
         const before = src.slice(Math.max(0, m.index! - 160), m.index!);
         assert(
-          /Deno\.remove\(|setProgress|setPhase|setBackupPath/.test(before),
+          /Deno\.remove\(|setProgress|setPhase|setRuntimeBytes|setBackupPath|call\(deps\.cell \?\? createUpdatesCell\(\)\)/
+            .test(before),
           `a swallowed promise in updates-runtime that is neither a cleanup ` +
             `nor cell reporting: …${
               src.slice(Math.max(0, m.index! - 80), m.index! + 20)

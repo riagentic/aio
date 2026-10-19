@@ -8232,12 +8232,14 @@
         },
         "UpdatesCell": {
           "kind": "typeAlias",
-          "sig": "2b9ab8c25b01e810",
+          "sig": "562e00330b7e5373",
           "members": {
             "check": "req:c3a61dd7415c7ea6",
             "apply": "req:2c53636243e777ff",
             "setProgress": "req:2782ed3ebd395bc2",
             "setPhase": "req:2f672c56b9d11030",
+            "setProgressOf": "opt:ccd15c899ae29084",
+            "setRuntimeBytes": "opt:7277b3c26e43f510",
             "setBackupPath": "req:048ae6d8d8c54e25",
             "ready": "req:d831502f3c16c146",
             "dismiss": "req:d831502f3c16c146",
@@ -8245,12 +8247,12 @@
             "setChannel": "req:67351a619be6d6af"
           },
           "sigs": [
-            "2b9ab8c25b01e810"
+            "562e00330b7e5373"
           ]
         },
         "UpdatesConfig": {
           "kind": "typeAlias",
-          "sig": "96dd65c94b6135f7",
+          "sig": "7e4fc3fcce765347",
           "members": {
             "source": "req:2fb40568533c1a6d",
             "kind": "opt:bf8928410526fb8a",
@@ -8261,10 +8263,11 @@
             "keys": "opt:9762f1d3561fa9bf",
             "canApply": "opt:841db791a200d26f",
             "allowUnsigned": "opt:0ecca0fe3beba89b",
-            "prerelease": "opt:0ecca0fe3beba89b"
+            "prerelease": "opt:0ecca0fe3beba89b",
+            "keepOld": "opt:f6522636230fa080"
           },
           "sigs": [
-            "96dd65c94b6135f7"
+            "7e4fc3fcce765347"
           ]
         },
         "UpdatesInput": {
@@ -8303,7 +8306,7 @@
         },
         "UpdatesState": {
           "kind": "typeAlias",
-          "sig": "315fb12a2acad21b",
+          "sig": "57180fb9ef2245af",
           "members": {
             "enabled": "req:0ecca0fe3beba89b",
             "kind": "req:57a69e0e33e08083",
@@ -8314,6 +8317,8 @@
             "available": "req:aaa12873a9d390d7",
             "blocked": "req:5b024c885b151a19",
             "progress": "req:f6522636230fa080",
+            "progressOf": "opt:1b18d89c42dbc9e7",
+            "runtimeBytes": "opt:3e582a8a913ed0b0",
             "lastChecked": "req:cb5114588202887c",
             "error": "req:cb5114588202887c",
             "dismissed": "req:cb5114588202887c",
@@ -8321,7 +8326,7 @@
             "shortcutAdded": "opt:cb5114588202887c"
           },
           "sigs": [
-            "315fb12a2acad21b"
+            "57180fb9ef2245af"
           ]
         },
         "UpdateStatus": {

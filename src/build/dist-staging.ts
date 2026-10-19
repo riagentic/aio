@@ -97,6 +97,42 @@ export async function foreignDistRefusal(dist: string): Promise<string | null> {
     `cannot be renamed — the build always stages there).`;
 }
 
+/** The `dist/` entries a previous build left there as its OUTPUT (`out` was
+ *  dist/), which the staging clean of a build to ANOTHER out would delete:
+ *  with a release `manifest.json` present, it and every entry that is not
+ *  staging (dotfiles aside), sorted — else []. Pure.
+ *
+ *  From a field report: `"out": "dist"` held the last release, a test build
+ *  with `--out=dist-online` emptied dist/ as staging, and the release was
+ *  gone without a word. */
+export function distRelease(entries: readonly string[]): string[] {
+  if (!entries.includes("manifest.json")) return [];
+  return entries.filter((e) => !e.startsWith(".") && !keepInDistStaging(e))
+    .sort();
+}
+
+/** Move a previous release out of `dist` (see {@linkcode distRelease}) into
+ *  `to`, before a build whose out is elsewhere empties dist/. Returns the
+ *  names moved — [] when there was none (or no dist/). A move that fails
+ *  throws: the caller must not build over what is left. */
+export async function keepDistRelease(
+  dist: string,
+  to: string,
+): Promise<string[]> {
+  const entries: string[] = [];
+  try {
+    for await (const e of Deno.readDir(dist)) entries.push(e.name);
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) return [];
+    throw e;
+  }
+  const names = distRelease(entries);
+  if (names.length === 0) return [];
+  await Deno.mkdir(to, { recursive: true });
+  for (const n of names) await moveArtifact(join(dist, n), join(to, n));
+  return names;
+}
+
 /** The refusal for an artifact directory a build is about to EMPTY (the web
  *  site, the iOS project) when no aio build wrote it — it holds entries
  *  (dotfiles aside) but not `mark`, a file whose text includes `sign` — or

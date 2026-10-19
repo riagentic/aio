@@ -70,6 +70,9 @@ export const HOME_STORE_VARS = [
   "AIO_FEEDBACK_DIR",
   "AIO_INSTALL_ROOT",
   "AIO_HOME",
+  // The shared Electron store (src/electron/shared-runtime.ts,
+  // SHARED_ELECTRON_DIR_ENV): `am prune --yes` in a test pruned the REAL one.
+  "AIO_SHARED_ELECTRON_DIR",
 ] as const;
 
 /** Each {@link HOME_STORE_VARS} entry's sandbox subdirectory. */
@@ -78,6 +81,7 @@ const STORE_SUBDIR: Record<(typeof HOME_STORE_VARS)[number], string> = {
   AIO_FEEDBACK_DIR: "feedback",
   AIO_INSTALL_ROOT: "install-root",
   AIO_HOME: "aio-home",
+  AIO_SHARED_ELECTRON_DIR: "electron-store",
 };
 
 /** `<base>/<subdir>` for every store variable — the ONE layout both the
@@ -113,6 +117,14 @@ export function _sandboxHomeStores(): void {
       const base = aioTestDir("stores-");
       _storeBase = base;
       globalThis.addEventListener("unload", () => {
+        // `deno test` runs each FILE in its own isolate, and this fires as
+        // each one ends — but the environment is the process's. Left set,
+        // the next file's writes would land in the folder removed here and
+        // re-create it, with no one left to remove it (~280 MB per run with
+        // an Electron in it). Cleared, the next file pins its own.
+        for (const [k, v] of Object.entries(homeStoreEnv(base))) {
+          if (Deno.env.get(k) === v) Deno.env.delete(k);
+        }
         try {
           Deno.removeSync(base, { recursive: true });
         } catch {
@@ -175,15 +187,18 @@ export function aioTestRoot(): string {
   }
   const home = (Deno.env.get("HOME") ?? Deno.env.get("USERPROFILE") ?? "")
     .replace(/[/\\]+$/, "");
+  // The OS's own separator: `C:\Users\dev/tmp/aio` is one folder to Windows
+  // but not to a string compare (the lock registry's, for one).
+  const sep = Deno.build.os === "windows" ? "\\" : "/";
   if (!home) {
     // No home to be private in — fall back rather than fail a whole suite, and
     // the 0700 below is then the only thing protecting it.
     const tmp = (Deno.env.get("TMPDIR") || "/tmp").replace(/[/\\]+$/, "");
-    const root = `${tmp}/aio`;
+    const root = `${tmp}${sep}aio`;
     Deno.mkdirSync(root, { recursive: true, mode: 0o700 });
     return root;
   }
-  const root = `${home}/tmp/aio`;
+  const root = [home, "tmp", "aio"].join(sep);
   Deno.mkdirSync(root, { recursive: true, mode: 0o700 });
   return root;
 }

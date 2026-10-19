@@ -1,5 +1,103 @@
 # Changelog
 
+## v1.0.22-beta — a splash screen on every target, one install named for what it is, a faster boot (2026-10-20)
+
+> **Nothing is removed or renamed. One default moves:** an update keeps ONE old
+> version (it kept three), in `old/` beside the install —
+> `updates: { keepOld: 3 }` keeps three again. **Added:** `build.splash`,
+> `updates.keepOld`, and on the updates state `progressOf` / `runtimeBytes`
+> (with the cell's optional `setProgressOf` / `setRuntimeBytes`). An app
+> upgrades with `am pin` and `am fix` and no edit by hand. What an existing app
+> can notice: after its next update a versioned single-file install
+> (`myapp-1.0.0-x86_64.AppImage`, `myapp-1.0.0.exe`) carries the new version's
+> name — aio's own menu entry follows, a shortcut made by hand does not, and the
+> log names both paths once; the replaced version is in `old/<version>/`. See
+> [the upgrade guide](docs/upgrade/from-1.0.21-beta-to-1.0.22-beta.md).
+
+### Splash screen: `build.splash`
+
+- **One option, every target**: `"build": { "splash": { "image": "…png" } }` —
+  an image, optionally with text (`text`, `font`, `color`) and a progress bar
+  (`progress`, `bar`), shown from the app's first moment until it has loaded,
+  never shorter than `minMs` (default 1000). Without the key nothing changes.
+  `docs/build/targets.md#splash-buildsplash`.
+- **Desktop**: native — Windows Forms, Cocoa, `yad` (a text-only `zenity` window
+  without it, and one log line) — opened by the app before Electron starts and
+  never waited on; an online app's first Electron download runs inside it, the
+  bar filling. The main window loads hidden and shows as the splash leaves
+  (`minMs` after it became visible); a splash that is lost never holds it — the
+  window shows at ready, and at most `minMs` + 5 s after. No taskbar or Dock
+  entry, a short fade, sharp `@2x` images.
+- **Android**: a native overlay above the WebView from the first frame until the
+  page has mounted, in the splash colour from the system's starting window on
+  (no white flash); `build.android.strict` counts a dropped splash.
+- **Web / iOS**: the splash is in the page's HTML (it paints before any script)
+  and goes when the app has mounted; iOS Home Screen launch images for 21 iPhone
+  and iPad screens (iOS 15.4+), made from the same image. The bundle does not
+  grow.
+
+### Updates: one install, the old one in `old/`
+
+- **A versioned single-file install is replaced by the new version under its own
+  name** (`myapp-1.0.1-x86_64.AppImage` beside nothing but `old/`); a file the
+  user renamed is updated in place, as are installs under a supervisor (systemd,
+  `AIO_SUPERVISED=1`), whose unit names the path. aio's own menu entry
+  (`Exec=`/`TryExec=`), the install records and the shared Electron store's
+  records follow the file.
+- **The replaced version goes into `old/<version>/`** — the automatic rollback —
+  on every OS; `keepOld` (default 1) are kept, pruned at the install and the
+  confirm. On macOS a bundle there is `<X>.app.noindex`, unregistered from
+  LaunchServices and dropped from Spotlight, so `open` and file types never
+  reach an old copy. Older `<install>.old-<v>` copies are moved in at the first
+  confirm.
+- **A rollback puts `old/<previous>` back under its old name** and the failed
+  build into `old/`, the menu entry and store records with it.
+- **A desktop app's update is confirmed by its loaded window** — not by
+  `onStart` or a clean exit. An online build whose first Electron download
+  failed or was cancelled was confirmed and could not open; now that start
+  counts as failed and the update rolls back after two. The failed-download
+  question offers **Start the previous version** while it is in `old/`.
+- **A rollback undoes what the update did outside the install**: the window
+  profile goes back to Electron's old place for a build that reads it there, and
+  the store's `pending` record of the removed version is dropped. A profile
+  found in both places keeps the newer; the other is set aside, never deleted.
+- **`updates.progressOf`** says which download `progress` measures — `"app"`,
+  then `"runtime"` while an online app's new Electron downloads — and
+  `updates.runtimeBytes` that download's size, so a bar no longer fills twice
+  under one name.
+
+### Builds
+
+- **A build to another `out` keeps the release `dist/` held** (`"out": "dist"`):
+  it is moved to `.aio/kept-dist-<time>/` first, and said; dist/ is every
+  build's staging and was emptied without a word.
+
+### Boot
+
+- **~0.6 ms faster per boot**: V8 builds each Error by scanning every stack
+  frame's position table up to its call site, so a missing-path check deep in
+  one 4400-line function cost ~72 µs; the long blocks of boot are functions of
+  their own now (~25 µs each).
+
+### Fixed
+
+- **An online app started by a bundled one could start that package's Electron**
+  (an inherited `$ELECTRON_PATH`, from a mount that can vanish): the online
+  launcher clears it and the app ignores it — it starts only the Electron its
+  build pinned.
+- **The shared Electron store is cleaned for end users**: an online app removes,
+  at most once a day after its window has loaded, each Electron no installed app
+  names that nothing started from in 30 days. Only `am prune` did, and end users
+  have no `am`.
+- **A splash whose helper died before it showed** left the online download with
+  no window: the plain progress window takes over. A slow helper no longer
+  leaves the splash over the shown main window.
+
+- **macOS: the online download window updated, closed and heard Cancel** — on
+  macOS 14 it showed and then froze until the app's 2 s kill (1.0.21).
+- **Tests: the shared Electron store is sandboxed** — a test's `am prune --yes`
+  ran against the developer's real store; `check:home-clean` now watches it.
+
 ## v1.0.21-beta — one Electron per machine, the device clock follows the server, nothing a page sent is lost on a reload (2026-10-19)
 
 > **Nothing is removed or renamed, and no default moves.** An app without the

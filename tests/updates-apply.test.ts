@@ -8,7 +8,7 @@ import {
   assertStringIncludes,
   assertThrows,
 } from "@std/assert";
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
 import {
   _swapDeps,
   awaitPredecessor,
@@ -18,6 +18,7 @@ import {
   launchArtifactPath,
   madeByOlderUpdater,
   MAX_BOOT_ATTEMPTS,
+  oldCopyPath,
   pendingPath,
   type PendingUpdate,
   pruneKeepingNewest,
@@ -236,7 +237,7 @@ Deno.test("swap: an artifact that cannot exec is REFUSED before anything moves",
       "the running version must be untouched",
     );
     assertEquals(
-      await Deno.stat(`${current}.old-1.0.0`).catch(() => null),
+      await Deno.stat(oldCopyPath(current, "1.0.0")).catch(() => null),
       null,
       "nothing was moved aside — the refusal happened first",
     );
@@ -332,6 +333,7 @@ async function keptAside(
   day: number,
 ): Promise<void> {
   record(data, path, kind, { role: "kept" });
+  await Deno.mkdir(dirname(path), { recursive: true });
   if (kind === "dir") await Deno.mkdir(path);
   else await Deno.writeTextFile(path, "an old version");
   // Distinct mtimes so "newest" is well-defined — set BEFORE it is written
@@ -349,28 +351,53 @@ Deno.test("swap: pruning keeps the N newest rollback targets — of the ones the
     const current = join(dir, "app");
     await Deno.writeTextFile(current, "this version");
     for (const [i, v] of ["1.0.0", "2.0.0", "3.0.0"].entries()) {
-      await keptAside(data, `${current}.old-${v}`, "file", 1 + i);
+      await keptAside(data, oldCopyPath(current, v), "file", 1 + i);
     }
-    // Not on the record: a file of the user's under the same prefix, and two
-    // that look like old versions — one the very same kind of file as the
-    // running one (another program of the same format), and the oldest of
-    // all. None is counted, none is touched.
-    await Deno.writeTextFile(`${current}.old-photos`, "holiday");
-    await Deno.writeTextFile(`${current}.old-0.5.0`, "my notes on 0.5.0");
+    // Not on the record: a file of the user's in `old/`, a copy that looks
+    // like an old version, and one an older aio kept beside the install. None
+    // is counted, none is touched.
+    await Deno.mkdir(join(dir, "old", "photos"), { recursive: true });
+    await Deno.writeTextFile(join(dir, "old", "photos", "app"), "holiday");
+    await Deno.mkdir(join(dir, "old", "0.5.0"), { recursive: true });
+    await Deno.writeTextFile(
+      oldCopyPath(current, "0.5.0"),
+      "my notes on 0.5.0",
+    );
     await Deno.writeTextFile(`${current}.old-0.9.0`, "this was 0.9.0");
-    const t = new Date(2025, 0, 1);
-    await Deno.utime(`${current}.old-0.9.0`, t, t);
 
-    await pruneOld(current, 2, data);
+    const res = await pruneOld(current, 2, data);
 
-    const left = [...Deno.readDirSync(dir)].map((e) => e.name).sort();
-    assertEquals(left, [
+    assertEquals(res, { removed: [oldCopyPath(current, "1.0.0")], failed: [] });
+    assertEquals([...Deno.readDirSync(dir)].map((e) => e.name).sort(), [
       "app",
-      "app.old-0.5.0",
       "app.old-0.9.0",
-      "app.old-2.0.0",
-      "app.old-3.0.0",
-      "app.old-photos",
+      "old",
+    ]);
+    // The version folder it emptied goes with the copy.
+    assertEquals(
+      [...Deno.readDirSync(join(dir, "old"))].map((e) => e.name).sort(),
+      ["0.5.0", "2.0.0", "3.0.0", "photos"],
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+    await Deno.remove(data, { recursive: true });
+  }
+});
+
+Deno.test("prune: keepOld counts from the copy the update being confirmed set aside — and then by when each went in, not by its version", async () => {
+  const dir = await tmp();
+  const data = await tmp();
+  try {
+    const current = join(dir, "app");
+    await Deno.writeTextFile(current, "3.0.0");
+    // Set aside in this order: 2.0.0 (a build that failed, moved in by a
+    // rollback), then 1.0.0, then — taken over from an older aio — 0.9.0.
+    for (const [i, v] of ["2.0.0", "1.0.0", "0.9.0"].entries()) {
+      await keptAside(data, oldCopyPath(current, v), "file", 1 + i);
+    }
+    await pruneOld(current, 1, data, oldCopyPath(current, "1.0.0"));
+    assertEquals([...Deno.readDirSync(join(dir, "old"))].map((e) => e.name), [
+      "1.0.0",
     ]);
   } finally {
     await Deno.remove(dir, { recursive: true });
@@ -588,7 +615,7 @@ Deno.test("directory swap: handed to a shell OUTSIDE both directories", {
       spawn: (cmd, args) => (spawned = { cmd, args }),
     });
 
-    assertEquals(previous, `${current}.old-1.0.0`);
+    assertEquals(previous, oldCopyPath(current, "1.0.0"));
     const call = spawned as unknown as { cmd: string; args: string[] };
     assert(
       call.cmd === "/bin/sh",
@@ -658,7 +685,7 @@ Deno.test("directory swap: the generated script really performs the swap", {
 
     assertEquals(await Deno.readTextFile(join(current, "VERSION")), "2.0.0");
     assertEquals(
-      await Deno.readTextFile(join(`${current}.old-1.0.0`, "VERSION")),
+      await Deno.readTextFile(join(oldCopyPath(current, "1.0.0"), "VERSION")),
       "1.0.0",
     );
   } finally {
@@ -851,12 +878,12 @@ Deno.test({
   fn: async () => {
     const dir = await tmp();
     const data = await tmp();
-    const held = join(dir, "MyApp.old-1.0.0", "held");
+    const current = join(dir, "MyApp");
+    const held = join(oldCopyPath(current, "1.0.0"), "held");
     try {
-      const current = join(dir, "MyApp");
       await Deno.writeTextFile(current, "the running build");
       const old = ["1.0.0", "2.0.0", "3.0.0", "4.0.0"].map((v) =>
-        `${current}.old-${v}`
+        oldCopyPath(current, v)
       );
       for (const [i, p] of old.entries()) {
         await keptAside(data, p, "dir", 1 + i);
@@ -865,13 +892,14 @@ Deno.test({
       await Deno.mkdir(held);
       await Deno.writeTextFile(join(held, "f"), "x");
       await Deno.chmod(held, 0o500);
-      const t = new Date(2026, 0, 1);
-      await Deno.utime(old[0]!, t, t);
 
-      await pruneOld(current, 1, data);
+      const res = await pruneOld(current, 1, data);
+      assertEquals(res.removed, [old[2], old[1]]);
+      assertEquals(res.failed.length, 1);
+      assertStringIncludes(res.failed[0]!, old[0]!);
       assertEquals(
-        [...Deno.readDirSync(dir)].map((e) => e.name).sort(),
-        ["MyApp", "MyApp.old-1.0.0", "MyApp.old-4.0.0"],
+        [...Deno.readDirSync(join(dir, "old"))].map((e) => e.name).sort(),
+        ["1.0.0", "4.0.0"],
       );
       assertEquals(readOwned(data).map((e) => e.path), [old[0], old[3]]);
     } finally {
@@ -882,7 +910,7 @@ Deno.test({
   },
 });
 
-Deno.test("prune: `.old-` DIRECTORIES are pruned too, not just files", async () => {
+Deno.test("prune: old DIRECTORIES are pruned too, not just files", async () => {
   // electron-zip keeps its rollback as a whole unpacked install. Skipping
   // directories meant that target leaked one complete copy of the app per
   // update, forever — nothing failed, the disk just filled.
@@ -894,43 +922,35 @@ Deno.test("prune: `.old-` DIRECTORIES are pruned too, not just files", async () 
     const launcher = Deno.build.os === "windows" ? "run.bat" : "run.sh";
     await Deno.writeTextFile(join(current, launcher), "start MyApp");
     for (const [i, v] of ["1.0.0", "2.0.0", "3.0.0"].entries()) {
-      await keptAside(data, `${current}.old-${v}`, "dir", 1 + i);
+      await keptAside(data, oldCopyPath(current, v), "dir", 1 + i);
     }
     // A folder of the user's, and a copy of this very app somebody made by
-    // hand (its launcher, an electron/ folder, a file of their own) — the
-    // oldest. On no record: not counted, not touched.
-    await Deno.mkdir(`${current}.old-projects`);
-    await Deno.writeTextFile(join(`${current}.old-projects`, "f"), "mine");
-    const legacy = `${current}.old-0.9.0`;
-    await Deno.mkdir(join(legacy, "electron"), { recursive: true });
-    await Deno.writeTextFile(join(legacy, launcher), "start MyApp");
-    await Deno.writeTextFile(join(legacy, "my-config.json"), "{}");
-    const t = new Date(2025, 0, 1);
-    await Deno.utime(legacy, t, t);
+    // hand (its launcher, an electron/ folder, a file of their own). On no
+    // record: not counted, not touched.
+    const projects = oldCopyPath(current, "projects");
+    await Deno.mkdir(projects, { recursive: true });
+    await Deno.writeTextFile(join(projects, "f"), "mine");
+    const byHand = oldCopyPath(current, "0.9.0");
+    await Deno.mkdir(join(byHand, "electron"), { recursive: true });
+    await Deno.writeTextFile(join(byHand, launcher), "start MyApp");
+    await Deno.writeTextFile(join(byHand, "my-config.json"), "{}");
     // A link of the user's to this very app is a link, not a copy of it.
     const posix = Deno.build.os !== "windows";
     if (posix) await Deno.symlink(current, `${current}.old-0.8.0`);
     assertEquals(
-      [legacy, `${current}.old-0.8.0`, `${current}.old-projects`].map((p) =>
+      [byHand, ...(posix ? [`${current}.old-0.8.0`] : []), projects].map((p) =>
         madeByOlderUpdater(p, current)
       ),
-      [true, false, false],
+      [true, ...(posix ? [false] : []), false],
     );
 
     await pruneOld(current, 1, data);
-    const left = [...Deno.readDirSync(dir)].map((e) => e.name).sort();
-    assertEquals(left, [
-      "MyApp",
-      ...(posix ? ["MyApp.old-0.8.0"] : []),
-      "MyApp.old-0.9.0",
-      "MyApp.old-3.0.0",
-      "MyApp.old-projects",
-    ]);
-    assertEquals(await Deno.readTextFile(join(legacy, "my-config.json")), "{}");
     assertEquals(
-      await Deno.readTextFile(join(`${current}.old-projects`, "f")),
-      "mine",
+      [...Deno.readDirSync(join(dir, "old"))].map((e) => e.name).sort(),
+      ["0.9.0", "3.0.0", "projects"],
     );
+    assertEquals(await Deno.readTextFile(join(byHand, "my-config.json")), "{}");
+    assertEquals(await Deno.readTextFile(join(projects, "f")), "mine");
   } finally {
     await Deno.remove(dir, { recursive: true });
     await Deno.remove(data, { recursive: true });
@@ -1054,13 +1074,13 @@ Deno.test("directory swap: the copy it keeps is on record as the very folder tha
     });
     assertEquals(
       readOwned(data).map((e) => [e.path, e.kind, e.role, e.is]),
-      [[`${current}.old-1.0.0`, "dir", "kept", identity(current)!]],
+      [[oldCopyPath(current, "1.0.0"), "dir", "kept", identity(current)!]],
     );
     assertEquals(spawned, 1);
     // The helper deletes whatever has that name. Somebody's folder there —
     // even a copy of this very app, made by hand — is on no record: refused
     // before the helper is started, nothing written.
-    const theirs = `${current}.old-1.5.0`;
+    const theirs = oldCopyPath(current, "1.5.0");
     await app(theirs);
     await Deno.writeTextFile(join(theirs, "user.txt"), "mine");
     clearPending(data);
@@ -1105,7 +1125,7 @@ Deno.test("swap: the copy a single-file update keeps is recorded as the very fil
         pending: { dataDir: data, from: "1.0.0", to: "2.0.0" },
       })
     );
-    const kept = `${current}.old-1.0.0`;
+    const kept = oldCopyPath(current, "1.0.0");
     // On record as that very file, and as not whole yet.
     assertEquals(
       readOwned(data).map((e) => [e.path, e.role, e.is, e.state]),
@@ -1128,7 +1148,7 @@ Deno.test(
     const data = await tmp();
     const real = _swapDeps.copyFile;
     try {
-      const current = join(dir, "app"), kept = `${current}.old-1.0.0`;
+      const current = join(dir, "app"), kept = oldCopyPath(current, "1.0.0");
       const swap = (to: string) =>
         swapArtifact({
           current,

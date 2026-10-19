@@ -20,6 +20,8 @@ import { isStandalone, resolveAppDir, resolveEntry } from "./config-rules.ts";
 // Their home moved; every importer of this module keeps finding them here.
 export { isStandalone, resolveAppDir, resolveEntry };
 import { resolveMacHost } from "./dmg.ts";
+import { resolveSplash } from "./splash.ts";
+import type { SplashSpec } from "../electron/splash.ts";
 import { isValidBundleId } from "./build-ios.ts";
 // The bundle-id shape rule is Apple's, and iOS already owns its one copy.
 export { isValidBundleId };
@@ -262,6 +264,9 @@ export interface BuildConfig {
    *  `build.electronRuntime`. Optional so a config built by hand (tests)
    *  means the default. */
   electronRuntime?: ElectronRuntimeMode;
+  /** deno.json `build.splash`, resolved (`build/splash.ts`) — baked into
+   *  `dist/electron.json`. Null/absent: no splash. */
+  splash?: SplashSpec | null;
   /** The macOS bundle identifier (`CFBundleIdentifier`) — the app's permanent
    *  OS-level identity, shown as the Dock entry's reverse-DNS name and used by
    *  macOS to merge the Deno server and its Electron child into ONE app.
@@ -511,6 +516,23 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
     console.error(`${NO} ${runtimeDecl.error}`);
     Deno.exit(1);
   }
+  // `build.splash` — checked on EVERY build (a key validated only when it
+  // fires is a typo that ships), its image included.
+  const splashDecl = resolveSplash(mainConfig, {
+    root,
+    appId: binaryName,
+    read: (p) => {
+      try {
+        return Deno.readFileSync(p);
+      } catch {
+        return null; // aio-ok: the resolver names the missing file
+      }
+    },
+  });
+  if ("error" in splashDecl) {
+    console.error(`${NO} ${splashDecl.error}`);
+    Deno.exit(1);
+  }
   const extrasNote = chromiumExtrasNote(mainConfig, doElectron);
   if (extrasNote) warn(extrasNote);
   // THE app version. The fleet resolves it once and hands it down
@@ -746,6 +768,7 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
     macosHost,
     windowsShortcut,
     electronRuntime: runtimeDecl.mode,
+    splash: splashDecl.splash,
     macBundleId,
     version,
     configEntry,

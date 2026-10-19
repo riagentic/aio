@@ -15,14 +15,17 @@ import {
 } from "./electron-client-script.ts";
 import { electronMainScriptUDS } from "./electron-uds.ts";
 import { log } from "../diagnostics/logger-api.ts";
-import { classifyElectronLine } from "./electron-renderer-log.ts";
+import { classifyElectronLine, MOUNT_LINE } from "./electron-renderer-log.ts";
+import { bakedSplash } from "./splash.ts";
+import { type SplashSession, splashSession } from "./splash-session.ts";
 import { appImageOwner, isCompiled, isPipePath } from "../server/paths.ts";
 import { isProcessAlive } from "../server/single-instance-lock.ts";
 import { DENO_JSON_NAMES, parseDenoJson } from "../server/deno-json.ts";
 import { HEY } from "../diagnostics/fmt.ts";
 import { redactUrlToken } from "../diagnostics/redact.ts";
 import { neutralCwd, spawnInheritingOrNull } from "../server/no-console.ts";
-import { sharedRuntimeForStart } from "./shared-runtime.ts";
+import { sharedElectronDir, sharedRuntimeForStart } from "./shared-runtime.ts";
+import { autoPruneSharedStore } from "./shared-prune.ts";
 import { launchArtifactPath } from "../server/updates-apply.ts";
 import {
   bakedElectronRuntime,
@@ -128,6 +131,11 @@ export type FindElectronOpts = {
   /** A shared-runtime start (`"build": { "electronRuntime": "online" }`):
    *  injected in tests; the default is `sharedRuntimeForStart`. */
   sharedRuntime?: typeof sharedRuntimeForStart;
+  /** The start's splash: a shared-runtime download is shown in it. */
+  splash?: SplashSession | null;
+  /** A shared-runtime start: the failure question's "Start the previous
+   *  version" (see `sharedRuntimeForStart`). */
+  previous?: () => Promise<boolean>;
 };
 
 /** Resolves an Electron binary — $ELECTRON_PATH > packaged dist > node_modules
@@ -146,23 +154,29 @@ export async function findElectronBin(
   opts: FindElectronOpts = {},
 ): Promise<string | null> {
   const compiledApp = opts.compiled ?? isCompiled();
-  // A shared-runtime app carries no runtime of its own, so its package
-  // layout's ELECTRON_PATH (the Windows exe's launcher sets it at the
-  // install's `electron\`, which this build leaves empty) points at nothing
-  // by design — that is not the "set but not found" this rung warns about.
   const shared = compiledApp &&
     await bakedElectronRuntime(opts.distDir) === "shared";
   // 1. ELECTRON_PATH env var (AppImage / custom deployment)
   let envPath = Deno.env.get("ELECTRON_PATH");
-  if (
-    shared && envPath &&
-    packagedElectronCandidates(opts.execPath, opts.os).includes(envPath)
-  ) {
-    try {
-      await Deno.stat(envPath);
-    } catch {
-      envPath = undefined;
+  // A shared-runtime app starts ONLY the store's runtime its build pinned and
+  // hash-checked. An ELECTRON_PATH it sees is another package's: a bundled
+  // AppImage's AppRun exports one into its own mount, and an update from a
+  // bundled build (or any app started from a bundled one's process) inherits
+  // it — another Electron version, from a mount that can vanish mid-run. Its
+  // own package layout's (the Windows exe's launcher sets it at the
+  // install's `electron\`, which this build leaves empty) points at nothing
+  // by design, and is dropped without a word.
+  if (shared && envPath) {
+    if (
+      !packagedElectronCandidates(opts.execPath, opts.os).includes(envPath)
+    ) {
+      log.info(
+        `electron: ignoring the inherited $ELECTRON_PATH (${envPath}) — ` +
+          `this app starts only the Electron its build pinned, from the ` +
+          `shared store`,
+      );
     }
+    envPath = undefined;
   }
   // An Electron AppImage's AppRun exports it into its own mount, and every
   // child inherits it: an app started from that AppImage's terminal would run
@@ -241,6 +255,8 @@ export async function findElectronBin(
       // What the download must hash to — pinned by the build, carried in
       // this binary, never taken from the network.
       sha256: await bakedRuntimeSha(opts.distDir, electronSlug()),
+      splash: opts.splash,
+      previous: opts.previous,
     });
   }
 
@@ -922,7 +938,11 @@ export async function electronStderrTail(
  *  do the main process's own tagged warnings/errors (category `electron`); GPU
  *  device-probe noise is dropped and counted; everything else passes through
  *  untouched. The sorting is `classifyElectronLine` — pure, unit-tested. */
-export function forwardStderr(proc: Deno.ChildProcess): void {
+export function forwardStderr(
+  proc: Deno.ChildProcess,
+  /** The renderer's mount line came: the main window has loaded. */
+  onMounted?: () => void,
+): void {
   let dropped = 0;
   let reported = false;
   const tail: string[] = [];
@@ -959,6 +979,9 @@ export function forwardStderr(proc: Deno.ChildProcess): void {
           log.warn(r.from, r.text);
           return;
         case "info":
+          if (r.from === "renderer" && r.text.startsWith(MOUNT_LINE[0])) {
+            onMounted?.();
+          }
           log.info(r.from, r.text);
           return;
         case "raw":
@@ -1599,6 +1622,10 @@ async function spawnElectron(
     profileDir?: string;
     /** The app's display title — its AppUserModelID on Windows. */
     title?: string;
+    /** The main window has loaded (the renderer's mount line). */
+    onMounted?: () => void;
+    /** Added to the window's environment (the splash hold). */
+    env?: Record<string, string>;
   } = {},
 ): Promise<Deno.ChildProcess> {
   // Spawn ELECTRON, not the thing that spawns it. `node_modules/.bin/electron`
@@ -1656,7 +1683,7 @@ async function spawnElectron(
       // the inherited environment, so the shim passes it through to Electron.
       // AIO_APP_CWD: the app's working directory, for the main script — the
       // window's own may be another one (`packagedCwd`).
-      env: { ...childEnv.env, AIO_APP_CWD: Deno.cwd() },
+      env: { ...childEnv.env, ...opts.env, AIO_APP_CWD: Deno.cwd() },
       cwd: packagedCwd(neutralCwd()),
       ...(stdio === "inherit"
         ? { stdout: "inherit" as const }
@@ -1697,7 +1724,7 @@ async function spawnElectron(
     removeEventListener("unload", cleanup);
     throw e;
   }
-  forwardStderr(proc);
+  forwardStderr(proc, opts.onMounted);
   // Primary cleanup: after Electron exits normally
   proc.status.then(cleanup);
   proc.status.then(() => removeEventListener("unload", cleanup));
@@ -1734,8 +1761,133 @@ export function electronSource(
   return "cache";
 }
 
-/** Spawns Electron with the main app script */
+/** `launch` run under the start's splash: the splash is opened FIRST and
+ *  never awaited (the launch does not wait for a window), told when the main
+ *  window has loaded (`onMounted`), and closed when Electron exits or never
+ *  starts, and when `signal` aborts. No splash: `launch` alone. */
+export async function runUnderSplash(
+  splash: SplashSession | null,
+  signal: AbortSignal | undefined,
+  launch: (onMounted?: () => void) => Promise<Deno.ChildProcess | null>,
+): Promise<Deno.ChildProcess | null> {
+  if (!splash) return launch();
+  splash.open();
+  const stop = () => splash.shutdown();
+  signal?.addEventListener("abort", stop, { once: true });
+  splash.closed.then(() => signal?.removeEventListener("abort", stop));
+  let proc: Deno.ChildProcess | null;
+  try {
+    proc = await launch(() => splash.ready());
+  } catch (e) {
+    splash.exit();
+    throw e;
+  }
+  if (!proc) splash.exit();
+  else proc.status.then(() => splash.exit(), () => splash.exit());
+  return proc;
+}
+
+/** What the start of an app's window tells the boot (an update's confirm). */
+export type LaunchHooks = {
+  /** The main window has loaded (the renderer's mount line). */
+  mounted?: () => void;
+  /** The profile was moved from Electron's old per-OS place `from` to `to`. */
+  profileMoved?: (from: string, to: string) => void;
+  /** Offered as "Start the previous version" when the shared runtime could
+   *  not be had: true once it is starting in this one's place. */
+  previous?: () => Promise<boolean>;
+};
+
+/** Spawns Electron with the main app script — under the splash a packaged
+ *  app's build baked (`build.splash`); a run from source shows none. */
 export async function launchElectron(
+  url: string,
+  log: Log,
+  meta?: AioMeta,
+  uds?: Parameters<typeof launchElectronNow>[3],
+  distDir?: string,
+  cdpPort?: number,
+  signal?: AbortSignal,
+  hooks: LaunchHooks = {},
+): Promise<Deno.ChildProcess | null> {
+  if (signal?.aborted) return null;
+  const spec = isCompiled() ? await bakedSplash(distDir) : null;
+  if (!spec) {
+    return launchElectronNow(
+      url,
+      log,
+      meta,
+      uds,
+      distDir,
+      cdpPort,
+      signal,
+      {},
+      hooks,
+    );
+  }
+  // The main window is created hidden and shown when this file appears —
+  // written when the splash goes (splashStep's showMain). Electron's own cap
+  // (`AIO_SPLASH_CAP_MS` after ready-to-show) shows it anyway, so a splash
+  // that is lost never hides the app.
+  const hold = await Deno.makeTempDir({ prefix: "aio-splash-" });
+  const showFile = join(hold, "show");
+  const drop = () =>
+    Deno.remove(hold, { recursive: true }).catch(() => {
+      // aio-ok: a leftover temp folder is all this costs
+    });
+  const splash = splashSession(spec, {
+    title: meta?.title ?? uds?.title ?? basename(Deno.execPath()),
+    log: { info: (m) => log.info(m), error: (m) => log.error(m) },
+    onShowMain: () => {
+      try {
+        Deno.writeTextFileSync(showFile, "show");
+      } catch (e) {
+        log.error(
+          `electron: splash — could not tell the window to show (${
+            e instanceof Error ? e.message : e
+          }); it shows by itself after ${splashHoldCapMs(spec.minMs)} ms`,
+        );
+      }
+    },
+    // Written by Electron when its own cap showed the window (before this
+    // side's onShowMain wrote it, which closes the splash in the same step).
+    mainShown: () => {
+      try {
+        Deno.statSync(showFile);
+        return true;
+      } catch {
+        return false; // aio-ok: not there yet — the window is still held
+      }
+    },
+  });
+  const proc = await runUnderSplash(
+    splash,
+    signal,
+    (onMounted) =>
+      launchElectronNow(url, log, meta, uds, distDir, cdpPort, signal, {
+        splash,
+        onMounted,
+        env: {
+          AIO_SPLASH_SHOW: showFile,
+          AIO_SPLASH_CAP_MS: String(splashHoldCapMs(spec.minMs)),
+        },
+      }, hooks),
+  ).catch((e) => {
+    drop();
+    throw e;
+  });
+  if (proc) proc.status.then(drop, drop);
+  else drop();
+  return proc;
+}
+
+/** How long after `ready-to-show` the hidden main window shows by itself,
+ *  whatever the splash does. Pure. */
+export function splashHoldCapMs(minMs: number): number {
+  return minMs + 5_000;
+}
+
+async function launchElectronNow(
   url: string,
   log: Log,
   meta?: AioMeta,
@@ -1774,12 +1926,20 @@ export async function launchElectron(
    *  (a first-run install), and a stop that lands meanwhile must not be
    *  followed by a window: once aborted this returns null and spawns nothing. */
   signal?: AbortSignal,
+  under: {
+    splash?: SplashSession | null;
+    onMounted?: () => void;
+    env?: Record<string, string>;
+  } = {},
+  hooks: LaunchHooks = {},
 ): Promise<Deno.ChildProcess | null> {
   if (signal?.aborted) return null;
   const bin = await findElectronBin(log, {
     distDir,
     signal,
     title: meta?.title ?? uds?.title,
+    splash: under.splash,
+    previous: hooks.previous,
   });
   if (!bin || signal?.aborted) return null;
   // The cache holds both a downloaded runtime and one unpacked from the exe
@@ -1800,6 +1960,25 @@ export async function launchElectron(
   const transport = uds
     ? (isPipePath(uds.socketPath) ? "named pipe" : "UDS")
     : "WS";
+  // A shared-runtime app cleans the store once its window has loaded — off
+  // the start path, never delaying it (shared-prune.ts).
+  let onMounted = under.onMounted;
+  if (mode === "shared runtime") {
+    const running = sharedElectronDir(
+      (await bakedElectronVersion(distDir)) ?? DEFAULT_ELECTRON_VERSION,
+      electronSlug(),
+    );
+    let pruned = false;
+    onMounted = () => {
+      under.onMounted?.();
+      if (pruned) return;
+      pruned = true;
+      void autoPruneSharedStore({
+        running,
+        log: { info: (m) => log.info(m), error: (m) => log.error(m) },
+      });
+    };
+  }
   log.info(
     `launching Electron (${mode}, ${transport}${
       cdpPort ? `, cdp 127.0.0.1:${cdpPort}` : ""
@@ -1815,12 +1994,25 @@ export async function launchElectron(
         `electron: the window's profile (cookies, storage, window size) ` +
           `moved from ${moved.from} into the app's home: ${meta.profileDir}`,
       );
+      hooks.profileMoved?.(moved.from, meta.profileDir);
+    } else if (moved.kind === "both") {
+      log.error(
+        `electron: the window's profile was in the app's home ` +
+          `(${meta.profileDir}) AND at its old place (${moved.from}) — ` +
+          `starting from the ${
+            moved.kept === "old" ? "old place's, written last" : "home's"
+          }; the other is kept as ${moved.backup} (delete it once nothing ` +
+          `is missing)`,
+      );
+      if (moved.kept === "old") {
+        hooks.profileMoved?.(moved.from, meta.profileDir);
+      }
     } else if (moved.kind === "kept-both") {
       log.error(
         `electron: the window's profile is in the app's home ` +
-          `(${meta.profileDir}) AND at its old place (${moved.from}) — ` +
-          `starting from the home's; the old one is left as it was (delete ` +
-          `it once nothing is missing)`,
+          `(${meta.profileDir}) AND at its old place (${moved.from}), and ` +
+          `the old one could not be set aside (${moved.why}) — starting from ` +
+          `the home's; the old one is left as it was`,
       );
     } else if (moved.kind === "failed") {
       log.error(
@@ -1860,6 +2052,11 @@ export async function launchElectron(
     profile: shellProfileName(meta, uds?.title),
     profileDir: meta?.profileDir,
     title: meta?.title ?? uds?.title,
+    onMounted: () => {
+      onMounted?.();
+      hooks.mounted?.();
+    },
+    env: under.env,
   });
 }
 

@@ -21,7 +21,7 @@
 // and what passes goes on the record. After that the record alone decides.
 
 import { createHash } from "node:crypto";
-import { basename, dirname, join } from "@std/path";
+import { basename, dirname, join, relative } from "@std/path";
 import { renameOverSync } from "../diagnostics/rename-over.ts";
 import { isProcessAlive } from "./single-instance-lock.ts";
 
@@ -383,6 +383,39 @@ export function moved(dataDir: string, path: string): void {
   writeOwned(dataDir, all.map((o) => o === e ? { ...o, is } : o));
 }
 
+/** Move the thing of ours at `from` to `to` (same folder tree, so a rename),
+ *  its record with it — the same object, set aside at the same time; `role`
+ *  changes what it is to the record. The entry for `to` goes down BEFORE the
+ *  rename: a crash leaves a record with nothing behind it, never a thing with
+ *  no record. Refuses what is not ours at `from`, and at `to` (a thing of
+ *  ours already there is removed first). */
+export function relocate(
+  dataDir: string,
+  from: string,
+  to: string,
+  role?: Owned["role"],
+): void {
+  const e = ownEntry(dataDir, from, false);
+  if (!e) {
+    throw new Error(
+      `${from} is not the thing this app's updater made there — not moved`,
+    );
+  }
+  assertNotInTheWay(dataDir, to);
+  if (exists(to)) {
+    Deno.removeSync(to, { recursive: true });
+    forget(dataDir, to);
+  }
+  writeOwned(dataDir, [
+    ...readOwned(dataDir).filter((x) => x.path !== to),
+    { ...e, path: to, ...(role ? { role } : {}) },
+  ]);
+  Deno.mkdirSync(dirname(to), { recursive: true });
+  Deno.renameSync(from, to);
+  moved(dataDir, to);
+  forget(dataDir, from);
+}
+
 /** Is `name`, in the folder of the install `base`, a name an update gives
  *  what it makes? Only these are looked at — and one with no record is named,
  *  never removed. `.aio-update-<8 hex>` is the download folder of builds up
@@ -556,7 +589,14 @@ export function sweepOwned(
       writeOwned(dataDir, [...ledger, aside]);
       Deno.renameSync(e.path, at);
       ledger = [...ledger.filter((x) => x !== e), aside];
-      claimed.push({ name: basename(e.path), at });
+      claimed.push({ name: relative(dir, e.path), at });
+      // A copy kept in `old/<version>/`: the version folder goes with it,
+      // when that leaves it empty.
+      if (dirname(dirname(e.path)) === join(dir, "old")) {
+        try {
+          Deno.removeSync(dirname(e.path));
+        } catch { /* aio-ok: not empty — something else is in it */ }
+      }
     } catch {
       // aio-ok: held open, or not ours to move — the next boot tries again
     }
@@ -587,7 +627,7 @@ export function sweepOwned(
         const ours = before.some((x) =>
           x !== e && x.path === e.path && matches(x, x.path, false)
         );
-        if (!ours) dropped.push(basename(e.path));
+        if (!ours) dropped.push(relative(dir, e.path));
       }
       continue;
     } else if (matches(e, e.path)) take(e);

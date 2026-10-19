@@ -7738,4 +7738,14 @@ export const LEDGER_1: readonly Mutation[] = [
     filter:
       "dev restart: the lock slot names a live process through every relaunch — no gap between the old app's release and the next child's placeholder",
   },
+  {
+    what:
+      "an update's Electron leg is not marked — progress drops from 1 to 0 and fills again under the app's name, and a person reads it as a loop",
+    file: "src/server/updates-runtime.ts",
+    find: '            onDownload: () => progressOf("runtime"),',
+    replace: "",
+    test: "tests/updates-progress-of.test.ts",
+    filter:
+      "updates progressOf: 'app' before the app download, 'runtime' before the Electron one with its size, null before the swap",
+  },
 ];

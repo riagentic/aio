@@ -6,6 +6,7 @@ import { join } from "@std/path";
 import {
   appProfileDir,
   moveOldProfile,
+  moveProfileBack,
 } from "../src/electron/electron-profile.ts";
 import { electronMainScript } from "../src/electron/electron-scripts.ts";
 import { electronMainScriptUDS } from "../src/electron/electron-uds.ts";
@@ -41,21 +42,108 @@ Deno.test("profile move: the old profile moves whole, once; nothing there is a n
   }
 });
 
-Deno.test("profile move: in both places, the home's wins and the old one is left as it was", async () => {
+/** A profile at `old` and one at `dir`, each's content written at `t` (s). */
+async function bothProfiles(tmp: string, oldAt: number, homeAt: number) {
+  const old = join(tmp, "config", "notes");
+  const dir = join(tmp, ".notes", "electron");
+  for (
+    const [p, text, t] of [[old, "old", oldAt], [dir, "home", homeAt]] as const
+  ) {
+    await Deno.mkdir(join(p, "Local Storage"), { recursive: true });
+    await Deno.writeTextFile(join(p, "Local Storage", "a"), text);
+    for (
+      const f of [join(p, "Local Storage", "a"), join(p, "Local Storage"), p]
+    ) {
+      await Deno.utime(f, t, t);
+    }
+  }
+  return { old, dir };
+}
+
+const NOW = new Date("2026-10-19T12:00:00Z");
+
+Deno.test("profile move: in both places, the one written last is kept and the other goes into the home as electron.previous-<date> — never deleted", async () => {
   const tmp = await tempDir("profile-both-");
   try {
-    const old = join(tmp, "config", "notes");
-    const dir = join(tmp, ".notes", "electron");
-    await Deno.mkdir(old, { recursive: true });
-    await Deno.writeTextFile(join(old, "a"), "old");
-    await Deno.mkdir(dir, { recursive: true });
-    await Deno.writeTextFile(join(dir, "a"), "new");
-    assertEquals(await moveOldProfile(old, dir), {
-      kind: "kept-both",
+    // The home's is newer: the old place's is set aside.
+    let { old, dir } = await bothProfiles(join(tmp, "a"), 1_000, 2_000);
+    let backup = join(tmp, "a", ".notes", "electron.previous-2026-10-19");
+    assertEquals(await moveOldProfile(old, dir, { now: NOW }), {
+      kind: "both",
       from: old,
+      kept: "home",
+      backup,
     });
-    assertEquals(await Deno.readTextFile(join(old, "a")), "old");
-    assertEquals(await Deno.readTextFile(join(dir, "a")), "new");
+    assertEquals(
+      await Deno.readTextFile(join(dir, "Local Storage", "a")),
+      "home",
+    );
+    assertEquals(
+      await Deno.readTextFile(join(backup, "Local Storage", "a")),
+      "old",
+    );
+    assert(!(await Deno.stat(old).then(() => true, () => false)));
+    // The old place's is newer (a rolled-back build used it since): IT is
+    // the profile now, and the home's is set aside.
+    ({ old, dir } = await bothProfiles(join(tmp, "b"), 3_000, 2_000));
+    backup = join(tmp, "b", ".notes", "electron.previous-2026-10-19");
+    assertEquals(await moveOldProfile(old, dir, { now: NOW }), {
+      kind: "both",
+      from: old,
+      kept: "old",
+      backup,
+    });
+    assertEquals(
+      await Deno.readTextFile(join(dir, "Local Storage", "a")),
+      "old",
+    );
+    assertEquals(
+      await Deno.readTextFile(join(backup, "Local Storage", "a")),
+      "home",
+    );
+  } finally {
+    await dropTempDir(tmp);
+  }
+});
+
+Deno.test("profile move: in both places, a set-aside that fails keeps both as they were and starts from the home's", async () => {
+  const tmp = await tempDir("profile-both-fail-");
+  try {
+    const { old, dir } = await bothProfiles(tmp, 3_000, 2_000);
+    let calls = 0;
+    const r = await moveOldProfile(old, dir, {
+      now: NOW,
+      // The home's moves aside, the old one cannot move in: put back.
+      rename: (a, b) =>
+        ++calls === 2 ? Promise.reject(new Error("EBUSY")) : Deno.rename(a, b),
+    });
+    assertEquals(r.kind, "kept-both");
+    assertEquals(
+      await Deno.readTextFile(join(dir, "Local Storage", "a")),
+      "home",
+    );
+    assertEquals(
+      await Deno.readTextFile(join(old, "Local Storage", "a")),
+      "old",
+    );
+  } finally {
+    await dropTempDir(tmp);
+  }
+});
+
+Deno.test("profile move back: a rollback puts the moved profile at its old place; never over one there", async () => {
+  const tmp = await tempDir("profile-back-");
+  try {
+    const from = join(tmp, "config", "notes");
+    const to = join(tmp, ".notes", "electron");
+    await Deno.mkdir(to, { recursive: true });
+    await Deno.writeTextFile(join(to, "a"), "signed-in");
+    assertEquals(await moveProfileBack({ from, to }), "moved");
+    assertEquals(await Deno.readTextFile(join(from, "a")), "signed-in");
+    assertEquals(await moveProfileBack({ from, to }), "none");
+    await Deno.mkdir(to);
+    assertStringIncludes(await moveProfileBack({ from, to }), "in use");
+    assertEquals(await Deno.readTextFile(join(from, "a")), "signed-in");
   } finally {
     await dropTempDir(tmp);
   }

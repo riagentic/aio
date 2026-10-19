@@ -731,8 +731,12 @@ async function fetchVerifiedZipInner(
         `${res.status} ${res.statusText}\n  ${url}\n` +
         `  (is ${version} a real Electron release? If a proxy blocks ` +
         `github.com, set $ELECTRON_MIRROR to a mirror of ` +
-        `electron/electron's releases, or point $ELECTRON_PATH at an ` +
-        `Electron you already have.)`,
+        `electron/electron's releases` +
+        // A pinned zip is a shared-runtime app's, which starts only the
+        // store's runtime: an $ELECTRON_PATH is ignored there.
+        (opts.sha256
+          ? `.)`
+          : `, or point $ELECTRON_PATH at an Electron you already have.)`),
     );
   }
   const bytes = await readWithProgress(
@@ -995,9 +999,12 @@ export async function ensureElectronRuntime(
       throw new Error(
         `another process has been downloading the Electron runtime ` +
           `${version} (${slug}) into ${dir} for over ` +
-          `${waitMs / 60_000} minutes and is still alive. Wait for it, ` +
-          `or point $ELECTRON_PATH at an Electron you already have. If no ` +
-          `such process exists, delete ${dir}.lock.`,
+          `${waitMs / 60_000} minutes and is still alive. Wait for it` +
+          // The shared store's app ignores an $ELECTRON_PATH.
+          (opts.into
+            ? `. `
+            : `, or point $ELECTRON_PATH at an Electron you already have. `) +
+          `If no such process exists, delete ${dir}.lock.`,
       );
     }
 

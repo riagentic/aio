@@ -60,7 +60,7 @@ const NO_XDEV = (() => {
  *  will permit, and the kernel does the refusing. */
 async function withRenameHook(
   before: (from: string, to: string) => void,
-  fn: () => Promise<void>,
+  fn: () => Promise<unknown>,
 ): Promise<void> {
   const D = Deno as unknown as { rename: typeof Deno.rename };
   const real = D.rename;
@@ -299,9 +299,13 @@ Deno.test({
     }
     assertEquals(result, false, "the boot continues — never brick on top");
 
-    const asideName = names(dir).find((n) => n.startsWith("app.failed-"));
-    assert(asideName, "the failed build was moved aside");
-    const aside = join(dir, asideName);
+    // Into old/, where a rollback keeps the build that failed.
+    const aside = join(dir, "old", "2.0.0", "app");
+    assertEquals(
+      await Deno.readTextFile(aside),
+      "v2-broken",
+      "the failed build was moved aside",
+    );
     const line = log.lines.find((l) =>
       l.startsWith("error") && l.includes("ROLLBACK FAILED")
     );

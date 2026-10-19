@@ -26,6 +26,7 @@ import {
 import {
   failedUpdatePath,
   MAX_BOOT_ATTEMPTS,
+  oldCopyPath,
   type PendingUpdate,
   readPending,
   swapArtifact,
@@ -199,9 +200,14 @@ Deno.test("boot: the electron-zip layout restores a DIRECTORY", {
 
     assertEquals(await Deno.readTextFile(join(current, "VERSION")), "1.0.0");
     assertEquals(readPending(data), null);
-    // The broken install is not left lying around as a second copy.
+    // The broken install is not left at the install's name: it is kept in
+    // old/ like any replaced version, and pruned like one.
     const left = [...Deno.readDirSync(dir)].map((e) => e.name).sort();
-    assertEquals(left, ["MyApp"]);
+    assertEquals(left, ["MyApp", "old"]);
+    assertEquals(
+      await Deno.readTextFile(join(dir, "old", "2.0.0", "MyApp", "VERSION")),
+      "2.0.0",
+    );
   } finally {
     await Deno.remove(dir, { recursive: true });
     await Deno.remove(data, { recursive: true });
@@ -557,7 +563,7 @@ Deno.test("updates: an app-supplied runtime and `updates:` cannot both win", asy
 // exits with the process, so the runtime's `pruneOld` never ran for it: every
 // update left one whole install behind as `<dir>.old-<v>`, forever. The
 // confirmed boot of the new build is where they are bounded now.
-Deno.test("boot: confirming a directory update keeps only the newest KEEP_OLD rollbacks", async () => {
+Deno.test("boot: confirming a directory update moves what an older aio kept beside it into old/, and keeps only the newest keepOld", async () => {
   const dir = await tmp();
   const data = await tmp();
   try {
@@ -593,17 +599,21 @@ Deno.test("boot: confirming a directory update keeps only the newest KEEP_OLD ro
     const ago = new Date(Date.now() - 2 * 3_600_000);
     await Deno.utime(join(dir, "Counter.app.staged-0.9.9"), ago, ago);
     writePending(data, mark({ artifact: current, attempts: 1 }));
-    confirmPendingUpdate(data, recorder());
+    const said = recorder();
+    confirmPendingUpdate(data, said, undefined, 2);
     await _confirm.pruned; // its background prune, read to the end
-    const left = async () =>
-      (await Array.fromAsync(Deno.readDir(dir))).map((e) => e.name).sort();
-    assertEquals(await left(), [
+    const left = async (d: string) =>
+      (await Array.fromAsync(Deno.readDir(d))).map((e) => e.name).sort();
+    assertEquals(await left(dir), [
       "Counter.app",
       "Counter.app.old-0.0.1",
-      "Counter.app.old-1.0.2",
-      "Counter.app.old-1.0.3",
-      "Counter.app.old-1.0.4",
+      "old",
     ]);
+    assertEquals(await left(join(dir, "old")), ["1.0.3", "1.0.4"]);
+    assertStringIncludes(
+      said.lines.join("\n"),
+      `Counter.app.old-1.0.4 → ${oldCopyPath(current, "1.0.4")}`,
+    );
   } finally {
     await Deno.remove(dir, { recursive: true });
     await Deno.remove(data, { recursive: true });

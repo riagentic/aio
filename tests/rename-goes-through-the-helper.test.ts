@@ -31,18 +31,25 @@ const ALLOWED: Record<string, number | true> = {
   // `renameWithRetry`: a directory move (the unpacked runtime), with its own
   // longer, measured bound and its own tests.
   "src/electron/electron-runtime-fetch.ts": 2,
-  // The window's profile folder moved once into the app's home: a directory,
-  // into a name checked to be free, and a failure keeps the old one in use.
-  "src/electron/electron-profile.ts": 2,
+  // The window's profile folder moved once into the app's home, moved back
+  // for a rollback, or set aside when both exist: a directory, into a name
+  // checked to be free, and a failure keeps the old one in use.
+  "src/electron/electron-profile.ts": 4,
+  // The auto-prune: an unused Electron folder moved out of its name under the
+  // store's lock before it is deleted; a refused move (Windows: in use) is
+  // that runtime kept, retried at the next day's prune.
+  "src/electron/shared-prune.ts": 1,
   // A rollback: what moves is a file OR a whole install folder, into a name
   // that was vacated first, and each step has its own undo and its own words.
-  "src/server/updates-apply.ts": 3,
+  // And the build that failed kept in `old/` (a file or a folder).
+  "src/server/updates-apply.ts": 4,
   // The data folder set aside for an update that retires it, and back.
   "src/server/updates-retire.ts": 2,
   // A leftover (a file or a tree) moved out of its name to a free one; one
   // that will not move stays for the next boot. And a kept download whose
-  // bytes changed, moved to a free name beside it: nothing is replaced.
-  "src/server/updates-owned.ts": 2,
+  // bytes changed, moved to a free name beside it: nothing is replaced. And
+  // a kept copy (a file or a folder) moved into `old/` with its record.
+  "src/server/updates-owned.ts": 3,
 };
 /** Build-time code: it fails loud at the terminal, on the developer's machine. */
 const SKIP_DIRS = ["src/build/"];
@@ -100,10 +107,12 @@ const VERBS: Record<string, { "replace-temp"?: number; "move-data"?: number }> =
     "src/server/journal.ts": { "replace-temp": 1, "move-data": 2 },
     "src/diagnostics/checkpoint.ts": { "replace-temp": 2 },
     "src/diagnostics/action-log.ts": { "replace-temp": 1 },
-    // a shared-runtime use record, written to a temp beside it
-    "src/electron/shared-runtime.ts": { "replace-temp": 1 },
+    // a shared-runtime use record, written to a temp beside it — and again
+    // under the install's new name
+    "src/electron/shared-runtime.ts": { "replace-temp": 2 },
     "src/am/am-cmd-state.ts": { "replace-temp": 1 },
-    "src/server/app-dirs.ts": { "replace-temp": 1 },
+    // …and the menu entry run.sh wrote, pointed at an install's new name
+    "src/server/app-dirs.ts": { "replace-temp": 2 },
     // the legacy database itself is moved; its cross-device copy is a temp
     "src/server/app-dirs-migrate.ts": { "replace-temp": 1, "move-data": 1 },
     // the quarantine record from a temp; every `fs.rename` (the two default
@@ -127,8 +136,13 @@ const VERBS: Record<string, { "replace-temp"?: number; "move-data"?: number }> =
     // of a versioned install. Data: an unreadable record set aside, the
     // staged build going in (3 layouts), the running version going aside and
     // back (2 layouts), the rollback's link — left where it is on a failure,
-    // because the error names it
-    "src/server/updates-apply.ts": { "replace-temp": 3, "move-data": 8 },
+    // because the error names it; under the new version's own name: the new
+    // file in, the running one into `old/`, both back on a failure, and the
+    // version that worked back to its name on a rollback
+    "src/server/updates-apply.ts": { "replace-temp": 3, "move-data": 12 },
+    // the old version moved into `old/` at the confirm, when a cut-off swap
+    // left it at its name
+    "src/server/updates-boot.ts": { "move-data": 1 },
     // the copy of the app bundle made beside its place in Applications, moved
     // into a name nothing holds (an existing bundle there means no move)
     "src/server/macos-move.ts": { "move-data": 1 },

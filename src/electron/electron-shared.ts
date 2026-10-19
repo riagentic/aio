@@ -788,6 +788,41 @@ const ipcMain = (() => {
  *  (measured: a listener from load time is never called once the app is
  *  ready), and its handler is the cancellable quit above.
  *  Expects `app` and `__aioLeave` (tmplCrashGuard) in scope. */
+/** `build.splash`: the main window is created hidden while the aio process
+ *  shows a splash (`$AIO_SPLASH_SHOW` names the file it writes when the
+ *  splash goes), loads underneath, and shows when that file appears — or,
+ *  whatever the splash does, `$AIO_SPLASH_CAP_MS` after `ready-to-show`, said
+ *  once. Without the variable nothing changes. `before` goes ahead of
+ *  `new BrowserWindow(b)`; `after` follows it (expects `win`). */
+export function tmplSplashHold(): { before: string; after: string } {
+  return {
+    before: `  if (process.env.AIO_SPLASH_SHOW) b.show = false;`,
+    after: `
+  if (process.env.AIO_SPLASH_SHOW) {
+    const __aioHoldFile = process.env.AIO_SPLASH_SHOW;
+    const __aioHoldCap = Number(process.env.AIO_SPLASH_CAP_MS) || 6000;
+    let __aioHeld = true;
+    const __aioRelease = (why) => {
+      if (!__aioHeld) return;
+      __aioHeld = false;
+      clearInterval(__aioHoldPoll);
+      if (why) {
+        console.warn('splash: the window showed by itself ' + why);
+        // Said back through the same file: the aio side closes the splash,
+        // so the two are never on screen together.
+        try { require('fs').writeFileSync(__aioHoldFile, 'shown'); } catch {}
+      }
+      if (!win.isDestroyed()) win.show();
+    };
+    const __aioHoldPoll = setInterval(() => {
+      if (require('fs').existsSync(__aioHoldFile)) __aioRelease();
+    }, 25);
+    win.once('ready-to-show', () => setTimeout(() => __aioRelease(__aioHoldCap + ' ms after it was ready — the splash never said to'), __aioHoldCap));
+    win.on('closed', () => clearInterval(__aioHoldPoll));
+  }`,
+  };
+}
+
 export function tmplParentWatch(): string {
   return `
 // Decimal digits only — same rule as the server's parentPidOf / AIO_PORT.

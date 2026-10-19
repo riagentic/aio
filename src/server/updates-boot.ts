@@ -35,6 +35,7 @@ import { MAX_TIMER_DELAY } from "../state/timer-ceiling.ts";
 let _aioInstalled: UpdatesRuntime | null = null;
 import {
   compareVersions,
+  DEFAULT_KEEP_OLD,
   isComparableVersion,
   type LocalData,
   resolveUpdates,
@@ -49,10 +50,20 @@ import {
 } from "./updates-check.ts";
 import {
   adoptOlder,
+  forget,
+  identity,
+  moved,
   ownedPath,
+  ownEntry,
+  readOwned,
   sweepOwned,
   unsaidLeft,
 } from "./updates-owned.ts";
+import { _menuDeps, followMenuEntry, rewriteMenuEntry } from "./app-dirs.ts";
+import { dropPendingUses, moveSharedUses } from "../electron/shared-runtime.ts";
+import { moveProfileBack } from "../electron/electron-profile.ts";
+import { moveFileSync } from "../diagnostics/rename-over.ts";
+import { installArtifactName } from "./app-version.ts";
 import { isProcessAlive } from "./single-instance-lock.ts";
 import { reconcileInstalledVersion } from "./install-record.ts";
 import { basename, dirname, join } from "@std/path";
@@ -67,21 +78,27 @@ import {
   firstBootPath,
   installDir,
   judgePending,
-  KEEP_OLD,
+  launchServices,
   madeByOlderUpdater,
+  MAX_BOOT_ATTEMPTS,
+  migrateLegacyOld,
+  oldCopyPath,
   parseUpdateRecord,
   pendingPath,
   pruneOld,
   readPending,
+  relaunch,
   repairSfxStamp,
   restoreArtifact,
+  sayPruned,
   setAsideRecord,
   stampSfxVersion,
   swapDirectoryDetached,
   writePending,
   writeRecordAtomic,
+  zipLauncher,
 } from "./updates-apply.ts";
-import type { PendingUpdate } from "./updates-apply.ts";
+import type { PendingUpdate, PendingVerdict } from "./updates-apply.ts";
 import { ensureSfxShortcut } from "./sfx-shortcut.ts";
 // NOTE: updates-runtime.ts and updates-cell.ts are imported DYNAMICALLY below,
 // never at module scope. `cell()` self-registers on import, so a static value
@@ -143,6 +160,10 @@ export async function judgePendingUpdate(
     swapDirectory?: typeof swapDirectoryDetached;
     /** `exeIdentity()` of this process's executable. */
     exe?: string;
+    /** `updates.keepOld`, for a confirm made here. */
+    keepOld?: number;
+    /** The shared Electron store (default: its own location). */
+    sharedStore?: string;
   } = {},
 ): Promise<boolean> {
   let pending = readPending(dataDir);
@@ -179,7 +200,7 @@ export async function judgePendingUpdate(
           `${appVersion ?? pending.from}, started by hand after it)`,
       );
       clearPending(dataDir);
-    } else confirmPendingUpdate(dataDir, log);
+    } else confirmPendingUpdate(dataDir, log, undefined, deps.keepOld);
     return false;
   }
   // The old file is running: the swap never happened (or was undone).
@@ -212,6 +233,7 @@ export async function judgePendingUpdate(
         log.warn("updates", `could not remove ${firstBootPath(dataDir)}: ${e}`);
       }
     }
+    unmakeRenamed(dataDir, pending, log);
     return false;
   }
   // A directory swap's helper waits for this boot to take the first-boot
@@ -279,6 +301,27 @@ export async function judgePendingUpdate(
     `update ${pending!.from} → ${pending!.to} failed to come up after ` +
       `${pending!.attempts} attempts — rolling back to ${verdict.to}`,
   );
+  return (await rollBack(dataDir, pending, verdict, log, deps)) !== null;
+}
+
+type RollBackDeps = {
+  os?: typeof Deno.build.os;
+  swapDirectory?: typeof swapDirectoryDetached;
+  exe?: string;
+  sharedStore?: string;
+};
+
+/** Put the version `pending` replaced back (`verdict`: the judge's). Where
+ *  it is now (`helper`: the Windows swap helper puts it there, and starts it,
+ *  once this process has exited), or null when the rollback failed — the
+ *  marker is then kept and says why. */
+async function rollBack(
+  dataDir: string,
+  pending: PendingUpdate,
+  verdict: Extract<PendingVerdict, { action: "rollback" }>,
+  log: Log,
+  deps: RollBackDeps,
+): Promise<{ at: string; helper: boolean } | null> {
   const current = stableArtifactPath(pending!, log);
   // A Windows directory install is running from `current`: it cannot move
   // its own folder (every in-app attempt failed). The swap helper does it
@@ -290,6 +333,7 @@ export async function judgePendingUpdate(
         staged: verdict.previous,
         fromVersion: pending.to,
         args: Deno.args,
+        dataDir,
       });
     } catch (e) {
       log.error(
@@ -298,9 +342,10 @@ export async function judgePendingUpdate(
           `update helper could not start (${e}). Put ${verdict.previous} ` +
           `back at ${current} by hand.`,
       );
-      return false;
+      return null;
     }
     log.error(`the update helper puts ${verdict.to} back once this exits`);
+    await undoOutside(pending, [current], log, deps.sharedStore);
     // The record follows the artifact on THIS layout too (see the flat path
     // below): left alone, `installed.json` kept naming the failed version
     // while the old one ran. Written now because nothing of this build runs
@@ -323,19 +368,51 @@ export async function judgePendingUpdate(
       failedExe: deps.exe ?? exeIdentity(),
       rollbackFailed: undefined,
     }, log);
-    return true;
+    return { at: current, helper: true };
   }
   try {
-    await restoreArtifact(current, verdict.previous, dataDir);
-    log.error(`rolled back the artifact → ${verdict.to} (${current})`);
+    // The build that failed is kept in `old/` like any replaced version.
+    const failedTo = oldCopyPath(current, pending.to, verdict.previous);
+    const { at, note } = await restoreArtifact(
+      current,
+      verdict.previous,
+      dataDir,
+      {
+        restoreTo: verdict.restoreTo,
+        failedTo,
+      },
+    );
+    await undoOutside(pending, [current, at], log, deps.sharedStore);
+    if (at !== current) {
+      followMenu(current, at, log);
+      // The mirror of the swap's: the records that keep the restored
+      // version's Electron from `am prune` name its path again.
+      await moveSharedUses(current, at, deps.sharedStore).catch((e) =>
+        log.warn(
+          "updates",
+          `could not move this app's records in the shared Electron store ` +
+            `back to ${at} (${e}) — its next start records them again`,
+        )
+      );
+    }
+    if (note) log.warn("updates", note);
+    // macOS: the build that failed, now in old/, is forgotten; the version
+    // put back is registered at the install's path again.
+    for (
+      const said of [
+        ...(note ? [] : launchServices("-u", failedTo)),
+        ...launchServices("-f", at),
+      ]
+    ) log.warn("updates", said);
+    log.error(`rolled back the artifact → ${verdict.to} (${at})`);
     // The record must follow the ARTIFACT, exactly as the forward swap's
     // reconcile makes it. Left alone, `installed.json` kept naming the failed
     // version while the app ran the old one — `am installed` and `am upgrade`
     // (its from/to report and its prune) then acted on a version that is not
     // running. Best-effort and non-fatal, like the swap's own reconcile.
-    await reconcileInstalledVersion(dirname(current), {
+    await reconcileInstalledVersion(dirname(at), {
       version: verdict.to,
-      artifact: basename(current),
+      artifact: basename(at),
     });
     if (verdict.backup) {
       // The binary going back cannot un-migrate the store, so the backup taken
@@ -359,7 +436,7 @@ export async function judgePendingUpdate(
     // Exit so the supervisor (or the user) starts the version that works. The
     // artifact at `current` is the old one now; this process is still the new
     // build and must not keep running.
-    return true;
+    return { at, helper: false };
   } catch (e) {
     // NEVER clear the marker here. Clearing it after a failed rollback is what
     // turned "this update broke the app" into "this app is broken forever with
@@ -384,7 +461,7 @@ export async function judgePendingUpdate(
     );
     // Do NOT stop the boot. The new build is still in place and might yet come
     // up; bricking the app on top of a failed rollback helps nobody.
-    return false;
+    return null;
   }
 }
 
@@ -396,6 +473,230 @@ function keepFailed(dataDir: string, p: PendingUpdate, log: Log): void {
     log.warn("updates", `could not keep the failed-update record: ${e}`);
   }
   clearPending(dataDir);
+}
+
+/** What an update did outside the install, undone by its rollback: the
+ *  shared store's records the update wrote before its swap (`pending`) for
+ *  `exes` go — the runtime they kept was fetched for the version removed —
+ *  and a window profile the new build moved out of Electron's old per-OS
+ *  place goes back there, for the build put back reads it there. Said, never
+ *  fatal. */
+async function undoOutside(
+  p: PendingUpdate,
+  exes: string[],
+  log: Log,
+  store?: string,
+): Promise<void> {
+  for (const exe of new Set(exes)) {
+    const n = await dropPendingUses(exe, store).catch((e) => {
+      log.warn(
+        "updates",
+        `could not drop the shared Electron store's records of ${p.to} for ` +
+          `${exe} (${e}) — \`am prune\` keeps its runtime until they go`,
+      );
+      return 0;
+    });
+    if (n > 0) {
+      log.info(
+        "updates",
+        `dropped ${p.to}'s record in the shared Electron store: ${exe} does ` +
+          `not start from its runtime`,
+      );
+    }
+  }
+  if (!p.profileMoved) return;
+  const { from, to } = p.profileMoved;
+  const back = await moveProfileBack(p.profileMoved);
+  if (back === "moved") {
+    log.info(
+      "updates",
+      `the window's profile moved back to ${from}, where ${p.from} reads it`,
+    );
+  } else if (back !== "none") {
+    log.warn(
+      "updates",
+      `could not move the window's profile back to ${from} (${back}) — ` +
+        `${p.from} starts with an empty one; it is kept at ${to}`,
+    );
+  }
+}
+
+/** The update this boot judged, rolled back NOW: its Electron runtime could
+ *  not be had and the user chose "Start the previous version". The judge's
+ *  own rollback, with the attempts spent. Where the version put back is
+ *  (see {@linkcode rollBack}), or null: no such update, its previous copy
+ *  is gone, or the rollback failed (said). */
+export async function rollBackNow(
+  dataDir: string,
+  log: Log,
+  judged: PendingUpdate,
+  deps: RollBackDeps = {},
+): Promise<{ at: string; helper: boolean } | null> {
+  const p = readPending(dataDir);
+  if (!p || p.startedAt !== judged.startedAt || p.to !== judged.to) return null;
+  if (!isThere(p.previous)) return null;
+  const verdict = judgePending({ ...p, attempts: MAX_BOOT_ATTEMPTS }, false);
+  if (verdict.action !== "rollback") return null;
+  log.error(
+    `update ${p.from} → ${p.to}: its Electron could not be had, and ` +
+      `"start the previous version" was chosen — rolling back to ${verdict.to}`,
+  );
+  return await rollBack(dataDir, p, verdict, log, deps);
+}
+
+/** What starts the version a rollback put at `at`: a macOS `.app` through
+ *  `open`, an unpacked folder through its launcher, a file itself. Pure. */
+export function restoredLauncher(
+  at: string,
+  argv: string[],
+  dir: boolean,
+  os: typeof Deno.build.os = Deno.build.os,
+): { artifact: string; args: string[] } {
+  if (os === "darwin" && at.endsWith(".app")) {
+    return { artifact: "/usr/bin/open", args: ["-n", at, "--args", ...argv] };
+  }
+  return { artifact: dir ? zipLauncher(at, os) : at, args: argv };
+}
+
+/** The window profile moved during THIS update's start (see
+ *  `PendingUpdate.profileMoved`): written on its marker — the first move
+ *  only. Never fatal. */
+export function noteProfileMove(
+  dataDir: string,
+  judged: PendingUpdate | null,
+  from: string,
+  to: string,
+  log: Log,
+): void {
+  const p = readPending(dataDir);
+  if (!judged || !p || p.startedAt !== judged.startedAt) return;
+  if (p.to !== judged.to || p.profileMoved) return;
+  try {
+    writePending(dataDir, { ...p, profileMoved: { from, to } });
+  } catch (e) {
+    log.warn(
+      "updates",
+      `could not note the profile move on update ${p.from} → ${p.to} (${e}) ` +
+        `— a rollback leaves the profile at ${to}`,
+    );
+  }
+}
+
+/** What a desktop app's window start tells the update this boot judged:
+ *  that a window is expected, that it loaded (`gate`), that the profile
+ *  moved, and — offered only while the version it replaced is kept —
+ *  "Start the previous version": rolled back now and started, with `argv`
+ *  (`relaunch` injected in tests). */
+export function updateWindow(
+  dataDir: string,
+  log: Log,
+  gate: ReturnType<typeof windowGate>,
+  argv: string[],
+  deps: RollBackDeps & { relaunch?: typeof relaunch } = {},
+): {
+  expect(): void;
+  hooks: {
+    mounted(): void;
+    profileMoved(from: string, to: string): void;
+    previous?: () => Promise<boolean>;
+  };
+} {
+  const judged = readPending(dataDir);
+  return {
+    expect: () => gate.expect(),
+    hooks: {
+      mounted: () => gate.loaded(),
+      profileMoved: (from, to) =>
+        noteProfileMove(dataDir, judged, from, to, log),
+      ...(judged && isThere(judged.previous)
+        ? {
+          previous: async () => {
+            const back = await rollBackNow(dataDir, log, judged, deps);
+            if (!back) return false;
+            // The Windows swap helper starts it once this has exited.
+            if (!back.helper) {
+              (deps.relaunch ?? relaunch)(
+                restoredLauncher(back.at, argv, isDir(back.at)),
+              );
+            }
+            return true;
+          },
+        }
+        : {}),
+    },
+  };
+}
+
+/** A desktop app's update is confirmed only once its main window has
+ *  loaded: the app's hook coming through, or a clean exit, is no proof for a
+ *  build whose window never opened (its Electron could not be downloaded, the
+ *  start was cancelled). `expect` (this start opens a window), then
+ *  `loaded`; `holds` answers whether a confirm must wait — and, unless at
+ *  exit, `later` is what runs once the window has loaded. Pure. */
+export function windowGate(): {
+  expect(): void;
+  loaded(): void;
+  holds(atExit: boolean, later: () => void): boolean;
+} {
+  let state: "none" | "awaited" | "loaded" = "none";
+  let later: (() => void) | null = null;
+  return {
+    expect() {
+      if (state === "none") state = "awaited";
+    },
+    loaded() {
+      state = "loaded";
+      const run = later;
+      later = null;
+      run?.();
+    },
+    holds(atExit, then) {
+      if (state !== "awaited") return false;
+      if (!atExit) later = then;
+      return true;
+    },
+  };
+}
+
+/** Point the menu entry `run.sh` wrote at `to` when it starts `from`; said
+ *  either way it goes, never fatal. */
+function followMenu(from: string, to: string, log: Log): void {
+  try {
+    if (followMenuEntry(installArtifactName(from).base, from, to)) {
+      log.info("updates", `the menu entry now starts ${to}`);
+    }
+  } catch (e) {
+    log.warn(
+      "updates",
+      `could not point the menu entry at ${to} (${e}) — it may still start ` +
+        `${from}`,
+    );
+  }
+}
+
+/** An update that installed the new version under its own name and never
+ *  took effect (the old file is still at its name, never moved into `old/`):
+ *  the new file this updater put beside it goes, and the menu entry with it
+ *  points back. Only the very file it made; never fatal. */
+function unmakeRenamed(dataDir: string, p: PendingUpdate, log: Log): void {
+  const made = p.artifact;
+  if (!p.restoreTo || !made || made === p.restoreTo) return;
+  if (!isThere(p.restoreTo) || isThere(p.previous)) return;
+  followMenu(made, p.restoreTo, log);
+  try {
+    if (!ownEntry(dataDir, made)) return;
+    Deno.removeSync(made);
+    forget(dataDir, made);
+    log.info(
+      "updates",
+      `removed ${made}: the update that put it there never took effect`,
+    );
+  } catch (e) {
+    log.warn(
+      "updates",
+      `could not remove ${made}, the update that put it there never took effect (${e}) — delete it by hand`,
+    );
+  }
 }
 
 function isDir(path: string): boolean {
@@ -467,6 +768,8 @@ export function confirmPendingUpdate(
    *  and would have confirmed a build that never booted, dropping its
    *  rollback. `null`: nothing was pending at boot, so nothing is confirmed. */
   judged?: PendingUpdate | null,
+  /** `updates.keepOld`: the versions `old/` keeps. */
+  keepOld: number = DEFAULT_KEEP_OLD,
 ): void {
   const pending = readPending(dataDir);
   if (
@@ -507,12 +810,101 @@ export function confirmPendingUpdate(
   // nothing pruned them: one whole ~300 MB install leaked per update.
   // The sweep first: it puts an older build's copies on the record, which is
   // all the pruning counts.
-  sweepLeftovers(dataDir, pending!.artifact ?? artifactPath(), log);
-  _confirm.pruned = pruneOld(
-    pending!.artifact ?? artifactPath(),
-    KEEP_OLD,
-    dataDir,
-  ).catch((e) => log.warn("updates", `could not prune old installs: ${e}`));
+  const install = pending!.artifact ?? artifactPath();
+  if (pending!.restoreTo && pending!.restoreTo !== install) {
+    settleRenamed(dataDir, pending!, install, log);
+  }
+  sweepLeftovers(dataDir, install, log);
+  // What an older aio kept BESIDE the install, into `old/` — then pruned
+  // like the rest.
+  try {
+    const legacy = migrateLegacyOld(dataDir, [
+      install,
+      ...(pending!.restoreTo ? [pending!.restoreTo] : []),
+    ]);
+    if (legacy.moved.length > 0) {
+      log.info(
+        "updates",
+        `moved the old versions an earlier aio kept beside ${install} into ` +
+          `old/: ${legacy.moved.join(", ")}`,
+      );
+    }
+    for (const said of legacy.said) log.warn("updates", said);
+    if (legacy.failed.length > 0) {
+      log.warn(
+        "updates",
+        `could not move into old/: ${legacy.failed.join(", ")} — left ` +
+          `where they are`,
+      );
+    }
+  } catch (e) {
+    log.warn("updates", `could not move old versions into old/: ${e}`);
+  }
+  // macOS: what the swap set aside is forgotten by LaunchServices (the swap
+  // helper did it already; this says it when it could not be done).
+  for (const said of launchServices("-u", pending!.previous)) {
+    log.warn("updates", said);
+  }
+  _confirm.pruned = pruneOld(install, keepOld, dataDir, pending!.previous)
+    .then((res) => sayPruned(log, keepOld, res))
+    .catch((e) => log.warn("updates", `could not prune old installs: ${e}`));
+}
+
+/** The confirm of an update that installed the new version under its own
+ *  name: the install is no leftover of the updater's any more (off the
+ *  record), the old version is in `old/` (moved there now if a cut-off swap
+ *  left it at its name), and — ONE line — what pointed at the old path by
+ *  hand does not follow. Never fatal. */
+function settleRenamed(
+  dataDir: string,
+  p: PendingUpdate,
+  install: string,
+  log: Log,
+): void {
+  try {
+    forget(dataDir, install);
+    const kept = readOwned(dataDir).find((e) => e.path === p.previous);
+    if (
+      kept?.is !== undefined && !isThere(p.previous) &&
+      identity(p.restoreTo!) === kept.is
+    ) {
+      Deno.mkdirSync(dirname(p.previous), { recursive: true });
+      moveFileSync(p.restoreTo!, p.previous);
+      moved(dataDir, p.previous);
+    }
+  } catch (e) {
+    log.warn(
+      "updates",
+      `could not move ${p.restoreTo} into ${dirname(p.previous)} (${e}) — ` +
+        `it stays where it is`,
+    );
+  }
+  // A WARNING: what pointed at the old path (a pinned shortcut, a launcher
+  // integration) now points at nothing. The menu entry is claimed only where
+  // one exists (Linux) and names the new path.
+  log.warn(
+    "updates",
+    `${p.to} is installed as ${install}; ${p.restoreTo} is gone — ` +
+      (menuStarts(install)
+        ? `the menu entry aio wrote starts ${install}; `
+        : "") +
+      `a shortcut, pin or launcher made by hand to ${p.restoreTo} does not ` +
+      `follow: ` +
+      `point it at ${install}`,
+  );
+}
+
+/** Does the menu entry `run.sh` wrote (Linux only) start `path`? */
+function menuStarts(path: string): boolean {
+  if (Deno.build.os !== "linux") return false;
+  try {
+    const text = Deno.readTextFileSync(
+      _menuDeps.path(installArtifactName(path).base),
+    );
+    return rewriteMenuEntry(text, path, path) !== null;
+  } catch {
+    return false; // aio-ok: no entry (or unreadable) — none is claimed
+  }
 }
 
 /** The prune the last confirm started — never awaited by a boot; a test
@@ -681,10 +1073,11 @@ function sweepLeftovers(
 export function pendingConfirmer(
   dataDir: string,
   log: Log,
+  keepOld?: number,
 ): (atExit?: boolean) => void {
   const judged = readPending(dataDir);
   return (atExit = false) => {
-    if (!atExit) return confirmPendingUpdate(dataDir, log, judged);
+    if (!atExit) return confirmPendingUpdate(dataDir, log, judged, keepOld);
     const pending = readPending(dataDir);
     if (
       !judged || !pending || pending.startedAt !== judged.startedAt ||

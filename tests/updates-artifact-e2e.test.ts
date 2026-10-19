@@ -102,6 +102,8 @@ Deno.test({
     const keyPath = join(installDir, "release-key.json");
     await Deno.writeTextFile(keyPath, JSON.stringify(keys));
     let proc: Deno.ChildProcess | null = null;
+    // The handover's child, once it served.
+    let relaunched: { pid: number } | null = null;
     try {
       // ── the app: updates configured, pointed at a local channel ───────────
       // `file://` is a first-class source, not a test fixture — air-gapped and
@@ -194,14 +196,20 @@ Deno.test({
       // keep the predecessor → swap → relaunch. The relaunched process is a
       // DIFFERENT pid on the SAME port, so waiting for health is waiting for
       // the new build to prove itself by serving.
+      //
+      // The OLD process serves the same cells until the swap, and a
+      // shared-runtime build first downloads its Electron (~100 MB) — so
+      // "something serves" is no signal: a different process answering is.
+      const oldPid = (await health(port)).pid;
       await dispatch(port, "updates:apply", 2000);
       let after: Record<string, unknown> | null = null;
-      for (let i = 0; i < 120; i++) {
+      for (let i = 0; i < 300; i++) {
         await new Promise((r) => setTimeout(r, 1000));
         try {
           const h = await health(port);
-          if (h.appId) {
+          if (h.appId && h.pid !== oldPid) {
             after = h;
+            if (typeof h.pid === "number") relaunched = { pid: h.pid };
             const cells = h.cells as Record<string, Record<string, unknown>>;
             if (cells?.counter) break;
           }
@@ -216,7 +224,7 @@ Deno.test({
       const kept = [...Deno.readDirSync(installDir)].map((e) => e.name);
       assert(
         kept.some((n) => n.includes("old")),
-        `the previous version was not kept: ${kept.join(", ")}`,
+        `the previous version was not kept: ${kept.join(", ")}\n${s.log()}`,
       );
 
       // ── the decisive read ─────────────────────────────────────────────────
@@ -236,7 +244,21 @@ Deno.test({
     } finally {
       if (proc) await kill(proc).catch(() => {});
       // The relaunched process is not `proc` — it is the handover's child, on
-      // the same port. Reap it by name so it cannot outlive the test.
+      // the same port. Reaped by the pid it served under, and waited out:
+      // alive, it writes its logs and its store record again into the
+      // folders removed below.
+      if (relaunched) {
+        // Asked to stop, then asked again until the pid is gone (the signal
+        // then throws): a second SIGTERM is aio's own "stop now".
+        for (let i = 0; i < 100; i++) {
+          try {
+            Deno.kill(relaunched.pid, i < 50 ? "SIGTERM" : "SIGKILL");
+          } catch {
+            break; // aio-ok: no such process — it has exited, the goal
+          }
+          await new Promise((r) => setTimeout(r, 100));
+        }
+      }
       await Deno.remove(dir, { recursive: true }).catch(() => {});
       await Deno.remove(channel, { recursive: true }).catch(() => {});
       await Deno.remove(installDir, { recursive: true }).catch(() => {});

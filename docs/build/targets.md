@@ -144,6 +144,7 @@ build warning (`deno.json build block: aio never reads …`) and does nothing.
 | `guestPreloads`   | list of file paths, relative to deno.json           | none                                        | `<webview>` preloads an Electron package ships — [guest preloads](#webview-guest-preloads-buildguestpreloads)                                                                                                            |
 | `smoke`           | `true` \| `"desktop"` \| `"strict"`                 | off                                         | start each built artifact and fail the build when it does not come up — [smoke](#start-what-you-built---smoke)                                                                                                           |
 | `electronRuntime` | `"online"` \| `"offline"`                           | `"offline"` (`am create` writes `"online"`) | a desktop package downloads its Electron once into a per-user store every online app starts from, or carries its own — [shared runtime](#shared-electron-runtime-buildelectronruntime)                                   |
+| `splash`          | `false` \| `{ "image": "…png", … }`                 | none                                        | the image a desktop package, an APK and the `web` target's page show from their first moment until the app has loaded — [splash](#splash-buildsplash)                                                                    |
 | `windows`         | `{ "shortcut": true \| false }`                     | `shortcut: true`                            | whether the one-click `.exe` adds a Start-menu shortcut — [electron](#electron-desktop-app)                                                                                                                              |
 | `macos`           | `{ "bundleId": "…", "host": "[user@]mac" }`         | `app.aio.<name>`                            | the bundle identifier, and the Mac that packs the `.dmg` — [macOS](#macos-the-app-and-the-dmg)                                                                                                                           |
 | `android`         | `{ "strict": true }`                                | `strict: false`                             | an `android/` overlay that drops part of the template's activity fails the build — [native code](#adding-native-android-code-the-android-folder); `keystore`, `keyAlias`, `aab` — [signing](#signing-a-release-apk--aab) |
@@ -260,7 +261,10 @@ without discarding its declared entry.
 > not own there. Chaining single-target builds that all write into it loses the
 > earlier artifacts. A `dist/` the project brought with it — holding none of the
 > files an aio build stages there and no `manifest.json` — is refused, its files
-> named, instead of emptied.
+> named, instead of emptied. When `dist/` holds a previous release
+> (`"out": "dist"`, the default) and this build's out is elsewhere
+> (`--out=dist-online`), that release — `manifest.json` and its artifacts — is
+> moved to `.aio/kept-dist-<time>/` first, and the build says so.
 >
 > Give each build its own destination instead — `build.ts` takes **`--out=`**:
 >
@@ -1410,7 +1414,15 @@ tag) — see [signing](../deploy/signing.md); [CI](ci.md) has the plain matrix.
 | Windows | `%LOCALAPPDATA%\aio\electron\` (never roams)      |
 
 `$AIO_SHARED_ELECTRON_DIR` moves it. It is app data, not a cache: an app cannot
-open without it, so nothing deletes from it on its own.
+open without it, so only what no installed app needs is ever deleted from it
+(see _Cleaning up_ below).
+
+**An online app starts only that Electron.** An `$ELECTRON_PATH` it inherits —
+from a bundled app's launcher, as when an update from a bundled build relaunches
+it — is cleared by its own launcher (`AppRun`, `run.bat`) and ignored by the app
+(logged once, naming the path): another package's Electron, from a mount that
+can vanish, is never started in its place. A bundled package keeps using
+`$ELECTRON_PATH` as before.
 
 **The Electron it downloads is the one the app was built with — byte for byte.**
 The build reads Electron's published `SHASUMS256.txt` once, on the build machine
@@ -1444,11 +1456,15 @@ through it.
   window cancels the start — nothing is installed, and the next start downloads
   again.
 - **The download fails** (offline, a proxy): a dialog names the reason and
-  offers **Retry** or **Quit** (Windows' own box labels Quit **Cancel**). A
-  store that cannot be written (a read-only or full disk) says so at once, with
-  the folder's name, before anything is downloaded. Started with no desktop (a
-  service, ssh) there is nothing to ask on: the reason is logged and the start
-  ends.
+  offers **Retry** or **Quit** (Windows' own box labels Quit **Cancel**) — and,
+  right after an update while the version it replaced is kept in `old/`, **Start
+  the previous version**, which rolls the update back and starts that one
+  (Windows' box is then Yes / No / Cancel, its text says which is which). A
+  start that never got its window does not confirm the update: two such starts
+  roll it back ([updates](../deploy/updates.md)). A store that cannot be written
+  (a read-only or full disk) says so at once, with the folder's name, before
+  anything is downloaded. Started with no desktop (a service, ssh) there is
+  nothing to ask on: the reason is logged and the start ends.
 - **Two apps start at once** without it: one downloads, the other waits for that
   download instead of making a second one. Closing either window ends that start
   at once.
@@ -1470,6 +1486,18 @@ copy starts from it. The updater asks the new build which Electron it needs
 (`--aio-electron-runtime`); a build that cannot answer refuses the update rather
 than being guessed at.
 
+Both downloads report into the same `updates.progress` under
+`status: "downloading"`, so the bar fills twice; `updates.progressOf` says which
+(`"app"`, then `"runtime"`), and `updates.runtimeBytes` gives the Electron
+download's size once it has begun, for one bar over both legs
+([cell state](../deploy/updates.md#cell-state-reference)).
+
+The **first** update from a build made before 1.0.21 (bundled Electron) to an
+online build is applied by the OLD updater, which knows nothing of the shared
+runtime: it installs the app alone, and the new version fetches its Electron at
+its first start, in the download window — not inside the app's update bar.
+Promise nothing else for that one update.
+
 **Cleaning up.** Every start, and every update before its swap, records which
 Electron the installed app needs (`<store>/apps/`, one record per app and
 Electron version; each app keeps its newest two — the one it runs and the one
@@ -1480,6 +1508,18 @@ records of uninstalled apps. Age decides nothing there: an app opened once a
 year still opens offline. An Electron an app started from in the last 10
 minutes, a window being made right now, and everything while any record cannot
 be read (it is named) are kept.
+
+End users have no `am`, so **an online app cleans the store itself**: once its
+window has loaded (never delaying the start) and at most once a day per user
+(`<store>/.aio-auto-prune`), it removes each Electron that same plan offers
+which nothing has started from in **30 days** — never one an installed app's
+record names (a record whose install is gone counts as gone), one being
+downloaded or installed (its lock is held), or the one the app itself runs from
+— and logs one line per Electron removed. 30 days, because a record names the
+install's path: an app the user moved and has not opened since names nothing
+until its next start, and offline that start could not download Electron again.
+Windows of removed apps and stale records are left to `am prune`. A failure is
+logged and never stops the app.
 
 **What it costs.**
 
@@ -1506,6 +1546,91 @@ be read (it is named) are kept.
   | Windows `.zip`   | 173.7 MB | 34.6 MB |
   | macOS `.dmg`     | 169.0 MB | 40.8 MB |
   | macOS `.app.tar` | 152.5 MB | 35.2 MB |
+
+### Splash: `build.splash`
+
+A desktop package can open with a splash: the app's image, drawn by the OS
+itself (not by Electron) the moment the app starts, before Electron is looked
+for, and gone once the app's window has loaded. An Android APK shows the same
+splash natively ([Android](#splash-on-android), below).
+
+```jsonc
+"build": {
+  "splash": {
+    "image": "assets/splash.png", // required: a PNG, at most 1 MB
+    "text": "Starting {title}…",  // optional; left out or false = the image alone
+    "progress": true,             // optional: a bar while Electron downloads
+    "minMs": 1000,                // optional: it stays at least this long (0–10000)
+    "font": { "family": "Georgia", "size": 13, "weight": "bold" },
+    "color": "#ffffff",           // the text's colour
+    "bar": { "style": "solid", "color": "#3b82f6", "track": "#e5e7eb" } // or "thin"
+  }
+}
+```
+
+- **Looks.** The image alone; the image with the text over its lower part; or
+  the image, the text and a small bar under it. The window is the image's size,
+  centred, without a frame, above other windows, and with no taskbar or Dock
+  entry. Name the file `…@2x.png` when it is drawn for a 2× screen: it is shown
+  at half its pixels, so it is sharp there.
+- **Colours.** Colours you leave out are the app's own (the same hue as its icon
+  and theme), in light and dark mode. The colour behind a transparent image is
+  the app's page background.
+- **Text.** `{title}` is the app's name. `{got}`, `{total}` and `{pct}` are the
+  download's MB and percent (`?` while the size is unknown). Any other `{…}` is
+  refused at build time.
+- **When it closes.** The app's window is made hidden and loads underneath the
+  splash. When its page has mounted and the splash has been on screen for
+  `minMs`, the splash fades out and the window shows, in the same moment. A
+  splash that is not up yet is waited for: it always shows, for `minMs`. The
+  splash also closes when Electron exits or never starts, when the app stops,
+  and after 30 s with no sign of the window; that last case is logged once. The
+  30 s do not count while a download runs. If the splash cannot be drawn, the
+  window shows as soon as its page has mounted. Whatever happens, the window
+  shows by itself `minMs` + 5 s after it is ready, and the log says so.
+- **Online apps.** On a first start (`electronRuntime: "online"`), Electron
+  downloads behind the same splash. With `progress: true` the bar shows the
+  download, and a ✕ on the splash cancels it. When no download runs, the bar is
+  hidden. If the download fails, the splash closes and the usual Retry / Quit
+  question is asked.
+- **Without `splash`** (or with `false`), nothing changes: there is no splash,
+  and a first download shows the plain progress window.
+- **Runs from source** (`deno task dev`, `--prod`) show no splash. Only a built
+  package does.
+- **Electron is never delayed.** Electron starts and loads its page while the
+  splash opens; only the window's show waits. The log says when each happened:
+  `electron: splash — visible N ms after it was asked for, M ms after the app started`
+  and `electron: splash — the main window shows N ms after the splash appeared`.
+- **The `web` target** shows it too, as part of the page — see
+  [the web splash](#splash-on-the-web).
+
+What each OS draws:
+
+| OS      | Drawn by                        | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ------- | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Windows | Windows Forms (PowerShell)      | visible about 650 ms after it is asked for. The text has no shadow. The window takes focus as it opens (Windows Forms cannot cheaply show a window without that). It fades out                                                                                                                                                                                                                                                         |
+| macOS   | Cocoa (JXA)                     | visible about 200 ms after it is asked for. The text has a soft shadow. The window never takes focus, has no Dock icon, and fades out                                                                                                                                                                                                                                                                                                  |
+| Linux   | `yad`, else `zenity`, else none | `yad`: the image at its pixel size (an `@2x` image is not halved), with the text in the bar under it, in the GTK theme's font and colours. With `progress`, the bar is the download's and stays empty when none runs; without `progress`, it pulses. Without `yad`: a plain `zenity` window with the text only; it cannot stay on top, so the app's window covers it once it opens. Without either: no splash. One log line says which |
+
+#### Splash on Android
+
+An APK built with `build.splash` draws the image, with the text under it (in its
+font and colour), centred on the app's background, full screen above the
+WebView. It is shown from the activity's first frame. On Android 12+ the system
+always shows its own icon splash before that; the APK's theme gives it the same
+background colour, as it does the starting window on Android 10 and 11, so there
+is no flash. It fades out once the page has loaded, never sooner than `minMs`
+after its first frame, and at most 30 s after the start (logged once). "Loaded"
+is the desktop's rule: aio's `#root` has content, or a page without one (the
+client APK's connect form) has been parsed. A WebView too old for the signal
+falls back to the page's `onPageFinished`. There is no download, so `progress`
+and `bar` are accepted and draw nothing, and `{got}`/`{total}`/`{pct}` read
+`0`/`?`/`?`. The colours left out follow the phone's light/dark mode, or
+`android.colorScheme` when it is `"dark"` or `"light"`. Only a cold start shows
+it: a rotation or a reload after a lost renderer does not. Logcat (`aio`) says
+`splash: shown`, `splash: the page has loaded, N ms after it was shown` and
+`splash: gone N ms after it was shown`. Without `build.splash`, the APK is
+exactly what it was.
 
 ## electron-client (thin client AppImage)
 
@@ -1663,6 +1788,7 @@ index.html             the shell: title, stylesheet, the Apple Home Screen tags
 manifest.webmanifest   name, icons and colours from deno.json (the appId's hue)
 app.js  style.css      the standalone bundle (an auto-mounting classic script)
 icon.png | icon-192.png icon-512.png   yours, or the generated monogram
+splash.png  apple-splash-*.png         with build.splash only — the splash on the web
 sw.js                  the offline cache
 <assets mounts>        deno.json "assets" — fetch them with a RELATIVE URL
 ```
@@ -1718,6 +1844,39 @@ sw.js                  the offline cache
   Playwright's WebKit, named by `AIO_PLAYWRIGHT_DIR`
   ([environment](environment.md)); without it the lane is skipped.
 
+### Splash on the web
+
+With [`build.splash`](#splash-buildsplash), the web build's page opens on the
+splash: the image centred over the app's page background (light or dark, as the
+device is), the `text` under it in its `font` and `color`. It is part of the
+page's HTML, so it paints with the page's first frame, before any script runs.
+The same page serves a plain browser tab and the installed Home Screen app, so
+both show it.
+
+- **When it goes.** Once the app has mounted (`#root` has content), and not
+  before `minMs` has passed since the page first painted, it fades out (0.2 s;
+  none with reduced motion) and is removed. Nothing of it stays to block a tap.
+  After 30 s it goes regardless — an app that never mounts shows what it shows
+  then.
+- **No download runs on the web,** so `progress` and `bar` are accepted and
+  ignored, and in `text` `{got}` reads `0` and `{total}` / `{pct}` read `?`.
+- **iOS launch images.** iOS shows a Home Screen app's launch image while it
+  starts, before the page. The build makes one per iPhone and iPad screen iOS
+  15.4 runs on (`apple-splash-<w>x<h>.png`, portrait, each with its exact
+  `apple-touch-startup-image` media query): the image at the size and place the
+  page draws it, on the light background, so the launch image and the page's
+  splash are one picture. They carry no text, and they stay light in dark mode
+  (the page's splash then turns dark). The offline cache does not hold them: iOS
+  fetches them, not the page. An image the build cannot read (16-bit,
+  interlaced) gets no launch images, with a warning.
+- **Colours.** The manifest's `background_color` and `theme_color` become the
+  app's page background — the splash's — and the dark mode's `theme-color` its
+  dark one, so the screen before the page matches the splash. Without `splash`
+  they are unchanged.
+- **Without `splash`** (or with `false`), the page is byte for byte the one
+  without it. Only the web build carries it; a server-served page (`browser`)
+  does not.
+
 ## Standalone runtime (`initStandalone`)
 
 For Android builds, aio uses a client-side dispatch loop instead of a server:
@@ -1760,7 +1919,9 @@ deno run -A dep/aio/src/build.ts --android
 
 Standalone Android APK running entirely in a WebView — no server, no Deno
 runtime. Dispatch loop, reducer, and effects all run client-side, over a durable
-native store ([below](#state-survives-a-kill)).
+native store ([below](#state-survives-a-kill)). With `build.splash` it opens
+with a native splash until the page has loaded (every APK, the client one too) —
+see [Android splash](#splash-on-android).
 
 **Prerequisites:** Android SDK (`$ANDROID_HOME`), Java 17+ (`$JAVA_HOME`),
 Gradle on `PATH`. On a Windows host the build runs the wrapper it generates as
@@ -2218,9 +2379,10 @@ the build reaches for, or that step quietly does nothing:
 | `MainActivity.kt`     | `return !url.startsWith("https://appassets.androidplatform.net/")` — rewritten so dev navigation stays in the WebView                                                                                                                                                                                                                                              |
 | `AndroidManifest.xml` | `{{APPLICATION_ID}}`, `{{APP_NAME}}`, `{{ICON_ATTR}}`, `{{CLEARTEXT_ATTR}}` and `{{CAMERA_PERMISSION}}` — `{{CLEARTEXT_ATTR}}` becomes `android:usesCleartextTraffic="true"` for a dev or `--remote` build and nothing for a standalone one; `{{CAMERA_PERMISSION}}` becomes the CAMERA declaration only with [`android: { camera: true }`](#the-camera-is-opt-in) |
 | `MainActivity.kt`     | `{{CAMERA_DECLARED}}` — the same flag, so the WebView's refusal cannot disagree with the manifest                                                                                                                                                                                                                                                                  |
+| `MainActivity.kt`     | `{{SPLASH}}` — `null`, or the [splash](#splash-on-android) that `build.splash` bakes in                                                                                                                                                                                                                                                                            |
 
-A replacement `MainActivity.kt` also replaces four things the template's
-activity does, and the build **warns** when an overlay drops any of them:
+A replacement `MainActivity.kt` also replaces what the template's activity does,
+and the build **warns** when an overlay drops any of these:
 
 - **The durable store** (standalone APK only). Without it the page falls back to
   `localStorage` and a change can be lost on a kill right after it (see
@@ -2258,7 +2420,14 @@ activity does, and the build **warns** when an overlay drops any of them:
   `defaultBack`. Without them no `onBackButton` handler ever runs (see
   [The Back button](#the-back-button)).
 
-A warning scrolls past. To make each of the four an **error** — no APK is built
+- **The splash** (only with [`build.splash`](#splash-on-android)). The app asked
+  for one, so an activity that never shows it is a loss. It is one
+  self-contained block — `// ── the splash` to the end of the file — plus the
+  lines marked `// splash` in `MainActivity`: copy both. An app that set
+  `build.splash` after copying its activity has to re-base it anyway: the
+  template changed, and the overlay-hash warning above says so.
+
+A warning scrolls past. To make each of these an **error** — no APK is built
 until the overlay carries it — opt in:
 
 ```json

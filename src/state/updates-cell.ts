@@ -308,6 +308,20 @@ export type UpdatesState = {
   available: AvailableUpdate | null;
   blocked: BlockedUpdate | null;
   progress: number;
+  /** Which download `progress` is measuring while `status` is
+   *  "downloading": `"app"` — the new version itself — or `"runtime"` — the
+   *  Electron an `electronRuntime: "online"` build needs, fetched into the
+   *  shared store after the app and before the swap (only when the new
+   *  version pins one the store does not have). `progress` restarts at 0 for
+   *  the runtime leg; this says why. Null otherwise, and when idle or done. */
+  progressOf?: "app" | "runtime" | null;
+  /** The size in bytes of the runtime leg's download, so one bar can span
+   *  both legs (`available.size` + this). Known only once that download has
+   *  begun — it is the server's Content-Length, and which Electron is needed
+   *  is only learnt from the downloaded app — so null until then, and null
+   *  when no runtime is downloaded or the server sent no length. Reset when
+   *  an `apply()` begins. */
+  runtimeBytes?: number | null;
   lastChecked: string | null;
   error: string | null;
   dismissed: string | null;
@@ -337,6 +351,11 @@ export type UpdatesCell = Readonly<UpdatesState> & CellDef & {
   setProgress(fraction: number): void;
   /** The phase of an in-flight install — called by the applier. */
   setPhase(phase: "downloading" | "applying"): void;
+  /** Which download `progress` measures — called by the applier. Optional
+   *  only so the type stays implementable as before; the cell always has it. */
+  setProgressOf?(of: "app" | "runtime" | null): void;
+  /** The runtime leg's size in bytes — called by the applier. */
+  setRuntimeBytes?(bytes: number): void;
   /** The pre-migration backup an install just took — called by the applier. */
   setBackupPath(path: string): void;
   /** Publish the configuration before the first check answers — called by the
@@ -422,6 +441,10 @@ function buildUpdatesCell(slot: UpdatesSlot): UpdatesCell {
       blocked: null as BlockedUpdate | null,
       /** 0..1 while downloading. */
       progress: 0,
+      /** Which download `progress` measures — see `UpdatesState`. */
+      progressOf: null as "app" | "runtime" | null,
+      /** The runtime leg's size — see `UpdatesState`. */
+      runtimeBytes: null as number | null,
       lastChecked: null as string | null,
       error: null as string | null,
       /** The version the user said No to; cleared when a newer one appears. */
@@ -657,6 +680,8 @@ function buildUpdatesCell(slot: UpdatesSlot): UpdatesCell {
         }
         s.status = "downloading";
         s.progress = 0;
+        s.progressOf = null;
+        s.runtimeBytes = null;
         s.error = null;
         slot.applyFailed = undefined;
         // Read before the await: a blocked release taken on purpose is not
@@ -682,8 +707,10 @@ function buildUpdatesCell(slot: UpdatesSlot): UpdatesCell {
           // last moments of this process's life.
           s.status = "staged";
           s.progress = 1;
+          s.progressOf = null;
         } catch (e) {
           s.status = "error";
+          s.progressOf = null;
           s.error = e instanceof Error ? e.message : String(e);
           slot.applyFailed = { version, error: s.error };
         }
@@ -710,6 +737,31 @@ function buildUpdatesCell(slot: UpdatesSlot): UpdatesCell {
           );
         }
         s.status = phase;
+      },
+
+      /** Which download `progress` measures, reported by the applier before
+       *  each leg — see `UpdatesState.progressOf`. */
+      setProgressOf(s, of: "app" | "runtime" | null) {
+        if (of !== "app" && of !== "runtime" && of !== null) {
+          throw new Error(
+            `[updates] setProgressOf(${
+              JSON.stringify(of)
+            }) — the legs are "app", "runtime", or null.`,
+          );
+        }
+        s.progressOf = of;
+      },
+
+      /** The runtime leg's size, reported by the applier once its download
+       *  has said it — see `UpdatesState.runtimeBytes`. */
+      setRuntimeBytes(s, bytes: number) {
+        if (!Number.isSafeInteger(bytes) || bytes <= 0) {
+          throw new Error(
+            `[updates] setRuntimeBytes(${bytes}) — a size is a positive ` +
+              `whole number of bytes.`,
+          );
+        }
+        s.runtimeBytes = bytes;
       },
 
       /** The pre-migration backup this install took. Reported by the applier

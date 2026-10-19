@@ -10,6 +10,7 @@
 // is the incident itself.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
+import { sharedElectronRoot } from "../src/electron/shared-runtime.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import {
   driveRoots,
@@ -152,11 +153,15 @@ Deno.test("check:home-clean: storeChanges names every added, changed and removed
   );
 });
 
-Deno.test("check:home-clean: the real stores watched are the version store and the install's worktree registry", () => {
+Deno.test("check:home-clean: the real stores watched are the version store, the install's worktree registry and the shared Electron store", () => {
   // The store paths are the host's own spelling (they are stat'ed).
+  // …and the shared Electron store, where the host's OS puts it.
+  const store = (env: Record<string, string>) =>
+    sharedElectronRoot({ env: (k) => env[k], home: () => "/h" });
   assertEquals(realStoreDirs({ HOME: "/h" }), [
     join("/h", ".local", "lib", "aio-versions"),
     join("/h", ".local", "lib", "aio", ".git", "worktrees"),
+    store({ HOME: "/h" }),
   ]);
   // A user's own relocation is watched too, beside the default.
   assertEquals(
@@ -166,6 +171,7 @@ Deno.test("check:home-clean: the real stores watched are the version store and t
       join("/h", ".local", "lib", "aio-versions"),
       join("/i", ".git", "worktrees"),
       join("/h", ".local", "lib", "aio", ".git", "worktrees"),
+      store({ HOME: "/h", AIO_VERSIONS_DIR: "/v", AIO_HOME: "/i" }),
     ],
   );
   assert(

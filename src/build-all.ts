@@ -39,6 +39,7 @@ import { moveArtifact, slugify } from "./build/build-helpers.ts";
 import {
   emptyDir,
   foreignDistRefusal,
+  keepDistRelease,
   keepInDistStaging,
   moveDirContents,
   previousReleaseNote,
@@ -1239,6 +1240,43 @@ export async function buildAll(): Promise<number> {
     }
     return m;
   };
+
+  // dist/ is every target's staging and is emptied whatever `out` is. When it
+  // was a previous build's OUT, its release would go with it: kept, and said.
+  const distDir = resolve(join(root, DIST_DIR));
+  if (outDir !== distDir) {
+    const kept = join(
+      root,
+      ".aio",
+      `kept-dist-${new Date().toISOString().replace(/[:.]/g, "-")}`,
+    );
+    // Shown in the build's own spelling (`→ dist/`): `/` on every OS.
+    const keptRel = kept.replace(root + SEPARATOR, "").split(SEPARATOR).join(
+      "/",
+    );
+    try {
+      const moved = await keepDistRelease(distDir, kept);
+      if (moved.length > 0) {
+        const shown = moved.slice(0, 5).join(", ") +
+          (moved.length > 5 ? `, … (${moved.length} in all)` : "");
+        console.warn(
+          `${C.yellow}⚠ dist/ held a previous release (${shown}) — moved to ` +
+            `${keptRel}/${C.r}: dist/ is staging, emptied by this build ` +
+            `into ${
+              outDir.replace(root + SEPARATOR, "").split(SEPARATOR).join("/")
+            }/.`,
+        );
+      }
+    } catch (e) {
+      console.error(
+        `${C.red}✗ refusing to build: dist/ holds a previous release ` +
+          `(manifest.json) that could not be moved to ${keptRel}/${C.r} — ` +
+          `${e instanceof Error ? e.message : String(e)}. This build would ` +
+          `DELETE it.\n  ${C.dim}fix: move it out of dist/ first.${C.r}`,
+      );
+      return 1;
+    }
+  }
 
   // Same-filesystem staging (survives each build's dist/ clean; rename is safe).
   const staging = join(root, ".aio", `build-staging-${crypto.randomUUID()}`);

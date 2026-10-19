@@ -288,7 +288,7 @@ Three rules that are not obvious from the field list:
 ### Identity fields are validated first — `SAFE_TOKEN`
 
 `name`, `version` and `channel` do not stay inside the manifest: they become
-filesystem path segments (a staging directory, an `.old-<version>` sibling, a
+filesystem path segments (a staging directory, an `old/<version>/` folder, a
 versioned install layout), part of a shell string on the electron-zip swap, and
 a positional argument to `git ls-remote`. A manifest is attacker-influenced
 input, so `verifyManifestClaims` applies one charset to all three before

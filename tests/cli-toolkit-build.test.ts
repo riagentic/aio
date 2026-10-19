@@ -36,6 +36,9 @@ const dec = new TextDecoder();
 let primed: Promise<void> | undefined;
 const prime = () =>
   primed ??= (async () => {
+    // Bounded: on Windows a `deno cache` here once spun on one core for 7 h
+    // (2026-10-20, not reproduced in 3 rounds) and held the whole run. Now it
+    // is killed after 5 min and named.
     const p = await new Deno.Command(Deno.execPath(), {
       args: ["cache", "--config", CONFIG, APP],
       cwd: EXAMPLE,
@@ -43,8 +46,14 @@ const prime = () =>
       stdin: "null",
       stdout: "null",
       stderr: "piped",
+      signal: AbortSignal.timeout(300_000),
     }).output();
-    assert(p.success, `could not set the example up: ${dec.decode(p.stderr)}`);
+    assert(
+      p.success,
+      p.signal
+        ? "`deno cache` of the example did not finish in 5 min — killed"
+        : `could not set the example up: ${dec.decode(p.stderr)}`,
+    );
   })();
 
 /** Run the example from SOURCE, from a throwaway cwd, capturing everything. */

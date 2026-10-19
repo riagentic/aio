@@ -562,22 +562,27 @@ export function _winLauncherBat(binaryName: string, shared = false): string {
   return `@echo off
 SET "HERE=%~dp0"
 ${
+    // Shared: one inherited from a bundled app's launcher is cleared — this
+    // package starts only the store's pinned runtime.
     shared
-      ? ""
-      : `SET "ELECTRON_PATH=%HERE%electron\\electron.exe"\n`
-  }start "" "%HERE%${binaryName}.exe" %*
+      ? `SET "ELECTRON_PATH="\n`
+      : `SET "ELECTRON_PATH=%HERE%electron\\electron.exe"\n`}start "" "%HERE%${binaryName}.exe" %*
 `;
 }
 
 /** The AppImage's `AppRun`. A shared-runtime package carries no `electron/`,
- *  so it exports no `ELECTRON_PATH` at one. @internal */
+ *  so it exports no `ELECTRON_PATH` at one — and clears one it inherited (an
+ *  update from a bundled build, a start from a bundled app's process: another
+ *  package's Electron, in a mount that can vanish). A bundled one clears the
+ *  shared marker it may inherit from a shared app's process the same way.
+ *  @internal */
 export function _appRun(binaryName: string, shared = false): string {
   return `#!/bin/bash -p
 HERE="$(dirname "$(readlink -f "$0")")"
 ${
     shared
-      ? `export ${SHARED_RUNTIME_ENV}="shared:$HERE"\n`
-      : `export ELECTRON_PATH="$HERE/electron/electron"\n`
+      ? `unset ELECTRON_PATH\nexport ${SHARED_RUNTIME_ENV}="shared:$HERE"\n`
+      : `unset ${SHARED_RUNTIME_ENV}\nexport ELECTRON_PATH="$HERE/electron/electron"\n`
   }exec "$HERE/${binaryName}" "$@"
 `;
 }

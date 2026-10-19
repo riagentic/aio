@@ -388,6 +388,24 @@ running after 30 s, or the app quit cleanly — exit code 0); if it does not, it
 puts the previous artifact back and exits so the supervisor starts a version
 that works, naming the backup if the update had migrated data.
 
+A **desktop** app (an Electron window) is proven by its window instead: the
+update is confirmed once the main window has loaded (the page mounted), never by
+`onStart` alone and never by a clean exit before that. A start whose window
+never came — its Electron could not be downloaded (a proxy, offline), the
+download was cancelled, the user pressed Quit — is a failed start, counted like
+a crash, and the second one rolls back. While the version the update replaced is
+in `old/`, the Retry / Quit question after a failed download also offers **Start
+the previous version**: the same rollback, at once, and that version is started
+in this one's place. A server or CLI app keeps the confirm above.
+
+A rollback undoes what the update did outside the install too: the shared
+Electron store's record the update wrote before its swap (`pending`, naming the
+runtime it fetched) goes, and a window profile the new build moved from
+Electron's old per-OS place (`~/.config/<name>/` and its equivalents) into the
+app's home goes back there, where the build put back reads it. A start that
+finds a profile in both places keeps the one written last and moves the other
+into the app's home as `electron.previous-<date>/` — once, never deleted.
+
 A new version that never boots at all cannot judge itself. For the directory
 swaps (Electron `.zip` and macOS `.app`) the swap helper covers that case: it
 waits up to 120 s for the new version's first boot to take a first-boot token.
@@ -410,8 +428,8 @@ staged, starts the old version, and records why; the next boot logs
 macOS and Linux the words of the `mv` or `rm` that failed, cut to one line) and,
 on Windows, the processes still running from the folder or started with its path
 (up to eight by name; a program that only has its working directory there is on
-no list Windows gives cheaply, and the line says so). An earlier
-`<install>.old-<version>` that cannot be removed is named as that:
+no list Windows gives cheaply, and the line says so). An earlier copy in
+`old/<version>/` that cannot be removed is named as that:
 `an earlier copy of the app (…) could not be removed`.
 
 A swap that was never made is not a rollback: Y never ran, so it is **not**
@@ -447,10 +465,9 @@ The folder an app is installed in is the user's — `~/Apps`, `Downloads`, a
 shared `Programs` folder — and an update leaves things there: a download
 (`<install>.zip-<version>`, `<install>.new-<version>`, and while it runs a
 staging folder `.aio-update-<download name>-<pid>-<8 hex>`), an unpacked tree
-(`<install>.staged-<version>`), the version it replaced
-(`<install>.old-<version>`), a build set aside by a rollback
-(`<install>.failed-<time>`). A name proves nothing there: `notes.staged-1.2.3`
-can be somebody's folder.
+(`<install>.staged-<version>`), the version it replaced and a build a rollback
+took out (`old/<version>/<its name>`). A name proves nothing there:
+`notes.staged-1.2.3` can be somebody's folder.
 
 So the updater removes a path only when it can prove it made what is there:
 
@@ -521,32 +538,93 @@ On a file system that gives files no creation time the record cannot prove
 anything it names: nothing is removed there and old versions are not pruned —
 each start warns with the path and its size, and they are yours to delete.
 
-### What an update keeps, and what it costs in disk
+### Where an update puts files, and what it costs in disk
 
-Each update keeps the version it replaced beside the install, as
-`<install>.old-<version>` — a file for a single-file artifact, a whole folder
-for an Electron `.zip` or a macOS `.app` install. That copy is what a rollback
-puts back, and what makes going back by hand a rename instead of a download.
+An update leaves **one install**, named for the version it is, and an `old/`
+folder beside it:
 
-A single-file artifact is kept by copying it (on Windows the running file is
-renamed aside instead). The copy is on the record as unfinished until every byte
-is on disk, and is recorded as whole before the new build goes in. One cut off
-half-way — the app killed, the disk full — is not a version: it is not counted
-among the kept ones, a rollback refuses it
+```
+~/Apps/myapp-0.1.745-x86_64.AppImage        the install
+~/Apps/old/0.1.740/myapp-0.1.740-x86_64.AppImage   the version it replaced
+```
+
+- **The new version gets its own name.** When the install's file name carries
+  the running version — the release's own name, as downloaded — the new release
+  goes in under ITS own name beside it, and the old file moves into
+  `old/<version>/`, under the name it had. A file you renamed (no version in its
+  name) is updated in place: the new build takes its name, the old one goes into
+  `old/<version>/` all the same. A macOS `.app` and a Windows install folder
+  carry no version in their names, so they keep their path; the version they
+  they replaced goes into `old/<version>/<bundle or folder>` — on macOS as
+  `<X>.app.noindex`. The bundle set aside — and the `Electron.app` inside it —
+  is unregistered from LaunchServices (`lsregister -u`; LaunchServices follows a
+  moved bundle by its file, not its name), so macOS never opens the old copy for
+  the app's links and files; and it is imported into Spotlight once more
+  (`mdimport`), which drops what Spotlight had indexed inside it while it was
+  the running version (a `*.noindex` name alone keeps it listed). A rollback
+  names it `<X>.app` again and registers it (`lsregister -f`). A tool that fails
+  is said once in the log, never a reason the update stops. An install under a
+  supervisor (systemd, `AIO_SUPERVISED=1`) is always updated in place: its unit
+  names the path.
+- **Launch points follow the file.** When the install's name changes, the menu
+  entry aio's installer wrote (`~/.local/share/applications/<app>.desktop`, its
+  `Exec=` and `TryExec=`) is pointed at the new file — only that entry, and only
+  when it named the old path — and so are the app's records in the shared
+  Electron store. A shortcut, pin or launcher integration you made yourself
+  cannot be followed: the confirm of the update warns, once, naming the old and
+  the new path
+  (`… a shortcut, pin or launcher made by hand to <old> does not
+  follow: point it at <new>`)
+  — and says the menu entry follows only where one (Linux) now starts the new
+  file.
+- **At every step something runs.** The new file goes in first, the menu entry
+  is pointed at it, and only then does the old one move: a crash anywhere in
+  between leaves a runnable install where the menu entry points. A step that
+  fails puts back what moved before it; the update is not installed, and says
+  why.
+- **A rollback restores the old name.** It moves `old/<previous>/…` back to
+  where the install was, under the name it had, points the menu entry back, and
+  moves the build that failed into `old/<its version>/`.
+
+A single-file artifact whose name stays is kept by copying it (on Windows the
+running file is renamed into `old/` instead); one that gets a new name is not
+copied at all — the old file itself moves. A copy is on the record as unfinished
+until every byte is on disk, and is recorded as whole before the new build goes
+in. One cut off half-way — the app killed, the disk full — is not a version: it
+is not counted among the kept ones, a rollback refuses it
 (`the copy to roll back to (…) was cut off while it was being written …`), and
 the next start removes it. A copy that comes out short stops the update, with
 nothing changed.
 
-The **three newest** are kept. Older ones are deleted when a later update is
-confirmed (the new version's first healthy boot), never before. Only copies the
-updater itself set aside are counted and deleted (see above): a
-`<install>.old-photos` of your own is neither. So an install that has been
-updated three times or more occupies up to **four times the app's size**: the
-running version plus three old ones. For a 430 MB Windows folder install that is
-about 1.7 GB. An install made by `run.sh` keeps its versions under
+**`old/` keeps ONE version** — the rollback — unless the app asks for more with
+`updates.keepOld` (an integer >= 1; anything else refuses to boot). Up to
+1.0.20-beta it kept **three**; `keepOld: 3` restores that count. The copy the
+update just set aside is always the one kept; past it, the newest by when each
+went in (not by version: a build that failed goes in too). Older ones are
+deleted when an update is installed or confirmed (the new version's first
+healthy boot) — a folder install (a `.app`, a Windows folder) makes room before
+its helper sets the running version aside — so `old/` holds `keepOld` at every
+point, on every OS; each removal is logged, and one that cannot be removed (held
+open) is named in a warning and never stops the update. Only copies the updater
+itself set aside are counted and deleted (see above): a folder of your own in
+`old/` is neither. So an install occupies about **twice the app's size** — the
+running version plus its rollback — or `keepOld + 1` times with more kept. With
+one old copy, an app that moved to a shared Electron
+(`electronRuntime:
+"online"`) keeps at most one copy that still carries its own
+bundled Electron. An install made by `run.sh` keeps its versions under
 `versions/<version>/` instead, three in all, pruned at the same moment. Deleting
-an `.old-` copy by hand is safe while no update is in flight; the only thing
+a copy in `old/` by hand is safe while no update is in flight; the only thing
 lost is the rollback to that version without a download.
+
+**From an older aio.** Copies an earlier aio kept beside the install as
+`<install>.old-<version>` are the updater's own (on its record, or taken over
+once as described above): the first confirmed update under this build moves them
+into `old/<version>/<install's name>`, says so in one line
+(`moved the old versions an earlier aio kept beside … into old/: …`), and then
+prunes to `keepOld`. Anything not on the record stays where it is. A rollback
+also moves the app's records in the shared Electron store back to the restored
+path, so `am prune` never takes its Electron for unused.
 
 If it cannot move the old folder back during a rollback, it starts the version
 in place and the next boot logs
@@ -624,9 +702,12 @@ thrown error, so a method can show it.
 ## Desktop and CLI
 
 - **AppImage / Electron (Linux)** — the new file is downloaded beside the
-  running one, verified, and renamed over it. Renaming a running executable is
-  safe on Unix (writing to one is not: `ETXTBSY`); the running process keeps its
-  inode, and the path now resolves to the new version. Then the app restarts.
+  running one, verified, and moved into place: under its own release name when
+  the install's name carries the version (the running file then moves into
+  `old/<version>/`), else renamed over it. Renaming a running executable is safe
+  on Unix (writing to one is not: `ETXTBSY`); the running process keeps its
+  inode. Then the app restarts — from the new file (see
+  [Where an update puts files](#where-an-update-puts-files-and-what-it-costs-in-disk)).
 - **Electron (macOS `.app`)** — the release is the signed bundle as
   `<bin>-mac-<arch>.app.tar.gz` (`am publish` names it in `darwin-<arch>.json`;
   the `.dmg` beside it stays the first download). It is unpacked beside the
@@ -715,6 +796,7 @@ update is needed.
 | `allowUnsigned` | `false`            | Accept unsigned releases                        |
 | `kind`          | inferred           | `"manifest"` or `"git"` when a URL is ambiguous |
 | `prerelease`    | `dev` only         | Follow `2.1.0-rc.1`-style versions              |
+| `keepOld`       | `1`                | Old versions kept in `old/` (integer >= 1)      |
 
 ### `canApply` — the one hook that cannot be defaulted
 
@@ -754,20 +836,22 @@ and a surprise on a desktop, so an Electron install with `auto: true` and no
 
 ## Cell state reference
 
-| Field                 | Meaning                                                                                                                                 |
-| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `enabled`             | `updates` was configured — true from boot, not from the first answer                                                                    |
-| `status`              | idle · checking · available · blocked · downloading · applying · staged · error                                                         |
-| `available`           | see below, or null                                                                                                                      |
-| `blocked`             | `{ version, blockers }` — newer, but unsafe here                                                                                        |
-| `progress`            | 0..1 while downloading                                                                                                                  |
-| `current` · `channel` | what is running, and what it follows. `current` is `null` when this build cannot say what version it is — render `current ?? "unknown"` |
-| `currentUnknown`      | why `current` is null (a sentence for a log or a dev banner, never a version); `null` when the version resolved                         |
-| `lastChecked`         | ISO timestamp                                                                                                                           |
-| `dismissed`           | the version the user said no to (persisted)                                                                                             |
-| `backupPath`          | the pre-migration backup this install took, or null — set before the swap                                                               |
-| `shortcutAdded`       | Windows one-click install: the path of the Start-menu shortcut THIS start added, else null — say "the downloaded .exe can be deleted"   |
-| `error`               | last failure, verbatim                                                                                                                  |
+| Field                 | Meaning                                                                                                                                                             |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`             | `updates` was configured — true from boot, not from the first answer                                                                                                |
+| `status`              | idle · checking · available · blocked · downloading · applying · staged · error                                                                                     |
+| `available`           | see below, or null                                                                                                                                                  |
+| `blocked`             | `{ version, blockers }` — newer, but unsafe here                                                                                                                    |
+| `progress`            | 0..1 while downloading                                                                                                                                              |
+| `progressOf`          | which download `progress` measures: `"app"`, then `"runtime"` (a shared Electron the new version needs — `progress` restarts at 0); null otherwise                  |
+| `runtimeBytes`        | that Electron download's size in bytes, once it has begun (its Content-Length) — null before, and when none is downloaded; for one bar over `available.size` + this |
+| `current` · `channel` | what is running, and what it follows. `current` is `null` when this build cannot say what version it is — render `current ?? "unknown"`                             |
+| `currentUnknown`      | why `current` is null (a sentence for a log or a dev banner, never a version); `null` when the version resolved                                                     |
+| `lastChecked`         | ISO timestamp                                                                                                                                                       |
+| `dismissed`           | the version the user said no to (persisted)                                                                                                                         |
+| `backupPath`          | the pre-migration backup this install took, or null — set before the swap                                                                                           |
+| `shortcutAdded`       | Windows one-click install: the path of the Start-menu shortcut THIS start added, else null — say "the downloaded .exe can be deleted"                               |
+| `error`               | last failure, verbatim                                                                                                                                              |
 
 `available` is
 `{ version, reason, notes, size, releasedAt, migrates, signed, keyFingerprint, warnings }`.

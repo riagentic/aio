@@ -17,6 +17,7 @@ import {
   tmplPreloadWrite,
   tmplProfileDir,
   tmplRendererDiagnostics,
+  tmplSplashHold,
   tmplTray,
   tmplWebGuard,
   tmplWillNavigate,
@@ -74,8 +75,9 @@ ${tmplBounds()}
 app.on('ready', () => {
   const b = loadBounds(${w}, ${h});
 ${tmplWindowShape(meta, { preload: "preloadFile" })}
+${tmplSplashHold().before}
   const win = new BrowserWindow(b);
-  if (b.x == null) win.center();
+  if (b.x == null) win.center();${tmplSplashHold().after}
   const _appOrigin = new URL(${JSON.stringify(url)}).origin;
   __aioIpcBind(win, _appOrigin); // before any handler can run (tmplIpcGuard)
 ${tmplBoundsTracking()}

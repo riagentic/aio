@@ -524,6 +524,66 @@ testCell(
 
 testCell(
   cellDef,
+  "progressOf: the applier names each leg; apply() resets it and the size, and a failure clears the leg",
+  async (t) => {
+    const cell = updates as unknown as {
+      setProgressOf(of: "app" | "runtime" | null): void;
+      setRuntimeBytes(bytes: number): void;
+    };
+    const seen: unknown[] = [];
+    installUpdatesRuntime({
+      kind: "manifest",
+      channel: "prod",
+      current: "1.0.0",
+      currentUnknown: null,
+      exposed: false,
+      check: () =>
+        Promise.resolve({ kind: "offer" as const, update: offer("2.0.0") }),
+      apply: async () => {
+        seen.push(state(t).progressOf, state(t).runtimeBytes);
+        await cell.setProgressOf("app");
+        seen.push(state(t).progressOf);
+        await cell.setProgressOf("runtime");
+        await cell.setRuntimeBytes(158_000_000);
+        seen.push(state(t).progressOf, state(t).runtimeBytes);
+        throw new Error("network died");
+      },
+      setChannel: () => Promise.resolve(),
+    });
+    try {
+      assertEquals(state(t).progressOf, null);
+      assertEquals(state(t).runtimeBytes, null);
+      await cell.setRuntimeBytes(1);
+      await check(t);
+      await t.send.apply!();
+      assertEquals(seen, [null, null, "app", "runtime", 158_000_000]);
+      assertEquals(state(t).status, "error");
+      assertEquals(state(t).progressOf, null);
+      // The size stays: it is a fact about the download that was begun.
+      assertEquals(state(t).runtimeBytes, 158_000_000);
+      for (
+        const bad of [
+          () => cell.setProgressOf("electron" as "app"),
+          () => cell.setRuntimeBytes(0),
+          () => cell.setRuntimeBytes(1.5),
+        ]
+      ) {
+        let threw = false;
+        try {
+          await bad();
+        } catch {
+          threw = true;
+        }
+        assert(threw, "an invalid report was accepted");
+      }
+    } finally {
+      installUpdatesRuntime(null);
+    }
+  },
+);
+
+testCell(
+  cellDef,
   "readyUpdates() publishes the configuration before any check answers",
   async (t) => {
     const { readyUpdates } = await import("../src/state/updates-cell.ts");

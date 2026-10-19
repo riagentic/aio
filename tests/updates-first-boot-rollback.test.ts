@@ -151,7 +151,7 @@ Deno.test({
     const rec = JSON.parse(await Deno.readTextFile(failedUpdatePath(data)));
     assertEquals([rec.from, rec.to, rec.attempts], ["1.0.0", "2.0.0", 0]);
     assertEquals(await exists(join(dir, "My App.staged-2.0.0")), false);
-    assertEquals(await exists(join(dir, "My App.old-1.0.0")), false);
+    assertEquals(await exists(join(dir, "old", "1.0.0", "My App")), false);
   } finally {
     await dropTempDir(dir);
   }
@@ -176,7 +176,7 @@ Deno.test({
     assertEquals((await Deno.readTextFile(ran)).trim(), "2.0.0");
     assertEquals(await exists(failedUpdatePath(data)), false);
     assert(await exists(pendingPath(data)));
-    assertEquals(await version(join(dir, "My App.old-1.0.0")), "1.0.0");
+    assertEquals(await version(join(dir, "old", "1.0.0", "My App")), "1.0.0");
   } finally {
     await dropTempDir(dir);
   }
@@ -247,7 +247,7 @@ Deno.test({
     assertEquals((await Deno.readTextFile(ran)).trim(), "2.0.0");
     assertEquals(await exists(failedUpdatePath(data)), false);
     assert(await exists(pendingPath(data)), "the marker is v2's to judge");
-    assertEquals(await version(join(dir, "My App.old-1.0.0")), "1.0.0");
+    assertEquals(await version(join(dir, "old", "1.0.0", "My App")), "1.0.0");
   } finally {
     if (pid && alive(pid)) Deno.kill(pid, "SIGKILL");
     await dropTempDir(dir);
@@ -413,7 +413,7 @@ Deno.test({
     );
     assertEquals(await exists(pendingPath(data)), false);
     assertEquals(await exists(firstBootPath(data)), false);
-    assertEquals(await exists(join(dir, "My App.old-1.0.0")), false);
+    assertEquals(await exists(join(dir, "old", "1.0.0", "My App")), false);
   } finally {
     await dropTempDir(dir);
   }
@@ -425,7 +425,7 @@ Deno.test({
   ignore: Deno.build.os === "windows" || Deno.uid() === 0, // the POSIX sh swap helper — its PowerShell twin: tests/updates-swap-windows.test.ts; root ignores the mode
 }, async () => {
   const dir = await tempDir("aio-swapfail-prev-");
-  const locked = join(dir, "My App.old-1.0.0", "locked");
+  const locked = join(dir, "old", "1.0.0", "My App", "locked");
   try {
     const { current, data, ran, out } = await swapWith(
       dir,
@@ -447,11 +447,11 @@ Deno.test({
     // What could not be removed is named: the reason nothing was moved.
     assertMatch(
       rec.swapFailed,
-      /^an earlier copy of the app \(.*\/My App\.old-1\.0\.0\) could not be removed \(rm: .*My App\.old-1\.0\.0\/locked.*\)$/,
+      /^an earlier copy of the app \(.*\/old\/1\.0\.0\/My App\) could not be removed \(rm: .*old\/1\.0\.0\/My App\/locked.*\)$/,
     );
     assertEquals(await exists(pendingPath(data)), false);
     assertEquals(
-      await exists(join(dir, "My App.old-1.0.0", "My App")),
+      await exists(join(dir, "old", "1.0.0", "My App", "My App")),
       false,
       "moved INTO the leftover copy",
     );
@@ -546,7 +546,7 @@ Deno.test({
     assertEquals(
       rec.swapFailed,
       "the version it replaces could not be set aside (mv: cannot move to '" +
-        join(dir, "My App.old-1.0.0") + "': Permission denied)",
+        join(dir, "old", "1.0.0", "My App") + "': Permission denied)",
     );
     assertEquals(await exists(join(dir, "My App.staged-2.0.0")), false);
     assertEquals(await exists(pendingPath(data)), false);
@@ -614,7 +614,7 @@ for (
         "1.0.0",
         "2.0.0",
       ]);
-      assertEquals(await version(join(dir, "My App.old-1.0.0")), "1.0.0");
+      assertEquals(await version(join(dir, "old", "1.0.0", "My App")), "1.0.0");
       // The helper ends by exec'ing the app: its status is the app's (exit 1).
       assert(!out.success, err(out));
     } finally {
@@ -1102,7 +1102,7 @@ exit $s
         (await Deno.readTextFile(ran)).trim().split("\n"),
         ["2.0.0", "1.0.0"],
       );
-      assertEquals(await exists(join(dir, "My App.old-1.0.0")), false);
+      assertEquals(await exists(join(dir, "old", "1.0.0", "My App")), false);
       assertEquals(await exists(join(dir, "My App.staged-2.0.0")), false);
       if (exchange) {
         assertEquals(await exists(log), false, "the install's name was empty");
@@ -1112,5 +1112,59 @@ exit $s
     } finally {
       await dropTempDir(dir);
     }
+  }
+});
+
+Deno.test({
+  name:
+    "first-boot rollback: LaunchServices forgets what the helper moves — the staged tree before it goes in, the old copy at the swap (and the bundle inside it, and from Spotlight), the failed build at the rollback — and registers the version put back",
+  ignore: Deno.build.os === "windows", // the POSIX sh swap helper — the PowerShell one moves no macOS bundle
+}, async () => {
+  const dir = await tempDir("aio-fbr-lsr-");
+  try {
+    // A stand-in lsregister that writes down how it was called (the real one
+    // exists only on macOS; anywhere else the helper calls nothing).
+    const calls = join(dir, "lsr.txt");
+    const lsr = join(dir, "lsregister");
+    await Deno.writeTextFile(lsr, `#!/bin/sh\necho "$@" >> '${calls}'\n`);
+    await Deno.chmod(lsr, 0o755);
+    const mdi = join(dir, "mdimport");
+    await Deno.writeTextFile(
+      mdi,
+      `#!/bin/sh\necho "mdimport $@" >> '${calls}'\n`,
+    );
+    await Deno.chmod(mdi, 0o755);
+    const lsrLine = /^lsr=\/System\/\S+\/lsregister$/m;
+    const mdiLine = /^mdi=\/usr\/bin\/mdimport$/m;
+    const { current, out } = await swapWith(dir, () => "exit 1", 2, {
+      seam: (text) => {
+        assertMatch(text, lsrLine);
+        assertMatch(text, mdiLine);
+        return text.replace(lsrLine, `lsr='${lsr}'`)
+          .replace(mdiLine, `mdi='${mdi}'`);
+      },
+      // The Electron.app an Electron .app carries, with the app's own id.
+      before: () =>
+        Deno.mkdir(
+          join(dir, "My App", "Contents", "Frameworks", "Electron.app"),
+          { recursive: true },
+        ),
+    });
+    assert(out.success, err(out));
+    assertEquals(await version(current), "1.0.0", "the old version is back");
+    const prev = join(dir, "old", "1.0.0", "My App");
+    const staged = join(dir, "My App.staged-2.0.0");
+    assertEquals((await Deno.readTextFile(calls)).trim().split("\n"), [
+      // What the updater's checks of the staged tree registered there.
+      `-u ${staged}`,
+      `-u ${join(prev, "Contents", "Frameworks", "Electron.app")}`,
+      `-u ${prev}`,
+      // Spotlight keeps what it indexed inside the copy until it is imported.
+      `mdimport ${prev}`,
+      `-u ${staged}`,
+      `-f ${current}`,
+    ]);
+  } finally {
+    await dropTempDir(dir);
   }
 });

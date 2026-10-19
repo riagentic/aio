@@ -15,7 +15,7 @@
 //
 // The behaviour — does the test go RED — stays with the gate. This is the
 // tripwire that says the gate's questions are still being asked.
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import {
   LEDGER,
   type Mutation,
@@ -166,6 +166,14 @@ const LOADS_ONLY_AT_HOME: Record<string, string> = {
 const EARLY_RETURN =
   /^[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*(?:permissiveUmask\(async \(\) => \{\n\s*)?if \(Deno\.build\.os (===|!==) "(\w+)"\) return;/;
 
+/** Files whose gate is a tool found where the OS installs it — so a faked OS
+ *  looks in that OS's places on this host, finds nothing and ignores the
+ *  test. Only this host's own answer counts for them. */
+const FINDS_TOOLS_AT_HOME: Record<string, string> = {
+  "tests/web-splash.test.ts":
+    "its chromium test is gated on findChromium(), which searches the paths of the OS it is told it runs on",
+};
+
 type Registered = { file: string; name: string; ignore: boolean };
 async function registered(
   os: (typeof OSES)[number],
@@ -208,6 +216,10 @@ Deno.test("mutation ledger: no row is run on an OS that ignores its test — the
       return ""; // aio-ok: a missing file is the test above's to name
     }
   };
+  // An exemption outlives its reason never: the file still finds its tool.
+  for (const f of Object.keys(FINDS_TOOLS_AT_HOME)) {
+    assert(/\bfindChromium\(\)/.test(src(f)), `${f} no longer finds Chromium`);
+  }
   // No `ignore` in the file: nothing in it can be gated. A row's `env` opens
   // its lane (a packaged AppImage is ignored without it, and Linux's with).
   const gated = LEDGER.filter((m) =>
@@ -238,6 +250,11 @@ Deno.test("mutation ledger: no row is run on an OS that ignores its test — the
             } else {
               bad.push(`${m.test} :: ${m.filter} — not registered as ${os}`);
             }
+          } else if (
+            os !== Deno.build.os && FINDS_TOOLS_AT_HOME[m.test] &&
+            mine.every((r) => r.ignore)
+          ) {
+            // a faked OS's empty search, not that OS's answer
           } else (mine.every((r) => r.ignore) ? ignored : runs).push(os);
         });
         // …and a test whose first statement returns on an OS does not run

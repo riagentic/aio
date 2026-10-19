@@ -37,6 +37,7 @@
 //          [--save=<file> (needs --allow-write) | --against=<file>]
 //          [--list — every stray install/profile path, on stdout]
 import { dirname, join } from "@std/path";
+import { sharedElectronRoot } from "../src/electron/shared-runtime.ts";
 
 type Env = Record<string, string | undefined>;
 
@@ -54,6 +55,11 @@ export function realStoreDirs(env: Env): string[] {
     home ? join(home, ".local", "lib", "aio-versions") : undefined,
     env.AIO_HOME ? join(env.AIO_HOME, ".git", "worktrees") : undefined,
     home ? join(home, ".local", "lib", "aio", ".git", "worktrees") : undefined,
+    // The shared Electron store: a removed runtime is a test that pruned it.
+    sharedElectronRoot({
+      env: (k) => env[k],
+      ...(home ? { home: () => home } : {}),
+    }),
   ];
   return [...new Set(dirs.filter((d): d is string => !!d))];
 }

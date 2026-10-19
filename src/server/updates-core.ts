@@ -98,7 +98,50 @@ export type UpdatesConfig = {
    *  and `false` everywhere else, where a prerelease is reported as
    *  "current" with the reason, never offered. */
   prerelease?: boolean;
+  /** How many replaced versions an update keeps in `old/` beside the install
+   *  — the copies a rollback puts back. Default `1`: the rollback needs one.
+   *  An integer >= 1; anything else refuses to boot. */
+  keepOld?: number;
 };
+
+/** {@linkcode UpdatesConfig.keepOld} when the app does not say. */
+export const DEFAULT_KEEP_OLD = 1;
+
+/** `keepOld` as the runtime uses it — the default when absent, a boot-time
+ *  error for anything that is not a whole number of copies (a rollback needs
+ *  one: `0` would leave an update with no way back). */
+export function resolveKeepOld(input: UpdatesInput | undefined): number {
+  const n = typeof input === "object" ? input.keepOld : undefined;
+  if (n === undefined) return DEFAULT_KEEP_OLD;
+  if (!Number.isInteger(n) || n < 1) {
+    throw new Error(
+      `[updates] keepOld: ${JSON.stringify(n)} is not a number of old ` +
+        `versions to keep. Use a whole number >= 1 (default ` +
+        `${DEFAULT_KEEP_OLD}: the copy a rollback puts back).`,
+    );
+  }
+  return n;
+}
+
+/** `keepOld` for the boot's judge, which must run whatever the config says:
+ *  an invalid value is said and the default used — the boot refuses it right
+ *  after (`resolveKeepOld`), once the attempt is counted, so a shipped bad
+ *  value is a failed start the judge rolls back, never a boot that refuses
+ *  before it. */
+export function judgeKeepOld(
+  input: UpdatesInput | undefined,
+  say: (m: string) => void,
+): number {
+  try {
+    return resolveKeepOld(input);
+  } catch (e) {
+    say(
+      `${e instanceof Error ? e.message : e} — the pending update is judged ` +
+        `with the default (${DEFAULT_KEEP_OLD})`,
+    );
+    return DEFAULT_KEEP_OLD;
+  }
+}
 
 /** Config after defaults are applied — what the runtime actually uses. */
 export type ResolvedUpdates = {
@@ -112,6 +155,9 @@ export type ResolvedUpdates = {
   keys?: JsonWebKey[];
   allowUnsigned: boolean;
   prerelease: boolean;
+  /** Old versions kept in `old/` (absent on a hand-built config: the
+   *  default). */
+  keepOld?: number;
   canApply?: () => boolean | Promise<boolean>;
   /** What the app itself wrote for the two channel-derived settings, so a
    *  channel change (`setChannel`) can re-derive the ones it left to the
@@ -267,6 +313,7 @@ export function resolveUpdates(
     // is alphas and rcs; every other channel is a release channel, where a
     // prerelease is an accident until somebody says otherwise.
     prerelease: cfg.prerelease ?? channel === "dev",
+    keepOld: resolveKeepOld(cfg),
     declared: { check: cfg.check, prerelease: cfg.prerelease },
   };
 }

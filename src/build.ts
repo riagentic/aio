@@ -193,11 +193,15 @@ export async function build(cfg?: BuildConfig): Promise<void> {
         Deno.exit(1);
       }
     }
+    // `build.splash`: drawn before any app code runs, so it travels in this
+    // record. Left out when the app has none (the record is then
+    // byte-for-byte what it was).
     await Deno.writeTextFile(
       join(dist, ELECTRON_VERSION_FILE),
-      JSON.stringify(
-        shared ? { version, runtime: "shared", sha256 } : { version },
-      ) + "\n",
+      JSON.stringify({
+        ...(shared ? { version, runtime: "shared", sha256 } : { version }),
+        ...(cfg.splash ? { splash: cfg.splash } : {}),
+      }) + "\n",
     );
     staged(
       `dist/${ELECTRON_VERSION_FILE}`,

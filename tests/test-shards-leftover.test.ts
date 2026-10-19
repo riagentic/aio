@@ -165,9 +165,11 @@ Deno.test("settleHomeLockDirs: only what holds a lock under the shard's OWN home
 
     // The apps root itself, and one inside it: both are the shard's.
     mine = await holder(runtime, undefined, home, "leaked");
-    const inner = await holder(runtime, 300, join(home, "nested"), "slow");
+    // "slow" lets go well inside the wait, and well after the first look —
+    // which on a loaded Windows box came later than a 300 ms holder lived.
+    const inner = await holder(runtime, 2000, join(home, "nested"), "slow");
     assertEquals(lockDirsOf(runtime, home).length, 2);
-    const s = await settleHomeLockDirs(runtime, home, none, 12, 50);
+    const s = await settleHomeLockDirs(runtime, home, none, 12, 100);
     await inner.status;
     assertEquals(s.first.length, 2, "both were held at the first look");
     assertEquals(s.left.length, 1, JSON.stringify(s));

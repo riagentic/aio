@@ -29,7 +29,8 @@ import { pruneVersions, reconcileInstalledVersion } from "./install-record.ts";
 import { isProcessAlive } from "./single-instance-lock.ts";
 import { appImageOwner, isCompiled } from "./paths.ts";
 import { locateDenoJsonAbove } from "./deno-json.ts";
-import { readBuildStamp } from "./app-version.ts";
+import { installArtifactName, readBuildStamp } from "./app-version.ts";
+import { _menuDeps, followMenuEntry } from "./app-dirs.ts";
 import {
   SHARED_RUNTIME_ENV,
   SHARED_RUNTIME_MARKER,
@@ -43,13 +44,18 @@ import {
   renameOverSync,
 } from "../diagnostics/rename-over.ts";
 import {
+  assertNotInTheWay,
+  claim,
   forget,
   identity,
   isOwn,
   made,
+  moved,
+  type Owned,
   ownEntry,
   readOwned,
   record,
+  relocate,
   sumOf,
 } from "./updates-owned.ts";
 import {
@@ -460,6 +466,11 @@ export type PendingUpdate = {
    *  Optional only because a marker written before this field existed may still
    *  be on disk; `judgePendingUpdate` says so out loud when it has to guess. */
   artifact?: string;
+  /** Where the replaced version was installed, when the update put the new
+   *  one under its own name (`app-1.0.0-x86_64.AppImage` →
+   *  `app-1.1.0-x86_64.AppImage`): a rollback puts `previous` back HERE, under
+   *  the name it had. Absent: the new one went in at `artifact` itself. */
+  restoreTo?: string;
   /** Set when a rollback was attempted and FAILED. The marker is then kept, not
    *  cleared: an unrecoverable install that silently forgets it tried is how an
    *  app crash-loops with no explanation. */
@@ -498,6 +509,10 @@ export type PendingUpdate = {
    *  profile, or the relaunch itself. Its logger was closed by then, so the
    *  line is carried here and said by the next boot that judges the marker. */
   handoverError?: string;
+  /** The new build moved the window's profile from Electron's old per-OS
+   *  place (`from`) into the app's home (`to`): the build this update
+   *  replaced reads the old place, so a rollback moves it back. */
+  profileMoved?: { from: string; to: string };
   attempts: number;
   startedAt: string;
 };
@@ -672,9 +687,10 @@ export function repairSfxStamp(
   const dir = dirname(install), kept = `${basename(install)}.old-`;
   const stamped = readOwned(dataDir)
     .filter((e) =>
-      e.kind === "dir" && dirname(e.path) === dir &&
-      basename(e.path).startsWith(kept) && !!ownEntry(dataDir, e.path) &&
-      existsSync(join(e.path, SFX_STAMP_FILE))
+      e.kind === "dir" &&
+      (dirname(e.path) === dir && basename(e.path).startsWith(kept) ||
+        dirname(dirname(e.path)) === join(dir, "old")) &&
+      !!ownEntry(dataDir, e.path) && existsSync(join(e.path, SFX_STAMP_FILE))
     )
     .map((e) => ({
       path: e.path,
@@ -870,6 +886,8 @@ export type PendingVerdict =
      *  Undefined only for a marker written before that field existed. */
     artifact?: string;
     previous: string;
+    /** {@linkcode PendingUpdate.restoreTo}. */
+    restoreTo?: string;
     backup?: string;
   };
 
@@ -892,6 +910,7 @@ export function judgePending(
     to: p.from,
     artifact: p.artifact,
     previous: p.previous,
+    ...(p.restoreTo ? { restoreTo: p.restoreTo } : {}),
     backup: p.backup,
   };
 }
@@ -1198,7 +1217,11 @@ export async function swapArtifact(opts: {
   smoke?: boolean;
   /** Overridable so the Windows ordering is exercised from any host. */
   strategy?: SwapStrategy;
-}): Promise<{ previous: string }> {
+  /** Where the new version goes (default `current`): its own versioned name
+   *  beside it ({@linkcode installName}). Then the running file is MOVED into
+   *  `old/` instead of replaced, and the menu entry follows. Flat layout only. */
+  next?: string;
+}): Promise<{ previous: string; installed: string; notes: string[] }> {
   if (opts.smoke !== false) {
     const smoked = await smokeTestArtifact(opts.staged);
     if (!smoked.ok) {
@@ -1210,12 +1233,14 @@ export async function swapArtifact(opts: {
   /** The marker goes down BEFORE the first rename, always. A crash between the
    *  swap and the marker used to leave a new binary with no attempt counter and
    *  no way back — permanently. */
+  const next = layout ? opts.current : opts.next ?? opts.current;
   const mark = (previous: string) => {
     if (!opts.pending) return;
     writePending(opts.pending.dataDir, {
       from: opts.pending.from,
       to: opts.pending.to,
-      artifact: opts.current,
+      artifact: next,
+      ...(next !== opts.current ? { restoreTo: opts.current } : {}),
       previous,
       backup: opts.pending.backup,
       fromExe: opts.pending.exe,
@@ -1285,9 +1310,12 @@ export async function swapArtifact(opts: {
       keep: Math.max(2, opts.keepVersions ?? 3),
       current: nextDir,
     }).catch(() => []);
-    return { previous: previousPath };
+    return { previous: previousPath, installed: opts.current, notes: [] };
   }
-  const previous = `${opts.current}.old-${opts.fromVersion}`;
+  const previous = oldCopyPath(opts.current, opts.fromVersion);
+  if (next !== opts.current) {
+    return await swapRenamed(opts, next, previous, mark);
+  }
   // On record before it exists — and something that is not the updater's
   // under that name refuses the update here, before anything moved. Windows
   // renames the running file there (the same object, known now). Elsewhere it
@@ -1304,6 +1332,9 @@ export async function swapArtifact(opts: {
       is: aside ? identity(opts.current) : null,
       sum: aside ? sumOf(opts.current) : null,
     });
+  }
+  const unmake = await makeFoldersFor(previous);
+  if (data) {
     if (!aside) {
       Deno.writeFileSync(previous, new Uint8Array());
       made(data, previous, { filling: true });
@@ -1342,6 +1373,7 @@ export async function swapArtifact(opts: {
       await Deno.remove(previous).catch(() => {
         // aio-ok: the partial copy may never have been created.
       });
+      await unmake();
       if (!data || !isOwn(data, opts.staged)) {
         await Deno.remove(opts.staged).catch(() => {
           // aio-ok: the staged file may already be gone.
@@ -1354,7 +1386,7 @@ export async function swapArtifact(opts: {
     version: opts.toVersion,
     artifact: opts.current.slice(dirname(opts.current).length + 1),
   });
-  return { previous };
+  return { previous, installed: opts.current, notes: [] };
 }
 
 /** Seam for tests: a copy that comes out short, and a file still held, which
@@ -1395,6 +1427,108 @@ async function swapFlat(
   }
 }
 
+/** The swap that installs the new version under its OWN name beside the
+ *  install: the new file goes in first, the menu entry `run.sh` wrote is
+ *  pointed at it, and only then is the running file moved into `old/` — so at
+ *  every step a runnable install is where the menu entry points. Nothing is
+ *  copied: the old file itself is the rollback. A step that fails puts back
+ *  what moved before it and throws; the old version runs on. */
+async function swapRenamed(
+  opts: Parameters<typeof swapArtifact>[0],
+  next: string,
+  previous: string,
+  mark: (previous: string) => void,
+): Promise<{ previous: string; installed: string; notes: string[] }> {
+  const data = opts.pending?.dataDir;
+  const base = installArtifactName(opts.current).base;
+  const menu = _menuDeps.path(base);
+  // BEFORE anything is recorded: a chmod that fails after the marker left one
+  // naming a file that never came, and the next start kept the version
+  // FAILED ("did not take effect") — never offered again.
+  if (Deno.build.os !== "windows") await Deno.chmod(opts.staged, 0o755);
+  if (data) {
+    assertNotInTheWay(data, next);
+    record(data, previous, "file", {
+      role: "kept",
+      is: identity(opts.current),
+      sum: sumOf(opts.current),
+    });
+  }
+  mark(previous);
+  const giveUp = () => {
+    if (opts.pending) clearPending(opts.pending.dataDir);
+    if (data) forget(data, previous);
+  };
+  try {
+    // On the record as KEPT while it is the install: a start's sweep removes
+    // leftovers (`temp`), and this is no leftover.
+    if (data) relocate(data, opts.staged, next, "kept");
+    else await moveFile(opts.staged, next);
+  } catch (e) {
+    giveUp();
+    throw e;
+  }
+  let followed = false;
+  let unmake = () => Promise.resolve();
+  try {
+    unmake = await makeFoldersFor(previous);
+    followed = followMenuEntry(base, opts.current, next);
+    // Ours or nothing (the record above refuses anything else): an earlier
+    // copy of the same version.
+    await Deno.remove(previous, { recursive: true }).catch(() => {
+      // aio-ok: absent — the move below fails loudly on anything else
+    });
+    await moveFile(opts.current, previous);
+  } catch (e) {
+    // The old version never moved: it is the install again, and the new one
+    // waits where it was downloaded, for the next try.
+    giveUp();
+    try {
+      if (followed) followMenuEntry(base, next, opts.current);
+      if (data) relocate(data, next, opts.staged, "temp");
+      else await moveFile(next, opts.staged);
+    } catch (e2) {
+      throw new Error(
+        `${e} — and putting the new version back failed too (${e2}): ` +
+          `${opts.current} still holds ${opts.fromVersion} and runs; ` +
+          `${next} holds the new version. Check that ${menu} starts ` +
+          `${opts.current}.`,
+        { cause: e },
+      );
+    }
+    await unmake();
+    throw e;
+  }
+  if (data) moved(data, previous);
+  await reconcileInstalledVersion(dirname(next), {
+    version: opts.toVersion,
+    artifact: basename(next),
+  });
+  return {
+    previous,
+    installed: next,
+    notes: followed ? [`the menu entry ${menu} now starts ${next}`] : [],
+  };
+}
+
+/** Make the folders `path` goes in (`old/<version>/`); returns what removes
+ *  again exactly the ones this made — a swap that did not happen leaves no
+ *  empty `old/` behind, and never removes a folder that was there before. */
+async function makeFoldersFor(path: string): Promise<() => Promise<void>> {
+  const made: string[] = [];
+  for (let d = dirname(path); !(await lexists(d)); d = dirname(d)) {
+    made.push(d);
+  }
+  await Deno.mkdir(dirname(path), { recursive: true });
+  return async () => {
+    for (const d of made) {
+      await Deno.remove(d).catch(() => {
+        // aio-ok: not empty (something was put in it) — it stays
+      });
+    }
+  };
+}
+
 /** Undo a swap: put the kept-aside artifact back at the stable path.
  *
  *  Three layouts, and the naive `rename(previous, current)` is correct for
@@ -1425,25 +1559,20 @@ export async function restoreArtifact(
   /** The app's data directory: the set-aside copy of the build that failed
    *  goes on record there, so a boot can remove it if this is cut off. */
   dataDir?: string,
-): Promise<void> {
-  try {
-    await Deno.lstat(previous);
-  } catch (e) {
-    throw new Error(
-      `the artifact to roll back to is ${
-        e instanceof Deno.errors.NotFound ? "gone" : `unreadable (${e})`
-      } (${previous}) — nothing was ` +
-        `changed. Re-install the version you want, or run \`am upgrade\`.`,
-      { cause: e },
-    );
+  o: {
+    /** {@linkcode PendingUpdate.restoreTo}: the version that worked goes
+     *  back HERE, under the name it had, and the build that failed is moved
+     *  out of `current`. */
+    restoreTo?: string;
+    /** Where the build that failed is KEPT — `old/<its version>/` — instead
+     *  of set aside and removed. */
+    failedTo?: string;
+  } = {},
+): Promise<{ at: string; note?: string }> {
+  if (o.restoreTo && o.restoreTo !== current) {
+    return await restoreRenamed(current, previous, o.restoreTo, dataDir, o);
   }
-  if (dataDir && ownEntry(dataDir, previous)?.state === "filling") {
-    throw new Error(
-      `the copy to roll back to (${previous}) was cut off while it was ` +
-        `being written — it is not a whole build, and nothing was changed. ` +
-        `Re-install the version you want, or run \`am upgrade\`.`,
-    );
-  }
+  await rollbackCopyIsWhole(previous, dataDir);
   const layout = await versionedInstall(current);
   if (layout) {
     const tmpLink = `${current}.rollback`;
@@ -1493,24 +1622,27 @@ export async function restoreArtifact(
         { cause: e },
       );
     }
-    return;
+    return { at: current };
   }
   // Move whatever is at the stable path aside FIRST. A directory cannot be
   // renamed onto, and a file that is still open on Windows cannot be replaced —
   // both are fixed by vacating the name before filling it.
   let aside: string | null = null;
   if (await lexists(current)) {
-    aside = `${current}.failed-${Date.now()}`;
+    aside = o.failedTo ?? `${current}.failed-${Date.now()}`;
     try {
-      if (dataDir) {
-        record(
-          dataDir,
-          aside,
-          (await Deno.lstat(current)).isDirectory ? "dir" : "file",
-          { is: identity(current), sum: sumOf(current) },
-        );
+      if (o.failedTo) await keepAside(current, o.failedTo, dataDir);
+      else {
+        if (dataDir) {
+          record(
+            dataDir,
+            aside,
+            (await Deno.lstat(current)).isDirectory ? "dir" : "file",
+            { is: identity(current), sum: sumOf(current) },
+          );
+        }
+        await Deno.rename(current, aside);
       }
-      await Deno.rename(current, aside);
     } catch (e) {
       throw new Error(
         `could not move the build that failed aside (${e}) — nothing was ` +
@@ -1560,7 +1692,9 @@ export async function restoreArtifact(
       { cause: e },
     );
   }
-  if (aside) {
+  await dropVersionFolder(previous);
+  // Kept in `old/` when that is where it went — pruned like any old version.
+  if (aside && !o.failedTo) {
     const gone = aside;
     // Off the record once it is gone; still held (Windows: the failed build
     // may still be running), it stays on it — provably ours — for a start to
@@ -1570,6 +1704,115 @@ export async function restoreArtifact(
       () => {}, // aio-ok: held — on record, removed by a later start
     );
   }
+  return { at: current };
+}
+
+/** The `old/<version>/` folder a copy was put back from, once it is empty. */
+async function dropVersionFolder(copy: string): Promise<void> {
+  if (basename(dirname(dirname(copy))) !== "old") return;
+  await Deno.remove(dirname(copy)).catch(() => {
+    // aio-ok: not empty — something else is in it
+  });
+}
+
+/** Refuse a rollback to a copy that is gone, or was cut off while written. */
+async function rollbackCopyIsWhole(
+  previous: string,
+  dataDir?: string,
+): Promise<void> {
+  try {
+    await Deno.lstat(previous);
+  } catch (e) {
+    throw new Error(
+      `the artifact to roll back to is ${
+        e instanceof Deno.errors.NotFound ? "gone" : `unreadable (${e})`
+      } (${previous}) — nothing was ` +
+        `changed. Re-install the version you want, or run \`am upgrade\`.`,
+      { cause: e },
+    );
+  }
+  if (dataDir && ownEntry(dataDir, previous)?.state === "filling") {
+    throw new Error(
+      `the copy to roll back to (${previous}) was cut off while it was ` +
+        `being written — it is not a whole build, and nothing was changed. ` +
+        `Re-install the version you want, or run \`am upgrade\`.`,
+    );
+  }
+}
+
+/** Move the build at `from` into `to` (in `old/`) and keep it there, on the
+ *  record as a kept version: by its own entry when it has one (an install
+ *  made under its own name), else recorded first. Something of ours already
+ *  at `to` is replaced; anything else refuses. */
+async function keepAside(
+  from: string,
+  to: string,
+  dataDir?: string,
+): Promise<void> {
+  await Deno.mkdir(dirname(to), { recursive: true });
+  if (dataDir && ownEntry(dataDir, from, false)) {
+    relocate(dataDir, from, to, "kept");
+    return;
+  }
+  if (dataDir) {
+    claim(dataDir, to, (await Deno.lstat(from)).isDirectory ? "dir" : "file", {
+      role: "kept",
+      is: identity(from),
+      sum: sumOf(from),
+    });
+  }
+  await Deno.rename(from, to);
+  if (dataDir) moved(dataDir, to);
+}
+
+/** The rollback of an update that installed the new version under its own
+ *  name: the version that worked goes back to `back`, the name it had — while
+ *  the build that failed still sits at `current`, so a runnable install is
+ *  there at every step — and then the build that failed moves into `old/`.
+ *  Not being able to move THAT is no failed rollback: said in `note`. */
+async function restoreRenamed(
+  current: string,
+  previous: string,
+  back: string,
+  dataDir: string | undefined,
+  o: { failedTo?: string },
+): Promise<{ at: string; note?: string }> {
+  if (!(await lexists(back))) {
+    await rollbackCopyIsWhole(previous, dataDir);
+    try {
+      await moveFile(previous, back);
+    } catch (e) {
+      throw new Error(
+        `could not move ${previous} back to ${back} (${e}) — nothing was ` +
+          `changed: ${current} still holds the build that failed, and ` +
+          `${previous} is untouched. Put it back by hand:\n` +
+          `  mv ${previous} ${back}`,
+        { cause: e },
+      );
+    }
+    if (dataDir) forget(dataDir, previous);
+    await dropVersionFolder(previous);
+  } else if (await lexists(previous)) {
+    throw new Error(
+      `${back} is in the way of the rollback — nothing was changed: ` +
+        `${current} still holds the build that failed, and ${previous} is ` +
+        `untouched. Move ${back} aside, then put it back by hand:\n` +
+        `  mv ${previous} ${back}`,
+    );
+  }
+  // …else the version that worked was never moved: it is at `back` still.
+  if (!o.failedTo || !(await lexists(current))) return { at: back };
+  try {
+    await keepAside(current, o.failedTo, dataDir);
+  } catch (e) {
+    return {
+      at: back,
+      note: `the build that failed could not be moved into ` +
+        `${dirname(o.failedTo)} (${e}) — it stays at ${current}; delete it ` +
+        `by hand`,
+    };
+  }
+  return { at: back };
 }
 
 /** Remove the temporary LINK a re-point leaves when it is cut off between
@@ -1601,48 +1844,261 @@ async function lexists(path: string): Promise<boolean> {
   }
 }
 
-/** How many superseded artifacts to keep so a manual rollback is a rename. */
+/** The name the new version is installed under, beside the install named
+ *  `name`. A name that carries the running version
+ *  (`app-1.0.0-x86_64.AppImage`, the release's own name) gets the new one —
+ *  the new release's own name; any other (a name the user gave it) stays.
+ *  Pure. */
+export function installName(name: string, from: string, to: string): string {
+  const at = new RegExp(
+    `-${from.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?=$|[-.])`,
+  );
+  return at.test(name) ? name.replace(at, () => `-${to}`) : name;
+}
+
+/** The name a copy has in `old/<version>/`: the install's own — except a
+ *  macOS bundle, which is `<X>.app.noindex` there: no bundle name (Finder
+ *  shows a folder), and Spotlight skips every `*.noindex` folder — under a
+ *  `.app` name the copy, and the `Electron.app` inside it with the app's own
+ *  identifier, are listed and can be opened for the app's links and files.
+ *  (LaunchServices follows the move by the file, not the name: what is set
+ *  aside is also unregistered — {@linkcode launchServices}.) A rollback moves
+ *  it back to the install's path, `<X>.app` again. Pure. */
+export function oldCopyName(
+  install: string,
+  os: string = Deno.build.os,
+): string {
+  const name = basename(install);
+  return os === "darwin" && name.endsWith(".app") ? `${name}.noindex` : name;
+}
+
+/** Where an update keeps the version it replaced: `old/<version>/<its name>`
+ *  ({@linkcode oldCopyName}) beside the install — a folder per version, so
+ *  names never collide and the version is always visible. `not`: a path this
+ *  must not be (the copy a rollback puts back, when the build that failed has
+ *  the same version — a rebuild); then `old/<version>-failed/`. Pure. */
+export function oldCopyPath(
+  install: string,
+  version: string,
+  not?: string,
+  os: string = Deno.build.os,
+): string {
+  const name = oldCopyName(install, os);
+  const at = join(dirname(install), "old", version, name);
+  return at === not
+    ? join(dirname(install), "old", `${version}-failed`, name)
+    : at;
+}
+
+/** How many pre-migration store backups to keep (`data/backups/`). */
 export const KEEP_OLD = 3;
 
-/** Keep the N most recent kept-aside artifacts, delete older ones. A manual
- *  rollback is then a rename, not a re-download.
+/** Keep the `keep` newest versions in `old/` beside `install`, delete the
+ *  rest. `first`: the copy the update being confirmed set aside — the
+ *  rollback, kept whatever the order says. Newest is when a copy went in
+ *  (its record), not its version: a build that failed is moved there too.
  *
- *  Only copies on the record in `dataDir` count, and only those are deleted.
- *  A `<install>.old-photos` of the user's — or a copy of the app somebody
- *  made by hand — is neither counted nor touched. */
+ *  Only copies on the record in `dataDir` count, and only those are deleted:
+ *  a folder of the user's in `old/` is neither counted nor touched. What
+ *  cannot be removed (held open) is named in `failed` and stays, on the
+ *  record, for a later prune. */
 export async function pruneOld(
-  current: string,
+  install: string,
   keep: number,
   dataDir: string,
-): Promise<void> {
-  const dir = dirname(current);
-  const prefix = `${current.slice(dir.length + 1)}.old-`;
-  const own: { path: string; mtime: number }[] = [];
-  try {
-    for await (const e of Deno.readDir(dir)) {
-      const path = join(dir, e.name);
-      if (e.isSymlink || !e.name.startsWith(prefix)) continue;
-      // A copy cut off while it was written is no version to keep.
-      // Counted by identity and size; proven by its bytes before it goes.
-      const kept = ownEntry(dataDir, path, false);
-      if (!kept || kept.state === "filling") continue;
-      const st = await Deno.stat(path).catch(() => null);
-      own.push({ path, mtime: st?.mtime?.getTime() ?? 0 });
-    }
-  } catch (e) {
-    if (e instanceof Deno.errors.NotFound) return; // nothing was ever kept
-    throw e;
+  first?: string,
+): Promise<{ removed: string[]; failed: string[] }> {
+  const old = join(dirname(install), "old");
+  const own = new Map<string, Owned>();
+  for (const e of readOwned(dataDir)) {
+    // A copy cut off while it was written is no version to keep.
+    if (e.role !== "kept" || e.state === "filling") continue;
+    if (dirname(dirname(e.path)) !== old) continue;
+    // Counted by identity and size; proven by its bytes before it goes.
+    if (ownEntry(dataDir, e.path, false)) own.set(e.path, e);
   }
-  own.sort((a, b) => b.mtime - a.mtime);
-  for (const f of own.slice(keep)) {
-    if (!ownEntry(dataDir, f.path)) continue;
+  // Newest first: by when it was set aside; among copies taken over from an
+  // older aio at one moment, by their own time; then by place on the record
+  // (each goes on at the end) — reversed, so a stable sort keeps that.
+  const mtime = (p: string) => Deno.lstatSync(p).mtime?.getTime() ?? 0;
+  const order = [...own.values()].reverse().sort((a, b) =>
+    a.path === first
+      ? -1
+      : b.path === first
+      ? 1
+      : b.at.localeCompare(a.at) || mtime(b.path) - mtime(a.path)
+  );
+  const removed: string[] = [], failed: string[] = [];
+  for (const e of order.slice(keep)) {
+    if (!ownEntry(dataDir, e.path)) continue;
+    try {
+      await _swapDeps.remove(e.path);
+    } catch (err) {
+      failed.push(`${e.path} (${err})`);
+      continue;
+    }
     // Off the record in the same step, once it is gone — a record that names
     // what is no longer there lags until a boot drops it.
-    await Deno.remove(f.path, { recursive: true }).then(
-      () => forget(dataDir, f.path),
-      () => {}, // aio-ok: held open — kept, and on record, for a later prune
+    forget(dataDir, e.path);
+    removed.push(e.path);
+    await Deno.remove(dirname(e.path)).catch(() => {
+      // aio-ok: the version folder goes only when it is empty
+    });
+  }
+  return { removed, failed };
+}
+
+/** Say what {@linkcode pruneOld} did: removed copies at info, one it could
+ *  not remove as a warning — never a reason an update or a confirm fails. */
+export function sayPruned(
+  logger: Log,
+  keep: number,
+  res: { removed: string[]; failed: string[] },
+): void {
+  if (res.removed.length > 0) {
+    logger.info(
+      "updates",
+      `removed old version(s) past keepOld (${keep}): ${
+        res.removed.join(", ")
+      }`,
     );
   }
+  if (res.failed.length > 0) {
+    logger.warn(
+      "updates",
+      `could not remove old version(s) past keepOld (${keep}): ${
+        res.failed.join(", ")
+      } — kept, and removed by a later update`,
+    );
+  }
+}
+
+/** The version a copy an older aio kept beside the install carries in its
+ *  name (`<install>.old-<version>`). */
+const LEGACY_OLD = /^\.old-([0-9A-Za-z][0-9A-Za-z._+-]*)$/;
+
+/** Move the copies an older aio kept BESIDE the install —
+ *  `<install>.old-<version>`, each on this updater's record (made by it, or
+ *  taken over as an older build's) — into `old/<version>/<install's name>`,
+ *  where this build keeps them. `installs`: the names the install had (it
+ *  can have changed with the update). What cannot be moved stays, named in
+ *  `failed`. Anything not on the record is not touched. */
+export function migrateLegacyOld(
+  dataDir: string,
+  installs: string[],
+): { moved: string[]; failed: string[]; said: string[] } {
+  const moved: string[] = [], failed: string[] = [], said: string[] = [];
+  for (const e of readOwned(dataDir)) {
+    if (e.role !== "kept" || e.state !== undefined) continue;
+    for (const install of installs) {
+      if (dirname(e.path) !== dirname(install)) continue;
+      const base = basename(install), name = basename(e.path);
+      const v = name.startsWith(base)
+        ? LEGACY_OLD.exec(name.slice(base.length))?.[1]
+        : undefined;
+      if (!v) continue;
+      const to = oldCopyPath(install, v);
+      try {
+        relocate(dataDir, e.path, to);
+        moved.push(`${name} → ${to}`);
+      } catch (err) {
+        failed.push(`${e.path} (${err})`);
+        continue;
+      }
+      said.push(...launchServices("-u", to));
+    }
+  }
+  return { moved, failed, said };
+}
+
+/** Run a macOS tool; throws its stderr when it fails. */
+function runTool(cmd: string, args: string[]): void {
+  const out = new Deno.Command(cmd, {
+    args,
+    cwd: neutralCwd(),
+    stdout: "null",
+    stderr: "piped",
+  }).outputSync();
+  if (!out.success) {
+    throw new Error(
+      new TextDecoder().decode(out.stderr).trim() || `exit ${out.code}`,
+    );
+  }
+}
+
+/** `lsregister`, `mdimport`, and the OS they run on — a seam, so a test never
+ *  registers or indexes anything on the machine. @internal */
+export const _lsDeps = {
+  os: (): string => Deno.build.os,
+  run: (args: string[]): void =>
+    runTool(
+      "/System/Library/Frameworks/CoreServices.framework/Frameworks/" +
+        "LaunchServices.framework/Support/lsregister",
+      args,
+    ),
+  index: (path: string): void => runTool("/usr/bin/mdimport", [path]),
+};
+
+/** macOS: tell LaunchServices about a bundle that moved. `-u`: a copy set
+ *  aside into `old/` — LaunchServices follows a moved bundle by its file, so
+ *  it, and every bundle inside it (an `Electron.app` carrying the app's own
+ *  identifier), stay registered and can be opened for the app's links and
+ *  files until they are forgotten. Spotlight too keeps what it had indexed
+ *  inside a copy moved into a `*.noindex` folder (measured: still listed 12
+ *  minutes on): `mdimport` of that folder drops it (within 5 s). `-f`: a
+ *  bundle put back at the install's path. Anywhere else, and for anything
+ *  that is no bundle, nothing. Returns what failed, for the caller to say —
+ *  never a reason an update stops. */
+export function launchServices(flag: "-u" | "-f", path: string): string[] {
+  if (_lsDeps.os() !== "darwin" || !/\.app(?:\.noindex|\.old)?$/.test(path)) {
+    return [];
+  }
+  const bundles: string[] = [];
+  const walk = (dir: string) => {
+    let entries: Deno.DirEntry[];
+    try {
+      entries = [...Deno.readDirSync(dir)];
+    } catch {
+      return; // aio-ok: gone or unreadable — nothing in it to forget
+    }
+    for (const e of entries) {
+      if (!e.isDirectory) continue;
+      const p = join(dir, e.name);
+      if (e.name.endsWith(".app")) bundles.push(p);
+      walk(p);
+    }
+  };
+  if (flag === "-u") walk(path);
+  const failed: string[] = [];
+  for (const p of [...bundles, path]) {
+    try {
+      _lsDeps.run([flag, p]);
+    } catch (e) {
+      // -10814 (kLSApplicationNotFoundErr): LaunchServices has no record of
+      // it — a helper bundle never launched, or one the swap helper forgot
+      // already. For -u that is the goal, not a failure (measured, macOS 14).
+      if (flag === "-u" && String(e).includes("-10814")) continue;
+      failed.push(
+        `could not ${flag === "-u" ? "unregister" : "register"} ${p} with ` +
+          `LaunchServices (${e instanceof Error ? e.message : e})` +
+          (flag === "-u"
+            ? ` — macOS may still open this old copy for the app's links`
+            : ""),
+      );
+    }
+  }
+  if (flag === "-u") {
+    try {
+      _lsDeps.index(path);
+    } catch (e) {
+      failed.push(
+        `could not drop ${path} from Spotlight (${
+          e instanceof Error ? e.message : e
+        }) — it may still list this old copy`,
+      );
+    }
+  }
+  return failed;
 }
 
 /** The content proof for a thing a build OLDER than the ownership record
@@ -2271,8 +2727,11 @@ export async function unpackAppTarball(
 }
 
 /** The launcher inside an unpacked Electron release, as the build writes it. */
-export function zipLauncher(dir: string): string {
-  return join(dir, Deno.build.os === "windows" ? "run.bat" : "run.sh");
+export function zipLauncher(
+  dir: string,
+  os: typeof Deno.build.os = Deno.build.os,
+): string {
+  return join(dir, os === "windows" ? "run.bat" : "run.sh");
 }
 
 /** Replace a whole install DIRECTORY, from outside it.
@@ -2305,6 +2764,9 @@ export function swapDirectoryDetached(opts: {
   launcher?: string;
   /** Write the rollback marker before the shell is handed the move. */
   pending?: PendingMark;
+  /** The app's data directory, for the record of the copy set aside into
+   *  `old/` (default: `pending`'s) — a rollback passes it with no marker. */
+  dataDir?: string;
   /** Injected in tests; defaults to spawning the real shell. `extra` carries
    *  the environment and working directory the helper must run with. */
   spawn?: (
@@ -2313,19 +2775,24 @@ export function swapDirectoryDetached(opts: {
     extra?: { env?: Record<string, string>; cwd?: string },
   ) => void;
 }): { previous: string } {
-  const previous = `${opts.current}.old-${opts.fromVersion}`;
+  // `old/<version>/<name>` beside the install; never the copy a rollback is
+  // putting back (a same-version rebuild).
+  const previous = oldCopyPath(opts.current, opts.fromVersion, opts.staged);
   // The helper removes whatever is at `previous`, then moves the running
   // version there. Written down first as an INTENT (`moving`): the record
   // keeps saying what is at `previous` now — a copy of ours that a held file
   // stops the helper from deleting stays ours — until the move is seen. And
   // refused here when something of the user's has that name.
-  if (opts.pending) {
-    record(opts.pending.dataDir, previous, "dir", {
+  const owner = opts.dataDir ?? opts.pending?.dataDir;
+  if (owner) {
+    record(owner, previous, "dir", {
       role: "kept",
       is: identity(opts.current),
       moving: true,
     });
   }
+  // The helper only moves: the version folder is made here.
+  Deno.mkdirSync(dirname(previous), { recursive: true });
   // An install extracted by the Windows one-click `.exe`: the tree going in
   // answers to the same stamp, an update and a rollback alike.
   if (opts.pending) repairSfxStamp(opts.current, opts.pending.dataDir);
@@ -2601,17 +3068,45 @@ unrolled() {
 # takes the token — its boot rewrites the marker, or removes it. Only a marker
 # that is gone, or that reads differently from "$1", is that claim. A read
 # error is not, and no cmp is needed (a box without diffutils has none).
+# macOS: LaunchServices follows a bundle that is moved (it tracks the file,
+# not the name), so a copy set aside into old/ — and every bundle inside it,
+# an Electron.app with the app's own identifier — stays registered and can be
+# opened for the app's links and files. Forgotten here; re-registered when a
+# bundle is put back at the install's name. Best effort: never a reason the
+# swap stops (where there is no lsregister, nothing to do).
+lsr=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+unreg() {
+  [ -x "$lsr" ] && [ -d "$1" ] || return 0
+  find "$1" -type d -name '*.app' -exec "$lsr" -u {} \\; >/dev/null 2>&1
+  "$lsr" -u "$1" >/dev/null 2>&1
+  :
+}
+rereg() {
+  [ -x "$lsr" ] && [ -d "$1" ] && "$lsr" -f "$1" >/dev/null 2>&1
+  :
+}
+# ...and Spotlight keeps what it indexed inside a copy moved into a *.noindex
+# folder until that folder is imported again.
+mdi=/usr/bin/mdimport
+unindex() {
+  [ -x "$mdi" ] && [ -d "$1" ] && "$mdi" "$1" >/dev/null 2>&1
+  :
+}
 claimed() {
   [ -e "$mark" ] || return 0
   a=$(cat "$mark") && b=$(cat "$1") || return 1
   [ "$a" != "$b" ]
 }
 while kill -0 "$pid" 2>/dev/null; do sleep 0.2; done
+# What the updater ran to check the staged tree (its smoke test, its data
+# contract) LaunchServices registered at the staged path: forgotten before it
+# moves, or the record follows the file under a name that no longer exists.
+unreg "$new"
 held=$(rm -rf "$prev" 2>&1)
 r=5
 [ -e "$prev" ] || [ -L "$prev" ] || { swap_in "$cur" "$new" "$prev"; r=$?; }
 case "$r" in
-  0) ;;
+  0) unreg "$prev"; unindex "$prev" ;;
   5) note "an earlier copy of the app ($prev) could not be removed"
      rm -rf "$new"
      exec "$launch" "$@" ;;
@@ -2661,7 +3156,9 @@ case "$?" in
   3) unrolled "the old version could not be moved back into place" "$@" ;;
   *) unrolled "the old version could not be moved back into place, nor the new one" "$@" ;;
 esac
+unreg "$new"
 rm -rf "$new"
+rereg "$cur"
 exec "$launch" "$@"
 `;
 

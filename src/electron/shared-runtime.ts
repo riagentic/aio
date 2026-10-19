@@ -35,6 +35,7 @@
  * bundled build puts on its nested runtime — and signed ad hoc on the Mac.
  */
 import { neutralCwd } from "../server/no-console.ts";
+import type { SplashSession } from "./splash-session.ts";
 import { renameOver } from "../diagnostics/rename-over.ts";
 import { basename, dirname, join, resolve } from "@std/path";
 import { homedir } from "../server/paths.ts";
@@ -274,6 +275,47 @@ export async function recordSharedUse(
         `then offer to delete it`,
     );
   }
+}
+
+/** The installed app moved from `from` to `to` (an update installed it under
+ *  its own versioned name): its records follow it, so what they protect from
+ *  `am prune` stays protected. Returns how many moved. */
+export async function moveSharedUses(
+  from: string,
+  to: string,
+  root: string = sharedElectronRoot(),
+): Promise<number> {
+  const a = await sharedUseKey(from), b = await sharedUseKey(to);
+  let n = 0;
+  for (const { file, use } of await readSharedUses(root)) {
+    if (use?.exe !== from || !basename(file).startsWith(`${a}-`)) continue;
+    const dest = join(dirname(file), b + basename(file).slice(a.length));
+    const tmp = `${dest}.${Deno.pid}.tmp`;
+    await Deno.writeTextFile(tmp, JSON.stringify({ ...use, exe: to }) + "\n");
+    await renameOver(tmp, dest);
+    await Deno.remove(file);
+    n++;
+  }
+  return n;
+}
+
+/** A rollback: the records an update wrote before its swap (`pending`) for
+ *  the install at `exe` go — the version that named them is gone, and they
+ *  kept the runtime it fetched from `am prune`. Started records stay (the
+ *  newest {@linkcode USES_PER_APP} are the design). Returns how many. */
+export async function dropPendingUses(
+  exe: string,
+  root: string = sharedElectronRoot(),
+): Promise<number> {
+  const key = await sharedUseKey(exe);
+  let n = 0;
+  for (const { file, use } of await readSharedUses(root)) {
+    if (use?.exe !== exe || !use.pending) continue;
+    if (!basename(file).startsWith(`${key}-`)) continue;
+    await Deno.remove(file);
+    n++;
+  }
+  return n;
 }
 
 /** Every record in the store, each with whether its app is still installed.
@@ -609,6 +651,10 @@ export function sharedFailureMessage(
       `could not be prepared.\n\n${why}\n\nFix the cause above, then Retry.`;
 }
 
+/** The failure question's third answer, offered when the version an update
+ *  replaced is kept. */
+export const PREVIOUS_ANSWER = "Start the previous version";
+
 /** How long a cancelled start waits for its own download's cleanup. */
 const CANCEL_CLEANUP_MS = 5_000;
 
@@ -648,6 +694,13 @@ export async function sharedRuntimeForStart(opts: {
    *  passes what the binary carries; `null` — a build that pinned none — is
    *  refused rather than trusting the network's checksum list. */
   sha256?: string | null;
+  /** The start's splash (`build.splash`): the download is shown in it in
+   *  place of the plain progress window. */
+  splash?: SplashSession | null;
+  /** The version this update replaced is kept in `old/`: the failure
+   *  question offers {@linkcode PREVIOUS_ANSWER}, which rolls the update back
+   *  and starts it — true once it is starting in this one's place. */
+  previous?: () => Promise<boolean>;
 }): Promise<string | null> {
   const { version, slug, log } = opts;
   const root = opts.root ?? sharedElectronRoot();
@@ -664,43 +717,85 @@ export async function sharedRuntimeForStart(opts: {
       : backend;
   while (true) {
     if (opts.signal?.aborted) return null;
-    let win: ProgressDialog | null = null;
+    // Widened on purpose: `attach` (a closure) sets it, which narrowing
+    // does not see.
+    let win = null as ProgressDialog | null;
+    let inSplash: ReturnType<SplashSession["download"]> = null;
     try {
       if (!(await runtimeUsable(dir, slug))) {
         log.info(
           `electron: ${version} is not in the shared store (${root}) yet — ` +
             `downloading it`,
         );
-        const b = await ui();
-        win = b
-          ? await b.progress(opts.title, RESOLVING_HEADING).catch((e) => {
-            log.error(
-              `electron: no progress window (${
-                e instanceof Error ? e.message : e
-              }) — the log carries the progress`,
-            );
-            return null;
-          })
-          : null;
-        win?.update(null, `Looking for Electron ${version}…`);
+        const plain = async () => {
+          const b = await ui();
+          return b
+            ? await b.progress(opts.title, RESOLVING_HEADING).catch((e) => {
+              log.error(
+                `electron: no progress window (${
+                  e instanceof Error ? e.message : e
+                }) — the log carries the progress`,
+              );
+              return null;
+            })
+            : null;
+        };
         // Closing the window (or the app stopping) ENDS the download — the
         // stage is removed and the lock released before this returns (up to
         // CANCEL_CLEANUP_MS; see the catch below).
         const ctl = new AbortController();
         let cancelled = false;
+        let stopNow!: () => void;
+        const stop = new Promise<never>((_, reject) => {
+          stopNow = () => reject(new Cancelled());
+        });
+        stop.catch(() => {
+          // aio-ok: observed by the race below
+        });
         const onCancel = () => {
           cancelled = true;
           ctl.abort();
+          stopNow();
         };
-        win?.cancelled.then(onCancel);
-        // A window that could not be shown is not a cancel: the download goes
-        // on, and the log is where its progress is.
-        win?.lost.then((why) =>
-          log.error(
-            `electron: the progress window could not be shown (${why}) — ` +
-              `downloading without it; the log carries the progress`,
-          )
-        );
+        // What the window shows now — what a window that takes over shows.
+        let shown: [number | null, string] = [
+          null,
+          `Looking for Electron ${version}…`,
+        ];
+        const show = (f: number | null, detail: string) => {
+          shown = [f, detail];
+          win?.update(f, detail);
+        };
+        const attach = (w: ProgressDialog | null) => {
+          win = w;
+          if (!w) return;
+          w.update(...shown);
+          w.cancelled.then(() => {
+            if (win === w) onCancel();
+          });
+          w.lost.then(async (why) => {
+            if (win !== w) return;
+            // The splash's helper died before it showed: the plain progress
+            // window takes over — the download is never left invisible.
+            if (w === inSplash) {
+              log.error(
+                `electron: the splash could not be shown (${why}) — the ` +
+                  `download goes on in the progress window`,
+              );
+              const next = await plain();
+              if (win !== w) return void next?.close(); // already over
+              return attach(next);
+            }
+            // A window that could not be shown is not a cancel: the download
+            // goes on, and the log is where its progress is.
+            log.error(
+              `electron: the progress window could not be shown (${why}) — ` +
+                `downloading without it; the log carries the progress`,
+            );
+          });
+        };
+        inSplash = opts.splash?.download() ?? null;
+        attach(inSplash ?? await plain());
         if (opts.sha256 === null) {
           throw new Error(
             `this build of ${opts.title} carries no checksum for Electron ` +
@@ -722,38 +817,25 @@ export async function sharedRuntimeForStart(opts: {
             log: log.info,
             warn: log.error,
             onBytes: (got, total) => {
+              inSplash?.bytes(got, total);
               if (finishing) return;
               if (total > 0 && got >= total) {
                 finishing = true;
-                win?.update(
-                  null,
-                  `Verifying and unpacking Electron ${version}…`,
-                );
+                show(null, `Verifying and unpacking Electron ${version}…`);
                 return;
               }
-              win?.update(
+              show(
                 total > 0 ? got / total : null,
                 downloadDetail(version, got, total),
               );
             },
           });
-          // A cancel ends the start NOW — also while this start waits on
-          // another's download (the lock), which the abort cannot cut short.
-          // That wait then ends on its own; its outcome is not this start's.
+          // A cancel ends the start NOW (`stop`, rejected by onCancel) — also
+          // while this start waits on another's download (the lock), which
+          // the abort cannot cut short. That wait then ends on its own; its
+          // outcome is not this start's.
           got.catch(() => {
             // aio-ok: once cancelled, the outcome is reported by nothing
-          });
-          const stop = new Promise<never>((_, reject) => {
-            if (cancelled) reject(new Cancelled());
-            win?.cancelled.then(() => reject(new Cancelled()));
-            opts.signal?.addEventListener(
-              "abort",
-              () => reject(new Cancelled()),
-              { once: true },
-            );
-          });
-          stop.catch(() => {
-            // aio-ok: observed by the race below
           });
           await Promise.race([got, stop]);
           if (cancelled) throw new Cancelled();
@@ -803,9 +885,11 @@ export async function sharedRuntimeForStart(opts: {
         );
       }
       await win?.close();
+      win = null; // a window still opening to take over closes itself
       return exe;
     } catch (e) {
       await win?.close();
+      win = null;
       if (e instanceof Cancelled) {
         log.error(
           `electron: the start was cancelled while Electron ${version} was ` +
@@ -816,6 +900,8 @@ export async function sharedRuntimeForStart(opts: {
       }
       const reason = e instanceof Error ? e.message : String(e);
       log.error(`electron: could not get Electron ${version}: ${reason}`);
+      // The question is the plain one, asked once the splash is gone.
+      opts.splash?.fail();
       const b = await ui();
       if (!b) return null;
       const answer = await b.ask(
@@ -826,8 +912,20 @@ export async function sharedRuntimeForStart(opts: {
           reason,
           e instanceof DownloadError,
         ),
+        opts.previous ? PREVIOUS_ANSWER : undefined,
       ).catch(() => "quit" as const);
       if (answer === "quit") return null;
+      if (answer === "previous" && opts.previous) {
+        const started = await opts.previous().catch((e) => {
+          log.error(
+            `electron: could not start the previous version (${
+              e instanceof Error ? e.message : e
+            })`,
+          );
+          return false;
+        });
+        if (started) return null;
+      }
       log.info("electron: retrying");
     }
   }

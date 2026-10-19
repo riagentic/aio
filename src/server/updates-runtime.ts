@@ -12,7 +12,7 @@
 // Nothing may be reordered. Verifying after downloading is fine; installing
 // before verifying is not. Backing up after migrating is useless. Handing over
 // before writing the pending marker loses the ability to roll back.
-import { join } from "@std/path";
+import { basename, dirname, join } from "@std/path";
 import { existsSync } from "@std/fs";
 import { SHARED_RUNTIME_MARKER } from "../electron/shared-runtime.ts";
 import type { Log } from "../diagnostics/logger-api.ts";
@@ -67,22 +67,26 @@ import {
   installableTargets,
   installDir,
   type InstalledTarget,
+  installName,
   KEEP_OLD,
   launchArtifactPath,
   macAppUpdateBlocker,
   macBundleExecutable,
+  oldCopyPath,
   type PendingMark,
   pruneKeepingNewest,
   pruneOld,
   readPending,
   relaunch,
   replacedExeIdentity,
+  sayPruned,
   smokeTestArtifact,
   swapArtifact,
   swapDirectoryDetached,
   unpackAppTarball,
   unpackArchive,
   verifyMacBundle,
+  versionedInstall,
   writePending,
   writeRecordAtomic,
   zipLauncher,
@@ -94,7 +98,12 @@ import {
   made,
   setAsideChanged,
 } from "./updates-owned.ts";
-import { dataCompatibility, followsPrereleases } from "./updates-core.ts";
+import {
+  dataCompatibility,
+  DEFAULT_KEEP_OLD,
+  followsPrereleases,
+} from "./updates-core.ts";
+import { moveSharedUses } from "../electron/shared-runtime.ts";
 import { rebuildFromGit } from "./updates-rebuild.ts";
 import { retireProfile } from "./updates-retire.ts";
 import { isServiceSupervised } from "./aio-lifecycle.ts";
@@ -146,6 +155,14 @@ export type UpdatesRuntimeDeps = {
   verifyBundle?: typeof verifyMacBundle;
   /** Where a git rebuild works. Injected in tests; defaults to a temp dir. */
   makeWorkDir?: () => Promise<string>;
+  /** The Electron pre-download (`updates-electron.ts`). Injected in tests. */
+  prefetchElectron?: typeof prefetchSharedElectron;
+  /** Under a service manager (default: {@linkcode isServiceSupervised}).
+   *  Injected in tests — the environment is the whole process's. */
+  supervised?: boolean;
+  /** The shared Electron store (default: its own location). Injected in
+   *  tests, so a test never touches the real one. */
+  sharedStore?: string;
 };
 
 /** `retireData` — see `retireProfile`. Read here through the public
@@ -169,6 +186,8 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
 
   const platform = { os: Deno.build.os, arch: Deno.build.arch };
   const targetOf = () => deps.artifact ?? artifactPath();
+  const keepOld = config.keepOld ?? DEFAULT_KEEP_OLD;
+  const supervised = () => deps.supervised ?? isServiceSupervised();
   const canInstall = () => deps.canInstall ?? installableTargets();
   const installedTarget = () => deps.installedTarget ?? detectTarget();
 
@@ -562,6 +581,17 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       ? `${current}.staged-${m.version}`
       : `${current}.new-${m.version}`;
     const download = isDirectory ? `${current}.zip-${m.version}` : staged;
+    // A single file whose name carries this version (the release's own name,
+    // `app-1.0.0-x86_64.AppImage`) is installed under the new release's own
+    // name beside it, and this one moves into `old/`. Not under a supervisor:
+    // its unit names the path, and nothing here can follow that.
+    const next = !isDirectory && !supervised() &&
+        !(await versionedInstall(current))
+      ? join(
+        dirname(current),
+        installName(basename(current), deps.appVersion, m.version),
+      )
+      : current;
     // What this update makes beside the install goes on record first, and a
     // leftover of an earlier try is removed — only one the record proves is
     // the updater's. Anything else under one of these names refuses the
@@ -581,7 +611,14 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
     }
     // Every name checked before any is written down: a refusal leaves no
     // entry for something that was never made.
-    for (const p of [download, staged, `${current}.old-${deps.appVersion}`]) {
+    for (
+      const p of [
+        download,
+        staged,
+        oldCopyPath(current, deps.appVersion),
+        ...(next !== current ? [next] : []),
+      ]
+    ) {
       assertNotInTheWay(deps.dataDir, p);
     }
     // The download of this very release, kept from a try whose swap was
@@ -607,6 +644,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
     // confirming that bytes are actually being asked for, and it is what makes
     // the phase true rather than hopeful.
     phase("downloading");
+    progressOf("app");
     // A single-file install first tries the release's patch against the file
     // installed here (updates-patch.ts). What a patch makes goes through the
     // same size and digest check as a download, and ANY miss — said in one
@@ -779,10 +817,11 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
         : zipLauncher(staged);
       if (runnable) {
         try {
-          await prefetchSharedElectron(runnable, {
+          await (deps.prefetchElectron ?? prefetchSharedElectron)(runnable, {
             log: (msg) => log.info("updates", msg),
-            // The name a start records too, so the two are one app's record.
-            installed: launchArtifactPath(),
+            // The name a start records too, so the two are one app's record
+            // — the new version's own, when it gets one.
+            installed: next !== current ? next : launchArtifactPath(),
             // A folder carries the marker at its top, a .app in Resources/.
             markedShared: isDirectory &&
               existsSync(
@@ -799,6 +838,8 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
                 // aio-ok: not bound — observe-only
               }
             },
+            onDownload: () => progressOf("runtime"),
+            onTotal: (bytes) => runtimeBytes(bytes),
           });
         } catch (e) {
           // The verified download stays for a retry; the unpacked copy goes —
@@ -813,6 +854,8 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
         }
       }
     }
+
+    progressOf(null);
 
     const migrates = !!m.data && Object.entries(m.data.cells).some(
       ([id, c]) => c.version > (deps.local.cells[id] ?? 0),
@@ -853,6 +896,15 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       // that never went in. Not the old one's either — the new build's first
       // check would read itself as "another build of this version".
       forgetInstalledDigest(deps.dataDir);
+      // The helper sets this version aside after this process has gone, and
+      // the confirm prunes only once the new one is up: room is made NOW,
+      // for the copy about to go in — so old/ holds keepOld at every point,
+      // as a single-file install's does.
+      await prune(
+        current,
+        oldCopyPath(current, deps.appVersion, staged),
+        keepOld - 1,
+      );
       deferHandOver(
         () => {
           try {
@@ -924,7 +976,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
               `${m.version} was NOT installed: ${why}. ${deps.appVersion} ` +
                 `is starting again.`,
             );
-            if (!isServiceSupervised()) {
+            if (!supervised()) {
               (deps.relaunch ?? relaunch)({
                 artifact: Deno.execPath(),
                 args: deps.argv,
@@ -937,10 +989,12 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       return;
     }
 
+    let swapped: Awaited<ReturnType<typeof swapArtifact>>;
     try {
-      await swapArtifact({
+      swapped = await swapArtifact({
         current,
         staged,
+        next,
         fromVersion: deps.appVersion,
         // Names the new file when this app was installed by `run.sh`
         // (~/app/<name>/<name>-<version>) — without it the swap would flatten
@@ -974,7 +1028,20 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       }
       throw e;
     }
-    await pruneOld(current, KEEP_OLD, deps.dataDir);
+    for (const note of swapped.notes) log.info("updates", note);
+    if (swapped.installed !== current) {
+      // The records that keep this app's Electron from `am prune` follow it.
+      await moveSharedUses(current, swapped.installed, deps.sharedStore)
+        .catch((e) =>
+          log.warn(
+            "updates",
+            `could not move this app's records in the shared Electron store ` +
+              `to ${swapped.installed} (${e}) — \`am prune\` may offer to ` +
+              `delete the Electron the previous version starts from`,
+          )
+        );
+    }
+    await prune(swapped.installed, swapped.previous);
     // What is installed now, by digest. This is the fact that makes the NEXT
     // "same version, re-published" detectable, and it is the digest that was
     // verified above — never one re-read from the file that was just written.
@@ -982,9 +1049,14 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
 
     log.info(
       "updates",
-      `installed ${deps.appVersion} → ${m.version}; restarting`,
+      `installed ${deps.appVersion} → ${m.version}` +
+        (swapped.installed !== current
+          ? ` as ${swapped.installed} (${deps.appVersion} is kept in ` +
+            `${dirname(swapped.previous)})`
+          : "") +
+        `; restarting`,
     );
-    startHandOver(current, retire);
+    startHandOver(swapped.installed, retire);
   }
 
   /** Take an update from a repository: clone, build, gate, swap.
@@ -1035,7 +1107,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
       made(deps.dataDir, staged);
 
       phase("applying");
-      await swapArtifact({
+      const swapped = await swapArtifact({
         current,
         staged,
         fromVersion: deps.appVersion,
@@ -1048,7 +1120,7 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
           exe: replacedExeIdentity(current),
         },
       });
-      await pruneOld(current, KEEP_OLD, deps.dataDir);
+      await prune(current, swapped.previous);
 
       // Record the commit this install now runs, so the next check compares
       // against what was actually built rather than what was last downloaded.
@@ -1070,14 +1142,44 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
     }
   }
 
+  /** Bound `old/` to `keepOld` after a swap — said, and never a reason the
+   *  update that is already in place does not hand over. */
+  async function prune(
+    install: string,
+    previous: string,
+    keep = keepOld,
+  ): Promise<void> {
+    await pruneOld(install, keep, deps.dataDir, previous).then(
+      (res) => sayPruned(log, keepOld, res),
+      (e) => log.warn("updates", `could not prune old installs: ${e}`),
+    );
+  }
+
   /** Tell the cell (and every client bound to it) which phase this is.
    *
    *  Best-effort for the same reason progress is: an applier driven outside a
    *  booted app has no cell to talk to, and reporting must never break the
    *  thing it reports on. */
   function phase(next: "downloading" | "applying"): void {
+    report((c) => c.setPhase(next));
+  }
+
+  /** Which download `progress` measures, reported the way `phase` is. */
+  function progressOf(of: "app" | "runtime" | null): void {
+    report((c) => c.setProgressOf?.(of));
+  }
+
+  /** The runtime leg's size, reported the way `phase` is. */
+  function runtimeBytes(bytes: number): void {
+    report((c) => c.setRuntimeBytes?.(bytes));
+  }
+
+  /** One report to the updates cell: observe-only, never awaited. */
+  function report(
+    call: (c: ReturnType<typeof createUpdatesCell>) => unknown,
+  ): void {
     try {
-      void Promise.resolve((deps.cell ?? createUpdatesCell()).setPhase(next))
+      void Promise.resolve(call(deps.cell ?? createUpdatesCell()))
         .catch(() => {});
     } catch {
       // aio-ok: not bound — the install continues either way
@@ -1145,16 +1247,16 @@ export function createUpdatesRuntime(deps: UpdatesRuntimeDeps): UpdatesRuntime {
    *  launch — exiting IS the restart, and launching would fight the unit. */
   function startHandOver(artifact: string, retire = false): void {
     // ONE decider for "under a service manager", shared with aio.restart().
-    const supervised = isServiceSupervised();
+    const underSupervisor = supervised();
     // Said NOW: inside the handover the logger is already shut down.
-    if (supervised) {
+    if (underSupervisor) {
       log.info(
         "updates",
         "under a supervisor — exiting so it starts the new version",
       );
     }
     deferHandOver(() => {
-      if (!supervised) {
+      if (!underSupervisor) {
         (deps.relaunch ?? relaunch)({ artifact, args: deps.argv });
       }
     }, retire);

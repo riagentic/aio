@@ -30,6 +30,7 @@ import {
   ensureSharedElectron,
   macWindowBundle,
   plistString,
+  PREVIOUS_ANSWER,
   readSharedUses,
   recordSharedUse,
   sharedElectronDir,
@@ -47,12 +48,19 @@ import {
   downloadDetail,
   encodedCommand,
   hasDesktop,
+  MAC_ASK_APPLESCRIPT,
   MAC_PROGRESS_JXA,
+  macAnswer,
   pangoText,
   type ProgressDialog,
   progressLine,
   type RetryAnswer,
+  WINDOWS_ASK_PS,
   WINDOWS_PROGRESS_PS,
+  windowsAnswer,
+  windowsAskText,
+  zenityAnswer,
+  zenityAskArgs,
   zenityEnding,
 } from "../src/electron/runtime-dialog.ts";
 import {
@@ -821,6 +829,7 @@ Deno.test("pinned checksum: a download is held to the build's pin alone — a fo
 
 Deno.test("update pre-download: progress reaches the updates cell once per whole percent, not once per chunk", async () => {
   const seen: number[] = [];
+  const marks: string[] = [];
   await prefetchSharedElectron("/new", {
     log: () => {},
     installed: "/installed/app",
@@ -844,8 +853,15 @@ Deno.test("update pre-download: progress reaches the updates cell once per whole
       o.onBytes(total, total);
       return Promise.resolve("/s");
     }) as unknown as typeof ensureSharedElectron,
-    onProgress: (f) => seen.push(f),
+    onProgress: (f) => {
+      if (marks.at(-1) !== "progress") marks.push("progress");
+      seen.push(f);
+    },
+    // The leg begins before its first byte, and its size is said once.
+    onDownload: () => marks.push("download"),
+    onTotal: (b) => marks.push(`total ${b}`),
   });
+  assertEquals(marks, ["download", "total 158000000", "progress"]);
   assertEquals(seen.length, 101);
   assertEquals(seen[0], 0);
   assertEquals(seen.at(-1), 1);
@@ -1014,12 +1030,13 @@ Deno.test("launchers: a shared package points ELECTRON_PATH at nothing — the A
     `export ELECTRON_PATH="$HERE/electron/electron"`,
   );
   const shared = _appRun("notes", true);
-  assert(!shared.includes("ELECTRON_PATH"));
+  // Only to clear an inherited one (tests/electron-shared-store-hygiene).
+  assert(!shared.includes("export ELECTRON_PATH"));
   assertStringIncludes(shared, `export AIO_ELECTRON_RUNTIME="shared:$HERE"`);
   assertStringIncludes(shared, `exec "$HERE/notes" "$@"`);
   assertStringIncludes(_winLauncherBat("notes"), "ELECTRON_PATH");
   const bat = _winLauncherBat("notes", true);
-  assert(!bat.includes("ELECTRON_PATH"));
+  assert(!bat.includes("ELECTRON_PATH=%"));
   assertStringIncludes(bat, `start "" "%HERE%notes.exe" %*`);
 });
 
@@ -1355,4 +1372,106 @@ Deno.test({
       await dropTempDir(tmp);
     }
   },
+});
+
+// ── "Start the previous version" ───────────────────────────────────────────
+
+Deno.test("shared start: with the version an update replaced still kept, the failure question offers Start the previous version — chosen, it starts in this one's place and the start ends", async () => {
+  const tmp = await tempDir("shared-previous-");
+  try {
+    const rel = await release(await runtimeZip(tmp));
+    rel.state.fail = true;
+    const root = join(tmp, "store");
+    const offered: Array<string | undefined> = [];
+    const answer = (a: RetryAnswer): DialogBackend => ({
+      ...fakeDialog().backend,
+      ask: (_t, _m, previous) => {
+        offered.push(previous);
+        return Promise.resolve(a);
+      },
+    });
+    const start = (dialog: DialogBackend, previous?: () => Promise<boolean>) =>
+      sharedRuntimeForStart({
+        version: V,
+        slug: SLUG,
+        execPath: join(tmp, "app"),
+        title: "Notes",
+        log: quiet,
+        root,
+        fetch: rel.fetch,
+        dialog,
+        previous,
+      });
+    // Nothing kept: two buttons.
+    assertEquals(await start(answer("quit")), null);
+    assertEquals(offered, [undefined]);
+    // Kept: the third, and choosing it hands over.
+    let handed = 0;
+    assertEquals(
+      await start(answer("previous"), () => Promise.resolve(++handed > 0)),
+      null,
+    );
+    assertEquals(offered[1], PREVIOUS_ANSWER);
+    assertEquals(handed, 1);
+    assertEquals(await sharedElectronReady(V, SLUG, root), false);
+  } finally {
+    await dropTempDir(tmp);
+  }
+});
+
+Deno.test("dialog: the third answer on every backend — Windows Yes/No/Cancel with the text saying which, Cocoa's button, zenity's extra button, yad's code, the browser page's button", async () => {
+  // Windows: no custom labels on a MessageBox.
+  assertEquals(windowsAskText("m"), "m");
+  assertStringIncludes(
+    windowsAskText("m", PREVIOUS_ANSWER),
+    `No: ${PREVIOUS_ANSWER}`,
+  );
+  assertEquals(
+    ["Retry", "Yes", "No", "Cancel", ""].map(windowsAnswer),
+    ["retry", "retry", "previous", "quit", "quit"],
+  );
+  assertStringIncludes(WINDOWS_ASK_PS, "$env:AIO_DLG_BUTTONS");
+  // macOS.
+  assertStringIncludes(MAC_ASK_APPLESCRIPT, "(item 3 of argv)");
+  assertEquals(macAnswer("Retry\n", PREVIOUS_ANSWER), "retry");
+  assertEquals(macAnswer(PREVIOUS_ANSWER, PREVIOUS_ANSWER), "previous");
+  assertEquals(macAnswer(PREVIOUS_ANSWER), "quit");
+  // zenity / yad.
+  assert(
+    !zenityAskArgs("zenity", "T", "m").some((a) => a.startsWith("--extra")),
+  );
+  assert(
+    zenityAskArgs("zenity", "T", "m", PREVIOUS_ANSWER).includes(
+      `--extra-button=${PREVIOUS_ANSWER}`,
+    ),
+  );
+  assert(
+    zenityAskArgs("yad", "T", "m", PREVIOUS_ANSWER).includes(
+      `--button=${PREVIOUS_ANSWER}:2`,
+    ),
+  );
+  assertEquals(zenityAnswer("zenity", 0, "", PREVIOUS_ANSWER), "retry");
+  assertEquals(
+    zenityAnswer("zenity", 1, `${PREVIOUS_ANSWER}\n`, PREVIOUS_ANSWER),
+    "previous",
+  );
+  assertEquals(zenityAnswer("zenity", 1, "", PREVIOUS_ANSWER), "quit");
+  assertEquals(zenityAnswer("yad", 2, "", PREVIOUS_ANSWER), "previous");
+  assertEquals(zenityAnswer("yad", 2, ""), "quit");
+  // The browser page: a hidden button, shown with its label while offered.
+  assertStringIncludes(browserPage("T"), "/answer?previous");
+  let page = "";
+  const b = browserBackend(async (url) => {
+    page = url;
+    await (await fetch(`${url}state`)).body?.cancel();
+  }, 2000);
+  const asked = b.ask("T", "failed", PREVIOUS_ANSWER);
+  for (let i = 0; i < 50 && !page; i++) {
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  const st = await (await fetch(`${page}state`)).json();
+  assertEquals(st.previous, PREVIOUS_ANSWER);
+  await (await fetch(`${page}answer?previous`, { method: "POST" })).body
+    ?.cancel();
+  assertEquals(await asked, "previous");
 });

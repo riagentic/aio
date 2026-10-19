@@ -258,14 +258,18 @@ import {
   returnBootAttempt,
   startUpdates,
   ttyPrompt,
+  updateWindow,
+  windowGate,
 } from "./updates-boot.ts";
 import { offerMoveToApplications } from "./macos-move.ts";
 import { PERSIST_SCHEMA_VERSION } from "./persist-schema.ts";
 import {
   deriveDataContract,
+  judgeKeepOld,
   PROBE_NONCE_ENV,
   probeLine,
   probeNonce,
+  resolveKeepOld,
 } from "./updates-core.ts";
 import {
   baseDirCandidates,
@@ -1134,6 +1138,82 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
     homeReady = true;
   };
   try {
+    // A function of its own: see `_recoverSyncLogs` (an Error built under a
+    // call site deep in one long function costs in step with that depth).
+    return await _composeAndRun();
+  } catch (e) {
+    // A BOOT THAT REFUSES LEAVES NOTHING BEHIND.
+    //
+    // The logger is installed before `_run()` and torn down by the app's
+    // shutdown — which a refusal (a lint error, a config conflict, a
+    // persistence that will not open) never reaches. So a refused boot left
+    // the heartbeat interval and the pending flush of its own refusal line
+    // armed: the caller got a correct error and a process that would not
+    // exit — the "worst of both" shape `logger-core.ts` describes, answered
+    // there with an unref that only hides it from the event loop. The op
+    // sanitizer named it in every test that asserts a refusal. Torn down
+    // HERE, the same way shutdown does it: stop, drain, detach — and an app
+    // that did come up before the throw (a hook after `_run`) closes fully.
+    // The refusal itself is what the caller sees; a teardown fault is said
+    // out loud beside it, never instead of it.
+    // Refused BEFORE the logger existed (a cell that cannot be composed, a
+    // read side left undecided): the log directory depends on neither, so
+    // the logger is brought up for this one line — in a home that ALREADY
+    // EXISTS. A refused start must not be what creates an app's home: with
+    // `--home=<a typo>` that left a folder of log files wherever the typo
+    // pointed. No home yet (a first start, a mistyped one) = the console
+    // only, as before. Not for an embedded app or a query (their output is
+    // the caller's), and not when the data folder itself is what was refused
+    // — then there is no log directory at all.
+    //
+    // What is NOT covered: a refusal raised before this `try` — the command
+    // line, the Deno version, the shape and keys of the `aio.run()` config,
+    // its schedules, its plugins. The config is not accepted yet at that
+    // point, so there is no app to plan a home for; those answer on the
+    // console only.
+    if (
+      !logger && !_contractMode && !fc.libraryMode && runtimeCount() === 0
+    ) {
+      try {
+        // `statSync` throws for a home that is not there: the same answer.
+        if (homeReady || Deno.statSync(planHome().plan.dirs.home).isDirectory) {
+          readyHome();
+          logger = await initLogger(fc);
+        }
+      } catch {
+        // aio-ok: no home yet, a refused data folder, no log directory — the
+        // refusal below goes to the console, which is where it went before.
+      }
+    }
+    // An embedded app's refusal is the exception its host catches: the host
+    // decides whether that is an error at all, so nothing is printed for it.
+    if (!fc.libraryMode) sayBootRefused(e);
+    try {
+      if (appRef.current) await appRef.current.close();
+      // Still installed = no shutdown ran (a refusal inside `_run` after the
+      // app's own shutdown existed has stopped and released it already; a
+      // second stop here wrote a second "stopped" line).
+      else if (logger && appLoggerInstalled(logger)) {
+        logger.onStop();
+        await logger.flush();
+        setLogger(null);
+      }
+      // The SIGINT/SIGTERM listeners go in before `_run()`; with no runtime
+      // ever registered, nothing else would take them out again.
+      releaseProcessListenersIfIdle();
+    } catch (teardown) {
+      log.error(
+        `boot refused, and the teardown after it failed too: ${teardown}`,
+      );
+    }
+    throw e;
+  } finally {
+    _releaseUpdatesClaim(_updatesSlot);
+    _releaseFeedbackClaim(_feedbackSlot);
+  }
+
+  // deno-lint-ignore no-explicit-any
+  async function _composeAndRun(): Promise<AioApp<any, any>> {
     // Configuring `updates` registers the built-in cell — BEFORE the registry
     // is read below, because a cell that registers afterwards is never composed
     // and never bound.
@@ -1488,11 +1568,11 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
     // Which cells `startUpdates`/`startFeedback` wire, handed to the boot by
     // the config object's identity rather than as a config KEY (which every
     // layer of validation would have to learn about).
-    const slots: {
-      updates?: UpdatesSlot;
-      feedback?: FeedbackSlot;
-      confirm?: (atExit?: boolean) => void;
-    } = { updates: _updatesSlot, feedback: _feedbackSlot };
+    const slots: AppSlots = {
+      updates: _updatesSlot,
+      feedback: _feedbackSlot,
+      window: windowGate(),
+    };
     _appSlots.set(config, slots);
     const app = await _run(composed.initialState, config);
     appRef.current = app;
@@ -1513,9 +1593,14 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
     // to bypass the catch entirely and surface as an unhandled rejection.
     // The pending update is confirmed only once the app's hook came through:
     // `failed` has already ended the process for a fatal one.
+    // …and, for a desktop app, only once its main window has loaded: a start
+    // whose Electron could not be had (a download refused, cancelled, Quit)
+    // stays unconfirmed — a failed start the judge counts — even when it
+    // exits cleanly.
     let confirmed = false;
     const confirmOnce = (atExit = false) => {
       if (confirmed || fc.libraryMode) return;
+      if (slots.window.holds(atExit, () => confirmOnce())) return;
       confirmed = true;
       removeEventListener("unload", onCleanExit);
       slots.confirm?.(atExit);
@@ -1562,75 +1647,6 @@ async function _runAsApp(a?: any, b?: any): Promise<AioApp<any, any>> {
       }
     } else confirmOnce();
     return app;
-  } catch (e) {
-    // A BOOT THAT REFUSES LEAVES NOTHING BEHIND.
-    //
-    // The logger is installed before `_run()` and torn down by the app's
-    // shutdown — which a refusal (a lint error, a config conflict, a
-    // persistence that will not open) never reaches. So a refused boot left
-    // the heartbeat interval and the pending flush of its own refusal line
-    // armed: the caller got a correct error and a process that would not
-    // exit — the "worst of both" shape `logger-core.ts` describes, answered
-    // there with an unref that only hides it from the event loop. The op
-    // sanitizer named it in every test that asserts a refusal. Torn down
-    // HERE, the same way shutdown does it: stop, drain, detach — and an app
-    // that did come up before the throw (a hook after `_run`) closes fully.
-    // The refusal itself is what the caller sees; a teardown fault is said
-    // out loud beside it, never instead of it.
-    // Refused BEFORE the logger existed (a cell that cannot be composed, a
-    // read side left undecided): the log directory depends on neither, so
-    // the logger is brought up for this one line — in a home that ALREADY
-    // EXISTS. A refused start must not be what creates an app's home: with
-    // `--home=<a typo>` that left a folder of log files wherever the typo
-    // pointed. No home yet (a first start, a mistyped one) = the console
-    // only, as before. Not for an embedded app or a query (their output is
-    // the caller's), and not when the data folder itself is what was refused
-    // — then there is no log directory at all.
-    //
-    // What is NOT covered: a refusal raised before this `try` — the command
-    // line, the Deno version, the shape and keys of the `aio.run()` config,
-    // its schedules, its plugins. The config is not accepted yet at that
-    // point, so there is no app to plan a home for; those answer on the
-    // console only.
-    if (
-      !logger && !_contractMode && !fc.libraryMode && runtimeCount() === 0
-    ) {
-      try {
-        // `statSync` throws for a home that is not there: the same answer.
-        if (homeReady || Deno.statSync(planHome().plan.dirs.home).isDirectory) {
-          readyHome();
-          logger = await initLogger(fc);
-        }
-      } catch {
-        // aio-ok: no home yet, a refused data folder, no log directory — the
-        // refusal below goes to the console, which is where it went before.
-      }
-    }
-    // An embedded app's refusal is the exception its host catches: the host
-    // decides whether that is an error at all, so nothing is printed for it.
-    if (!fc.libraryMode) sayBootRefused(e);
-    try {
-      if (appRef.current) await appRef.current.close();
-      // Still installed = no shutdown ran (a refusal inside `_run` after the
-      // app's own shutdown existed has stopped and released it already; a
-      // second stop here wrote a second "stopped" line).
-      else if (logger && appLoggerInstalled(logger)) {
-        logger.onStop();
-        await logger.flush();
-        setLogger(null);
-      }
-      // The SIGINT/SIGTERM listeners go in before `_run()`; with no runtime
-      // ever registered, nothing else would take them out again.
-      releaseProcessListenersIfIdle();
-    } catch (teardown) {
-      log.error(
-        `boot refused, and the teardown after it failed too: ${teardown}`,
-      );
-    }
-    throw e;
-  } finally {
-    _releaseUpdatesClaim(_updatesSlot);
-    _releaseFeedbackClaim(_feedbackSlot);
   }
 }
 
@@ -1683,14 +1699,14 @@ function createBootUndo(): BootUndo {
 /** The per-app `updates` / `feedback` slots `run()` chose, keyed by the
  *  config it hands `_run` — and the update confirmation `_run` hands back,
  *  which `run()` calls once the app's own `onStart` has come through. */
-const _appSlots = new WeakMap<
-  object,
-  {
-    updates?: UpdatesSlot;
-    feedback?: FeedbackSlot;
-    confirm?: (atExit?: boolean) => void;
-  }
->();
+type AppSlots = {
+  updates?: UpdatesSlot;
+  feedback?: FeedbackSlot;
+  confirm?: (atExit?: boolean) => void;
+  /** A desktop app's confirm waits for its main window (`windowGate`). */
+  window: ReturnType<typeof windowGate>;
+};
+const _appSlots = new WeakMap<object, AppSlots>();
 /** How long an `async onStart` that has not settled holds the confirmation
  *  back: a hook that serves forever still proves the build boots. */
 const CONFIRM_BACKSTOP_MS = 30_000;
@@ -1762,7 +1778,12 @@ async function _runPhases<S, A, E>(
     }
   }
 
-  if (cli.dataContract) {
+  if (cli.dataContract) _printDataContract();
+  function _printDataContract(): void {
+    // `aio ship` asks this before publishing: a build whose `updates.keepOld`
+    // its boot would refuse is refused HERE (throws, non-zero) — the boot's
+    // own refusal comes only after its judge has counted the attempt.
+    resolveKeepOld(config.updates);
     // What this build promises about data already on disk. Derived from the
     // very same cell versions and onMigrate hooks the boot path uses, so a
     // published contract cannot drift from what the binary actually does.
@@ -1869,7 +1890,8 @@ async function _runPhases<S, A, E>(
   // artifacts that exist to explain a crash silently not written. Turning off
   // the console logger must not turn off the black box.
   setFallbackLogDir(_dirs.logs);
-  if (!config.libraryMode) {
+  if (!config.libraryMode) await _checkUnpackPlace();
+  async function _checkUnpackPlace(): Promise<void> {
     // A packaged app unpacks itself BEFORE any of our code runs, so this can
     // only observe where that happened — and say so when it happened somewhere
     // other users on the host can reach. Never fatal (the app works either
@@ -2085,7 +2107,11 @@ async function _runPhases<S, A, E>(
   // that never got as far as owning the app cannot be evidence about the build.
   if (
     !config.libraryMode &&
-    await judgePendingUpdate(_dirs.data, log, await _appVersion())
+    await judgePendingUpdate(_dirs.data, log, await _appVersion(), {
+      // Never a refusal before the judge has counted: an invalid value is
+      // refused by the boot right after, as a failed start it rolls back.
+      keepOld: judgeKeepOld(config.updates, (m) => log.error("updates", m)),
+    })
   ) {
     appLock?.release();
     Deno.exit(1);
@@ -2144,7 +2170,8 @@ async function _runPhases<S, A, E>(
   // Prod detection
   let distDir = resolve(join(Deno.cwd(), "dist"));
   let prod = cli.prod === true;
-  if (!prod && isCompiled()) {
+  if (!prod && isCompiled()) await _detectCompiledProd();
+  async function _detectCompiledProd(): Promise<void> {
     // Entry-relative (the binary's EMBEDDED dist/) first, real filesystem after
     // — so a compiled binary detects prod from ANY cwd. See distCandidates.
     const candidates = distCandidates({
@@ -2550,7 +2577,14 @@ async function _runPhases<S, A, E>(
   /** Where the ops a clean stop of this run may vouch for start (exclusive):
    *  the ones issued before it were placed — or lost — by an earlier run. */
   let _cleanRunFrom: number | undefined;
-  if (asyncDb && syncCellIds.length > 0) {
+  // Each long boot block is a function of its own: V8 builds every Error by
+  // scanning the position table of each function on the stack up to its call
+  // site, so code deep in one long function made each Error built under it
+  // (a missing file's NotFound) ~15x dearer (todo.md, "Boot: every error").
+  if (asyncDb && syncCellIds.length > 0) await _recoverSyncLogs(asyncDb);
+  async function _recoverSyncLogs(
+    asyncDb: NonNullable<typeof boot.asyncDb>,
+  ): Promise<void> {
     let tail: JournalEntry[] = [];
     let lines: JournalEntry[] = [];
     try {
@@ -3238,7 +3272,10 @@ async function _runPhases<S, A, E>(
   /** Per sync cell: the `compacted_ts` its last journalled fold left, as
    *  recorded before this boot (`syncJournalSnapshotKey`). */
   const _foldedAt = new Map<string, number>();
-  if (journal) {
+  if (journal) await _wireJournal(journal);
+  async function _wireJournal(
+    journal: NonNullable<typeof boot.journal>,
+  ): Promise<void> {
     if (_syncJournal) {
       const stored: Record<string, number> = {};
       for (const c of syncCellIds) {
@@ -3489,7 +3526,10 @@ async function _runPhases<S, A, E>(
   // where its listener's record certainly lacks it (op-placement.ts
   // `inFlightVerdict`); held and named everywhere else.
   const _rederivedCells = new Set<string>();
-  if (_deferred.length > 0 && asyncDb) {
+  if (_deferred.length > 0 && asyncDb) await _reduceDeferred(asyncDb);
+  async function _reduceDeferred(
+    asyncDb: NonNullable<typeof boot.asyncDb>,
+  ): Promise<void> {
     const quarantined = getSyncReplayContext(asyncDb)?.quarantined;
     // A store another run saved without journalling may hold anything: a
     // store-persisted listener's reaction is held, never applied.
@@ -4753,77 +4793,83 @@ async function _runPhases<S, A, E>(
   // declared key, a key added under a closed declared object) is said at the
   // write, dev and prod — see declared-shape-guard.ts.
   const _writeGuard = boot.writeGuard;
-  const _dispatchCore = setupDispatch<S, A, E>({
-    reduce: withShapeGuard(reduce, _writeGuard, config._cellBreaker?.count),
-    // Effects run inside the effect scope, so everything they dispatch — now,
-    // or later from a timer, a promise or an async body they started — is
-    // recorded as `cause: "effect"` (see `_effectScope`).
-    execute: (app, e) =>
-      _effectScope.run(
-        true,
-        () =>
-          _inCallScope(
-            e,
-            (call, sure) => execute(_callDoor(app, call, sure), e),
-          ),
-      ),
-    beforeReduce: config.beforeReduce,
-    onAction,
-    onEffect,
-    getState: () => state,
-    setState: (s) => {
-      state = s;
-    },
-    getApp: () => app,
-    getServer: () => ({
-      broadcast: (patches) => server.broadcast(patches),
-      broadcastTT: () => server.broadcastTT(),
-      broadcastUi: (raw) => server.broadcastUi?.(raw) ?? 0,
-    }),
-    // A timer a method arms and a process it owns dispatch LATER, from their
-    // own callbacks — which inherit the scope they were created in.
-    scheduleManager: {
-      handle: (e) =>
+  const _dispatchCore = _setupDispatchCore();
+  function _setupDispatchCore() {
+    return setupDispatch<S, A, E>({
+      reduce: withShapeGuard(reduce, _writeGuard, config._cellBreaker?.count),
+      // Effects run inside the effect scope, so everything they dispatch — now,
+      // or later from a timer, a promise or an async body they started — is
+      // recorded as `cause: "effect"` (see `_effectScope`).
+      execute: (app, e) =>
         _effectScope.run(
           true,
-          () => _outsideCall(() => scheduleManager.handle(e)),
+          () =>
+            _inCallScope(
+              e,
+              (call, sure) => execute(_callDoor(app, call, sure), e),
+            ),
         ),
-    },
-    ownManager: {
-      handle: (e) =>
-        _effectScope.run(true, () => _outsideCall(() => ownManager.handle(e))),
-    },
-    schedulePersist: (p) => schedulePersist(p),
-    getTT: () => tt,
-    setTT: (t) => {
-      tt = t;
-    },
-    reportOpts: _reportOpts,
-    cellPatchStrategies: config._cellPatchStrategies,
-    cellFilterFields: config._cellFilterFields,
-    onUdsBroadcast: udsCtrl.onUdsBroadcast,
-    onPerf,
-    perfCheck: config.perfCheck,
-    // Dev holds reduce to ONE FRAME (16ms) instead of the 100ms prod budget:
-    // a reduce is on the server's single dispatch path, so every millisecond it
-    // takes is a millisecond every client's next action waits. Dev-stricter is
-    // the allowed direction (observe-only, throttled to one report per action
-    // type per 10s) — it teaches the "keep actions instant, move compute
-    // off-thread" habit while the app is still small. Prod keeps 100ms so a
-    // deployed app doesn't chatter. Override either with `perfBudget`.
-    perfBudget: config.perfBudget ??
-      (prod ? undefined : { reduce: DEV_FRAME_BUDGET_MS }),
-    perfLog: (source, type, duration, budget, breakdown) =>
-      getLogger()?.perf(source, type, duration, budget, breakdown),
-    freezeState: config.freezeState ?? !prod,
-    effectTimeout: config.effectTimeoutMs,
-    reduceBreakdown: config._reduceBreakdown,
-    ttSkipActions,
-    notifyCrossUser: _notifyCrossUser,
-    afterAction: afterActionHook,
-    log,
-    debug: VERBOSE,
-  });
+      beforeReduce: config.beforeReduce,
+      onAction,
+      onEffect,
+      getState: () => state,
+      setState: (s) => {
+        state = s;
+      },
+      getApp: () => app,
+      getServer: () => ({
+        broadcast: (patches) => server.broadcast(patches),
+        broadcastTT: () => server.broadcastTT(),
+        broadcastUi: (raw) => server.broadcastUi?.(raw) ?? 0,
+      }),
+      // A timer a method arms and a process it owns dispatch LATER, from their
+      // own callbacks — which inherit the scope they were created in.
+      scheduleManager: {
+        handle: (e) =>
+          _effectScope.run(
+            true,
+            () => _outsideCall(() => scheduleManager.handle(e)),
+          ),
+      },
+      ownManager: {
+        handle: (e) =>
+          _effectScope.run(
+            true,
+            () => _outsideCall(() => ownManager.handle(e)),
+          ),
+      },
+      schedulePersist: (p) => schedulePersist(p),
+      getTT: () => tt,
+      setTT: (t) => {
+        tt = t;
+      },
+      reportOpts: _reportOpts,
+      cellPatchStrategies: config._cellPatchStrategies,
+      cellFilterFields: config._cellFilterFields,
+      onUdsBroadcast: udsCtrl.onUdsBroadcast,
+      onPerf,
+      perfCheck: config.perfCheck,
+      // Dev holds reduce to ONE FRAME (16ms) instead of the 100ms prod budget:
+      // a reduce is on the server's single dispatch path, so every millisecond it
+      // takes is a millisecond every client's next action waits. Dev-stricter is
+      // the allowed direction (observe-only, throttled to one report per action
+      // type per 10s) — it teaches the "keep actions instant, move compute
+      // off-thread" habit while the app is still small. Prod keeps 100ms so a
+      // deployed app doesn't chatter. Override either with `perfBudget`.
+      perfBudget: config.perfBudget ??
+        (prod ? undefined : { reduce: DEV_FRAME_BUDGET_MS }),
+      perfLog: (source, type, duration, budget, breakdown) =>
+        getLogger()?.perf(source, type, duration, budget, breakdown),
+      freezeState: config.freezeState ?? !prod,
+      effectTimeout: config.effectTimeoutMs,
+      reduceBreakdown: config._reduceBreakdown,
+      ttSkipActions,
+      notifyCrossUser: _notifyCrossUser,
+      afterAction: afterActionHook,
+      log,
+      debug: VERBOSE,
+    });
+  }
   // THE one door every dispatch passes — client, trojan, server code, a
   // schedule, an effect. Whether the effect scope is active is decided HERE,
   // at the call, because by the time the action is reduced the drain loop is
@@ -5031,86 +5077,89 @@ async function _runPhases<S, A, E>(
   // counts too — and it can only ever produce the once-per-app notice, never
   // suppress it.
   let _workerUserCalls = 0;
-  const workerPool = createCellWorkerPool({
-    // The SAME resolved value the main isolate uses and the boot line
-    // prints — one decider, so a worker cell is never freeze-checked more
-    // loosely than a local one.
-    freezeState: freezeEnabled,
-    // …and the SAME `refusalsReject` the composed reduce was given, for the
-    // same reason: it decides what an in-process `await cell.method()` sees
-    // when the reduce refuses the write, and a worker that never learned it
-    // answered its callers differently from the cell sitting next to it.
-    refusalsReject: config._refusalsReject === true,
-    // …and the SAME supervision of a stray rejection (see initDiagAndVitals
-    // above): a worker cell survives what the main isolate survives.
-    guardRejections: config.guardDispatches ?? true,
-    // …and the dev refusal of a declared-type change, which a worker cell's
-    // reduce must run itself (the owner sees only its committed patches).
-    ...(boot.strictTypeFilter
-      ? { strictTypeFilter: boot.strictTypeFilter }
-      : {}),
-    // EVERY worker cell, hosted or not: the pool refuses what a thread
-    // boundary cannot honour (selectors, sync, listensTo, a machine) before it
-    // decides whether to host. It used to be handed `[]` under libraryMode, so
-    // `testServer` booted a `worker: true` + `selectors` cell that the real
-    // app refused to start.
-    cells: (config._workerCells ?? []) as unknown as Parameters<
-      typeof createCellWorkerPool
-    >[0]["cells"],
-    host: _hostWorkers,
-    entry: _workerEntry,
-    prod,
-    getSlice: (cell) =>
-      ((state as Record<string, unknown>)[cell] ?? {}) as Record<
-        string,
-        unknown
-      >,
-    dispatch: (a) => dispatch(a as unknown as A),
-    // The SAME identity `composeCells` was given (aio-composition.ts), so the
-    // pool scopes the cancel registry exactly as the composed reduce does.
-    appId,
-    // The main door's paused-time-travel refusal, for calls routed around it.
-    isPaused: () => tt?.paused === true,
-    // A worker cell's INIT_ERROR / EFFECT_ASYNC_ERROR reaches the app's
-    // `onError` exactly as the same cell's does on this isolate.
-    reportError: (err) => reportAioError(err, _reportOpts),
-    // …and counts toward the app's `circuitBreaker`, as it does there.
-    ...(config._cellBreaker ? { breaker: config._cellBreaker } : {}),
-    // An effect handed back by a worker executes HERE, where the runtime lives.
-    // A schedule effect is NOT an action — dispatching it would do nothing at
-    // all, and the schedule would silently never fire.
-    // Inside the effect scope, like a main-isolate effect: what it dispatches
-    // or schedules is `cause: "effect"` (see `_effectScope`).
-    runEffect: (effect) =>
-      _effectScope.run(true, () =>
-        // ONE exhaustive classifier, the same one the dispatch loop and the
-        // worker host use — a new framework effect kind is a compile error here
-        // rather than something this router silently treats as an app action
-        // (see route-effect.ts). This site hand-wrote the chain, and the kind it
-        // had never been taught about was `notify`: a `notify()` from a worker
-        // cell was posted home correctly and then dispatched here as an action
-        // type no cell answers, so the notification simply never appeared.
-        // `__own` had been exactly the same bug one kind earlier.
-        routeEffect<unknown>(effect, {
-          schedule: (e) => scheduleManager.handle(e),
-          // Worker cells hold their resources in their own isolate
-          // (cell-worker-host.ts), so nothing should arrive here — and if
-          // anything ever does, the own manager says so out loud.
-          own: (e) => ownManager.handle(e),
-          // The clients live on this isolate; same semantics as a notify from a
-          // main-isolate cell, because it is the same function.
-          notify: (e) =>
-            _notifyCrossUser(
-              showNotifyEffect(
-                e,
-                server?.broadcastUi,
-                (m) => log.warn("aio", m),
+  const workerPool = _createWorkerPool();
+  function _createWorkerPool() {
+    return createCellWorkerPool({
+      // The SAME resolved value the main isolate uses and the boot line
+      // prints — one decider, so a worker cell is never freeze-checked more
+      // loosely than a local one.
+      freezeState: freezeEnabled,
+      // …and the SAME `refusalsReject` the composed reduce was given, for the
+      // same reason: it decides what an in-process `await cell.method()` sees
+      // when the reduce refuses the write, and a worker that never learned it
+      // answered its callers differently from the cell sitting next to it.
+      refusalsReject: config._refusalsReject === true,
+      // …and the SAME supervision of a stray rejection (see initDiagAndVitals
+      // above): a worker cell survives what the main isolate survives.
+      guardRejections: config.guardDispatches ?? true,
+      // …and the dev refusal of a declared-type change, which a worker cell's
+      // reduce must run itself (the owner sees only its committed patches).
+      ...(boot.strictTypeFilter
+        ? { strictTypeFilter: boot.strictTypeFilter }
+        : {}),
+      // EVERY worker cell, hosted or not: the pool refuses what a thread
+      // boundary cannot honour (selectors, sync, listensTo, a machine) before it
+      // decides whether to host. It used to be handed `[]` under libraryMode, so
+      // `testServer` booted a `worker: true` + `selectors` cell that the real
+      // app refused to start.
+      cells: (config._workerCells ?? []) as unknown as Parameters<
+        typeof createCellWorkerPool
+      >[0]["cells"],
+      host: _hostWorkers,
+      entry: _workerEntry,
+      prod,
+      getSlice: (cell) =>
+        ((state as Record<string, unknown>)[cell] ?? {}) as Record<
+          string,
+          unknown
+        >,
+      dispatch: (a) => dispatch(a as unknown as A),
+      // The SAME identity `composeCells` was given (aio-composition.ts), so the
+      // pool scopes the cancel registry exactly as the composed reduce does.
+      appId,
+      // The main door's paused-time-travel refusal, for calls routed around it.
+      isPaused: () => tt?.paused === true,
+      // A worker cell's INIT_ERROR / EFFECT_ASYNC_ERROR reaches the app's
+      // `onError` exactly as the same cell's does on this isolate.
+      reportError: (err) => reportAioError(err, _reportOpts),
+      // …and counts toward the app's `circuitBreaker`, as it does there.
+      ...(config._cellBreaker ? { breaker: config._cellBreaker } : {}),
+      // An effect handed back by a worker executes HERE, where the runtime lives.
+      // A schedule effect is NOT an action — dispatching it would do nothing at
+      // all, and the schedule would silently never fire.
+      // Inside the effect scope, like a main-isolate effect: what it dispatches
+      // or schedules is `cause: "effect"` (see `_effectScope`).
+      runEffect: (effect) =>
+        _effectScope.run(true, () =>
+          // ONE exhaustive classifier, the same one the dispatch loop and the
+          // worker host use — a new framework effect kind is a compile error here
+          // rather than something this router silently treats as an app action
+          // (see route-effect.ts). This site hand-wrote the chain, and the kind it
+          // had never been taught about was `notify`: a `notify()` from a worker
+          // cell was posted home correctly and then dispatched here as an action
+          // type no cell answers, so the notification simply never appeared.
+          // `__own` had been exactly the same bug one kind earlier.
+          routeEffect<unknown>(effect, {
+            schedule: (e) => scheduleManager.handle(e),
+            // Worker cells hold their resources in their own isolate
+            // (cell-worker-host.ts), so nothing should arrive here — and if
+            // anything ever does, the own manager says so out loud.
+            own: (e) => ownManager.handle(e),
+            // The clients live on this isolate; same semantics as a notify from a
+            // main-isolate cell, because it is the same function.
+            notify: (e) =>
+              _notifyCrossUser(
+                showNotifyEffect(
+                  e,
+                  server?.broadcastUi,
+                  (m) => log.warn("aio", m),
+                ),
+                _workerUserCalls > 0,
               ),
-              _workerUserCalls > 0,
-            ),
-          app: (e) => void dispatch(e as unknown as A), // cross-cell action
-        })),
-  });
+            app: (e) => void dispatch(e as unknown as A), // cross-cell action
+          })),
+    });
+  }
   bootUndo.push("workers", () => workerPool.close());
   /** Cells that WOULD run in a worker but are running in this isolate because a
    *  test owns the entry module. Empty in production. */
@@ -5228,109 +5277,112 @@ async function _runPhases<S, A, E>(
     await workerPool.ready();
   }
 
-  const { shutdown: _shutdownRuntime } = createShutdownOrchestrator({
-    sessionStore,
-    userStore,
-    flushPersist: async () => {
-      await persistence.flushPersist();
-      // Sync cells' server-origin writes debounce into their snapshot — a
-      // clean exit must not leave the last write inside that window.
-      const unfolded = await syncHandler?.flushServerWrites();
-      // What a clean stop covers: every value this run issued (input is
-      // closed by now) — read AFTER the folds, which take values of their
-      // own, so the next run's first value continues the range. Only a run
-      // that SAVES: with persist off no store holds a store-persisted
-      // listener's reactions, so there is nothing to vouch for.
-      const cleanTo = asyncDb && shouldPersist && _cleanRunFrom !== undefined
-        ? await issuedThrough(asyncDb).catch(() => undefined)
-        : undefined;
-      // The manager never rejects (the loop has to survive a bad window), so
-      // the verdict is read back — and on the LAST flush there is no next
-      // window to fix it in. A clean-looking exit that dropped every write
-      // since the first refusal is exactly the shape this line exists to
-      // break: the process is still going down (refusing to exit would strand
-      // the operator), but it says what it is taking with it.
-      const failed = persistence.lastCycleError();
-      if (failed) {
-        log.error(
-          `shutdown: the FINAL persist was refused — ${failed.message}`,
-        );
-      } else if (
-        !unfolded && cleanTo !== undefined && _cleanRunFrom !== undefined &&
-        asyncDb
-      ) {
-        // Every record is saved: say so, for the next boot (`CLEAN_STOP_ROW`).
-        await recordCleanStop(asyncDb, _cleanRunFrom, cleanTo).catch((e) =>
-          log.warn(`shutdown: could not record the clean stop — ${e}`)
-        );
-      }
-      if (!failed && shouldPersist) {
-        // A clean verdict from the HANDLE is not a fact about the disk. Delete
-        // the database out from under a running app (a cleared tmp dir, a
-        // container volume that was not really persistent, `am remove --data
-        // --force`) and POSIX keeps the inode alive for the open fd: SQLite
-        // commits happily into a file no path can reach. Measured: every
-        // window after the deletion reported success, `lastCycleError()` stayed
-        // null, and the app exited `errors=0` having lost every write since.
-        // Existence is the cheapest fact that catches it, and this is the one
-        // moment it costs nothing — there is no next window to notice in.
-        // `:memory:` is SQLite's SENTINEL for "there is no file", not a path.
-        // Resolving it produced `<cwd>/:memory:`, which of course does not
-        // exist, so every in-memory app ended a clean run with a FATAL-sounding
-        // "the database file is GONE … NONE of them are on disk" — about a
-        // database that was never meant to be on disk. A false alarm in the one
-        // message that must be believed the day it is real is worse than no
-        // message: it is how a reader learns to discount this exact line.
-        const dbFile = dbPath ? resolve(dbPath) : _dirs.stateDb;
-        const inMemory = dbPath === ":memory:" ||
-          dbPath === "file::memory:" ||
-          String(dbPath ?? "").startsWith(":memory:");
-        const gone = inMemory ? false : await Deno.stat(dbFile).then(
-          () => false,
-          (e) => e instanceof Deno.errors.NotFound,
-        );
-        if (gone) {
+  const { shutdown: _shutdownRuntime } = _createShutdown();
+  function _createShutdown() {
+    return createShutdownOrchestrator({
+      sessionStore,
+      userStore,
+      flushPersist: async () => {
+        await persistence.flushPersist();
+        // Sync cells' server-origin writes debounce into their snapshot — a
+        // clean exit must not leave the last write inside that window.
+        const unfolded = await syncHandler?.flushServerWrites();
+        // What a clean stop covers: every value this run issued (input is
+        // closed by now) — read AFTER the folds, which take values of their
+        // own, so the next run's first value continues the range. Only a run
+        // that SAVES: with persist off no store holds a store-persisted
+        // listener's reactions, so there is nothing to vouch for.
+        const cleanTo = asyncDb && shouldPersist && _cleanRunFrom !== undefined
+          ? await issuedThrough(asyncDb).catch(() => undefined)
+          : undefined;
+        // The manager never rejects (the loop has to survive a bad window), so
+        // the verdict is read back — and on the LAST flush there is no next
+        // window to fix it in. A clean-looking exit that dropped every write
+        // since the first refusal is exactly the shape this line exists to
+        // break: the process is still going down (refusing to exit would strand
+        // the operator), but it says what it is taking with it.
+        const failed = persistence.lastCycleError();
+        if (failed) {
           log.error(
-            `shutdown: the database file is GONE (${dbFile}) — it was deleted ` +
-              `while the app was running, so writes since then committed into ` +
-              `an unlinked file and NONE of them are on disk.`,
+            `shutdown: the FINAL persist was refused — ${failed.message}`,
+          );
+        } else if (
+          !unfolded && cleanTo !== undefined && _cleanRunFrom !== undefined &&
+          asyncDb
+        ) {
+          // Every record is saved: say so, for the next boot (`CLEAN_STOP_ROW`).
+          await recordCleanStop(asyncDb, _cleanRunFrom, cleanTo).catch((e) =>
+            log.warn(`shutdown: could not record the clean stop — ${e}`)
           );
         }
-      }
-    },
-    setShuttingDown: persistence.setShuttingDown,
-    diagHooks,
-    getVitalsCheckTimer: () => _vitalsCheckTimer,
-    getVitalsSystem: () => vitalsSystem,
-    onStopping,
-    // In the orchestrator's own sequence (after onStopping, before dispatch
-    // closes) — so no shutdown path can skip it or run it out of order.
-    closeWorkers: () => workerPool.close(),
-    onStop,
-    appLock,
-    releaseFileSizeGuard,
-    scheduleManager,
-    ownManager,
-    dispatch,
-    // Shutdown aborts + drains THIS app's cells only — another app sharing the
-    // process (D2) keeps running its own in-flight methods.
-    getCellNames: () => config._cellNames ?? [],
-    getAppId: () => resolveAppId(config.appId),
-    getElectronProc: () => _electronProc,
-    clearElectronProc: () => {
-      _electronProc = null;
-    },
-    disposeUds: udsCtrl.dispose,
-    getUdsHandle: () => udsHandle,
-    getServer: () => server,
-    getDiscoveryStop: () => discoveryRef.stop,
-    asyncDb,
-    kvDb,
-    setRunning: (_v: boolean) => {
-      /* multi-instance (D2): no process-wide running flag */
-    },
-    log,
-  });
+        if (!failed && shouldPersist) {
+          // A clean verdict from the HANDLE is not a fact about the disk. Delete
+          // the database out from under a running app (a cleared tmp dir, a
+          // container volume that was not really persistent, `am remove --data
+          // --force`) and POSIX keeps the inode alive for the open fd: SQLite
+          // commits happily into a file no path can reach. Measured: every
+          // window after the deletion reported success, `lastCycleError()` stayed
+          // null, and the app exited `errors=0` having lost every write since.
+          // Existence is the cheapest fact that catches it, and this is the one
+          // moment it costs nothing — there is no next window to notice in.
+          // `:memory:` is SQLite's SENTINEL for "there is no file", not a path.
+          // Resolving it produced `<cwd>/:memory:`, which of course does not
+          // exist, so every in-memory app ended a clean run with a FATAL-sounding
+          // "the database file is GONE … NONE of them are on disk" — about a
+          // database that was never meant to be on disk. A false alarm in the one
+          // message that must be believed the day it is real is worse than no
+          // message: it is how a reader learns to discount this exact line.
+          const dbFile = dbPath ? resolve(dbPath) : _dirs.stateDb;
+          const inMemory = dbPath === ":memory:" ||
+            dbPath === "file::memory:" ||
+            String(dbPath ?? "").startsWith(":memory:");
+          const gone = inMemory ? false : await Deno.stat(dbFile).then(
+            () => false,
+            (e) => e instanceof Deno.errors.NotFound,
+          );
+          if (gone) {
+            log.error(
+              `shutdown: the database file is GONE (${dbFile}) — it was deleted ` +
+                `while the app was running, so writes since then committed into ` +
+                `an unlinked file and NONE of them are on disk.`,
+            );
+          }
+        }
+      },
+      setShuttingDown: persistence.setShuttingDown,
+      diagHooks,
+      getVitalsCheckTimer: () => _vitalsCheckTimer,
+      getVitalsSystem: () => vitalsSystem,
+      onStopping,
+      // In the orchestrator's own sequence (after onStopping, before dispatch
+      // closes) — so no shutdown path can skip it or run it out of order.
+      closeWorkers: () => workerPool.close(),
+      onStop,
+      appLock,
+      releaseFileSizeGuard,
+      scheduleManager,
+      ownManager,
+      dispatch,
+      // Shutdown aborts + drains THIS app's cells only — another app sharing the
+      // process (D2) keeps running its own in-flight methods.
+      getCellNames: () => config._cellNames ?? [],
+      getAppId: () => resolveAppId(config.appId),
+      getElectronProc: () => _electronProc,
+      clearElectronProc: () => {
+        _electronProc = null;
+      },
+      disposeUds: udsCtrl.dispose,
+      getUdsHandle: () => udsHandle,
+      getServer: () => server,
+      getDiscoveryStop: () => discoveryRef.stop,
+      asyncDb,
+      kvDb,
+      setRunning: (_v: boolean) => {
+        /* multi-instance (D2): no process-wide running flag */
+      },
+      log,
+    });
+  }
 
   /** The worker threads stop INSIDE the orchestrator's sequence
    *  (`closeWorkers`: after `onStopping`, before dispatch closes), and the
@@ -5384,45 +5436,48 @@ async function _runPhases<S, A, E>(
   // registered app dirs everything else uses; lazy (no dirs until first put).
   const blobStore = openBlobStore(appId, config.appDir);
 
-  const app = buildAppObject<S, A>({
-    dispatch: appDispatch,
-    getState: () => state,
-    // Only a snapshot load replaces state through here. Journalled as the
-    // state it put in place, in the same turn, exactly like a time-travel
-    // jump: the load only SCHEDULES a persist, so an action acked on the
-    // loaded state and a crash inside the debounce replayed that action onto
-    // the PRE-load database (5, load 1000, deposit(1), SIGKILL → 6).
-    // tests/journal-snapshot-load-crash.test.ts.
-    // …and its SYNC cells as a server write, as a jump's are: a sync cell is
-    // durable only in its op-log and fold snapshot, which the scheduled KV
-    // persist never writes — so `am snapshot load` answered "loaded" and a
-    // restart brought back the writes it undid.
-    // tests/snapshot-load-sync-cell-durable.test.ts.
-    setState: (s) => {
-      const before = state;
-      state = s;
-      if (s !== before) {
-        _recordTimeTravel("snapshot", undefined, before, s);
-        _jumpSyncCells(before, s);
-      }
-    },
-    port,
-    asyncDb,
-    initialState,
-    persistence,
-    schedulePersist: () => schedulePersist(),
-    getTT: () => tt,
-    setTT: (t) => {
-      tt = t;
-    },
-    getServer: () => server,
-    udsBroadcastFull: () => udsCtrl.broadcastFull(),
-    onStateReplaced: () => workerPool.reseed(),
-    shutdown,
-    sessionStore,
-    userStore,
-    blobs: blobStore,
-  });
+  const app = _buildApp();
+  function _buildApp() {
+    return buildAppObject<S, A>({
+      dispatch: appDispatch,
+      getState: () => state,
+      // Only a snapshot load replaces state through here. Journalled as the
+      // state it put in place, in the same turn, exactly like a time-travel
+      // jump: the load only SCHEDULES a persist, so an action acked on the
+      // loaded state and a crash inside the debounce replayed that action onto
+      // the PRE-load database (5, load 1000, deposit(1), SIGKILL → 6).
+      // tests/journal-snapshot-load-crash.test.ts.
+      // …and its SYNC cells as a server write, as a jump's are: a sync cell is
+      // durable only in its op-log and fold snapshot, which the scheduled KV
+      // persist never writes — so `am snapshot load` answered "loaded" and a
+      // restart brought back the writes it undid.
+      // tests/snapshot-load-sync-cell-durable.test.ts.
+      setState: (s) => {
+        const before = state;
+        state = s;
+        if (s !== before) {
+          _recordTimeTravel("snapshot", undefined, before, s);
+          _jumpSyncCells(before, s);
+        }
+      },
+      port,
+      asyncDb,
+      initialState,
+      persistence,
+      schedulePersist: () => schedulePersist(),
+      getTT: () => tt,
+      setTT: (t) => {
+        tt = t;
+      },
+      getServer: () => server,
+      udsBroadcastFull: () => udsCtrl.broadcastFull(),
+      onStateReplaced: () => workerPool.reseed(),
+      shutdown,
+      sessionStore,
+      userStore,
+      blobs: blobStore,
+    });
+  }
 
   // From here the orchestrator above owns every step so far AND whatever
   // Phase 4 starts (it reads the server, the UDS handle, the watcher and the
@@ -5622,154 +5677,159 @@ async function _runPhases<S, A, E>(
   // Resolved BEFORE the transport is set up so an invalid `tls` shape fails at
   // boot, where it can name the config key, not at the first handshake.
   const _tls = _tlsOf(config as { tls?: AioConfig<S, A, E>["tls"] });
-  const transport = await setupTransport<S, A>({
-    appId,
-    appVersion: await _appVersion(),
-    port,
-    portRequested: _portRequested,
-    prod,
-    distDir,
-    electronDistDir,
-    // The shell the app runs in: the dev graph evaluation presents its UA.
-    shell: defaultClientFor(config.client) === "electron"
-      ? "electron"
-      : "browser",
-    baseDir,
-    baseDirFallbacks,
-    expose,
-    token,
-    users,
-    resolveUser: _resolveUser,
-    sessionResolver,
-    // Every source of "this socket's user is not who it was" the boot has.
-    // Built from the STORES, not from `authFlows` — `authFlows` exists only
-    // under `auth: true`, which left `sessions: true` on the 5-second sweep
-    // (measured: 4.8s and ten more frames of private state after a revoke).
-    // A role change had no source at all; `onUserChanged` is the new one.
-    onIdentityChange: (sessionStore || userStore)
-      ? (fn: () => void) => {
-        const offs: (() => void)[] = [];
-        if (sessionStore) offs.push(sessionStore.onRevoked(fn));
-        if (userStore?.onUserChanged) offs.push(userStore.onUserChanged(fn));
-        return () => {
-          for (const off of offs) off();
-        };
-      }
-      : undefined,
-    // AUTH-2/3: login-flow deps — aio-server adds the TLS-aware `secure` flag.
-    authFlows: userStore && sessionStore
-      ? {
-        users: userStore,
-        sessions: sessionStore,
-        signup: authOpts.signup !== false,
-        cookie: authOpts.cookie !== false,
-        ttlMs: authOpts.ttlMs,
-        appTitle: title,
-        sendMail: authOpts.sendMail,
-        requireVerified: authOpts.requireVerified,
-        totp: authOpts.totp,
-        oidc: authOpts.oidc,
-        publicDir: authOpts.publicDir,
-      }
-      : undefined,
-    // TLS: ONE decider for the flag/config pair. The flags are per-launch and
-    // win; `tls` in config is how a compiled binary — a service unit passes no
-    // shell flags — declares the same thing (R-7).
-    cliCert: tlsOf(cli, _tls).cert?.value,
-    cliKey: tlsOf(cli, _tls).key?.value,
-    cliNoTls: tlsOf(cli, _tls).noTls?.value,
-    // Which of the two said so — the warning names what was actually written.
-    noTlsSource: cli.noTls !== undefined ? "flag" : "config",
-    certSource: cli.cert !== undefined || cli.key !== undefined
-      ? "flag" as const
-      : "config" as const,
-    cliTransport: cli.transport,
-    // `--no-watch` / `--watch=…` beats the config value: a flag is a decision
-    // about THIS run, a config value is the app's standing preference. Merged
-    // HERE because `config` below is passed whole and must stay the app's own
-    // object (tests/config-bridge-hop2.test.ts).
-    cliWatch: cli.watch,
-    ui,
-    title,
-    // HOP 2 of the config bridge — MECHANICAL, never a hand-copied literal.
-    // The whole config rides across and `TransportConfig` (aio-server.ts) is
-    // the single list of what may be read. The literal that used to stand here
-    // silently dropped `serveDirs` (feature dead on arrival) and `_cellNames`
-    // (browser drift warning unreachable), after strictOrigin/redactActions/
-    // appDir/renderBudget did the same at hop 1. Gate:
-    // tests/config-bridge-hop2.test.ts.
-    config,
-    getState: () => state,
-    getUIState: (s, user?) => getUIState(s, user),
-    // ROUTED dispatch: a network-borne action for a `worker: true` cell must
-    // reach its worker, not be reduced here. The raw dispatcher would have run
-    // the method on the main isolate — no isolation at all, and the worker's
-    // copy of the slice would drift out of sync with ours.
-    //
-    // …and an action that came in through a network door has no call for an
-    // author — no call's continuation made it. Known, not guessed (`_sureOf`):
-    // its failed save is its own ack's, not every open call's.
-    dispatch: (action) => {
-      if (action !== null && typeof action === "object") {
-        _sureOf.add(action as object);
-      }
-      return appDispatch(action as A);
-    },
-    closing: () => dispatch.phase() !== "open",
-    app: {
-      snapshot: () => app.snapshot!(),
-      loadSnapshot: (json, opts) => app.loadSnapshot!(json, opts),
-    },
-    blobs: blobStore,
-    vitalsSystem,
-    costMeter,
-    useElectron,
-    tt: tt ? { handleTTCommand, getTTBroadcast: () => toBroadcast(tt!) } : null,
-    syncHandler: syncHandler ?? null,
-    syncBroadcastRef,
-    shutdown,
-    udsHandle: udsRef,
-    // `am persist` / trojan `persist`: the reply is the claim "on disk", so
-    // this is the flush itself, awaited, and a cycle that reported a failure
-    // rejects (the manager never rejects on its own — it keeps the loop alive
-    // — so the verdict is read back from `lastCycleError`). Sync cells'
-    // server-origin writes debounce into their own snapshot; they ride too,
-    // exactly as on a clean exit.
-    flushPersist: async () => {
-      await persistence.flushPersist();
-      await syncHandler?.flushServerWrites();
-      const failed = persistence.lastCycleError();
-      if (failed) throw failed;
-    },
-    // The SAME value, read by `/__aio/health` — one verdict, every door.
-    lastPersistError: () => persistence.lastCycleError(),
-    budgets: _budgetLedger,
-    shouldPersist,
-    scheduleManager,
-    // Cell id → method names — trojan `cells` route (amui run-method buttons).
-    cellMethods: config._cellMethods ?? {},
-    cellAsyncMethods: config._cellAsyncMethods ?? {},
-    cellMethodArity: config._cellMethodArity ?? {},
-    cellFields: config._cellFields ?? {},
-    // The same version / converts-state facts boot replay reads, for every
-    // declared cell — `am replay` applies the one stamp rule (staleStamps).
-    cellVersions: Object.fromEntries(
-      (config._cellNames ?? []).map((c) => [c, {
-        version: config._cellVersions?.[c] ?? 0,
-        migrates: !!config._cellMigrations?.get(c)?.onMigrate,
-      }]),
-    ),
-    asyncDb,
-    // In-memory dispatch timeline — the trojan `timeline` route.
-    getTimeline: (after?: number, limit?: number) =>
-      timeline.entries(after, limit),
-    getTimelineRotated: () => timeline.rotated(),
-    // Boot migration + shape-drift picture — trojan `migrations`.
-    migrations: migrationSummary,
-    appLock,
-    clientCounter,
-    log,
-  });
+  const transport = await _setupTransport();
+  async function _setupTransport() {
+    return setupTransport<S, A>({
+      appId,
+      appVersion: await _appVersion(),
+      port,
+      portRequested: _portRequested,
+      prod,
+      distDir,
+      electronDistDir,
+      // The shell the app runs in: the dev graph evaluation presents its UA.
+      shell: defaultClientFor(config.client) === "electron"
+        ? "electron"
+        : "browser",
+      baseDir,
+      baseDirFallbacks,
+      expose,
+      token,
+      users,
+      resolveUser: _resolveUser,
+      sessionResolver,
+      // Every source of "this socket's user is not who it was" the boot has.
+      // Built from the STORES, not from `authFlows` — `authFlows` exists only
+      // under `auth: true`, which left `sessions: true` on the 5-second sweep
+      // (measured: 4.8s and ten more frames of private state after a revoke).
+      // A role change had no source at all; `onUserChanged` is the new one.
+      onIdentityChange: (sessionStore || userStore)
+        ? (fn: () => void) => {
+          const offs: (() => void)[] = [];
+          if (sessionStore) offs.push(sessionStore.onRevoked(fn));
+          if (userStore?.onUserChanged) offs.push(userStore.onUserChanged(fn));
+          return () => {
+            for (const off of offs) off();
+          };
+        }
+        : undefined,
+      // AUTH-2/3: login-flow deps — aio-server adds the TLS-aware `secure` flag.
+      authFlows: userStore && sessionStore
+        ? {
+          users: userStore,
+          sessions: sessionStore,
+          signup: authOpts.signup !== false,
+          cookie: authOpts.cookie !== false,
+          ttlMs: authOpts.ttlMs,
+          appTitle: title,
+          sendMail: authOpts.sendMail,
+          requireVerified: authOpts.requireVerified,
+          totp: authOpts.totp,
+          oidc: authOpts.oidc,
+          publicDir: authOpts.publicDir,
+        }
+        : undefined,
+      // TLS: ONE decider for the flag/config pair. The flags are per-launch and
+      // win; `tls` in config is how a compiled binary — a service unit passes no
+      // shell flags — declares the same thing (R-7).
+      cliCert: tlsOf(cli, _tls).cert?.value,
+      cliKey: tlsOf(cli, _tls).key?.value,
+      cliNoTls: tlsOf(cli, _tls).noTls?.value,
+      // Which of the two said so — the warning names what was actually written.
+      noTlsSource: cli.noTls !== undefined ? "flag" : "config",
+      certSource: cli.cert !== undefined || cli.key !== undefined
+        ? "flag" as const
+        : "config" as const,
+      cliTransport: cli.transport,
+      // `--no-watch` / `--watch=…` beats the config value: a flag is a decision
+      // about THIS run, a config value is the app's standing preference. Merged
+      // HERE because `config` below is passed whole and must stay the app's own
+      // object (tests/config-bridge-hop2.test.ts).
+      cliWatch: cli.watch,
+      ui,
+      title,
+      // HOP 2 of the config bridge — MECHANICAL, never a hand-copied literal.
+      // The whole config rides across and `TransportConfig` (aio-server.ts) is
+      // the single list of what may be read. The literal that used to stand here
+      // silently dropped `serveDirs` (feature dead on arrival) and `_cellNames`
+      // (browser drift warning unreachable), after strictOrigin/redactActions/
+      // appDir/renderBudget did the same at hop 1. Gate:
+      // tests/config-bridge-hop2.test.ts.
+      config,
+      getState: () => state,
+      getUIState: (s, user?) => getUIState(s, user),
+      // ROUTED dispatch: a network-borne action for a `worker: true` cell must
+      // reach its worker, not be reduced here. The raw dispatcher would have run
+      // the method on the main isolate — no isolation at all, and the worker's
+      // copy of the slice would drift out of sync with ours.
+      //
+      // …and an action that came in through a network door has no call for an
+      // author — no call's continuation made it. Known, not guessed (`_sureOf`):
+      // its failed save is its own ack's, not every open call's.
+      dispatch: (action) => {
+        if (action !== null && typeof action === "object") {
+          _sureOf.add(action as object);
+        }
+        return appDispatch(action as A);
+      },
+      closing: () => dispatch.phase() !== "open",
+      app: {
+        snapshot: () => app.snapshot!(),
+        loadSnapshot: (json, opts) => app.loadSnapshot!(json, opts),
+      },
+      blobs: blobStore,
+      vitalsSystem,
+      costMeter,
+      useElectron,
+      tt: tt
+        ? { handleTTCommand, getTTBroadcast: () => toBroadcast(tt!) }
+        : null,
+      syncHandler: syncHandler ?? null,
+      syncBroadcastRef,
+      shutdown,
+      udsHandle: udsRef,
+      // `am persist` / trojan `persist`: the reply is the claim "on disk", so
+      // this is the flush itself, awaited, and a cycle that reported a failure
+      // rejects (the manager never rejects on its own — it keeps the loop alive
+      // — so the verdict is read back from `lastCycleError`). Sync cells'
+      // server-origin writes debounce into their own snapshot; they ride too,
+      // exactly as on a clean exit.
+      flushPersist: async () => {
+        await persistence.flushPersist();
+        await syncHandler?.flushServerWrites();
+        const failed = persistence.lastCycleError();
+        if (failed) throw failed;
+      },
+      // The SAME value, read by `/__aio/health` — one verdict, every door.
+      lastPersistError: () => persistence.lastCycleError(),
+      budgets: _budgetLedger,
+      shouldPersist,
+      scheduleManager,
+      // Cell id → method names — trojan `cells` route (amui run-method buttons).
+      cellMethods: config._cellMethods ?? {},
+      cellAsyncMethods: config._cellAsyncMethods ?? {},
+      cellMethodArity: config._cellMethodArity ?? {},
+      cellFields: config._cellFields ?? {},
+      // The same version / converts-state facts boot replay reads, for every
+      // declared cell — `am replay` applies the one stamp rule (staleStamps).
+      cellVersions: Object.fromEntries(
+        (config._cellNames ?? []).map((c) => [c, {
+          version: config._cellVersions?.[c] ?? 0,
+          migrates: !!config._cellMigrations?.get(c)?.onMigrate,
+        }]),
+      ),
+      asyncDb,
+      // In-memory dispatch timeline — the trojan `timeline` route.
+      getTimeline: (after?: number, limit?: number) =>
+        timeline.entries(after, limit),
+      getTimelineRotated: () => timeline.rotated(),
+      // Boot migration + shape-drift picture — trojan `migrations`.
+      migrations: migrationSummary,
+      appLock,
+      clientCounter,
+      log,
+    });
+  }
 
   server = transport.server;
   // The port this process is REALLY on. `port` above may be the literal 0 of
@@ -5924,188 +5984,202 @@ async function _runPhases<S, A, E>(
     : undefined;
 
   // Lifecycle: globals, onStart, schedules, logging, client launch
-  startLifecycle({
-    // Boot-report auth label — "password+totp+oidc", "sessions", or fallback.
-    authMode: authEnabled
-      ? [
-        "password",
-        authOpts.totp !== false ? "totp" : "",
-        authOpts.oidc ? "oidc" : "",
-        authOpts.requireVerified ? "verified-email" : "",
-      ].filter(Boolean).join("+")
-      : sessionStore
-      ? "sessions"
-      : undefined,
-    // Facts the report cannot read off the process: where this app keeps what
-    // it owns, and what it is actually running.
-    bootExtras: {
-      pid: Deno.pid,
-      // `--verbose`: every setting with more than one home, the value it
-      // resolved to and WHO decided — from the same resolvers that decided it
-      // (config-sources.ts), so the label cannot disagree with the value.
-      sources: VERBOSE ? _settings : undefined,
-      client: { value: client, from: clientFrom },
-      // An app that binds no TCP port has no port fact to report. It used to
-      // print one anyway — `findFreePort()` runs before the transport is even
-      // decided — so a zero-port app announced a number it never bound, and
-      // anyone who tried it got a refused connection. `sourced()` drops an
-      // undefined value, and the socket is named on its own line instead.
-      port: { value: _tcpPort as number, from: portFrom },
-      entry: {
-        // What is RUNNING, read from the process — not what a config said
-        // should run. Those differ exactly when someone is confused.
-        value: entryPathOf(Deno.mainModule),
-        from: "default",
+  await _startLifecycle();
+  async function _startLifecycle(): Promise<void> {
+    return startLifecycle({
+      // Boot-report auth label — "password+totp+oidc", "sessions", or fallback.
+      authMode: authEnabled
+        ? [
+          "password",
+          authOpts.totp !== false ? "totp" : "",
+          authOpts.oidc ? "oidc" : "",
+          authOpts.requireVerified ? "verified-email" : "",
+        ].filter(Boolean).join("+")
+        : sessionStore
+        ? "sessions"
+        : undefined,
+      // Facts the report cannot read off the process: where this app keeps what
+      // it owns, and what it is actually running.
+      bootExtras: {
+        pid: Deno.pid,
+        // `--verbose`: every setting with more than one home, the value it
+        // resolved to and WHO decided — from the same resolvers that decided it
+        // (config-sources.ts), so the label cannot disagree with the value.
+        sources: VERBOSE ? _settings : undefined,
+        client: { value: client, from: clientFrom },
+        // An app that binds no TCP port has no port fact to report. It used to
+        // print one anyway — `findFreePort()` runs before the transport is even
+        // decided — so a zero-port app announced a number it never bound, and
+        // anyone who tried it got a refused connection. `sourced()` drops an
+        // undefined value, and the socket is named on its own line instead.
+        port: { value: _tcpPort as number, from: portFrom },
+        entry: {
+          // What is RUNNING, read from the process — not what a config said
+          // should run. Those differ exactly when someone is confused.
+          value: entryPathOf(Deno.mainModule),
+          from: "default",
+        },
+        heap: _heapLine,
+        plugins: config._pluginNames,
+        dataDir: _dirs.home,
+        // `--db-path` moves the state file OUT of the data dir, and a relative
+        // one resolves against CWD — so the `data` line above was pointing at a
+        // directory the state was not in. Resolved, because "./rel.db" is not an
+        // answer to "where is it".
+        dbFile: dbPath ? resolve(dbPath) : undefined,
+        logs: { dir: _dirs.logs, level: cli.verbose ? "debug" : "info" },
+        journal: config.journal
+          ? (typeof config.journal === "string"
+            ? config.journal
+            : _dirs.journal)
+          : undefined,
+        cells: Object.keys(config._cellMethods ?? {}),
+        // What is NOT ordinary about a cell: its own thread, or a second writer.
+        // Both change how a symptom is read, and neither was visible without
+        // opening the source.
+        workers: [...getRegisteredCells().values()]
+          .filter((c) => (c as { __aio?: { worker?: boolean } }).__aio?.worker)
+          .map((c) => (c as { __aio: { id: string } }).__aio.id),
+        syncCells: [...getRegisteredCells().values()]
+          .filter((c) =>
+            (c as { __aio?: { syncConfig?: unknown } }).__aio?.syncConfig !==
+              undefined
+          )
+          .map((c) => (c as { __aio: { id: string } }).__aio.id),
+        routes: config.routes ? Object.keys(config.routes).length : 0,
+        feedback: _feedback
+          ? {
+            auto: _feedback.auto,
+            keep: _feedback.keep,
+            destination: _feedback.url ??
+              (_feedback.hasSink ? "custom sink" : undefined),
+          }
+          : undefined,
+        updates: _updates
+          ? {
+            source: _updates.source,
+            kind: _updates.kind,
+            channel: _updates.channel,
+            intervalMs: _updates.intervalMs,
+            auto: _updates.auto,
+          }
+          : undefined,
       },
-      heap: _heapLine,
-      plugins: config._pluginNames,
-      dataDir: _dirs.home,
-      // `--db-path` moves the state file OUT of the data dir, and a relative
-      // one resolves against CWD — so the `data` line above was pointing at a
-      // directory the state was not in. Resolved, because "./rel.db" is not an
-      // answer to "where is it".
-      dbFile: dbPath ? resolve(dbPath) : undefined,
-      logs: { dir: _dirs.logs, level: cli.verbose ? "debug" : "info" },
-      journal: config.journal
-        ? (typeof config.journal === "string" ? config.journal : _dirs.journal)
+      appId,
+      appVersion: await _appVersion(),
+      title,
+      prod,
+      electronDistDir,
+      distDir,
+      baseDir,
+      expose,
+      singletonMode,
+      childWindows: !!config.childWindows,
+      electron: config.electron,
+      client,
+      useElectron,
+      isHeadless,
+      libraryMode: config.libraryMode,
+      transport: transport.transport,
+      skipHttp: transport.skipHttp,
+      httpSocketPath: transport.httpSocketPath,
+      port: livePort,
+      token,
+      users,
+      perUserAuth: _perUserAuth,
+      tlsCert: transport.tlsCert,
+      shareUrl: transport.shareUrl,
+      localUrl: transport.localUrl,
+      advertiseHost: transport.advertiseHost,
+      bindHost: transport.bindHost,
+      server,
+      udsHandle,
+      app,
+      // `onStart` here is the cells bridge's: it runs every cell's `onInit`
+      // (the app's own `onStart` fires later, from `aio.run`). Boot re-creates
+      // what `onInit` dispatches — every harness runs it too — so it is caused,
+      // like a timer a method arms. Recorded as an input, `am record` emitted
+      // the call AND `bootCells` ran `onInit`: applied twice.
+      //
+      // Worker cells' `onInit` runs in THEIR isolate, started here — beside the
+      // main cells' and no earlier: a patch it dispatches is applied through
+      // this isolate's dispatch, whose broadcast is wired only now. Posted
+      // BEFORE the main `onInit`s, so a main cell calling a worker cell from its
+      // own `onInit` reaches one that has already initialised (per-worker FIFO).
+      onStart: onStart || workerPool.size > 0
+        ? ((a: Parameters<NonNullable<typeof onStart>>[0]) => {
+          workerPool.start();
+          if (onStart) return _effectScope.run(true, () => onStart(a));
+        })
         : undefined,
-      cells: Object.keys(config._cellMethods ?? {}),
-      // What is NOT ordinary about a cell: its own thread, or a second writer.
-      // Both change how a symptom is read, and neither was visible without
-      // opening the source.
-      workers: [...getRegisteredCells().values()]
-        .filter((c) => (c as { __aio?: { worker?: boolean } }).__aio?.worker)
-        .map((c) => (c as { __aio: { id: string } }).__aio.id),
-      syncCells: [...getRegisteredCells().values()]
-        .filter((c) =>
-          (c as { __aio?: { syncConfig?: unknown } }).__aio?.syncConfig !==
-            undefined
+      fatalOnStart: config.fatalOnStart,
+      scheduleManager,
+      schedules: config.schedules,
+      shouldPersist,
+      persistMode,
+      asyncDb,
+      db: config.db,
+      maxConnections: config.maxConnections,
+      cli: {
+        width: cli.width,
+        height: cli.height,
+        keepServer: cli.keepServer,
+        open: cli.open,
+        // Read by the report only, to say when `--channel` can do nothing.
+        channel: cli.channel,
+      },
+      // The FULL head-shaped config, not just the window box: the dev Electron
+      // aio:// shell is templated at launch and has no other way to learn
+      // ui.head/ui.viewport/ui.showStatus. Dropping them here made an app that
+      // respected ui.head under `deno task dev` (HTTP) ship it in the packaged
+      // window but NOT in the dev Electron window — two dev surfaces, two heads
+      // (WYSIDIWYSIP).
+      // EVERY key the lifecycle's `ui` type names — not a hand-picked five.
+      // The list here silently lost chrome, theme, layout and lang (and then
+      // tray) on the way to the dev Electron launch: the lifecycle read
+      // `ui.chrome` from an object that never had it, so the templated shell
+      // drew the OS frame whatever the app asked for. Measured: `const TRAY =
+      // null` in the generated main of an app that configured a tray.
+      ui: {
+        width: ui.width,
+        height: ui.height,
+        showStatus: ui.showStatus,
+        viewport: ui.viewport,
+        head: ui.head,
+        chrome: ui.chrome,
+        theme: ui.theme,
+        layout: ui.layout,
+        // …and `dir` is the key it lost NEXT, after the five the comment above
+        // was written about. The lifecycle's `ui` shape is a `Pick<UiConfig>`
+        // now, so a key it names and this object omits is a compile error
+        // rather than a config that reaches no target.
+        dir: ui.dir,
+        lang: ui.lang,
+        tray: ui.tray,
+      },
+      security: config.security,
+      wire: config.wire,
+      keepServer: config.keepServer,
+      setElectronProc: (proc) => {
+        _electronProc = proc;
+      },
+      stopSignal: _stopCtl.signal,
+      // The update this boot judged, told what the window's start did.
+      window: !config.libraryMode && _appSlots.get(config)
+        ? updateWindow(
+          _dirs.data,
+          log,
+          _appSlots.get(config)!.window,
+          ownReplayArgs(),
         )
-        .map((c) => (c as { __aio: { id: string } }).__aio.id),
-      routes: config.routes ? Object.keys(config.routes).length : 0,
-      feedback: _feedback
-        ? {
-          auto: _feedback.auto,
-          keep: _feedback.keep,
-          destination: _feedback.url ??
-            (_feedback.hasSink ? "custom sink" : undefined),
-        }
         : undefined,
-      updates: _updates
-        ? {
-          source: _updates.source,
-          kind: _updates.kind,
-          channel: _updates.channel,
-          intervalMs: _updates.intervalMs,
-          auto: _updates.auto,
-        }
-        : undefined,
-    },
-    appId,
-    appVersion: await _appVersion(),
-    title,
-    prod,
-    electronDistDir,
-    distDir,
-    baseDir,
-    expose,
-    singletonMode,
-    childWindows: !!config.childWindows,
-    electron: config.electron,
-    client,
-    useElectron,
-    isHeadless,
-    libraryMode: config.libraryMode,
-    transport: transport.transport,
-    skipHttp: transport.skipHttp,
-    httpSocketPath: transport.httpSocketPath,
-    port: livePort,
-    token,
-    users,
-    perUserAuth: _perUserAuth,
-    tlsCert: transport.tlsCert,
-    shareUrl: transport.shareUrl,
-    localUrl: transport.localUrl,
-    advertiseHost: transport.advertiseHost,
-    bindHost: transport.bindHost,
-    server,
-    udsHandle,
-    app,
-    // `onStart` here is the cells bridge's: it runs every cell's `onInit`
-    // (the app's own `onStart` fires later, from `aio.run`). Boot re-creates
-    // what `onInit` dispatches — every harness runs it too — so it is caused,
-    // like a timer a method arms. Recorded as an input, `am record` emitted
-    // the call AND `bootCells` ran `onInit`: applied twice.
-    //
-    // Worker cells' `onInit` runs in THEIR isolate, started here — beside the
-    // main cells' and no earlier: a patch it dispatches is applied through
-    // this isolate's dispatch, whose broadcast is wired only now. Posted
-    // BEFORE the main `onInit`s, so a main cell calling a worker cell from its
-    // own `onInit` reaches one that has already initialised (per-worker FIFO).
-    onStart: onStart || workerPool.size > 0
-      ? ((a: Parameters<NonNullable<typeof onStart>>[0]) => {
-        workerPool.start();
-        if (onStart) return _effectScope.run(true, () => onStart(a));
-      })
-      : undefined,
-    fatalOnStart: config.fatalOnStart,
-    scheduleManager,
-    schedules: config.schedules,
-    shouldPersist,
-    persistMode,
-    asyncDb,
-    db: config.db,
-    maxConnections: config.maxConnections,
-    cli: {
-      width: cli.width,
-      height: cli.height,
-      keepServer: cli.keepServer,
-      open: cli.open,
-      // Read by the report only, to say when `--channel` can do nothing.
-      channel: cli.channel,
-    },
-    // The FULL head-shaped config, not just the window box: the dev Electron
-    // aio:// shell is templated at launch and has no other way to learn
-    // ui.head/ui.viewport/ui.showStatus. Dropping them here made an app that
-    // respected ui.head under `deno task dev` (HTTP) ship it in the packaged
-    // window but NOT in the dev Electron window — two dev surfaces, two heads
-    // (WYSIDIWYSIP).
-    // EVERY key the lifecycle's `ui` type names — not a hand-picked five.
-    // The list here silently lost chrome, theme, layout and lang (and then
-    // tray) on the way to the dev Electron launch: the lifecycle read
-    // `ui.chrome` from an object that never had it, so the templated shell
-    // drew the OS frame whatever the app asked for. Measured: `const TRAY =
-    // null` in the generated main of an app that configured a tray.
-    ui: {
-      width: ui.width,
-      height: ui.height,
-      showStatus: ui.showStatus,
-      viewport: ui.viewport,
-      head: ui.head,
-      chrome: ui.chrome,
-      theme: ui.theme,
-      layout: ui.layout,
-      // …and `dir` is the key it lost NEXT, after the five the comment above
-      // was written about. The lifecycle's `ui` shape is a `Pick<UiConfig>`
-      // now, so a key it names and this object omits is a compile error
-      // rather than a config that reaches no target.
-      dir: ui.dir,
-      lang: ui.lang,
-      tray: ui.tray,
-    },
-    security: config.security,
-    wire: config.wire,
-    keepServer: config.keepServer,
-    setElectronProc: (proc) => {
-      _electronProc = proc;
-    },
-    stopSignal: _stopCtl.signal,
-    setDiscoveryStop: (stop) => {
-      discoveryRef.stop = stop;
-    },
-    appLock,
-    log,
-  });
+      setDiscoveryStop: (stop) => {
+        discoveryRef.stop = stop;
+      },
+      appLock,
+      log,
+    });
+  }
 
   // Whatever was pending has booted far enough to SERVE. It is confirmed —
   // so a later boot does not roll back a version that works — by `run()`,
@@ -6116,7 +6190,11 @@ async function _runPhases<S, A, E>(
   // a schedule passes without doing anything an app is for.
   const slot = _appSlots.get(config);
   if (!config.libraryMode && slot) {
-    slot.confirm = pendingConfirmer(_dirs.data, log);
+    slot.confirm = pendingConfirmer(
+      _dirs.data,
+      log,
+      resolveKeepOld(config.updates),
+    );
   }
 
   // Boot is DONE: the crash guard may now supervise runtime rejections. Until

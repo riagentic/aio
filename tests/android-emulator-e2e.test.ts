@@ -1427,6 +1427,97 @@ self.onmessage = () => { mid.postMessage(1); own.postMessage(1); };`,
       );
 
       await step(
+        "build.splash: the splash is on screen at launch, gone once the page has loaded and not before minMs, and the app works after",
+        async () => {
+          const dirP = await tempDir("aio-android-e2e-splash-");
+          try {
+            const title = "aio-android-e2e-splash";
+            await counterApp(dirP, { title });
+            await Deno.mkdir(join(dirP, "assets"), { recursive: true });
+            const { appIconPng } = await import("../src/build/app-icon.ts");
+            await Deno.writeFile(
+              join(dirP, "assets", "splash.png"),
+              await appIconPng("S", 256, title),
+            );
+            const minMs = 2500;
+            const cfgPath = join(dirP, "deno.json");
+            const cfg = JSON.parse(await Deno.readTextFile(cfgPath));
+            cfg.build = {
+              ...cfg.build,
+              splash: {
+                image: "assets/splash.png",
+                text: "Starting {title}",
+                minMs,
+                progress: true, // no download on Android: accepted, no bar
+              },
+            };
+            await Deno.writeTextFile(cfgPath, JSON.stringify(cfg, null, 2));
+            const pkg = await install(await build(dirP, false));
+            assertStringIncludes(buildOut, "splash: 256×256");
+            const text = `Starting ${title}`;
+            await adb("logcat", "-c");
+            const t0 = Date.now();
+            await launch(pkg, true);
+            await until(
+              "the splash text on screen",
+              async () =>
+                (await screen()).some((n) => n.text === text) ? true : null,
+              15_000,
+            );
+            const seenAt = Date.now() - t0;
+            // ONE spec per tag: `aio:I` is I and above (a second `aio:E`
+            // replaced it, and the info lines were never seen).
+            const lines = () =>
+              adb("logcat", "-d", "-s", "aio:I").then((r) => r.out);
+            const gone = Number(
+              await until(
+                "the splash to close",
+                async () =>
+                  (await lines()).match(/splash: gone (\d+) ms after/)?.[1] ??
+                    null,
+                40_000,
+              ),
+            );
+            const log = await lines();
+            const loaded = log.match(/splash: the page has loaded, ([^\n]+)/)
+              ?.[1];
+            console.log(
+              `[aio] android e2e splash: on screen ${seenAt} ms after launch; ` +
+                `page loaded ${loaded}; gone ${gone} ms after it was shown`,
+            );
+            assert(loaded, `the page's load signal never came:\n${log}`);
+            assert(
+              !log.includes("no load signal"),
+              `the cap closed it:\n${log}`,
+            );
+            assert(
+              gone >= minMs,
+              `gone ${gone} ms after shown < minMs ${minMs}`,
+            );
+            await until(
+              "the splash to leave the screen",
+              async () =>
+                (await screen()).some((n) => n.text === text) ? null : true,
+              5_000,
+            );
+            const ev = (e: string) => onPage(pkg, e);
+            assertEquals(
+              await until("the counter", async () => (await ev(COUNT)) ?? null),
+              "0",
+            );
+            await ev(PLUS);
+            await until(
+              "a tap after the splash",
+              async () => (await ev(COUNT)) === "1" ? true : null,
+            );
+            await adb("uninstall", pkg);
+          } finally {
+            await dropTempDir(dirP);
+          }
+        },
+      );
+
+      await step(
         "release: a keystore from the environment signs the APK and the bundle; not debuggable; it runs",
         async () => {
           const keys = await tempDir("aio-android-e2e-keys-");
@@ -1938,7 +2029,7 @@ self.onmessage = () => { mid.postMessage(1); own.postMessage(1); };`,
         .trim();
       const { recordProof } = await import("../scripts/proof.ts");
       const proved =
-        `API ${api}: standalone (dispatch, durable native store — survives an instant kill and a background kill, rotation, light/dark live, android.colorScheme dark and light hold against the system, app.ts options baked — ui.theme/lang/dir reach the phone, persist: false a new install while an install holding state keeps it, a second app keeps its own storage, browser workers (module, classic+nested, three deep, assets mount), nativeFetch past an Origin-refusing API, a foreign iframe can neither read nor write the store) + signed release (keystore from the environment, APK + AAB, not debuggable, runs) + client (connect, server dispatch, ${
+        `API ${api}: standalone (dispatch, durable native store — survives an instant kill and a background kill, rotation, light/dark live, android.colorScheme dark and light hold against the system, app.ts options baked — ui.theme/lang/dir reach the phone, persist: false a new install while an install holding state keeps it, a second app keeps its own storage, browser workers (module, classic+nested, three deep, assets mount), nativeFetch past an Origin-refusing API, a foreign iframe can neither read nor write the store, build.splash shown at launch and closed on load not before minMs) + signed release (keystore from the environment, APK + AAB, not debuggable, runs) + client (connect, server dispatch, ${
           isEmulator() ? "a call made offline delivered, " : ""
         }Back, unreachable, keyed --expose server by pairing code and by share link over http and over self-signed TLS — certificate pinned; wrong code, unknown and changed certificate refused)`;
       // Two literal rows (tests/proof-claims-have-gates.test.ts reads them).

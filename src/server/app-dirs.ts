@@ -382,6 +382,63 @@ export function installedAppPaths(name: string): {
   };
 }
 
+/** `text` — a `.desktop` entry — with every `Exec=`/`TryExec=` mention of the
+ *  path `from` (a whole path: quoted, or bounded by spaces or the line's ends)
+ *  changed to `to`; null when no such line names `from`. Pure. */
+export function rewriteMenuEntry(
+  text: string,
+  from: string,
+  to: string,
+): string | null {
+  const at = new RegExp(
+    `(?<=^|[=\\s"'])${
+      from.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    }(?=$|[\\s"'])`,
+    "g",
+  );
+  let hit = false;
+  const out = text.split("\n").map((line) => {
+    if (!/^(?:Try)?Exec=/.test(line) || line.search(at) === -1) return line;
+    hit = true;
+    return line.replace(at, () => to);
+  });
+  return hit ? out.join("\n") : null;
+}
+
+/** Where the menu entry `run.sh` writes for the app `base` is — a test seam,
+ *  so a test never reads or writes the real one (the environment is the
+ *  whole process's). @internal */
+export const _menuDeps = {
+  path: (base: string): string => installedAppPaths(base).desktop,
+};
+
+/** Point the menu entry `run.sh` wrote for the install at `from` —
+ *  `<applications>/<base>.desktop`, `base` named by the build's own rule — at
+ *  `to`, when it names `from`. Only that file, and only then: a launcher a
+ *  person made is theirs. True when it was rewritten. Linux only; throws when
+ *  the entry cannot be read or written. */
+export function followMenuEntry(
+  base: string,
+  from: string,
+  to: string,
+): boolean {
+  if (Deno.build.os !== "linux") return false;
+  const path = _menuDeps.path(base);
+  let text: string;
+  try {
+    text = Deno.readTextFileSync(path);
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) return false;
+    throw e;
+  }
+  const next = rewriteMenuEntry(text, from, to);
+  if (next === null) return false;
+  const tmp = `${path}.tmp-${Deno.pid}`;
+  Deno.writeTextFileSync(tmp, next);
+  renameOverSync(tmp, path);
+  return true;
+}
+
 /** What an install of `name` may have left on this OS — every path, what it
  *  is, and the directory that OWNS it (the containment `am remove` checks
  *  before it deletes anything). THE decider for "what did installing this app

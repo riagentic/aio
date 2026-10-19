@@ -113,6 +113,7 @@ Deno.test("android camera: the manifest and the WebView are ONE decider", () => 
       "{{TALKS_TO_SERVER}}": "false",
       "{{IS_CLIENT}}": "false",
       "{{CAMERA_DECLARED}}": String(camera),
+      "{{SPLASH}}": "null",
     });
     assertStringIncludes(kotlin, `CAMERA_DECLARED = ${camera}`);
     assertEquals(

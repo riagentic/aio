@@ -49,6 +49,7 @@ import {
 } from "../server/app-files.ts";
 import { HEY, NO, OK } from "../diagnostics/fmt.ts";
 import { count } from "../diagnostics/fmt.ts";
+import { type SplashSpec, splashText } from "../electron/splash.ts";
 
 /** The app version an APK declares, from THE resolved build version.
  *
@@ -223,7 +224,14 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
       // the manifest's declaration and the WebView's refusal message.
       "{{CAMERA_PERMISSION}}": _cameraPermission(cfg.androidCamera),
       "{{CAMERA_DECLARED}}": String(cfg.androidCamera === true),
-      "{{APP_THEME}}": _appTheme(cfg.androidColorScheme),
+      "{{APP_THEME}}": cfg.splash
+        ? SPLASH_THEME
+        : _appTheme(cfg.androidColorScheme),
+      "{{SPLASH}}": _splashKotlin(
+        cfg.splash ?? null,
+        appTitle ?? binaryName,
+        cfg.androidColorScheme,
+      ),
     });
     // A token no substitution knows (an overlay's typo, a template key from
     // another aio version) reaches gradle as text and fails it opaquely, or
@@ -255,6 +263,7 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
   if (overlaid.includes(MAIN_ACTIVITY)) {
     const losses = await ownActivityWarnings(androidDir, overlaid, {
       standalone: !talksToServer(serverOpts),
+      splash: !!cfg.splash,
     });
     const refusal = ownActivityRefusal(losses, strict);
     for (const w of losses) {
@@ -297,6 +306,30 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
     } else {
       await _writeLocalAssets(cfg, assetsDir);
     }
+  }
+
+  // `build.splash`: its image, and the theme whose window background is the
+  // splash's — the system's starting window (Android 12+: its icon splash)
+  // is then already that colour, with no flash before the first frame.
+  if (cfg.splash) {
+    for (
+      const [f, content] of Object.entries(
+        _splashFiles(cfg.splash, cfg.androidColorScheme),
+      )
+    ) {
+      const dest = join(androidDir, f);
+      await Deno.mkdir(dirname(dest), { recursive: true });
+      if (typeof content === "string") await Deno.writeTextFile(dest, content);
+      else await Deno.writeFile(dest, content);
+    }
+    console.log(
+      `${OK} splash: ${cfg.splash.image.w}\u00d7${cfg.splash.image.h}` +
+        (cfg.splash.text ? ", with its text" : "") +
+        `, at least ${cfg.splash.minMs} ms` +
+        (cfg.splash.progress
+          ? " (progress: no download on Android, no bar)"
+          : ""),
+    );
   }
 
   // Icon → mipmap resources. An app with no `icon.png` gets its MONOGRAM
@@ -544,6 +577,81 @@ export function _appTheme(scheme: "system" | "dark" | "light"): string {
     dark: "Theme.AppCompat.NoActionBar",
     light: "Theme.AppCompat.Light.NoActionBar",
   }[scheme];
+}
+
+/** The activity theme of an APK with `build.splash` (see `_splashFiles`). */
+const SPLASH_THEME = "AioSplash";
+
+/** A string as a Kotlin string literal. Pure. */
+function kotlinString(s: string): string {
+  return '"' +
+    [...s].map((c) =>
+      c === "\\" || c === '"' || c === "$"
+        ? "\\" + c
+        : c === "\n"
+        ? "\\n"
+        : c < " " || c === "\x7f"
+        ? "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0")
+        : c
+    ).join("") + '"';
+}
+
+/** MainActivity.kt's `SPLASH`: `null` without `build.splash` (nothing of the
+ *  splash runs), else its `AioSplashSpec`. `{title}` is filled; there is no
+ *  download, so `{got}` reads 0 and `{total}`/`{pct}` read `?`. The mode is
+ *  `android.colorScheme`'s — `system` follows the phone. Pure. */
+export function _splashKotlin(
+  spec: SplashSpec | null,
+  title: string,
+  scheme: "system" | "dark" | "light",
+): string {
+  if (!spec) return "null";
+  const argb = (hex: string) => `0xFF${hex.slice(1)}.toInt()`;
+  const pair = (m: SplashSpec["light"]) =>
+    `intArrayOf(${argb(m.background)}, ${argb(m.text)})`;
+  return `AioSplashSpec(minMs = ${spec.minMs}L, text = ${
+    spec.text === null ? "null" : kotlinString(splashText(spec.text, title))
+  }, family = ${
+    spec.font.family === null ? "null" : kotlinString(spec.font.family)
+  }, size = ${spec.font.size}f, bold = ${
+    spec.font.weight === "bold"
+  }, scale = ${spec.image.scale}, night = ${
+    scheme === "system" ? "null" : String(scheme === "dark")
+  }, light = ${pair(spec.light)}, dark = ${pair(spec.dark)})`;
+}
+
+/** The files an APK with `build.splash` adds, by path under the Android
+ *  project: the image, and the `AioSplash` theme — the activity theme
+ *  `_appTheme` names, with the splash background as its window background,
+ *  per mode where the mode follows the system. Pure. */
+export function _splashFiles(
+  spec: SplashSpec,
+  scheme: "system" | "dark" | "light",
+): Record<string, string | Uint8Array> {
+  const res = "app/src/main/res/";
+  const color = (bg: string) =>
+    `<?xml version="1.0" encoding="utf-8"?>\n<resources>\n` +
+    `  <color name="aio_splash_background">${bg}</color>\n</resources>\n`;
+  const files: Record<string, string | Uint8Array> = {
+    "app/src/main/assets/aio-splash.png": Uint8Array.from(
+      atob(spec.image.png),
+      (c) => c.charCodeAt(0),
+    ),
+    [`${res}values/aio_splash_theme.xml`]:
+      `<?xml version="1.0" encoding="utf-8"?>\n<resources>\n` +
+      `  <style name="${SPLASH_THEME}" parent="${_appTheme(scheme)}">\n` +
+      `    <item name="android:windowBackground">@color/aio_splash_background</item>\n` +
+      `  </style>\n</resources>\n`,
+    [`${res}values/aio_splash_color.xml`]: color(
+      (scheme === "dark" ? spec.dark : spec.light).background,
+    ),
+  };
+  if (scheme === "system") {
+    files[`${res}values-night/aio_splash_color.xml`] = color(
+      spec.dark.background,
+    );
+  }
+  return files;
 }
 
 /** The manifest's camera declaration — deno.json `android: { "camera": true }`,
@@ -1265,7 +1373,9 @@ export function safeDevUrl(devUrl: string): string {
  *     it, by design): the page looks for the JS global `"AioNativeStore"`, so
  *     the overlay must inject one under that exact name;
  *   - the insets frame — every APK: targetSdk 35 draws edge-to-edge, and
- *     without a listener the page draws under the status bar. */
+ *     without a listener the page draws under the status bar;
+ *   - the splash — only with deno.json `build.splash`: the app asked for one,
+ *     and an activity without `AioSplash` shows none, with nothing said. */
 export function ownActivityLosses(
   sources: string,
   opts: {
@@ -1275,6 +1385,8 @@ export function ownActivityLosses(
      *  item doing the same) HAS insets handling — its Kotlin just never says
      *  the word, and reading only .kt/.java warned it falsely. */
     resXml?: string;
+    /** deno.json `build.splash` is set. */
+    splash?: boolean;
   },
 ): string[] {
   const where = "aio's android-template/app/src/main/java/aio/app/" +
@@ -1343,6 +1455,13 @@ export function ownActivityLosses(
         `defaultBack from ${where}.`,
     );
   }
+  if (opts.splash && !/AioSplash\.show\s*\(/.test(sources)) {
+    out.push(
+      `your android/…/MainActivity.kt never shows AioSplash, so this APK ` +
+        `opens without the splash deno.json build.splash asks for. Copy the ` +
+        `"the splash" block and the lines marked // splash from ${where}.`,
+    );
+  }
   return out;
 }
 
@@ -1388,7 +1507,7 @@ const FITS_SYSTEM_WINDOWS_XML =
 export async function ownActivityWarnings(
   androidDir: string,
   overlaid: readonly string[],
-  opts: { standalone: boolean },
+  opts: { standalone: boolean; splash?: boolean },
 ): Promise<string[]> {
   const read = (re: RegExp) =>
     Promise.all(
@@ -1403,6 +1522,7 @@ export async function ownActivityWarnings(
   return ownActivityLosses(code.join("\n"), {
     standalone: opts.standalone,
     resXml: xml.join("\n"),
+    splash: opts.splash,
   });
 }
 

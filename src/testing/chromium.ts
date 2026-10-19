@@ -224,8 +224,11 @@ function profileProcesses(profile: string): number[] {
 export async function dropBrowserProfile(profile: string): Promise<void> {
   // Off Linux ONE look at the process table costs a second or more (a `ps`,
   // a PowerShell query) — under load five seconds was two looks, and a
-  // helper outlived the bound (seen on Windows, 1 run in 5).
-  const deadline = Date.now() + (Deno.build.os === "linux" ? 5_000 : 20_000);
+  // helper outlived the bound (seen on Windows, 1 run in 5). On Linux a
+  // SIGKILLed helper stayed listed past five seconds under a full release
+  // check (two crashpad handlers): the look ends as soon as none is left, so
+  // the longer bound costs only the slow case.
+  const deadline = Date.now() + (Deno.build.os === "linux" ? 15_000 : 20_000);
   for (;;) {
     // What a look finds is killed — on the last look too: the bound ends the
     // LOOKING, it never leaves a found helper running.

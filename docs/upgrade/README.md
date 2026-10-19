@@ -66,6 +66,11 @@ them before the first run:
   far off follows the server's; `runCommand`, `appVersion()` and
   `build.android.keystore`/`keyAlias`/`aab` are new; an in-process refused write
   rejects `ACTION_REFUSED`
+- [1.0.21-beta → **1.0.22-beta**](from-1.0.21-beta-to-1.0.22-beta.md) — nothing
+  is removed or renamed; one default moves: an update keeps one old version (was
+  three) in `old/` beside the install, `updates.keepOld` for more.
+  `build.splash` adds a splash screen on every target; nothing to change by
+  hand.
 - [1.0.19-beta → **1.0.20-beta**](from-1.0.19-beta-to-1.0.20-beta.md) — nothing
   is removed or renamed and no default moves; nothing to change by hand. The
   safer values are opt-ins (`electron.strictPin`, `electron.ignoreDebugEnv`,

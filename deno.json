@@ -1,6 +1,6 @@
 {
   "name": "@riagentic/aio",
-  "version": "1.0.21-beta",
+  "version": "1.0.22-beta",
   "appId": "aio",
   "exports": {
     ".": "./mod.ts",

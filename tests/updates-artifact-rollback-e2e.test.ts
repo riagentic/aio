@@ -101,6 +101,8 @@ Deno.test({
       JSON.stringify(await generateSigningKey()),
     );
     const procs: Deno.ChildProcess[] = [];
+    // The install's port: the handover's successor serves on it.
+    let servedOn: number | null = null;
     const logs: (() => string)[] = [];
     const allLogs = () =>
       logs.map((l, i) => `--- run ${i} ---\n${l()}`).join("\n");
@@ -162,6 +164,7 @@ Deno.test({
 
       // ── v0.1.0 runs, writes data, and installs v0.2.0 ─────────────────────
       const port = freePort();
+      servedOn = port;
       const run = () => {
         const s = spawn(installed, [`--port=${port}`], installDir);
         procs.push(s.proc);
@@ -220,8 +223,21 @@ Deno.test({
       );
     } finally {
       for (const p of procs) await kill(p).catch(() => {});
-      // The handover's successor is not in `procs`; stop whatever still
-      // serves on the install (AIO_PARENT_PID ends it with this process too).
+      // The handover's successor is not in `procs`; whatever still serves on
+      // the install is stopped by the pid it answers with, and waited out —
+      // alive, it writes its logs again into the folders removed below
+      // (AIO_PARENT_PID ends it only when this whole process does).
+      const left = servedOn === null ? null : await health(servedOn);
+      if (typeof left?.pid === "number") {
+        for (let i = 0; i < 100; i++) {
+          try {
+            Deno.kill(left.pid, i < 50 ? "SIGTERM" : "SIGKILL");
+          } catch {
+            break; // aio-ok: no such process — it has exited, the goal
+          }
+          await new Promise((r) => setTimeout(r, 100));
+        }
+      }
       await Deno.remove(dir, { recursive: true }).catch(() => {});
       await dropTempDir(channel);
       await dropTempDir(installDir);

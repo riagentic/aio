@@ -65,7 +65,8 @@ Deno.test({
       await Deno.writeTextFile(current, oldText);
       await Deno.chmod(current, 0o755);
       // The kept-aside copy lands on a full disk.
-      await Deno.symlink("/dev/full", `${current}.old-1.0.0`);
+      await Deno.mkdir(join(root, "old", "1.0.0"), { recursive: true });
+      await Deno.symlink("/dev/full", join(root, "old", "1.0.0", "app"));
 
       const rt = createUpdatesRuntime({
         config: resolveUpdates({

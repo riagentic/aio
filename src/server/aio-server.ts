@@ -1037,7 +1037,11 @@ async function setupTransportInner<S, A>(
       shutdown: async () => {},
       clientCount: () => 0,
     }
-    : createServer({
+    : _startServer();
+  // A function of its own: an Error built under a call site deep in one
+  // long function costs in step with that depth (aio.ts, `_recoverSyncLogs`).
+  function _startServer(): ServerHandle {
+    return createServer({
       appVersion,
       port,
       shell: deps.shell,
@@ -1307,6 +1311,7 @@ async function setupTransportInner<S, A>(
             : Promise.resolve({ error: "UDS not active" }),
       },
     });
+  }
 
   // Wire sync broadcast now that server handle is available. v2 parity:
   // UDS peers receive op broadcasts too (no per-conn exclude there — the

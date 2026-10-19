@@ -29,6 +29,7 @@ import {
   tmplProfileDir,
   tmplRendererDiagnostics,
   tmplSocketFetch,
+  tmplSplashHold,
   tmplTray,
   tmplWebGuard,
   tmplWillNavigate,
@@ -230,8 +231,9 @@ app.on('ready', () => {
 
   const b = loadBounds(${w}, ${h});
 ${tmplWindowShape(opts.meta, { preload: "preloadFile" })}
+${tmplSplashHold().before}
   const win = new BrowserWindow(b);
-  if (b.x == null) win.center();
+  if (b.x == null) win.center();${tmplSplashHold().after}
   // protocol//host on both branches — see tmplWillNavigate for why not .origin.
   const _appOrigin = USE_PROTOCOL ? 'aio://app': (u => u.protocol + '//' + u.host)(new URL(${
     JSON.stringify(url)

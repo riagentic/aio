@@ -12,7 +12,7 @@ import {
   assertRejects,
   assertStringIncludes,
 } from "@std/assert";
-import { basename, join } from "@std/path";
+import { basename, dirname, join, SEPARATOR } from "@std/path";
 import { existsSync } from "node:fs";
 import {
   buildReleaseManifest,
@@ -21,6 +21,11 @@ import {
   type ShipManifest,
 } from "../src/build/ship.ts";
 import { createUpdatesRuntime } from "../src/server/updates-runtime.ts";
+import {
+  readSharedUses,
+  sharedUseKey,
+} from "../src/electron/shared-runtime.ts";
+import { _menuDeps } from "../src/server/app-dirs.ts";
 import { resolveUpdates } from "../src/server/updates-core.ts";
 import {
   failedUpdatePath,
@@ -30,6 +35,8 @@ import {
   writePending,
 } from "../src/server/updates-apply.ts";
 import {
+  _confirm,
+  confirmPendingUpdate,
   judgePendingUpdate,
   startUpdates,
 } from "../src/server/updates-boot.ts";
@@ -43,7 +50,9 @@ import {
   forget,
   identity,
   isOwn,
+  made,
   readOwned,
+  record,
 } from "../src/server/updates-owned.ts";
 import type { Log } from "../src/diagnostics/logger.ts";
 
@@ -170,6 +179,8 @@ function runtimeFor(r: Rig, opts: {
   exits?: number[];
   snapshots?: string[];
   relaunched?: string[];
+  supervised?: boolean;
+  sharedStore?: string;
 }) {
   const config = resolveUpdates({
     source: `file://${r.releases}`,
@@ -196,6 +207,8 @@ function runtimeFor(r: Rig, opts: {
     // Never actually hand over in a test — assert that we would have.
     exit: (code) => void opts.exits?.push(code),
     relaunch: ({ artifact }) => void opts.relaunched?.push(artifact),
+    supervised: opts.supervised,
+    sharedStore: opts.sharedStore,
     shutdown: () => Promise.resolve(),
     snapshot: async (path) => {
       opts.snapshots?.push(path);
@@ -236,7 +249,7 @@ Deno.test("updates e2e: publish → check → apply replaces the artifact", asyn
       await programBytes(appBody("2.0.0")),
     );
     assertEquals(
-      await Deno.readFile(`${r.artifact}.old-1.0.0`),
+      await Deno.readFile(join(r.root, "old", "1.0.0", "app")),
       await programBytes(appBody("1.0.0")),
     );
     assertEquals(exits, [0]);
@@ -1279,7 +1292,7 @@ Deno.test("updates e2e: a moved git ref is rebuilt, gated, and installed", async
     // The git artifact is built by the repo's own `make.ts`, not by `publish`.
     assertStringIncludes(await Deno.readTextFile(r.artifact), "echo APP 2.0.0");
     assertEquals(
-      await Deno.readFile(`${r.artifact}.old-1.0.0`),
+      await Deno.readFile(join(r.root, "old", "1.0.0", "app")),
       await programBytes(appBody("1.0.0")),
     );
     assertEquals(exits, [0]);
@@ -1751,8 +1764,8 @@ Deno.test("updates e2e: a single-file update puts what it makes on record — th
     assertEquals((await rt.check({ dismissed: null })).kind, "offer");
     await rt.apply();
     await settle(rt);
-    const old = `${r.artifact}.old-1.0.0`;
-    assertEquals(beside(r), ["app.old-1.0.0"]);
+    const old = join(r.root, "old", "1.0.0", "app");
+    assertEquals(beside(r), ["old"]);
     assertEquals(
       readOwned(r.dataDir).filter((e) => e.path === old)
         .map((e) => [e.kind, e.role, e.is]),
@@ -1782,7 +1795,7 @@ for (
     ],
     [
       "where the old version is kept",
-      "app.old-1.0.0",
+      join("old", "1.0.0", "app"),
       (_: number) => appBody("0.9.0"),
     ],
   ] as const
@@ -1792,6 +1805,7 @@ for (
     try {
       const m = await publish(r, { version: "2.0.0", channel: "prod" });
       const mine = body(m.size);
+      await Deno.mkdir(dirname(join(r.root, name)), { recursive: true });
       await Deno.writeTextFile(join(r.root, name), mine);
       const rt = runtimeFor(r, {});
       assertEquals((await rt.check({ dismissed: null })).kind, "offer");
@@ -1802,7 +1816,7 @@ for (
         `${join(r.root, name)} is in the way of the update, and it was not ` +
           `made by this app's updater`,
       );
-      assertEquals(beside(r), [name]);
+      assertEquals(beside(r), [name.split(SEPARATOR)[0]]);
       assertEquals(await Deno.readTextFile(join(r.root, name)), mine);
       assertEquals(
         await Deno.readFile(r.artifact),
@@ -1849,7 +1863,11 @@ async function zipRuntime(r: Rig, swaps: string[]) {
 }
 
 for (
-  const name of ["MyApp.staged-2.0.0", "MyApp.zip-2.0.0", "MyApp.old-1.0.0"]
+  const name of [
+    "MyApp.staged-2.0.0",
+    "MyApp.zip-2.0.0",
+    join("old", "1.0.0", "MyApp"),
+  ]
 ) {
   Deno.test(`updates e2e: a folder of the user's named ${name} refuses a .zip update before anything is downloaded — it is not removed`, async () => {
     const r = await rig();
@@ -1868,7 +1886,7 @@ for (
       let failed = "";
       await rt.apply().catch((e) => (failed = String(e)));
       assertStringIncludes(failed, `${join(r.root, name)} is in the way`);
-      assertEquals(beside(r), [name]);
+      assertEquals(beside(r), [name.split(SEPARATOR)[0]]);
       assertEquals(
         await Deno.readTextFile(join(r.root, name, "user.txt")),
         "mine",
@@ -1909,5 +1927,250 @@ Deno.test("updates e2e: a .zip update's staged tree is on record as the very fol
     assertEquals(mine(), [["dir", "temp", identity(staged)!]]);
   } finally {
     await Deno.remove(r.root, { recursive: true });
+  }
+});
+
+Deno.test("updates e2e: a folder install makes room in old/ at the install — the helper sets this version aside after the process is gone, so keepOld 1 holds at every point", async () => {
+  const r = await rig();
+  try {
+    await publishZip(r, { version: "2.0.0", channel: "prod" });
+    const swaps: string[] = [];
+    const { install, rt } = await zipRuntime(r, swaps);
+    // The rollback the last update left: the one copy keepOld 1 allows.
+    const older = join(r.root, "old", "0.9.0", "MyApp");
+    record(r.dataDir, older, "dir", { role: "kept" });
+    await Deno.mkdir(older, { recursive: true });
+    made(r.dataDir, older);
+    assertEquals((await rt.check({ dismissed: null })).kind, "offer");
+    await rt.apply();
+    await settle(rt);
+    assertEquals(swaps, [`${install}.staged-2.0.0`]);
+    // The helper's move of 1.0.0 into old/1.0.0/ comes next: room for it.
+    assertEquals(existsSync(join(r.root, "old", "0.9.0")), false);
+    assertEquals(isOwn(r.dataDir, older), false, "and off the record");
+  } finally {
+    await Deno.remove(r.root, { recursive: true });
+  }
+});
+
+// ── a versioned name: the new version under its own, the old one in old/ ────
+//
+// A file downloaded as `app-1.0.0-x86_64.AppImage` that updates itself used to
+// be written over in place: a file NAMED 1.0.0 that IS 2.0.0, beside
+// `<install>.old-1.0.0` copies (a field report). Now the folder holds one
+// install named for what it is, plus `old/`; the menu entry `run.sh` wrote
+// follows it, and a rollback restores the old name.
+
+/** Run `fn` with the menu entry `run.sh` writes looked for under `root` —
+ *  never the real one. (Through the seam, not HOME: the environment is the
+ *  whole test process's, and a parallel file's temp dirs live under HOME.) */
+async function sandboxed(root: string, fn: () => Promise<void>) {
+  const real = _menuDeps.path;
+  _menuDeps.path = (base) =>
+    join(root, "home", ".local", "share", "applications", `${base}.desktop`);
+  try {
+    await fn();
+  } finally {
+    _menuDeps.path = real;
+  }
+}
+
+const names = (dir: string) =>
+  [...Deno.readDirSync(dir)].map((e) => e.name).sort();
+
+Deno.test({
+  name:
+    "updates e2e: a versioned file name — the new version goes in under its own name, the old one into old/, the menu entry follows, and a rollback restores the old name",
+  ignore: Deno.build.os !== "linux", // the menu entry is Linux's; the naming itself is pure (updates-old-layout.test.ts)
+  fn: async () => {
+    const r = await rig();
+    try {
+      await sandboxed(r.root, async () => {
+        const apps = join(r.root, "Apps");
+        await Deno.mkdir(apps);
+        const v1 = join(apps, "app-1.0.0-x86_64.AppImage");
+        const v2 = join(apps, "app-2.0.0-x86_64.AppImage");
+        await writeProgram(v1, appBody("1.0.0"));
+        const menu = join(r.root, "home", ".local", "share", "applications");
+        await Deno.mkdir(menu, { recursive: true });
+        const entry = (p: string) =>
+          `[Desktop Entry]\nType=Application\nName=app\nExec=sh -c 'exec "${p}" "$@"' _ %U\nTryExec=${p}\n`;
+        await Deno.writeTextFile(join(menu, "app.desktop"), entry(v1));
+        // A launcher of the user's own is theirs: never rewritten.
+        await Deno.writeTextFile(join(menu, "mine.desktop"), entry(v1));
+
+        // What 1.0.0's starts recorded in the shared Electron store.
+        const store = join(r.root, "electron-store");
+        await Deno.mkdir(join(store, "apps"), { recursive: true });
+        await Deno.writeTextFile(
+          join(store, "apps", `${await sharedUseKey(v1)}-38.0.0.json`),
+          JSON.stringify({ exe: v1, version: "38.0.0", slug: "s", at: "x" }),
+        );
+        const uses = async () =>
+          (await readSharedUses(store)).map((u) => u.use?.exe);
+
+        await publish(r, { version: "2.0.0", channel: "prod" });
+        const relaunched: string[] = [];
+        const rt = runtimeFor({ ...r, artifact: v1 }, {
+          relaunched,
+          supervised: false,
+          sharedStore: store,
+        });
+        assertEquals((await rt.check({ dismissed: null })).kind, "offer");
+        await rt.apply();
+        await settle(rt);
+        assertEquals(await uses(), [v2], "the records follow the install");
+
+        // ONE install, named for what it is, and old/<version>/<its name>.
+        assertEquals(names(apps), ["app-2.0.0-x86_64.AppImage", "old"]);
+        assertEquals(names(join(apps, "old")), ["1.0.0"]);
+        const kept = join(apps, "old", "1.0.0", "app-1.0.0-x86_64.AppImage");
+        assertEquals(
+          await Deno.readFile(kept),
+          await programBytes(appBody("1.0.0")),
+        );
+        assertEquals(
+          await Deno.readFile(v2),
+          await programBytes(appBody("2.0.0")),
+        );
+        assertEquals(relaunched, [v2]);
+        assertEquals(
+          await Deno.readTextFile(join(menu, "app.desktop")),
+          entry(v2),
+        );
+        assertEquals(
+          await Deno.readTextFile(join(menu, "mine.desktop")),
+          entry(v1),
+        );
+        const p = readPending(r.dataDir)!;
+        assertEquals([p.artifact, p.restoreTo, p.previous], [v2, v1, kept]);
+
+        // The new build never comes up: the rollback puts 1.0.0 back under
+        // the name it had, and the build that failed into old/.
+        writePending(r.dataDir, { ...p, attempts: 2 });
+        const errors: string[] = [];
+        const log = {
+          ...silentLog,
+          error: (...a: unknown[]) => void errors.push(a.map(String).join(" ")),
+        } as Log;
+        assertEquals(
+          await judgePendingUpdate(r.dataDir, log, "2.0.0", {
+            sharedStore: store,
+          }),
+          true,
+        );
+        assertEquals(names(apps), ["app-1.0.0-x86_64.AppImage", "old"]);
+        assertEquals(names(join(apps, "old")), ["2.0.0"]);
+        assertEquals(
+          await Deno.readFile(v1),
+          await programBytes(appBody("1.0.0")),
+        );
+        assertEquals(
+          await Deno.readTextFile(join(menu, "app.desktop")),
+          entry(v1),
+        );
+        // …and so do the store's records: `am prune` never sees the
+        // restored version's Electron as unused.
+        assertEquals(await uses(), [v1], "the records come back");
+        assert(
+          errors.some((e) =>
+            e.includes(`rolled back the artifact → 1.0.0 (${v1})`)
+          ),
+          errors.join(" | "),
+        );
+        assert(
+          !errors.some((e) => e.includes("ROLLBACK FAILED")),
+          errors.join(" | "),
+        );
+      });
+    } finally {
+      await Deno.remove(r.root, { recursive: true });
+    }
+  },
+});
+
+Deno.test({
+  name:
+    "updates e2e: a versioned file name — the confirm says ONE line about shortcuts made by hand, and the install is no updater leftover",
+  ignore: Deno.build.os !== "linux",
+  fn: async () => {
+    const r = await rig();
+    try {
+      await sandboxed(r.root, async () => {
+        const apps = join(r.root, "Apps");
+        await Deno.mkdir(apps);
+        const v1 = join(apps, "app-1.0.0-x86_64.AppImage");
+        const v2 = join(apps, "app-2.0.0-x86_64.AppImage");
+        await writeProgram(v1, appBody("1.0.0"));
+        await publish(r, { version: "2.0.0", channel: "prod" });
+        const rt = runtimeFor({ ...r, artifact: v1 }, {
+          supervised: false,
+          sharedStore: join(r.root, "electron-store"),
+        });
+        assertEquals((await rt.check({ dismissed: null })).kind, "offer");
+        await rt.apply();
+        await settle(rt);
+
+        const lines: string[] = [];
+        const log = {
+          ...silentLog,
+          warn: (...a: unknown[]) => void lines.push(a.map(String).join(" ")),
+        } as Log;
+        confirmPendingUpdate(r.dataDir, log);
+        await _confirm.pruned;
+        // A WARNING (a pin to the old path now opens nothing), naming both
+        // paths — and no menu entry is claimed: none was written.
+        const said = lines.filter((l) => l.includes("made by hand"));
+        assertEquals(said.length, 1, lines.join(" | "));
+        assertStringIncludes(said[0]!, v1);
+        assertStringIncludes(said[0]!, v2);
+        assert(!said[0]!.includes("menu entry"), said[0]);
+        assert(!isOwn(r.dataDir, v2), "the install is still on the record");
+        assertEquals(names(apps), ["app-2.0.0-x86_64.AppImage", "old"]);
+      });
+    } finally {
+      await Deno.remove(r.root, { recursive: true });
+    }
+  },
+});
+
+Deno.test("updates e2e: a file the user renamed (no version in it), or one under a supervisor, is updated in place — the old one into old/", async () => {
+  for (
+    const [name, supervised] of [
+      ["My App", false],
+      ["app-1.0.0-x86_64.AppImage", true],
+    ] as const
+  ) {
+    const r = await rig();
+    try {
+      await sandboxed(r.root, async () => {
+        const apps = join(r.root, "Apps");
+        await Deno.mkdir(apps);
+        const v1 = join(apps, name);
+        await writeProgram(v1, appBody("1.0.0"));
+        await publish(r, { version: "2.0.0", channel: "prod" });
+        const relaunched: string[] = [];
+        const rt = runtimeFor({ ...r, artifact: v1 }, {
+          relaunched,
+          supervised,
+          sharedStore: join(r.root, "electron-store"),
+        });
+        assertEquals((await rt.check({ dismissed: null })).kind, "offer");
+        await rt.apply();
+        await settle(rt);
+        assertEquals(names(apps), [name, "old"]);
+        assertEquals(
+          await Deno.readFile(v1),
+          await programBytes(appBody("2.0.0")),
+        );
+        assertEquals(
+          await Deno.readFile(join(apps, "old", "1.0.0", name)),
+          await programBytes(appBody("1.0.0")),
+        );
+        assertEquals(readPending(r.dataDir)?.restoreTo, undefined);
+      });
+    } finally {
+      await Deno.remove(r.root, { recursive: true });
+    }
   }
 });

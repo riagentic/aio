@@ -724,6 +724,8 @@ private class AioConnect(private val pins: android.content.SharedPreferences) : 
 
 class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
+    private var splash: AioSplash? = null
+    private var splashByPage = false
     private var pendingCameraRequest: PermissionRequest? = null
     /** `<input type="file">`: the page's callback, held while the system's
      *  picker is open. It MUST be answered exactly once — null included (the
@@ -806,7 +808,11 @@ class MainActivity : AppCompatActivity() {
                 WebViewCompat.addWebMessageListener(this, SAVE_GLOBAL, saveOrigins, AioSave(this@MainActivity))
                 WebViewCompat.addDocumentStartJavaScript(this, SAVE_HOOK, saveOrigins)
             }
+            if (SPLASH != null) splashByPage = !AioSplash.listen(this, saveOrigins) { splash?.ready() } // splash
             webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, url: String?) { // splash
+                    if (splashByPage) splash?.ready() // splash
+                } // splash
                 // The bridge belongs to the app's own bundle and to nothing
                 // else. A standalone APK cannot navigate away from it, so this
                 // should never fire — which is the point: an invariant that is
@@ -1048,6 +1054,8 @@ class MainActivity : AppCompatActivity() {
             insets
         }
         ViewCompat.requestApplyInsets(root)
+        // A cold start only: a renderer-loss `recreate()` carries a saved state.
+        if (SPLASH != null && savedInstanceState == null) splash = AioSplash.show(this, SPLASH) // splash
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
@@ -1083,5 +1091,133 @@ class MainActivity : AppCompatActivity() {
         else if (IS_CLIENT && Uri.parse(webView.url ?: "").host != ASSET_HOST) {
             webView.loadUrl("https://$ASSET_HOST/assets/index.html#change")
         } else super.onBackPressed()
+    }
+}
+
+// ── the splash (deno.json `build.splash`) ───────────────────────────────────
+// Self-contained: this block, plus the lines in MainActivity marked
+// `// splash`. An app with its own MainActivity.kt copies both to keep it.
+
+/** Baked by the build (`_splashKotlin` in build-android.ts): null without
+ *  `build.splash`, and then nothing below ever runs. */
+private val SPLASH: AioSplashSpec? = {{SPLASH}}
+/** No load signal within this long: the splash goes anyway, said once. */
+private const val SPLASH_CAP_MS = 30_000L
+private const val SPLASH_GLOBAL = "AioSplash"
+/** Says "loaded" once: aio's `#root` has content (the desktop's "ui mounted"
+ *  rule), or a page with no `#root` (the client's connect form) has parsed. */
+private const val SPLASH_HOOK = """(()=>{if(window.top!==window||typeof AioSplash!=='object')return;let done=false;
+const up=()=>{if(done)return true;const r=document.getElementById('root');
+if(r?!r.hasChildNodes():document.readyState==='loading')return false;done=true;AioSplash.postMessage('up');return true};
+if(up())return;const mo=new MutationObserver(()=>{if(up())mo.disconnect()});mo.observe(document,{childList:true,subtree:true});
+document.addEventListener('DOMContentLoaded',()=>{if(up())mo.disconnect()})})();"""
+
+/** Colours are `[background, text]`; `night` null = the system's mode. */
+private class AioSplashSpec(
+    val minMs: Long, val text: String?, val family: String?, val size: Float,
+    val bold: Boolean, val scale: Int, val night: Boolean?, val light: IntArray, val dark: IntArray,
+)
+
+/** The image (assets/aio-splash.png) and the text, centred over the app's
+ *  background, above the WebView: from the first frame until the page has
+ *  loaded, never shorter than `minMs` from that frame, at most SPLASH_CAP_MS. */
+private class AioSplash(private val view: android.view.View, private val minMs: Long) {
+    private var shownAt = -1L
+    private var ready = false
+    private var gone = false
+    private fun now() = android.os.SystemClock.uptimeMillis()
+
+    init {
+        view.viewTreeObserver.addOnPreDrawListener(object : android.view.ViewTreeObserver.OnPreDrawListener {
+            override fun onPreDraw(): Boolean {
+                view.viewTreeObserver.removeOnPreDrawListener(this)
+                shownAt = now()
+                android.util.Log.i("aio", "splash: shown")
+                closeWhenDue()
+                return true
+            }
+        })
+        view.postDelayed({
+            if (!gone) android.util.Log.w("aio", "splash: no load signal in " + SPLASH_CAP_MS / 1000 + " s — closed anyway")
+            hide()
+        }, SPLASH_CAP_MS)
+    }
+
+    /** The page has loaded. */
+    fun ready() {
+        if (ready) return
+        ready = true
+        android.util.Log.i("aio", "splash: the page has loaded, " + (if (shownAt < 0) "before the first frame" else "" + (now() - shownAt) + " ms after it was shown"))
+        closeWhenDue()
+    }
+
+    private fun closeWhenDue() {
+        if (gone || !ready || shownAt < 0) return
+        view.postDelayed({ hide() }, maxOf(0L, shownAt + minMs - now()))
+    }
+
+    private fun hide() {
+        if (gone) return
+        gone = true
+        android.util.Log.i("aio", "splash: gone " + (now() - shownAt) + " ms after it was shown")
+        view.animate().alpha(0f).setDuration(200).withEndAction {
+            (view.parent as? android.view.ViewGroup)?.removeView(view)
+        }
+    }
+
+    companion object {
+        fun show(a: AppCompatActivity, s: AioSplashSpec): AioSplash? {
+            val bmp = try {
+                a.assets.open("aio-splash.png").use { android.graphics.BitmapFactory.decodeStream(it) }
+            } catch (e: Exception) {
+                null
+            }
+            if (bmp == null) {
+                android.util.Log.e("aio", "splash NOT shown: assets/aio-splash.png is missing or not an image")
+                return null
+            }
+            // An `@2x` image is drawn at half its pixels, in dp.
+            bmp.density = android.util.DisplayMetrics.DENSITY_DEFAULT * s.scale
+            val night = s.night ?: ((a.resources.configuration.uiMode and
+                android.content.res.Configuration.UI_MODE_NIGHT_MASK) == android.content.res.Configuration.UI_MODE_NIGHT_YES)
+            val c = if (night) s.dark else s.light
+            val dm = a.resources.displayMetrics
+            val box = android.widget.LinearLayout(a).apply {
+                orientation = android.widget.LinearLayout.VERTICAL
+                gravity = android.view.Gravity.CENTER
+                setBackgroundColor(c[0])
+                isClickable = true // a tap does not reach the page under it
+            }
+            box.addView(android.widget.ImageView(a).apply {
+                adjustViewBounds = true
+                maxWidth = (dm.widthPixels * 0.8).toInt()
+                maxHeight = (dm.heightPixels * 0.6).toInt()
+                setImageDrawable(android.graphics.drawable.BitmapDrawable(a.resources, bmp))
+            })
+            if (s.text != null) box.addView(android.widget.TextView(a).apply {
+                text = s.text
+                setTextColor(c[1])
+                textSize = s.size
+                typeface = android.graphics.Typeface.create(s.family,
+                    if (s.bold) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
+                gravity = android.view.Gravity.CENTER
+                setPadding(0, (16 * dm.density).toInt(), 0, 0)
+            })
+            a.addContentView(box, android.view.ViewGroup.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT, android.view.ViewGroup.LayoutParams.MATCH_PARENT))
+            return AioSplash(box, s.minMs)
+        }
+
+        /** The page's load signal (SPLASH_HOOK), or false when this WebView
+         *  cannot carry it — then `onPageFinished` is the signal. */
+        fun listen(w: WebView, origins: Set<String>, ready: () -> Unit): Boolean {
+            if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER) ||
+                !WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) return false
+            WebViewCompat.addWebMessageListener(w, SPLASH_GLOBAL, origins) { _, _, _, isMainFrame, _ ->
+                if (isMainFrame) ready()
+            }
+            WebViewCompat.addDocumentStartJavaScript(w, SPLASH_HOOK, origins)
+            return true
+        }
     }
 }

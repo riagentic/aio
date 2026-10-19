@@ -180,6 +180,10 @@ export const VALID_BUILD_KEYS = new Set<string>([
   // whether a desktop package carries its Electron or starts from the
   // per-user shared store (electron/shared-runtime.ts).
   "electronRuntime",
+  // `false | { image, text, progress, minMs, font, color, bar }` — read by
+  // build-config.ts (`resolveSplash`, build/splash.ts): the desktop app's
+  // splash, from its start until its window has loaded.
+  "splash",
   // `{ shortcut }` — read by build-config.ts (`resolveWindowsShortcut`):
   // whether the one-click Windows `.exe` adds a Start-menu shortcut.
   "windows",
@@ -446,7 +450,7 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
   ],
   updates: [
     "off",
-    'release source URL ("https://…" / "file://…" / a git repo) — or { source, kind, auto, check, channel, key, keys, canApply, allowUnsigned, prerelease }',
+    'release source URL ("https://…" / "file://…" / a git repo) — or { source, kind, auto, check, channel, key, keys, canApply, allowUnsigned, prerelease, keepOld }',
   ],
   appId: ["", "unique app identity — lock file, UDS socket, KV/SQLite paths"],
   cells: ["", "cell definitions array"],
@@ -1498,6 +1502,7 @@ export const VALID_UPDATES_KEYS: Set<string> = new Set([
   "canApply",
   "allowUnsigned",
   "prerelease",
+  "keepOld",
 ]);
 
 /** The runtime SHAPE a config value must have. */

@@ -48,36 +48,42 @@ Deno.test("shutdown: a hung onStop still leaves the closes and the stopped line 
   }
 });
 
-Deno.test("shutdown: a slow onStop that finishes inside 4 s is awaited to the end, never cut", async () => {
-  // Compat: before the hook got a capped share, a 4 s flush ran to completion
-  // inside the teardown. The reserve for the closes after it must not take
-  // that back (a measured real hook took 4.5 s).
-  const dir = await tempDir("aio-slow-onstop-");
-  try {
-    let finished = false;
-    const c = cell("slowstop", { state: { n: 0 }, methods: {} });
-    const app = await aio.run({
-      cells: [c],
-      appId: "slow-onstop-app",
-      client: "server-only",
-      libraryMode: true,
-      appDir: dir,
-      // Its own directory, not the live `tests/`: a file saved there by
-      // anything else during the 5 s close would start a reload under it.
-      baseDir: dir,
-      port: freePort(),
-      onStop: () =>
-        new Promise<void>((r) =>
-          setTimeout(() => {
-            finished = true;
-            r();
-          }, 4_000)
-        ),
-      // deno-lint-ignore no-explicit-any
-    } as any);
-    await app.close();
-    assert(finished, "close() returned before a 4 s onStop finished");
-  } finally {
-    await dropTempDir(dir);
-  }
+Deno.test({
+  name:
+    "shutdown: a slow onStop that finishes inside 4 s is awaited to the end, never cut",
+  // aio-ok(sanitizers): the 4 s hook leaves the closes after it ~1 s of the 5 s budget; under a loaded machine sqlite's close outlives its share — said in a WARN line, by design — and finishes after close() returns
+  sanitizeOps: false,
+  fn: async () => {
+    // Compat: before the hook got a capped share, a 4 s flush ran to completion
+    // inside the teardown. The reserve for the closes after it must not take
+    // that back (a measured real hook took 4.5 s).
+    const dir = await tempDir("aio-slow-onstop-");
+    try {
+      let finished = false;
+      const c = cell("slowstop", { state: { n: 0 }, methods: {} });
+      const app = await aio.run({
+        cells: [c],
+        appId: "slow-onstop-app",
+        client: "server-only",
+        libraryMode: true,
+        appDir: dir,
+        // Its own directory, not the live `tests/`: a file saved there by
+        // anything else during the 5 s close would start a reload under it.
+        baseDir: dir,
+        port: freePort(),
+        onStop: () =>
+          new Promise<void>((r) =>
+            setTimeout(() => {
+              finished = true;
+              r();
+            }, 4_000)
+          ),
+        // deno-lint-ignore no-explicit-any
+      } as any);
+      await app.close();
+      assert(finished, "close() returned before a 4 s onStop finished");
+    } finally {
+      await dropTempDir(dir);
+    }
+  },
 });

@@ -124,6 +124,10 @@ export async function prefetchSharedElectron(
   opts: {
     log: (m: string) => void;
     onProgress?: (fraction: number) => void;
+    /** The download is about to begin — called only when one happens. */
+    onDownload?: () => void;
+    /** The download's size in bytes, once, when its response states one. */
+    onTotal?: (bytes: number) => void;
     /** The installed artifact the store's record names (as a start does). */
     installed: string;
     /** The staged package carries `electron-shared.json`: it IS a shared
@@ -196,6 +200,7 @@ export async function prefetchSharedElectron(
     // a dispatch into the updates cell ~440 times a second (measured on
     // Windows, a DISPATCH_STORM for the whole 158 MB download).
     let reported = -1;
+    opts.onDownload?.();
     try {
       await (opts.ensure ?? ensureSharedElectron)(version, slug, {
         log: opts.log,
@@ -203,6 +208,7 @@ export async function prefetchSharedElectron(
         sha256: answer.sha256,
         onBytes: (got, total) => {
           if (total <= 0) return;
+          if (reported < 0) opts.onTotal?.(total);
           const pct = Math.min(100, Math.floor((got / total) * 100));
           if (pct > reported) {
             reported = pct;

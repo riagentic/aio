@@ -79,6 +79,11 @@ const SAFE: Record<string, { why: string; has?: RegExp[]; never?: RegExp[] }> =
       why: "resolves which Electron would run; launches none",
       never: [LAUNCH[0]!, LAUNCH[2]!],
     },
+    "electron-shared-store-hygiene.test.ts": {
+      why: "the AppRun it starts runs a fake app that only echoes its env",
+      has: [/`#!\/bin\/sh\\necho "EP=\\\$\{ELECTRON_PATH-unset\}/],
+      never: [LAUNCH[0]!, LAUNCH[2]!],
+    },
     "electron-main-script-litter.test.ts": {
       why: "its own `inHome()` points every profile parent into a temp dir",
       has: [
