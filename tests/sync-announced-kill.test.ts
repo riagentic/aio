@@ -262,8 +262,14 @@ async function episode(kills: number[], seed: number): Promise<number> {
         await Promise.all(socks.map(closed));
         // A clean stop on every OS: SIGTERM, or on Windows (where a SIGTERM
         // is a TerminateProcess) the stop request `am stop` sends. An
-        // announced kill that came first is a child already gone.
-        await stopChild(s.child, { quiet: true });
+        // announced kill that came first is a child already gone. Not quiet: a
+        // child that had to be hard-killed THROWS, saying whether it refused
+        // the stop request or accepted it and stayed up — quiet, it read as a
+        // bare "1 ≠ 0" (Windows full suite, 2026-10-20, not reproduced since).
+        await stopChild(s.child, {
+          label: `${tag} round ${r}`,
+          log: s.out,
+        });
       }
       const st = await s.status;
       logs.push(`--- round ${r} (kill ${killAt})\n${s.out()}`);
