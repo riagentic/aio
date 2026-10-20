@@ -2,27 +2,27 @@
   {
     "target": "android",
     "env": "emulator",
-    "commit": "9c8155d5a",
-    "date": "2026-10-19",
-    "detail": "API 35: standalone (dispatch, durable native store — survives an instant kill and a background kill, rotation, light/dark live, android.colorScheme dark and light hold against the system, app.ts options baked — ui.theme/lang/dir reach the phone, persist: false a new install while an install holding state keeps it, a second app keeps its own storage, browser workers (module, classic+nested, three deep, assets mount), nativeFetch past an Origin-refusing API, a foreign iframe can neither read nor write the store) + signed release (keystore from the environment, APK + AAB, not debuggable, runs) + client (connect, server dispatch, a call made offline delivered, Back, unreachable, keyed --expose server by pairing code and by share link over http and over self-signed TLS — certificate pinned; wrong code, unknown and changed certificate refused)"
+    "commit": "488e26c92",
+    "date": "2026-10-20",
+    "detail": "API 35: standalone (dispatch, durable native store — survives an instant kill and a background kill, rotation, light/dark live, android.colorScheme dark and light hold against the system, app.ts options baked — ui.theme/lang/dir reach the phone, persist: false a new install while an install holding state keeps it, a second app keeps its own storage, browser workers (module, classic+nested, three deep, assets mount), nativeFetch past an Origin-refusing API, a foreign iframe can neither read nor write the store, build.splash shown at launch and closed on load not before minMs) + signed release (keystore from the environment, APK + AAB, not debuggable, runs) + client (connect, server dispatch, a call made offline delivered, Back, unreachable, keyed --expose server by pairing code and by share link over http and over self-signed TLS — certificate pinned; wrong code, unknown and changed certificate refused)"
   },
   {
     "target": "cli",
     "env": "binary",
-    "commit": "bccdb3f3d",
-    "date": "2026-10-19",
+    "commit": "488e26c92",
+    "date": "2026-10-20",
     "detail": "compiled cli-client ↔ compiled server, state printed"
   },
   {
     "target": "macos",
     "env": "native suite",
-    "commit": "d8980552a",
-    "date": "2026-10-19",
-    "detail": "2606 test files in 2 shard(s), 2838s",
-    "how": "deno task test there; read from mac-final.log",
-    "passed": 14115,
+    "commit": "488e26c92",
+    "date": "2026-10-20",
+    "detail": "2615 test files in 2 shard(s), 2949s",
+    "how": "deno task test there; read from mac-suite.log",
+    "passed": 14204,
     "failed": 0,
-    "ignored": 307
+    "ignored": 313
   },
   {
     "target": "soak",
@@ -34,20 +34,20 @@
   {
     "target": "web",
     "env": "real-browser",
-    "commit": "d8980552a",
-    "date": "2026-10-19",
+    "commit": "488e26c92",
+    "date": "2026-10-20",
     "detail": "chromium: surface → trigger → server state converged"
   },
   {
     "target": "windows",
     "env": "native suite",
-    "commit": "bccdb3f3d",
-    "date": "2026-10-19",
-    "detail": "2606 test files in 4 shard(s), 3481s",
-    "how": "deno task test there; read from win-final-fixed.log",
-    "passed": 13931,
+    "commit": "088ebfaf9",
+    "date": "2026-10-20",
+    "detail": "2615 test files in 4 shard(s), 2649s",
+    "how": "deno task test there; read from win-suite2.utf8.log",
+    "passed": 14017,
     "failed": 0,
-    "ignored": 491
+    "ignored": 500
   },
   {
     "target": "windows",
