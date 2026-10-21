@@ -240,6 +240,72 @@ export type ElectronConfig = {
    *  aio.run({ cells, electron: { strictPin: true } });
    *  ``` */
   strictPin?: boolean;
+  /** The window's own keyboard shortcuts, each on by default. `false` leaves
+   *  the key to the page: `reload` — Ctrl/Cmd+R and Ctrl/Cmd+F5 (a hard
+   *  reload); `print` — Ctrl/Cmd+P (prints the whole window). A word
+   *  processor wants Ctrl+R for "align right" and Ctrl+P for its own print
+   *  (`print()` from `aio/air`).
+   *
+   *  @example
+   *  ```ts
+   *  aio.run({ cells, electron: { shortcuts: { reload: false, print: false } } });
+   *  ``` */
+  shortcuts?: { reload?: boolean; print?: boolean };
+  /** When the page vetoes a close or reload (`beforeunload` +
+   *  `preventDefault()`), ask the person with the native "Leave / Stay"
+   *  dialog instead of keeping the window open without a word.
+   *
+   *  Off by default, so an app that shows its own Save / Don't Save / Cancel
+   *  keeps that say; a veto is then logged once, as a warning. Default:
+   *  false. */
+  confirmUnload?: boolean;
+  /** The window's background before (and wherever) the page paints: what a
+   *  resize or a slow page shows. `"#rrggbb"`, or `{ light, dark }` to follow
+   *  the OS's dark mode. Default: the page background of aio's theme when
+   *  it paints one (`ui.theme: "full"`, or `"auto"` without a `style.css`);
+   *  otherwise Electron's (white). Set it when the app's own CSS paints the
+   *  page, so a dark app never shows white.
+   *
+   *  @example
+   *  ```ts
+   *  aio.run({ cells, electron: { backgroundColor: "#101418" } });
+   *  ``` */
+  backgroundColor?: string | { light: string; dark: string };
+  /** The window is made hidden and shown once its page has painted (its
+   *  first frame is the page, never a blank rectangle), or after `capMs`
+   *  if the page never paints (said once). `false`: shown the moment it is
+   *  made, as before 1.0.23. Default: `true` (`capMs` 5000). */
+  showWhenPainted?: boolean | { capMs: number };
+  /** The window a first start shows while it downloads Electron
+   *  (`build.electronRuntime: "online"` with no `build.splash`), and its
+   *  Retry / Quit question. Every key is optional; the defaults are aio's.
+   *  The texts take `{title}`, `{version}` (Electron's), and in `text` also
+   *  `{got}` / `{total}` (MB); `question` takes `{reason}`. Colours not set
+   *  are the app's identity colours, light or dark as the OS is; a colour
+   *  set is used in both modes — the splash's own keys and rule.
+   *
+   *  @example
+   *  ```ts
+   *  aio.run({ cells, electron: { downloadWindow: {
+   *    heading: "Setting up {title}", bar: { color: "#14f195" },
+   *  } } });
+   *  ``` */
+  downloadWindow?: {
+    /** Default: "Getting {title} ready". */
+    heading?: string;
+    /** Default: "Downloading Electron {version} — first start only ·
+     *  {got} / {total} MB". */
+    text?: string;
+    /** The Retry / Quit question's text. Default: aio's, which names what
+     *  failed and how to fix it; `{reason}` is that. */
+    question?: string;
+    background?: string;
+    color?: string;
+    bar?: { color?: string; track?: string };
+    /** The Cancel button (the window's close cancels either way). Default:
+     *  true. */
+    cancel?: boolean;
+  };
 };
 
 /** One Electron permission name (Electron's own spelling). */

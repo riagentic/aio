@@ -57,6 +57,7 @@ Deno.test("build flags: every flag the builder parses is forwarded or exempt", (
     "src/build/build-config.ts",
     "src/build/build-flags.ts",
     "src/build/build-compile.ts",
+    "src/build/build-service.ts",
     "src/build/build-cli.ts",
   ]);
   const unaccounted = [...parsed].filter((f) =>

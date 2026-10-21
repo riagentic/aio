@@ -184,6 +184,12 @@ export interface PersistenceManager {
    *  so the next dev boot judges that drift as a declaration change. Optional
    *  so a stand-in manager need not carry it. */
   unstampShapes?(cells: readonly string[]): void;
+  /** Take an UNDECLARED stored cell (one of `orphanCells`, never a `__`
+   *  framework-parked slice) out of every future write: the next cycle
+   *  deletes its row (multi) or rewrites the document without it (single).
+   *  `true`, or — when `cell` is not one — the cells that could be dropped.
+   *  Optional so a stand-in manager need not carry it. */
+  dropOrphanCell?(cell: string): true | string[];
   /** @internal test probe — per-table pass counts (`hinted` = the O(change)
    *  row-set pass, `full` = a whole-table walk) across every window planned.
    *  Optional so a stand-in manager need not carry it. */
@@ -1698,6 +1704,13 @@ export function createPersistenceManager(
     resetPrevState,
     unstampShapes: (cells) => {
       for (const c of cells) _foreignShapes.add(c);
+    },
+    dropOrphanCell: (cell) => {
+      const orphans = cfg.orphanCells ?? {};
+      const droppable = Object.keys(orphans).filter((k) => !k.startsWith("__"));
+      if (!droppable.includes(cell)) return droppable;
+      delete orphans[cell];
+      return true;
     },
     _windowStats: () => ({ ..._passes }),
   };

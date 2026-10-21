@@ -104,6 +104,16 @@ function boot(
     constructor() {
       windows.push(this.w);
     }
+    // Shown when its page has painted (tmplShowWhenPainted).
+    once(n: string, f: (...a: unknown[]) => void) {
+      (this.w.listeners[`win:${n}`] ??= []).push(f);
+      // Its page paints at once: the show cap's timer is cleared.
+      if (n === "ready-to-show") queueMicrotask(() => f());
+    }
+    isDestroyed() {
+      return false;
+    }
+    show() {}
     static getAllWindows() {
       return windows.map((w) => ({
         webContents: {

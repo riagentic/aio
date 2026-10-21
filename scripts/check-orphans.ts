@@ -883,7 +883,7 @@ if (clean) {
           fresh.slice(0, 10).map((d) => `  ${d}`).join("\n") +
           (fresh.length > 10 ? `\n  … and ${fresh.length - 10} more` : "") +
           `\n  Whatever created them did not prune them at exit ` +
-          `(single-instance-lock.ts pruneAtExit). \`deno task clean:tmp\` ` +
+          `(lock-dir.ts pruneAtExit). \`deno task clean:tmp\` ` +
           `removes them.`,
       );
       Deno.exit(1);

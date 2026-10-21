@@ -15,9 +15,16 @@ import {
 } from "./electron-client-script.ts";
 import { electronMainScriptUDS } from "./electron-uds.ts";
 import { log } from "../diagnostics/logger-api.ts";
-import { classifyElectronLine, MOUNT_LINE } from "./electron-renderer-log.ts";
-import { bakedSplash } from "./splash.ts";
+import {
+  classifyElectronLine,
+  MOUNT_LINE,
+  NOISE_NOTE,
+  type WindowAt,
+} from "./electron-renderer-log.ts";
+import { bakedSplash, type SplashSpec } from "./splash.ts";
+import { type Bounds, boundsFromState } from "./splash-place.ts";
 import { type SplashSession, splashSession } from "./splash-session.ts";
+import { electronSplashFor } from "./electron-splash.ts";
 import { appImageOwner, isCompiled, isPipePath } from "../server/paths.ts";
 import { isProcessAlive } from "../server/single-instance-lock.ts";
 import { DENO_JSON_NAMES, parseDenoJson } from "../server/deno-json.ts";
@@ -136,6 +143,13 @@ export type FindElectronOpts = {
   /** A shared-runtime start: the failure question's "Start the previous
    *  version" (see `sharedRuntimeForStart`). */
   previous?: () => Promise<boolean>;
+  /** Where the app's window opens: a download's window and question are
+   *  centred on it (`windowBoundsOf`). */
+  target?: Bounds | null;
+  /** The app's identity colours: a download's window and question wear them. */
+  colors?: AioMeta["colors"];
+  /** `electron.downloadWindow`'s words and Cancel. */
+  words?: AioMeta["downloadWindow"];
 };
 
 /** Resolves an Electron binary — $ELECTRON_PATH > packaged dist > node_modules
@@ -257,6 +271,9 @@ export async function findElectronBin(
       sha256: await bakedRuntimeSha(opts.distDir, electronSlug()),
       splash: opts.splash,
       previous: opts.previous,
+      target: opts.target,
+      colors: opts.colors,
+      words: opts.words ?? undefined,
     });
   }
 
@@ -936,15 +953,18 @@ export async function electronStderrTail(
  *  the framework logger at their level (so a page that throws lands in the
  *  app log and `am logs`, not only on a terminal nobody is watching), and so
  *  do the main process's own tagged warnings/errors (category `electron`); GPU
- *  device-probe noise is dropped and counted; everything else passes through
+ *  device-probe and X11 atom-cache noise is dropped and counted (said once per
+ *  kind); everything else passes through
  *  untouched. The sorting is `classifyElectronLine` — pure, unit-tested. */
 export function forwardStderr(
   proc: Deno.ChildProcess,
   /** The renderer's mount line came: the main window has loaded. */
   onMounted?: () => void,
+  /** Where the app's window is (the main script's `WINDOW_TAG` line). */
+  onWindow?: (at: WindowAt) => void,
 ): void {
   let dropped = 0;
-  let reported = false;
+  const reported = new Set<string>();
   const tail: string[] = [];
   let finished!: () => void;
   _stderrTails.set(proc, {
@@ -956,6 +976,10 @@ export function forwardStderr(
     let carry = "";
     const route = async (line: string) => {
       const r = classifyElectronLine(line);
+      if (r.route === "window") {
+        onWindow?.(r.at);
+        return;
+      }
       if (r.route !== "drop" && r.text.trim() !== "") {
         tail.push(r.text);
         if (tail.length > STDERR_TAIL_LINES) tail.shift();
@@ -964,11 +988,10 @@ export function forwardStderr(
         case "drop":
           dropped++;
           // Say it once, so the lines are accounted for rather than vanished.
-          if (!reported) {
-            reported = true;
+          if (!reported.has(r.noise)) {
+            reported.add(r.noise);
             await Deno.stderr.write(enc.encode(
-              "[aio] suppressing GPU device-probe messages from Electron " +
-                "(harmless: a GPU with no Mesa driver, probed and skipped)\n",
+              `[aio] suppressing ${NOISE_NOTE[r.noise]}\n`,
             )).catch(() => {});
           }
           return;
@@ -1001,7 +1024,9 @@ export function forwardStderr(
     finished();
     if (dropped > 0) {
       await Deno.stderr.write(enc.encode(
-        `[aio] suppressed ${dropped} GPU device-probe line(s)\n`,
+        `[aio] suppressed ${dropped} known-harmless Electron line(s) (${
+          [...reported].join(", ")
+        })\n`,
       )).catch(() => {});
     }
   })();
@@ -1624,6 +1649,8 @@ async function spawnElectron(
     title?: string;
     /** The main window has loaded (the renderer's mount line). */
     onMounted?: () => void;
+    /** Where the main window is, when it shows and after it moves. */
+    onWindow?: (at: WindowAt) => void;
     /** Added to the window's environment (the splash hold). */
     env?: Record<string, string>;
   } = {},
@@ -1724,7 +1751,7 @@ async function spawnElectron(
     removeEventListener("unload", cleanup);
     throw e;
   }
-  forwardStderr(proc, opts.onMounted);
+  forwardStderr(proc, opts.onMounted, opts.onWindow);
   // Primary cleanup: after Electron exits normally
   proc.status.then(cleanup);
   proc.status.then(() => removeEventListener("unload", cleanup));
@@ -1796,10 +1823,14 @@ export type LaunchHooks = {
   /** Offered as "Start the previous version" when the shared runtime could
    *  not be had: true once it is starting in this one's place. */
   previous?: () => Promise<boolean>;
+  /** A run from source: the splash deno.json declares (a package reads the
+   *  one its build baked instead). */
+  splash?: SplashSpec;
 };
 
 /** Spawns Electron with the main app script — under the splash a packaged
- *  app's build baked (`build.splash`); a run from source shows none. */
+ *  app's build baked (`build.splash`), or, run from source, the one its
+ *  deno.json declares (`hooks.splash`). */
 export async function launchElectron(
   url: string,
   log: Log,
@@ -1811,7 +1842,7 @@ export async function launchElectron(
   hooks: LaunchHooks = {},
 ): Promise<Deno.ChildProcess | null> {
   if (signal?.aborted) return null;
-  const spec = isCompiled() ? await bakedSplash(distDir) : null;
+  const spec = isCompiled() ? await bakedSplash(distDir) : hooks.splash ?? null;
   if (!spec) {
     return launchElectronNow(
       url,
@@ -1825,66 +1856,66 @@ export async function launchElectron(
       hooks,
     );
   }
-  // The main window is created hidden and shown when this file appears —
-  // written when the splash goes (splashStep's showMain). Electron's own cap
-  // (`AIO_SPLASH_CAP_MS` after ready-to-show) shows it anyway, so a splash
-  // that is lost never hides the app.
-  const hold = await Deno.makeTempDir({ prefix: "aio-splash-" });
-  const showFile = join(hold, "show");
-  const drop = () =>
-    Deno.remove(hold, { recursive: true }).catch(() => {
-      // aio-ok: a leftover temp folder is all this costs
-    });
+  // Nothing waits for the splash: the window shows the moment it is ready,
+  // as it does without one; the splash, kept above it, goes on its own
+  // timeline (splashStep).
   const splash = splashSession(spec, {
     title: meta?.title ?? uds?.title ?? basename(Deno.execPath()),
+    // Opened where the window will: the bounds aio restores for it.
+    target: windowBoundsOf(meta, uds?.title),
     log: { info: (m) => log.info(m), error: (m) => log.error(m) },
-    onShowMain: () => {
-      try {
-        Deno.writeTextFileSync(showFile, "show");
-      } catch (e) {
-        log.error(
-          `electron: splash — could not tell the window to show (${
-            e instanceof Error ? e.message : e
-          }); it shows by itself after ${splashHoldCapMs(spec.minMs)} ms`,
-        );
-      }
-    },
-    // Written by Electron when its own cap showed the window (before this
-    // side's onShowMain wrote it, which closes the splash in the same step).
-    mainShown: () => {
-      try {
-        Deno.statSync(showFile);
-        return true;
-      } catch {
-        return false; // aio-ok: not there yet — the window is still held
-      }
-    },
+    // Windows: Electron's main process draws it when Electron is here
+    // (electron-splash.ts) — the Forms helper is too slow to come first.
+    electronDraws: Deno.build.os === "windows",
   });
-  const proc = await runUnderSplash(
+  return await runUnderSplash(
     splash,
     signal,
     (onMounted) =>
       launchElectronNow(url, log, meta, uds, distDir, cdpPort, signal, {
         splash,
+        spec,
         onMounted,
-        env: {
-          AIO_SPLASH_SHOW: showFile,
-          AIO_SPLASH_CAP_MS: String(splashHoldCapMs(spec.minMs)),
-        },
       }, hooks),
-  ).catch((e) => {
-    drop();
-    throw e;
-  });
-  if (proc) proc.status.then(drop, drop);
-  else drop();
-  return proc;
+  );
 }
 
-/** How long after `ready-to-show` the hidden main window shows by itself,
- *  whatever the splash does. Pure. */
-export function splashHoldCapMs(minMs: number): number {
-  return minMs + 5_000;
+/** The bounds the app's window opens with (splash-place.ts
+ *  `boundsFromState`, the rule the main script runs): its saved state and the
+ *  size it declares — the default the main scripts use when it declares
+ *  none. */
+export function windowBoundsOf(
+  meta: AioMeta | undefined,
+  title: string | undefined,
+  os: string = Deno.build.os,
+): Bounds {
+  const b = boundsFromState(
+    readWindowState(meta, title),
+    meta?.width ?? 800,
+    meta?.height ?? 600,
+  );
+  // Windows' helpers are per-monitor DPI aware: they place in physical
+  // pixels, which the window saved beside its DIPs (`screen`).
+  return os === "windows" && b.screen ? { ...b.screen } : b;
+}
+
+/** The window's saved `window-state.json` (electron-shared.ts
+ *  `tmplBounds`): in its profile in the app's home, or — before the profile
+ *  has moved there (`moveOldProfile`) — at Electron's old per-OS place. */
+function readWindowState(
+  meta: AioMeta | undefined,
+  title: string | undefined,
+): string | null {
+  const old = meta ? electronProfileDir(shellProfileName(meta, title)) : null;
+  for (const dir of [meta?.profileDir, old]) {
+    if (!dir) continue;
+    try {
+      return Deno.readTextFileSync(join(dir, "window-state.json"));
+    } catch {
+      // aio-ok: no saved state there — a first start opens on the primary
+    }
+  }
+  return null;
 }
 
 async function launchElectronNow(
@@ -1928,6 +1959,8 @@ async function launchElectronNow(
   signal?: AbortSignal,
   under: {
     splash?: SplashSession | null;
+    /** The splash's spec, for Electron to draw when the session hands off. */
+    spec?: SplashSpec;
     onMounted?: () => void;
     env?: Record<string, string>;
   } = {},
@@ -1940,8 +1973,30 @@ async function launchElectronNow(
     title: meta?.title ?? uds?.title,
     splash: under.splash,
     previous: hooks.previous,
+    // A download's window opens where the app's window will, in its colours.
+    target: windowBoundsOf(meta, uds?.title),
+    colors: meta?.colors,
+    words: meta?.downloadWindow ?? undefined,
   });
   if (!bin || signal?.aborted) return null;
+  // Electron is here and no download opened the helper: its main process
+  // draws the splash, before the app's window (electron-splash.ts).
+  let splashDir: string | null = null;
+  if (under.spec && under.splash?.handOff?.()) {
+    const os = Deno.build.os === "windows" || Deno.build.os === "darwin"
+      ? Deno.build.os
+      : "linux";
+    const e = await electronSplashFor(
+      under.spec,
+      meta?.title ?? uds?.title ?? basename(Deno.execPath()),
+      os,
+    );
+    splashDir = e.dir;
+    meta = { ...meta, splash: e.splash };
+    log.info(
+      "electron: splash — drawn by Electron's main process, before the app's window",
+    );
+  }
   // The cache holds both a downloaded runtime and one unpacked from the exe
   // itself (under a `-fused` name); whether this binary CARRIES one is the
   // decider, not the path.
@@ -2047,7 +2102,7 @@ async function launchElectronNow(
     : electronMainScript(url, meta);
   // `requireSandbox` rides on the meta this window was described by — the app
   // said it, and this is where the app's window is actually launched.
-  return spawnElectron(bin, script, cdpSwitches(cdpPort), {
+  const proc = await spawnElectron(bin, script, cdpSwitches(cdpPort), {
     requireSandbox: meta?.requireSandbox,
     profile: shellProfileName(meta, uds?.title),
     profileDir: meta?.profileDir,
@@ -2056,8 +2111,20 @@ async function launchElectronNow(
       onMounted?.();
       hooks.mounted?.();
     },
+    // The splash centres on the window as it really is.
+    onWindow: (at) => under.splash?.windowAt?.(at),
     env: under.env,
   });
+  if (splashDir) {
+    const dir = splashDir;
+    const rm = () =>
+      Deno.remove(dir, { recursive: true }).catch(() => {
+        // aio-ok: a leftover temp page is all this costs
+      });
+    if (proc) proc.status.then(rm, rm);
+    else void rm();
+  }
+  return proc;
 }
 
 /** Launches Electron with the client connect-page script (no server needed) */

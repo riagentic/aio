@@ -334,3 +334,23 @@ Deno.test("am agent: Markdown that renders — one H2 per section, fenced code, 
   }
   assert(ALL.startsWith("# aio test — AGENT BRIEF"), "the brief has no H1");
 });
+
+// "Run the artifact from another cwd" sent an agent to start an AppImage on the
+// human's display and screen-capture it (field report). Verifying a build is
+// headless, at every level, and the bundled/downloaded Electron choice sits
+// next to it.
+Deno.test("am agent: SHIP verifies an artifact headless — never on the human's screen — and names what electronRuntime does offline", () => {
+  const ship = agentBrief({ version: "test", task: "ship" });
+  for (const text of [ship, MIN, SCAFFOLD]) {
+    assert(
+      !/another cwd/i.test(text),
+      "the old 'run it from another cwd' step is back",
+    );
+    assert(
+      text.includes("--client=server-only") && text.includes("build --smoke"),
+    );
+    assert(/human's (screen|display)/.test(text));
+  }
+  assert(ship.includes('"online"') && ship.includes('"offline"'));
+  assert(/offline on first run = no app/.test(ship));
+});

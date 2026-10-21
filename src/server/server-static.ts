@@ -68,6 +68,14 @@ import { appLocalImmer, loadVendorImmer } from "./server-vendor.ts";
 import { BLOB_ID_RE, BLOB_URL_PREFIX, type BlobStore } from "./blobs.ts";
 import { appIconLabel, appIconSvg } from "../build/app-icon.ts";
 import { etagMatches, etagOf, MAX_BUFFER_BYTES } from "./http-encoding.ts";
+import {
+  blobContentType,
+  fileWindow,
+  parseByteRange,
+  unsatisfiable,
+} from "./serve-file.ts";
+
+export { blobContentType, parseByteRange };
 
 // Framework module URLs — this file lives in src/server/, so entry files at the
 // src/ root and folderized modules are one level up. The /__aio/ namespace
@@ -78,21 +86,6 @@ const AIR_TS_URL = new URL("../air.ts", import.meta.url);
 const LISTENERS_TS_URL = new URL("../state/listeners.ts", import.meta.url);
 // Base for resolving sub-module imports served under /__aio/ (src/ root).
 const AIO_SRC_BASE_URL = new URL("../", import.meta.url);
-
-/** A 416 describes the ERROR body it carries: plain text, with the
- *  Content-Range naming the size (RFC 9110 §15.5.17). It used to carry the
- *  file's own Content-Type and ETag — a "image/png" label, and a validator,
- *  on the text "Range Not Satisfiable". */
-function unsatisfiable(size: number): Response {
-  return new Response("Range Not Satisfiable", {
-    status: 416,
-    headers: {
-      "Content-Type": "text/plain; charset=utf-8",
-      "Content-Range": `bytes */${size}`,
-      "Cache-Control": "no-store",
-    },
-  });
-}
 
 /** `text/*` gets `; charset=utf-8` (what the server decoded it as); every
  *  other type is left exactly as it is. */
@@ -617,45 +610,6 @@ export function _decodePathname(pathname: string): string | null {
   return out.join("/");
 }
 
-/** The Content-Type a stored blob may be served AS.
- *
- *  The type used to come straight from the UPLOADED FILENAME's extension, and
- *  `docs/persistence/big-data.md` shows exactly that pattern —
- *  `blobs.put(ctx.req.body, { name: ctx.params.name })` with the client's own
- *  filename, then `blobs.url(id)` handed back. So `evil.html` was served as
- *  `text/html` and `evil.svg` as `image/svg+xml`: navigating to that URL ran
- *  attacker script in the APP's origin. The default CSP carries no
- *  `script-src`, and `nosniff` does not help a type the server DECLARED.
- *
- *  So: an inert allowlist. Images (never SVG — it carries script), video,
- *  audio, PDF and plain text keep their type because a `<img>`/`<video>` tag
- *  needs it; everything else is `application/octet-stream`, which no browser
- *  renders. Paired with `Content-Security-Policy: sandbox` on every blob
- *  response, which makes even a mis-typed one scriptless.
- *
- *  Pure — the rule is unit-testable without a server. */
-const BLOB_INLINE_TYPES: ReadonlySet<string> = new Set([
-  "image/png",
-  "image/jpeg",
-  "image/gif",
-  "image/webp",
-  "image/avif",
-  "image/bmp",
-  "image/x-icon",
-  "image/vnd.microsoft.icon",
-  "application/pdf",
-  "text/plain",
-]);
-
-export function blobContentType(name?: string): string {
-  const declared = name ? MIME[fileExt(name)] : undefined;
-  if (!declared) return "application/octet-stream";
-  const base = declared.split(";")[0]!.trim().toLowerCase();
-  if (BLOB_INLINE_TYPES.has(base)) return base;
-  if (base.startsWith("video/") || base.startsWith("audio/")) return base;
-  return "application/octet-stream";
-}
-
 /** The longest file NAME any filesystem aio runs on accepts (ext4, APFS,
  *  NTFS: 255 bytes/units). A longer segment cannot name a file, so the
  *  answer is 404 — decided BEFORE the filesystem is asked, because asking
@@ -828,82 +782,23 @@ export function aioModuleUrl(
 
 /** Safety limits — prevent resource exhaustion */
 
-/** Parse a single-range `Range` header against a resource of `size` bytes.
- *
- *  Returns the byte window `{ start, end }` (end EXCLUSIVE), the string
- *  `"unsatisfiable"` (→ 416 with a Content-Range naming the total size), or
- *  null when the header is absent/malformed/multi-range — per RFC 7233 an
- *  unreadable Range is IGNORED (a full 200), never guessed at. Pure +
- *  exported for tests. */
-export function parseByteRange(
-  header: string | null,
-  size: number,
-): { start: number; end: number } | "unsatisfiable" | null {
-  if (!header) return null;
-  const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
-  if (!m) return null; // malformed or multi-range — serve the full resource
-  const [, rawStart, rawEnd] = m;
-  if (rawStart === "" && rawEnd === "") return null;
-  if (rawStart === "") {
-    // Suffix range: last N bytes.
-    const n = Number(rawEnd);
-    if (!Number.isSafeInteger(n)) return null;
-    if (n === 0 || size === 0) return "unsatisfiable";
-    const start = Math.max(0, size - n);
-    return { start, end: size };
-  }
-  const start = Number(rawStart);
-  if (!Number.isSafeInteger(start)) return null;
-  if (start >= size) return "unsatisfiable";
-  if (rawEnd === "") return { start, end: size };
-  const endIncl = Number(rawEnd);
-  if (!Number.isSafeInteger(endIncl) || endIncl < start) return null;
-  return { start, end: Math.min(endIncl + 1, size) };
-}
-
-/** `len` bytes from `file`'s current position, 64 KiB at a time, closing the
- *  file when they are sent, on a read error, or when the client goes away. */
-function fileWindow(
-  file: Deno.FsFile,
-  len: number,
-): ReadableStream<Uint8Array> {
-  let remaining = len;
-  let closed = false;
-  const close = () => {
-    if (closed) return;
-    closed = true;
-    try {
-      file.close();
-    } catch { /* already closed */ }
-  };
-  return new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      if (remaining <= 0) {
-        close();
-        controller.close();
-        return;
-      }
-      const buf = new Uint8Array(Math.min(64 * 1024, remaining));
-      let n: number | null;
-      try {
-        n = await file.read(buf);
-      } catch (e) {
-        close();
-        controller.error(e);
-        return;
-      }
-      if (n === null) {
-        close();
-        controller.close();
-        return;
-      }
-      remaining -= n;
-      controller.enqueue(buf.subarray(0, n));
-    },
-    cancel() {
-      close();
-    },
-  });
+/** A dev server's hot reloads, as `/__aio/error` reports them: when it
+ *  started, how many reloads went out, and when (the last
+ *  {@linkcode RELOAD_LOG_MAX}). Reload #k is the k-th; #0 is the start. */
+export type ReloadLog = { bootAt: number; count: number; at: number[] };
+/** How many reload times a dev server keeps. */
+export const RELOAD_LOG_MAX = 500;
+/** Count one live-reload signal: a reload (a patch is one) is a new code
+ *  generation; a CSS restyle is not. */
+export function noteReload(
+  log: ReloadLog,
+  signal: "reload" | "css",
+  now = Date.now(),
+): void {
+  if (signal !== "reload") return;
+  log.count++;
+  log.at.push(now);
+  if (log.at.length > RELOAD_LOG_MAX) log.at.shift();
 }
 
 /** Dependencies injected from server.ts — no mutable state owned */
@@ -1003,6 +898,8 @@ export interface StaticDeps {
   appVersion?: string;
   // Graph validation state — mutable ref from server.ts (dev only)
   getGraphResult: () => GraphResult | null;
+  /** Dev: this server's hot reloads, for `/__aio/error` (`am errors`). */
+  getReloads?: () => ReloadLog;
   // Snapshot support
   getSnapshot?: () => string;
   loadSnapshot?: (json: string, opts?: { force?: boolean }) => void;
@@ -1470,9 +1367,13 @@ export function createStaticHandler(deps: StaticDeps): {
 
     // ── Dev-only error endpoints ──
     if (!prod && pathname === "/__aio/error") {
-      return new Response(JSON.stringify({ errors: getRecentErrors() }), {
-        headers: { "Content-Type": "application/json" },
-      });
+      return new Response(
+        JSON.stringify({
+          errors: getRecentErrors(),
+          reloads: deps.getReloads?.(),
+        }),
+        { headers: { "Content-Type": "application/json" } },
+      );
     }
 
     if (!prod && pathname === "/__aio/client-error" && req?.method === "POST") {

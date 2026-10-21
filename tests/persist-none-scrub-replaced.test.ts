@@ -1,7 +1,7 @@
 // `am restore` moves the data it replaces aside to `<home>/data.replaced-<stamp>/`
 // (am-cmd-data.ts — kept so "wrong archive" is recoverable). That folder is a
 // whole copy of the store: `state.db`, its rolling `.snapshot`, the update's
-// `backups/`. The `persist: "none"` copy scrub (aio-boot.ts
+// `backups/`. The `persist: "none"` copy scrub (boot-scrub.ts
 // `scrubStoreCopies`) looked only beside the live db and under the two
 // `backups/` roots — so a secret an older build wrote stayed in the replaced
 // folder forever, with not even the warning a `.corrupt-*` copy gets. It is

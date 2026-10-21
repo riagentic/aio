@@ -35,7 +35,8 @@ import { serverRequest } from "./auth-context.ts";
  *  default title, `startIn` → a directory, bare extensions — so the window
  *  opens exactly what the spawned tools would have. */
 export type DialogRequest = {
-  kind: "file" | "files" | "directory";
+  /** `"save"`: `pickSave` — `defaultPath` is then the suggested file. */
+  kind: "file" | "files" | "directory" | "save";
   title: string;
   defaultPath?: string;
   filters?: { name: string; extensions: string[] }[];

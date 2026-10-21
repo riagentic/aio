@@ -70,7 +70,9 @@ Deno.test("app graph: importing aio reaches the runtime's own build modules and 
     "build/esbuild-shared.ts",
     "build/graph-audit.ts",
     "build/graph-eval.ts",
+    "build/png-scale.ts", // splash.ts reads the image's lower third for the text colour (pure, node:zlib only)
     "build/ship.ts", // release manifests and their signatures
+    "build/splash.ts", // a source start resolves build.splash the way a build does (14 KB, no new deps)
   ]);
   // The bundler is loaded by a computed specifier where a dev server needs
   // it; a static edge would put it in every app's npm graph.

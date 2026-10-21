@@ -27,7 +27,7 @@ const ALLOWED: Record<string, number | true> = {
   // The stdout log of an app that is RUNNING: its writer holds it for life,
   // so no bounded wait can outlast the holder; the failure falls back to a
   // symlink and is said.
-  "src/am/am-cmd-process.ts": 1,
+  "src/am/am-cmd-start.ts": 1,
   // `renameWithRetry`: a directory move (the unpacked runtime), with its own
   // longer, measured bound and its own tests.
   "src/electron/electron-runtime-fetch.ts": 2,
@@ -252,7 +252,7 @@ const LINK = /\bDeno\s*\.\s*link(Sync)?\b/g;
  *  never renamed over. `not` is what no rename in the file may name. */
 const LINK_PUBLISHERS: Record<string, { renames: number; not?: RegExp }> = {
   // The lock record: every change to it is a write through an open handle.
-  "src/server/single-instance-lock.ts": { renames: 0 },
+  "src/server/lock-file.ts": { renames: 0 },
   // The link publishes a blob's NAME record (`metaPath`), which is then only
   // read and removed; the one rename puts the blob's bytes at their own name.
   "src/server/blobs.ts": { renames: 1, not: /metaPath/ },

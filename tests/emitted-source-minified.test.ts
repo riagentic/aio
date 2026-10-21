@@ -29,6 +29,11 @@ import {
   Unminifiable,
 } from "../src/build/minify-server.ts";
 import { createBlockingPool } from "../src/state/blocking.ts";
+import {
+  boundsFromState,
+  centredOn,
+  windowRect,
+} from "../src/electron/splash-place.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import {
   BACKOFF_BASE_MS,
@@ -41,7 +46,13 @@ const ROOT = fromFileUrl(new URL("../", import.meta.url));
  *  that runs it minified. A new site fails the guard until it is listed —
  *  and listing it means writing the test that evaluates it. */
 const SITES: Record<string, string[]> = {
+  "src/electron/electron-shared.ts": [
+    "boundsFromState",
+    "windowRect",
+    "centredOn", // Electron's own splash (electron-splash.ts)
+  ],
   "src/electron/electron-uds.ts": ["backoffDelay", "createLineReader"],
+  "src/electron/runtime-dialog.ts": ["windowRect", "centredOn"],
   "src/media/encoder.ts": ["fitFrame"],
   "src/state/blocking.ts": ["fn"],
 };
@@ -201,6 +212,89 @@ Deno.test({
       );
     });
     assertEquals(lines, [["a"], ["bc"], 0]);
+  },
+});
+
+Deno.test({
+  name:
+    "emitted source: the placement rule RUNS where it lands when aio is minified — the Electron main script's loadBounds and the Cocoa helpers' aioPlace",
+  sanitizeResources: Deno.build.os !== "windows", // see the test above
+  fn: async () => {
+    await using copy = await minifiedCopy(
+      "src/electron/electron-shared.ts",
+      "src/electron/runtime-dialog.ts",
+    );
+    const { tmplBounds } = await copy.load("src/electron/electron-shared.ts");
+    const { MAC_PLACE_JS } = await copy.load(
+      "src/electron/runtime-dialog.ts",
+    );
+    // Nothing in the emitted rule calls the minifier's keepNames global,
+    // which neither Electron's main process nor osascript has.
+    assert(!tmplBounds().includes(KEEP_NAME), "keepNames in the main script");
+    assert(!MAC_PLACE_JS.includes(KEEP_NAME), "keepNames in the Cocoa rule");
+    const primary = { x: 0, y: 0, width: 1920, height: 1040 };
+    const second = { x: 1920, y: 0, width: 1280, height: 1000 };
+    // Saved half off the second screen: moved back onto it (the clamp runs).
+    const saved = { x: 2800, y: 100, width: 800, height: 600 };
+    // The main script's: a saved window on the second screen stays there.
+    const loadBounds = new Function(
+      KEEP_NAME,
+      "fs",
+      "path",
+      "app",
+      "require",
+      "console",
+      tmplBounds() + "\nreturn loadBounds;",
+    )(
+      undefined,
+      { readFileSync: () => JSON.stringify(saved) },
+      { join: (...p: string[]) => p.join("/") },
+      { getPath: () => "/u" },
+      () => ({
+        screen: {
+          getAllDisplays: () =>
+            [primary, second].map((workArea) => ({ workArea })),
+          getPrimaryDisplay: () => ({ workArea: primary }),
+        },
+      }),
+      console,
+    ) as (w: number, h: number) => Record<string, number>;
+    const want = windowRect(
+      boundsFromState(JSON.stringify(saved), 800, 600),
+      [primary, second],
+      primary,
+    );
+    assertEquals(loadBounds(800, 600), {
+      width: want.width,
+      height: want.height,
+      x: want.x,
+      y: want.y,
+    });
+    // The Cocoa helpers': a 460×140 window centred on that saved window.
+    const PH = primary.height;
+    const ns = [primary, second].map((r) => ({
+      visibleFrame: {
+        origin: { x: r.x, y: PH - (r.y + r.height) },
+        size: { width: r.width, height: r.height },
+      },
+      frame: { size: { width: r.width, height: r.height } },
+    }));
+    const aioPlace = new Function(
+      KEEP_NAME,
+      "$",
+      MAC_PLACE_JS + "\nreturn aioPlace;",
+    )(undefined, {
+      NSScreen: {
+        screens: { count: ns.length, objectAtIndex: (i: number) => ns[i] },
+      },
+      NSMakePoint: (x: number, y: number) => ({ x, y }),
+    }) as (T: unknown, w: number, h: number) => { x: number; y: number };
+    const got = aioPlace([2800, 100, 800, 600], 460, 140);
+    assertEquals(want.x, 2400, "the clamp ran");
+    assertEquals(
+      { x: got.x, y: PH - (got.y + 140) },
+      centredOn(want, 460, 140),
+    );
   },
 });
 

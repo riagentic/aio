@@ -2281,7 +2281,14 @@ export function createWsManager(deps: WsDeps): WsManager {
           () =>
             runWithUser(
               meta.user,
-              () => invokeServerFn(ns, name, args, meta.user),
+              () =>
+                invokeServerFn(ns, name, args, meta.user, false, (hold) => {
+                  try {
+                    socket.send(enc("sfnh", { cid, hold }));
+                  } catch {
+                    // aio-ok: the caller left — no one is waiting on its timeout
+                  }
+                }),
             ),
         )
           .then((result) => {

@@ -826,7 +826,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "a testUI seed of an undeclared key throws again instead of warning, refusing input that mounted on 1.0.11",
-    file: "src/testing/ui-test.ts",
+    file: "src/testing/ui-test-build.ts",
     find: "          console.warn(\n            `[aio] seed: cell",
     replace: "          throw new Error(\n            `[aio] seed: cell",
     test: "tests/testui-seed-optional-key.test.tsx",
@@ -1178,7 +1178,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "testUI seed with a key the cell does not have lands silently so the fixture looks pinned and pins nothing",
-    file: "src/testing/ui-test.ts",
+    file: "src/testing/ui-test-build.ts",
     find: "if (bad.length > 0) {",
     replace: "if (bad.length < 0) {",
     test: "tests/testui-named-opts.test.tsx",
@@ -1402,7 +1402,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "a systemd unit is written for Windows and macOS server binaries, which have no systemd and collide in dist",
-    file: "src/build/build-compile.ts",
+    file: "src/build/build-service.ts",
     find: '  if (cfg.os === "windows" || cfg.os === "darwin") {\n',
     replace: '  if ((cfg.os as string) === "plan9") {\n',
     test: "tests/build-service-unit-platforms.test.ts",
@@ -1412,7 +1412,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "every platform's unit is named <name>.service so a multi-platform server build collides and crashes the fleet",
-    file: "src/build/build-compile.ts",
+    file: "src/build/build-service.ts",
     // aio-ok: the literal SOURCE line this mutation patches in and out
     find: "    `${artifact}.service`,\n  );",
     // aio-ok: the literal SOURCE line this mutation patches in and out
@@ -1884,7 +1884,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "testUI dispose never retires its boot — mount A's onInit commits into mount B",
-    file: "src/testing/ui-test.ts",
+    file: "src/testing/ui-test-build.ts",
     find: "      standalone._retire(booted);",
     replace: "      void booted;",
     test: "tests/testui-generation-fence.test.tsx",
@@ -1962,7 +1962,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "the project-wide am stop the refusal recommends exits through that same refusal — no way out",
-    file: "src/am/am-cmd-process.ts",
+    file: "src/am/am-cmd-stop.ts",
     find: "  if (appIsAmbiguous()) return undefined;",
     replace: "  if (appIsAmbiguous() && false) return undefined;",
     test: "tests/am-components-lazy-app.test.ts",
@@ -1991,7 +1991,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "every binary embeds every *.server.ts again — the public relay ships the agent's input-injection code and each desktop app the relay's (remote-desktop report §4)",
-    file: "src/build/build-compile.ts",
+    file: "src/build/build-includes.ts",
     find:
       "    (reached.has(c) || under(c) || graphDirs.has(dirOf(c)) ? embed : skipped)",
     replace: "    (true ? embed : skipped)",
@@ -2209,7 +2209,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "a symlinked root makes the whole graph look outside the project, so the binary dies at a sibling server-module import",
-    file: "src/build/build-compile.ts",
+    file: "src/build/build-includes.ts",
     find: "    const bases = [await Deno.realPath(root), resolve(root)];",
     replace: "    const bases = [resolve(root)];",
     test: "tests/build-server-module-symlink-root.test.ts",
@@ -2219,15 +2219,15 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "the skipped-module line loses its warning prefix and scrolls past, so the one-line fix is never seen",
-    file: "src/build/build-compile.ts",
+    file: "src/build/build-includes.ts",
     // aio-ok: ledger text is SOURCE, matched verbatim — never interpolated
     find:
       // aio-ok: ledger text is SOURCE, matched verbatim — never interpolated
-      "        `${HEY} not embedding ${plan.skipped.length} *.server.ts ${entry} cannot ` +",
+      "        `${HEY} not embedding ${skipped.length} *.server.ts ${entry} cannot ` +",
     // aio-ok: ledger text is SOURCE, matched verbatim — never interpolated
     replace:
       // aio-ok: ledger text is SOURCE, matched verbatim — never interpolated
-      "        `not embedding ${plan.skipped.length} *.server.ts ${entry} cannot ` +",
+      "        `not embedding ${skipped.length} *.server.ts ${entry} cannot ` +",
     test: "tests/build-server-module-symlink-root.test.ts",
     filter:
       "assetIncludes: a symlinked project root embeds the same *.server.ts as the real one, and says loudly what it skips",
@@ -2235,7 +2235,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "the web binary embeds the agent target's server code (input injection) because its folder sits under src/",
-    file: "src/build/build-compile.ts",
+    file: "src/build/build-includes.ts",
     find: "    if (siblingOwns(c)) {",
     replace: "    if (siblingOwns(c) && false) {",
     test: "tests/build-server-module-sibling-targets.test.ts",
@@ -2256,7 +2256,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "the builder prints a finished checkmark on a staged unit path that the fleet then moves away",
-    file: "src/build/build-compile.ts",
+    file: "src/build/build-service.ts",
     find: "  compiled(serviceFile, cfg.root ?? Deno.cwd());",
     // aio-ok: ledger text is SOURCE, matched verbatim — never interpolated
     replace: "  console.log(`✓ ${serviceFile}`);",
@@ -2309,7 +2309,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "every boot reopens and rescans every store copy instead of only the unverified ones",
-    file: "src/server/aio-boot.ts",
+    file: "src/server/boot-scrub.ts",
     find: "    if (known(p)) continue; // verified before, unchanged since",
     replace:
       "    if (known(p) && !p) continue; // verified before, unchanged since",
@@ -2414,7 +2414,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "a failed project start hides which components are up and which were never attempted",
-    file: "src/am/am-cmd-process.ts",
+    file: "src/am/am-cmd-start.ts",
     find: "    if (line) sayErr(line);",
     replace: '    if (line === "") sayErr(line);',
     test: "tests/am-components-lazy-app.test.ts",
@@ -2436,7 +2436,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "am stop exits 0 while the process is still alive, so a restart hits Already running",
-    file: "src/am/am-cmd-process.ts",
+    file: "src/am/am-cmd-stop.ts",
     find: "  if (flags.wait === undefined && !flags.noWait) {",
     replace: "  if (flags.wait === undefined && flags.noWait) {",
     test: "tests/am-cmd.test.ts",
@@ -2445,7 +2445,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "a socket-only app's start reports port 0, a door that does not exist",
-    file: "src/am/am-cmd-process.ts",
+    file: "src/am/am-cmd-start.ts",
     find: "  const door = socketPath && !port",
     replace: "  const door = socketPath && port < 0",
     test: "tests/am-start-names-socket.test.ts",
@@ -2619,7 +2619,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "testUI never installs the boot scope, so mount A's late handle call commits into mount B unseen",
-    file: "src/testing/ui-test.ts",
+    file: "src/testing/ui-test-build.ts",
     find: "    _armBootScope(standalone._installBootScope);",
     replace: "    void standalone._installBootScope;",
     test: "tests/testui-generation-fence.test.tsx",
@@ -2690,7 +2690,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "testUI shows an onInit throw only as post-test output — the mount passes with the cell never initialised",
-    file: "src/testing/ui-test.ts",
+    file: "src/testing/ui-test-build.ts",
     find: "    inits.pipe(ledger);",
     replace: "    void inits;",
     test: "tests/harness-oninit-strict.test.tsx",
@@ -3198,7 +3198,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "an explicit dbPath outside the profile home silently opens the everyday database under the profile's lock and logs",
-    file: "src/server/aio.ts",
+    file: "src/server/aio-run-entry.ts",
     find: "if (split) throw new Error(split);",
     replace: "if (split) log.debug(split);",
     test: "tests/resolve-home.test.ts",
@@ -3219,7 +3219,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "a refused dbPath still records the profile, so a second app in the process that catches the refusal runs half-profiled",
-    file: "src/server/aio.ts",
+    file: "src/server/aio-run-entry.ts",
     find: "    if (split) throw new Error(split);",
     replace:
       "    recordAppDirs(_earlyAppId, plan);\n    if (split) throw new Error(split);",
@@ -3336,7 +3336,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "a container's in-flight lock temp (pid 7, dead HERE) is swept mid-write at the next acquire",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-dir.ts",
     find:
       "  if ((ns === undefined ? undefined : parseInt(ns, 16)) === ownPidNs()) {",
     replace: '  if (ns !== "" || ownPidNs() === ownPidNs()) {',
@@ -3348,7 +3348,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "a lock dir prune deletes another pid namespace's live watch sentinel and in-flight temp",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-dir.ts",
     find:
       "  if ((ns === undefined ? undefined : parseInt(ns, 16)) === ownPidNs()) {",
     replace: '  if (ns !== "" || ownPidNs() === ownPidNs()) {',
@@ -3951,7 +3951,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "another pid namespace's app lock is judged by a pid that means nothing here",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-owner.ts",
     find: "  if (lock.ns !== undefined && lock.ns !== ownPidNs()) {",
     replace: "  if (lock.ns === -1) {",
     test: "tests/lock-foreign-namespace-hold.test.ts",
@@ -3962,7 +3962,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "a dead container's app lock reads alive forever (its hold is never probed)",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-owner.ts",
     find: "      if (f.tryLockSync(true)) return false;",
     replace: "      if (f.tryLockSync(true)) return true;",
     test: "tests/lock-foreign-namespace-hold.test.ts",
@@ -3973,7 +3973,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "a container's live pid equal to ours reads as our own lock (taken over, released, overwritten)",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-owner.ts",
     find: "    (lock.ns === undefined || lock.ns === ownPidNs());",
     replace: "    (lock.ns === undefined || lock.ns !== -1);",
     test: "tests/lock-foreign-namespace-hold.test.ts",
@@ -3983,7 +3983,7 @@ export const LEDGER: readonly Mutation[] = [
   },
   {
     what: "a pid from another pid namespace is signalled here",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-owner.ts",
     find: "  if (lock.ns === undefined || lock.ns === ownPidNs()) return null;",
     replace: "  if (lock.ns !== -1) return null;",
     test: "tests/lock-foreign-namespace-hold.test.ts",
@@ -4014,7 +4014,7 @@ export const LEDGER: readonly Mutation[] = [
   },
   {
     what: "a lock CAS for our pid 7 rewrites a container's pid 7",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-file.ts",
     find:
       "  if (was.ns !== undefined && now.ns !== undefined && was.ns !== now.ns) {",
     replace: "  if (was.ns === -1) {",
@@ -4092,7 +4092,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "every restart reports a cell's UNPERSISTED fields as 'not in the stored data — new, or a method deleted it'",
-    file: "src/server/aio-boot.ts",
+    file: "src/server/boot-restore.ts",
     find: "      ? applyCellFieldFilter(filter, declState)",
     replace: "      ? declState",
     test: "tests/persist-filtered-field-not-new-on-restart.test.ts",
@@ -4151,7 +4151,7 @@ export const LEDGER: readonly Mutation[] = [
     replace: '  const mm = MAIN_LINE.exec("");',
     test: "tests/electron-renderer-log.test.ts",
     filter:
-      "classifier: a tagged main-process warn/error is forwarded under `electron`; other levels stay raw",
+      "classifier: a tagged main-process info/warn/error is forwarded under `electron`; other levels stay raw",
   },
   {
     what:
@@ -4210,7 +4210,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "a queued action (click/type) runs outside its mount, so the timer its handler arms goes to the outer mount",
-    file: "src/testing/ui-test.ts",
+    file: "src/testing/ui-test-build.ts",
     find: "    const run = _tail.then(() => _inMount(mountFence, fn));",
     replace: "    const run = _tail.then(fn);",
     test: "tests/testui-timer-fence-nested.test.tsx",
@@ -4656,7 +4656,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "update confirm: a clean quit while an async onStart still ran left a healthy build unconfirmed — two quick quits rolled it back",
-    file: "src/server/aio.ts",
+    file: "src/server/aio-run-entry.ts",
     find: "      if (Deno.exitCode === 0) confirmOnce(true);",
     replace: "      if (Deno.exitCode === 0 && false) confirmOnce(true);",
     test: "tests/update-confirm-after-app-onstart.test.ts",
@@ -4819,7 +4819,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "lock prune: an untagged watch file of a dead pid kept a gone root's lock dir (six per suite run)",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-dir.ts",
     find: "          (rootGone && !isProcessAlive(Number(m[1]))))",
     replace: "          (rootGone && Number(m[1]) < 0))",
     test: "tests/lock-prune-untagged-root-gone.test.ts",
@@ -4830,7 +4830,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "lock prune: dropping a temp dir judged its lock dirs as if the root still lived",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-dir.ts",
     find:
       "    if (name.includes(tag) && pruneDeadLockDirAt(join(base, name), true)) n++;",
     replace:
@@ -5687,7 +5687,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "an accepted op whose mark a kill took is removed as never accepted once its commit line is gone from the journal, because the boot that read the commit did not write the mark",
-    file: "src/server/aio-boot.ts",
+    file: "src/server/boot-sync-replay.ts",
     find: "      opts.committed?.has(opKey(last!.id, last!.serverTs ?? NaN))",
     replace: "      false",
     test: "tests/sync-settled-marks.test.ts",
@@ -5741,7 +5741,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "`am kill --stale` ends ANY process a loopback listener names — a stranger's pid is accepted without evidence that it holds the port that answered",
-    file: "src/am/am-cmd-process.ts",
+    file: "src/am/am-cmd-kill.ts",
     find: "  if (!/\\bdeno\\b|aio/i.test(cmd) && !ownsPort()) {",
     replace:
       "  if (!/\\bdeno\\b|aio/i.test(cmd) && !ownsPort() && Number.isNaN(0)) {",
@@ -5804,7 +5804,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "Windows refuses the mutex file's name while its last holder's unlink is pending, and the waiter throws instead of waiting — an app's start or stop dies because another one just left the lock",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-file.ts",
     find:
       "        (_lockDeps.windows() ? isHeldOpenError(e) : removedUnderCreate(e)) &&",
     replace: "        (_lockDeps.windows() ? false : removedUnderCreate(e)) &&",
@@ -5815,7 +5815,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "Windows has no start identity for a process — a lock whose pid the system gave to another program reads as its live owner, and `am stop` / `am kill` end a stranger",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/process-liveness.ts",
     find: "      return t[0]! > 0n ? String(t[0]) : null;",
     replace: "      return t[0]! > 0n ? null : null;",
     test: "tests/pid-lock-start-tag.test.ts",
@@ -5899,7 +5899,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "macOS: a lock dir pruned under the temp file of a lock record is not made again — an app's start fails with 'the lock DIRECTORY is unusable' because a sibling app quit",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-file.ts",
     find: "      holdLockDir(tmp, () => {",
     replace: "      void (() => {",
     test: "tests/lock-record-pruned-under-create.test.ts",
@@ -5910,7 +5910,7 @@ export const LEDGER: readonly Mutation[] = [
   {
     what:
       "`am restart` names its own child as the started app while another launch of the app holds the lock and answers on the port — the pid it reports exits a moment later",
-    file: "src/am/am-cmd-process.ts",
+    file: "src/am/am-cmd-start.ts",
     find:
       "      if (holder && !_ofLaunch(holder, pid) && isLockOwnerAlive(holder)) {",
     replace:
@@ -6630,33 +6630,159 @@ export const LEDGER: readonly Mutation[] = [
   },
   {
     what:
-      "build.splash.minMs: the ready signal closes the splash at once and shows the main window — a fast app flashes the splash for a few ms",
+      "build.splash.minMs: the ready signal closes the splash at once — a fast app flashes the splash for a few ms",
     file: "src/electron/splash.ts",
-    find: "    return n.shownAt !== null && at - n.shownAt >= o.minMs",
-    replace: "    return n.shownAt !== null && at >= 0",
+    find: "      : n.shownAt === null || at - n.shownAt >= o.minMs",
+    replace: "      : n.shownAt === null || at >= 0",
     test: "tests/splash.test.ts",
     filter:
-      "splash lifetime: ready before minMs — the main window waits, and shows as the splash goes at minMs after it APPEARED",
+      "splash lifetime: ready before minMs — the splash stays until minMs after it APPEARED; the app's window is not held for it",
   },
   {
     what:
-      "build.splash: a ready app no longer waits for a splash that is not up yet — a warm start shows its window and no splash",
+      "build.splash: an app ready before its splash is on screen still gets the splash for minMs — over its already-shown window",
     file: "src/electron/splash.ts",
-    find: "    return n.shownAt !== null && at - n.shownAt >= o.minMs",
-    replace: "    return n.shownAt === null || at - n.shownAt >= o.minMs",
+    find: "      : n.shownAt === null || at - n.shownAt >= o.minMs",
+    replace: "      : n.shownAt !== null && at - n.shownAt >= o.minMs",
     test: "tests/splash.test.ts",
     filter:
-      "splash lifetime: ready before the splash is visible — it still shows, for minMs, and the main window waits for it",
+      "splash lifetime: ready before the splash is visible — there is nothing to cover any more, it goes at once",
   },
   {
     what:
-      "build.splash: the main window no longer waits for minMs — it opens over the splash the moment Electron makes it",
+      "the Linux splash is not re-raised — with no window manager honouring keep-above, the app's window shown under it covers it",
+    file: "src/electron/gtk-splash-worker.ts",
+    find: "      gt.gdk_window_raise(gt.gtk_widget_get_window(win));",
+    replace: "      void 0;",
+    test: "tests/splash-gtk.test.ts",
+    filter:
+      "GTK splash: stays above the app's window shown after it (even with no window manager to honour keep-above); closed, the app's window is what shows",
+    os: "linux",
+  },
+  {
+    what:
+      "the Windows splash is activated when it shows — it takes the focus, and Electron's window, shown later by another process, cannot take it back",
+    file: "src/electron/runtime-dialog.ts",
+    find:
+      "  protected override bool ShowWithoutActivation { get { return true; } }",
+    replace: "",
+    test: "tests/splash.test.ts",
+    filter:
+      "splash helpers: above the app's window, never the focus — Windows: TopMost, shown without activation (measured on w11pro: above the later Electron window, WS_EX_NOACTIVATE); macOS: the floating level, ordered front, never activated (measured: layer 3 over Electron's 0, never frontmost)",
+  },
+  {
+    what:
+      "a window saved on a monitor that is gone opens off every screen — and the splash, the download window and the question with it",
+    file: "src/electron/splash-place.ts",
+    find: "    x: Math.max(s.x, Math.min(x, s.x + Math.max(0, s.width - w))),",
+    replace: "    x,",
+    test: "tests/window-place.test.ts",
+    filter:
+      "window place: the owner's layout — saved window on DP-2 opens there; no state, the primary's centre",
+  },
+  {
+    what:
+      "the Linux download window and question open where GTK puts them, not centred on the app's window (another screen, on a two-monitor desk)",
+    file: "src/electron/gtk-splash-worker.ts",
+    find:
+      "  gt.gtk_window_move(win, o.x, o.y);\n  gt.gtk_widget_show_all(win);\n  let shown = false, ticks = 0;",
+    replace:
+      "  void o;\n  gt.gtk_widget_show_all(win);\n  let shown = false, ticks = 0;",
+    test: "tests/splash-gtk.test.ts",
+    filter:
+      "GTK dialogs: the download window and the question are aio's own, in the app's identity colours, centred where the app's window opens; Cancel (the download window's one button) cancels; the question answers the button clicked",
+    os: "linux",
+  },
+  {
+    what:
+      "the desktop window is shown the moment it is made — a blank (white) rectangle before its page paints",
     file: "src/electron/electron-shared.ts",
-    find: "    before: `  if (process.env.AIO_SPLASH_SHOW) b.show = false;`,",
-    replace: '    before: "",',
-    test: "tests/splash.test.ts",
+    // aio-ok: ledger text is SOURCE, matched verbatim — never interpolated
+    find:
+      // aio-ok: ledger text is SOURCE, matched verbatim — never interpolated
+      "  b.show = ${JSON.stringify(meta?.showWhenPainted === false)};",
+    replace: "  b.show = true;",
+    test: "tests/electron-first-frame.test.ts",
     filter:
-      "splash hold: the hidden main window shows by itself minMs + 5 s after ready-to-show — a splash that never says so never hides the app",
+      "first frame: the window is made hidden, with the known background as the OS is now",
+  },
+  {
+    what:
+      "the splash stays where it was predicted, not on the window a window manager (or Electron) really opened",
+    file: "src/electron/splash-session.ts",
+    find: "      if (dialog) moveTo(dialog, w);",
+    replace: "      void moveTo;",
+    test: "tests/window-follow.test.ts",
+    filter:
+      "follow: the splash moves onto the window where it really is — when it shows and after each move",
+  },
+  {
+    what:
+      "the UDS shell never makes Electron's own splash — a Windows later start shows none",
+    file: "src/electron/electron-uds.ts",
+    // aio-ok: ledger text is SOURCE, matched verbatim — never interpolated
+    find: "${tmplSplash(opts.meta?.splash)}\n",
+    replace: "",
+    test: "tests/electron-splash.test.ts",
+    filter:
+      "electron splash: the main script makes it before the app's window, in both shells; none without one",
+  },
+  {
+    what:
+      "the session opens the Windows helper on every start, not only for a download — it paints after the app's window",
+    file: "src/electron/splash-session.ts",
+    find:
+      'let deferred = look.show === "firstStart" || opts.electronDraws === true,',
+    replace: 'let deferred = look.show === "firstStart",',
+    test: "tests/electron-splash.test.ts",
+    filter:
+      "electron splash: the session opens the helper only for a download, and hands the splash to Electron otherwise — silently, once; show firstStart never hands off",
+  },
+  {
+    what:
+      "the main process's info lines (the splash's) fall through as raw stderr",
+    file: "src/electron/electron-renderer-log.ts",
+    find: "const MAIN_LINE = /^\\[aio:main:(info|warn|error)\\] (.*)$/s;",
+    replace: "const MAIN_LINE = /^\\[aio:main:(warn|error)\\] (.*)$/s;",
+    test: "tests/electron-splash.test.ts",
+    filter: "electron splash: its main-process lines are logged at info",
+  },
+  {
+    what:
+      "the main process never says where the window really is — nothing for the splash to follow",
+    file: "src/electron/electron-shared.ts",
+    find: "    __aioWindowAt(true);",
+    replace: "",
+    test: "tests/electron-first-frame.test.ts",
+    filter:
+      "first frame: once shown, the window says where it REALLY is (the splash follows it) — on Windows in physical pixels too; not where aio placed it is said once, with both rects; a move says it again",
+  },
+  {
+    what:
+      "the Windows helpers run DPI-unaware: on mixed scales their rect and Electron's disagree, and they are drawn bitmap-stretched",
+    file: "src/electron/runtime-dialog.ts",
+    find:
+      "try { $aioPm = [AioDpi]::SetProcessDpiAwarenessContext([IntPtr](-4)) } catch {}",
+    replace: "",
+    test: "tests/window-follow.test.ts",
+    filter:
+      "follow: every Windows helper is per-monitor DPI aware before its first window, and sizes itself by that monitor's scale; the splash re-places from its move file",
+  },
+  {
+    what:
+      "a desktop window whose page never paints stays hidden forever — no window, no way to close it",
+    file: "src/electron/electron-shared.ts",
+    // aio-ok: ledger text is SOURCE, matched verbatim — never interpolated
+    find:
+      // aio-ok: ledger text is SOURCE, matched verbatim — never interpolated
+      "      ? `  const __aioShowCap = setTimeout(() => __aioShow(true), ${capMs});",
+    // aio-ok: ledger text is SOURCE, matched verbatim — never interpolated
+    replace:
+      // aio-ok: ledger text is SOURCE, matched verbatim — never interpolated
+      "      ? `  const __aioShowCap = setTimeout(() => {}, ${capMs});",
+    test: "tests/electron-first-frame.test.ts",
+    filter:
+      "first frame: a page that never paints is shown after the cap, said once; a late paint changes nothing",
   },
   {
     what:
@@ -6898,18 +7024,8 @@ export const LEDGER: readonly Mutation[] = [
   },
   {
     what:
-      "Electron's own cap shows the main window while the TopMost splash is still up (a slow helper, or an ack never written: up to 30 s)",
-    file: "src/electron/splash-session.ts",
-    find: "        if (!state.closed && opts.mainShown?.()) {",
-    replace: "        if (false as boolean) {",
-    test: "tests/splash.test.ts",
-    filter:
-      "splash: the main window showing by itself (Electron's cap) closes the splash at once — never both on screen",
-  },
-  {
-    what:
       "a desktop app's update is confirmed once onStart came through — before its Electron was even downloaded — so a download that fails or is cancelled leaves a confirmed build that cannot open",
-    file: "src/server/aio.ts",
+    file: "src/server/aio-run-entry.ts",
     find: "      if (slots.window.holds(atExit, () => confirmOnce())) return;",
     replace: "      void slots.window;",
     test: "tests/updates-desktop-confirm.test.ts",

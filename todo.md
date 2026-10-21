@@ -145,25 +145,17 @@ or is small and known.
       window, upgrade, start: does the window join the pin?). `am kill --json`
       there: 1.0.20 adds `"how"`, asks first (app exit 0, was 1), and can say
       `killed: false` with exit 1 when the process survives.
-- [ ] An `online` app's plain `--compile` binary (target `binary`) answers
+- [x] An `online` app's plain `--compile` binary (target `binary`) answers
       `--aio-electron-runtime` with "shared", so each update first fetches its
       Electron (~100 MB) into the store — also for a binary that only ever opens
-      in a browser (since 1.0.21; nothing breaks, it costs bandwidth). The
-      binary cannot tell before boot whether its client will be Electron.
-      Recommended: the build bakes the default client into `electron.json`, and
-      the prefetch skips a browser-default `binary`; its first
-      `--client=
-      electron` start downloads with the progress window, as
-      any online start.
+      in a browser (since 1.0.21; nothing breaks, it costs bandwidth). Done as
+      recommended: the build bakes `client` into an online non-Electron binary's
+      `electron.json` (`electronRecord`), `--aio-electron-runtime` answers it,
+      and `prefetchSharedElectron` skips a non-Electron default; its first
+      `--client=electron` start downloads with the progress window.
 
 ### Known and small
 
-- [ ] Tests: run together in ONE `deno test --parallel` process (not the shard
-      runner, which isolates files), `updates-git-ref-exact`, the git-source
-      case of `updates-e2e`, `am-version-pin` and `am-versions-self-heal` fail
-      at `git` — the same on v1.0.21-beta, so a test elsewhere in the update
-      files leaks process-wide state (env or cwd) into them. Found 2026-10-19;
-      the suite runner is green.
 - [ ] Boot: an Error built under a call site deep in one long function costs in
       step with that depth — V8 scans each frame's position table up to its call
       site; `Error.stackTraceLimit` does not change it (measured 2026-10-19: 2
@@ -171,15 +163,23 @@ or is small and known.
       stack). Done after 1.0.21: `_runPhases`' long blocks and long calls,
       `_runAsApp`'s body and `setupTransportInner`'s `createServer` call are
       functions of their own — a boot's missing-path NotFound went ~72 → ~25 µs
-      (12 per boot). Left: call sites deep inside `createServer` (~2000 lines,
-      the watcher and stylesheet checks) and `startLifecycle`; and moving
-      `_runPhases`' phase functions out of the function itself.
-- [ ] Electron zero-port (IPC): the main process holds the socket; no
-      silent-socket watchdog there (the page's rule is in
-      `src/browser/browser-vitals.ts`, `connectCli`'s in
-      `src/server/cli-client.ts` since 1.0.21). The page watchdog is proven on
-      the Android WebView and by fake-socket tests, not in a desktop browser
-      with a black-holed socket; the 20-beat ceiling is unit-tested only.
+      (12 per boot). Measured 2026-10-20 (examples/counter, dev; a NotFound
+      built at the spot): only a function's OWN statements before the site count
+      — nested function declarations cost nothing, so moving the phase functions
+      out gains nothing. `_runPhases`: 7 µs at its top → 33 µs at its end (~650
+      lines of small top-level statements, none over 34 lines); its sync
+      NotFounds: `pendingConfirmer` +26 µs, `_warnPinDrift` +11,
+      `recoverInterruptedBuild` +7 — ~45 µs a boot. `createServer`: 7 → 10 µs at
+      the watcher start (6 NotFounds, dev only, ≤ 19 µs). `startLifecycle`:
+      nothing measurable. Left is regrouping many small statements that bind
+      what later ones use — not mechanical.
+- [ ] Electron zero-port (IPC): no silent-socket watchdog in the main process,
+      by verdict (2026-10-20): its socket is LOCAL (Unix socket / named pipe) —
+      a dead server is always a close — and the server answers nothing it could
+      count (`ping` gets no reply on UDS); silence there is a busy or stopped
+      server, which a reconnect does not fix. The page watchdog is proven on the
+      Android WebView and by fake-socket tests, not in a desktop browser with a
+      black-holed socket; the 20-beat ceiling is unit-tested only.
 - [ ] Discovery: the real-socket test assumes a machine hears its own broadcast
       (true on Linux; not run elsewhere).
 - [ ] Dev: one extra restart at dev start for an app whose start rewrites a cell
@@ -213,9 +213,9 @@ or is small and known.
       confirmed at macOS background priority; own-HOME for test browsers is
       Linux only; `tests/electron-handshake-watch.test.ts` now runs in the
       serialized real-window lane.
-- [ ] Windows stub, next rebuild: a cut-short download's box says "not an aio
-      SFX (missing AIOSFX02 trailer)" — say "this download is incomplete,
-      download it again" (seen on w11pro 2026-10-19; needs a re-pinned stub).
+- [ ] Windows stub: a cut-short download now says "this download is incomplete,
+      download it again" (rebuilt and re-pinned 2026-10-20); not yet seen on
+      w11pro — open a truncated `.exe` there.
 - [ ] Windows: no ledger row for the stub's Rust (a `cargo test` row made the
       real checkout reuse the mutant's binary); the first `am state` after a
       1.0.19 app boots timed out once (8 s, fixture without `node_modules`). The
@@ -224,19 +224,32 @@ or is small and known.
       `pruneVersions` knows one `current`, not a running version (guarded in
       `run.sh` for the bundle only). Full runs on the Mac keep their ssh session
       open: a detached job cannot send LAN broadcasts there.
-- [ ] Code health (audit): the first cut of `single-instance-lock.ts` is done
-      (App ID resolution → `app-id.ts`, 196 → 183 KB); the lock file and the
-      other 150–280 KB hotspots are uncut. 293 silent-catch blocks, ratcheted.
+- [ ] Code health (audit): six hotspots cut by pure moves (old path re-exports
+      all; `check:api` unchanged; same module load order):
+      `single-instance-lock.ts` 185 → 59 KB (+ `lock-dir` 53, `lock-file` 44,
+      `lock-owner` 24, `process-liveness` 11; App ID in `app-id.ts`);
+      `am-cmd-process.ts` 190 → 25 KB (+ `am-launch` 16, `am-cmd-start` 71,
+      `am-cmd-stop` 35, `am-cmd-status` 28, `am-cmd-kill` 22); `ui-test.ts` 205
+      → 35 KB (+ `ui-test-names` 19, `-wire` 24, `-env` 24, `-build` 108 — one
+      function, `_buildTestUI`, ~100 KB of it); `build-compile.ts` 157 → 29 KB
+      (+ `build-dev-exclude` 83, `build-includes` 28, `build-service` 22);
+      `aio-boot.ts` 174 → 78 KB (+ `boot-sync-replay` 42, `boot-restore` 23,
+      `boot-scrub` 22, `boot-db-bindings` 13); `aio.ts` 280 → 218 KB (+
+      `aio-run-entry` 48, `aio-run-config` 18). Left: `_runPhases` (~200 KB) and
+      `_buildTestUI` (~100 KB) — their nested parts close over the outer locals,
+      so a further cut is a rewrite, not a move. 289 silent-catch blocks,
+      ratcheted.
 - [ ] Deno: a close for cause can lose its code to an unread frame
       (`_closeAfterRead` narrows it; the reconnect's 401 ends it right);
-      `node:dgram` reports EHOSTUNREACH as `UNKNOWN`.
+      `node:dgram` reports EHOSTUNREACH and EPERM as `UNKNOWN` (a VPN firewall's
+      refused multicast send reads `send UNKNOWN`; Node says EPERM).
 - [ ] Page size: message prose is a fifth of the download; codes would need a
       source convention at ~300 sites (v2 §68).
-- [ ] Refusals: one stable `code` and a one-line summary head on each harness
-      refusal (`DEAD_BOOT` is the first, 1.0.21); the rest carry prose only
-      (field report).
-- [ ] `am errors`: a hot reload's errors are not tagged or superseded by reload
-      number (`--since` filters by time only; field report).
+- [ ] Refusals: every harness refusal carries a stable `code` (table in
+      docs/debugging/errors.md, pinned by tests/harness-refusal-codes.test.ts).
+      Open: the one-line summary HEAD — prepending a line changes each message's
+      first line, which an app's test may match; most first lines already are
+      the summary, `DEAD_BOOT`'s is one long line (field report).
 - [ ] Upgrade test breakage: the shapes that go red are a list in
       `docs/upgrade/README.md`; no machine-readable index or
       `am migrate --tests` (field report).

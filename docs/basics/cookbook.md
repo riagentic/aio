@@ -799,7 +799,7 @@ import { onGlobalKey } from "aio/air";
 import { palette } from "./cell/palette.ts";
 
 export default function Palette(): JSX.Element {
-  onGlobalKey("k", () => palette.open(), { mod: true }); // ⌘K / Ctrl-K
+  onGlobalKey("mod+k", () => palette.open()); // ⌘K / Ctrl-K, nothing else held
   onGlobalKey("Escape", () => palette.close());
   return (
     <div>
@@ -827,6 +827,28 @@ export const palette = cell("palette", {
   },
 });
 ```
+
+Two spellings, two modifier rules:
+
+| Spelling                                           | Fires on                          | Modifiers you left out |
+| -------------------------------------------------- | --------------------------------- | ---------------------- |
+| `onGlobalKey("ctrl+shift+s", fn)`                  | Ctrl+Shift+S only                 | must be up (exact)     |
+| `onGlobalKey("mod+h", fn)`                         | Ctrl+H or ⌘H — not Ctrl+Shift+H   | must be up (exact)     |
+| `onGlobalKey("h", fn, { mod: true })`              | Ctrl+H, Ctrl+Shift+H, Ctrl+Alt+H… | don't care             |
+| `onGlobalKey("h", fn, { mod: true, exact: true })` | Ctrl+H or ⌘H only                 | must be up (exact)     |
+
+A chord string is `modifier+…+key` with `ctrl`, `shift`, `alt`, `meta`, `mod`
+(Ctrl or ⌘); an unknown word (`"hyper+k"`) throws at render. Pass
+`{ exact: false }` to make a string loose. Exact leaves Shift free on a symbol
+key (`"ctrl+?"`), because Shift is how `?` is typed.
+
+A chord string names the key on the keycap, on any layout. A digit is the
+digit-row key, so `"ctrl+shift+1"` fires although Shift+1 types `!`, and
+AZERTY's unshifted `&` key is `"ctrl+1"`. Shift is a real modifier on a digit:
+`"ctrl+1"` and `"ctrl+shift+1"` are two bindings. A letter is the key labelled
+with it on the user's layout (AZERTY's `"ctrl+a"` is its A key). When the key
+types no ASCII character, the US position is used instead: macOS Alt+F typing
+`ƒ`, a dead key, or a Cyrillic layout. The object form matches `e.key` only.
 
 From a test, `ui.<anything>.press("Escape")` bubbles to the document — but aim
 it at something that is NOT an input, or the ignore-in-field rule swallows it

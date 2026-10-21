@@ -16,11 +16,13 @@ import {
   outError,
   outValue,
   sayData,
+  sayErr,
   stack,
   style,
 } from "./am-output.ts";
 import {
   amCtx,
+  liveLock,
   overwriteRefusal,
   parseNumArg,
   parsePayload,
@@ -30,6 +32,8 @@ import {
   runTrojanGet,
 } from "./am-utils.ts";
 import { FETCH_TIMEOUT, httpGet, trojanGet, trojanPost } from "./am-http.ts";
+import { appDirs } from "../server/app-dirs.ts";
+import { readStoredState } from "../server/stored-state.ts";
 
 // ── am expect: e2e assertion over server state ──────────────────
 
@@ -394,6 +398,7 @@ export async function cmdState(
   // answered. (`--ui` too: its argument is a single user.)
   const extra = _extraPathError(args);
   if (extra) fail(extra, detectMode(flags));
+  if (args.includes("--offline")) return offlineState(args, flags);
   // `--ui`: the filtered UI-state projection (optionally per user) instead of
   // raw state — the command that used to be spelled `am ui`.
   if (flags.ui) return uiProjection(args, flags);
@@ -473,6 +478,69 @@ export async function cmdState(
     }
     await new Promise((r) => setTimeout(r, interval));
   }
+}
+
+/** `am state --offline [path]` — what the app last PERSISTED, read from its
+ *  store without booting it and without writing to it (another app showing
+ *  this one's data, a script looking at a stopped app). Read-only through
+ *  aio's own store code (`readStoredState`), so the caller is not coupled to
+ *  the `aio_kv` layout.
+ *
+ *  A running app is no reason to refuse: SQLite WAL lets a reader in beside
+ *  the writer, and the answer is still "what is on disk" — said on stderr,
+ *  with the way to the live value. */
+async function offlineState(args: string[], flags: GlobalFlags): Promise<void> {
+  const mode = detectMode(flags);
+  if (flags.ui || flags.wait !== undefined || args.includes("--watch")) {
+    fail(
+      "--offline reads the store once — --ui, --watch and --wait need the " +
+        "running app (drop --offline)",
+      mode,
+    );
+  }
+  const appId = resolveAmAppId(flags.app);
+  const dbPath = appDirs(appId).stateDb;
+  let running: boolean;
+  try {
+    running = liveLock(appId) !== null;
+  } catch {
+    running = true; // several homes are up — at least one is running
+  }
+  let state: Record<string, unknown> | null;
+  try {
+    state = await readStoredState(dbPath, appId);
+  } catch (e) {
+    fail(
+      e instanceof Deno.errors.NotFound
+        ? `no store for "${appId}" at ${dbPath} — it has not persisted ` +
+          `anything there (an app with \`dbPath\` keeps it elsewhere; ` +
+          `--home=<dir> reads another home)`
+        : `cannot read ${dbPath}: ${e instanceof Error ? e.message : e}`,
+      mode,
+    );
+  }
+  if (state === null) fail(`${dbPath} holds no persisted state`, mode);
+  if (mode !== "quiet") {
+    sayErr(
+      `offline: ${dbPath} — what "${appId}" last persisted` +
+        (running
+          ? " (it is RUNNING: live state may be a persist window ahead — " +
+            "drop --offline to read that)"
+          : "") +
+        `; db: tables and sync: true cells keep their rows in their own ` +
+        `tables, not in this snapshot`,
+    );
+  }
+  const path = _pathOfArgs(args);
+  if (!path) return outValue(state, mode);
+  const r = resolvePath(state, path);
+  if (!r.found) {
+    fail(
+      `path "${path}" not found in stored state${_missHint(state, path)}`,
+      mode,
+    );
+  }
+  outValue(r.value, mode);
 }
 
 /** `am ui [user]` — server-side UI state (the projected state tree). For live
@@ -1291,11 +1359,13 @@ export async function cmdMigrations(
 }
 
 export async function cmdPersist(
-  _args: string[],
+  args: string[],
   flags: GlobalFlags,
 ): Promise<void> {
   const mode = detectMode(flags);
   const appId = resolveAmAppId(flags.app);
+  const drop = args.find((a) => a === "--drop" || a.startsWith("--drop="));
+  if (drop !== undefined) return persistDrop(drop.slice(7), appId, flags);
   const port = resolvePort(flags.port, appId, {
     explicit: flags.app !== undefined,
   });
@@ -1305,6 +1375,52 @@ export async function cmdPersist(
     Deno.exit(1);
   }
   out(mode === "pretty" ? "persisted" : result.data, mode);
+}
+
+/** `am persist --drop=<cell>` — remove a stored cell this build no longer
+ *  declares (the boot's `stored cell "X" is not declared` warning names it
+ *  and this verb). Through the RUNNING app only: it alone knows what it
+ *  declares, so it is the one that refuses a declared cell — an offline
+ *  delete would have to guess, and a wrong guess is lost user data. */
+async function persistDrop(
+  cell: string,
+  appId: string,
+  flags: GlobalFlags,
+): Promise<void> {
+  const mode = detectMode(flags);
+  if (!cell) {
+    fail(
+      "--drop needs =<cell> — the name the boot warning gives " +
+        '(stored cell "pick" is not declared → am persist --drop=pick)',
+      mode,
+    );
+  }
+  let live: unknown;
+  try {
+    live = liveLock(appId);
+  } catch (e) {
+    fail(e instanceof Error ? e.message : String(e), mode);
+  }
+  if (!live && flags.port === undefined) {
+    fail(
+      `${appId} is not running — --drop goes through the running app, the ` +
+        `only one that knows which cells it declares (a declared cell's ` +
+        `data is never dropped). Start it (am start), then: am persist ` +
+        `--drop=${cell}`,
+      mode,
+    );
+  }
+  const port = resolvePort(flags.port, appId, {
+    explicit: flags.app !== undefined,
+  });
+  const r = await trojanPost(port, "persist/drop", { cell }, appId);
+  if (!r.ok) fail(r.error, mode);
+  out(
+    mode === "pretty"
+      ? `dropped stored cell "${cell}" — its data is gone from the store`
+      : r.data,
+    mode,
+  );
 }
 
 export async function cmdSnapshot(

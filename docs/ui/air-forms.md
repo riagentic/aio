@@ -198,6 +198,10 @@ Without `useForm`, an input is yours to wire:
   time such a control shows something other than its prop, the console says so
   once and names `defaultValue`. Write `defaultValue` when that is what you
   mean.
+- A re-render keeps an uncontrolled input (no `value`, or `defaultValue`) as the
+  user left it: the same element, its typed value, its caret/selection and its
+  focus — no module-level state or extra child component needed
+  (`tests/rerender-keeps-uncontrolled-input.test.tsx`).
 
 ## Testing form inputs
 

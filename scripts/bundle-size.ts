@@ -99,7 +99,17 @@ async function writeCounterApp(dir: string, bare: boolean): Promise<void> {
       },
     }),
   );
-  await Deno.symlink(`${ROOT}node_modules`, `${dir}/node_modules`);
+  // Reuse the checkout's node_modules when it HAS one. A fresh clone or a git
+  // worktree has none (deno.json sets no nodeModulesDir), and the symlink then
+  // dangled: Deno's `nodeModulesDir: "auto"` mkdir'd through it and every
+  // probe died with "failed to create directory …/node_modules/.deno/
+  // node_modules: File exists (os error 17)". Without it the probe resolves
+  // its own from the Deno cache.
+  const shared = await Deno.stat(`${ROOT}node_modules`).then(
+    (s) => s.isDirectory,
+    () => false,
+  );
+  if (shared) await Deno.symlink(`${ROOT}node_modules`, `${dir}/node_modules`);
   await Deno.writeTextFile(
     `${dir}/src/cell.ts`,
     `import { cell } from "aio";

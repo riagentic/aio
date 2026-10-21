@@ -201,7 +201,7 @@ export function unstoredCellOf(
 }
 
 /** A journal file's text with every `persist: "none"` cell's value taken
- *  out — what the copy scrub (aio-boot.ts `scrubStoreCopies`) writes over a
+ *  out — what the copy scrub (boot-scrub.ts `scrubStoreCopies`) writes over a
  *  journal an `am backup` / `am restore` / a set-aside kept. A call on such a
  *  cell becomes the line this build writes ({@linkcode JournalEntry.unstored});
  *  a time-travel / reaction line loses that cell's slice; a torn line naming

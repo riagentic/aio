@@ -97,19 +97,69 @@ export function pickDirectory(opts: PickOptions = {}): Promise<string | null> {
   return _pick("directory", opts) as Promise<string | null>;
 }
 
+/** How the Save dialog opens: its title, the path it suggests, and what it
+ *  filters. */
+export type SaveOptions = {
+  /** Dialog title. Defaults to "Save as". */
+  title?: string;
+  /** The suggested path: a file name (`"draft.txt"`), a directory to open in,
+   *  or both as one path (`"/home/me/docs/draft.txt"`). */
+  defaultPath?: string;
+  /** Extension groups for the type dropdown, as for {@linkcode pickFile}.
+   *  The macOS spawned dialog (`osascript`) has no type filter and ignores
+   *  them. */
+  filters?: PickFilter[];
+};
+
+/** The native "Save as…" dialog. Resolves to the absolute path the user
+ *  chose — which may not exist yet — or `null` when they cancelled. Writing
+ *  the file is the caller's job.
+ *
+ *  An existing file is confirmed by the dialog itself ("replace it?") on
+ *  every path: Electron's `showSaveDialog` (`showOverwriteConfirmation`),
+ *  zenity `--confirm-overwrite`, PowerShell's `OverwritePrompt`, and the
+ *  kdialog and macOS save panels. A path that comes back is one the user
+ *  agreed to write.
+ *
+ *  ```ts
+ *  const path = await pickSave({ defaultPath: "draft.txt" });
+ *  if (path === null) return;          // cancelled — not an error
+ *  await Deno.writeTextFile(path, s.text);
+ *  ```
+ *
+ *  Same endings as {@linkcode pickFile}: no dialog available, no desktop
+ *  session, or a dialog that failed THROW. */
+export function pickSave(opts: SaveOptions = {}): Promise<string | null> {
+  return _pick("save", opts) as Promise<string | null>;
+}
+
 // ── The one implementation ──────────────────────────────────────────────
 
-type PickKind = "file" | "files" | "directory";
+type PickKind = "file" | "files" | "directory" | "save";
+/** Both option shapes, as the one implementation reads them. */
+type AnyPickOptions = PickOptions & SaveOptions;
+
+/** The public name a message carries for `kind`. */
+const _who = (kind: PickKind) =>
+  kind === "save" ? "pickSave" : "pickFile/pickDirectory";
+
+/** The dialog's title when the caller gave none. */
+const _defaultTitle = (kind: PickKind) =>
+  kind === "directory"
+    ? "Choose a folder"
+    : kind === "save"
+    ? "Save as"
+    : "Choose a file";
 
 async function _pick(
   kind: PickKind,
-  opts: PickOptions,
+  opts: AnyPickOptions,
 ): Promise<string | string[] | null> {
   const os = Deno.build.os;
   const host = dialogHostForCall();
   // The window has a desktop by construction; only a spawned tool needs one
   // checked before it can be told apart from a cancel.
-  if (!host) _assertDesktopSession(os);
+  if (!host) _assertDesktopSession(os, kind);
   // Deadlines pause for the dialog and RESUME when it closes (fresh, full
   // window) — see the note above pauseCallDeadlines. The resume rides a
   // finally so a throwing provider cannot leave every in-flight call
@@ -128,7 +178,7 @@ async function _pick(
 async function _pickInWindow(
   host: DialogHost,
   kind: PickKind,
-  opts: PickOptions,
+  opts: AnyPickOptions,
   os: typeof Deno.build.os,
 ): Promise<string | string[] | null> {
   let reply: DialogReply;
@@ -136,7 +186,7 @@ async function _pickInWindow(
     reply = await host.open(dialogRequest(kind, opts, os));
   } catch (e) {
     throw new Error(
-      `pickFile/pickDirectory: ${host.label} did not answer — ${
+      `${_who(kind)}: ${host.label} did not answer — ${
         e instanceof Error ? e.message : String(e)
       }`,
     );
@@ -150,15 +200,15 @@ async function _pickInWindow(
  *  filters on a folder pick. Pure. @internal */
 export function dialogRequest(
   kind: PickKind,
-  opts: PickOptions,
+  opts: AnyPickOptions,
   os: typeof Deno.build.os,
 ): DialogRequest {
-  const req: DialogRequest = {
-    kind,
-    title: opts.title ??
-      (kind === "directory" ? "Choose a folder" : "Choose a file"),
-  };
-  if (opts.startIn) req.defaultPath = _asDirectory(opts.startIn, os);
+  const req: DialogRequest = { kind, title: opts.title ?? _defaultTitle(kind) };
+  // A save suggests a FILE: its path goes to the window as given (Electron
+  // takes a name, a directory, or both). An open starts in a directory.
+  if (kind === "save") {
+    if (opts.defaultPath) req.defaultPath = opts.defaultPath;
+  } else if (opts.startIn) req.defaultPath = _asDirectory(opts.startIn, os);
   if (kind !== "directory" && opts.filters?.length) {
     req.filters = opts.filters.map((f) => ({
       name: f.name,
@@ -184,11 +234,11 @@ export function interpretDialogReply(
     const why = reply && typeof reply === "object" && "error" in reply
       ? reply.error
       : `a malformed answer (${JSON.stringify(reply)})`;
-    throw new Error(`pickFile/pickDirectory: ${label}'s dialog failed: ${why}`);
+    throw new Error(`${_who(kind)}: ${label}'s dialog failed: ${why}`);
   }
   if (!("canceled" in reply) || !Array.isArray(reply.paths)) {
     throw new Error(
-      `pickFile/pickDirectory: ${label}'s dialog failed: a malformed answer ` +
+      `${_who(kind)}: ${label}'s dialog failed: a malformed answer ` +
         `(${JSON.stringify(reply)})`,
     );
   }
@@ -203,7 +253,7 @@ export function interpretDialogReply(
 async function _pickDialog(
   os: typeof Deno.build.os,
   kind: PickKind,
-  opts: PickOptions,
+  opts: AnyPickOptions,
 ): Promise<string | string[] | null> {
   const providers = os === "linux" ? LINUX_PROVIDERS : [{
     cmd: os === "darwin" ? "osascript" : "powershell",
@@ -235,7 +285,7 @@ async function _pickDialog(
   }
 
   throw new Error(
-    `pickFile/pickDirectory: no file dialog available on ${os} — tried ${
+    `${_who(kind)}: no file dialog available on ${os} — tried ${
       missing.join(", ") || "none"
     }. Install one: ${
       providers.map((p) => p.install).filter(Boolean).join(" · ") ||
@@ -248,11 +298,14 @@ async function _pickDialog(
  *  refused up front — the same check `am start` makes before launching a GUI
  *  client. Without it, `zenity` exits 1 with "cannot open display", which is
  *  byte-identical to a cancel. */
-function _assertDesktopSession(os: typeof Deno.build.os): void {
+function _assertDesktopSession(
+  os: typeof Deno.build.os,
+  kind: PickKind,
+): void {
   if (os !== "linux") return;
   if (Deno.env.get("DISPLAY") || Deno.env.get("WAYLAND_DISPLAY")) return;
   throw new Error(
-    "pickFile/pickDirectory: no desktop session (no DISPLAY or " +
+    `${_who(kind)}: no desktop session (no DISPLAY or ` +
       "WAYLAND_DISPLAY) — a native dialog cannot open here. Take the path as " +
       "an argument, or run the app on a desktop.",
   );
@@ -275,7 +328,7 @@ export function _interpret(
   if (stdout.length === 0) {
     if (_isCancel(cmd, out.code, stderr)) return null; // cancelled
     throw new Error(
-      `pickFile/pickDirectory: ${cmd} failed (exit ${out.code})${
+      `${_who(kind)}: ${cmd} failed (exit ${out.code})${
         stderr ? `: ${stderr.split("\n").slice(-3).join(" ")}` : ""
       }`,
     );
@@ -331,11 +384,11 @@ export function pickSpec(
   os: typeof Deno.build.os,
   provider: string,
   kind: PickKind,
-  opts: PickOptions,
+  opts: AnyPickOptions,
 ): { cmd: string; args: string[] } | null {
+  if (kind === "save") return _saveSpec(os, provider, opts);
   const dir = opts.startIn ? _asDirectory(opts.startIn, os) : undefined;
-  const title = opts.title ??
-    (kind === "directory" ? "Choose a folder" : "Choose a file");
+  const title = opts.title ?? _defaultTitle(kind);
 
   if (provider === "zenity") {
     const args = ["--file-selection", `--title=${title}`];
@@ -437,6 +490,106 @@ export function pickSpec(
     };
   }
   return null;
+}
+
+/** The Save dialog per provider — pure, beside {@linkcode pickSpec}. Each one
+ *  asks before an existing file is replaced: zenity when told
+ *  (`--confirm-overwrite`; zenity 4 always asks and ignores the flag),
+ *  PowerShell's `OverwritePrompt`, the kdialog and macOS save panels by
+ *  themselves. */
+function _saveSpec(
+  os: typeof Deno.build.os,
+  provider: string,
+  opts: SaveOptions,
+): { cmd: string; args: string[] } | null {
+  const title = opts.title ?? _defaultTitle("save");
+  const { dir, name } = _splitSavePath(opts.defaultPath, os);
+  const sep = os === "windows" ? "\\" : "/";
+  const joined = dir ? (dir.endsWith(sep) ? dir : dir + sep) + name : name;
+  const patterns = (f: PickFilter, by: string) =>
+    f.extensions.map((e) => `*.${_bareExt(e)}`).join(by);
+
+  if (provider === "zenity") {
+    const args = [
+      "--file-selection",
+      "--save",
+      "--confirm-overwrite",
+      `--title=${title}`,
+    ];
+    if (joined) args.push(`--filename=${joined}`);
+    for (const f of opts.filters ?? []) {
+      args.push(`--file-filter=${f.name} | ${patterns(f, " ")}`);
+    }
+    return { cmd: "zenity", args };
+  }
+  if (provider === "kdialog") {
+    const args = ["--title", title, "--getsavefilename", joined || "."];
+    const filter = (opts.filters ?? []).map((f) =>
+      `${patterns(f, " ")}|${f.name}`
+    ).join("\n");
+    if (filter) args.push(filter);
+    return { cmd: "kdialog", args };
+  }
+  if (provider === "osascript") {
+    const nm = name ? ` default name ${_asEscape(name)}` : "";
+    const loc = dir ? ` default location POSIX file ${_asEscape(dir)}` : "";
+    return {
+      cmd: "osascript",
+      args: [
+        "-e",
+        `return POSIX path of (choose file name with prompt ${
+          _asEscape(title)
+        }${nm}${loc})`,
+      ],
+    };
+  }
+  if (provider === "powershell") {
+    const ps = `Add-Type -AssemblyName System.Windows.Forms;` +
+      `$o = New-Object System.Windows.Forms.Form -Property @{TopMost=$true;ShowInTaskbar=$false};` +
+      `$d = New-Object System.Windows.Forms.SaveFileDialog;` +
+      `$d.Title = ${_psEscape(title)};` +
+      `$d.OverwritePrompt = $true;` +
+      (dir ? `$d.InitialDirectory = ${_psEscape(dir)};` : "") +
+      (name ? `$d.FileName = ${_psEscape(name)};` : "") +
+      (opts.filters?.length
+        ? `$d.Filter = ${
+          _psEscape(
+            opts.filters.map((f) => `${f.name}|${patterns(f, ";")}`).join("|"),
+          )
+        };`
+        : "") +
+      `if ($d.ShowDialog($o) -eq 'OK') { Write-Output $d.FileName }`;
+    return {
+      cmd: "powershell",
+      args: ["-NoProfile", "-NonInteractive", "-STA", "-Command", ps],
+    };
+  }
+  return null;
+}
+
+/** A save's `defaultPath` as the spawned tools take it: the directory to open
+ *  in and the name to suggest. An existing directory is all directory; a bare
+ *  name is all name. Exported for its test. @internal */
+export function _splitSavePath(
+  p: string | undefined,
+  os: typeof Deno.build.os,
+): { dir?: string; name: string } {
+  if (!p) return { name: "" };
+  try {
+    if (Deno.statSync(p).isDirectory) return { dir: p, name: "" };
+  } catch {
+    // aio-ok: not there yet — the file a save names usually is not
+  }
+  const cut = Math.max(
+    // aio-ok: path-split — a typed path in either style; `\\` only on Windows
+    p.lastIndexOf("/"),
+    os === "windows" ? p.lastIndexOf("\\") : -1,
+  );
+  if (cut < 0) return { name: p };
+  // A root keeps its separator: `/x` → `/`, `C:\x` → `C:\` (bare `C:` is the
+  // drive's CURRENT directory, not its root).
+  const root = cut === 0 || (os === "windows" && cut === 2 && p[1] === ":");
+  return { dir: p.slice(0, root ? cut + 1 : cut), name: p.slice(cut + 1) };
 }
 
 /** `startIn` accepts a file because "reopen where the last pick landed" is the

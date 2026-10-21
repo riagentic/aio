@@ -84,7 +84,7 @@ printConsole({ ts: "t", lvl: "info", cat: "aio", msg: "detail", data: { url: "sh
   // The terminal is the one place the link stays whole — including via data.
   assertStringIncludes(terminal, DATA_KEY);
   const am = await Deno.readTextFile(
-    new URL("../src/am/am-cmd-process.ts", import.meta.url),
+    new URL("../src/am/am-cmd-start.ts", import.meta.url),
   );
   assertStringIncludes(am, `[STDOUT_IS_LOG_ENV]: "1"`);
 });

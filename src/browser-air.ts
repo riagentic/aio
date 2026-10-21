@@ -284,6 +284,9 @@ export const blocking: typeof ServerBlocking = /* @__PURE__ */ Object.assign(
 /** Ask for desktop-notification permission from a click handler — the one
  *  place a browser grants it. See `notify()`. */
 export { requestNotificationPermission } from "./browser/desktop-notify.ts";
+/** Open the page's print dialog (the window's main process in an aio desktop
+ *  window, `window.print()` elsewhere). */
+export { print } from "./browser/desktop-print.ts";
 /** `fetch` — plain `fetch` in a browser page; native in a standalone APK. */
 export { nativeFetch } from "./browser/native-fetch.ts";
 

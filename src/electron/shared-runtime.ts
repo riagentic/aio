@@ -36,6 +36,7 @@
  */
 import { neutralCwd } from "../server/no-console.ts";
 import type { SplashSession } from "./splash-session.ts";
+import type { Bounds } from "./splash-place.ts";
 import { renameOver } from "../diagnostics/rename-over.ts";
 import { basename, dirname, join, resolve } from "@std/path";
 import { homedir } from "../server/paths.ts";
@@ -56,9 +57,11 @@ import {
 import {
   type DialogBackend,
   dialogBackend,
+  type DialogColors,
   downloadDetail,
   type ProgressDialog,
 } from "./runtime-dialog.ts";
+import type { DownloadWords } from "./electron-shared.ts";
 
 /** Beside the launcher of a shared-runtime package (the Windows folder, the
  *  AppImage's AppDir): what says "an Electron install" where a bundled one
@@ -624,8 +627,35 @@ export async function sharedWindowExecutable(opts: {
 
 // ── the start: find it, or fetch it with a progress window ─────────────────
 
-/** The heading the progress window shows. */
-export const RESOLVING_HEADING = "Resolving dependencies";
+/** `electron.downloadWindow`'s texts filled: `{title}`, `{version}`,
+ *  `{got}` / `{total}` (MB, `?` while unknown), `{reason}`; another `{x}`
+ *  stays as written. Pure. */
+export function fillWords(
+  template: string,
+  v: {
+    title: string;
+    version: string;
+    got?: number;
+    total?: number;
+    reason?: string;
+  },
+): string {
+  const mb = (n: number) => (n / 1e6).toFixed(0);
+  const vars: Record<string, string> = {
+    title: v.title,
+    version: v.version,
+    got: mb(v.got ?? 0),
+    total: (v.total ?? 0) > 0 ? mb(v.total!) : "?",
+    reason: v.reason ?? "",
+  };
+  return template.replace(
+    /\{(\w+)\}/g,
+    (m, k: string) => (Object.hasOwn(vars, k) ? vars[k]! : m),
+  );
+}
+
+/** The heading the progress window shows: "Getting Notes ready". Pure. */
+export const readyHeading = (title: string) => `Getting ${title} ready`;
 
 /** Thrown inside {@linkcode sharedRuntimeForStart} when the user closed the
  *  progress window. */
@@ -701,6 +731,14 @@ export async function sharedRuntimeForStart(opts: {
    *  question offers {@linkcode PREVIOUS_ANSWER}, which rolls the update back
    *  and starts it — true once it is starting in this one's place. */
   previous?: () => Promise<boolean>;
+  /** Where the app's window opens: the download window and the question are
+   *  centred on it, on its screen. */
+  target?: Bounds | null;
+  /** The app's identity colours: the download window and the question take
+   *  them (light or dark, as the OS is). */
+  colors?: DialogColors | null;
+  /** `electron.downloadWindow`'s words and Cancel; absent: aio's. */
+  words?: DownloadWords;
 }): Promise<string | null> {
   const { version, slug, log } = opts;
   const root = opts.root ?? sharedElectronRoot();
@@ -713,7 +751,13 @@ export async function sharedRuntimeForStart(opts: {
   let backend: DialogBackend | null | undefined = opts.dialog;
   const ui = async () =>
     backend === undefined
-      ? (backend = await dialogBackend({ icon: await macIcon() }))
+      ? (backend = await dialogBackend({
+        icon: await macIcon(),
+        target: opts.target,
+        log: opts.log.info,
+        colors: opts.colors,
+        cancel: opts.words?.cancel !== false,
+      }))
       : backend;
   while (true) {
     if (opts.signal?.aborted) return null;
@@ -730,14 +774,21 @@ export async function sharedRuntimeForStart(opts: {
         const plain = async () => {
           const b = await ui();
           return b
-            ? await b.progress(opts.title, RESOLVING_HEADING).catch((e) => {
-              log.error(
-                `electron: no progress window (${
-                  e instanceof Error ? e.message : e
-                }) — the log carries the progress`,
-              );
-              return null;
-            })
+            ? await b.progress(
+              opts.title,
+              opts.words?.heading
+                ? fillWords(opts.words.heading, { title: opts.title, version })
+                : readyHeading(opts.title),
+            ).catch(
+              (e) => {
+                log.error(
+                  `electron: no progress window (${
+                    e instanceof Error ? e.message : e
+                  }) — the log carries the progress`,
+                );
+                return null;
+              },
+            )
             : null;
         };
         // Closing the window (or the app stopping) ENDS the download — the
@@ -826,7 +877,14 @@ export async function sharedRuntimeForStart(opts: {
               }
               show(
                 total > 0 ? got / total : null,
-                downloadDetail(version, got, total),
+                opts.words?.text
+                  ? fillWords(opts.words.text, {
+                    title: opts.title,
+                    version,
+                    got,
+                    total,
+                  })
+                  : downloadDetail(version, got, total),
               );
             },
           });
@@ -906,12 +964,18 @@ export async function sharedRuntimeForStart(opts: {
       if (!b) return null;
       const answer = await b.ask(
         opts.title,
-        sharedFailureMessage(
-          opts.title,
-          version,
-          reason,
-          e instanceof DownloadError,
-        ),
+        opts.words?.question
+          ? fillWords(opts.words.question, {
+            title: opts.title,
+            version,
+            reason: reason.split("\n")[0]!.trim(),
+          })
+          : sharedFailureMessage(
+            opts.title,
+            version,
+            reason,
+            e instanceof DownloadError,
+          ),
         opts.previous ? PREVIOUS_ANSWER : undefined,
       ).catch(() => "quit" as const);
       if (answer === "quit") return null;

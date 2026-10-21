@@ -192,3 +192,5 @@ When a field report, an issue or a doc needs to refer to these: **"one app, many
 surfaces"** (architecture 1) and **"service + rich clients"** (architecture 2).
 If you're unsure which you're building, start with 1 — it is one app and no
 protocol of your own; move a client to 2 only when it needs a life of its own.
+An orchestrator over several apps, power access and AI agents:
+[cross-app](cross-app.md).

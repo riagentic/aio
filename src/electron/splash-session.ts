@@ -3,15 +3,18 @@
  * One splash per start, owned by the aio process: opened before Electron is
  * looked for (never awaited — the launch does not wait for a window), the
  * download's screen in an online app, and closed by the pure
- * {@linkcode splashStep} — on the main window's ready signal once it has been
- * visible for `minMs` (the hidden main window is shown in the same moment:
- * `onShowMain`), Electron's exit, the cap, shutdown, a dismissal, a failed
- * download, or a helper that never showed.
+ * {@linkcode splashStep} — once the app is ready and the splash has been
+ * visible for `minMs`, Electron's exit, the cap, shutdown, a dismissal, a
+ * failed download, or a helper that never showed. Nothing waits for it: the
+ * app's window shows the moment it is ready, under the splash while the
+ * splash is still up.
  */
 import type { ProgressDialog, SplashOpener } from "./runtime-dialog.ts";
 import { splashBackend } from "./runtime-dialog.ts";
+import type { Bounds } from "./splash-place.ts";
+import type { WindowAt } from "./electron-renderer-log.ts";
 import {
-  SPLASH_CAP_MS,
+  lookOf,
   type SplashClose,
   type SplashEvent,
   splashOpened,
@@ -40,6 +43,14 @@ export interface SplashSession {
   shutdown(): void;
   /** The download failed: the plain Retry / Quit question takes over. */
   fail(): void;
+  /** Where the app's window really is (its main process says, when it shows
+   *  and after it moves): with `position: "window"` and `followWindow`, the
+   *  splash re-centres on it. */
+  windowAt?(at: WindowAt): void;
+  /** Electron is found and no download opened the helper: with
+   *  `electronDraws`, the splash is handed to Electron's main process
+   *  (electron-splash.ts) — true, and this session is done, silently. */
+  handOff?(): boolean;
   /** Why it closed, once it has. */
   readonly closed: Promise<SplashClose>;
 }
@@ -54,22 +65,43 @@ export function splashSession(spec: SplashSpec, opts: {
   now?: () => number;
   tickMs?: number;
   capMs?: number;
-  /** The main window (created hidden) may show now. Called once. */
-  onShowMain?: () => void;
-  /** Polled each tick: has the main window shown by itself (Electron's own
-   *  cap, `splashHoldCapMs`)? Then the splash goes at once. */
-  mainShown?: () => boolean;
+  /** The app window's saved bounds (`position: "window"`). */
+  target?: Bounds | null;
+  /** Electron's main process draws the splash when Electron is already
+   *  here (Windows): the helper opens only for a download. */
+  electronDraws?: boolean;
 }): SplashSession {
   const now = opts.now ?? (() => performance.now());
-  const o = { minMs: spec.minMs, capMs: opts.capMs ?? SPLASH_CAP_MS };
+  const look = lookOf(spec);
+  const o = { minMs: spec.minMs, capMs: opts.capMs ?? look.maxMs };
+  // `show: "firstStart"`: the window opens only once a download starts; a
+  // start without one never shows it.
+  let deferred = look.show === "firstStart" || opts.electronDraws === true,
+    opened = false;
   let state = splashOpened(now());
   let dialog: ProgressDialog | null = null;
   let tick: ReturnType<typeof setInterval> | undefined;
   let got = 0, total = 0, fraction: number | null = null, inDownload = false;
+  // The window's real bounds, once known; said once if the helper cannot
+  // move to them.
+  let at: WindowAt | null = null, saidStays = false;
+  const follow = look.position === "window" && look.followWindow !== false;
+  const moveTo = (d: ProgressDialog, w: WindowAt) => {
+    if (d.move) return d.move(w);
+    if (saidStays) return;
+    saidStays = true;
+    opts.log.info(
+      `electron: splash — this helper cannot move it, so it stays where it ` +
+        `opened, not on the window at ${w.x},${w.y} ${w.width}x${w.height}`,
+    );
+  };
   let done!: (c: SplashClose) => void;
   const closed = new Promise<SplashClose>((r) => (done = r));
-  const text = () =>
-    spec.text === null ? "" : splashText(spec.text, opts.title, got, total);
+  // `downloadText` while a download runs, else `text`.
+  const text = () => {
+    const t = inDownload ? spec.downloadText ?? spec.text : spec.text;
+    return t === null ? "" : splashText(t, opts.title, got, total);
+  };
   const push = () =>
     dialog?.update(spec.progress && inDownload ? fraction : null, text());
 
@@ -90,80 +122,80 @@ export function splashSession(spec: SplashSpec, opts: {
   const step = (e: SplashEvent) => {
     const was = state;
     state = splashStep(state, e, o);
-    if (state.showMain && !was.showMain) {
+    if (state.readyAt !== null && was.readyAt === null) {
       opts.log.info(
-        `electron: splash — the main window shows${
+        `electron: splash — the app is ready${
           state.shownAt === null
-            ? ""
+            ? ", before the splash was on screen"
             : ` ${
               Math.round(now() - state.shownAt)
             } ms after the splash appeared`
-        }`,
+        }; its window shows now`,
       );
-      opts.onShowMain?.();
     }
     if (state.closed && !was.closed) finish(state.closed);
+  };
+
+  const openNow = () => {
+    opened = true;
+    const t0 = now();
+    const id = setInterval(
+      () => step({ type: "tick", at: now() }),
+      opts.tickMs ?? 100,
+    );
+    tick = id;
+    Deno.unrefTimer(id);
+    void (async () => {
+      const opener = await (opts.backend ??
+        (() =>
+          splashBackend(spec, { log: opts.log.info, target: opts.target })))();
+      if (!opener) return step({ type: "lost" });
+      const d = await opener.open(opts.title, text());
+      dialog = d;
+      if (state.closed) return void d.close();
+      push();
+      if (at) moveTo(d, at);
+      const seen = () => {
+        if (state.closed || state.shownAt !== null) return;
+        // performance.now() counts from the process's start: both numbers
+        // are what a user waits through.
+        opts.log.info(
+          `electron: splash — visible ${
+            Math.round(now() - t0)
+          } ms after it was asked for, ${
+            Math.round(performance.now())
+          } ms after the app started (${opener.name})`,
+        );
+        step({ type: "shown", at: now() });
+      };
+      if (d.shown) d.shown.then(seen);
+      else seen();
+      d.lost.then((why) => {
+        if (state.closed) return;
+        opts.log.error(`electron: splash — not shown (${why})`);
+        step({ type: "lost" });
+      });
+      d.cancelled.then(() => step({ type: "dismissed" }));
+    })().catch((e) => {
+      opts.log.error(
+        `electron: splash — not shown (${e instanceof Error ? e.message : e})`,
+      );
+      step({ type: "lost" });
+    });
   };
 
   return {
     closed,
     open() {
-      const t0 = now();
-      const id = setInterval(() => {
-        if (!state.closed && opts.mainShown?.()) {
-          opts.log.info(
-            `electron: splash — the main window showed by itself; closing ` +
-              `the splash`,
-          );
-          return step({ type: "mainShown" });
-        }
-        step({ type: "tick", at: now() });
-      }, opts.tickMs ?? 100);
-      tick = id;
-      Deno.unrefTimer(id);
-      void (async () => {
-        const opener = await (opts.backend ??
-          (() => splashBackend(spec, { log: opts.log.info })))();
-        if (!opener) return step({ type: "lost" });
-        const d = await opener.open(opts.title, text());
-        dialog = d;
-        if (state.closed) return void d.close();
-        push();
-        const seen = () => {
-          if (state.closed || state.shownAt !== null) return;
-          // performance.now() counts from the process's start: both numbers
-          // are what a user waits through.
-          opts.log.info(
-            `electron: splash — visible ${
-              Math.round(now() - t0)
-            } ms after it was asked for, ${
-              Math.round(performance.now())
-            } ms after the app started (${opener.name})`,
-          );
-          step({ type: "shown", at: now() });
-        };
-        if (d.shown) d.shown.then(seen);
-        else seen();
-        d.lost.then((why) => {
-          if (state.closed) return;
-          opts.log.error(`electron: splash — not shown (${why})`);
-          step({ type: "lost" });
-        });
-        d.cancelled.then(() => step({ type: "dismissed" }));
-      })().catch((e) => {
-        opts.log.error(
-          `electron: splash — not shown (${
-            e instanceof Error ? e.message : e
-          })`,
-        );
-        step({ type: "lost" });
-      });
+      if (!deferred) openNow();
     },
     download() {
       if (state.closed) return null;
+      if (deferred && !opened) openNow();
       step({ type: "download", on: true, at: now() });
       inDownload = true;
       fraction = null;
+      push(); // `downloadText` from the download's first moment
       return {
         update(f) {
           fraction = f;
@@ -187,9 +219,36 @@ export function splashSession(spec: SplashSpec, opts: {
         },
       };
     },
-    ready: () => step({ type: "ready", at: now() }),
+    ready: () => {
+      if (deferred && !opened && !state.closed) {
+        // No download ran: nothing to show.
+        deferred = false;
+        state = { ...state, readyAt: now(), closed: "ready" };
+        opts.log.info(
+          `electron: splash — not shown (show: "firstStart", no download)`,
+        );
+        return done("ready");
+      }
+      step({ type: "ready", at: now() });
+    },
     exit: () => step({ type: "exit" }),
     shutdown: () => step({ type: "shutdown" }),
     fail: () => step({ type: "failed" }),
+    handOff() {
+      if (
+        !opts.electronDraws || opened || state.closed ||
+        look.show === "firstStart"
+      ) return false;
+      deferred = false;
+      state = { ...state, readyAt: now(), closed: "ready" }; // nothing to say later
+      clearInterval(tick);
+      done("ready");
+      return true;
+    },
+    windowAt(w) {
+      if (!follow || state.closed) return;
+      at = w;
+      if (dialog) moveTo(dialog, w);
+    },
   };
 }

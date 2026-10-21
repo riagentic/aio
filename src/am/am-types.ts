@@ -42,6 +42,9 @@ export type GlobalFlags = {
    *  the `am` process AND the child it starts. It composes with `--profile`:
    *  `--instance=x --profile=dev` → `~/.aio-instances/x/<appId>-dev`. */
   instance?: string;
+  /** `--fresh` (with `am start --instance=<name>`) — start from EMPTY data
+   *  in a home of the instance's own, thrown away on `am stop`. */
+  fresh?: boolean;
   wait?: number;
   /** `--no-wait` — return as soon as the child is spawned, without waiting for
    *  it to be reachable. `am start` WAITS by default (see cmdStart). */

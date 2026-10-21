@@ -6,18 +6,41 @@ import {
   assertStringIncludes,
 } from "jsr:@std/assert@^1.0.0";
 import { join } from "@std/path";
-import { resolveSplash, SPLASH_MAX_BYTES } from "../src/build/splash.ts";
+import {
+  overTextColor,
+  resolveSplash,
+  sourceSplash,
+  SPLASH_MAX_BYTES,
+} from "../src/build/splash.ts";
+import { pngFromRgba } from "../src/build/app-icon.ts";
+import { decodePngSync } from "../src/build/png-scale.ts";
+import { gtkSplashLayout } from "../src/electron/gtk-splash.ts";
+import {
+  boundsFromState,
+  fitRect,
+  roundedRows,
+  splashFrame,
+  splashOrigin,
+} from "../src/electron/splash-place.ts";
+import { webSplash } from "../src/build/web-splash.ts";
+import { _splashKotlin } from "../src/build/build-android.ts";
 import { appIdentityColors } from "../src/build/app-theme.ts";
 import {
   bakedSplash,
   BAR_PT,
+  helperLook,
+  lookOf,
   SPLASH_CAP_MS,
   type SplashEvent,
+  splashHasText,
+  splashNotDrawn,
   splashOpened,
   type SplashSpec,
   type SplashState,
   splashStep,
   splashText,
+  splashWithVersion,
+  targetSplash,
 } from "../src/electron/splash.ts";
 import {
   linuxSplash,
@@ -35,9 +58,7 @@ import { splashSession } from "../src/electron/splash-session.ts";
 import {
   forwardStderr,
   runUnderSplash,
-  splashHoldCapMs,
 } from "../src/electron/electron-spawn.ts";
-import { tmplSplashHold } from "../src/electron/electron-shared.ts";
 import { electronMainScript } from "../src/electron/electron-scripts.ts";
 import { electronMainScriptUDS } from "../src/electron/electron-uds.ts";
 import {
@@ -98,22 +119,83 @@ Deno.test("splash config: absent or false is none; the image alone takes every d
   assertEquals(s.image.w, 480);
   assertEquals(s.image.h, 300);
   assertEquals(s.image.scale, 1);
-  assertEquals(s.text, null);
-  assertEquals(s.progress, false);
+  // 1.0.23's defaults: the title, and the download's own line while
+  // Electron downloads.
+  assertEquals(s.text, "{title}");
+  assertEquals(s.downloadText, "Getting {title} ready · {got} of {total} MB");
+  assertEquals(s.look!.radius, 8);
+  assertEquals(s.look!.align, null); // not set: centred by every helper
+  assertEquals(helperLook(s, "windows").align, "center");
+  assertEquals(helperLook(s, "darwin").fadeMs, 200);
+  // The bar (and its ✕) while Electron downloads.
+  assertEquals(s.progress, true);
   assertEquals(s.minMs, 1000);
   assertEquals(s.font, { family: null, size: 13, weight: "bold" });
   assertEquals(s.bar, "solid");
+  // The text over the image reads on the image (this fixture is a bare
+  // header that cannot be decoded: white); the rest is the identity's.
   assertEquals(s.light, {
     background: id.light.background,
-    text: id.light.text,
+    text: "#ffffff",
     bar: id.light.accent,
     track: id.light.track,
   });
-  assertEquals(s.dark.text, id.dark.text);
+  assertEquals(s.dark.text, "#ffffff");
+  // Below the image, the text is on the strip: the identity's text colour.
+  const below = spec({ image: "assets/splash.png", textPosition: "below" });
+  assertEquals(below.light.text, id.light.text);
+  assertEquals(below.dark.text, id.dark.text);
   assertEquals(
     atob(s.image.png).length,
     files["/p/assets/splash.png"]!.length,
   );
+});
+
+Deno.test("splash config: the default text colour reads on the image's lower part — white on a dark one, near-black on a light one; a set colour, or text below the image, is not measured", async () => {
+  // Top half light, lower half dark — and the reverse.
+  const two = (top: number, low: number) => {
+    const w = 40, h = 30, px = new Uint8Array(w * h * 4);
+    for (let i = 0; i < w * h; i++) {
+      px.fill(i < (w * h) / 2 ? top : low, i * 4, i * 4 + 3);
+      px[i * 4 + 3] = 255;
+    }
+    return pngFromRgba(px, w, h);
+  };
+  const dark = await two(240, 20), light = await two(20, 235);
+  const f: Record<string, Uint8Array> = {
+    ...files,
+    "/p/d.png": dark,
+    "/p/l.png": light,
+  };
+  const of = (splash: unknown) => {
+    const r = resolveSplash({ build: { splash } }, {
+      ...ctx,
+      read: (p) => f[p.replace(/^[A-Za-z]:/, "").replaceAll("\\", "/")] ?? null,
+    });
+    if ("error" in r) throw new Error(r.error);
+    return r.splash!;
+  };
+  assertEquals([
+    of({ image: "d.png" }).light.text,
+    of({ image: "d.png" }).dark.text,
+  ], ["#ffffff", "#ffffff"]);
+  assertEquals([
+    of({ image: "l.png" }).light.text,
+    of({ image: "l.png" }).dark.text,
+  ], ["#111111", "#111111"]);
+  assertEquals(of({ image: "l.png", color: "#ff0000" }).light.text, "#ff0000");
+  const id = appIdentityColors(ctx.appId);
+  assertEquals(
+    of({ image: "l.png", textPosition: "below" }).light.text,
+    id.light.text,
+  );
+  // The sync decode is the async one's pixels; a transparent image is
+  // measured over the background it is drawn on.
+  assertEquals((decodePngSync(dark) as { rgba: Uint8Array }).rgba[0], 240);
+  const clear = await pngFromRgba(new Uint8Array(4 * 4 * 4), 4, 4);
+  assertEquals(overTextColor(decodePngSync(clear), "#000000"), "#ffffff");
+  assertEquals(overTextColor(decodePngSync(clear), "#ffffff"), "#111111");
+  assertEquals(overTextColor("not a PNG", "#ffffff"), "#ffffff");
 });
 
 Deno.test("splash config: an @2x image is drawn at half its pixels; set colours are the same in both modes", () => {
@@ -186,40 +268,36 @@ const O = { minMs: 1000, capMs: 30_000 };
 const run = (events: SplashEvent[], s: SplashState = splashOpened(0)) =>
   events.reduce((st, e) => splashStep(st, e, O), s);
 
-const at = (s: SplashState) => [s.closed, s.showMain] as const;
+const at = (s: SplashState) => s.closed;
 
-Deno.test("splash lifetime: ready after minMs — the splash goes and the main window shows at ready", () => {
+Deno.test("splash lifetime: ready after minMs — the splash goes at ready", () => {
   assertEquals(
     at(run([{ type: "shown", at: 100 }, { type: "ready", at: 1200 }])),
-    ["ready", true],
+    "ready",
   );
 });
 
-Deno.test("splash lifetime: ready before minMs — the main window waits, and shows as the splash goes at minMs after it APPEARED", () => {
+Deno.test("splash lifetime: ready before minMs — the splash stays until minMs after it APPEARED; the app's window is not held for it", () => {
   const early = run([{ type: "shown", at: 100 }, { type: "ready", at: 300 }]);
-  assertEquals(at(early), [null, false]);
-  assertEquals(at(run([{ type: "tick", at: 1099 }], early)), [null, false]);
-  assertEquals(at(run([{ type: "tick", at: 1100 }], early)), ["ready", true]);
+  // Two timelines: the app is ready (its window shows now), the splash stays.
+  assertEquals(early.readyAt, 300);
+  assertEquals(at(early), null);
+  assertEquals(at(run([{ type: "tick", at: 1099 }], early)), null);
+  assertEquals(at(run([{ type: "tick", at: 1100 }], early)), "ready");
 });
 
-Deno.test("splash lifetime: ready before the splash is visible — it still shows, for minMs, and the main window waits for it", () => {
-  const s = run([{ type: "ready", at: 10 }, { type: "tick", at: 500 }]);
-  assertEquals(at(s), [null, false]);
-  const up = run([{ type: "shown", at: 650 }, { type: "tick", at: 1649 }], s);
-  assertEquals(at(up), [null, false]);
-  assertEquals(at(run([{ type: "tick", at: 1650 }], up)), ["ready", true]);
+Deno.test("splash lifetime: ready before the splash is visible — there is nothing to cover any more, it goes at once", () => {
+  assertEquals(at(run([{ type: "ready", at: 10 }])), "ready");
+  // …and a late ack changes nothing.
+  assertEquals(
+    at(run([{ type: "ready", at: 10 }, { type: "shown", at: 650 }])),
+    "ready",
+  );
 });
 
-Deno.test("splash lifetime: a lost helper (never visible) — the main window shows at ready, before or after it was lost", () => {
-  assertEquals(
-    at(run([{ type: "lost" }, { type: "ready", at: 300 }])),
-    ["lost", true],
-  );
-  assertEquals(
-    at(run([{ type: "ready", at: 300 }, { type: "lost" }])),
-    ["lost", true],
-  );
-  assertEquals(at(run([{ type: "lost" }])), ["lost", false]);
+Deno.test("splash lifetime: a lost helper (never visible) stays lost, ready or not", () => {
+  assertEquals(at(run([{ type: "lost" }, { type: "ready", at: 300 }])), "lost");
+  assertEquals(at(run([{ type: "lost" }])), "lost");
 });
 
 Deno.test("splash lifetime: exit, shutdown, a dismissal, a failed download and a lost helper close it at once; a closed one stays closed", () => {
@@ -227,9 +305,9 @@ Deno.test("splash lifetime: exit, shutdown, a dismissal, a failed download and a
     const t of ["exit", "shutdown", "dismissed", "failed", "lost"] as const
   ) {
     const s = run([{ type: "shown", at: 0 }, { type: t }]);
-    assertEquals(at(s), [t, false]);
-    // …and the window, when it is ready, is not held for a splash that went.
-    assertEquals(at(run([{ type: "ready", at: 5000 }], s)), [t, true]);
+    assertEquals(at(s), t);
+    assertEquals(at(run([{ type: "ready", at: 5000 }], s)), t);
+    assertEquals(at(run([{ type: "tick", at: 90_000 }], s)), t);
   }
 });
 
@@ -246,29 +324,12 @@ Deno.test("splash lifetime: the cap closes it without a ready signal, never duri
   assertEquals(run([{ type: "tick", at: 149_999 }], after).closed, null);
   assertEquals(run([{ type: "tick", at: 150_000 }], after).closed, "cap");
   assertEquals(SPLASH_CAP_MS, 30_000);
-  // A ready signal after the cap shows the window at once.
+  // A ready signal after the cap leaves it closed as the cap closed it.
   const capped = run([{ type: "tick", at: 30_000 }]);
-  assertEquals(at(capped), ["cap", false]);
-  assertEquals(at(run([{ type: "ready", at: 31_000 }], capped)), ["cap", true]);
+  assertEquals(at(run([{ type: "ready", at: 31_000 }], capped)), "cap");
 });
 
-Deno.test("splash hold: the hidden main window shows by itself minMs + 5 s after ready-to-show — a splash that never says so never hides the app", () => {
-  assertEquals(splashHoldCapMs(1000), 6000);
-  assertEquals(splashHoldCapMs(0), 5000);
-  const { before, after } = tmplSplashHold();
-  assertStringIncludes(
-    before,
-    "if (process.env.AIO_SPLASH_SHOW) b.show = false;",
-  );
-  for (
-    const k of [
-      "process.env.AIO_SPLASH_CAP_MS",
-      "win.once('ready-to-show'",
-      "existsSync(__aioHoldFile)",
-      "win.show()",
-    ]
-  ) assertStringIncludes(after, k);
-  // Both shells hold their window, before it is made and after.
+Deno.test("splash: nothing holds the app's window for the splash — both shells show it when its page has painted, with no splash hold in them", () => {
   for (
     const src of [
       electronMainScript("http://127.0.0.1:1/"),
@@ -276,9 +337,14 @@ Deno.test("splash hold: the hidden main window shows by itself minMs + 5 s after
     ]
   ) {
     new Function("require", "process", src); // parses
-    const made = src.indexOf("const win = new BrowserWindow(b);");
-    assert(src.indexOf(before) < made && src.indexOf(before) > 0);
-    assert(src.indexOf(after) > made);
+    assertStringIncludes(src, "const win = new BrowserWindow(b);");
+    assertStringIncludes(
+      src,
+      "win.once('ready-to-show', () => __aioShow(false));",
+    );
+    for (const k of ["AIO_SPLASH", "__aioHold", "splashHold"]) {
+      assert(!src.includes(k), k);
+    }
   }
 });
 
@@ -291,7 +357,12 @@ const full = spec({
   font: { family: "Georgia", size: 15 },
   bar: { style: "thin" },
 });
-const plain = spec({ image: "assets/splash.png" });
+// Image only (`text: false`): no label, no bar.
+const plain = spec({
+  image: "assets/splash.png",
+  text: false,
+  progress: false,
+});
 const a = {
   title: "Notes",
   text: "0 of ? MB",
@@ -305,7 +376,7 @@ Deno.test("splash helpers: the macOS script parses, reads every argument it is g
   assert(!MAC_SPLASH_JXA.includes("registerSubclass("));
   assert(!MAC_PROGRESS_JXA.includes("registerSubclass("));
   const argv = macSplashArgs(full, a);
-  assertEquals(argv.length, 14);
+  assertEquals(argv.length, 16);
   assertStringIncludes(MAC_SPLASH_JXA, `argv[${argv.length - 1}]`);
   assertEquals(argv.slice(1, 3), ["0 of ? MB", "1"]);
   assertEquals(argv[9], "2");
@@ -349,10 +420,38 @@ Deno.test("splash helpers: the Windows script reads exactly the variables it is 
 Deno.test("splash helpers: a splash closed while its helper was starting is never shown (measured on Windows: a warm start's window loads before PowerShell is up)", () => {
   const ps = WINDOWS_SPLASH_PS;
   const psCheck = ps.indexOf("-eq 'close') { exit 0 }");
-  assert(psCheck > 0 && psCheck < ps.indexOf("$f.ShowDialog()"));
+  assert(
+    psCheck > 0 &&
+      psCheck < ps.indexOf("[System.Windows.Forms.Application]::Run($f)"),
+  );
   const js = MAC_SPLASH_JXA;
   const jsCheck = js.indexOf("pre.js === 'close') $.exit(0)");
   assert(jsCheck > 0 && jsCheck < js.indexOf("win.orderFrontRegardless"));
+});
+
+Deno.test("splash helpers: above the app's window, never the focus — Windows: TopMost, shown without activation (measured on w11pro: above the later Electron window, WS_EX_NOACTIVATE); macOS: the floating level, ordered front, never activated (measured: layer 3 over Electron's 0, never frontmost)", () => {
+  const ps = WINDOWS_SPLASH_PS;
+  for (
+    const k of [
+      "$f = New-Object AioSplashForm",
+      "$f.TopMost = $true",
+      "protected override bool ShowWithoutActivation { get { return true; } }",
+      "p.ExStyle |= 0x08000008", // WS_EX_NOACTIVATE | WS_EX_TOPMOST
+    ]
+  ) assertStringIncludes(ps, k);
+  // ShowDialog activates the window whatever it asks for.
+  assert(!ps.includes("ShowDialog"), "the splash is never shown as a dialog");
+  const js = MAC_SPLASH_JXA;
+  for (
+    const k of [
+      "NSApplicationActivationPolicyAccessory",
+      "win.level = 3;",
+      "win.orderFrontRegardless;",
+    ]
+  ) assertStringIncludes(js, k);
+  for (const k of ["activateIgnoringOtherApps", "makeKeyAndOrderFront"]) {
+    assert(!js.includes(k), k);
+  }
 });
 
 const pwsh = (() => {
@@ -443,10 +542,12 @@ Deno.test({
       const bin = join(tmp, "zenity");
       await Deno.writeTextFile(
         bin,
-        `#!/bin/sh\nprintf '%s\\n' "$@" > "${tmp}/args"\ncat > "${tmp}/stdin"\n`,
+        `#!/bin/sh\nprintf '%s\\n' "$@" > "${tmp}/args"\n/bin/cat > "${tmp}/stdin"\n`,
       );
       await Deno.chmod(bin, 0o755);
-      Deno.env.set("PATH", `${tmp}:/usr/bin:/bin`);
+      // ONLY the fake: a box with yad installed (in /usr/bin) would pick it.
+      Deno.env.set("PATH", tmp);
+      // No display there: GTK cannot draw, so the helpers are asked.
       Deno.env.set("DISPLAY", ":99");
       const notes: string[] = [];
       const s = spec({ image: "assets/splash.png", text: "Starting {title}…" });
@@ -454,6 +555,7 @@ Deno.test({
       assertEquals(opener?.name, "zenity splash");
       assertEquals(notes.length, 1);
       assertStringIncludes(notes[0]!, "yad is not installed");
+      assertStringIncludes(notes[0]!, "GTK could not draw it (");
       const d = await opener!.open("Notes", "Starting Notes…");
       d.update(null, "Starting Notes…");
       await d.close();
@@ -514,9 +616,18 @@ const tickle = () => new Promise((r) => setTimeout(r, 5));
 /** The session's tick is unref'd — a splash never keeps the app alive — so a
  *  test that waits on it alone can see its event loop end first: on Windows's
  *  ~15 ms timer grain the tick is not yet due when the loop checks. Held. */
-const held = <T>(p: Promise<T>): Promise<T> => {
-  const keep = setInterval(() => {}, 1000);
-  return p.finally(() => clearInterval(keep));
+const held = <T>(p: Promise<T>, ms = 5000): Promise<T> => {
+  // Keeps the loop alive while `p` settles — and FAILS after `ms` rather than
+  // waiting forever: a splash that never closes (a lost ready signal) must be
+  // a red test, not a hang (the mutation gate killed one at its ceiling).
+  let keep: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => {
+    keep = setTimeout(
+      () => reject(new Error(`the splash did not settle within ${ms} ms`)),
+      ms,
+    );
+  });
+  return Promise.race([p, late]).finally(() => clearTimeout(keep));
 };
 
 function session(
@@ -525,21 +636,19 @@ function session(
   clock = { t: 0 },
 ) {
   const log: string[] = [];
-  const shows: number[] = [];
   const ses = splashSession(s, {
     title: "Notes",
     log: { info: (m) => log.push(m), error: (m) => log.push(`! ${m}`) },
     backend: () => Promise.resolve(f.opener),
     now: () => clock.t,
     tickMs: 2,
-    onShowMain: () => shows.push(clock.t),
   });
-  return { ses, log, clock, shows };
+  return { ses, log, clock };
 }
 
-Deno.test("splash session: opened with its text, says when it is visible, and holds a ready signal until minMs has passed", async () => {
+Deno.test("splash session: opened with its text, says when it is visible; a ready signal before minMs keeps the splash (not the app) until minMs has passed", async () => {
   const f = fakeOpener();
-  const { ses, log, clock, shows } = session(
+  const { ses, log, clock } = session(
     spec({ image: "assets/splash.png", text: "Starting {title}…" }),
     f,
   );
@@ -556,19 +665,30 @@ Deno.test("splash session: opened with its text, says when it is visible, and ho
   clock.t = 500;
   ses.ready();
   await tickle();
-  assertEquals(f.seen.closed, 0);
-  assertEquals(shows, []); // the main window waits for minMs
+  assertEquals(f.seen.closed, 0); // the splash stays for minMs…
+  // …while the app's window shows now: said once, at the ready signal.
+  const said = (l: string) =>
+    l.includes("the app is ready 460 ms after the splash appeared") &&
+    l.includes("its window shows now");
+  assertEquals(log.filter(said).length, 1, log.join("\n"));
   clock.t = 1040;
   assertEquals(await held(ses.closed), "ready");
   assertEquals(f.seen.closed, 1);
-  // Shown once, in the step the splash went — no gap, no overlap.
-  assertEquals(shows, [1040]);
+  ses.ready();
+  await tickle();
+  assertEquals(log.filter(said).length, 1, log.join("\n"));
+});
+
+Deno.test("splash session: ready before the splash is on screen — it goes at once, and says the app was first", async () => {
+  const f = fakeOpener();
+  const { ses, log } = session(plain, f);
+  ses.open();
   await tickle();
   ses.ready();
-  assertEquals(shows, [1040]);
+  assertEquals(await held(ses.closed), "ready");
   assert(
     log.some((l) =>
-      l.includes("the main window shows 1000 ms after the splash appeared")
+      l.includes("the app is ready, before the splash was on screen")
     ),
     log.join("\n"),
   );
@@ -576,7 +696,15 @@ Deno.test("splash session: opened with its text, says when it is visible, and ho
 
 Deno.test("splash session: a download fills the bar and the text; its end hides the bar; a dismissal is the download's cancel", async () => {
   const f = fakeOpener();
-  const { ses } = session(full, f);
+  const { ses } = session(
+    spec({
+      image: "assets/splash@2x.png",
+      text: "{got} of {total} MB",
+      downloadText: "{got} of {total} MB",
+      progress: true,
+    }),
+    f,
+  );
   ses.open();
   await tickle();
   f.show();
@@ -595,7 +723,10 @@ Deno.test("splash session: a download fills the bar and the text; its end hides 
 
 Deno.test("splash session: no progress → the bar never shows; a failed download closes it before the plain question", async () => {
   const f = fakeOpener();
-  const { ses } = session(spec({ image: "assets/splash.png", text: "x" }), f);
+  const { ses } = session(
+    spec({ image: "assets/splash.png", text: "x", progress: false }),
+    f,
+  );
   ses.open();
   await tickle();
   ses.download()!.update(0.5, "");
@@ -865,46 +996,6 @@ Deno.test("splash: an online start whose splash is lost mid-download goes on in 
   }
 });
 
-Deno.test("splash: the main window showing by itself (Electron's cap) closes the splash at once — never both on screen", async () => {
-  // Pure: before minMs, before the splash was even visible.
-  assertEquals(at(run([{ type: "mainShown" }])), ["ready", true]);
-  assertEquals(
-    at(run([{ type: "shown", at: 0 }, { type: "mainShown" }])),
-    ["ready", true],
-  );
-  // A splash that already went stays as it went.
-  assertEquals(at(run([{ type: "lost" }, { type: "mainShown" }])), [
-    "lost",
-    false,
-  ]);
-  // The window side says so through the hold file.
-  assertStringIncludes(
-    tmplSplashHold().after,
-    "writeFileSync(__aioHoldFile, 'shown')",
-  );
-  // The session polls it: a splash whose ack never came (shownAt null)
-  // still goes the moment the window showed.
-  const f = fakeOpener();
-  let windowShown = false;
-  const log: string[] = [];
-  const ses = splashSession(plain, {
-    title: "Notes",
-    log: { info: (m) => log.push(m), error: (m) => log.push(m) },
-    backend: () => Promise.resolve(f.opener),
-    tickMs: 2,
-    mainShown: () => windowShown,
-  });
-  ses.open();
-  await tickle();
-  ses.ready();
-  await tickle();
-  assertEquals(f.seen.closed, 0);
-  windowShown = true;
-  assertEquals(await held(ses.closed), "ready");
-  assertEquals(f.seen.closed, 1);
-  assert(log.some((l) => l.includes("showed by itself")), log.join("\n"));
-});
-
 Deno.test("splash: the build's record carries it; a record without it (or none) is no splash", async () => {
   const tmp = await tempDir("splash-baked-");
   try {
@@ -921,4 +1012,499 @@ Deno.test("splash: the build's record carries it; a record without it (or none) 
   } finally {
     await dropTempDir(tmp);
   }
+});
+
+// ── {version}, downloadText, the GTK layout, a run from source ────────────
+
+Deno.test("splash config: {version} is a placeholder; downloadText is checked like text and kept only when set", () => {
+  const img = "assets/splash.png";
+  const s = spec({
+    image: img,
+    text: "{title} {version}",
+    downloadText: "Installing dependencies · {got} of {total} MB",
+  });
+  assertEquals(s.text, "{title} {version}");
+  assertEquals(
+    s.downloadText,
+    "Installing dependencies · {got} of {total} MB",
+  );
+  // Left out: the download's own line (1.0.23); text false: none.
+  assertEquals(
+    spec({ image: img, text: "x" }).downloadText,
+    "Getting {title} ready · {got} of {total} MB",
+  );
+  assert(!("downloadText" in spec({ image: img, text: false })));
+  assertStringIncludes(
+    err({ image: img, downloadText: "{name}" }),
+    "build.splash.downloadText uses {name}",
+  );
+  assertStringIncludes(
+    err({ image: img, text: "{name}" }),
+    "{title} {version} {got} {total} {pct}",
+  );
+  for (const bad of ["", " ", false, 1]) {
+    assertStringIncludes(
+      err({ image: img, downloadText: bad }),
+      "build.splash.downloadText is",
+    );
+  }
+});
+
+Deno.test("splash version: {version} filled in text and downloadText, the run-time placeholders left for splashText", () => {
+  const s = splashWithVersion(
+    spec({
+      image: "assets/splash.png",
+      text: "{title} {version}",
+      downloadText: "{version}: {got} of {total} MB",
+    }),
+    "0.1.760",
+  );
+  assertEquals(s.text, "{title} 0.1.760");
+  assertEquals(s.downloadText, "0.1.760: {got} of {total} MB");
+  assertEquals(splashText(s.text!, "Risoto"), "Risoto 0.1.760");
+  // Image only stays image only; no downloadText stays absent.
+  const p = splashWithVersion(plain, "1.2.3");
+  assertEquals(p.text, null);
+  assert(!("downloadText" in p));
+});
+
+Deno.test("splash session: downloadText while a download runs, text before and after it", async () => {
+  const f = fakeOpener();
+  const { ses } = session(
+    spec({
+      image: "assets/splash.png",
+      text: "Notes 1.0",
+      downloadText: "Installing · {got} of {total} MB",
+      progress: true,
+    }),
+    f,
+  );
+  ses.open();
+  await tickle();
+  f.show();
+  assertEquals(f.seen.opened, ["Notes | Notes 1.0"]);
+  const d = ses.download()!;
+  assertEquals(f.seen.lines.at(-1), [null, "Installing · 0 of ? MB"]);
+  d.bytes(38e6, 92e6);
+  d.update(0.41, "ignored");
+  assertEquals(f.seen.lines.at(-1), [0.41, "Installing · 38 of 92 MB"]);
+  await d.close();
+  assertEquals(f.seen.lines.at(-1), [null, "Notes 1.0"]);
+  ses.shutdown();
+  assertEquals(await held(ses.closed), "shutdown");
+});
+
+Deno.test("splash helpers: text false with a downloadText still gets a label — it reads empty until a download runs", () => {
+  const s = spec({
+    image: "assets/splash.png",
+    text: false,
+    downloadText: "Installing · {pct} %",
+    progress: true,
+  });
+  assertEquals(s.text, null);
+  assert(splashHasText(s));
+  assert(!splashHasText(plain));
+  assertEquals(windowsSplashEnv(s, a).AIO_SPL_HASTEXT, "1");
+  assertEquals(windowsSplashEnv(plain, a).AIO_SPL_HASTEXT, "0");
+  assertEquals(macSplashArgs(s, a)[2], "1");
+  assertEquals(
+    yadSplash(s, a).line(0.5, "Installing · 50 %"),
+    "49\n# Installing · 50 %\n",
+  );
+});
+
+Deno.test("splash helpers: Linux — GTK first; with why it could not, yad, then zenity, then none, in ONE line", () => {
+  const g = linuxSplash({ gtk: true, yad: true, zenity: true });
+  assertEquals(g.use, "gtk");
+  assertStringIncludes(g.note, "drawn by GTK 3");
+  const why = "GTK could not open the display :0";
+  const y = linuxSplash({ gtk: why, yad: true, zenity: true });
+  assertEquals(y.use, "yad");
+  assertStringIncludes(y.note, `GTK could not draw it (${why}); drawn by yad`);
+  const z = linuxSplash({ gtk: why, yad: false, zenity: true });
+  assertEquals(z.use, "zenity");
+  assertStringIncludes(z.note, "GTK could not draw it");
+  const n = linuxSplash({ gtk: why, yad: false, zenity: false });
+  assertEquals(n.use, null);
+  assertStringIncludes(n.note, "not shown: GTK could not draw it");
+  for (const x of [g, y, z, n]) assert(!x.note.includes("\n"));
+});
+
+Deno.test("splash layout: today's numbers by default — the bar 18 px above the bottom, 24 px side gaps, the text 8 px above the bar; @2x halved", () => {
+  const L = gtkSplashLayout(full); // @2x 960×600, thin bar
+  assertEquals([L.w, L.h, L.bp, L.side, L.bottom], [480, 300, 4, 24, 18]);
+  assertEquals(splashFrame(L, 20), {
+    TH: 300,
+    yb: 300 - 18 - 4,
+    bx: 24,
+    bw: 480 - 48,
+    labelBottom: 300 - 18 - 4 - 8,
+  });
+  const solid = spec({ image: "assets/splash.png", progress: true });
+  assertEquals(gtkSplashLayout(solid).bp, 8); // 6 pt at 96 dpi
+  // No bar: the text's bottom is 18 px above the window's.
+  assertEquals(splashFrame(gtkSplashLayout(plain), 20).labelBottom, 282);
+  // The defaults (1.0.23): centred, a 200 ms fade, 8 px corners; the text's
+  // and the window's shadow where the OS draws them (not Windows).
+  const w = helperLook(plain, "windows"), m = helperLook(plain, "darwin");
+  assertEquals([w.shadow, w.windowShadow, w.fadeMs, w.align], [
+    false,
+    false,
+    200,
+    "center",
+  ]);
+  assertEquals([m.shadow, m.windowShadow, m.radius, m.border], [
+    true,
+    true,
+    8,
+    null,
+  ]);
+  assertEquals(helperLook(plain, "linux").shadow, true);
+  assertEquals([w.sized, w.mode, w.cancel, w.barRadius], [
+    false,
+    "window",
+    true,
+    null,
+  ]);
+});
+
+Deno.test("splash layout: size, fit, a strip below, the bar along the bottom edge, the margin and the bar's height", () => {
+  const s = spec({
+    image: "assets/splash.png", // 480×300
+    text: "x",
+    progress: true,
+    size: { width: 640, height: 360 },
+    textPosition: "below",
+    margin: 12,
+    bar: { height: 5, position: "bottom-edge" },
+  });
+  const L = gtkSplashLayout(s);
+  assertEquals([L.sized, L.w, L.h, L.bp, L.side, L.bottom], [
+    true,
+    640,
+    360,
+    5,
+    12,
+    12,
+  ]);
+  const f = splashFrame(L, 20);
+  // The strip: 8 above the text, the text, the margin under it.
+  assertEquals(f.TH, 360 + 8 + 20 + 12);
+  assertEquals([f.yb, f.bx, f.bw], [f.TH - 5, 0, 640]);
+  assertEquals(f.labelBottom, f.TH - 12);
+  // cover fills (cropped), contain shows it whole (centred).
+  assertEquals(fitRect(480, 300, 640, 360, "cover"), {
+    x: 0,
+    y: -20,
+    width: 640,
+    height: 400,
+  });
+  assertEquals(fitRect(480, 300, 640, 360, "contain"), {
+    x: 32,
+    y: 0,
+    width: 576,
+    height: 360,
+  });
+  // A rounded shape covers the box exactly once per row.
+  const rows = roundedRows(100, 60, 10);
+  assertEquals(rows.at(-1), { x: 0, y: 10, width: 100, height: 40 });
+  // The corner rows step in (the top row most), the rest span the width.
+  assertEquals([rows[0]!.y, rows[0]!.x > 5, rows[1]!.y], [0, true, 59]);
+  assert(rows.every((r) => r.x >= 0 && r.x + r.width <= 100));
+});
+
+Deno.test("splash place: centred on the app window's saved bounds, fitted to a screen that still exists; else the primary's centre; or the pointer's screen", () => {
+  // The owner's two monitors (#39): DP-2 primary, DP-0.8 portrait right.
+  const dp2 = { x: 0, y: 392, width: 2560, height: 1440 };
+  const dp08 = { x: 2560, y: 0, width: 1440, height: 2560 };
+  const screens = [dp2, dp08];
+  const saved = boundsFromState(
+    '{"x":636,"y":624,"width":1296,"height":939,"declaredWidth":800,"declaredHeight":600}',
+    800,
+    600,
+  );
+  const at = (o: Partial<Parameters<typeof splashOrigin>[0]>) =>
+    splashOrigin({
+      mode: "window",
+      target: saved,
+      screens,
+      primary: dp2,
+      pointer: null,
+      w: 640,
+      h: 360,
+      ...o,
+    });
+  // Centre of the saved window (636+648-320, 624+469.5-180).
+  assertEquals(at({}), { x: 964, y: 914 });
+  // No saved position: where the window opens, the primary's centre.
+  assertEquals(at({ target: null }), { x: 960, y: 932 });
+  assertEquals(at({ target: { width: 800, height: 600 } }), { x: 960, y: 932 });
+  assertEquals(at({ mode: "primary" }), { x: 960, y: 932 });
+  // The pointer's screen, whatever the saved bounds.
+  assertEquals(at({ mode: "pointer", pointer: { x: 3000, y: 100 } }), {
+    x: 2560 + 720 - 320,
+    y: 1280 - 180,
+  });
+  // A saved window on a screen that is gone: moved into the one it overlaps
+  // most, as Electron moves the window itself, then centred on.
+  const half = { x: 3500, y: 300, width: 800, height: 600 };
+  assertEquals(at({ target: half }), { x: 3280, y: 420 });
+  // Overlapping none: the first screen, as Electron's own fit picks.
+  const gone = { x: 5000, y: 300, width: 800, height: 600 };
+  assertEquals(at({ target: gone }), { x: 1840, y: 512 });
+  // Kept inside the screen; one larger than it sits at its top-left.
+  assertEquals(at({ target: { x: 0, y: 392, width: 100, height: 100 } }), {
+    x: 0,
+    y: 392,
+  });
+  assertEquals(at({ w: 3000, target: null }), { x: 0, y: 932 });
+  // The saved file (the main script's own rule): no position → the size
+  // alone; unreadable → the declared size; a declared size that changed wins.
+  assertEquals(boundsFromState('{"width":900,"height":700}', 800, 600), {
+    width: 800,
+    height: 600,
+    maximized: false,
+  });
+  assertEquals(boundsFromState("not json", 800, 600), {
+    width: 800,
+    height: 600,
+    maximized: false,
+  });
+  assertEquals(
+    boundsFromState(
+      '{"x":10,"y":20,"width":800,"height":600,"declaredWidth":800,"declaredHeight":600,"maximized":true}',
+      1024,
+      768,
+    ),
+    { x: 10, y: 20, width: 1024, height: 768, maximized: true },
+  );
+});
+
+Deno.test("splash helpers: the look reaches Windows and macOS whole; yad is placed on the saved window", () => {
+  const s = spec({
+    image: "assets/splash.png",
+    text: "x",
+    progress: true,
+    align: "center",
+    radius: 12,
+    border: "#102030",
+  });
+  const t = { x: 100, y: 200, width: 800, height: 600 };
+  const win = JSON.parse(
+    windowsSplashEnv(s, { ...a, target: t }).AIO_SPL_LOOK!,
+  );
+  assertEquals([win.align, win.radius, win.border], ["center", 12, "#102030"]);
+  assertEquals(win.target, [100, 200, 800, 600]);
+  const mac = JSON.parse(macSplashArgs(s, { ...a, target: t })[14]!);
+  assertEquals(mac, helperLook(s, "darwin", t));
+  assertStringIncludes(MAC_SPLASH_JXA, "JSON.parse(argv[14])");
+  for (
+    const k of [
+      "L.target",
+      "L.radius",
+      "L.border",
+      "L.align",
+      "L.cancel",
+      "L.fadeMs",
+      "L.barEdge",
+    ]
+  ) {
+    assertStringIncludes(WINDOWS_SPLASH_PS, `$${k}`, k);
+    assertStringIncludes(MAC_SPLASH_JXA, k, k);
+  }
+  assertStringIncludes(WINDOWS_SPLASH_PS, "$f.StartPosition = 'Manual'");
+  assert(!WINDOWS_SPLASH_PS.includes("CenterScreen"));
+  assert(!MAC_SPLASH_JXA.includes("win.center"));
+  assert(
+    yadSplash(s, { ...a, target: t }).args.includes(
+      "--geometry=480x300+260+350",
+    ),
+  );
+  assert(yadSplash(s, a).args.includes("--center"));
+});
+
+Deno.test("splash helpers: what a helper cannot draw is named, once, never dropped", () => {
+  const none = spec({ image: "assets/splash@2x.png" });
+  assertEquals(splashNotDrawn(none, "windows"), []);
+  assertEquals(splashNotDrawn(none, "cocoa"), []);
+  assertEquals(splashNotDrawn(none, "gtk"), []);
+  // yad has no ✕ for the default bar's download.
+  assertEquals(splashNotDrawn(none, "yad"), ["the @2x scale", "cancel (no ✕)"]);
+  const s = spec({
+    image: "assets/splash.png",
+    progress: true,
+    shadow: true,
+    windowShadow: true,
+    size: { width: 100, height: 100 },
+    radius: 4,
+  });
+  assertEquals(splashNotDrawn(s, "windows"), ["shadow", "windowShadow"]);
+  assertEquals(splashNotDrawn(s, "cocoa"), []);
+  assertEquals(splashNotDrawn(s, "gtk"), ["windowShadow"]);
+  assertEquals(splashNotDrawn(s, "yad"), [
+    "size",
+    "shadow",
+    "radius",
+    "windowShadow",
+    "cancel (no ✕)",
+  ]);
+  assertEquals(splashNotDrawn(s, "web"), ["size", "windowShadow"]);
+  assertEquals(splashNotDrawn(s, "android"), [
+    "size",
+    "shadow",
+    "radius",
+    "windowShadow",
+  ]);
+});
+
+Deno.test("splash config: every look key is checked by name; show never is no splash; textPosition none is no text", () => {
+  const img = "assets/splash.png";
+  for (
+    const [k, v, msg] of [
+      ["fit", "fill", '"cover" or "contain"'],
+      ["position", "center", '"window", "primary" or "pointer"'],
+      ["background", "white", '"#rrggbb"'],
+      ["textPosition", "top", '"over", "below" or "none"'],
+      ["align", "middle", '"left", "center" or "right"'],
+      ["margin", -1, "0 to 200"],
+      ["shadow", "yes", "true or false"],
+      ["radius", 1.5, "0 to 200"],
+      ["border", "#fff", '"#rrggbb"'],
+      ["windowShadow", 1, "true or false"],
+      ["maxMs", 10, "1000 to 600000"],
+      ["fadeMs", 5000, "0 to 2000"],
+      ["show", "once", '"always", "firstStart" or "never"'],
+      ["cancel", "no", "true or false"],
+      ["followWindow", "yes", "true or false"],
+      ["size", 640, '{ "width": 640, "height": 360 }'],
+    ] as const
+  ) {
+    assertStringIncludes(
+      err({ image: img, [k]: v }),
+      `build.splash.${k} is`,
+      k,
+    );
+    assertStringIncludes(err({ image: img, [k]: v }), msg, k);
+  }
+  assertStringIncludes(
+    err({ image: img, size: { width: 640 } }),
+    "size.height is missing",
+  );
+  assertStringIncludes(
+    err({ image: img, size: { w: 1, h: 1 } }),
+    "size.w is not a key",
+  );
+  assertStringIncludes(err({ image: img, bar: { height: 0 } }), "bar.height");
+  assertStringIncludes(
+    err({ image: img, bar: { position: "top" } }),
+    "bar.position",
+  );
+  assertStringIncludes(err({ image: img, bar: { radius: 99 } }), "bar.radius");
+  assertStringIncludes(
+    err({ image: img, minMs: 3000, maxMs: 2000 }),
+    "under minMs",
+  );
+  assertEquals(resolveOf({ image: img, show: "never" }), { splash: null });
+  // A typo is refused even when the splash is off.
+  assertStringIncludes(
+    err({ image: img, show: "never", fitt: "cover" }),
+    "fitt",
+  );
+  const n = spec({
+    image: img,
+    text: "x",
+    downloadText: "y",
+    textPosition: "none",
+  });
+  assertEquals([n.text, n.downloadText], [null, undefined]);
+  const b = spec({ image: img, background: "#123456" });
+  assertEquals([b.light.background, b.dark.background], ["#123456", "#123456"]);
+  // A spec an earlier aio baked (no look) looks as it did then: square,
+  // left-aligned, the 100 ms fade.
+  const { look: _l, ...old } = plain;
+  assertEquals(lookOf(old as SplashSpec), {
+    ...plain.look!,
+    radius: 0,
+    align: "left",
+    fadeMs: 100,
+  });
+});
+
+Deno.test("splash session: show firstStart opens only when a download starts — without one, the window shows at once", async () => {
+  const s = spec({
+    image: "assets/splash.png",
+    text: "x",
+    downloadText: "x",
+    show: "firstStart",
+  });
+  const f = fakeOpener();
+  const { ses, log } = session(s, f);
+  ses.open();
+  await tickle();
+  assertEquals(f.seen.opened, []);
+  ses.ready();
+  assertEquals(await held(ses.closed), "ready");
+  assert(
+    log.some((l) => l.includes('not shown (show: "firstStart", no download)')),
+  );
+  const f2 = fakeOpener();
+  const two = session(s, f2);
+  two.ses.open();
+  two.ses.download();
+  await tickle();
+  assertEquals(f2.seen.opened, ["Notes | x"]);
+  two.ses.shutdown();
+});
+
+Deno.test("splash: maxMs is the desktop cap, the web's and Android's; fadeMs their fade", () => {
+  const s = spec({
+    image: "assets/splash.png",
+    text: "x",
+    maxMs: 5000,
+    fadeMs: 400,
+  });
+  const page = webSplash(s, "Notes");
+  assertStringIncludes(page.body, "setTimeout(go,5000)");
+  assertStringIncludes(page.head, "transition:opacity 0.4s");
+  const today = webSplash(plain, "Notes");
+  assertStringIncludes(today.body, `setTimeout(go,${SPLASH_CAP_MS})`);
+  assertStringIncludes(today.head, "transition:opacity 0.2s");
+  assertStringIncludes(today.body, "},250)");
+  const kt = _splashKotlin(s, "Notes", "system");
+  assertStringIncludes(kt, ", capMs = 5000L, fadeMs = 400L)");
+  assert(!_splashKotlin(plain, "Notes", "system").includes("capMs"));
+  assertEquals(
+    targetSplash(
+      spec({ image: "assets/splash.png", show: "firstStart" }),
+      "web",
+    ).splash,
+    null,
+  );
+  assertEquals(targetSplash(plain, "android"), { splash: plain, note: null });
+});
+
+Deno.test("splash from source: the build's resolver over deno.json, {version} filled — and nothing on dev's automatic restart", () => {
+  const config = {
+    build: {
+      splash: { image: "assets/splash.png", text: "{title} {version}" },
+    },
+  };
+  const at = { ...ctx, version: "0.1.5", restarted: false };
+  const r = sourceSplash(config, at);
+  assert(!("error" in r));
+  assertEquals(r.splash!.text, "{title} 0.1.5");
+  assertEquals(
+    r.splash,
+    splashWithVersion(
+      spec({ image: "assets/splash.png", text: "{title} {version}" }),
+      "0.1.5",
+    ),
+  );
+  assertEquals(sourceSplash(config, { ...at, restarted: true }), {
+    splash: null,
+  });
+  assertEquals(sourceSplash({}, at), { splash: null });
+  assertEquals(sourceSplash(undefined, at), { splash: null });
+  const bad = sourceSplash({ build: { splash: { image: "nope.png" } } }, at);
+  assert("error" in bad && bad.error.includes("which is not there"));
 });

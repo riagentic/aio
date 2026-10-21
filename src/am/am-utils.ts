@@ -288,7 +288,7 @@ export function declaredPort(
 
 /** The runtime's rule, read statically: the key is set AND the client this
  *  launch runs (`--client` > `aio.run({ client })` > deno.json `client` >
- *  electron — `clientOf` in aio.ts) is electron. */
+ *  electron — `clientOf` in aio-run-config.ts) is electron. */
 function _ignoresEnvPort(clientFlag?: string): boolean {
   const ec = readEntryConfig();
   if (!ec.ignoreDebugEnv) return false;
@@ -1224,6 +1224,7 @@ export function parseGlobalFlags(
     else if (a.startsWith("--home=")) flags.home = a.slice(7);
     else if (a.startsWith("--profile=")) flags.profile = a.slice(10);
     else if (a.startsWith("--instance=")) flags.instance = a.slice(11);
+    else if (a === "--fresh") flags.fresh = true;
     else if (a.startsWith("--timeout=")) {
       flags.timeout = num(a.slice(10), "--timeout", { min: 1, integer: true });
     } else if (a.startsWith("--client-index=")) {

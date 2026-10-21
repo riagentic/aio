@@ -245,8 +245,11 @@ Process (singleton — one instance per app identity):
                           am backup/restore holds the app). With components: one line
                           each, and the same three codes read over the whole
                           project — 0 every one up, 1 every one down, 2 partial.
-  instances               List running aio apps in THIS scope — an instance or
-                          AIO_APPS_DIR scope lists only its own apps
+  instances               List running aio apps: the shared scope AND every
+                          private instance (INSTANCE column; an instance or
+                          AIO_APPS_DIR scope lists only its own), and who
+                          started each (BY: am · other = a terminal/launcher,
+                          maybe a person's window — am stop says so)
 
 State:
   state [path] [--wait=N]  State query (dot-path, [*] wildcard, {pick})
@@ -256,6 +259,9 @@ State:
                           undone within one interval is not seen
   state --ui [user]       Server-side UI-state projection (was \`am ui\`; for
                           live client UI use: surface)
+  state --offline [path]  What a STOPPED app last persisted, read from its
+                          store read-only (no boot, no write); --app=X for
+                          another app. db: tables / sync cells are not in it
   expect <path> <op> [v]  ASSERT / TEST / verify state (eq/ne/gt/lt/contains/exists…);\n                          e2e; --wait=N — the check to reach for instead of\n                          piping \`am state\` through a parser
   record [out] [--from=J] GENERATE A TEST — writes a bootCells replay test from\n                          the RUNNING app's timeline, so a bug you reproduced\n                          becomes a test (app stopped: its crash journal;\n                          --from=J: that journal file)
   dispatch <cell:method> [a b …]  Call a method with POSITIONAL args (setHost "1.2.3.4")
@@ -276,6 +282,9 @@ Time-travel:
 
 Persistence:
   persist                 Force immediate persist
+  persist --drop=<cell>   DROP a stored cell this build no longer declares (the
+                          boot's "stored cell … is not declared" warning) —
+                          via the running app, which refuses a declared one
   snapshot                Dump state JSON to stdout
   snapshot save [file]    Save snapshot to file
   snapshot load <file>    Load snapshot from file (replaces ALL state;
@@ -339,7 +348,10 @@ Inspect:
                           channel, default 2; --max-diff=RATIO, default 0).
   shot --video[=F.mp4|.webm]  RECORD the window until Ctrl-C (or --duration=S),
                           then encode it in the window — no ffmpeg; the
-                          extension picks H.264 MP4 or VP8 WebM
+                          extension picks H.264 MP4 or VP8 WebM. --json: a
+                          stderr {"event":"recording","file","t0"} once frame 0
+                          is taken (t0 = its epoch ms). --markers: F.mp4.markers.json,
+                          [{t,path,action,rect}] per am trigger (ms, video px)
                           Deterministic state: am snapshot load, then am dispatch
   eval '<expression>'     Evaluate ONE JS expression in the live renderer, get
                           JSON back (statements: '(() => { …; return x })()') —
@@ -361,7 +373,11 @@ Inspect:
                           fails to build. Scaffolded into \`deno task check\`
   --instance=<name>       (global) run and address a PRIVATE copy: its own
                           lock, data home and logs, beside anyone else's.
-                          An agent and a human stop sharing one session
+                          An agent and a human stop sharing one session.
+                          A compiled artifact takes it too (same meaning)
+  --fresh                 (am start --instance=<name>) start from EMPTY data;
+                          am stop --instance=<name> throws it away (a run
+                          left behind is dropped on the next --fresh start)
   --profile=<name|path>   (global) the app's PROFILE: a second data home
                           beside its own (dev → ~/.<app>-dev, shown as
                           <app>@dev). am start --profile dev starts it; every
@@ -383,7 +399,8 @@ Inspect:
                           --lines=N counts EVENTS; --json .matched is the
                           health-check count (.total keeps unreadable lines)
   errors                  What went wrong: the build error (if any) first,
-                          then the tail of error.log (--lines=N --since=15m)
+                          then the tail of error.log (--lines=N --since=15m),
+                          tagged by hot reload; --since=reload: only the current
   metrics                 Uptime, connections, schedules
   cost                    Bytes pushed/s, per cell and per key, + reduce p95
   cost --keys             …every key, not just the top three

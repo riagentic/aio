@@ -39,7 +39,8 @@ foreach ($f in @('install.ps1', 'run.ps1')) {
 }
 
 # ── 2. the decisions inside them ────────────────────────────────────────
-# Dot-sourcing defines the functions without installing or building anything.
+# Dot-sourced with the load-only switches: the functions, nothing installed or built.
+$env:AIO_INSTALL_LOAD_ONLY = '1'; $env:AIO_RUN_LOAD_ONLY = '1'
 . (Join-Path $root 'install.ps1')
 . (Join-Path $root 'run.ps1')
 

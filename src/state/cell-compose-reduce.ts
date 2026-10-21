@@ -2,7 +2,7 @@
 
 import { notifyMethodCancel } from "./method-cancel.ts";
 import { isDevMode } from "./dev-flag.ts";
-import { isFrozenWriteError } from "./immutable.ts";
+import { draftCloneError, isFrozenWriteError } from "./immutable.ts";
 import { recordRejection } from "./rejection-tracker.ts";
 import { RefusedWrite } from "./method-rejection.ts";
 import {
@@ -56,6 +56,8 @@ function methodThrew(
   e: unknown,
   hint = "",
 ): Error {
+  // `structuredClone(s.x)` on the draft — the engine's message names no fix.
+  e = draftCloneError(e) ?? e;
   const orig = describeThrown(e);
   // ONE voice for the two paths. Immer refuses `Object.defineProperty` and
   // `Object.setPrototypeOf` on a draft with a message that names neither the
@@ -101,7 +103,8 @@ function methodThrew(
       `Object.seal / Object.preventExtensions on cell state. Cell state is ` +
       `ALREADY frozen once the method returns — freezing the draft breaks ` +
       `the draft itself. Drop the call; if you wanted a snapshot to keep, ` +
-      `copy it: const snap = structuredClone(s.field).`
+      `copy it: const snap = JSON.parse(JSON.stringify(s.field)) ` +
+      `(structuredClone refuses the draft).`
     : `${orig}${hint}`;
   // The hint is guidance about THIS failure (an illegal cross-cell write), so
   // it belongs with the message; the framework's own name does not.

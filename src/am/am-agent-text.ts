@@ -219,6 +219,8 @@ Deno.test("a schedule fires on the virtual clock", async () => {
   await h.advance(60_000);                              // every(1000) + advance(3000) = 3 ticks
   assertEquals(notes.items.length, 0);
 });
+// e2e in a REAL browser: await using b = await testBrowser(url) — headless Chromium, killed on
+// dispose; drive it with am surface / am trigger. Never hand-roll a CDP driver.
 `,
 };
 
@@ -469,6 +471,7 @@ export const BRIEF_API: readonly { entry: string; names: readonly string[] }[] =
         "openExternal",
         "pickFile",
         "pickDirectory",
+        "pickSave",
         "spawn",
         "runCommand",
       ],
@@ -998,10 +1001,13 @@ ${show(APP_TSX)}
 - **attribute names** React's camelCase: autoComplete readOnly maxLength tabIndex htmlFor (or for)
   onInput · NO: autocomplete= (type error) · class or className · data-x/aria-x stay hyphenated
 - **hooks (aio/air)** useLocal useSignal useRef useId createContext/useContext resource/useResource
-  onChange watch computed effect batch untrack trackedMemo useHead({ title }) useDimensions useRaf
-  useInterval useOptimistic useVirtualList useConnected useUser onMount onCleanup afterRender
-  onWindowEvent onGlobalKey("ctrl+k", fn) onBackButton (Android Back; returns a disposer) — hooks in
-  call order, never behind an if
+  onChange watch computed effect batch untrack trackedMemo useHead({ title }) useDimensions
+  useRaf((time, delta) => …) useInterval useOptimistic useVirtualList useConnected useUser onMount
+  onCleanup afterRender onWindowEvent onGlobalKey("mod+k", fn) (a chord string matches modifiers
+  exactly; ("k", fn, { mod: true }) = others don't care) onBackButton (Android Back; returns a
+  disposer) — hooks in call order, never behind an if
+- **methods are a round trip** prefs.setZoom(prefs.zoom + 10) twice fast loses a step: state updates
+  after the reply — build on your own value (a local signal / the method's arg), not the stale read
 - **components** <Show when={x} fallback={…}>{(v) => …}</Show> · lazy(() => import("./X.tsx")) ·
   <Defer trigger="viewport" load={…}> · <Transition> · ErrorBoundary/Suspense/Portal are symbols:
   NO: <ErrorBoundary> (TS2604) YES: h(ErrorBoundary, { fallback: (e: Error) => <p>{e.message}</p> }, <Kid/>)
@@ -1097,7 +1103,9 @@ routes: { "/x/:id": route((ctx) => ctx.json(…)) } (raw HTTP: webhooks, uploads
 notify({ title }) via s.$do · updates: "<channel url>" · feedback: true · plugins:
 [definePlugin({ … })] · connectCli(url) (aio/server) for a remote CLI client · UDP/multicast →
 node:dgram (stable, no flag); Deno.listenDatagram type-checks but is undefined at runtime
-unless deno.json has "unstable": ["net"]
+unless deno.json has "unstable": ["net"] · a multicast send from a socket bound to a LAN address
+or given setMulticastInterface lanIp can fail (send UNKNOWN) on a host whose VPN firewall blocks it;
+unbound it follows the default route (the VPN) → also unicast the query to each known host
 
 ### workers
 
@@ -1135,7 +1143,7 @@ ${show(TEST_TSX)}
   1000 ms schedule.every with h.advance(3000) fires exactly 3 ticks)
   · testServer({ cells, routes }) real HTTP/WS on freePort() ·
   testMultiClient(cfg, n) real wire calls (JSON args/returns, access) · openCassette(path)
-  record/replay external calls · testBrowser(url) headless Chromium ·
+  record/replay external calls ·
   serverImport("./x.server.ts", import.meta.url) + stub
 - from an app: am testgen → tests/ui.gen.ts (typed names) · am record tests/x.test.ts turns what
   the RUNNING app dispatched (its timeline) into a bootCells test; a stopped app: its crash journal
@@ -1185,7 +1193,7 @@ ui       am surface [idx|server] [--component=X] [--path=App/Main] [--depth=N] [
            app started with am start --client=electron --cdp)
          am shot --video[=F.mp4|.webm] [--duration=S]   record the window until Ctrl-C
 inspect  am logs [substr] [--level=warn] [--tag=cell:notes] [--since=15m] [--lines=N] [--follow]
-         am errors [--lines=N] · am health · am metrics · am heap · am top · am config
+         am errors [--lines=N] [--since=reload] · am health · am metrics · am heap · am top · am config
          am cost [--keys] [--cell=X] [--window=5m] · am doctor (running app vs aio on disk)
          am check (client bundle builds?) · am where <file> · am migrate [--from=X] (retired spellings)
          am testgen [entry] [--out=F]
@@ -1197,7 +1205,8 @@ project  am create <name> · am add cell <n> · am add server <n> · am build [t
 net/auth am auth users|create <id> --role=admin|passwd|unlock|totp <id> off|role|verify|revoke|rm ·
          am pair · am profile [--out=F] · am trust · am discover [--timeout=ms]
 global   --app=<id>[@profile] --port=N --profile=<name|path> (2nd data home)
-         --instance=<name> (private copy: own lock/data/logs)
+         --instance=<name> (private copy: own lock/data/logs; am start --instance=<name> --fresh =
+         empty data, thrown away by am stop) · am instances lists every instance + startedBy
          --quiet --timeout=ms --wait[=N] · \`--\` ends am's flags · am help <verb> = full detail`,
     )
   }`;
@@ -1266,6 +1275,9 @@ const SHIP = `## SHIP — build targets, versions, releases
   gradle) · web: static PWA directory, the standalone shape (https host; iPhone: Add to Home
   Screen) · cli-client / electron-client / android-client / ios-client: thin clients →
   build.server "host:port"
+- **electronRuntime** (deno.json build) "online" (am create writes it): the package has no
+  Electron, the FIRST start downloads it (~120 MB, checksum-pinned) — offline on first run = no app ·
+  "offline" (absent = this): Electron bundled, opens with no network, first run included
 - **platforms** "host" (default) linux linux-arm64 windows macos macos-arm64 — server/browser/cli
   cross-compile; electron/android package on their own OS (skipped with a reason)
 - **commands** deno task compile (the default "client" target) · deno task build [--targets=a,b]
@@ -1281,16 +1293,23 @@ const SHIP = `## SHIP — build targets, versions, releases
   [--notes=…] (build + sign → release/<channel>/<os>-<arch>.json; --dir=D) → host that dir → app:
   aio.run({ updates: "<channel base url>" }) · deno task ship github → CI workflow
 - **prod facts** a binary is prod: no control API (am state/dispatch/surface need dev; am
-  status/health/logs work) · same data dir as dev · --expose → LAN + TLS + key/PIN · run the artifact
-  from another cwd before calling it done
+  status/health/logs work) · same data dir as dev · --expose → LAN + TLS + key/PIN
+- **verify before calling it done** — headless, NEVER on the human's screen (no window of yours
+  on their display, no screen capture): deno task build --smoke (each artifact from a foreign cwd,
+  throwaway home, free port; Linux desktop windows on a nested display) · or <artifact>
+  --client=server-only + am status/health/logs + a headless test against its port
+  · beside a person's running copy: <binary> --instance=<name> (own data, lock and window profile
+  — no faked HOME/XDG_*) · end it: am stop --instance=<name> --app=<id>
 - **dev flags** deno task dev --client=electron|browser|cli|server-only --expose --port=N --cdp --open
   --watch=false --prod · unknown flags are refused (Deno flags like --env-file: am start)`;
 
 const SHIP_MIN = `## SHIP
 
-- deno task compile → dist/<name>-<M.m.build> (+ manifest.json); run it from ANOTHER cwd before
-  calling it done · deno task build [--targets=…] for every target · am publish for releases
+- deno task compile → dist/<name>-<M.m.build> (+ manifest.json); verify it headless before calling
+  it done — deno task build --smoke, or <artifact> --client=server-only + a headless test; never on
+  the human's screen · deno task build [--targets=…] for every target · am publish for releases
 - a binary is prod: no am state/dispatch/surface (status/health/logs work) · --expose = LAN + TLS + PIN
+- beside a person's copy: <binary> --instance=<name> (own data/lock) · am stop --instance=<name> --app=<id>
 - standalone APK: no Deno, no server — content = deno.json "assets" + relative fetch; state = cells
 - more: am agent --task=ship`;
 
@@ -1507,7 +1526,7 @@ const PITFALLS = `## PITFALLS — the long list (symptom → cause → fix)
 - Kill -9 inside the 100ms persist window → last writes lost → journal: true (+ PRAGMA synchronous=FULL).
 - Two apps with one appId → one lock/one db → distinct appId per entry.
 - Entry moved to src/client/app.ts → app root moves → ../core imports 404 → keep entry at the top.
-- assets only in aio.run → 404 in the binary → also deno.json "assets".
+- assets only in aio.run, or a .wasm beside a browser module → 404 packaged → deno.json "assets".
 - build.v8Flags vs compile.v8Flags → compile aborts → build.v8Flags.
 - Unknown runtime flag (--headless) → refused → --client=server-only.
 - A Deno flag (--env-file) after deno task dev → refused (lands after the entry) → am start --env-file=.env
@@ -1780,7 +1799,9 @@ section (\`--list\` for all; \`--task=new\` is the build flow).
   app on the machine. Use \`am stop\` (\`am stop --all\` for this project);
   \`am instances\` shows what is running.
 - **Never take over the screen.** Use \`am start --client=server-only\` and read
-  the UI with \`am surface\` — it needs no window.
+  the UI with \`am surface\` — it needs no window. The built artifact too:
+  \`deno task build --smoke\`, or \`<artifact> --client=server-only\` and a
+  headless test — never its window on the human's display.
 - **Never script around \`am\`.** Python, jq or curl against this app is a worse
   copy of a verb. Every command takes \`--json\`.
 - **Learn before editing.** \`am agent\` first — aio is not React/Next.

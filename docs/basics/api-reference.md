@@ -102,15 +102,16 @@ depth and effect backlog are read from the loop probe, not from an import --
 
 ## Server (HTTP + caller context)
 
-| API                                     | Description                                                                                                                          |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `route(handler, opts?)`                 | A `routes: {}` handler with `:id` params, method guard, cookies, `ctx.json/text/redirect`                                            |
-| `serverUser()`                          | Ambient caller identity — `undefined` = anonymous or server-origin                                                                   |
-| `serverRequest()`                       | Ambient request facts — `{ ip, headers, cookies, url, method, via }`, read-only                                                      |
-| `serverFns(ns, fns)`                    | DEFINE server-only functions (server side)                                                                                           |
-| `serverFn<T>(ns)`                       | CALL them from the client — a typed proxy over the WS bridge (never queued: offline, or a connection lost mid-call, rejects at once) |
-| `generateTotpSecret()` / `totpUri(...)` | TOTP enrollment primitives for a hand-rolled 2FA UI                                                                                  |
-| `verifyTotp(secret, code)`              | Verify a TOTP code                                                                                                                   |
+| API                                     | Description                                                                                                                                  |
+| --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `route(handler, opts?)`                 | A `routes: {}` handler with `:id` params, method guard, cookies, `ctx.json/text/redirect`                                                    |
+| `serveFile(req, path, { type? })`       | (`aio/server`) A file on disk with Range (206/416), safe type + nosniff — see [big data](../persistence/big-data.md#files-on-disk-servefile) |
+| `serverUser()`                          | Ambient caller identity — `undefined` = anonymous or server-origin                                                                           |
+| `serverRequest()`                       | Ambient request facts — `{ ip, headers, cookies, url, method, via }`, read-only                                                              |
+| `serverFns(ns, fns)`                    | DEFINE server-only functions (server side)                                                                                                   |
+| `serverFn<T>(ns)`                       | CALL them from the client — a typed proxy over the WS bridge (never queued: offline, or a connection lost mid-call, rejects at once)         |
+| `generateTotpSecret()` / `totpUri(...)` | TOTP enrollment primitives for a hand-rolled 2FA UI                                                                                          |
+| `verifyTotp(secret, code)`              | Verify a TOTP code                                                                                                                           |
 
 See [routes](../examples/05-integrations.md) and [auth](../auth/auth.md).
 

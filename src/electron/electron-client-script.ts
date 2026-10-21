@@ -7,6 +7,7 @@ import {
   tmplCrashGuard,
   tmplIpcGuard,
   tmplPermissionGuard,
+  tmplShowWhenPainted,
   tmplWebGuard,
 } from "./electron-shared.ts";
 
@@ -933,11 +934,17 @@ app.on('ready', () => {
     else if (arg.endsWith('.aioapp')) profileFile = arg;
   }
 
+  // Hidden until its page has painted, like an app's window (no blank frame).
   const win = new BrowserWindow({
     width: 480, height: 300,
     resizable: false,
+    show: false,
     webPreferences: { nodeIntegration: false, contextIsolation: true },
   });
+  {
+    const __aioRestoreMax = false, __aioBgNow = () => null;
+${tmplShowWhenPainted()}
+  }
   // 🔒 The same rules as an app's own shell. Until a connect, no origin is
   // the app (the connect page needs no permission). There is no <webview>
   // (webviewTag is off) and no openWindow here, so the one other page this

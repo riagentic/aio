@@ -38,6 +38,11 @@ import { bytes } from "../diagnostics/fmt.ts";
 import { bad, ok, staged, step, warn } from "./build-say.ts";
 import { minifyDeclared } from "./minify-server.ts";
 import { HEY, NO } from "../diagnostics/fmt.ts";
+import {
+  mountsOf,
+  unmountedAssetUrlMessage,
+  unmountedAssetUrls,
+} from "./asset-urls.ts";
 
 /** Where the bundle's REAL input list is recorded — esbuild's own metafile,
  *  reduced to the local files it actually read.
@@ -671,6 +676,25 @@ export async function runBundle(
         },
       });
       for (const [headline, fix] of notes) warn(headline, undefined, fix);
+      // A `.wasm` (any non-module file) the page loads beside its module —
+      // dev serves it; no artifact does (asset-urls.ts).
+      for (
+        const f of unmountedAssetUrls({
+          module: input,
+          src: code,
+          mounts: mountsOf(declared.assets),
+          isFile: (rel) => {
+            try {
+              return Deno.statSync(join(root, rel)).isFile;
+            } catch {
+              return false; // aio-ok: absent is "not a file"
+            }
+          },
+        })
+      ) {
+        const [headline, fix] = unmountedAssetUrlMessage(input, f);
+        warn(headline, undefined, fix);
+      }
     }
   };
 

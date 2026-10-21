@@ -100,7 +100,7 @@ Deno.test("every Worker module deno compile cannot trace is in the include list"
         `  FIX: add \`new URL("${
           "../" + relative(SRC, w).split("\\").join("/")
         }", import.meta.url)\` to the worker list in dbWorkerInclude() ` +
-        `(src/build/build-compile.ts).`,
+        `(src/build/build-includes.ts).`,
     );
   }
 });

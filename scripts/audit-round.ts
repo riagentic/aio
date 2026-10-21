@@ -89,7 +89,7 @@ import {
 } from "../src/state/state-filter.ts";
 import { applyWirePatches, type WirePatch } from "../src/protocol/patch-ops.ts";
 import { narrowStringPatches } from "../src/state/patch-compact.ts";
-import { parseCli } from "../src/server/aio-cli.ts";
+import { instanceRequest, parseCli } from "../src/server/aio-cli.ts";
 import { awaitPredecessor } from "../src/server/updates-apply.ts";
 import {
   AIO_RUNTIME_FLAG_SPECS,
@@ -2135,6 +2135,7 @@ async function round30(r: () => number): Promise<void> {
     "--cdp=": "9222",
     "--profile=": "dev",
     "--home=": "/tmp/aio-audit-home",
+    "--instance=": "audit",
     "--__aio-relaunch-after=": "123",
   };
 
@@ -2142,7 +2143,9 @@ async function round30(r: () => number): Promise<void> {
   // relaunch handshake reads it straight off argv in `awaitPredecessor`,
   // before any config exists. It is checked below by being USED, so the
   // exception cannot quietly grow into "this flag does nothing".
-  const RAW_ARGV_ONLY = new Set(["--__aio-relaunch-after="]);
+  // `--instance=<name>` too: read off argv by `instanceRequest` BEFORE boot,
+  // because it picks the apps root every later path is resolved against.
+  const RAW_ARGV_ONLY = new Set(["--__aio-relaunch-after=", "--instance="]);
 
   for (const spec of AIO_RUNTIME_FLAG_SPECS) {
     const arg = spec.endsWith("=")
@@ -2185,6 +2188,19 @@ async function round30(r: () => number): Promise<void> {
   }
 
   // …and RAW_ARGV_ONLY is only defensible if something really does read it.
+  {
+    const asked = instanceRequest(["--instance=audit"]);
+    if (!asked || asked.name !== "audit" || !asked.appsDir.endsWith("audit")) {
+      finding(
+        "30",
+        `--instance=audit is RAW_ARGV_ONLY, but instanceRequest() did not ` +
+          `read it (${JSON.stringify(asked)}) — the flag would do nothing`,
+      );
+    }
+    if (instanceRequest([]) !== null) {
+      finding("30", "instanceRequest() answers an instance with no flag given");
+    }
+  }
   // Proven, not asserted: `awaitPredecessor` must WAIT on the pid the flag
   // carries, and return at once without it.
   {

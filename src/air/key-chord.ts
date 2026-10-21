@@ -1,6 +1,6 @@
-// key-chord.ts — the ONE reading of a key spelling, shared by `am trigger`
-// and testUI's `press`/`keyDown`/`keyUp`. Pure; not imported by the browser
-// bundle (the live client receives the already-parsed key + modifiers).
+// key-chord.ts — the ONE reading of a key spelling, shared by `am trigger`,
+// testUI's `press`/`keyDown`/`keyUp`, and `onGlobalKey`'s chord strings
+// (`bindingChord` — the one export the browser bundle reaches). Pure.
 
 /** The KeyboardEvent `key` for the names people write in lowercase or short
  *  form. `press("enter")` used to dispatch `key: "enter"` — no handler and no
@@ -140,4 +140,75 @@ export function pressChord(
     );
   }
   return c;
+}
+
+type BindMod = "ctrl" | "meta" | "alt" | "shift" | "mod";
+
+/** The modifiers a BINDING spelling names, keyed as `KeyChord` fields. */
+const BIND_MODS: Record<string, BindMod> = {
+  ctrl: "ctrl",
+  control: "ctrl",
+  cmd: "meta",
+  command: "meta",
+  meta: "meta",
+  super: "meta",
+  alt: "alt",
+  option: "alt",
+  shift: "shift",
+  mod: "mod",
+};
+
+/** Does a keydown (`key`, `code`) press the KEYCAP a chord string names?
+ *
+ *  `e.key` alone misses two presses a user means: Shift+1 types `"!"` (so
+ *  `"ctrl+shift+1"` never fired), and on macOS Alt+letter types another
+ *  character (`"alt+f"` → `"ƒ"`), as does every letter on a non-Latin layout
+ *  (`"ф"`). The rule, per key class:
+ *  - a DIGIT is the digit-row key (`code` `Digit1`) or a key typing that
+ *    digit (numpad): every layout prints the digits on that row, even the
+ *    ones (AZERTY) where the unshifted key types `&` — and Shift is then a
+ *    real modifier, so `"ctrl+1"` and `"ctrl+shift+1"` are different bindings;
+ *  - a LETTER is the key typing that letter — the layout's own keycap, so
+ *    AZERTY's `"ctrl+a"` is the key labelled A, not QWERTY's A position — and
+ *    falls back to the US position (`code` `KeyA`) only when the key typed no
+ *    ASCII character (Alt on macOS, a dead key, a non-Latin layout), the same
+ *    fallback browsers' own shortcuts use. An ASCII result is never
+ *    re-interpreted: AZERTY's `,` sits at `KeyM` and must not fire `"ctrl+m"`;
+ *  - anything else is `key` alone (case-insensitive). */
+export function keycapMatch(bind: string, key: string, code: string): boolean {
+  if (key.toLowerCase() === bind.toLowerCase()) return true;
+  if (/^[0-9]$/.test(bind)) return code === "Digit" + bind;
+  if (!/^[a-z]$/i.test(bind)) return false;
+  const typedNoAscii = key === "Dead" || key === "Unidentified" ||
+    ([...key].length === 1 && key.codePointAt(0)! > 0x7f);
+  return typedNoAscii && code === "Key" + bind.toUpperCase();
+}
+
+/** `onGlobalKey`'s chord string —`"ctrl+s"`, `"ctrl+shift+s"`, `"mod+k"`,
+ *  `"alt+f1"`, `"ctrl++"` — as the key plus the modifiers it names. Unlike a
+ *  press, `mod` stays `mod` (Ctrl OR ⌘ at event time): a binding runs on
+ *  every platform. A segment before the key that is not a modifier
+ *  (`"hyper+k"`), or no key at all (`"ctrl+"`), throws — the string used to
+ *  be compared literally against `KeyboardEvent.key` and never fired. */
+export function bindingChord(
+  spec: string,
+): { key: string; mods: Partial<Record<BindMod, true>> } {
+  const fail = (why: string) =>
+    new Error(
+      `onGlobalKey(${JSON.stringify(spec)}): ${why} — write ` +
+        `modifier+…+key with ctrl/shift/alt/meta/mod ` +
+        `("ctrl+s", "mod+shift+k", "alt+f1").`,
+    );
+  // `"ctrl++"` is Ctrl and the `+` key: splitting on "+" would lose it.
+  const plusKey = spec.endsWith("++");
+  const parts = (plusKey ? spec.slice(0, -2) : spec).split("+");
+  const key = plusKey ? "+" : parts.pop()!;
+  if (key === "") throw fail("no key after the last +");
+  const mods: Partial<Record<BindMod, true>> = {};
+  for (const p of parts) {
+    const m = BIND_MODS[p.toLowerCase()];
+    if (!m) throw fail(`${JSON.stringify(p)} is not a modifier`);
+    mods[m] = true;
+  }
+  return { key: normalizeKey(key), mods };
 }

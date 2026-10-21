@@ -263,6 +263,10 @@ Deno.test("am: ensureSingleton — responding instance refuses with exit 1", asy
     });
     // --json errors land on STDOUT (the stream a script parses) + exit 1.
     assert(logs.some((l) => l.includes("already running")));
+    // …and name the private copy, so the next move is not `am stop` on a
+    // person's window (jot §4): the document's `fix` field.
+    const doc = JSON.parse(logs.find((l) => l.includes("already running"))!);
+    assertStringIncludes(doc.fix, "am start --instance=<name>");
   } finally {
     dropFixtureLock(app);
     await server.shutdown();

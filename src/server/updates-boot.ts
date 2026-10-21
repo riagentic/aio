@@ -1217,8 +1217,16 @@ function recordInstalledVersion(
 ): void {
   if (isThere(pendingPath(dataDir)) || isThere(firstBootPath(dataDir))) return;
   const dir = dirname(here);
-  // This process is already writing it (a confirm earlier in this boot).
-  if (recordWrites.has(dir)) return;
+  // This process is already writing it (a confirm earlier in this boot): the
+  // check is made again once that write has answered — never dropped, since
+  // the record can change after that write lands and before it answers.
+  const inFlight = recordWrites.get(dir);
+  if (inFlight) {
+    void inFlight.then(() =>
+      recordInstalledVersion(here, version, dataDir, { from, said })
+    );
+    return;
+  }
   let rec: { version?: unknown; artifact?: unknown } | null;
   try {
     rec = JSON.parse(Deno.readTextFileSync(join(dir, "installed.json")));
@@ -1230,10 +1238,9 @@ function recordInstalledVersion(
   const named = rec.version;
   if (typeof named !== "string" || named === version) return;
   if (from !== undefined && named !== from) return;
-  recordWrites.add(dir);
   // Said once the writer has answered: it alone decides what is a record it
   // can rewrite, and it reports a write that failed, with the path and why.
-  void reconcileInstalledVersion(dir, { version }).then((written) => {
+  const write = reconcileInstalledVersion(dir, { version }).then((written) => {
     if (written) {
       said?.warn(
         "updates",
@@ -1242,10 +1249,12 @@ function recordInstalledVersion(
       );
     }
   }).finally(() => recordWrites.delete(dir));
+  recordWrites.set(dir, write);
 }
 
-/** Install folders whose record this process is rewriting right now. */
-const recordWrites = new Set<string>();
+/** Install folders whose record this process is rewriting right now, and
+ *  that write (settled: the writer reports its own failure). */
+const recordWrites = new Map<string, Promise<void>>();
 
 function isThere(path: string): boolean {
   try {

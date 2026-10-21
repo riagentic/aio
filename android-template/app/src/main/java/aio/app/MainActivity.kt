@@ -1116,6 +1116,7 @@ document.addEventListener('DOMContentLoaded',()=>{if(up())mo.disconnect()})})();
 private class AioSplashSpec(
     val minMs: Long, val text: String?, val family: String?, val size: Float,
     val bold: Boolean, val scale: Int, val night: Boolean?, val light: IntArray, val dark: IntArray,
+    val capMs: Long = SPLASH_CAP_MS, val fadeMs: Long = 200L,
 )
 
 /** The image (assets/aio-splash.png) and the text, centred over the app's
@@ -1138,9 +1139,9 @@ private class AioSplash(private val view: android.view.View, private val minMs: 
             }
         })
         view.postDelayed({
-            if (!gone) android.util.Log.w("aio", "splash: no load signal in " + SPLASH_CAP_MS / 1000 + " s — closed anyway")
+            if (!gone) android.util.Log.w("aio", "splash: no load signal in " + (SPLASH?.capMs ?: SPLASH_CAP_MS) / 1000 + " s — closed anyway")
             hide()
-        }, SPLASH_CAP_MS)
+        }, SPLASH?.capMs ?: SPLASH_CAP_MS)
     }
 
     /** The page has loaded. */
@@ -1160,7 +1161,7 @@ private class AioSplash(private val view: android.view.View, private val minMs: 
         if (gone) return
         gone = true
         android.util.Log.i("aio", "splash: gone " + (now() - shownAt) + " ms after it was shown")
-        view.animate().alpha(0f).setDuration(200).withEndAction {
+        view.animate().alpha(0f).setDuration(SPLASH?.fadeMs ?: 200L).withEndAction {
             (view.parent as? android.view.ViewGroup)?.removeView(view)
         }
     }

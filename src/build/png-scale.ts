@@ -14,6 +14,7 @@
  * Pure: bytes in, bytes out.
  */
 
+import { inflateSync } from "node:zlib";
 import { ICO_SIZES, icoFromPngs, pngFromRgba, pngSize } from "./app-icon.ts";
 
 /** The largest side read: 4096² RGBA is 64 MB, and no icon is drawn larger. */
@@ -22,10 +23,65 @@ const MAX_SIDE = 4096;
 /** Samples per pixel by PNG colour type (palette: one index). */
 const CHANNELS: Record<number, number> = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 };
 
+/** A PNG's header and chunks, read; its pixel data still deflated. */
+type PngParts = {
+  w: number;
+  h: number;
+  type: number;
+  channels: number;
+  idat: Uint8Array[];
+  palette: Uint8Array | null;
+  alpha: Uint8Array | null;
+};
+
 /** A PNG as RGBA pixels, or why this one is not read. Never throws. */
 export async function decodePng(
   png: Uint8Array,
 ): Promise<{ w: number; h: number; rgba: Uint8Array } | string> {
+  const p = pngParts(png);
+  if (typeof p === "string") return p;
+  let raw: Uint8Array;
+  try {
+    raw = new Uint8Array(
+      await new Response(
+        new Blob(p.idat as BlobPart[]).stream().pipeThrough(
+          new DecompressionStream("deflate"),
+        ),
+      ).arrayBuffer(),
+    );
+  } catch (e) {
+    return `its pixel data cannot be inflated (${
+      e instanceof Error ? e.message : e
+    })`;
+  }
+  return pngPixels(p, raw);
+}
+
+/** `decodePng`, synchronously (for a resolver that is pure and sync, such as
+ *  the splash's). Never throws. */
+export function decodePngSync(
+  png: Uint8Array,
+): { w: number; h: number; rgba: Uint8Array } | string {
+  const p = pngParts(png);
+  if (typeof p === "string") return p;
+  let raw: Uint8Array;
+  try {
+    const all = new Uint8Array(p.idat.reduce((n, d) => n + d.length, 0));
+    let at = 0;
+    for (const d of p.idat) {
+      all.set(d, at);
+      at += d.length;
+    }
+    raw = new Uint8Array(inflateSync(all));
+  } catch (e) {
+    return `its pixel data cannot be inflated (${
+      e instanceof Error ? e.message : e
+    })`;
+  }
+  return pngPixels(p, raw);
+}
+
+function pngParts(png: Uint8Array): PngParts | string {
   const size = pngSize(png);
   if (!size) return "not a PNG";
   const { w, h } = size;
@@ -57,22 +113,15 @@ export async function decodePng(
   if (type === 3 && !palette) return "a palette image with no palette";
   // A colour KEY (one grey level or one RGB value is transparent), not alpha.
   if (alpha && type !== 3) return "transparency by colour key";
+  return { w, h, type, channels, idat, palette, alpha };
+}
 
+function pngPixels(
+  p: PngParts,
+  raw: Uint8Array,
+): { w: number; h: number; rgba: Uint8Array } | string {
+  const { w, h, type, channels, palette, alpha } = p;
   const stride = w * channels;
-  let raw: Uint8Array;
-  try {
-    raw = new Uint8Array(
-      await new Response(
-        new Blob(idat as BlobPart[]).stream().pipeThrough(
-          new DecompressionStream("deflate"),
-        ),
-      ).arrayBuffer(),
-    );
-  } catch (e) {
-    return `its pixel data cannot be inflated (${
-      e instanceof Error ? e.message : e
-    })`;
-  }
   if (raw.length !== h * (stride + 1)) {
     return "its pixel data has the wrong length";
   }

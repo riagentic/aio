@@ -12,19 +12,9 @@
 //    reported as "unreachable or stalled".
 import { assert, assertEquals, assertMatch } from "@std/assert";
 import { join } from "@std/path";
-import { gitLsRemote } from "../src/server/updates-check.ts";
-import { rebuildFromGit } from "../src/server/updates-rebuild.ts";
-import type { Log } from "../src/diagnostics/logger.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { EXE, programBytes, writeProgram } from "./fake-program-helper.ts";
-import { gitRunsFrom } from "./proc-helper.ts";
-
-const silentLog = {
-  info: () => {},
-  warn: () => {},
-  error: () => {},
-  debug: () => {},
-} as unknown as Log;
+import { gitRunsFrom, inChildEnv } from "./proc-helper.ts";
 
 /** Test-side git: the test's own env, minus anything a case sets. */
 async function git(args: string[], cwd: string): Promise<string> {
@@ -88,26 +78,34 @@ if (Deno.build.os !== "windows") await Deno.chmod(out, 0o755);
 `,
 };
 
-/** Run `fn` with env vars set, restoring them after. */
-async function withEnv<T>(
-  vars: Record<string, string | undefined>,
-  fn: () => Promise<T>,
-): Promise<T> {
-  const prev = Object.fromEntries(
-    Object.keys(vars).map((k) => [k, Deno.env.get(k)]),
+const REBUILD =
+  new URL("../src/server/updates-rebuild.ts", import.meta.url).href;
+const CHECK = new URL("../src/server/updates-check.ts", import.meta.url).href;
+
+type Rebuilt = {
+  ok: boolean;
+  sha?: string;
+  error?: string;
+  contract?: unknown;
+  /** How long the rebuild took, measured in the child. */
+  ms: number;
+};
+
+/** `rebuildFromGit(opts)` in a child whose environment has `env` — an
+ *  inherited variable is the case, and the process's own env is every
+ *  parallel test file's (`inChildEnv`). */
+function rebuildUnder(
+  env: Record<string, string | undefined>,
+  opts: Record<string, unknown>,
+): Promise<Rebuilt> {
+  return inChildEnv<Rebuilt>(
+    env,
+    `import { rebuildFromGit } from ${JSON.stringify(REBUILD)};`,
+    `const log = { info() {}, warn() {}, error() {}, debug() {} };
+const t0 = Date.now();
+const r = await rebuildFromGit({ ...${JSON.stringify(opts)}, log });
+return { ...r, ms: Date.now() - t0 };`,
   );
-  const put = (v: Record<string, string | undefined>) => {
-    for (const [k, x] of Object.entries(v)) {
-      if (x === undefined) Deno.env.delete(k);
-      else Deno.env.set(k, x);
-    }
-  };
-  put(vars);
-  try {
-    return await fn();
-  } finally {
-    put(prev);
-  }
 }
 
 Deno.test({
@@ -119,17 +117,11 @@ Deno.test({
       const want = await repo(join(dir, "src"), app);
       const other = await repo(join(dir, "hook"), { "x": "other" });
       assert(want !== other);
-      const r = await withEnv(
+      const r = await rebuildUnder(
         { GIT_DIR: join(dir, "hook", ".git") },
-        () =>
-          rebuildFromGit({
-            source: join(dir, "src"),
-            ref: "main",
-            workDir: join(dir, "work"),
-            log: silentLog,
-          }),
+        { source: join(dir, "src"), ref: "main", workDir: join(dir, "work") },
       );
-      assert(r.ok, r.ok ? "" : r.error);
+      assert(r.ok, r.error);
       assertEquals(r.sha, want, "recorded the hook repo's commit");
       assertEquals(
         (r.contract as unknown as { gitDir: string }).gitDir,
@@ -149,17 +141,11 @@ Deno.test({
     try {
       const want = await repo(join(dir, "src"), app);
       await Deno.mkdir(join(dir, "elsewhere"));
-      const r = await withEnv(
+      const r = await rebuildUnder(
         { GIT_WORK_TREE: join(dir, "elsewhere") },
-        () =>
-          rebuildFromGit({
-            source: join(dir, "src"),
-            ref: "main",
-            workDir: join(dir, "work"),
-            log: silentLog,
-          }),
+        { source: join(dir, "src"), ref: "main", workDir: join(dir, "work") },
       );
-      assert(r.ok, r.ok ? "" : r.error);
+      assert(r.ok, r.error);
       assertEquals(r.sha, want);
     } finally {
       await dropTempDir(dir);
@@ -185,7 +171,7 @@ Deno.test({
         join(bin, "ssh" + EXE),
         `#!/bin/sh\necho "$@" >> "${argv}"\nexit 255\n`,
       );
-      await withEnv(
+      const r = await inChildEnv<{ ok: boolean; error?: string }>(
         {
           ...gitRunsFrom(bin),
           GIT_DIR: join(dir, "hook", ".git"),
@@ -194,15 +180,14 @@ Deno.test({
           GIT_CONFIG_GLOBAL: "/dev/null",
           GIT_CONFIG_NOSYSTEM: "1",
         },
-        async () => {
-          const r = await gitLsRemote(
-            "ssh://nobody@127.0.0.1/r.git",
-            "main",
-            10_000,
-          );
-          assert(!r.ok);
-        },
+        `import { gitLsRemote } from ${JSON.stringify(CHECK)};`,
+        `return await gitLsRemote("ssh://nobody@127.0.0.1/r.git", "main", 60_000);`,
       );
+      assert(!r.ok);
+      // The fake ssh exits at once; a deadline is only a backstop (a never-run
+      // exe's first start on a loaded Windows can stall seconds). A timeout is
+      // reported as itself, not as the missing argv file it leaves behind.
+      assert(!/did not answer within/.test(r.error ?? ""), r.error);
       const call = (await Deno.readTextFile(argv)).trim();
       assertMatch(call, /-o BatchMode=yes/);
       assert(!/User=hook/.test(call), call);
@@ -255,33 +240,30 @@ Deno.exit((await up.status).code);
       );
       const cfg = join(dir, "gitconfig");
       await Deno.writeTextFile(cfg, `[protocol "ext"]\n\tallow = always\n`);
-      const t0 = Date.now();
-      const r = await withEnv(
+      const r = await rebuildUnder(
         { GIT_CONFIG_GLOBAL: cfg, GIT_CONFIG_NOSYSTEM: "1" },
-        () =>
-          rebuildFromGit({
-            source: `ext::${
-              [
-                Deno.execPath(),
-                "run",
-                "-A",
-                "--no-config",
-                trickle,
-                join(dir, "src"),
-              ]
-                .map((w) => w.replaceAll("%", "%%").replaceAll(" ", "% "))
-                .join(" ")
-            }`,
-            ref: "main",
-            workDir: join(dir, "work"),
-            log: silentLog,
-            timeoutMs: 2500,
-          }),
+        {
+          source: `ext::${
+            [
+              Deno.execPath(),
+              "run",
+              "-A",
+              "--no-config",
+              trickle,
+              join(dir, "src"),
+            ]
+              .map((w) => w.replaceAll("%", "%%").replaceAll(" ", "% "))
+              .join(" ")
+          }`,
+          ref: "main",
+          workDir: join(dir, "work"),
+          timeoutMs: 2500,
+        },
       );
-      assert(r.ok, r.ok ? "" : r.error);
+      assert(r.ok, r.error);
       assertEquals(r.sha, want);
       assert(
-        Date.now() - t0 > 2 * 2500,
+        r.ms > 2 * 2500,
         "the transfer was not slower than the deadline",
       );
     } finally {

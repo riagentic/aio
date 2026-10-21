@@ -22,8 +22,9 @@
 
 // ── Command imports ────────────────────────────────────────
 
-import { fromFileUrl, join, resolve } from "@std/path";
-import { homedir } from "./server/paths.ts";
+import { fromFileUrl, resolve } from "@std/path";
+import { instanceAppsDir, instanceNameError } from "./server/app-dirs.ts";
+import { freshHome } from "./am/am-instance.ts";
 import {
   cmdInstances,
   cmdKill,
@@ -385,19 +386,26 @@ async function main(): Promise<void> {
   // silently relocating someone who set it by hand is the surprise this flag
   // exists to prevent for everyone else.
   if (flags.instance !== undefined) {
-    if (!flags.instance || /[\\/]/.test(flags.instance)) {
-      outError(
-        `--instance needs a simple name: --instance=agent1 ` +
-          `(got ${JSON.stringify(flags.instance)})`,
-        detectMode(flags),
-      );
+    const bad = instanceNameError(flags.instance);
+    if (bad) {
+      outError(bad, detectMode(flags));
       Deno.exit(1);
     }
-    const wanted = join(homedir(), ".aio-instances", flags.instance);
+    const wanted = instanceAppsDir(flags.instance);
     const explicit = Deno.env.get("AIO_APPS_DIR");
     if (!explicit) {
       Deno.env.set("AIO_APPS_DIR", wanted);
     } else if (resolve(explicit) !== resolve(wanted)) {
+      // `--fresh` throws its data away on stop — only ever inside the
+      // instance it names, never in a scope some variable picked instead.
+      if (flags.fresh) {
+        outError(
+          `--fresh needs --instance to pick the scope, and AIO_APPS_DIR ` +
+            `(${explicit}) overrides it — unset AIO_APPS_DIR`,
+          detectMode(flags),
+        );
+        Deno.exit(1);
+      }
       // Winning is fine; winning SILENTLY is not. `--instance=agent1` is a
       // request for a private copy, and a shell that happens to export
       // AIO_APPS_DIR turned it into "whatever that scope is" — possibly the
@@ -440,6 +448,37 @@ async function main(): Promise<void> {
         args.splice(i, 1);
       }
     }
+  }
+  // `am start --instance=X --fresh` — a run that starts from EMPTY data and
+  // throws it away on `am stop` (demos, tests, agents: studio §3). The data
+  // home is a directory of the instance's own (`freshHome`), bound here as
+  // `--home` so every later step — the lock key, launch.json, the logs, a
+  // restart — follows it like any other requested home. Only ever inside a
+  // named instance: never the shared scope a person's copy lives in.
+  if (flags.fresh) {
+    const fail = (m: string): never => {
+      outError(m, detectMode(flags));
+      Deno.exit(1);
+    };
+    if (command !== "start") {
+      fail(
+        `--fresh is am start's (am start --instance=<name> --fresh); ` +
+          `\`am stop --instance=<name>\` throws the fresh data away`,
+      );
+    }
+    if (flags.instance === undefined) {
+      fail(
+        "--fresh needs --instance=<name>: a fresh run's data is thrown away " +
+          "on stop, so it only ever lives in a private instance — " +
+          "am start --instance=demo --fresh",
+      );
+    }
+    if (flags.home !== undefined || flags.profile !== undefined) {
+      fail("--fresh picks its own data home — drop --home/--profile");
+    }
+    const oneApp = !appIsAmbiguous(flags.app);
+    if (!oneApp) fail("--fresh starts ONE app — name it: --app=<id>");
+    flags.home = freshHome(flags.instance!, resolveAmAppId(flags.app));
   }
   // `help` / `--version` act on no app, so they bind no home: in a project
   // that declares components there is no ONE app to bind it for, and asking

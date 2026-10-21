@@ -255,19 +255,30 @@ Deno.test({
         stdout: "piped",
         stderr: "piped",
       }).spawn();
-      // Let it boot, then end it and read everything it said. A permission it
-      // was told it did not need shows up as NotCapable — from anywhere in the
-      // graph, including a dependency the app author never wrote (the real one
-      // was `immer` reading NODE_ENV, before aio printed a line).
-      const killer = setTimeout(() => {
+      // Read what it says as it says it; end it once it reaches "running" or
+      // reports a missing permission. A permission it was told it did not need
+      // shows up as NotCapable — from anywhere in the graph, including a
+      // dependency the app author never wrote (the real one was `immer`
+      // reading NODE_ENV, before aio printed a line). The deadline is only a
+      // backstop: a fixed boot window ran out under a loaded full suite
+      // (Windows, 4 shards).
+      let out = "";
+      const settled = /running \(|NotCapable|Requires .* access/;
+      const stop = () => {
         try {
           proc.kill();
         } catch { /* already gone */ }
-      }, 8_000);
-      const { stdout, stderr } = await proc.output();
+      };
+      const killer = setTimeout(stop, 60_000);
+      const read = async (s: ReadableStream<Uint8Array>) => {
+        const dec = new TextDecoder();
+        for await (const chunk of s) {
+          out += dec.decode(chunk, { stream: true });
+          if (settled.test(out)) stop();
+        }
+      };
+      await Promise.all([read(proc.stdout), read(proc.stderr), proc.status]);
       clearTimeout(killer);
-      const out = new TextDecoder().decode(stderr) +
-        new TextDecoder().decode(stdout);
       assert(
         !/NotCapable|Requires .* access/.test(out),
         `the advertised flags must actually run the app; got:\n${

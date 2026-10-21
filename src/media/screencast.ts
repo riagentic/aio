@@ -35,6 +35,9 @@ export type Recording = {
    *  was asked for (frame times count from there). The screenshot's own
    *  duration: 20 ms idle, hundreds on a loaded machine. */
   startedUs?: number;
+  /** Epoch ms of the video's time zero — frame 0's place on the wall clock:
+   *  a moment `t` ms into the video is `t0 + t`. */
+  t0?: number;
   /** The page went away (window closed) before `stop` fired. */
   lost: boolean;
 };
@@ -71,11 +74,14 @@ export function jpegSize(
 /** Record the page behind `cdp` into `dir` until `stop` resolves (or the page
  *  goes away). The first frame is a screenshot taken at the start, so a window
  *  that never repaints still has a picture; after that, a frame arrives each
- *  time the page paints. */
+ *  time the page paints. `onStart` is told the recording's `t0` (see
+ *  {@linkcode Recording.t0}) once frame 0 is on disk — before the screencast
+ *  starts. */
 export async function recordScreencast(
   cdp: CdpSession,
   dir: string,
   stop: Promise<void>,
+  onStart?: (t0: number) => void,
 ): Promise<Recording> {
   const frames: RecordedFrame[] = [];
   const writes: Promise<void>[] = [];
@@ -95,6 +101,7 @@ export async function recordScreencast(
   }) as { data?: string };
   if (!first?.data) throw new Error("[aio:video] the window gave no picture");
   save(0, first.data);
+  onStart?.(t0);
   const off = cdp.on("Page.screencastFrame", (p) => {
     const f = p as {
       sessionId: number;
@@ -146,7 +153,7 @@ export async function recordScreencast(
   }
   const endUs = Math.max((Date.now() - t0) * 1000, frames.at(-1)!.us + 1000);
   await Promise.all(writes);
-  return { frames, endUs, lost, startedUs };
+  return { frames, endUs, lost, startedUs, t0 };
 }
 
 /** Frames per call into the page — bounded so one `Runtime.evaluate` never

@@ -14,6 +14,7 @@ import { join } from "@std/path";
 import { latestRelease, offMainNote } from "../src/am/am-versions.ts";
 import { pinInfo } from "../src/am/am-cmd-pin.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { _withVersionsDir } from "../src/server/framework-pin.ts";
 
 async function git(cwd: string, ...args: string[]): Promise<void> {
   const r = await new Deno.Command("git", {
@@ -48,7 +49,6 @@ Deno.test({
     "latestRelease: a provisioned release newer than the clone's origin/main is reported, not silently passed over",
   async fn() {
     const base = await tempDir("am-latest-offmain-");
-    const prev = Deno.env.get("AIO_VERSIONS_DIR");
     try {
       const origin = join(base, "origin");
       const clone = join(base, "clone");
@@ -67,41 +67,39 @@ Deno.test({
       for (const v of ["v1.0.8-beta", "v1.0.9-beta", "v2.0.0-alpha1", "main"]) {
         await Deno.mkdir(join(store, v), { recursive: true });
       }
-      Deno.env.set("AIO_VERSIONS_DIR", store);
+      await _withVersionsDir(store, async () => {
+        assertEquals(await latestRelease(clone), {
+          latest: "v1.0.8-beta",
+          offMain: ["v2.0.0-alpha1", "v1.0.9-beta"],
+        });
+        assertEquals(await latestRelease(clone, { major: 1 }), {
+          latest: "v1.0.8-beta",
+          offMain: ["v1.0.9-beta"],
+        });
 
-      assertEquals(await latestRelease(clone), {
-        latest: "v1.0.8-beta",
-        offMain: ["v2.0.0-alpha1", "v1.0.9-beta"],
-      });
-      assertEquals(await latestRelease(clone, { major: 1 }), {
-        latest: "v1.0.8-beta",
-        offMain: ["v1.0.9-beta"],
-      });
+        // `am pin`'s report carries the same answer, and says why.
+        const app = join(base, "app");
+        await Deno.mkdir(app);
+        await Deno.writeTextFile(
+          join(app, "deno.json"),
+          JSON.stringify({ aioVersion: "v1.0.8-beta" }),
+        );
+        const info = await pinInfo(app, clone);
+        assertEquals(info.latest, "v1.0.8-beta");
+        assert(info.available.includes("v1.0.9-beta"));
+        assertStringIncludes(
+          info.latestNote ?? "",
+          "v1.0.9-beta provisioned but not on origin/main",
+        );
 
-      // `am pin`'s report carries the same answer, and says why.
-      const app = join(base, "app");
-      await Deno.mkdir(app);
-      await Deno.writeTextFile(
-        join(app, "deno.json"),
-        JSON.stringify({ aioVersion: "v1.0.8-beta" }),
-      );
-      const info = await pinInfo(app, clone);
-      assertEquals(info.latest, "v1.0.8-beta");
-      assert(info.available.includes("v1.0.9-beta"));
-      assertStringIncludes(
-        info.latestNote ?? "",
-        "v1.0.9-beta provisioned but not on origin/main",
-      );
-
-      // Fetched: the disagreement is gone, and so is the note.
-      await git(clone, "fetch", "-q", "--tags", "origin", "main");
-      assertEquals(await latestRelease(clone, { major: 1 }), {
-        latest: "v1.0.9-beta",
-        offMain: [],
+        // Fetched: the disagreement is gone, and so is the note.
+        await git(clone, "fetch", "-q", "--tags", "origin", "main");
+        assertEquals(await latestRelease(clone, { major: 1 }), {
+          latest: "v1.0.9-beta",
+          offMain: [],
+        });
       });
     } finally {
-      if (prev === undefined) Deno.env.delete("AIO_VERSIONS_DIR");
-      else Deno.env.set("AIO_VERSIONS_DIR", prev);
       await dropTempDir(base);
     }
   },

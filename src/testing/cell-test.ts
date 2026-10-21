@@ -55,7 +55,7 @@ import {
 import { frameworkEffectInWrongRuntime } from "../state/cell-compose-execute.ts";
 import { AioError, createAioError } from "../diagnostics/error.ts";
 import { log } from "../diagnostics/logger-api.ts";
-import { reduceThrowCode } from "../state/method-rejection.ts";
+import { reduceThrowCode, withRefusalCode } from "../state/method-rejection.ts";
 
 // Dev-strict arming lives in its own module so every harness can call it
 // without an import cycle (see test-strict.ts). Re-exported here because this
@@ -916,13 +916,18 @@ export function testCell(
             !Object.hasOwn(known, k)
           );
           if (unknown.length > 0) {
-            throw new Error(
-              `[${f.__aio.id}] t.init(): unknown state key(s) ${
-                unknown.map((k) => `"${k}"`).join(", ")
-              } — this cell's state is { ${Object.keys(known).join(", ")} }. ` +
-                `A seed that lands nowhere looks like a fixture and pins ` +
-                `nothing.\n  an OPTIONAL key counts only once declared: ` +
-                `declare \`${unknown[0]}: undefined\` in \`state:\``,
+            throw withRefusalCode(
+              new Error(
+                `[${f.__aio.id}] t.init(): unknown state key(s) ${
+                  unknown.map((k) => `"${k}"`).join(", ")
+                } — this cell's state is { ${
+                  Object.keys(known).join(", ")
+                } }. ` +
+                  `A seed that lands nowhere looks like a fixture and pins ` +
+                  `nothing.\n  an OPTIONAL key counts only once declared: ` +
+                  `declare \`${unknown[0]}: undefined\` in \`state:\``,
+              ),
+              "UNKNOWN_STATE_KEY",
             );
           }
           // FROZEN, like every committed state (declared initials are
@@ -1409,14 +1414,17 @@ export async function bootCells(
       }
       return;
     }
-    throw new Error(
-      `bootCells: settle() gave up after ${ROUNDS} rounds — dispatch is still ` +
-        `producing work, so the app has NOT quiesced and any assertion after ` +
-        `this point is unguarded.\n` +
-        `  still running: ${stillRunning.join(", ") || "(unnamed calls)"}\n` +
-        `  fix: await the call itself instead of settle(); drive time with ` +
-        `\`await h.advance(ms)\` if it is waiting on a schedule; or give the ` +
-        `method an abort path (\`s.$signal\`) if it genuinely never finishes.`,
+    throw withRefusalCode(
+      new Error(
+        `bootCells: settle() gave up after ${ROUNDS} rounds — dispatch is still ` +
+          `producing work, so the app has NOT quiesced and any assertion after ` +
+          `this point is unguarded.\n` +
+          `  still running: ${stillRunning.join(", ") || "(unnamed calls)"}\n` +
+          `  fix: await the call itself instead of settle(); drive time with ` +
+          `\`await h.advance(ms)\` if it is waiting on a schedule; or give the ` +
+          `method an abort path (\`s.$signal\`) if it genuinely never finishes.`,
+      ),
+      "SETTLE_GAVE_UP",
     );
   };
   const dispose = () => {

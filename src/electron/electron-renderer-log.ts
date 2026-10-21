@@ -28,13 +28,44 @@ export type RendererLevel = "info" | "warn" | "error";
 
 /** Where one stderr line from the Electron child goes. */
 export type ElectronLineRoute =
-  /** GPU device-probe chatter: dropped, counted, reported once. */
-  | { route: "drop" }
+  /** Known upstream chatter: dropped, counted, reported once per `noise`. */
+  | { route: "drop"; noise: keyof typeof NOISE_NOTE }
   /** Anything Electron/Chromium wrote on its own: passed through to stderr. */
   | { route: "raw"; text: string }
   /** A line the shell tagged: framework log at this level, under the log
    *  category `from` — a renderer's, or the main process's own. */
-  | { route: RendererLevel; text: string; from: "renderer" | "electron" };
+  | { route: RendererLevel; text: string; from: "renderer" | "electron" }
+  /** Where the app's window IS (`windowLine`): the splash follows it. */
+  | { route: "window"; at: WindowAt };
+
+/** The app's window as the main process reads it once it shows (and after
+ *  each move): Electron's own bounds, in DIPs, and — on Windows — the same
+ *  rect in physical screen pixels (`screen.dipToScreenRect`), which is the
+ *  space a per-monitor-aware helper places in. */
+export type WindowAt = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  screen?: { x: number; y: number; width: number; height: number };
+};
+
+/** The tag of the main process's window line — ONE spelling. */
+export const WINDOW_TAG = "[aio:window] ";
+
+/** The window line the main script writes (`tmplShowWhenPainted`). Pure. */
+// aio-ok: the generated main script writes this line in JS; this is its spelling, pinned by tests/window-follow.test.ts
+export function windowLine(at: WindowAt): string {
+  return WINDOW_TAG + JSON.stringify(at);
+}
+
+const isRect = (r: unknown): r is WindowAt => {
+  const o = r as Record<string, unknown> | null;
+  return !!o &&
+    ["x", "y", "width", "height"].every((k) =>
+      typeof o[k] === "number" && Number.isFinite(o[k])
+    );
+};
 
 /** The tag the generated shell writes — ONE spelling, read by `classify`. */
 export const RENDERER_TAG = "[aio:renderer:";
@@ -46,7 +77,7 @@ const RENDERER_LINE = /^\[aio:renderer:(info|warn|error)\] (.*)$/s;
  *  `[aio:electron] … DENIED` line reached nobody. */
 export const MAIN_TAG = "[aio:main:";
 
-const MAIN_LINE = /^\[aio:main:(warn|error)\] (.*)$/s;
+const MAIN_LINE = /^\[aio:main:(info|warn|error)\] (.*)$/s;
 
 /** Lines Electron's graphics stack emits while ENUMERATING devices, which say
  *  nothing about the app. Exact shapes only — see the file comment. */
@@ -57,8 +88,35 @@ export const GPU_PROBE_NOISE: readonly RegExp[] = [
   /^failed to load driver: \w+$/,
 ];
 
+/** Chromium's X11 atom cache, on every drag and drop: a drop offers a MIME
+ *  type (`application/vnd.portal.files`, …) the cache was not compiled with,
+ *  and Chromium logs that at ERROR level — then interns the atom and the drop
+ *  works. Exact shape only: `[pid:tid:date/time:ERROR:…atom_cache.cc(N)]` (or
+ *  `:N]` in newer builds) `Add <type> to kAtomsToCache`. */
+export const X11_ATOM_NOISE: readonly RegExp[] = [
+  /^\[[\d:/.]+:ERROR:(?:[\w./]*\/)?atom_cache\.cc(?:\(\d+\)|:\d+)\] Add \S+ to kAtomsToCache$/,
+];
+
+/** The one line said when a kind of noise is first dropped. */
+export const NOISE_NOTE = {
+  gpu: "GPU device-probe messages from Electron (harmless: a GPU with no " +
+    "Mesa driver, probed and skipped)",
+  x11: "Chromium's X11 drag-and-drop atom-cache messages (harmless: a drop " +
+    "type it had not cached, added on the spot)",
+} as const;
+
 /** Sort one line of the Electron child's stderr. Pure. */
 export function classifyElectronLine(line: string): ElectronLineRoute {
+  if (line.startsWith(WINDOW_TAG)) {
+    try {
+      const at = JSON.parse(line.slice(WINDOW_TAG.length));
+      if (isRect(at) && (at.screen === undefined || isRect(at.screen))) {
+        return { route: "window", at };
+      }
+    } catch {
+      // aio-ok: not a window line after all — passed through below
+    }
+  }
   const m = RENDERER_LINE.exec(line);
   if (m) return { route: m[1] as RendererLevel, text: m[2]!, from: "renderer" };
   const mm = MAIN_LINE.exec(line);
@@ -66,7 +124,12 @@ export function classifyElectronLine(line: string): ElectronLineRoute {
     return { route: mm[1] as RendererLevel, text: mm[2]!, from: "electron" };
   }
   const t = line.trim();
-  if (GPU_PROBE_NOISE.some((re) => re.test(t))) return { route: "drop" };
+  if (GPU_PROBE_NOISE.some((re) => re.test(t))) {
+    return { route: "drop", noise: "gpu" };
+  }
+  if (X11_ATOM_NOISE.some((re) => re.test(t))) {
+    return { route: "drop", noise: "x11" };
+  }
   return { route: "raw", text: line };
 }
 

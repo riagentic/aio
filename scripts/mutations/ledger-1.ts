@@ -627,7 +627,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "a control SOCKET is bound in a directory another local user owns \u2014 chmod on someone else's directory fails with EPERM, and whoever can reach the socket can dispatch methods into the app",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-dir.ts",
     find: "  return privateDirRefusal(dir, at.mode, at.uid);",
     replace: "  return null;",
     test: "tests/lock-dir-private.test.ts",
@@ -1300,7 +1300,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "a journal a crash left, found by a journal-OFF run, is copied aside but left in place — the next journal-on boot replays it over everything the off run saved, with the warning still saying it was moved",
-    file: "src/server/aio-boot.ts",
+    file: "src/server/boot-sync-replay.ts",
     find: "  j.quarantine(to);",
     replace: "  Deno.copyFileSync(j.path, to);",
     test: "tests/journal-toggle-stale.test.ts",
@@ -1359,7 +1359,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "an older build's persist:\"none\" slice is deleted but not vacuumed, so the secret's older revisions stay readable as bytes in freed SQLite pages",
-    file: "src/server/aio-boot.ts",
+    file: "src/server/boot-scrub.ts",
     find:
       '  await db.execute("VACUUM");\n  await db.execute("PRAGMA wal_checkpoint(TRUNCATE)");',
     replace:
@@ -1415,7 +1415,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "the lock dir is named after the raw AIO_APPS_DIR string — two spellings of one apps root are two lock dirs, so a second instance boots on the same data and am says 'not running' about a live app",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-dir.ts",
     find:
       '  // an app whose data it could see.\n  const appsRoot = appsDirEnv() ?? "";',
     replace:
@@ -1446,7 +1446,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "am start --profile stops forwarding the profile as ARGV — the child boots on the app's real home, and an older runtime can no longer refuse the unknown flag",
-    file: "src/am/am-cmd-process.ts",
+    file: "src/am/am-cmd-start.ts",
     find: "    if (pa) passthrough.push(pa);",
     replace: "    if (pa) void pa;",
     test: "tests/am-profile-roundtrip.test.ts",
@@ -1455,7 +1455,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "lock publication stops being exclusive — two racing instances both believe they hold the lock and open one state.db",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-file.ts",
     find:
       "    f.close();\n    if (e instanceof Deno.errors.AlreadyExists) return false;",
     replace:
@@ -2527,7 +2527,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       'an older build\'s persist:"none" bytes survive in the snapshot and backup copies — the secret is still on disk after the scrub',
-    file: "src/server/aio-boot.ts",
+    file: "src/server/boot-scrub.ts",
     find: "    const gone = await scrubCopy(p, persistKey, staleOf);",
     replace: "    const gone: string[] = [];",
     test: "tests/persist-none-scrub-once.test.ts",
@@ -2547,7 +2547,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "the lock dir is there at the umask's mode until its chmod — a sibling that looks in between refuses it",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-dir.ts",
     find: "      Deno.mkdirSync(dir, { recursive: true, mode: 0o700 });",
     replace: "      Deno.mkdirSync(dir, { recursive: true });",
     test: "tests/lock-dir-removed-under-create.test.ts",
@@ -2557,7 +2557,7 @@ export const LEDGER_1: readonly Mutation[] = [
   },
   {
     what: "the lock file is world-readable on filesystems without hard links",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-file.ts",
     find: "    Deno.openSync(path, { ...how, mode: 0o600 }),",
     replace: "    Deno.openSync(path, { ...how }),",
     test: "tests/single-instance-lock-file-mode.test.ts",
@@ -2566,7 +2566,7 @@ export const LEDGER_1: readonly Mutation[] = [
   },
   {
     what: "the lock file is world-readable on the normal path",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-file.ts",
     find: "    Deno.openSync(path, { ...how, mode: 0o600 }),",
     replace: "    Deno.openSync(path, { ...how }),",
     test: "tests/single-instance-lock-file-mode.test.ts",
@@ -2576,7 +2576,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "the owner's start time is read in local time — a live app is judged dead and a second instance takes state.db",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/process-liveness.ts",
     find: '      env: { LC_ALL: "C", LANG: "C", TZ: "UTC" },',
     replace: '      env: { LC_ALL: "C", LANG: "C", TZ: "Asia/Kolkata" },',
     test: "tests/lock-start-epoch-tz.test.ts",
@@ -2600,7 +2600,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "the scrubbed slice stays in the -wal file — the secret is still on disk while the app runs",
-    file: "src/server/aio-boot.ts",
+    file: "src/server/boot-scrub.ts",
     find:
       '  await db.execute("VACUUM");\n  await db.execute("PRAGMA wal_checkpoint(TRUNCATE)");',
     replace: '  await db.execute("VACUUM");\n  await Promise.resolve();',
@@ -2757,7 +2757,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "a lock folder of ours that is already there wider than 0700 is refused as not owner-only instead of narrowed — every start warns, and the lock and control socket leave the shared folder for the uid sibling",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-dir.ts",
     find: "      (ops.chmod ?? Deno.chmodSync)(dir, 0o700);",
     replace: "      void ops.chmod;",
     test: "tests/lock-dir-choose.test.ts",
@@ -2867,7 +2867,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "am start latches the first lock port — a live socket-only app is reported not responding, exit 1, and an agent restarts it",
-    file: "src/am/am-cmd-process.ts",
+    file: "src/am/am-cmd-start.ts",
     find:
       "    {\n      // Our own child's lock — and only if it IS our child's (same pid):",
     replace:
@@ -3159,7 +3159,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "a stale lock is deleted without comparing it to what was judged dead — a live instance that re-published meanwhile loses its lock, and two processes open one state.db",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-file.ts",
     find: "    if (now !== judged) return false;",
     replace: "    if (now === null) return false;",
     test: "tests/lock-removal-cas.test.ts",
@@ -3168,7 +3168,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "a lock is replaced without comparing it to the record read — a newer owner's lock is overwritten, and it looks stale to the next reader",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-file.ts",
     find: "    if (!now || !sameRecord(expected, now)) return false;",
     replace: "    if (!now) return false;",
     test: "tests/lock-removal-cas.test.ts",
@@ -3352,7 +3352,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "the data.replaced-* copy that am restore keeps holds the persist:none secret forever, with no warning",
-    file: "src/server/aio-boot.ts",
+    file: "src/server/boot-scrub.ts",
     find: "      ...replaced,",
     replace: "      ...replaced.slice(0, 0),",
     test: "tests/persist-none-scrub-replaced.test.ts",
@@ -3493,7 +3493,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "a prod server-only app is reported not responding, stuck at starting, and killed by the next start as a zombie",
-    file: "src/am/am-cmd-process.ts",
+    file: "src/am/am-cmd-start.ts",
     find: '  const health = await get("/__aio/health");',
     replace: '  const health = await get("/");',
     test: "tests/am-start-prod-server-only.test.ts",
@@ -4193,7 +4193,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "an empty db table the app emptied on purpose restores the seeded state default on every reboot, resurrecting deleted rows",
-    file: "src/server/aio-boot.ts",
+    file: "src/server/boot-db-bindings.ts",
     find: "if (rows.length === 0 && !synced?.has(b.table)) {",
     replace: "if (rows.length === 0) {",
     test: "tests/db-emptied-table-stays-empty.test.ts",
@@ -5022,7 +5022,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "an expectCell failure under a signed-in user dumps the server slice including rows the predicate never saw",
-    file: "src/testing/ui-test.ts",
+    file: "src/testing/ui-test-build.ts",
     find: "if (keys.length === 0) {",
     replace: "if (keys.length >= 0) {",
     test: "tests/testui-visible-for-user-parity.test.tsx",
@@ -5032,7 +5032,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "testUI hover on a display:none element runs its onMouseEnter although a browser delivers no event",
-    file: "src/testing/ui-test.ts",
+    file: "src/testing/ui-test-build.ts",
     find: "const invisible = _hiddenReason(e);",
     replace: 'const invisible = "";',
     test: "tests/ui-harness-fidelity.test.tsx",
@@ -5041,7 +5041,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "testUI focus on a hidden or disabled element runs onFocus or silently passes where a browser refuses focus",
-    file: "src/testing/ui-test.ts",
+    file: "src/testing/ui-test-build.ts",
     find: 'act("focus", (e)',
     replace: "act(null, (e)",
     test: "tests/ui-harness-fidelity.test.tsx",
@@ -5068,7 +5068,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "a testUI mount refused at its seed leaves its boot live so a later cell call commits into the dead mount's store",
-    file: "src/testing/ui-test.ts",
+    file: "src/testing/ui-test-build.ts",
     find: "standalone._retire(bootedHere);",
     replace: "void bootedHere;",
     test: "tests/testui-seed.test.tsx",
@@ -5121,7 +5121,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "a typo'd aio.run key under libraryMode calls Deno.exit and kills the test runner",
-    file: "src/server/aio.ts",
+    file: "src/server/aio-run-config.ts",
     find: "  if (!libraryMode) return undefined;",
     replace: "  if (!libraryMode || libraryMode) return undefined;",
     test: "tests/library-mode-config-typo-throws.test.ts",
@@ -5437,7 +5437,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "testUI leaves confirm()/alert()/prompt() to Deno — a click asking one is a silent no-op in CI and a y/N prompt on a terminal",
-    file: "src/testing/ui-test.ts",
+    file: "src/testing/ui-test-build.ts",
     find: "      dialogs[name] = _refuseDialog[name];\n",
     replace: "",
     test: "tests/testui-native-dialog.test.tsx",
@@ -5498,7 +5498,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "the dev checkpoint writes persist-excluded fields (top-level and nested secrets) to logs/checkpoint.json on disk",
-    file: "src/server/aio-boot.ts",
+    file: "src/server/boot-scrub.ts",
     find: "const kept = applyCellFieldFilter(filter, slice);",
     replace: "const kept: Record<string, unknown> | undefined = slice;",
     test: "tests/checkpoint-persist-exclude.test.ts",
@@ -5508,7 +5508,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "restoring a checkpoint hands back persist-excluded fields from its copy instead of the values a restart gives",
-    file: "src/server/aio-boot.ts",
+    file: "src/server/boot-scrub.ts",
     find: "const next = unpersistedFromBase(filter, base, slice);",
     replace: "const next = slice;",
     test: "tests/checkpoint-persist-exclude.test.ts",
@@ -5538,7 +5538,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "testUI persist dispose cancels the pending debounced save so the last change before teardown is lost",
-    file: "src/testing/ui-test.ts",
+    file: "src/testing/ui-test-build.ts",
     find: "if (opts.persist) standalone._flushPendingPersist();",
     replace: "if (false) standalone._flushPendingPersist();",
     test: "tests/testui-persist-key-flush.test.tsx",
@@ -5579,7 +5579,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "declaring version 1 on an unversioned sync cell as the boot hint advises refuses the boot or quarantines the cell",
-    file: "src/server/aio-boot.ts",
+    file: "src/server/boot-sync-replay.ts",
     find: "const adoptV0 = declared > 0 && !hook;",
     replace: "const adoptV0 = false as boolean;",
     test: "tests/sync/sync-version-advice-followed.test.ts",
@@ -5907,7 +5907,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "a testUI seed of an undeclared optional key is warned without naming the declare-it-undefined fix",
-    file: "src/testing/ui-test.ts",
+    file: "src/testing/ui-test-build.ts",
     // aio-ok: the literal SOURCE line this mutation patches in and out
     find: "`once declared: declare \\`${bad[0]}: undefined\\` in \\`state:\\``",
     replace: "`once declared`",
@@ -6400,7 +6400,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "no-lock message for a running id lists it twice and never names the profile or home",
-    file: "src/am/am-cmd-process.ts",
+    file: "src/am/am-cmd-start.ts",
     find: "    if (same.length > 0) {",
     replace: "    if (same.length > 99) {",
     test: "tests/am-no-lock-names-sibling-homes.test.ts",
@@ -6898,7 +6898,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "am instances LISTENING shows only uds and hides the TCP port of an app with both wires",
-    file: "src/am/am-cmd-process.ts",
+    file: "src/am/am-cmd-status.ts",
     // aio-ok: the literal SOURCE line this mutation patches in and out
     find: '        ? (inst.port > 0 ? `:${inst.port} + uds` : "uds")',
     replace: '        ? "uds"',
@@ -6910,7 +6910,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "a lock dir planted as somebody else's symbolic link is followed — the app's lock and control socket go where another local user points them",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-dir.ts",
     find: "    if (me !== null && known(entry.uid) && entry.uid !== me) {",
     replace: "    if (me === null) {",
     test: "tests/lock-dir-one-look.test.ts",
@@ -6921,7 +6921,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "the lock dir is looked at a second time by path — a directory swapped for a link after the first look is followed to a private directory of ours and accepted",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-dir.ts",
     find: "  return privateDirRefusal(dir, at.mode, at.uid);",
     replace:
       "  return privateDirRefusal(\n    dir,\n    Deno.statSync(dir).mode,\n    Deno.statSync(dir).uid,\n  );",
@@ -6933,7 +6933,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "a lock dir replaced while a file is created in it is kept — the app's record or control socket stays in a directory another local user owns",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-dir.ts",
     find: "  const why = lockDirMoved(dirname(path));",
     replace: "  const why = null as string | null;",
     test: "tests/lock-dir-one-look.test.ts",
@@ -6944,7 +6944,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "any directory named aio gets the lock dir's rules — a caller's socket directory is chmodded 0700 and the reverse proxy that reached it through the group is cut off",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-dir.ts",
     find: "  return _lockDeps.chosen.has(dir) || dir === lockDir();",
     replace:
       "  return _lockDeps.chosen.has(dir) || dir === lockDir() ||\n    /^aio(-u\\d+)?$/.test(basename(dir));",
@@ -6956,7 +6956,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "a create whose lock dir a sibling's exit pruned is not tried again — an app's start fails because another app quit",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-dir.ts",
     find:
       "  const gone = dirGone(e) || (_lockDeps.windows() && isHeldOpenError(e));",
     replace: "  const gone = dirGone(e) && e === null;",
@@ -6967,7 +6967,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "the lock dir of an apps root is not named as 1.0.19 named it — an app pinned to it and an `am` on this build look in two dirs: no single-instance refusal, `am` says not running",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-dir.ts",
     find: '      .slice(-48)\n    : "";',
     replace: '      .slice(-40)\n    : "";',
     test: "tests/lock-dir-scope-of-a-root.test.ts",
@@ -6976,7 +6976,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "the peer listener's lock dir is looked at before its socket is bound — a dir replaced before the bind keeps the app's control socket where another local user put it",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-dir.ts",
     find: "        bound: () => holdLockDir(path, () => removeIfSocket(path)),",
     replace: "        bound: () => {},",
     test: "tests/lock-dir-held-after-bind.test.ts",
@@ -6987,7 +6987,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "a lock dir that is gone right after a file was created in it reads as pruned — the name was taken away with the app's record or socket behind it, and nothing is said",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-dir.ts",
     find:
       // aio-ok: the enforcing line's own source text, template and all
       "    if (e instanceof Deno.errors.NotFound) return `${dir} is no longer there`;",
@@ -7000,7 +7000,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "with no uid to read, a lock dir that is a symbolic link is chmodded — through the link, narrowing whatever directory it was pointed at",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-dir.ts",
     find: "  const blind = me === null && !entry.isSymlink;",
     replace: "  const blind = me === null;",
     test: "tests/lock-dir-no-uid.test.ts",
@@ -7033,7 +7033,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "a waiter that locked an unlinked mutex file takes the new file at the path for it when their numbers collide (Windows) — two processes inside the lock mutex, and two apps on one state.db",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-file.ts",
     find: "  if (mine.nlink === 0 && at.nlink !== 0) return false;",
     replace: "  if (mine.nlink === 0 && at.nlink === -1) return false;",
     test: "tests/lock-mutex-same-file.test.ts",
@@ -7043,7 +7043,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "on a filesystem that counts no links every live mutex file reads as unlinked — taking a project's pid lock loops forever",
-    file: "src/server/single-instance-lock.ts",
+    file: "src/server/lock-file.ts",
     find: "  if (mine.nlink === 0 && at.nlink !== 0) return false;",
     replace: "  if (mine.nlink === 0) return false;",
     test: "tests/lock-mutex-same-file.test.ts",
@@ -7157,7 +7157,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "am stop under one AIO_APPS_DIR stops the app of another root that shares its lock folder name",
-    file: "src/am/am-cmd-process.ts",
+    file: "src/am/am-cmd-stop.ts",
     find: "  if (otherRoot) return { ok: false, appId, error: otherRoot };",
     replace:
       "  if (otherRoot && Number.isNaN(0)) return { ok: false, appId, error: otherRoot };",
@@ -7168,7 +7168,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "am kill under one AIO_APPS_DIR kills the app of another root that shares its lock folder name",
-    file: "src/am/am-cmd-process.ts",
+    file: "src/am/am-cmd-kill.ts",
     find:
       '    const foreign = foreignOwnerRefusal(pf) ?? otherRootRefusal("kill", pf);',
     replace: "    const foreign = foreignOwnerRefusal(pf);",
@@ -7200,7 +7200,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "testUI handle form: a rejection that lost its class on the wire is never said — a failing check on it names nothing",
-    file: "src/testing/ui-test.ts",
+    file: "src/testing/ui-test-build.ts",
     find: "    _handleForm = name === undefined;",
     replace: "    _handleForm = false;",
     test: "tests/wire-harness-differential.test.tsx",
@@ -7210,7 +7210,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "a package the compile itself installs (a linked framework's own pinned happy-dom) is in the FIRST binary and in no later one — the build is not compiled again once it is on disk",
-    file: "src/build/build-compile.ts",
+    file: "src/build/build-dev-exclude.ts",
     find: "    if (late.length === 0) return true;",
     replace: "    if (late.length >= 0) return true;",
     test: "tests/build-e2e.test.ts",
@@ -7408,7 +7408,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "testUI: a form whose submit handler reads it with new FormData(form) cannot be submitted — a sign-in form has no in-process driver",
-    file: "src/testing/ui-test.ts",
+    file: "src/testing/ui-test-build.ts",
     find: "      globalThis.FormData = TestFormData;\n",
     replace: "      void TestFormData;\n",
     test: "tests/auth-login-joined.test.tsx",
@@ -7479,7 +7479,7 @@ export const LEDGER_1: readonly Mutation[] = [
   {
     what:
       "am start holds its 180 s download wait for an app whose download ended long ago — a hung boot takes three minutes to be reported",
-    file: "src/am/am-cmd-process.ts",
+    file: "src/am/am-cmd-start.ts",
     find:
       "  return was ? Math.ceil((elapsedMs + defaultMs) / 1000) * 1000 : waitMs;",
     replace: "  return waitMs;",

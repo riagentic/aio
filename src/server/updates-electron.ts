@@ -32,7 +32,9 @@ import { probeOffThread } from "./updates-apply.ts";
  *  print before it). */
 export function parseElectronRuntimeAnswer(
   stdout: string,
-): { runtime: string; version?: string; sha256?: string } | null {
+):
+  | { runtime: string; version?: string; sha256?: string; client?: string }
+  | null {
   const lines = stdout.trim().split("\n").reverse();
   for (const l of lines) {
     try {
@@ -44,6 +46,7 @@ export function parseElectronRuntimeAnswer(
           ...(typeof v.sha256 === "string" && /^[0-9a-f]{64}$/.test(v.sha256)
             ? { sha256: v.sha256 }
             : {}),
+          ...(typeof v.client === "string" ? { client: v.client } : {}),
         };
       }
     } catch {
@@ -55,7 +58,15 @@ export function parseElectronRuntimeAnswer(
 
 /** What a build said when asked how it gets its Electron. */
 export type ElectronRuntimeProbe =
-  | { kind: "answer"; runtime: string; version?: string; sha256?: string }
+  | {
+    kind: "answer";
+    runtime: string;
+    version?: string;
+    sha256?: string;
+    /** The client the build baked as this binary's default (only an online
+     *  binary that is not the desktop package says it). */
+    client?: string;
+  }
   /** It predates the question: it refused the flag by name. */
   | { kind: "old" }
   | { kind: "failed"; why: string };
@@ -169,6 +180,17 @@ export async function prefetchSharedElectron(
         } when asked which Electron it needs. ` + NOT_INSTALLED,
       );
     }
+    return;
+  }
+  if (!opts.markedShared && answer.client && answer.client !== "electron") {
+    // A plain binary whose default client is the browser (or a server): it
+    // may never open a window, so ~100 MB is not fetched on its behalf. Its
+    // first `--client=electron` start downloads with the progress window,
+    // as any online start does.
+    opts.log(
+      `the new version opens as "${answer.client}" by default — no Electron ` +
+        `is fetched before the swap (a --client=electron start fetches its own)`,
+    );
     return;
   }
   if (!answer.version) {

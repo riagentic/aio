@@ -35,7 +35,12 @@ Deno.test({
     };
     const pids: number[] = [];
     try {
-      const s = await am("start", "--client=server-only", "--json");
+      const s = await am(
+        "start",
+        "--client=server-only",
+        "--json",
+        "--wait=60",
+      );
       assertEquals(s.code, 0, s.out + s.err);
       const a = JSON.parse(s.out.trim().split("\n").at(-1)!);
       pids.push(a.pid);

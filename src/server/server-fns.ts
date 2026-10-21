@@ -25,6 +25,22 @@ import { log } from "../diagnostics/logger-api.ts";
 import { _diagScopeNow } from "../diagnostics/diagnostic-bus.ts";
 import type { AioErrorCode } from "../diagnostics/error.ts";
 import type { Remote } from "../protocol/protocol-types.ts";
+import { _onPauseCallDeadlines } from "../state/cell-impl.ts";
+
+/** Every network serverFn call in flight, as the way to tell ITS caller
+ *  "a person is deciding — hold your timeout" (`sfnh`). The caller's 30 s
+ *  clock runs in the client, out of `pauseCallDeadlines`' reach: a picker
+ *  inside a serverFn lost the pick at 30 s while the same picker in a cell
+ *  method waited (a field report). Held like those: every call in flight,
+ *  resumed with a fresh window when the dialog closes. */
+const _holdable = new Set<(hold: boolean) => void>();
+_onPauseCallDeadlines(() => {
+  const held = [..._holdable];
+  for (const h of held) h(true);
+  return () => {
+    for (const h of held) if (_holdable.has(h)) h(false);
+  };
+});
 
 // deno-lint-ignore no-explicit-any
 type FnMap = Record<string, (...args: any[]) => any>;
@@ -283,6 +299,10 @@ export async function invokeServerFn(
   user?: AioUser,
   /** `testUI({ enforceAccess: false })` only: the rule is not asked. */
   _skipAccess = false,
+  /** Tell the caller its timeout is held (`true`) or restarts (`false`) —
+   *  the transport sends an `sfnh` frame. Absent: the caller has no clock
+   *  to hold. */
+  onHold?: (hold: boolean) => void,
 ): Promise<
   { ok: true; value: unknown } | {
     ok: false;
@@ -321,6 +341,7 @@ export async function invokeServerFn(
   const fn = fns && Object.hasOwn(fns, name) ? fns[name] : undefined;
   if (typeof fn !== "function") return notRegistered(ns, name);
   let value: unknown;
+  if (onHold) _holdable.add(onHold);
   try {
     value = await fn(...args);
   } catch (e) {
@@ -329,6 +350,8 @@ export async function invokeServerFn(
     // rejects with an Error carrying the code). Dropped, a serverFn that
     // rethrew ACCESS_DENIED / ACTION_REFUSED reached its caller code-less.
     return { ok: false, ...errorFields(e) };
+  } finally {
+    if (onHold) _holdable.delete(onHold);
   }
   // THE RESULT MUST BE WIRE-SAFE *HERE*, not at the two send sites.
   //

@@ -1,13 +1,13 @@
 # Every option, one page
 
 > Generated from the source by `deno task update:reference` — do not edit by
-> hand; `check:release` fails when it is stale. 192 entries: the signature, what
+> hand; `check:release` fails when it is stale. 193 entries: the signature, what
 > it does, an example when the source has one, and the file it lives in. The
 > guides explain; this page is for looking a name up.
 
 - [cell options](#cell-options) — 25
 - [aio.run options](#aiorun-options) — 81
-- [aio/air](#aioair) — 86
+- [aio/air](#aioair) — 87
 
 ## cell options
 
@@ -1555,6 +1555,8 @@ A window/document-level key binding, scoped to this component's lifetime.
 ```tsx
 onGlobalKey("Escape", () => lightbox.close());
 onGlobalKey("k", () => palette.open(), { mod: true });
+onGlobalKey("mod+s", () => doc.save()); // exact: not Ctrl+Shift+S
+onGlobalKey("ctrl+shift+s", () => doc.saveAs());
 ```
 
 ### `onMount`
@@ -1624,6 +1626,21 @@ Portal: unknown;
 
 Portal — renders children into a target DOM node outside the component
 hierarchy. <sub>src/air/vdom-types.ts</sub>
+
+### `print`
+
+```ts
+print(): void
+```
+
+Open the print dialog for this page. In an aio desktop window it is printed by
+the window's main process (Linux has no working `window.print()` there); in a
+browser it is `window.print()`. <sub>src/browser/desktop-print.ts</sub>
+
+```tsx
+import { print } from "aio/air";
+<button type="button" onClick={() => print()}>Print</button>;
+```
 
 ### `reactIsland`
 

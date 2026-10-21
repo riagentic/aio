@@ -12,6 +12,8 @@ page is the short door.
 - [Core Concepts](concepts.md) — mental model and framework rules
 - [App Architectures](app-architectures.md) — one app many surfaces · service +
   rich clients
+- [Cross-app](cross-app.md) — one app using another: code reuse, the running
+  instance, orchestrators, AI agents, what to avoid
 - [Project Structure](project-structure.md) — file organization
 - [aio on Windows and macOS](windows-macos.md) — PowerShell spellings, where
   files are, firewall, startup, stopping, uninstalling

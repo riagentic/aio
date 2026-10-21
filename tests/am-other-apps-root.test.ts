@@ -140,7 +140,7 @@ await aio.run({ cells: [c], appId: "${APP}", client: "server-only", port: ${port
     assertStringIncludes(row.stopWith, rootB);
     // The table (a terminal's rendering — a pipe is JSON) marks the row.
     assertStringIncludes(
-      await Deno.readTextFile(join(REPO, "src/am/am-cmd-process.ts")),
+      await Deno.readTextFile(join(REPO, "src/am/am-cmd-status.ts")),
       '(otherAppsRootOf(inst) ? " (other apps dir)" : "")',
     );
 

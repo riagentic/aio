@@ -10,6 +10,8 @@
 - [Where does this code run?](where-code-runs.md) — the six execution contexts,
   one table: `Deno.*`, hidden fields, tracked reads, and what refuses you
 - [Project Structure](project-structure.md) — file organization
+- [Cross-app](cross-app.md) — one app using another: code reuse, the running
+  instance, orchestrators, AI agents, what to avoid
 - [API Reference](api-reference.md) — all exports, types, configs
 - [Tutorial](tutorial.md) — step-by-step from zero to running app
 - [FAQ](faq.md) — design decisions and non-goals

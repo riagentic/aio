@@ -11,6 +11,7 @@ import { nearestOf } from "../state/cell-helpers.ts";
 import { removalMessage, removalOf } from "../state/removals.ts";
 import { findFreePort } from "./paths.ts";
 import { profileOf } from "./config-sources.ts";
+import { instanceAppsDir, instanceNameError } from "./app-dirs.ts";
 import { BUILD_BOOL_FLAGS, BUILD_VALUE_FLAGS } from "../build/build-flags.ts";
 
 /** Framework version — printed by --version, checked in tests.
@@ -27,7 +28,7 @@ import { BUILD_BOOL_FLAGS, BUILD_VALUE_FLAGS } from "../build/build-flags.ts";
  *  annotation is a WIDENING for every consumer — with the literal type,
  *  `VERSION === "1.0.0-alpha76"` was a compile error for having no overlap;
  *  now it is an ordinary comparison. */
-export const VERSION: string = "1.0.22-beta";
+export const VERSION: string = "1.0.23-beta";
 
 /** What `--version` prints: what this artifact IS, and what it was built with.
  *
@@ -64,7 +65,7 @@ export type CliFlags = {
    *  from the cells rather than guessed from the source. */
   dataContract?: boolean;
   /** `--aio-electron-runtime`: print how this build gets its Electron as one
-   *  JSON line — `{"runtime":"shared","version":"44.7.0"}`, `{"runtime":
+   *  JSON line — `{"runtime":"shared","version":"44.9.0"}`, `{"runtime":
    *  "bundled",…}`, or `{"runtime":"none"}` — and exit, touching nothing. An
    *  updater asks the verified new build this before the swap, so a shared-
    *  runtime update's Electron is in the store when it first starts. */
@@ -278,6 +279,26 @@ export function homeRequest(
     ...(home !== undefined ? { home } : {}),
     ...(source ? { source } : {}),
   };
+}
+
+/** `--instance=<name>` on THIS process's command line — the apps root it
+ *  asks for (`~/.aio-instances/<name>`, as `am --instance` gives its child),
+ *  or null. The same meaning from source and from a compiled artifact: its
+ *  own data, its own lock (jot §8: an AppImage refused the flag, so an agent
+ *  testing it beside a person's dev copy had to fake HOME and XDG_* by
+ *  hand). Null when the app claims `--instance` for itself. The LAST one
+ *  wins, as for every flag; a bad name was refused by `parseCli`. */
+export function instanceRequest(
+  args: readonly string[] = Deno.args,
+): { name: string; appsDir: string } | null {
+  if (appClaims("--instance")) return null;
+  const stop = args.indexOf("--");
+  const own = stop === -1 ? args : args.slice(0, stop);
+  const arg = own.findLast((a) => a.startsWith("--instance="));
+  if (arg === undefined) return null;
+  const name = arg.slice(11);
+  if (instanceNameError(name)) return null;
+  return { name, appsDir: instanceAppsDir(name) };
 }
 
 /** Test seam: forget the memoized default parse. @internal */
@@ -629,6 +650,13 @@ function _parseCliUncached(args: readonly string[]): CliFlags {
       const eq = arg.indexOf("=");
       if (arg.startsWith("--profile=")) r.profile = arg.slice(eq + 1);
       else r.home = arg.slice(eq + 1);
+    } else if (
+      arg.startsWith("--instance=") && !appClaims("--instance")
+    ) {
+      // Read by `instanceRequest` (applied in aio.ts before anything resolves
+      // a directory); refused HERE when it cannot name one.
+      const bad = instanceNameError(arg.slice(11));
+      if (bad) throw teachableError(bad, "a plain word, e.g. --instance=demo");
     } else if (arg === "--takeover") r.takeover = true;
     else if (arg === "--kill-existing") refuseFlag("--kill-existing");
     else if (arg.startsWith("--db-path=")) r.dbPath = arg.slice(10);
@@ -888,6 +916,10 @@ Flags:
                    URL)
   --server-url=X   Connect to a specific remote aio server (Electron thin client)
   --takeover       Kill running instance and take over
+  --instance=NAME  Run a PRIVATE copy beside any other: its own data, lock
+                   and window profile under ~/.aio-instances/NAME — what
+                   "am start --instance=NAME" does (an explicit AIO_APPS_DIR
+                   wins)
   --db-path=PATH   Override the SQLite file (":memory:" for throwaway runs)
   --no-backup-logs Wipe the log directory on start instead of rotating
                    (keeping previous logs — rotate to .1, .2, … — is the default)

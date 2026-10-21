@@ -162,6 +162,9 @@ export interface ServerConfig {
      *  cycle reported a failure. Never a "schedule" — the reply is a promise
      *  that the data is on disk. */
     forcePersist?: () => Promise<void>;
+    /** Take an UNDECLARED stored cell out of every future write (`am persist
+     *  --drop`) — `true`, or the droppable cells when `cell` is not one. */
+    dropStoredCell?: (cell: string) => true | string[];
     sqlQuery?: (sql: string) => Promise<unknown[]>; // read-only SQL query (async)
     /** Graceful shutdown; `by` names the requester in the log line. */
     shutdown?: (by?: "am stop" | "takeover") => Promise<void>;

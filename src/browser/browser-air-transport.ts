@@ -4,7 +4,11 @@
 // heartbeat on WS (browser-vitals.ts: render meter + `vitals-ping`).
 
 import { diagEmit } from "../diagnostics/diagnostic-bus.ts";
-import { _registerSfnTransport, handleSfnResult } from "./server-fns-client.ts";
+import {
+  _registerSfnTransport,
+  handleSfnHold,
+  handleSfnResult,
+} from "./server-fns-client.ts";
 import { loadDevChunk } from "../air/dev-hooks.ts";
 import { isDevMode } from "../state/dev-flag.ts";
 import { bindShellTray } from "./tray-actions.ts";
@@ -618,6 +622,9 @@ function _route(line: string): void {
   switch (f.t) {
     case "sfnr":
       handleSfnResult(f.d);
+      return;
+    case "sfnh":
+      handleSfnHold(f.d);
       return;
     case "op":
     case "op-rejected":

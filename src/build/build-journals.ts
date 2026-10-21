@@ -1,5 +1,5 @@
 // What a build that DIED leaves behind, by name — and the one cheap question
-// a starting app asks about it. Kept apart from build-compile.ts so the boot
+// a starting app asks about it. Kept apart from build-dev-exclude.ts so the boot
 // path can ask without loading the build.
 import { join } from "@std/path";
 

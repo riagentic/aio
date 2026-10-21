@@ -1,5 +1,6 @@
 // Electron main.cjs script generators — standard (WebSocket) and client modes
 
+import { tmplSplash } from "./electron-splash.ts";
 import {
   type AioMeta,
   shellBridgePreload,
@@ -17,7 +18,7 @@ import {
   tmplPreloadWrite,
   tmplProfileDir,
   tmplRendererDiagnostics,
-  tmplSplashHold,
+  tmplShowWhenPainted,
   tmplTray,
   tmplWebGuard,
   tmplWillNavigate,
@@ -62,7 +63,7 @@ ${tmplProfileDir(meta?.profileDir)}${
       ),
     )
   }
-${tmplCrashGuard()}
+${tmplCrashGuard(meta?.confirmUnload)}
 ${tmplPermissionGuard(meta?.permissions)}
 ${tmplWebGuard(meta)}
 ${tmplIpcGuard()}
@@ -74,12 +75,12 @@ ${tmplBounds()}
 
 app.on('ready', () => {
   const b = loadBounds(${w}, ${h});
+${tmplSplash(meta?.splash)}
 ${tmplWindowShape(meta, { preload: "preloadFile" })}
-${tmplSplashHold().before}
   const win = new BrowserWindow(b);
-  if (b.x == null) win.center();${tmplSplashHold().after}
   const _appOrigin = new URL(${JSON.stringify(url)}).origin;
   __aioIpcBind(win, _appOrigin); // before any handler can run (tmplIpcGuard)
+${tmplShowWhenPainted(meta?.showWhenPainted)}
 ${tmplBoundsTracking()}
 ${tmplRendererDiagnostics(true)}
 ${tmplTray(meta, trayIcon, meta?.title)}
@@ -99,7 +100,7 @@ ${tmplWillNavigate("_appOrigin")}
     if (sameOrigin) { event.preventDefault(); cb(true); }
     else cb(false);
   });
-${tmplKeyboardShortcuts()}
+${tmplKeyboardShortcuts(meta?.shortcuts)}
 });
 app.on('window-all-closed', () => { ${tmplPreloadCleanup()} process.exit(0); });
 `.trim();

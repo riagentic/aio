@@ -1,6 +1,6 @@
 // run.ps1 / install.ps1, the parts that can be RUN: on Windows the scripts are
-// dot-sourced under Windows PowerShell (which defines their functions and
-// installs nothing) and the functions are called. Elsewhere the same facts
+// dot-sourced under Windows PowerShell with AIO_INSTALL_LOAD_ONLY /
+// AIO_RUN_LOAD_ONLY (which define their functions and install nothing) and the functions are called. Elsewhere the same facts
 // are read from the text.
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join, toFileUrl } from "@std/path";
@@ -15,6 +15,10 @@ import { existsSync } from "node:fs";
 
 const ROOT = join(import.meta.dirname!, "..");
 const WINDOWS = Deno.build.os === "windows";
+/** Dot-sourcing alone installs/runs (GitHub Actions loads a step that way);
+ *  these switches are what make a load define the functions only. */
+const LOAD_ONLY =
+  "$env:AIO_INSTALL_LOAD_ONLY='1'; $env:AIO_RUN_LOAD_ONLY='1'; ";
 
 /** Dot-source `script`, run `body`, return what it printed. */
 async function ps(
@@ -33,7 +37,7 @@ async function ps(
       "-ExecutionPolicy",
       "Bypass",
       "-Command",
-      `. '${join(ROOT, script)}'; ${body}`,
+      `${LOAD_ONLY}. '${join(ROOT, script)}'; ${body}`,
     ],
     clearEnv: true,
     env: { ...full, NO_COLOR: "1" },
@@ -57,7 +61,7 @@ async function psRaw(
       "-ExecutionPolicy",
       "Bypass",
       "-Command",
-      `. '${join(ROOT, script)}'; ${body}`,
+      `${LOAD_ONLY}. '${join(ROOT, script)}'; ${body}`,
     ],
     env: { ...env, NO_COLOR: "1" },
     stdout: "piped",
@@ -744,4 +748,32 @@ Deno.test({
       "C:\\plain\\",
     ]);
   },
+});
+
+// GitHub Actions runs a `shell: pwsh` step as `. '{0}'`. A gate on
+// `$MyInvocation.InvocationName -ne '.'` read that as a test load: `irm … | iex`
+// exited 0 in ~1.5 s with nothing installed (field report). The only load that
+// skips the work is the explicit switch; a dot-source does the work.
+Deno.test("install.ps1 + run.ps1: only an explicit LOAD_ONLY switch skips the work — a dot-source (GitHub Actions) installs/runs", async () => {
+  for (
+    const [script, fn, sw] of [
+      ["install.ps1", "Invoke-AioInstall", "AIO_INSTALL_LOAD_ONLY"],
+      ["run.ps1", "Invoke-AioRun", "AIO_RUN_LOAD_ONLY"],
+    ] as const
+  ) {
+    const code = (await Deno.readTextFile(join(ROOT, script)))
+      .split(/\r?\n/).filter((l) => !/^\s*#/.test(l));
+    assert(
+      !code.some((l) => l.includes("InvocationName")),
+      `${script} gates on how it was loaded`,
+    );
+    // The one top-level call, and its guard, exactly.
+    assertEquals(
+      code.filter((l) =>
+        /^\S/.test(l) && l.includes(fn) && !l.startsWith("function ")
+      ),
+      [`if ($env:${sw} -ne '1') { ${fn} }`],
+      script,
+    );
+  }
 });

@@ -5,12 +5,17 @@
 // challenge ran the askpass GUI, and a stalled remote hung the update forever.
 import { assert, assertEquals, assertMatch } from "@std/assert";
 import { join } from "@std/path";
-import { gitLsRemote, gitSshEnv } from "../src/server/updates-check.ts";
+import { gitSshEnv } from "../src/server/updates-check.ts";
 import { rebuildFromGit } from "../src/server/updates-rebuild.ts";
 import type { Log } from "../src/diagnostics/logger.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 import { EXE, writeProgram } from "./fake-program-helper.ts";
-import { descendantsIn, gitRunsFrom, processParents } from "./proc-helper.ts";
+import {
+  descendantsIn,
+  gitRunsFrom,
+  inChildEnv,
+  processParents,
+} from "./proc-helper.ts";
 
 const silentLog = {
   info: () => {},
@@ -58,27 +63,17 @@ const noUserConfig = {
   GIT_CONFIG_NOSYSTEM: "1",
 };
 
-/** Run `fn` with env vars set, restoring them after. */
-async function withEnv<T>(
-  vars: Record<string, string | undefined>,
-  fn: () => Promise<T>,
-): Promise<T> {
-  const prev = Object.fromEntries(
-    Object.keys(vars).map((k) => [k, Deno.env.get(k)]),
-  );
-  const put = (v: Record<string, string | undefined>) => {
-    for (const [k, x] of Object.entries(v)) {
-      if (x === undefined) Deno.env.delete(k);
-      else Deno.env.set(k, x);
-    }
-  };
-  put(vars);
-  try {
-    return await fn();
-  } finally {
-    put(prev);
-  }
-}
+// A case about an inherited variable runs in a child (`inChildEnv`): set in
+// THIS process's env, an askpass, a PATH with a stand-in `ssh` or a
+// GIT_CONFIG_GLOBAL reached every parallel test file's git.
+const CHECK = new URL("../src/server/updates-check.ts", import.meta.url).href;
+const REBUILD = new URL("../src/server/updates-rebuild.ts", import.meta.url)
+  .href;
+/** The child's imports, and its silent log. */
+const CHILD_HEAD = `import { gitLsRemote } from ${JSON.stringify(CHECK)};
+import { rebuildFromGit } from ${JSON.stringify(REBUILD)};
+const log = { info() {}, warn() {}, error() {}, debug() {} };`;
+type Outcome = { ok: boolean; error?: string };
 
 Deno.test({
   name:
@@ -150,19 +145,19 @@ Deno.test({
         }),
     );
     try {
-      const r = await withEnv(
+      const opts = JSON.stringify({
+        source: "http://127.0.0.1:" + server.addr.port + "/repo.git",
+        ref: "main",
+        workDir: join(dir, "work"),
+        timeoutMs: 10_000,
+      });
+      const r = await inChildEnv<Outcome>(
         { GIT_ASKPASS: askpass, SSH_ASKPASS: askpass },
-        () =>
-          rebuildFromGit({
-            source: `http://127.0.0.1:${server.addr.port}/repo.git`,
-            ref: "main",
-            workDir: join(dir, "work"),
-            log: silentLog,
-            timeoutMs: 10_000,
-          }),
+        CHILD_HEAD,
+        `return await rebuildFromGit({ ...${opts}, log });`,
       );
       assert(!r.ok);
-      assertMatch(r.error, /git clone failed/);
+      assertMatch(r.error ?? "", /git clone failed/);
       let asked = true;
       try {
         await Deno.stat(marker);
@@ -209,33 +204,34 @@ Deno.test({
     const first = gitRunsFrom(bin);
     const source = "ssh://nobody@127.0.0.1/repo.git";
     try {
-      await withEnv(
+      // A deadline no first start of a just-written program reaches: at
+      // 10 s a busy Windows ended the poll before the stand-in `ssh` had
+      // recorded anything (one call seen, the clone's), and `!ok` could
+      // not tell that from the refusal this test is about. It fails in
+      // about a second either way.
+      const { ls, r } = await inChildEnv<{ ls: Outcome; r: Outcome }>(
         {
           ...first,
           GIT_SSH_COMMAND: undefined,
           GIT_SSH: undefined,
           ...noUserConfig,
         },
-        async () => {
-          // A deadline no first start of a just-written program reaches: at
-          // 10 s a busy Windows ended the poll before the stand-in `ssh` had
-          // recorded anything (one call seen, the clone's), and `!ok` could
-          // not tell that from the refusal this test is about. It fails in
-          // about a second either way.
-          const ls = await gitLsRemote(source, "main", PATIENT_MS);
-          assert(!ls.ok);
-          assert(!/did not answer within/.test(ls.error), ls.error);
-          const r = await rebuildFromGit({
-            source,
-            ref: "main",
-            workDir: join(dir, "work"),
-            log: silentLog,
-            timeoutMs: PATIENT_MS,
-          });
-          assert(!r.ok);
-          assertMatch(r.error, /git clone failed/);
-        },
+        CHILD_HEAD,
+        `const source = ${JSON.stringify(source)};
+const ls = await gitLsRemote(source, "main", ${PATIENT_MS});
+const r = await rebuildFromGit({
+  source,
+  ref: "main",
+  workDir: ${JSON.stringify(join(dir, "work"))},
+  log,
+  timeoutMs: ${PATIENT_MS},
+});
+return { ls, r };`,
       );
+      assert(!ls.ok);
+      assert(!/did not answer within/.test(ls.error ?? ""), ls.error);
+      assert(!r.ok);
+      assertMatch(r.error ?? "", /git clone failed/);
       const calls = (await Deno.readTextFile(argv)).trim().split("\n");
       assertEquals(calls.length, 2, calls.join("\n"));
       for (const c of calls) {
@@ -244,9 +240,12 @@ Deno.test({
       }
       // The user's own ssh command is left exactly as they set it.
       await Deno.remove(argv);
-      await withEnv(
+      await inChildEnv(
         { ...first, GIT_SSH_COMMAND: "ssh -o User=mine", ...noUserConfig },
-        () => gitLsRemote(source, "main", PATIENT_MS),
+        CHILD_HEAD,
+        `return await gitLsRemote(${
+          JSON.stringify(source)
+        }, "main", ${PATIENT_MS});`,
       );
       const theirs = (await Deno.readTextFile(argv)).trim();
       assertMatch(theirs, /-o User=mine/);

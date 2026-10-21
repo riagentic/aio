@@ -14,6 +14,7 @@ import {
   _setCurrentCollector,
 } from "./renderer-state.ts";
 import { _inSsrCall } from "./vdom-ssr.ts";
+import { bindingChord, keycapMatch } from "./key-chord.ts";
 import { _ssrRenderCurrent } from "./ssr-render.ts";
 
 /** Is the hook that is running part of a SERVER render of a component?
@@ -306,6 +307,13 @@ export type KeyChord = {
   /** Match either Ctrl or Cmd — the portable "the modifier key" (Ctrl+K on
    *  Linux/Windows, ⌘K on macOS), which is what an app almost always means. */
   mod?: boolean;
+  /** Match modifiers EXACTLY: every modifier this chord leaves out must be up
+   *  (with `mod`, the other of Ctrl/⌘ is free). `{ mod: true, exact: true }`
+   *  on `"h"` fires on Ctrl+H, not Ctrl+Shift+H. Shift stays free for a
+   *  symbol key (`"?"`, `"+"`) since Shift is what types it. Default `false`
+   *  for the `(key, fn, chord)` form (omitted = "don't care"); a chord STRING
+   *  (`"ctrl+s"`) defaults to `true`. */
+  exact?: boolean;
   /** Ignore the chord while focus is in an input/textarea/contenteditable.
    *  Default `true`: a bare `"n"` shortcut that fires while someone is typing
    *  a note is a bug in every app that has ever shipped one. */
@@ -346,13 +354,35 @@ export const _globalKeyProbe = { ran: 0, swallowed: 0 };
  *  ```tsx
  *  onGlobalKey("Escape", () => lightbox.close())
  *  onGlobalKey("k", () => palette.open(), { mod: true })
+ *  onGlobalKey("mod+s", () => doc.save())          // exact: not Ctrl+Shift+S
+ *  onGlobalKey("ctrl+shift+s", () => doc.saveAs())
  *  ```
- *  `key` is matched case-insensitively against `KeyboardEvent.key`. */
+ *  `key` is matched case-insensitively against `KeyboardEvent.key`. A key
+ *  containing `+` (longer than one character) is a chord string:
+ *  modifiers `ctrl`/`shift`/`alt`/`meta`/`mod` (+ `control`/`cmd`/`command`/
+ *  `super`/`option`) then one key; it matches modifiers exactly unless the
+ *  chord says `exact: false`, and an unknown modifier word throws. Its key is
+ *  the KEYCAP (`keycapMatch`): `"ctrl+shift+1"` fires though Shift+1 types
+ *  `!`, `"alt+f"` fires though macOS Alt+F types `ƒ`. */
 export function onGlobalKey(
   key: string,
   fn: (e: KeyboardEvent) => void,
   chord: KeyChord = {},
 ): void {
+  const isString = key.length > 1 && key.includes("+");
+  if (isString) {
+    const parsed = bindingChord(key);
+    for (const m of Object.keys(parsed.mods) as (keyof KeyChord)[]) {
+      if (chord[m] === false) {
+        throw new Error(
+          `onGlobalKey(${JSON.stringify(key)}): the string names ${m} and ` +
+            `the chord says ${m}: false — say it once.`,
+        );
+      }
+    }
+    key = parsed.key;
+    chord = { exact: true, ...parsed.mods, ...chord };
+  }
   // The LATEST callback, chord and key — refreshed every render, read at event
   // time. The listener is registered inside `onMount`, which runs ONCE, so
   // closing over the arguments froze them at mount: a handler reading a value
@@ -366,6 +396,8 @@ export function onGlobalKey(
   chordRef.current = chord;
   const keyRef = useRef(key);
   keyRef.current = key;
+  const stringRef = useRef(isString);
+  stringRef.current = isString;
   onMount(() => {
     const doc = _activeRoot?.root?.ownerDocument ??
       (globalThis as { document?: Document }).document;
@@ -373,11 +405,33 @@ export function onGlobalKey(
     const handler = (ev: Event) => {
       const e = ev as KeyboardEvent;
       const chord = chordRef.current;
-      if ((e.key ?? "").toLowerCase() !== keyRef.current.toLowerCase()) return;
-      if (chord.ctrl !== undefined && e.ctrlKey !== chord.ctrl) return;
-      if (chord.meta !== undefined && e.metaKey !== chord.meta) return;
-      if (chord.alt !== undefined && e.altKey !== chord.alt) return;
-      if (chord.shift !== undefined && e.shiftKey !== chord.shift) return;
+      const k = keyRef.current;
+      // A chord STRING names a keycap (`keycapMatch`: Shift+1 → "!", macOS
+      // Alt+F → "ƒ" still fire it); the object form keeps `e.key` alone.
+      if (
+        stringRef.current
+          ? !keycapMatch(k, e.key ?? "", e.code ?? "")
+          : (e.key ?? "").toLowerCase() !== k.toLowerCase()
+      ) return;
+      // exact: an omitted modifier means "up" — except Ctrl/⌘ under `mod`,
+      // and Shift on a symbol key (Shift is how "?" is typed). A digit is not
+      // a symbol: "ctrl+1" and "ctrl+shift+1" are two bindings.
+      const ex = chord.exact === true;
+      const freeCM = chord.mod === true;
+      const want = (v: boolean | undefined, free: boolean) =>
+        v ?? (ex && !free ? false : undefined);
+      const ctrl = want(chord.ctrl, freeCM);
+      const meta = want(chord.meta, freeCM);
+      const alt = want(chord.alt, false);
+      const shift = want(
+        chord.shift,
+        k.length === 1 && k.toLowerCase() === k.toUpperCase() &&
+          !/[0-9]/.test(k),
+      );
+      if (ctrl !== undefined && e.ctrlKey !== ctrl) return;
+      if (meta !== undefined && e.metaKey !== meta) return;
+      if (alt !== undefined && e.altKey !== alt) return;
+      if (shift !== undefined && e.shiftKey !== shift) return;
       if (chord.mod !== undefined && (e.ctrlKey || e.metaKey) !== chord.mod) {
         return;
       }

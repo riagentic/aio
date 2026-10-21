@@ -14,6 +14,7 @@ import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join, normalize } from "@std/path";
 import { ensureVersion, removeVersion } from "../src/am/am-versions.ts";
+import { _withVersionsDir } from "../src/server/framework-pin.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const GIT_ENV = {
@@ -44,7 +45,6 @@ const registered = async (repo: string) =>
 
 Deno.test("ensureVersion drops stale STORE registrations, and only those", async () => {
   const base = await tempDir("am-versions-heal-");
-  const saved = Deno.env.get("AIO_VERSIONS_DIR");
   try {
     const repo = join(base, "aio");
     await Deno.mkdir(repo);
@@ -67,33 +67,31 @@ Deno.test("ensureVersion drops stale STORE registrations, and only those", async
     const before = await registered(repo);
     assert(before.includes(stale) && before.includes(theirs), "plants took");
 
-    Deno.env.set("AIO_VERSIONS_DIR", store);
-    const r = await ensureVersion(repo, "v9.9.9");
-    assert(r.ok, r.ok ? "" : r.error);
-    assertEquals(r.created, true);
+    await _withVersionsDir(store, async () => {
+      const r = await ensureVersion(repo, "v9.9.9");
+      assert(r.ok, r.ok ? "" : r.error);
+      assertEquals(r.created, true);
 
-    const now = await registered(repo);
-    assertEquals(
-      now.includes(stale),
-      false,
-      "the store's stale entry survived",
-    );
-    assert(
-      now.includes(theirs),
-      "a worktree OUTSIDE the store lost its registration — only the store " +
-        "is aio's to forget",
-    );
-    assert(now.includes(join(store, "v9.9.9")), now.join("\n"));
+      const now = await registered(repo);
+      assertEquals(
+        now.includes(stale),
+        false,
+        "the store's stale entry survived",
+      );
+      assert(
+        now.includes(theirs),
+        "a worktree OUTSIDE the store lost its registration — only the store " +
+          "is aio's to forget",
+      );
+      assert(now.includes(join(store, "v9.9.9")), now.join("\n"));
+    });
   } finally {
-    if (saved === undefined) Deno.env.delete("AIO_VERSIONS_DIR");
-    else Deno.env.set("AIO_VERSIONS_DIR", saved);
     await dropTempDir(base);
   }
 });
 
 Deno.test("ensureVersion heals a SYMLINKED store (git records the real path)", async () => {
   const base = await tempDir("am-versions-heal-link-");
-  const saved = Deno.env.get("AIO_VERSIONS_DIR");
   try {
     const repo = join(base, "aio");
     await Deno.mkdir(repo);
@@ -107,19 +105,20 @@ Deno.test("ensureVersion heals a SYMLINKED store (git records the real path)", a
     await Deno.mkdir(real);
     const link = join(base, "store-link");
     await Deno.symlink(real, link);
-    Deno.env.set("AIO_VERSIONS_DIR", link);
+    await _withVersionsDir(link, async () => {
+      const first = await ensureVersion(repo, "v9.9.9");
+      assert(first.ok, first.ok ? "" : first.error);
+      // The version dir vanishes (a cleaned store); its registration stays.
+      await Deno.remove(join(real, "v9.9.9"), { recursive: true });
 
-    const first = await ensureVersion(repo, "v9.9.9");
-    assert(first.ok, first.ok ? "" : first.error);
-    // The version dir vanishes (a cleaned store); its registration stays.
-    await Deno.remove(join(real, "v9.9.9"), { recursive: true });
-
-    const again = await ensureVersion(repo, "v9.9.9");
-    assert(again.ok, `re-provisioning failed: ${again.ok ? "" : again.error}`);
-    assertEquals(again.created, true);
+      const again = await ensureVersion(repo, "v9.9.9");
+      assert(
+        again.ok,
+        `re-provisioning failed: ${again.ok ? "" : again.error}`,
+      );
+      assertEquals(again.created, true);
+    });
   } finally {
-    if (saved === undefined) Deno.env.delete("AIO_VERSIONS_DIR");
-    else Deno.env.set("AIO_VERSIONS_DIR", saved);
     await dropTempDir(base);
   }
 });
@@ -180,16 +179,14 @@ async function withStore(
   fn: (base: string, repo: string, store: string) => Promise<void>,
 ) {
   const base = await tempDir("am-versions-torn-");
-  const saved = Deno.env.get("AIO_VERSIONS_DIR");
   try {
     const repo = await repoWithTag(base);
     const store = join(base, "store");
     await Deno.mkdir(store);
-    Deno.env.set("AIO_VERSIONS_DIR", store);
-    await fn(base, repo, store);
+    await _withVersionsDir(store, async () => {
+      await fn(base, repo, store);
+    });
   } finally {
-    if (saved === undefined) Deno.env.delete("AIO_VERSIONS_DIR");
-    else Deno.env.set("AIO_VERSIONS_DIR", saved);
     await dropTempDir(base);
   }
 }
@@ -387,50 +384,46 @@ Deno.test("ensureVersion: a complete legacy checkout git cannot inspect is KEPT"
 
 Deno.test("ensureVersion: …and kept even when the root no longer has the tag", async () => {
   const base = await tempDir("am-versions-notag-");
-  const saved = Deno.env.get("AIO_VERSIONS_DIR");
   try {
     const store = join(base, "store");
     await Deno.mkdir(store);
-    Deno.env.set("AIO_VERSIONS_DIR", store);
-    await Deno.mkdir(join(base, "first"));
-    const path = await orphanedLegacy(base, store);
-    // A root with no v9.9.9 at all (the tag was deleted upstream / offline).
-    const bare = join(base, "bare");
-    await Deno.mkdir(bare);
-    await git(bare, "init", "-q");
-    await Deno.writeTextFile(join(bare, "mod.ts"), "export {};\n");
-    await git(bare, "add", "mod.ts");
-    await git(bare, "commit", "-q", "-m", "init");
-    const r = await ensureVersion(bare, "v9.9.9");
-    assert(r.ok, r.ok ? "" : r.error);
-    assert(await Deno.stat(join(path, "mod.ts")).then(() => true), "deleted");
+    await _withVersionsDir(store, async () => {
+      await Deno.mkdir(join(base, "first"));
+      const path = await orphanedLegacy(base, store);
+      // A root with no v9.9.9 at all (the tag was deleted upstream / offline).
+      const bare = join(base, "bare");
+      await Deno.mkdir(bare);
+      await git(bare, "init", "-q");
+      await Deno.writeTextFile(join(bare, "mod.ts"), "export {};\n");
+      await git(bare, "add", "mod.ts");
+      await git(bare, "commit", "-q", "-m", "init");
+      const r = await ensureVersion(bare, "v9.9.9");
+      assert(r.ok, r.ok ? "" : r.error);
+      assert(await Deno.stat(join(path, "mod.ts")).then(() => true), "deleted");
+    });
   } finally {
-    if (saved === undefined) Deno.env.delete("AIO_VERSIONS_DIR");
-    else Deno.env.set("AIO_VERSIONS_DIR", saved);
     await dropTempDir(base);
   }
 });
 
 Deno.test("ensureVersion: a TORN checkout the root cannot rebuild is refused and left", async () => {
   const base = await tempDir("am-versions-torn-notag-");
-  const saved = Deno.env.get("AIO_VERSIONS_DIR");
   try {
     const store = join(base, "store");
     await Deno.mkdir(store);
-    Deno.env.set("AIO_VERSIONS_DIR", store);
-    await Deno.mkdir(join(base, "tagged"));
-    const tagged = await repoWithTag(join(base, "tagged"));
-    const path = join(store, "v9.9.9");
-    await git(tagged, "worktree", "add", "--detach", path, "v9.9.9");
-    await Deno.remove(join(path, "src"), { recursive: true });
-    await git(tagged, "tag", "-d", "v9.9.9"); // gone upstream
-    const r = await ensureVersion(tagged, "v9.9.9");
-    assertEquals(r.ok, false);
-    assertStringIncludes(r.ok ? "" : r.error, "left in place");
-    assert(await Deno.stat(join(path, "mod.ts")).then(() => true), "deleted");
+    await _withVersionsDir(store, async () => {
+      await Deno.mkdir(join(base, "tagged"));
+      const tagged = await repoWithTag(join(base, "tagged"));
+      const path = join(store, "v9.9.9");
+      await git(tagged, "worktree", "add", "--detach", path, "v9.9.9");
+      await Deno.remove(join(path, "src"), { recursive: true });
+      await git(tagged, "tag", "-d", "v9.9.9"); // gone upstream
+      const r = await ensureVersion(tagged, "v9.9.9");
+      assertEquals(r.ok, false);
+      assertStringIncludes(r.ok ? "" : r.error, "left in place");
+      assert(await Deno.stat(join(path, "mod.ts")).then(() => true), "deleted");
+    });
   } finally {
-    if (saved === undefined) Deno.env.delete("AIO_VERSIONS_DIR");
-    else Deno.env.set("AIO_VERSIONS_DIR", saved);
     await dropTempDir(base);
   }
 });

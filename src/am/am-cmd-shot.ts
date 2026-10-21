@@ -264,7 +264,10 @@ export async function cmdShot(
   const cdp = await cdpConnect(target.webSocketDebuggerUrl, timeout);
   if (video) {
     try {
-      await recordShotVideo(cdp, target.url, video, mode);
+      await recordShotVideo(cdp, target.url, video, mode, {
+        appId,
+        pid: pf.pid,
+      });
     } finally {
       await cdp.close();
     }

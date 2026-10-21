@@ -130,19 +130,19 @@ const KEEPS_ITS_CWD: [string, string, number, string][] = [
   ],
   ["src/server/updates-apply.ts", 'new Deno.Command("tar"', 1, "macOS only"],
   [
-    "src/server/single-instance-lock.ts",
+    "src/server/lock-dir.ts",
     'new Deno.Command("netstat"',
     1,
     "macOS only, synchronous",
   ],
   [
-    "src/server/single-instance-lock.ts",
+    "src/server/process-liveness.ts",
     "new Deno.Command(cmd",
     1,
     "macOS only (`ps`, bounded by perl), synchronous",
   ],
   [
-    "src/server/single-instance-lock.ts",
+    "src/server/process-liveness.ts",
     'new Deno.Command("pgrep"',
     1,
     "POSIX only: Windows has no pgrep, and the NotFound is the answer",

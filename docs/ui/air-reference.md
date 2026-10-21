@@ -197,7 +197,7 @@ so `<ErrorBoundary …>` in TSX fails `deno check` with TS2604 — write them wi
 | `useContext`         | `useContext<T>(ctx): T`                   | Read context value             |
 | `useContextSelector` | `useContextSelector<T,R>(ctx, sel): R`    | Selective context              |
 | `useDimensions`      | `useDimensions(): DimensionsState`        | Element size tracking          |
-| `useRaf`             | `useRaf(cb, active?): void`               | Managed rAF loop, auto-cleanup |
+| `useRaf`             | `useRaf(cb, active?): void`               | rAF loop; `cb(time, delta)` ms |
 
 ## Server State Hooks
 

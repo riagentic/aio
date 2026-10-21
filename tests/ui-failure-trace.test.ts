@@ -91,7 +91,7 @@ Deno.test("the writer is synchronous — an async write would outlive the test",
   // be reported by the leak sanitizers against whichever test ran next, which
   // is the exact class this repo has spent two suite runs on.
   const src = await Deno.readTextFile(
-    new URL("../src/testing/ui-test.ts", import.meta.url),
+    new URL("../src/testing/ui-test-names.ts", import.meta.url),
   );
   const fn = src.slice(src.indexOf("function writeTrace("));
   const body = fn.slice(0, fn.indexOf("\n}"));

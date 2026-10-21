@@ -5,9 +5,11 @@
 
 import { join } from "@std/path";
 import { appDirs } from "../server/app-dirs.ts";
+import type { ReloadLog } from "../server/server-static.ts";
 import { collectElementPaths, type UISurfaceNode } from "../air/ui-surface.ts";
 import { parseChord, pressChord } from "../air/key-chord.ts";
 import type { GlobalFlags, OutputMode } from "./am-types.ts";
+import { liveJournal, type MarkerRect, noteTrigger } from "./am-markers.ts";
 import {
   detectMode,
   fail,
@@ -723,13 +725,18 @@ export async function cmdErrors(
 ): Promise<void> {
   const mode = detectMode(flags);
   // `--since=` as `am logs` reads it (network §8: an error a later reload
-  // fixed stayed in the list for good). Refused when not a time.
+  // fixed stayed in the list for good), plus `--since=reload`: only what
+  // happened after the app's last hot reload. Refused when neither.
   const sinceRaw = _args.find((a) => a.startsWith("--since="))?.slice(8);
-  const sinceMs = sinceRaw === undefined ? undefined : parseSince(sinceRaw);
+  const sinceReload = sinceRaw === "reload";
+  let sinceMs = sinceRaw === undefined || sinceReload
+    ? undefined
+    : parseSince(sinceRaw);
   if (sinceMs === null) {
     outError(
       `--since=${sinceRaw} is not a time — use a duration (15m, 2h, 30s, ` +
-        `1d) or a timestamp (2026-09-08T10:00)`,
+        `1d), a timestamp (2026-09-08T10:00) or reload (since the last hot ` +
+        `reload)`,
       mode,
     );
     Deno.exit(1);
@@ -759,31 +766,60 @@ export async function cmdErrors(
   const text = (result.data as string).trim();
   // Server returns JSON { errors: [...] } or null/empty when no errors
   let errors: string[] = [];
+  let reloads: ReloadLog | null = null;
   try {
     const parsed = JSON.parse(text);
     if (parsed && Array.isArray(parsed.errors)) errors = parsed.errors;
     else if (parsed === null) errors = [];
     else errors = [text]; // legacy: plain text error
+    if (isReloadLog(parsed?.reloads)) reloads = parsed.reloads;
   } catch {
     if (text) errors = [text]; // plain text fallback
+  }
+  if (sinceReload) {
+    if (!reloads) {
+      fail(
+        `--since=reload needs the app's reload count, and this app's dev ` +
+          `server does not report one (it runs an aio older than this am). ` +
+          `Use --since=15m or a timestamp.`,
+        mode,
+      );
+    }
+    sinceMs = reloads.at.at(-1) ?? reloads.bootAt;
   }
   // …and the RUNTIME errors, which is what the word means to the person
   // typing it. `/__aio/error` is the BUILD error — the thing that stops the
   // app from loading at all — so it comes first when present, but a command
   // called `errors` that stayed silent about error.log was answering a
   // narrower question than it was asked.
-  const runtime = await tailErrorLog(
-    appId,
-    flags.lines ?? 20,
-    sinceMs ?? undefined,
+  const events = tagByReload(
+    await errorLogEvents(appId, sinceMs ?? undefined),
+    reloads,
   );
+  // The last N LINES, as before; each remembers its event.
+  const kept = events.flatMap((e, i) => e.lines.map((l) => ({ l, i })))
+    .slice(-(flags.lines ?? 20));
+  const runtime = kept.map((k) => k.l);
 
   if (mode !== "pretty") {
     // `errors` keeps meaning what it always meant — the BUILD errors — because
     // `--json` is the scripting interface and a key that changes meaning under
     // a script is worse than a missing one. `build` is its clearer name, and
-    // `runtime` is the new half.
-    out({ errors, build: errors, runtime }, mode);
+    // `runtime` is the new half. `runtimeEvents` is `runtime` by event, with
+    // the reload each happened under; `reloads` is null from an older server.
+    const shown = new Map<number, string[]>();
+    for (const k of kept) shown.set(k.i, [...shown.get(k.i) ?? [], k.l]);
+    out({
+      errors,
+      build: errors,
+      runtime,
+      reloads,
+      runtimeEvents: [...shown].map(([i, lines]) => ({
+        reload: events[i]!.reload,
+        superseded: events[i]!.superseded,
+        lines,
+      })),
+    }, mode);
     return;
   }
   if (errors.length === 0 && runtime.length === 0) {
@@ -798,28 +834,101 @@ export async function cmdErrors(
   if (runtime.length > 0) {
     if (parts.length) parts.push("");
     parts.push(`runtime — last ${runtime.length} from error.log:`);
-    parts.push(runtime.join("\n"));
+    parts.push(...withReloadHeaders(kept, events, reloads));
   }
   outData(parts.join("\n"), mode); // error.log lines are the app's DATA
 }
 
-/** The tail of the app's own `error.log`. Absent file = no errors yet, which
- *  is different from "the app has no log directory" only in ways this command
- *  cannot act on — either way there is nothing to show. */
-async function tailErrorLog(
+/** The app's own `error.log`, by event, from `sinceMs` on. Absent file = no
+ *  errors yet, which is different from "the app has no log directory" only in
+ *  ways this command cannot act on — either way there is nothing to show. */
+async function errorLogEvents(
   appId: string,
-  lines: number,
   sinceMs?: number,
-): Promise<string[]> {
+): Promise<string[][]> {
   try {
     const path = join(appDirs(appId).logs, "error.log");
-    const all = (await Deno.readTextFile(path)).split("\n");
-    const kept = sinceMs === undefined ? all : groupLogEvents(all)
-      .filter((e) => logEventMatches(e, { sinceMs })).flat();
-    return kept.filter((l) => l.trim() !== "").slice(-lines);
+    const all = groupLogEvents(
+      (await Deno.readTextFile(path)).split("\n"),
+    );
+    return sinceMs === undefined
+      ? all
+      : all.filter((e) => logEventMatches(e, { sinceMs }));
   } catch {
     return [];
   }
+}
+
+function isReloadLog(v: unknown): v is ReloadLog {
+  const r = v as ReloadLog | null | undefined;
+  return typeof r?.bootAt === "number" && typeof r.count === "number" &&
+    Array.isArray(r.at);
+}
+
+/** An error.log event and the hot reload it happened under. */
+export type ReloadTagged = {
+  lines: string[];
+  /** #k: after the app's k-th hot reload (0: before the first); null: before
+   *  this server started (a line an earlier run wrote), or no reload count. */
+  reload: number | null;
+  /** A later reload went out after it — the edit that caused it may be gone. */
+  superseded: boolean;
+};
+
+/** Tag each event with its reload, by its timestamp; an event with no
+ *  readable timestamp (a raw write) takes the one before it. Pure. */
+export function tagByReload(
+  events: readonly string[][],
+  r: ReloadLog | null,
+): ReloadTagged[] {
+  let prev: number | null = null;
+  return events.map((e) => {
+    const lines = e.filter((l) => l.trim() !== "");
+    if (!r) return { lines, reload: null, superseded: false };
+    const ts = logEventHead(e[0] ?? "")?.ts ?? null;
+    if (ts !== null) {
+      if (ts < r.bootAt) prev = null;
+      else {
+        // Reloads older than the kept times count as before every event.
+        let k = r.count - r.at.length;
+        for (const t of r.at) if (t <= ts) k++;
+        prev = k;
+      }
+    }
+    return {
+      lines,
+      reload: prev,
+      superseded: prev === null || prev < r.count,
+    };
+  }).filter((t) => t.lines.length > 0);
+}
+
+/** The shown lines, with a header wherever the reload changes (none without
+ *  a reload count): an error a later reload may have fixed reads as such
+ *  (network §8). Pure. */
+export function withReloadHeaders(
+  kept: readonly { l: string; i: number }[],
+  events: readonly ReloadTagged[],
+  r: ReloadLog | null,
+): string[] {
+  const out: string[] = [];
+  let last: string | undefined;
+  for (const { l, i } of kept) {
+    const head = r ? reloadHeader(events[i]!, r) : undefined;
+    if (head !== undefined && head !== last) out.push(head);
+    last = head;
+    out.push(l);
+  }
+  return out;
+}
+
+/** The header line above a run of events from one reload. */
+function reloadHeader(t: ReloadTagged, r: ReloadLog): string {
+  if (t.reload === null) return "── before this run (an earlier start) ──";
+  const at = t.reload === 0 ? "start" : `reload #${t.reload}`;
+  return t.superseded
+    ? `── ${at} — superseded: ${r.count - t.reload} reload(s) since ──`
+    : `── ${at} — current ──`;
 }
 
 export async function cmdMetrics(
@@ -1722,11 +1831,23 @@ export async function cmdTrigger(
   // result is inspected too: on a path miss the element does not exist, and
   // typing into it next would answer with a second, identical miss instead of
   // the first one's `available` list.
+  // `am shot --video --markers` recording this app? Then this step is noted
+  // in its journal (am-markers.ts) — with the target's rect, asked of the page.
+  let journal: string | null = null;
+  try {
+    const lock = liveLock(appId);
+    if (lock) journal = liveJournal(appId, lock.pid);
+  } catch {
+    // aio-ok: several homes of one id — the trigger itself resolved its
+    // target above; there is no single recording to note it in.
+  }
+  const at = Date.now();
   if (action === "setValue") {
     await post({ path, action: "clear" });
   }
   const wire = action === "setValue" ? "type" : action;
   const body: Record<string, unknown> = { path, action: wire };
+  if (journal) body.rect = true;
   if (
     wire === "type" || wire === "select" || wire === "scroll" ||
     wire === "dragTo"
@@ -1753,6 +1874,16 @@ export async function cmdTrigger(
     if (chord.mods) body.mods = chord.mods;
   }
   const replied = await post(body);
+  if (journal) {
+    const rect = (replied as { rect?: MarkerRect } | null)?.rect;
+    await noteTrigger(journal, { at, path, action, ...(rect ? { rect } : {}) })
+      .catch((e) =>
+        sayErr(
+          `note: the trigger ran, but the recording's marker was not ` +
+            `written (${journal}): ${e}`,
+        )
+      );
+  }
   // Report the action the caller asked for, not the wire action it decomposed
   // into — a reply saying "type" to a `setValue` request reads like the command
   // did something else.

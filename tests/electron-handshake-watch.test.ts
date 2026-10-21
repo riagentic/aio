@@ -91,7 +91,7 @@ const webContents = {
 };
 class BrowserWindow {
   constructor() { this.webContents = webContents; }
-  on() {} center() {} setIcon() {} setMenuBarVisibility() {} loadURL() {}
+  on() {} once() {} show() {} center() {} setIcon() {} setMenuBarVisibility() {} loadURL() {}
   isDestroyed() { return false; } isVisible() { return true; } isMinimized() { return false; }
   getBounds() { return { x: 0, y: 0, width: 800, height: 600 }; }
   getTitle() { return title; }
@@ -111,6 +111,7 @@ module.exports = {
     whenReady: () => new Promise((r) => setTimeout(r, 0)),
   },
   BrowserWindow,
+  screen: { getAllDisplays: () => [{ workArea: { x: 0, y: 0, width: 1280, height: 900 } }], getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1280, height: 900 } }) },
   // macOS: the generated main builds its menu after whenReady (tmplAppMenu;
   // the menu itself is pinned by electron-window-close-and-menu.test.ts).
   Menu: { setApplicationMenu() {}, buildFromTemplate: (t) => t },

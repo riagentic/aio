@@ -484,8 +484,10 @@ for (const when of ["boot", "save"] as const) {
               [],
               "the CSS step outlived close()",
             );
+            // Far below the 30 s step, and above the ~2.5 s a loaded Windows
+            // takes to end the step's child (4-shard full suite).
             assert(
-              ms < 2000,
+              ms < 10_000,
               `close waited ${ms.toFixed(0)} ms on a 30 s step`,
             );
             await new Promise((r) => setTimeout(r, 0));

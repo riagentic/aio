@@ -5,7 +5,7 @@
 // between fails the create (ENOENT; on macOS EINVAL too). Three sites had
 // that shape — both socket binds and the watcher's sentinel — and an app's
 // start failed because another app quit. `createInLockDir` /
-// `listenInLockDir` (single-instance-lock.ts) close the gap; this keeps the
+// `listenInLockDir` (lock-dir.ts) close the gap; this keeps the
 // next site from opening it again.
 import { assertEquals } from "@std/assert";
 import { fromFileUrl, join, relative } from "@std/path";
@@ -24,5 +24,5 @@ Deno.test("lock dir: `ensureLockDirOf` is called by the helper alone", () => {
   const callers = [...tsFiles(SRC)]
     .filter((f) => /\bensureLockDirOf\(/.test(Deno.readTextFileSync(f)))
     .map((f) => relative(SRC, f).replaceAll("\\", "/"));
-  assertEquals(callers, ["server/single-instance-lock.ts"]);
+  assertEquals(callers, ["server/lock-dir.ts"]);
 });

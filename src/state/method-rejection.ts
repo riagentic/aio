@@ -28,6 +28,19 @@ export function reduceThrowCode(e: unknown): "ACTION_REFUSED" | "REDUCE_ERROR" {
   return e instanceof RefusedWrite ? "ACTION_REFUSED" : "REDUCE_ERROR";
 }
 
+/** Refusals whose `code` was added after the fact (1.0.23): the code is for
+ *  `errorCode(e)` only and must not change how the refusal is classified. */
+const _additiveCode = new WeakSet<object>();
+
+/** Give a refusal a stable `code` WITHOUT changing its classification: below,
+ *  any other `code` reads as "aio's own error, a bug", and these refusals were
+ *  classified by their class and message before they had one (a harness's
+ *  `alert()` refusal thrown inside a method was, and stays, deliberate). */
+export function withRefusalCode<E extends Error>(e: E, code: string): E {
+  _additiveCode.add(e);
+  return Object.assign(e, { code });
+}
+
 /** Engine error classes: a method that throws one of these has a bug. */
 const BUG_CLASSES = new Set([
   "TypeError",
@@ -60,7 +73,9 @@ export function isDeliberateRejection(e: unknown): boolean {
     x = x.cause, depth++
   ) {
     if (BUG_CLASSES.has(x.name)) return false;
-    if ((x as { code?: unknown }).code !== undefined) return false;
+    if (
+      (x as { code?: unknown }).code !== undefined && !_additiveCode.has(x)
+    ) return false;
     if (x.message.startsWith("[")) return false;
   }
   return e.message.length > 0;

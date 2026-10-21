@@ -21,7 +21,7 @@
     "aio/extras": "../../src/extras/mod.ts",
     "aio/updates": "../../src/updates.ts",
     "aio/testing": "../../src/cell-test.ts",
-    "electron": "npm:electron@44.7.0",
+    "electron": "npm:electron@44.9.0",
     "esbuild": "npm:esbuild@0.25.12",
     "immer": "npm:immer@10.2.0",
     "happy-dom": "npm:happy-dom@20.14.5",

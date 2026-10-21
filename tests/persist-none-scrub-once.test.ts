@@ -1,5 +1,5 @@
 // `persist: "none"` slices an OLDER build left in the store are scrubbed at
-// boot (aio-boot.ts `scrubStaleSlices`: secure_delete, VACUUM, WAL truncate)
+// boot (boot-scrub.ts `scrubStaleSlices`: secure_delete, VACUUM, WAL truncate)
 // — ONCE. The heavy proof is the hosts lane (tests/hosts.test.ts, a real
 // binary per host); this is the light one, in-process, pinning what that lane
 // does not: the first boot SAYS it (one log line) and takes the slice off the

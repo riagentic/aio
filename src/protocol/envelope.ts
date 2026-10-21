@@ -71,6 +71,7 @@ export type Kind =
   | "sync-err" // S→C — sync failure, client backs off + re-requests
   | "sfn" // C→S — server-function invocation
   | "sfnr" // S→C — server-function result
+  | "sfnh" // S→C — a serverFn call waits on a person (a picker): hold / resume its timeout {cid,hold}
   | "ctl" // C→S — control-plane request {id,path,method,headers?,body?}
   | "ctlr" // S→C — control-plane reply {id,status,headers?,body}
   | "dialog" // S→C — open a native file dialog in the window {id,kind,title,defaultPath?,filters?}
@@ -117,6 +118,7 @@ export const FRAME_KINDS: readonly Kind[] = [
   "sync-err",
   "sfn",
   "sfnr",
+  "sfnh",
   "ctl",
   "ctlr",
   "dialog",
@@ -239,6 +241,7 @@ export const SERVES: Record<
     "op-rejected",
     "sync-err",
     "sfnr",
+    "sfnh",
   ]),
   // The CONTROL client (`am`, amui) — a fourth router, and the only peer that
   // is not a UI. It connects to the same socket as the Electron shell and
@@ -385,6 +388,10 @@ export type SfnrPayload = {
    *  same way, or an app ends up with two error vocabularies. */
   code?: string;
 };
+/** `hold: true` — the call `cid` is waiting on a person (a native picker,
+ *  `pauseCallDeadlines`): its caller stops the timeout. `false` — the wait is
+ *  over: the caller starts a fresh, full one. */
+export type SfnhPayload = { cid: string; hold: boolean };
 /** A control-plane request, tunnelled over the socket.
  *
  *  Deliberately HTTP-shaped: the server answers it by building a `Request`

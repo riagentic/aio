@@ -169,7 +169,7 @@ export function initDiagnostics(
   // object, so `"toString" in it` is true even when the view dropped the cell
   // — a `persist: "none"` cell named after an Object.prototype member would
   // have `unkept` answer false and its arguments written in cleartext. Same
-  // rule as `restorableSlices` (aio-boot.ts), which builds the view with
+  // rule as `restorableSlices` (boot-scrub.ts), which builds the view with
   // `Object.entries`.
   const unkept = (cell: string | undefined): boolean =>
     cell !== undefined && cpView !== null &&

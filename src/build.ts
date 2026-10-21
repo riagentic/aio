@@ -34,6 +34,7 @@ import { buildAndroid } from "./build/build-android.ts";
 import { buildIos } from "./build/build-ios.ts";
 import { buildWeb } from "./build/build-web.ts";
 import {
+  bakedClientArgs,
   recoverInterruptedLinks,
   runDenoCompile,
   writeServiceFile,
@@ -44,7 +45,7 @@ import {
   checkedGuestPreloads,
   guestPreloadFindings,
 } from "./build/guest-preloads.ts";
-import { bakesElectronVersion } from "./build/electron-bake.ts";
+import { bakesElectronVersion, electronRecord } from "./build/electron-bake.ts";
 import {
   reportElectronDrift,
   resolveElectronVersion,
@@ -193,15 +194,14 @@ export async function build(cfg?: BuildConfig): Promise<void> {
         Deno.exit(1);
       }
     }
-    // `build.splash`: drawn before any app code runs, so it travels in this
-    // record. Left out when the app has none (the record is then
-    // byte-for-byte what it was).
     await Deno.writeTextFile(
       join(dist, ELECTRON_VERSION_FILE),
-      JSON.stringify({
-        ...(shared ? { version, runtime: "shared", sha256 } : { version }),
-        ...(cfg.splash ? { splash: cfg.splash } : {}),
-      }) + "\n",
+      JSON.stringify(electronRecord({
+        version,
+        sha256,
+        client: bakedClientArgs(cfg)[0]?.slice("--client=".length),
+        splash: cfg.splash,
+      })) + "\n",
     );
     staged(
       `dist/${ELECTRON_VERSION_FILE}`,

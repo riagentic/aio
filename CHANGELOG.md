@@ -1,5 +1,167 @@
 # Changelog
 
+## v1.0.23-beta — the splash on every desktop the same and never in the way, a native Save dialog, private instances, files served with Range (2026-10-21)
+
+> **Nothing is removed or renamed, and no option changes meaning.** The splash
+> (a day old) gets good defaults for the keys an app left out. Four behaviours
+> change because they were wrong: the desktop splash no longer holds the app's
+> window back (the window shows when it is ready, under the splash); the splash
+> and the download dialogs open where the window will, not under the pointer;
+> the window shows once its page has painted, not as a white rectangle; and
+> `--instance=.` / `--instance=..` are refused (they escaped
+> `~/.aio-instances`). Everything else is added. An app upgrades with `am pin`
+> and `am fix` and no edit by hand. See
+> [the upgrade guide](docs/upgrade/from-1.0.22-beta-to-1.0.23-beta.md).
+
+### Splash
+
+- **`{version}`** in `build.splash.text`, filled at build time (the string
+  `--version` prints), and **`downloadText`**, shown instead of `text` while
+  Electron downloads (absent = `text`).
+- **Linux: aio draws the splash itself with GTK 3** (which Electron already
+  needs), in a worker — the same look as Windows and macOS: `@2x` halved, the
+  spec's font, colours and bar, a ✕ during a download. `yad`, then `zenity`,
+  only when GTK cannot draw; the reason is logged.
+- **Runs from source show the splash** (`deno task dev`, `--prod`, `am start`),
+  resolved from `deno.json` like a build — not on dev's restart after a save.
+  `docs/build/targets.md` lists every difference between a run from source and a
+  built package, each with its reason.
+- **The window, the splash, the download window and the Retry / Quit question
+  open on the same screen, centred on the same spot**: one placement rule
+  (`splash-place.ts`) shared by every process — the window's saved bounds, kept
+  on a screen that still exists, else the primary display. The download window
+  and the question are aio's own on every OS (GTK on Linux, Windows Forms,
+  Cocoa); `zenity` / `yad` only where GTK cannot draw.
+- **Nothing waits for it**: the window shows the moment the app is ready, under
+  the splash; the splash stays in front until `minMs` has passed, never takes
+  the focus, and is not shown at all when the app is ready first.
+- **Every part of the look is the app's**: `size`, `fit`, `position`,
+  `background`, `textPosition`, `align`, `margin`, `shadow`, `radius`, `border`,
+  `windowShadow`, `maxMs`, `fadeMs`, `show` (`always` / `firstStart` / `never`),
+  `cancel`, `followWindow`, `bar.height` / `bar.position` / `bar.radius` —
+  validated at build; one table in `docs/build/targets.md`. What a target cannot
+  draw is named there and logged once.
+- **Good defaults** (the splash is a day old; a key the app sets is kept
+  exactly): `text` `"{title}"`, `downloadText`
+  `"Getting {title} ready ·
+  {got} of {total} MB"`, `progress` on (a bar and a
+  ✕ while Electron downloads), the text white or near-black — whichever reads on
+  the image — centred over its lower part, corners of 8 px, a 200 ms fade, a
+  text shadow (macOS, Linux) and a window shadow (macOS). `text: false` is no
+  text.
+- **`show: "firstStart"`** is the way to get the Electron download inside your
+  splash and nothing on later starts. Without `build.splash`, the download
+  window and the Retry / Quit question wear the app's identity colours (light or
+  dark as the OS is), say "Getting <title> ready", and have one button, Cancel.
+- **The splash follows the real window**: once Electron reports where its window
+  is, the splash re-centres on it (`followWindow`); a difference is logged.
+  Windows helpers are per-monitor DPI aware.
+- **Windows: the splash is always first.** When Electron is already on the
+  machine (a later start, a run from source, an offline build), Electron's main
+  process draws the splash before it opens the app window — the same look,
+  placement and `followWindow`; on Windows 11 it was on screen 153–309 ms after
+  Electron started, before the window in 30 of 30 starts (the PowerShell helper
+  needed 0.9–2.4 s and lost to the window). The Windows Forms helper draws only
+  the online first start's download. macOS and Linux keep Cocoa and GTK, which
+  appear before Electron starts.
+- Fixes found running the checklist on all three OSes: the Windows splash could
+  not start once its script passed the 32 767-character command line (dialogs
+  now start from a short fixed command); an offline macOS `.dmg` failed its
+  signature with Electron 44.9's new framework helper (every helper is now
+  signed); a minified build's placement code stopped at its first call.
+
+### Desktop
+
+- **No white flash**: every window is made hidden and shown once its page has
+  painted (a 5 s cap, said once), on the page's background —
+  `electron.backgroundColor` (`"#rrggbb"` or `{ light, dark }`), else the
+  theme's; it follows the OS's dark mode.
+- **`pickSave({ title, defaultPath, filters })`** in `aio/server` — the native
+  Save dialog with the OS overwrite confirmation.
+- **A picker inside a `serverFn` holds the caller's 30 s timeout** while the
+  dialog is open (it lost the pick before).
+- **`electron.shortcuts: { reload: false, print: false }`** gives Ctrl/Cmd+R,
+  Ctrl+F5 and Ctrl/Cmd+P back to the page.
+- **`print()`** in `aio/air` — works in a desktop window on Linux, where
+  `window.print()` does nothing.
+- **A vetoed close is logged once**; `electron.confirmUnload: true` shows the
+  native Leave / Stay dialog.
+- Chromium's X11 drag-and-drop `atom_cache` lines are suppressed.
+- An `online` app's browser- or server-default binary no longer prefetches
+  Electron on each update.
+- Electron 44.7.0 → 44.9.0.
+
+### UI
+
+- **`onGlobalKey("ctrl+s", fn)`** — chord strings (`ctrl` / `shift` / `alt` /
+  `meta` / `mod` + key) now fire; they type-checked and never fired. They match
+  modifiers exactly and name the key on the keycap (`"ctrl+shift+1"` fires on
+  Shift+1, `"alt+f"` on macOS). An unknown modifier throws. `KeyChord.exact`
+  opts the object form into exact matching.
+- JSX types for the missing standard HTML attributes (`<input list>`,
+  `<time dateTime>`, `inert`, `popover`, `form*`, …).
+- `structuredClone` of a draft inside a method names the fix.
+
+### App manager
+
+- **`am start --instance=X --fresh`** — empty data, thrown away on `am stop`.
+- **`am instances` lists every instance** (`instance`, `startedBy`: am / other /
+  unknown); `am stop` notes when it stopped one am did not start; `am start` on
+  a running app suggests `--instance=<name>`.
+- **`am restart` replays the start env that decides where data lives** (XDG_*,
+  APPDATA, LOCALAPPDATA, AIO_PROFILE) and names what it could not; a `--home` /
+  `--fresh` instance restarts on its own home.
+- **Apps and compiled artifacts accept `--instance=<name>`**.
+- **`am shot --video --json`** prints `{"event":"recording","file","t0"}` when
+  frame 0 is taken; **`--markers`** writes `<video>.markers.json` from every
+  `am trigger` during the recording.
+- **`am state --offline [path]`** reads a stopped app's saved state, read-only.
+- **`am persist --drop=<cell>`** removes a stored cell the build no longer
+  declares (the boot warning names it).
+- **`am errors`** tags each error with its hot reload; `--since=reload`.
+
+### Server and build
+
+- **`serveFile(req, path, { type? })`** in `aio/server` — a file on disk with
+  the blob route's Range contract (206 / 416, safe type + `nosniff`, closed on
+  cancel), so a `<video>` can seek.
+- **`deno task compile` embeds an app's own server Workers**
+  (`new Worker(new URL("./x.ts", import.meta.url))`; only `*.server.ts` ones
+  were before — the rest compiled green and failed at run time); a computed URL
+  warns with the `compile.include` line.
+- **The build and `aiol` warn** when a browser
+  `new URL("<file>",
+  import.meta.url)` is served by no `deno.json` `assets`
+  mount once bundled; `aiol` also flags a browser `fetch` under `src/` and an
+  `aio.run({ assets })` mount `deno.json` lacks.
+- Every test-harness refusal carries a stable `code` (`errorCode(e)`; table in
+  `docs/debugging/errors.md`); classification is unchanged.
+- **`install.ps1` / `run.ps1` run when dot-sourced** (GitHub Actions
+  `shell: pwsh` installed nothing and exited 0); `AIO_INSTALL_LOAD_ONLY=1` /
+  `AIO_RUN_LOAD_ONLY=1` load the functions only.
+- A directory install's boot check of `installed.json`, asked for while the
+  process's own write of it was still finishing, was skipped instead of made
+  afterwards — a record changed in that moment kept the wrong version. It now
+  runs again once that write has answered.
+- Windows: a one-click `.exe` that stopped downloading says "this download is
+  incomplete, download it again".
+
+### Docs
+
+- SHIP verifies an artifact headless (`build --smoke`, or `--client=server-only`
+  - a headless test), never on a person's screen; `electronRuntime` offline vs
+    online; Windows CI runs `am` with `shell: pwsh`; `node:dgram` multicast
+    under a VPN firewall; methods are a round trip; `useRaf((time, delta))`;
+    `onChange` listens to `input`; uncontrolled inputs survive re-renders.
+
+### Inside
+
+- Six source files of 157–285 KB split by pure moves (`single-instance-lock`,
+  `am-cmd-process`, `ui-test`, `build-compile`, `aio-boot`, `aio`); old paths
+  re-export everything, the module load order is the same, boot time unchanged.
+- Tests no longer leak `GIT_*`, askpass or `AIO_VERSIONS_DIR` into each other
+  under one-process `deno test --parallel`.
+
 ## v1.0.22-beta — a splash screen on every target, one install named for what it is, a faster boot (2026-10-20)
 
 > **Nothing is removed or renamed. One default moves:** an update keeps ONE old

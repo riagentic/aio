@@ -1409,6 +1409,26 @@ To get the raw action object — before or after binding (composition, tests,
 `schedule.*`) — use the method's `.action()`: `counter.increment.action(5)`
 returns `{ type: "counter:increment", payload: { args: [5] } }`.
 
+### A method call is a round trip — build on your own value
+
+In the browser, state updates after the server's reply, not at the call. Two
+quick calls that each compute from the state they read lose a step:
+
+```ts
+prefs.setZoom(prefs.zoom + 10); // reads 100, sends 110
+prefs.setZoom(prefs.zoom + 10); // still reads 100 (no reply yet), sends 110 again
+```
+
+Let the method compute from its own state (`zoomBy(10)`: `s.zoom += 10`, run in
+order on the server), or keep the pending value yourself and send that:
+
+```ts
+let zoom = prefs.zoom;
+const step = () => prefs.setZoom(zoom += 10); // 110, 120 — no lost step
+```
+
+`await` the call when the next line must read the new state.
+
 ---
 
 ## Common Pitfalls

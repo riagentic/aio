@@ -36,6 +36,7 @@ export const GLOBAL_FLAGS: readonly string[] = [
   "--filter",
   "--follow",
   "--force",
+  "--fresh",
   "--help",
   "--home",
   "--json",
@@ -95,7 +96,7 @@ export const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
   // "every gated verb refuses --zzz" and "every verb appears" — neither can
   // see a flag the COMMAND implements and the table omits. That direction is
   // gated now too (tests/am-help-flags-are-accepted.test.ts).
-  state: ["--watch"],
+  state: ["--watch", "--offline"],
   expect: [],
   record: ["--from"],
   timeline: ["--from"],
@@ -104,7 +105,7 @@ export const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
   dispatch: [],
   actions: [],
   timetravel: [],
-  persist: [],
+  persist: ["--drop"],
   snapshot: [],
   // Data
   data: [],
@@ -136,6 +137,8 @@ export const VERB_FLAGS: Readonly<Record<string, readonly string[]>> = {
     // `--duration=<s>` stops it by itself.
     "--video",
     "--duration",
+    // `--markers`: `<video>.markers.json`, one entry per `am trigger`.
+    "--markers",
   ],
   eval: ["--window"],
   sql: [],

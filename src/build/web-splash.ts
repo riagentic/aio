@@ -13,11 +13,7 @@ import { appIdentityColors } from "./app-theme.ts";
 import { pngFromRgba } from "./app-icon.ts";
 import { decodePng } from "./png-scale.ts";
 import { escHtml } from "../server/server-html-constants.ts";
-import {
-  SPLASH_CAP_MS,
-  type SplashSpec,
-  splashText,
-} from "../electron/splash.ts";
+import { lookOf, type SplashSpec, splashText } from "../electron/splash.ts";
 
 /** The splash image's file in the web build. */
 export function webSplashFile(s: SplashSpec): string {
@@ -45,7 +41,7 @@ export function splashCssWidth(s: SplashSpec, vw: number, vh: number): number {
  *  and the script that takes it away). The script waits for `#root`'s first
  *  child — the mount, the same signal the desktop's window reports — then
  *  for `minMs` since the first paint, fades it out and removes it; after
- *  {@linkcode SPLASH_CAP_MS} it goes regardless. ES5: an engine too old for
+ *  `maxMs` (30 s unless set) it goes regardless. ES5: an engine too old for
  *  the bundle still shows the page's notice about it. Pure. */
 export function webSplash(
   s: SplashSpec,
@@ -53,20 +49,27 @@ export function webSplash(
 ): { head: string; body: string } {
   const { w, h, scale } = s.image;
   const cw = w / scale, ch = h / scale;
+  const look = lookOf(s);
+  const fade = look.fadeMs ?? 200;
   const family = s.font.family
     ? JSON.stringify(s.font.family).replace(/</g, "\\3c ") + ","
     : "";
   const css = `#aio-splash{position:fixed;inset:0;z-index:2147483647;` +
     `display:flex;align-items:center;justify-content:center;` +
-    `background:${s.light.background};transition:opacity .2s}` +
+    `background:${s.light.background};transition:opacity ${fade / 1000}s}` +
     `#aio-splash>div{position:relative}` +
     `#aio-splash img{display:block;height:auto;` +
+    (look.radius ? `border-radius:${look.radius}px;` : "") +
+    (look.border
+      ? `outline:1px solid ${look.border};outline-offset:-1px;`
+      : "") +
     `width:min(${cw}px,80vw,calc(80vh*${cw}/${ch}))}` +
     `#aio-splash p{position:absolute;top:100%;left:50%;` +
     `transform:translateX(-50%);width:max-content;max-width:90vw;` +
     `margin:16px 0 0;text-align:center;` +
     `font:${s.font.weight} ${s.font.size}pt ${family}system-ui,sans-serif;` +
-    `color:${s.light.text}}` +
+    `color:${s.light.text}` +
+    (look.shadow ? `;text-shadow:0 1px 2px rgba(0,0,0,.45)` : "") + `}` +
     `@media (prefers-color-scheme:dark){#aio-splash{` +
     `background:${s.dark.background}}#aio-splash p{color:${s.dark.text}}}` +
     `@media (prefers-reduced-motion:reduce){#aio-splash{transition:none}}`;
@@ -75,10 +78,10 @@ export function webSplash(
     : `<p>${escHtml(splashText(s.text, title))}</p>`;
   const js = `(function(){var s=document.getElementById("aio-splash"),` +
     `r=document.getElementById("root"),done=0,` +
-    `c=setTimeout(go,${SPLASH_CAP_MS});` +
+    `c=setTimeout(go,${look.maxMs});` +
     `function go(){if(done)return;done=1;o.disconnect();clearTimeout(c);` +
     `s.style.opacity="0";s.style.pointerEvents="none";` +
-    `setTimeout(function(){s.parentNode.removeChild(s)},250)}` +
+    `setTimeout(function(){s.parentNode.removeChild(s)},${fade + 50})}` +
     // It appeared at the first paint. Mounted before any paint (a cached
     // bundle; measured: mount 134 ms, paint 156 ms), there is no paint yet:
     // wait minMs from now — still before the paint — then measure again.

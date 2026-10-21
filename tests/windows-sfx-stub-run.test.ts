@@ -539,7 +539,7 @@ Deno.test({
       // stub that is longer than the pinned one.
       assertEquals(
         await ps(
-          `. '${join(REPO, "run.ps1")}'; ` +
+          `$env:AIO_RUN_LOAD_ONLY='1'; . '${join(REPO, "run.ps1")}'; ` +
             `"$(Test-OneClickExe '${iconed}') $(Test-OneClickInstallSwitch '${iconed}')"`,
           env,
         ),
@@ -613,7 +613,9 @@ Deno.test({
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
-            `. '${join(REPO, "run.ps1")}'; $LASTEXITCODE = 42; ` +
+            `$env:AIO_RUN_LOAD_ONLY='1'; . '${
+              join(REPO, "run.ps1")
+            }'; $LASTEXITCODE = 42; ` +
             `Start-OneClickExe '${path}' @(${
               args.map((a) => `'${a}'`).join(", ")
             })`,

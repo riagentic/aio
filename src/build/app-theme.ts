@@ -290,6 +290,51 @@ export function appIdentityColors(
   };
 }
 
+/** The app's identity as the download window and the Retry / Quit question
+ *  wear it, light and dark: page background and text, the bar (the accent)
+ *  and its ground — the splash's defaults exactly (`build/splash.ts`). Pure. */
+export function identityDialogColors(
+  appId: string,
+  /** The colours the app set (`electron.downloadWindow`): each is used in
+   *  both modes, as the splash's are. */
+  set: {
+    background?: string;
+    color?: string;
+    bar?: { color?: string; track?: string };
+  } = {},
+): {
+  light: { background: string; text: string; bar: string; track: string };
+  dark: { background: string; text: string; bar: string; track: string };
+} {
+  const id = appIdentityColors(appId);
+  const mode = (m: IdentityColors) => ({
+    background: set.background ?? m.background,
+    text: set.color ?? m.text,
+    bar: set.bar?.color ?? m.accent,
+    track: set.bar?.track ?? m.track,
+  });
+  return { light: mode(id.light), dark: mode(id.dark) };
+}
+
+/** The desktop window's background, light and dark: `electron.backgroundColor`
+ *  when set; else the page background aio's theme paints — `"full"`, or
+ *  `"auto"` while the app ships no `style.css` (the shell's own rule,
+ *  server-html-gen) — which is {@linkcode appIdentityColors}' by the same
+ *  table; else undefined: the page is the app's own, and its colour unknown.
+ *  Pure. */
+export function windowBackground(
+  set: string | { light: string; dark: string } | null | undefined,
+  theme: string | undefined,
+  hasCSS: boolean,
+  appId: string,
+): { light: string; dark: string } | undefined {
+  if (typeof set === "string") return { light: set, dark: set };
+  if (set) return { light: set.light, dark: set.dark };
+  if (theme !== "full" && !(theme === "auto" && !hasCSS)) return undefined;
+  const c = appIdentityColors(appId);
+  return { light: c.light.background, dark: c.dark.background };
+}
+
 export function appThemeCss(name: string): string {
   const hue = appHue(name);
   const { accent, onAccent, fill } = accentFill(hue);

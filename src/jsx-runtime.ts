@@ -181,7 +181,7 @@ type AioHTMLAttributes<T extends EventTarget = HTMLElement> =
       | AioStyleObject;
     title?: string;
     tabIndex?: number;
-    hidden?: boolean;
+    hidden?: boolean | "until-found";
     role?: string;
     slot?: string;
     dir?: string;
@@ -222,6 +222,27 @@ type AioHTMLAttributes<T extends EventTarget = HTMLElement> =
       | "sentences"
       | "words"
       | "characters";
+    // The rest of the WHATWG global attributes. Unlisted, each was TS2322 and
+    // pushed people toward `as any` while the renderer already wrote it (any
+    // non-property prop is `setAttribute`d verbatim; HTML attribute names are
+    // case-insensitive, so React's camelCase spellings land correctly).
+    accessKey?: string;
+    autoFocus?: boolean;
+    autoCorrect?: "on" | "off";
+    inert?: boolean;
+    nonce?: string;
+    /** `"auto"` (light dismiss), `"manual"`, `"hint"`; `""` = auto. */
+    popover?: "auto" | "manual" | "hint" | "";
+    translate?: "yes" | "no";
+    writingSuggestions?: "true" | "false";
+    is?: string;
+    part?: string;
+    exportParts?: string;
+    itemScope?: boolean;
+    itemProp?: string;
+    itemType?: string;
+    itemID?: string;
+    itemRef?: string;
     [key: `data-${string}`]: string | number | boolean | undefined;
     [key: `aria-${string}`]: string | number | boolean | undefined;
     ref?: ((el: HTMLElement | null) => void) | { current: HTMLElement | null };
@@ -231,7 +252,10 @@ type AioHTMLAttributes<T extends EventTarget = HTMLElement> =
     t?: string;
     children?: unknown;
     dangerouslySetInnerHTML?: { __html: string };
-  };
+  }
+  // `0 extends 1 & T` holds only for `T = any` — the index signature's
+  // instantiation, which is what every tag without its own entry gets.
+  & (0 extends 1 & T ? AioUnlistedTagAttributes : unknown);
 
 /** `<input>` JSX attributes. */
 type AioInputAttributes = AioHTMLAttributes<HTMLInputElement> & {
@@ -256,6 +280,22 @@ type AioInputAttributes = AioHTMLAttributes<HTMLInputElement> & {
   maxLength?: number;
   minLength?: number;
   size?: number;
+  /** The id of a `<datalist>` offering suggestions. */
+  list?: string;
+  form?: string;
+  alt?: string;
+  src?: string;
+  width?: string | number;
+  height?: string | number;
+  dirName?: string;
+  capture?: "user" | "environment" | boolean;
+  formAction?: string;
+  formEncType?: string;
+  formMethod?: string;
+  formNoValidate?: boolean;
+  formTarget?: string;
+  popoverTarget?: string;
+  popoverTargetAction?: "toggle" | "show" | "hide";
 };
 
 /** `<textarea>` JSX attributes. */
@@ -273,6 +313,9 @@ type AioTextAreaAttributes = AioHTMLAttributes<HTMLTextAreaElement> & {
   minLength?: number;
   wrap?: string;
   autoFocus?: boolean;
+  autoComplete?: string;
+  dirName?: string;
+  form?: string;
 };
 
 /** `<select>` JSX attributes. */
@@ -287,6 +330,8 @@ type AioSelectAttributes = AioHTMLAttributes<HTMLSelectElement> & {
   multiple?: boolean;
   size?: number;
   autoFocus?: boolean;
+  autoComplete?: string;
+  form?: string;
 };
 
 /** `<a>` JSX attributes. */
@@ -298,6 +343,7 @@ type AioAnchorAttributes = AioHTMLAttributes<HTMLAnchorElement> & {
   hreflang?: string;
   type?: string;
   referrerPolicy?: string;
+  ping?: string;
 };
 
 /** `<img>` JSX attributes. */
@@ -341,6 +387,8 @@ type AioFormAttributes = AioHTMLAttributes<HTMLFormElement> & {
   noValidate?: boolean;
   autoComplete?: string;
   name?: string;
+  acceptCharset?: string;
+  rel?: string;
 };
 
 /** `<button>` JSX attributes. */
@@ -351,6 +399,16 @@ type AioButtonAttributes = AioHTMLAttributes<HTMLButtonElement> & {
   value?: string;
   autoFocus?: boolean;
   form?: string;
+  formAction?: string;
+  formEncType?: string;
+  formMethod?: string;
+  formNoValidate?: boolean;
+  formTarget?: string;
+  popoverTarget?: string;
+  popoverTargetAction?: "toggle" | "show" | "hide";
+  /** Invoker commands: the id of the element `command` acts on. */
+  commandFor?: string;
+  command?: string;
 };
 
 /** `<label>` JSX attributes. */
@@ -412,6 +470,7 @@ type AioDetailsAttributes = AioHTMLAttributes<HTMLDetailsElement> & {
 /** `<dialog>` attributes, including the `open` boolean AIR treats as state. */
 type AioDialogAttributes = AioHTMLAttributes<HTMLDialogElement> & {
   open?: boolean;
+  closedBy?: "any" | "closerequest" | "none";
 };
 
 /** `<progress>` / `<meter>` — a UI that reports progress needs these typed. */
@@ -436,6 +495,94 @@ type AioTableCellAttributes = AioHTMLAttributes<HTMLTableCellElement> & {
   headers?: string;
   scope?: "row" | "col" | "rowgroup" | "colgroup";
   abbr?: string;
+};
+
+/** The attributes of the standard tags that have no entry of their own in
+ *  `JsxIntrinsicElements` — `<time dateTime>`, `<ol reversed start>`,
+ *  `<blockquote cite>`, `<col span>`, `<meta charSet>`, `<link as>`,
+ *  `<script async>`, `<source srcSet>`, `<track srcLang>`, `<area coords>`,
+ *  `<template shadowRootMode>`… — admitted on the index signature (the only
+ *  attribute type those tags reach). Unlisted, each was TS2322 and pushed
+ *  people toward `as any`; the renderer already wrote every one of them
+ *  (non-property props are `setAttribute`d verbatim, and HTML attribute names
+ *  are case-insensitive, so React's camelCase lands correctly).
+ *
+ *  Why not one entry per tag: a new KEY in `JsxIntrinsicElements` collides
+ *  with an app's own `declare module` augmentation of the same tag (TS2717) —
+ *  the documented workaround for exactly these gaps — so it is not additive.
+ *  Attributes on the index's type collide with nothing. Shared names take the
+ *  union of their per-tag value types. */
+type AioUnlistedTagAttributes = {
+  /** `<time>`, `<del>`, `<ins>` — React's spelling; `datetime` also works. */
+  dateTime?: string;
+  datetime?: string;
+  /** `<blockquote>`, `<q>`, `<del>`, `<ins>`. */
+  cite?: string;
+  /** `<ol>`. */
+  reversed?: boolean;
+  start?: number;
+  /** `<col>`, `<colgroup>`. */
+  span?: number;
+  /** `<li>` (its ordinal), `<data>` (the machine-readable value). As wide as
+   *  every listed tag's `value` (`<select multiple>` takes an array): each
+   *  listed entry must stay assignable to the index (TS2411). */
+  value?: string | number | readonly (string | number)[];
+  /** `<ol>` numbering, or the MIME type of `<script>`/`<link>`/`<source>`/
+   *  `<embed>`/`<object>`. */
+  type?: string;
+  /** `<output>` — the ids of the controls it reflects. */
+  htmlFor?: string;
+  for?: string;
+  form?: string;
+  name?: string;
+  disabled?: boolean;
+  /** `<link>`, `<base>`, `<area>`. */
+  href?: string;
+  hreflang?: string;
+  rel?: string;
+  target?: string;
+  as?: string;
+  media?: string;
+  sizes?: string;
+  imageSizes?: string;
+  imageSrcSet?: string;
+  color?: string;
+  /** `<script>`, `<link>`, `<style>`. */
+  async?: boolean;
+  defer?: boolean;
+  noModule?: boolean;
+  integrity?: string;
+  blocking?: string;
+  /** `"anonymous"` / `"use-credentials"` (string: `<img>`'s is). */
+  crossOrigin?: string;
+  fetchPriority?: "high" | "low" | "auto";
+  referrerPolicy?: string;
+  /** `<meta>`; `property` is RDFa — Open Graph's `<meta property="og:title">`. */
+  charSet?: string;
+  content?: string;
+  httpEquiv?: string;
+  property?: string;
+  /** `<source>`, `<track>`, `<embed>`, `<object>`. */
+  src?: string;
+  srcSet?: string;
+  width?: string | number;
+  height?: string | number;
+  data?: string;
+  default?: boolean;
+  kind?: "subtitles" | "captions" | "descriptions" | "chapters" | "metadata";
+  label?: string;
+  srcLang?: string;
+  /** `<area>`. */
+  alt?: string;
+  coords?: string;
+  shape?: "rect" | "circle" | "poly" | "default";
+  download?: string | boolean;
+  ping?: string;
+  /** `<template>` — declarative shadow DOM. */
+  shadowRootMode?: "open" | "closed";
+  shadowRootDelegatesFocus?: boolean;
+  shadowRootClonable?: boolean;
+  shadowRootSerializable?: boolean;
 };
 
 /** Media elements — the attributes that decide playback behaviour. */

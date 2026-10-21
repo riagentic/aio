@@ -106,6 +106,9 @@ export interface TrojanDeps {
       | import("./aio-boot.ts").MigrationSummary
       | undefined;
     forcePersist?: () => Promise<void>;
+    /** Take an UNDECLARED stored cell out of every future write — `true`, or
+     *  the cells that could be dropped when `cell` is not one of them. */
+    dropStoredCell?: (cell: string) => true | string[];
     sqlQuery?: (sql: string) => Promise<unknown[]>;
     shutdown?: (by?: "am stop" | "takeover") => Promise<void>;
     startedAt: number;
@@ -1332,6 +1335,51 @@ async function handlePost(
     const unsaved = await _persistVerdict(trojan);
     if (unsaved) return err(unsaved, 500);
     return json({ ok: true });
+  }
+
+  // `am persist --drop=<cell>` — remove a stored slice THIS build does not
+  // declare (dev debris: a cell added for a minute warns at every boot
+  // forever). Only the running app knows what is declared, so the drop is
+  // its decision, made here: a declared cell, a framework-parked `__` slice
+  // or a name the store does not hold is refused, listing what can be
+  // dropped. Then the same awaited flush as `persist` — `ok` means gone from
+  // disk.
+  if (route === "persist/drop") {
+    if (!trojan.dropStoredCell || !trojan.forcePersist) {
+      return err("persistence not available", 501);
+    }
+    let cell: unknown;
+    try {
+      const raw = await readBounded(req, CONTROL_MAX_BODY);
+      if (raw === null) return err(tooLargeMessage("persist/drop"), 413);
+      cell = JSON.parse(raw)?.cell;
+    } catch {
+      return err("invalid JSON");
+    }
+    if (typeof cell !== "string" || !cell) {
+      return err('body must be { cell: "<stored cell>" }', 400);
+    }
+    const droppable = trojan.dropStoredCell(cell);
+    if (droppable !== true) {
+      return err(
+        `"${cell}" is not an undeclared stored cell — only a slice this ` +
+          `build does not declare (the boot warns "stored cell … is not ` +
+          `declared") can be dropped; a declared cell's data never is. ` +
+          (droppable.length
+            ? `Droppable now: ${droppable.join(", ")}.`
+            : `This app holds none.`),
+        409,
+      );
+    }
+    const unsaved = await _persistVerdict(trojan);
+    if (unsaved) {
+      return err(
+        `${unsaved} — "${cell}" is out of the app's next write, but that ` +
+          `write did not land; its row is still on disk`,
+        500,
+      );
+    }
+    return json({ ok: true, dropped: cell });
   }
 
   // `am pair` — issue a FRESH pairing PIN on a running app.

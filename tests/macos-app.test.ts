@@ -497,6 +497,8 @@ Deno.test("dmg: the code seal is built deepest-first", () => {
     return i;
   };
   const helperBin = at(`Frameworks/*.app; do for b in`);
+  // Every framework helper (Electron 44.9 added `app_shim_loader`), by glob.
+  const fwHelpers = at(`Versions/A'/Helpers/*; do sign "$b"`);
   const dylib = at("Libraries/");
   const framework = at("Frameworks/*.framework");
   const helperApp = at(`Frameworks/*.app; do sign "$h"`);
@@ -506,6 +508,7 @@ Deno.test("dmg: the code seal is built deepest-first", () => {
 
   assert(helperBin < framework, "helper binaries sign before frameworks");
   assert(dylib < framework, "dylibs sign before the framework that hosts them");
+  assert(fwHelpers < framework, "framework helpers sign before the framework");
   assert(framework < helperApp, "frameworks before the helper apps");
   assert(helperApp < nested, "helper apps before the nested Electron.app");
   assert(nested < outerBinary, "nested bundle before the outer binary");

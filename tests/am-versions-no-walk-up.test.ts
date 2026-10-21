@@ -21,6 +21,7 @@ import {
   removeVersion,
 } from "../src/am/am-versions.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
+import { _withVersionsDir } from "../src/server/framework-pin.ts";
 
 const GIT_ENV = {
   GIT_AUTHOR_NAME: "t",
@@ -82,27 +83,29 @@ Deno.test({
     "am versions: a plain AIO_HOME inside an enclosing repo is not a clone, and that repo's .git stays byte-identical",
   async fn() {
     const base = await tempDir("am-no-walk-up-");
-    const prev = Deno.env.get("AIO_VERSIONS_DIR");
     try {
       const outer = await enclosing(base);
       const plain = join(outer, "vendor", "aio"); // an aio checkout, no .git
       await Deno.mkdir(plain, { recursive: true });
       await Deno.writeTextFile(join(plain, "mod.ts"), "export {};\n");
-      Deno.env.set("AIO_VERSIONS_DIR", join(base, "versions"));
-      const before = await snapshot(join(outer, ".git"));
+      await _withVersionsDir(join(base, "versions"), async () => {
+        const before = await snapshot(join(outer, ".git"));
 
-      assertEquals(await isClone(plain), false);
-      assertEquals(await knownTags(plain), [], "tags read from the outer repo");
-      const r = await ensureVersion(plain, "v1.0.1");
-      assertEquals(r.ok, false);
-      await ensureVersion(plain, "main");
-      await pruneStoreRegistrations(plain);
-      await removeVersion(plain, "v1.0.0");
+        assertEquals(await isClone(plain), false);
+        assertEquals(
+          await knownTags(plain),
+          [],
+          "tags read from the outer repo",
+        );
+        const r = await ensureVersion(plain, "v1.0.1");
+        assertEquals(r.ok, false);
+        await ensureVersion(plain, "main");
+        await pruneStoreRegistrations(plain);
+        await removeVersion(plain, "v1.0.0");
 
-      assertEquals(await snapshot(join(outer, ".git")), before);
+        assertEquals(await snapshot(join(outer, ".git")), before);
+      });
     } finally {
-      if (prev === undefined) Deno.env.delete("AIO_VERSIONS_DIR");
-      else Deno.env.set("AIO_VERSIONS_DIR", prev);
       await dropTempDir(base);
     }
   },

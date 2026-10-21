@@ -287,8 +287,35 @@ field report lost a session to this):
    `"share": ["../shared"]` in deno.json instead — dev serving and the bundler
    resolve the same `/shared/…` prefix; see project-structure.md):
    `serveDirs: { "/crypto": "./crypto" }` — otherwise even the JS bindings 404
-   in dev. Prod bundling follows the relative import and needs no mapping;
-   compiled binaries embed `.wasm` files as data assets automatically.
+   in dev. Prod bundling follows the relative import and needs no mapping.
+3. **Put the `.wasm` the PAGE loads in a deno.json `assets` mount.** In dev the
+   page loads each module from its own path, so
+   `new URL("pkg_bg.wasm", import.meta.url)` lands beside the source file and
+   the module tree serves it. Every artifact runs the **bundle**: there
+   `import.meta.url` is `/app.js`, the URL resolves against that, and a binary,
+   a web build or an APK serves only the bundle and the `assets` mounts — so
+   `WebAssembly` fails with "HTTP status code is not ok", in the packaged app
+   only. Move the file into a mount and load it by the mount's URL, relative to
+   the page (it then also works under a web build's sub-path):
+
+   ```jsonc
+   // deno.json — one declaration: the server serves it, every build carries it
+   { "assets": { "/assets": "./assets" } }
+   ```
+
+   ```ts
+   await init(new URL("assets/pkg_bg.wasm", document.baseURI));
+   ```
+
+   The build warns about every browser-module
+   `new URL("<file>", import.meta.url)` whose bundled URL no mount answers
+   (`src/core/glue.ts:2 — new URL("./pkg_bg.wasm", import.meta.url) loads … 404
+   in the packaged app`),
+   and `aiol` reports the same finding before any build — along with a browser
+   `fetch` of a path under `src/` and an `aio.run({ assets })` mount that
+   deno.json does not declare. A `.wasm` that only SERVER code reads
+   (`Deno.readFile(new URL(…))`) needs none of this: compiled binaries embed
+   `.wasm` files as data assets automatically.
 
 ### WASM is compressed on the wire
 

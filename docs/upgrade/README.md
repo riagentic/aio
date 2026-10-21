@@ -71,6 +71,9 @@ them before the first run:
   three) in `old/` beside the install, `updates.keepOld` for more.
   `build.splash` adds a splash screen on every target; nothing to change by
   hand.
+- [1.0.22-beta → **1.0.23-beta**](from-1.0.22-beta-to-1.0.23-beta.md) — nothing
+  to change; the desktop splash no longer holds the window back and opens where
+  the window will.
 - [1.0.19-beta → **1.0.20-beta**](from-1.0.19-beta-to-1.0.20-beta.md) — nothing
   is removed or renamed and no default moves; nothing to change by hand. The
   safer values are opt-ins (`electron.strictPin`, `electron.ignoreDebugEnv`,

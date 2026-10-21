@@ -170,8 +170,8 @@ committed file. A new toolchain or dependency changes the bytes: update the
 pins, this README and `THIRD_PARTY_NOTICES` together.
 
 Current build: `rustc 1.98.0`, SHA-256
-`e42bab2fbc298159b7b85ffa92b74f0418008013dd93b82fe40ff8743d49c7da`; sources
-`3593c77447f9c465bf10cc92e4d510f66eed518d342cbd9f33e4054b469c2852`.
+`08cfb24b73a83a54201a38fd5a70f5780839c176968ce37d7c4fb7bcb90d8b9f`; sources
+`393d92e29dbe0b9353b38f58ff3e271ad9354cda92015a89332f71080cef6838`.
 
 The trailer format is shared with `build-windows-exe.ts`:
 `[stub][payload][JSON header][u32 hdrLen][u64 payloadLen][AIOSFX02]`.

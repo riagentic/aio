@@ -1,7 +1,7 @@
 /**
  * @module
  * The pid lock file — ONE decider for the build lock
- * (`build/build-compile.ts`) and the Electron runtime download lock
+ * (`build/build-dev-exclude.ts`) and the Electron runtime download lock
  * (`electron/electron-runtime-fetch.ts`).
  *
  * The lock holds the bare pid (what an older aio reads with `Number`); the

@@ -234,6 +234,9 @@ export const BUILD_PATHS: Record<string, string[]> = {
   cli: [
     "src/build/build-cli.ts",
     "src/build/build-compile.ts",
+    "src/build/build-dev-exclude.ts",
+    "src/build/build-includes.ts",
+    "src/build/build-service.ts",
     "src/server/cli-client.ts",
   ],
   web: [

@@ -23,6 +23,7 @@ import {
 import { APP_ICON, APP_STYLE, BUNDLE_JS } from "../server/app-files.ts";
 import { escHtml } from "../server/server-html-constants.ts";
 import { HEY, NO, OK } from "../diagnostics/fmt.ts";
+import { targetSplash } from "../electron/splash.ts";
 import { count } from "../diagnostics/fmt.ts";
 import { VERSION_STAMP } from "../protocol/protocol-version.ts";
 import {
@@ -338,7 +339,9 @@ export async function buildWeb(cfg: BuildConfig): Promise<void> {
     }
   }
   // `build.splash`: the page's own splash, and iOS's launch images of it.
-  const splash = cfg.splash ?? null;
+  const forWeb = targetSplash(cfg.splash, "web");
+  if (forWeb.note) console.warn(`${HEY} ${forWeb.note}`);
+  const splash = forWeb.splash;
   let splashHead = "";
   let launch: string[] = [];
   if (splash) {

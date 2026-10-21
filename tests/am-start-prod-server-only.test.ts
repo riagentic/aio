@@ -81,7 +81,7 @@ await aio.run({ cells: [c], appId: "pso", persist: false, client: "server-only" 
     };
     let pid = 0;
     try {
-      const s = await am("start", "--prod", "--json");
+      const s = await am("start", "--prod", "--json", "--wait=60");
       try {
         pid = JSON.parse(s.out).pid ?? 0;
       } catch { /* the refusal document */ }

@@ -2,6 +2,7 @@
 // Dev mode: page from HTTP, state via UDS+IPC
 // Prod mode: page from disk via aio:// protocol, state via UDS+IPC
 
+import { tmplSplash } from "./electron-splash.ts";
 import { MIME } from "../server/server-html-constants.ts";
 import {
   BACKOFF_BASE_MS,
@@ -28,8 +29,8 @@ import {
   tmplPreloadWrite,
   tmplProfileDir,
   tmplRendererDiagnostics,
+  tmplShowWhenPainted,
   tmplSocketFetch,
-  tmplSplashHold,
   tmplTray,
   tmplWebGuard,
   tmplWillNavigate,
@@ -101,7 +102,9 @@ const fs = require('fs');
 app.commandLine.appendSwitch('disable-features', 'CloudPrintEnable');
 ${tmplAppMenu(opts.meta?.title ?? opts.title)}
 app.name = ${JSON.stringify(slug)};
-${tmplProfileDir(opts.meta?.profileDir)}${tmplCrashGuard()}
+${tmplProfileDir(opts.meta?.profileDir)}${
+    tmplCrashGuard(opts.meta?.confirmUnload)
+  }
 ${tmplPermissionGuard(opts.meta?.permissions)}
 ${tmplWebGuard(opts.meta)}
 ${tmplIpcGuard()}
@@ -230,10 +233,9 @@ app.on('ready', () => {
   }
 
   const b = loadBounds(${w}, ${h});
+${tmplSplash(opts.meta?.splash)}
 ${tmplWindowShape(opts.meta, { preload: "preloadFile" })}
-${tmplSplashHold().before}
   const win = new BrowserWindow(b);
-  if (b.x == null) win.center();${tmplSplashHold().after}
   // protocol//host on both branches — see tmplWillNavigate for why not .origin.
   const _appOrigin = USE_PROTOCOL ? 'aio://app': (u => u.protocol + '//' + u.host)(new URL(${
     JSON.stringify(url)
@@ -261,6 +263,7 @@ ${tmplSplashHold().before}
   } catch {}
 
 ${tmplTray(opts.meta, "__aioIcon", opts.title)}
+${tmplShowWhenPainted(opts.meta?.showWhenPainted)}
 ${tmplBoundsTracking()}
 ${tmplRendererDiagnostics(true)}
 
@@ -580,6 +583,7 @@ ${tmplRendererDiagnostics(true)}
       return;
     }
     if (win.isDestroyed()) return _dialogResult(d.id, { error: 'the window is gone' });
+    if (d.kind === 'save') return _saveDialog(d);
     const props = d.kind === 'directory'
       ? ['openDirectory', 'createDirectory']
       : (d.kind === 'files' ? ['openFile', 'multiSelections'] : ['openFile']);
@@ -600,6 +604,26 @@ ${tmplRendererDiagnostics(true)}
     }
     Promise.resolve(p).then(
       (r) => _dialogResult(d.id, { canceled: !!(r && r.canceled), paths: (r && r.filePaths) || [] }),
+      (e) => _dialogResult(d.id, { error: String((e && e.message) || e) }),
+    );
+  }
+  // pickSave: the OS save panel. macOS and Windows confirm replacing an
+  // existing file by themselves; Linux (GTK) only with
+  // showOverwriteConfirmation — a path that comes back is one the user agreed
+  // to write, on every OS. Answered in the open dialog's shape, one path.
+  function _saveDialog(d) {
+    const o = { title: String(d.title || ''), message: String(d.title || ''), properties: ['showOverwriteConfirmation', 'createDirectory'] };
+    if (typeof d.defaultPath === 'string' && d.defaultPath) o.defaultPath = d.defaultPath;
+    if (Array.isArray(d.filters) && d.filters.length > 0) o.filters = d.filters;
+    const owner = win.isVisible() && !win.isMinimized() ? win : null;
+    let p;
+    try {
+      p = owner ? require('electron').dialog.showSaveDialog(owner, o) : require('electron').dialog.showSaveDialog(o);
+    } catch (e) {
+      return _dialogResult(d.id, { error: String((e && e.message) || e) });
+    }
+    Promise.resolve(p).then(
+      (r) => _dialogResult(d.id, { canceled: !!(r && r.canceled), paths: r && r.filePath ? [r.filePath] : [] }),
       (e) => _dialogResult(d.id, { error: String((e && e.message) || e) }),
     );
   }
@@ -923,7 +947,7 @@ ${tmplRendererDiagnostics(true)}
     }
   });
 
-${tmplKeyboardShortcuts()}
+${tmplKeyboardShortcuts(opts.meta?.shortcuts)}
 
   if (!USE_PROTOCOL) {
     // Reads the URL that FAILED (arg 3), compared to this app's own origin —

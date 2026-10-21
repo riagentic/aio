@@ -88,7 +88,16 @@ Deno.test("android splash: configured, minMs, the text ({title} filled, escaped)
   assertStringIncludes(_splashKotlin(s, "A", "light"), "night = false");
   // Defaults: minMs 1000, bold, the system font, image only.
   const d = _splashKotlin(spec({ image: "assets/splash.png" }), "A", "system");
-  assertStringIncludes(d, "minMs = 1000L, text = null, family = null");
+  // 1.0.23: the title by default; text false is image only.
+  assertStringIncludes(d, 'minMs = 1000L, text = "A", family = null');
+  assertStringIncludes(
+    _splashKotlin(
+      spec({ image: "assets/splash.png", text: false }),
+      "A",
+      "system",
+    ),
+    "text = null",
+  );
   assertStringIncludes(d, "bold = true");
   // An @2x image is drawn at half its pixels.
   assertStringIncludes(
@@ -146,7 +155,7 @@ Deno.test("android splash: it closes on the page's load signal, never before min
   );
   // shownAt is the first frame (pre-draw), not onCreate.
   assertStringIncludes(KOTLIN, "shownAt = now()");
-  assertStringIncludes(KOTLIN, "}, SPLASH_CAP_MS)");
+  assertStringIncludes(KOTLIN, "}, SPLASH?.capMs ?: SPLASH_CAP_MS)");
   assertStringIncludes(KOTLIN, "private const val SPLASH_CAP_MS = 30_000L");
   // The signal: aio's #root has content — the desktop's "ui mounted" rule —
   // main frame only; onPageFinished only on a WebView that cannot carry it.

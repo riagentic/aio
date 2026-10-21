@@ -125,7 +125,7 @@ function winEsbuildChildPids(): number[] {
  *  executable (`proc_pidpath`). By executable, like Windows: the argv is not
  *  readable without more privilege, and aio starts no other esbuild. Empty
  *  when FFI is not granted (the Windows rule). */
-function macEsbuildChildPids(): number[] {
+function macEsbuildChildPids(anyChild = false): number[] {
   if (Deno.permissions.querySync({ name: "ffi" }).state !== "granted") {
     return [];
   }
@@ -143,6 +143,10 @@ function macEsbuildChildPids(): number[] {
     const path = new Uint8Array(4096); // PROC_PIDPATHINFO_MAXSIZE
     const td = new TextDecoder();
     return [...kids.subarray(0, Math.max(0, n))].filter((pid) => {
+      // `anyChild`: a child that has EXITED but is not reaped yet has no
+      // path (`proc_pidpath` fails) and is still in the child list — still
+      // there, for the stop's wait (a test's leak check saw it close late).
+      if (anyChild) return true;
       const len = lib.symbols.proc_pidpath(pid, path, path.length);
       return len > 0 &&
         /(^|\/)esbuild$/.test(td.decode(path.subarray(0, len)));
@@ -302,7 +306,15 @@ export async function stopEsbuildService(
     );
   const stillThere = () => {
     if (!byTable) return _stillThere(pids, Deno.build.os, inProcTable);
-    const now = new Set(pids.length > 0 ? _esbuildChildPids() : []);
+    // macOS: a pid we listed stays "there" until it leaves the child list
+    // (reaped) — its executable path goes as soon as it exits, before that.
+    const now = new Set(
+      pids.length === 0
+        ? []
+        : Deno.build.os === "darwin"
+        ? macEsbuildChildPids(true)
+        : _esbuildChildPids(),
+    );
     return _stillThere(pids, Deno.build.os, (pid) => now.has(pid));
   };
   const asked = Date.now();

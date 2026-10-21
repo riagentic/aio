@@ -388,7 +388,6 @@ export const LEDGER: readonly string[] = [
   "src/server/server-html-importmap.ts|_resetImportMapWarnings",
   "src/server/server-vendor.ts|_resetVendorCache",
   "src/server/server.ts|_resetSecurityWarnings",
-  "src/server/single-instance-lock.ts|removeLaunchInfo",
   "src/server/updates-check.ts|cacheCurrentEtag",
   "src/server/updates-check.ts|isShipManifest",
   "src/server/win-pipe.ts|overlappedEvent",

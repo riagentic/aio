@@ -21,7 +21,7 @@ import { isStandalone, resolveAppDir, resolveEntry } from "./config-rules.ts";
 export { isStandalone, resolveAppDir, resolveEntry };
 import { resolveMacHost } from "./dmg.ts";
 import { resolveSplash } from "./splash.ts";
-import type { SplashSpec } from "../electron/splash.ts";
+import { type SplashSpec, splashWithVersion } from "../electron/splash.ts";
 import { isValidBundleId } from "./build-ios.ts";
 // The bundle-id shape rule is Apple's, and iOS already owns its one copy.
 export { isValidBundleId };
@@ -768,7 +768,10 @@ export async function loadBuildConfig(): Promise<BuildConfig> {
     macosHost,
     windowsShortcut,
     electronRuntime: runtimeDecl.mode,
-    splash: splashDecl.splash,
+    // `{version}` is the version this build resolved — the string the
+    // artifact's `--version` prints — filled now, once both are known.
+    splash: splashDecl.splash &&
+      splashWithVersion(splashDecl.splash, version.version),
     macBundleId,
     version,
     configEntry,

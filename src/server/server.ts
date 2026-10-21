@@ -103,7 +103,12 @@ import { handleAuthFlow } from "./auth-flows.ts";
 import { stopEsbuild } from "./server-transpile.ts";
 import { createWsManager, isPeerGone } from "./server-ws.ts";
 import { createBroadcaster } from "./server-broadcast.ts";
-import { createStaticHandler, isShellAsset } from "./server-static.ts";
+import {
+  createStaticHandler,
+  isShellAsset,
+  noteReload,
+  type ReloadLog,
+} from "./server-static.ts";
 import { createFileWatcher } from "./server-watcher.ts";
 import { _runAppCssStep } from "./server-css-step.ts";
 import {
@@ -710,6 +715,11 @@ export function createServer(config: ServerConfig): ServerHandle {
       );
     }
   }
+  /** Dev: when this server started and when each hot reload went out (the
+   *  last `RELOAD_LOG_MAX` of them; `count` is all of them). `/__aio/error`
+   *  hands it to `am errors`, which tags each error with the reload it
+   *  happened under. */
+  const reloadLog: ReloadLog = { bootAt: Date.now(), count: 0, at: [] };
   const graphValidation = !prod
     ? startGraphValidation(
       absBaseDir,
@@ -949,6 +959,7 @@ export function createServer(config: ServerConfig): ServerHandle {
     syncCells: config.syncCells,
     callTimeouts: config.callTimeouts,
     getGraphResult: () => graphValidation?.getResult() ?? null,
+    getReloads: () => reloadLog,
     getSnapshot: config.getSnapshot,
     loadSnapshot: config.loadSnapshot,
     blobs: config.blobs,
@@ -989,7 +1000,10 @@ export function createServer(config: ServerConfig): ServerHandle {
       watch: config.watch,
       debug,
       broadcastWs: (msg) => broadcaster.broadcastRaw(msg),
-      onReload: config.onReload,
+      onReload: (signal) => {
+        noteReload(reloadLog, signal);
+        config.onReload?.(signal);
+      },
       onCellChange: config.onCellChange,
       savedBeforeWatch: config.savedBeforeWatch,
       onGraphResult: (result) => graphValidation?.setResult(result),

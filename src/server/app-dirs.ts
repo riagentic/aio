@@ -75,6 +75,33 @@ export function appsDirEnv(): string | undefined {
   return raw ? resolve(raw) : undefined;
 }
 
+/** Where `--instance=<name>` puts its apps root: `~/.aio-instances/<name>`.
+ *  ONE spelling for `am` and the runtime (a compiled artifact takes the flag
+ *  too), so both sides of an instance land in the same private world. */
+export function instanceAppsDir(name: string): string {
+  return join(homedir(), ".aio-instances", name);
+}
+
+/** Why `name` cannot name an instance, or null. It becomes ONE directory
+ *  segment: a separator nests or escapes, and `.`/`..` ARE escapes
+ *  (`--instance=..` was the user's home). Pure. */
+export function instanceNameError(name: string): string | null {
+  return !name || /[\\/]/.test(name) || name === "." || name === ".."
+    ? `--instance needs a simple name: --instance=agent1 ` +
+      `(got ${JSON.stringify(name)})`
+    : null;
+}
+
+/** The instance whose apps root is `dir` (`~/.aio-instances/<name>`), or
+ *  undefined for any other root. Pure over the env. */
+export function instanceOfAppsDir(dir: string | undefined): string | undefined {
+  if (!dir) return undefined;
+  const r = resolve(dir);
+  return dirname(r) === resolve(homedir(), ".aio-instances")
+    ? basename(r)
+    : undefined;
+}
+
 export function appHome(appId: string, configured?: string): string {
   if (configured) return configured;
   const root = appsDirEnv();

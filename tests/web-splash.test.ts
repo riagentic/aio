@@ -86,8 +86,15 @@ Deno.test("web splash: the shell is today's without build.splash, and carries it
     p.head,
     `<meta name="theme-color" media="(prefers-color-scheme: dark)" content="${id.dark.background}">`,
   );
-  // Image only: no text element.
-  assert(!webSplash(await spec({ image: "a.png" }), "x").body.includes("<p>"));
+  // Image only (text false): no text element; left out, the title.
+  assert(
+    !webSplash(await spec({ image: "a.png", text: false }), "x").body
+      .includes("<p>"),
+  );
+  assertStringIncludes(
+    webSplash(await spec({ image: "a.png" }), "Notes").body,
+    "Notes",
+  );
   // The script is ES5 — an engine too old for the bundle still runs it.
   const js = p.body.match(/<script>(.*)<\/script>/)![1]!;
   assert(!/=>|\blet\b|\bconst\b|`/.test(js), js);
@@ -290,7 +297,9 @@ Deno.test({
       // Mounted before the first paint: still minMs from the PAINT (measured
       // on a real bundle: a wait from the script's own time was 42 ms short).
       const early = await run("early1500", -1);
-      assert(early.mount! <= early.paint, JSON.stringify(early));
+      // (`paint` is whole milliseconds, `mount` is not: 428.1 vs 428 is the
+      // same moment.)
+      assert(early.mount! < early.paint + 1, JSON.stringify(early));
       assert(early.hide! - early.paint >= 1500, JSON.stringify(early));
       assert(early.hide! - early.paint < 2500, JSON.stringify(early));
 

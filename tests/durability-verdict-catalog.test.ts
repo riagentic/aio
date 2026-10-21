@@ -188,7 +188,7 @@ const CATALOG: Row[] = [
     writes: "the final flush, on the way down",
     verdict: "finalPersistVerdict BEFORE the shutdown POST → unsaved → exit 1",
     check: async () => {
-      const src = await code("src/am/am-cmd-process.ts");
+      const src = await code("src/am/am-cmd-stop.ts");
       const stop = fnBody(src, "stopOne");
       const verdictAt = stop.indexOf("finalPersistVerdict(");
       const shutdownAt = stop.indexOf('trojanPost(port, "shutdown"');

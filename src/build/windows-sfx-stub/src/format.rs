@@ -132,7 +132,11 @@ fn trailer_end<F: Read + Seek>(f: &mut F, size: u64) -> Result<u64, String> {
             }
         }
     }
-    Err(format!("not an aio SFX (missing {MAGIC} trailer)"))
+    // The stub only ever reads its own file, and the trailer is its last
+    // bytes: a missing one is a download that stopped short.
+    Err(format!(
+        "this download is incomplete, download it again (no {MAGIC} trailer at its end)"
+    ))
 }
 
 fn magic_at<F: Read + Seek>(f: &mut F, off: u64) -> bool {
@@ -254,6 +258,13 @@ mod tests {
         assert!(
             parse(&exe).is_err(),
             "a trailer that is neither at EOF nor before the cert table"
+        );
+        // A cut-short download: the trailer (its last bytes) is gone.
+        let whole = with_trailer(&stub, "PAYLOAD", HDR);
+        let err = parse(&whole[..whole.len() - 3]).unwrap_err();
+        assert!(
+            err.starts_with("this download is incomplete, download it again"),
+            "{err}"
         );
         // A payload length larger than the file.
         let mut bad = with_trailer(&stub, "P", HDR);

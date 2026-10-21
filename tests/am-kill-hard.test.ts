@@ -81,7 +81,7 @@ Deno.test("am kill (Windows path): a process that never answered and is already 
   assertStringIncludes(killSaid("notes", 7, "hard"), ENDED_HARD);
   // …and the op branch says the outcome it got, in both spellings.
   const src = await Deno.readTextFile(
-    join(REPO, "src/am/am-cmd-process.ts"),
+    join(REPO, "src/am/am-cmd-kill.ts"),
   );
   assert(!src.includes('how: "hard"'), "an outcome is hard-coded");
 });

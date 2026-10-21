@@ -761,6 +761,19 @@ Deno.test("runTask: cancel via signal terminates promptly (never hangs)", async 
 // Start and Run-task inherited all three: every app amui started tried to bind
 // amui's port ("port N already in use … held by aio app amui") while amui said
 // "started", and would have died with amui's supervisor. Measured as a user.
+/** Remove `dir`, retrying while Windows still holds it (a child exiting). */
+async function removeWhenFree(dir: string): Promise<void> {
+  for (let i = 0;; i++) {
+    try {
+      await Deno.remove(dir, { recursive: true });
+      return;
+    } catch (e) {
+      if (i >= 100) throw e;
+      await new Promise((res) => setTimeout(res, 50));
+    }
+  }
+}
+
 Deno.test("startApp / runTask: the runtime env of amui itself never reaches the app", async () => {
   const { startApp, runTask } = await import("./server/proc.server.ts");
   const dir = await Deno.makeTempDir();
@@ -804,7 +817,10 @@ Deno.test("startApp / runTask: the runtime env of amui itself never reaches the 
     keys.forEach((k, i) =>
       prev[i] === undefined ? Deno.env.delete(k) : Deno.env.set(k, prev[i]!)
     );
-    await Deno.remove(dir, { recursive: true });
+    // The started app runs FROM `dir` and may still be exiting (its start log
+    // is in there): Windows refuses to delete a folder in use (os error 32,
+    // 1 of 3 runs on w11pro). Retried until it lets go, then loud.
+    await removeWhenFree(dir);
   }
 });
 

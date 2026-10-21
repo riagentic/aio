@@ -7,7 +7,7 @@
  * tool's npm package slips into that graph, the whole tool ships: `tsc` and
  * `tsc.exe` copies, `typescript.js`, `_tsc.js`, `tsserver`, plus
  * `esbuild@…/esbuild` and, historically, the cached `appimagetool`.
- * {@link DEV_ONLY_PACKAGES} in `build-compile.ts` is supposed to keep them out;
+ * {@link DEV_ONLY_PACKAGES} in `build-dev-exclude.ts` is supposed to keep them out;
  * this module is the instrument that shows whether it actually did, on a REAL
  * artifact, rather than trusting the intent.
  *
@@ -100,7 +100,7 @@ export const BUILD_TOOL_MIN_BYTES = 64 * 1024;
  *  links again mid-compile and follows each into its package, so through them
  *  every binary carried `electron/cli.js` and `esbuild/bin/esbuild` out of
  *  packages the build had excluded. The build excludes all three
- *  (`build-compile.ts`); a hit means that stopped working. */
+ *  (`build-dev-exclude.ts`); a hit means that stopped working. */
 export const INSTALL_BIN_DIR = "node_modules/.bin";
 export const INSTALL_STATE_FILES: readonly string[] = [
   ".setup-cache.bin",
@@ -640,7 +640,7 @@ async function compiledPath(out: string): Promise<string> {
 
 /** Warn when a compiled artifact still carries a build tool's files. Dead
  *  weight in the binary, and the fix is usually already applied
- *  (`DEV_ONLY_PACKAGES` in `build-compile.ts`) — so a hit means the exclusion
+ *  (`DEV_ONLY_PACKAGES` in `build-dev-exclude.ts`) — so a hit means the exclusion
  *  silently stopped working, which is exactly the failure a release gate must
  *  not have to guess at. An app that named the package (or its family:
  *  `esbuild` covers `@esbuild/linux-x64`) in `build.keepPackages` asked for

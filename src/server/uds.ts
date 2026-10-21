@@ -1423,7 +1423,15 @@ function _handleUDSConn(
               // predicate) escaped as an unhandled rejection, and aio's crash
               // handler is a last-words logger, not a survival net — one bad
               // serverFn took the whole server down.
-              _dialogCaller(() => invokeServerFn(ns, name, args))
+              _dialogCaller(() =>
+                invokeServerFn(ns, name, args, undefined, false, (hold) => {
+                  try {
+                    sendTo(conn, enc("sfnh", { cid, hold }));
+                  } catch {
+                    // aio-ok: the peer left — no one is waiting on its timeout
+                  }
+                })
+              )
                 .then((result) => {
                   try {
                     sendTo(conn, enc("sfnr", { cid, ...result }));
@@ -1445,7 +1453,9 @@ function _handleUDSConn(
                       conn,
                       enc("sfnr", { cid, ok: false, ...errorFields(e) }),
                     );
-                  } catch { /* peer gone */ }
+                  } catch {
+                    // aio-ok: the peer left — no one is waiting on its timeout
+                  }
                 });
               continue;
             }

@@ -437,6 +437,33 @@ export function isFrozenWriteError(message: string): boolean {
   return FROZEN_WRITE.test(message);
 }
 
+/** A `structuredClone` refusal thrown inside a method, with the fix attached.
+ *
+ *  `structuredClone(s.story)` is the natural way to copy, and inside a method
+ *  `s` (and everything read through it) is a Proxy — an Immer draft in a sync
+ *  method, a live view in an async one — which structuredClone refuses as
+ *  "#<Object> could not be cloned.", naming neither the draft nor the fix (a
+ *  field report). Same text in dev and prod. `undefined` when `e` is not a
+ *  clone refusal, so the caller keeps the original error untouched. */
+export function draftCloneError(e: unknown): Error | undefined {
+  const err = e as { name?: unknown; message?: unknown } | null;
+  if (
+    err?.name !== "DataCloneError" ||
+    !/could not be cloned/.test(String(err.message))
+  ) return undefined;
+  const wrapped = new Error(
+    `${err.message} — inside a method, cell state (\`s\` and anything read ` +
+      `through it) is a draft proxy, which structuredClone refuses. Copy it ` +
+      `with JSON.parse(JSON.stringify(s.x)), or spread one level ` +
+      `({ ...s.x }, [...s.arr]). Not cell state? Then the value holds ` +
+      `something structuredClone cannot copy (a function, a DOM node, a ` +
+      `class instance).`,
+    { cause: e },
+  );
+  wrapped.name = "DataCloneError";
+  return wrapped;
+}
+
 /** THE explanation for a frozen-state write. `raw` is the engine's own text
  *  (kept — it says WHICH property), `cellName` names the state that was
  *  frozen when it is known.

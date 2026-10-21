@@ -5,6 +5,8 @@
 // pid" or "a pid that names no process" asks for it here; the runtime that is
 // running the test is the one program every OS is known to have.
 
+import { fromFileUrl } from "@std/path";
+
 /** Arguments (after `Deno.execPath()`) of a child that stays alive doing
  *  nothing — the portable `sleep 600`. For a fixture that builds its own
  *  command line. */
@@ -224,4 +226,51 @@ export async function reapUnder(dir: string): Promise<void> {
       Deno.kill(pid, "SIGKILL");
     } catch { /* aio-ok: gone between the listing and the kill */ }
   }
+}
+
+/** Runs `body` — the inside of an async function, after the `imports` lines —
+ *  in a child runtime whose environment is this process's with `env` laid over
+ *  it (`undefined` removes a variable), and returns what it returned (JSON).
+ *
+ *  For a case about an INHERITED variable (`GIT_DIR` from a hook, a
+ *  `GIT_ASKPASS`, a PATH with a stand-in `ssh`). Set with `Deno.env.set` it
+ *  would be the whole PROCESS's for as long as the case runs: under
+ *  `deno test --parallel` every other file's git saw it — a `GIT_WORK_TREE`
+ *  failed every `git commit` in four unrelated files. */
+export async function inChildEnv<T>(
+  env: Record<string, string | undefined>,
+  imports: string,
+  body: string,
+): Promise<T> {
+  const merged: Record<string, string> = { ...Deno.env.toObject() };
+  for (const [k, v] of Object.entries(env)) {
+    if (v === undefined) delete merged[k];
+    else merged[k] = v;
+  }
+  const mark = "\u0000aio-child-result:";
+  const out = await new Deno.Command(Deno.execPath(), {
+    args: [
+      "eval",
+      "--ext=ts",
+      `${imports}\nconst r = await (async () => {\n${body}\n})();\n` +
+      `console.log(${JSON.stringify(mark)} + JSON.stringify(r ?? null));`,
+    ],
+    // The repo's deno.json — what the imported sources resolve `@std/…` by.
+    cwd: fromFileUrl(new URL("..", import.meta.url)),
+    clearEnv: true,
+    env: merged,
+    stdin: "null",
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  const text = new TextDecoder().decode(out.stdout);
+  const at = text.lastIndexOf(mark);
+  if (!out.success || at < 0) {
+    throw new Error(
+      `child runtime failed (exit ${out.code}):\n${text}\n${
+        new TextDecoder().decode(out.stderr)
+      }`,
+    );
+  }
+  return JSON.parse(text.slice(at + mark.length)) as T;
 }

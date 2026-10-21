@@ -205,6 +205,52 @@ import { openBlobStore } from "aio/server";
 const blobs = openBlobStore("mail"); // same dir `app.blobs` uses
 ```
 
+### Files on disk: `serveFile`
+
+A file that is already on disk — a rendered video, a recording, a model — does
+not have to go through the blob store to be seekable.
+`serveFile(req, path,
+{ type? })` from `aio/server` answers with the blob
+route's exact contract:
+
+- `GET`/`HEAD` only (`405` otherwise); `Accept-Ranges: bytes`;
+- one range → `206` + `Content-Range`; a range past the end → `416`; a malformed
+  or multi-range header → the whole file (`200`);
+- streamed 64 KiB at a time, the file **closed** when sent, on error, and when
+  the client goes away (a `<video>` seeking cancels a lot of requests);
+- the content type from the extension through the same inert allowlist (images
+  but not SVG, video, audio, PDF, plain text; anything else
+  `application/octet-stream`), or exactly the `type` you pass;
+  `X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox` on
+  every reply;
+- a weak ETag (mtime + size) — `If-None-Match` gets `304`, and `If-Range` never
+  matches it, so a file that changed is sent whole, never spliced;
+- a missing path or a directory → `404`.
+
+`path` is a filesystem path **you** chose — containment is yours: never hand it
+a raw request path. Reduce the name to a basename inside one directory:
+
+```ts
+import { aio, route } from "aio";
+import { serveFile } from "aio/server";
+import { basename, join } from "@std/path";
+
+const MEDIA = "./renders";
+
+await aio.run({
+  routes: {
+    "/media/:name": route((ctx) =>
+      serveFile(ctx.req, join(MEDIA, basename(ctx.params.name ?? "")))
+    ),
+  },
+});
+```
+
+```tsx
+// The page seeks freely: every scrub is a Range request answered with 206.
+<video src="/media/demo.mp4" controls />;
+```
+
 ## Tier 4 — Pipelines: `.server.ts` + progress in state
 
 Heavy compute over big data (imports, exports, indexing, transcoding) runs in a

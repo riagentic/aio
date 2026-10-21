@@ -27,6 +27,7 @@ import {
   MOUNT_DEADLINE_MS,
   mountLine,
   RENDERER_TAG,
+  X11_ATOM_NOISE,
 } from "../src/electron/electron-renderer-log.ts";
 import { electronMainScriptUDS } from "../src/electron/electron-uds.ts";
 import { electronMainScript } from "../src/electron/electron-scripts.ts";
@@ -95,6 +96,31 @@ Deno.test("classifier: GPU device-probe noise is dropped — exactly those shape
     assertEquals(classifyElectronLine(l), { route: "raw", text: l }, l);
   }
   assertEquals(GPU_PROBE_NOISE.length, 4, "the noise list grew — justify it");
+});
+
+Deno.test("classifier: X11 drag-and-drop atom-cache noise is dropped — that shape only", () => {
+  const noise = [
+    "[48213:48213:1020/141502.318204:ERROR:atom_cache.cc(229)] Add application/vnd.portal.files to kAtomsToCache",
+    "[48213:48213:1020/141502.318204:ERROR:ui/gfx/x/atom_cache.cc:229] Add application/vnd.portal.filetransfer to kAtomsToCache",
+    "[9:9:1020/1.2:ERROR:atom_cache.cc(229)] Add text/x-moz-url to kAtomsToCache",
+  ];
+  for (const l of noise) {
+    assertEquals(classifyElectronLine(l), { route: "drop", noise: "x11" }, l);
+  }
+  const kept = [
+    "[48213:48213:1020/141502.318204:ERROR:atom_cache.cc(229)] Add a to kAtomsToCache, then crashed",
+    "[48213:48213:1020/141502.318204:ERROR:atom_cache.cc(229)] something else entirely",
+    "[48213:48213:1020/141502.318204:ERROR:x11_atom_cache_evil.cc(1)] Add x to kAtomsToCache",
+    "Add application/vnd.portal.files to kAtomsToCache",
+  ];
+  for (const l of kept) {
+    assertEquals(classifyElectronLine(l), { route: "raw", text: l }, l);
+  }
+  assertEquals(X11_ATOM_NOISE.length, 1, "the noise list grew — justify it");
+  assertEquals(
+    classifyElectronLine("failed to load driver: nouveau"),
+    { route: "drop", noise: "gpu" },
+  );
 });
 
 Deno.test("classifier: a renderer line is never mistaken for noise, and a folded stack stays one line", () => {
@@ -183,7 +209,7 @@ Deno.test("AIO_ELECTRON_PROTOCOL: forceProtocol makes a dev window with a TCP po
   );
 });
 
-Deno.test("classifier: a tagged main-process warn/error is forwarded under `electron`; other levels stay raw", () => {
+Deno.test("classifier: a tagged main-process info/warn/error is forwarded under `electron`; other levels stay raw", () => {
   assertEquals(
     classifyElectronLine(
       MAIN_TAG + 'warn] [aio:electron] permission "clipboard-read" DENIED',
@@ -199,7 +225,13 @@ Deno.test("classifier: a tagged main-process warn/error is forwarded under `elec
     text: "boom",
     from: "electron",
   });
-  for (const l of [MAIN_TAG + "info] x", "echo " + MAIN_TAG + "warn] x"]) {
+  // info: Electron's own splash says what it did (electron-splash.ts).
+  assertEquals(classifyElectronLine(MAIN_TAG + "info] x"), {
+    route: "info",
+    text: "x",
+    from: "electron",
+  });
+  for (const l of [MAIN_TAG + "debug] x", "echo " + MAIN_TAG + "warn] x"]) {
     assertEquals(classifyElectronLine(l), { route: "raw", text: l }, l);
   }
 });

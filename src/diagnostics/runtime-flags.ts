@@ -53,16 +53,19 @@ export const AIO_RUNTIME_FLAGS: ReadonlySet<string> = new Set(
     "--__aio-relaunch-after=",
     "--profile=",
     "--home=",
+    "--instance=",
   ].map((f) => (f.endsWith("=") ? f.slice(0, -1) : f)),
 );
 
 /** Runtime flags an APP may also claim for itself (added in 1.0.10, after
  *  apps could already have their own `--profile`/`--home`). A claimed one is
  *  the app's: aio does not read it from argv, only from its env variable
- *  (`AIO_PROFILE`, `AIO_HOME`). */
+ *  (`AIO_PROFILE`, `AIO_HOME`). `--instance` joined in 1.0.23 under the same
+ *  rule: an app with its own keeps it (aio then reads `AIO_APPS_DIR` only). */
 export const CLAIMABLE_RUNTIME_FLAGS: ReadonlySet<string> = new Set([
   "--profile",
   "--home",
+  "--instance",
 ]);
 
 const _claimed = new Set<string>();
@@ -115,4 +118,5 @@ export const AIO_RUNTIME_FLAG_SPECS: readonly string[] = [
   "--__aio-relaunch-after=",
   "--profile=",
   "--home=",
+  "--instance=",
 ];

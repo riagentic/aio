@@ -13,7 +13,8 @@
 import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
-import { join } from "@std/path";
+import { fromFileUrl, join } from "@std/path";
+import { _withVersionsDir } from "../src/server/framework-pin.ts";
 import {
   allowScriptsDrift,
   compareVersions,
@@ -36,6 +37,8 @@ import {
 } from "../src/am/am-versions.ts";
 import { pinInfo } from "../src/am/am-cmd-pin.ts";
 
+const REPO = fromFileUrl(new URL("..", import.meta.url));
+
 /** A throwaway clone of this repo (tags + history) plus its own versions dir, so
  *  nothing here touches the developer's real install. */
 async function sandbox(): Promise<{
@@ -51,7 +54,9 @@ async function sandbox(): Promise<{
   const clone = await new Deno.Command("git", {
     // --no-hardlinks: /tmp is usually a different filesystem, and a hardlinking
     // clone dies there with "Invalid cross-device link".
-    args: ["clone", "-q", "--no-hardlinks", Deno.cwd(), root],
+    // THIS checkout by its own path, never `Deno.cwd()`: the cwd is the
+    // process's, and another test file may have moved it.
+    args: ["clone", "-q", "--no-hardlinks", REPO, root],
     stdout: "null",
     stderr: "piped",
   }).output();
@@ -75,15 +80,14 @@ async function sandbox(): Promise<{
     ) +
       "\n",
   );
-  const prev = Deno.env.get("AIO_VERSIONS_DIR");
-  Deno.env.set("AIO_VERSIONS_DIR", versions);
+  // The store is `versions` for the test's own call path only — each test
+  // runs inside `_withVersionsDir(s.versions, …)`. AIO_VERSIONS_DIR is the
+  // process's: under one-process `deno test --parallel` another file's store.
   return {
     root,
     versions,
     app,
     cleanup: async () => {
-      if (prev === undefined) Deno.env.delete("AIO_VERSIONS_DIR");
-      else Deno.env.set("AIO_VERSIONS_DIR", prev);
       await Deno.remove(base, { recursive: true }).catch(() => {});
     },
   };
@@ -91,142 +95,158 @@ async function sandbox(): Promise<{
 
 Deno.test("pin: a tag is provisioned as a worktree and linked", async () => {
   const s = await sandbox();
-  try {
-    const tags = await knownTags(s.root);
-    assert(tags.length > 0, "the clone must carry release tags");
-    const tag = tags[0]!;
+  await _withVersionsDir(s.versions, async () => {
+    try {
+      const tags = await knownTags(s.root);
+      assert(tags.length > 0, "the clone must carry release tags");
+      const tag = tags[0]!;
 
-    const res = await ensureVersion(s.root, tag);
-    assert(res.ok, res.ok ? "" : res.error);
-    assertEquals(res.created, true, "first call provisions it");
-    // A real checkout of that exact tag — not a copy of the working tree.
-    assertEquals(
-      (await Deno.readTextFile(join(res.path, "deno.json"))).includes(
-        tag.replace(/^v/, ""),
-      ),
-      true,
-      `${res.path} should be aio ${tag}`,
-    );
+      const res = await ensureVersion(s.root, tag);
+      assert(res.ok, res.ok ? "" : res.error);
+      assertEquals(res.created, true, "first call provisions it");
+      // A real checkout of that exact tag — not a copy of the working tree.
+      assertEquals(
+        (await Deno.readTextFile(join(res.path, "deno.json"))).includes(
+          tag.replace(/^v/, ""),
+        ),
+        true,
+        `${res.path} should be aio ${tag}`,
+      );
 
-    // Second call is a no-op — an immutable pin is the whole point.
-    const again = await ensureVersion(s.root, tag);
-    assert(again.ok);
-    assertEquals(again.created, false);
+      // Second call is a no-op — an immutable pin is the whole point.
+      const again = await ensureVersion(s.root, tag);
+      assert(again.ok);
+      assertEquals(again.created, false);
 
-    await linkTo(s.app, res.path);
-    assertEquals(await currentLink(s.app), versionPath(tag));
-    assertEquals(refOfLink(versionPath(tag)), tag);
-    assertEquals(await provisioned(), [tag]);
-  } finally {
-    await removeVersion(s.root, (await knownTags(s.root))[0]!).catch(() => {});
-    await s.cleanup();
-  }
+      await linkTo(s.app, res.path);
+      assertEquals(await currentLink(s.app), versionPath(tag));
+      assertEquals(refOfLink(versionPath(tag)), tag);
+      assertEquals(await provisioned(), [tag]);
+    } finally {
+      await removeVersion(s.root, (await knownTags(s.root))[0]!).catch(
+        () => {},
+      );
+      await s.cleanup();
+    }
+  });
 });
 
 Deno.test("pin: an unknown version fails loud, listing what exists", async () => {
   const s = await sandbox();
-  try {
-    const res = await ensureVersion(s.root, "v9.9.9-nope");
-    assertEquals(res.ok, false);
-    if (!res.ok) {
-      assert(res.error.includes("v9.9.9-nope"), res.error);
-      assert(
-        /Known:/.test(res.error),
-        `must list what IS available: ${res.error}`,
-      );
+  await _withVersionsDir(s.versions, async () => {
+    try {
+      const res = await ensureVersion(s.root, "v9.9.9-nope");
+      assertEquals(res.ok, false);
+      if (!res.ok) {
+        assert(res.error.includes("v9.9.9-nope"), res.error);
+        assert(
+          /Known:/.test(res.error),
+          `must list what IS available: ${res.error}`,
+        );
+      }
+    } finally {
+      await s.cleanup();
     }
-  } finally {
-    await s.cleanup();
-  }
+  });
 });
 
 Deno.test("pin: the app records it, and drift is detectable", async () => {
   const s = await sandbox();
-  const tags = await knownTags(s.root);
-  const [newer, older] = [tags[0]!, tags[1] ?? tags[0]!];
-  try {
-    assertEquals(await readPin(s.app), null, "starts unpinned");
-    let info = await pinInfo(s.app, s.root);
-    assertEquals(info.pinned, null);
-    assertEquals(info.drift, false, "an unpinned app cannot drift");
+  await _withVersionsDir(s.versions, async () => {
+    const tags = await knownTags(s.root);
+    const [newer, older] = [tags[0]!, tags[1] ?? tags[0]!];
+    try {
+      assertEquals(await readPin(s.app), null, "starts unpinned");
+      let info = await pinInfo(s.app, s.root);
+      assertEquals(info.pinned, null);
+      assertEquals(info.drift, false, "an unpinned app cannot drift");
 
-    await writePin(s.app, older);
-    assertEquals(await readPin(s.app), older);
-    // The pin survives a re-read as valid JSON with the app's own fields intact.
-    const cfg = JSON.parse(await Deno.readTextFile(join(s.app, "deno.json")));
-    assertEquals(cfg.aioVersion, older);
-    assertEquals(cfg.name, "demo", "the developer's own fields are untouched");
-    assertEquals(cfg.imports.aio, "./dep/aio/mod.ts");
+      await writePin(s.app, older);
+      assertEquals(await readPin(s.app), older);
+      // The pin survives a re-read as valid JSON with the app's own fields intact.
+      const cfg = JSON.parse(await Deno.readTextFile(join(s.app, "deno.json")));
+      assertEquals(cfg.aioVersion, older);
+      assertEquals(
+        cfg.name,
+        "demo",
+        "the developer's own fields are untouched",
+      );
+      assertEquals(cfg.imports.aio, "./dep/aio/mod.ts");
 
-    // Linked to a DIFFERENT version than pinned → drift, which `am pin` reports
-    // and exits non-zero on (a CI check for "this app is built wrong").
-    const other = await ensureVersion(s.root, newer);
-    assert(other.ok);
-    await linkTo(s.app, other.path);
-    info = await pinInfo(s.app, s.root);
-    assertEquals(info.pinned, older);
-    assertEquals(info.linkedRef, newer);
-    assertEquals(
-      info.drift,
-      newer !== older,
-      "asking for one version while building against another must be visible",
-    );
+      // Linked to a DIFFERENT version than pinned → drift, which `am pin` reports
+      // and exits non-zero on (a CI check for "this app is built wrong").
+      const other = await ensureVersion(s.root, newer);
+      assert(other.ok);
+      await linkTo(s.app, other.path);
+      info = await pinInfo(s.app, s.root);
+      assertEquals(info.pinned, older);
+      assertEquals(info.linkedRef, newer);
+      assertEquals(
+        info.drift,
+        newer !== older,
+        "asking for one version while building against another must be visible",
+      );
 
-    // Re-pinning twice must not duplicate the field.
-    await writePin(s.app, newer);
-    const raw = await Deno.readTextFile(join(s.app, "deno.json"));
-    assertEquals(raw.match(/"aioVersion"/g)?.length, 1);
-    assertEquals(JSON.parse(raw).aioVersion, newer);
-  } finally {
-    for (const tag of new Set([newer, older])) {
-      await removeVersion(s.root, tag).catch(() => {});
+      // Re-pinning twice must not duplicate the field.
+      await writePin(s.app, newer);
+      const raw = await Deno.readTextFile(join(s.app, "deno.json"));
+      assertEquals(raw.match(/"aioVersion"/g)?.length, 1);
+      assertEquals(JSON.parse(raw).aioVersion, newer);
+    } finally {
+      for (const tag of new Set([newer, older])) {
+        await removeVersion(s.root, tag).catch(() => {});
+      }
+      await s.cleanup();
     }
-    await s.cleanup();
-  }
+  });
 });
 
 Deno.test("pin: latestTag picks a release, never the branch tip", async () => {
   const s = await sandbox();
-  try {
-    const latest = await latestTag(s.root);
-    assert(latest, "there must be a latest release");
-    assert(latest.startsWith("v"), `expected a version tag, got ${latest}`);
-    assertEquals(
-      (await knownTags(s.root)).includes(latest),
-      true,
-      "the default pin must be a real tag — the branch tip is WIP by definition",
-    );
-  } finally {
-    await s.cleanup();
-  }
+  await _withVersionsDir(s.versions, async () => {
+    try {
+      const latest = await latestTag(s.root);
+      assert(latest, "there must be a latest release");
+      assert(latest.startsWith("v"), `expected a version tag, got ${latest}`);
+      assertEquals(
+        (await knownTags(s.root)).includes(latest),
+        true,
+        "the default pin must be a real tag — the branch tip is WIP by definition",
+      );
+    } finally {
+      await s.cleanup();
+    }
+  });
 });
 
 Deno.test("pin: linkTo never destroys a vendored copy", async () => {
   const s = await sandbox();
-  try {
-    // A real directory at dep/aio is someone's deliberately vendored framework.
-    const dep = join(s.app, "dep", "aio");
-    await Deno.mkdir(dep, { recursive: true });
-    await Deno.writeTextFile(join(dep, "mod.ts"), "// vendored");
-    let threw = false;
+  await _withVersionsDir(s.versions, async () => {
     try {
-      await linkTo(s.app, s.root);
-    } catch {
-      threw = true;
+      // A real directory at dep/aio is someone's deliberately vendored framework.
+      const dep = join(s.app, "dep", "aio");
+      await Deno.mkdir(dep, { recursive: true });
+      await Deno.writeTextFile(join(dep, "mod.ts"), "// vendored");
+      let threw = false;
+      try {
+        await linkTo(s.app, s.root);
+      } catch {
+        threw = true;
+      }
+      assertEquals(
+        threw,
+        true,
+        "replacing a vendored copy must refuse, not delete",
+      );
+      assertEquals(
+        await Deno.readTextFile(join(dep, "mod.ts")),
+        "// vendored",
+        "the vendored copy is still there",
+      );
+    } finally {
+      await s.cleanup();
     }
-    assertEquals(
-      threw,
-      true,
-      "replacing a vendored copy must refuse, not delete",
-    );
-    assertEquals(
-      await Deno.readTextFile(join(dep, "mod.ts")),
-      "// vendored",
-      "the vendored copy is still there",
-    );
-  } finally {
-    await s.cleanup();
-  }
+  });
 });
 
 // ── Surviving alpha → beta → 1.0 → 2.0 ─────────────────────────
@@ -281,82 +301,86 @@ Deno.test("order: --latest never crosses a major on its own", () => {
 
 Deno.test("pin: a moving ref is committed RESOLVED, so a clone reproduces it", async () => {
   const s = await sandbox();
-  try {
-    const first = await ensureVersion(s.root, "main");
-    assert(first.ok, first.ok ? "" : first.error);
-    assert(
-      /^main-[0-9a-f]{7,}$/.test(first.ref),
-      `"main" must resolve to an exact commit, got ${first.ref}`,
-    );
+  await _withVersionsDir(s.versions, async () => {
+    try {
+      const first = await ensureVersion(s.root, "main");
+      assert(first.ok, first.ok ? "" : first.error);
+      assert(
+        /^main-[0-9a-f]{7,}$/.test(first.ref),
+        `"main" must resolve to an exact commit, got ${first.ref}`,
+      );
 
-    // Two apps tracking main get the SAME immutable checkout, not one mutable
-    // directory that either can rewrite under the other.
-    const second = await ensureVersion(s.root, "main");
-    assert(second.ok);
-    assertEquals(second.ref, first.ref);
-    assertEquals(second.created, false);
+      // Two apps tracking main get the SAME immutable checkout, not one mutable
+      // directory that either can rewrite under the other.
+      const second = await ensureVersion(s.root, "main");
+      assert(second.ok);
+      assertEquals(second.ref, first.ref);
+      assertEquals(second.created, false);
 
-    // And the resolved pin is provisionable on a machine that has never seen it
-    // — which is what makes `git clone && am fix` reproduce a main-follower.
-    await writePin(s.app, first.ref);
-    assertEquals(await readPin(s.app), first.ref);
-    const reproduced = await ensureVersion(s.root, first.ref);
-    assert(reproduced.ok, reproduced.ok ? "" : reproduced.error);
-    assertEquals(reproduced.ref, first.ref);
-  } finally {
-    for (const ref of await provisioned()) {
-      await removeVersion(s.root, ref).catch(() => {});
+      // And the resolved pin is provisionable on a machine that has never seen it
+      // — which is what makes `git clone && am fix` reproduce a main-follower.
+      await writePin(s.app, first.ref);
+      assertEquals(await readPin(s.app), first.ref);
+      const reproduced = await ensureVersion(s.root, first.ref);
+      assert(reproduced.ok, reproduced.ok ? "" : reproduced.error);
+      assertEquals(reproduced.ref, first.ref);
+    } finally {
+      for (const ref of await provisioned()) {
+        await removeVersion(s.root, ref).catch(() => {});
+      }
+      await s.cleanup();
     }
-    await s.cleanup();
-  }
+  });
 });
 
 Deno.test("pin: the framework's own dep versions are synced into the app", async () => {
   const s = await sandbox();
-  try {
-    const tag = (await knownTags(s.root))[0]!;
-    const res = await ensureVersion(s.root, tag);
-    assert(res.ok, res.ok ? "" : res.error);
+  await _withVersionsDir(s.versions, async () => {
+    try {
+      const tag = (await knownTags(s.root))[0]!;
+      const res = await ensureVersion(s.root, tag);
+      assert(res.ok, res.ok ? "" : res.error);
 
-    // An app carrying a RANGE where the framework pins an exact version is a
-    // half-pin: `dep/aio/**` resolves through the APP's map, so the framework
-    // would get whatever immer the range picks — and the day aio needs immer@^11
-    // that app breaks at runtime while claiming to be pinned.
-    const appCfg = join(s.app, "deno.json");
-    await Deno.writeTextFile(
-      appCfg,
-      JSON.stringify(
-        {
-          name: "demo",
-          imports: { aio: "./dep/aio/mod.ts", immer: "npm:immer@^10" },
-        },
-        null,
-        2,
-      ) + "\n",
-    );
-    const changes = await syncFrameworkDeps(s.app, res.path);
-    const immer = changes.find((c) => c.key === "immer");
-    assert(immer, `immer should be aligned: ${JSON.stringify(changes)}`);
-    const after = JSON.parse(await Deno.readTextFile(appCfg));
-    assertEquals(after.imports.immer, immer!.to);
-    assert(
-      /^npm:immer@\d/.test(after.imports.immer),
-      `expected the framework's exact pin, got ${after.imports.immer}`,
-    );
-    assertEquals(after.name, "demo", "the app's own fields are untouched");
-    assertEquals(after.imports.aio, "./dep/aio/mod.ts");
+      // An app carrying a RANGE where the framework pins an exact version is a
+      // half-pin: `dep/aio/**` resolves through the APP's map, so the framework
+      // would get whatever immer the range picks — and the day aio needs immer@^11
+      // that app breaks at runtime while claiming to be pinned.
+      const appCfg = join(s.app, "deno.json");
+      await Deno.writeTextFile(
+        appCfg,
+        JSON.stringify(
+          {
+            name: "demo",
+            imports: { aio: "./dep/aio/mod.ts", immer: "npm:immer@^10" },
+          },
+          null,
+          2,
+        ) + "\n",
+      );
+      const changes = await syncFrameworkDeps(s.app, res.path);
+      const immer = changes.find((c) => c.key === "immer");
+      assert(immer, `immer should be aligned: ${JSON.stringify(changes)}`);
+      const after = JSON.parse(await Deno.readTextFile(appCfg));
+      assertEquals(after.imports.immer, immer!.to);
+      assert(
+        /^npm:immer@\d/.test(after.imports.immer),
+        `expected the framework's exact pin, got ${after.imports.immer}`,
+      );
+      assertEquals(after.name, "demo", "the app's own fields are untouched");
+      assertEquals(after.imports.aio, "./dep/aio/mod.ts");
 
-    // Idempotent: a second sync reports nothing.
-    assertEquals((await syncFrameworkDeps(s.app, res.path)).length, 0);
+      // Idempotent: a second sync reports nothing.
+      assertEquals((await syncFrameworkDeps(s.app, res.path)).length, 0);
 
-    // A dep the app never declared is NOT added — no widening its graph.
-    assert(!("esbuild" in after.imports));
-  } finally {
-    for (const ref of await provisioned()) {
-      await removeVersion(s.root, ref).catch(() => {});
+      // A dep the app never declared is NOT added — no widening its graph.
+      assert(!("esbuild" in after.imports));
+    } finally {
+      for (const ref of await provisioned()) {
+        await removeVersion(s.root, ref).catch(() => {});
+      }
+      await s.cleanup();
     }
-    await s.cleanup();
-  }
+  });
 });
 
 // ── allowScripts follows the imports ─────────────────────────────────────────

@@ -49,7 +49,13 @@ import {
 } from "../server/app-files.ts";
 import { HEY, NO, OK } from "../diagnostics/fmt.ts";
 import { count } from "../diagnostics/fmt.ts";
-import { type SplashSpec, splashText } from "../electron/splash.ts";
+import {
+  lookOf,
+  SPLASH_CAP_MS,
+  type SplashSpec,
+  splashText,
+  targetSplash,
+} from "../electron/splash.ts";
 
 /** The app version an APK declares, from THE resolved build version.
  *
@@ -89,6 +95,9 @@ export function androidVersion(
 
 /** Build the Android APK. Exits process on completion or error. */
 export async function buildAndroid(cfg: BuildConfig): Promise<void> {
+  const forAndroid = targetSplash(cfg.splash, "android");
+  if (forAndroid.note) console.warn(`${HEY} ${forAndroid.note}`);
+  const splash = forAndroid.splash;
   const { binaryName, appTitle, doRemote, doRelease } = cfg;
 
   const androidHome = resolveSdk(); // ANDROID_HOME, its Sdk subdir, or defaults
@@ -224,11 +233,11 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
       // the manifest's declaration and the WebView's refusal message.
       "{{CAMERA_PERMISSION}}": _cameraPermission(cfg.androidCamera),
       "{{CAMERA_DECLARED}}": String(cfg.androidCamera === true),
-      "{{APP_THEME}}": cfg.splash
+      "{{APP_THEME}}": splash
         ? SPLASH_THEME
         : _appTheme(cfg.androidColorScheme),
       "{{SPLASH}}": _splashKotlin(
-        cfg.splash ?? null,
+        splash ?? null,
         appTitle ?? binaryName,
         cfg.androidColorScheme,
       ),
@@ -263,7 +272,7 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
   if (overlaid.includes(MAIN_ACTIVITY)) {
     const losses = await ownActivityWarnings(androidDir, overlaid, {
       standalone: !talksToServer(serverOpts),
-      splash: !!cfg.splash,
+      splash: !!splash,
     });
     const refusal = ownActivityRefusal(losses, strict);
     for (const w of losses) {
@@ -311,10 +320,10 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
   // `build.splash`: its image, and the theme whose window background is the
   // splash's — the system's starting window (Android 12+: its icon splash)
   // is then already that colour, with no flash before the first frame.
-  if (cfg.splash) {
+  if (splash) {
     for (
       const [f, content] of Object.entries(
-        _splashFiles(cfg.splash, cfg.androidColorScheme),
+        _splashFiles(splash, cfg.androidColorScheme),
       )
     ) {
       const dest = join(androidDir, f);
@@ -323,12 +332,10 @@ export async function buildAndroid(cfg: BuildConfig): Promise<void> {
       else await Deno.writeFile(dest, content);
     }
     console.log(
-      `${OK} splash: ${cfg.splash.image.w}\u00d7${cfg.splash.image.h}` +
-        (cfg.splash.text ? ", with its text" : "") +
-        `, at least ${cfg.splash.minMs} ms` +
-        (cfg.splash.progress
-          ? " (progress: no download on Android, no bar)"
-          : ""),
+      `${OK} splash: ${splash.image.w}\u00d7${splash.image.h}` +
+        (splash.text ? ", with its text" : "") +
+        `, at least ${splash.minMs} ms` +
+        (splash.progress ? " (progress: no download on Android, no bar)" : ""),
     );
   }
 
@@ -606,6 +613,7 @@ export function _splashKotlin(
   scheme: "system" | "dark" | "light",
 ): string {
   if (!spec) return "null";
+  const look = lookOf(spec);
   const argb = (hex: string) => `0xFF${hex.slice(1)}.toInt()`;
   const pair = (m: SplashSpec["light"]) =>
     `intArrayOf(${argb(m.background)}, ${argb(m.text)})`;
@@ -617,7 +625,12 @@ export function _splashKotlin(
     spec.font.weight === "bold"
   }, scale = ${spec.image.scale}, night = ${
     scheme === "system" ? "null" : String(scheme === "dark")
-  }, light = ${pair(spec.light)}, dark = ${pair(spec.dark)})`;
+  }, light = ${pair(spec.light)}, dark = ${pair(spec.dark)}${
+    // Only when set: an app's own MainActivity (an android/ overlay) may
+    // carry an AioSplashSpec from before these existed.
+    look.maxMs !== SPLASH_CAP_MS ? `, capMs = ${look.maxMs}L` : ""}${
+    look.fadeMs !== null ? `, fadeMs = ${look.fadeMs}L` : ""
+  })`;
 }
 
 /** The files an APK with `build.splash` adds, by path under the Android

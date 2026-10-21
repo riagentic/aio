@@ -60,7 +60,7 @@ async function ws(port: number, type: string, settleMs: number) {
 
 Deno.test({
   name:
-    "artifact: a shared-runtime update fetches its Electron into the store BEFORE the swap; a failed fetch refuses the update and the old build keeps serving",
+    "artifact: an online app's plain binary (browser by default) updates without fetching Electron — the mirror down changes nothing, nothing lands in the store",
   ignore: !GATE,
   // aio-ok: a compiled binary re-execs ITSELF to update; the successor is not a child the test can await
   sanitizeOps: false,
@@ -167,35 +167,14 @@ Deno.test({
       proc = s.proc;
       await waitForHttp(`http://127.0.0.1:${port}/__aio/health`, 60_000);
 
-      // 1. The mirror is down: the update is REFUSED, nothing swapped.
+      // A plain `--compile` binary is baked `--client=browser`: it may never
+      // open a window, so its update fetches no Electron (1.0.23) — with the
+      // mirror DOWN it still applies, and the store stays empty. The desktop
+      // PACKAGE path (fetch before the swap, a failed fetch refuses the
+      // update) is pinned in tests/electron-shared-runtime.test.ts
+      // ("update pre-download…", "…refused…").
       const c1 = await ws(port, "updates:check", 4000);
       assertEquals(c1.updates?.status, "available", JSON.stringify(c1.updates));
-      const failed = await ws(port, "updates:apply", 8000);
-      assert(
-        mirror.zipRequests > 0,
-        `the updater never asked for Electron:\n${s.log()}`,
-      );
-      assertStringIncludes(
-        String(failed.updates?.error ?? ""),
-        "update was NOT installed",
-        `${JSON.stringify(failed.updates)}\n${s.log()}`,
-      );
-      assertEquals(
-        await sharedElectronReady(DEFAULT_ELECTRON_VERSION, SLUG, store),
-        false,
-      );
-      // …and it is still v0.1.0 serving: v0.2.0's method is not there.
-      await ws(port, "counter:double", 800);
-      const h1 = await (await fetch(`http://127.0.0.1:${port}/__aio/health`))
-        .json();
-      assert(
-        h1.cells?.counter?.lastAction !== "counter:double",
-        `v0.2.0 is running although its Electron could not be had:\n${s.log()}`,
-      );
-
-      // 2. The mirror is back: Electron lands in the store, THEN the swap.
-      mirror.down = false;
-      await ws(port, "updates:check", 4000);
       await ws(port, "updates:apply", 2000);
       let up = false;
       for (let i = 0; i < 120 && !up; i++) {
@@ -208,9 +187,15 @@ Deno.test({
         } catch { /* mid-handover */ }
       }
       assert(up, `v0.2.0 never served after the update:\n${s.log()}`);
-      assert(
+      assertEquals(
+        mirror.zipRequests,
+        0,
+        `a browser-default binary's update asked for Electron:\n${s.log()}`,
+      );
+      assertEquals(
         await sharedElectronReady(DEFAULT_ELECTRON_VERSION, SLUG, store),
-        `the update swapped without its Electron in the store:\n${s.log()}`,
+        false,
+        "Electron landed in the store for a binary that opens in a browser",
       );
     } finally {
       if (proc) await kill(proc).catch(() => {});

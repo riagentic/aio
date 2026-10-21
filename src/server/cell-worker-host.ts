@@ -20,6 +20,7 @@
 //   - schedule effects and cross-cell dispatches are forwarded to main, where
 //     the scheduler and the other cells live
 
+import { withRefusalCode } from "../state/method-rejection.ts";
 import type { WirePatch as Patch } from "../protocol/patch-ops.ts";
 import { nameIsTaken } from "../state/cell-helpers.ts";
 import { composeCells } from "../state/cell-compose.ts";
@@ -131,7 +132,10 @@ function isolatePeerCells(hosted: string): void {
       try {
         Object.defineProperty(def, key, {
           get() {
-            throw new Error(peerReadInWorkerMessage(hosted, name, key));
+            throw withRefusalCode(
+              new Error(peerReadInWorkerMessage(hosted, name, key)),
+              "WORKER_PEER_READ",
+            );
           },
           enumerable: false,
           configurable: true,

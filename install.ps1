@@ -262,6 +262,8 @@ aio needs deno $minDeno+ and this machine has $have, which could not be upgraded
   Write-Host '  cd my-app; deno task dev'
 }
 
-# Dot-sourcing (`. .\install.ps1`) defines the functions WITHOUT installing
-# anything — that is how the tests reach them. Any other invocation installs.
-if ($MyInvocation.InvocationName -ne '.') { Invoke-AioInstall }
+# AIO_INSTALL_LOAD_ONLY=1 defines the functions WITHOUT installing anything —
+# that is how the tests reach them. Every other load installs, dot-sourcing
+# included: GitHub Actions runs a `shell: pwsh` step as `. '{0}'`, so a
+# dot-source check made `irm … | iex` there exit 0 having installed nothing.
+if ($env:AIO_INSTALL_LOAD_ONLY -ne '1') { Invoke-AioInstall }

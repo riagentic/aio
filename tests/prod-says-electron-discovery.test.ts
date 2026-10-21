@@ -36,6 +36,11 @@ function boot(dgram: unknown, platform = "linux") {
       session: {},
       setWindowOpenHandler() {},
     };
+    once() {}
+    show() {}
+    isDestroyed() {
+      return false;
+    }
     static getAllWindows() {
       return [];
     }

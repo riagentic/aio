@@ -4,6 +4,7 @@
 // free port + temp data dir, and a headless-chromium launcher that leaked
 // browser processes when Deno died. Both are packaged here, `await using`-ready.
 
+import { withRefusalCode } from "../state/method-rejection.ts";
 import { aio } from "../server/aio.ts";
 import { _armTestStrict } from "./test-strict.ts";
 import {
@@ -164,45 +165,60 @@ export type TestServerConfig = CellsConfig & {
 function resolveWorkerMode(config: TestServerConfig): string | undefined {
   const { workers, workerEntry } = config;
   if (workers !== undefined && workers !== "in-isolate" && workers !== "real") {
-    throw new Error(
-      `testServer: workers must be "in-isolate" or "real" — got ` +
-        `${JSON.stringify(workers)}.`,
+    throw withRefusalCode(
+      new Error(
+        `testServer: workers must be "in-isolate" or "real" — got ` +
+          `${JSON.stringify(workers)}.`,
+      ),
+      "HARNESS_OPTION",
     );
   }
   if (workers !== "real") {
     if (workerEntry !== undefined) {
-      throw new Error(
-        'testServer: workerEntry was given without workers: "real", so it ' +
-          'would govern nothing. Add workers: "real", or drop workerEntry.',
+      throw withRefusalCode(
+        new Error(
+          'testServer: workerEntry was given without workers: "real", so it ' +
+            'would govern nothing. Add workers: "real", or drop workerEntry.',
+        ),
+        "HARNESS_OPTION",
       );
     }
     return undefined;
   }
   if (workerEntry === undefined) {
-    throw new Error(
-      'testServer: workers: "real" needs workerEntry — the module each cell ' +
-        "worker boots from.\n" +
-        "  It cannot be inferred: under a test the main module is the TEST " +
-        "file, and a worker on it re-runs the test in another thread.\n" +
-        '  Pass workerEntry: import.meta.resolve("./my-app.ts") — a module ' +
-        "that defines the same cells and calls aio.run() when isCellWorker().\n" +
-        "  (docs/testing/prod-parity.md)",
+    throw withRefusalCode(
+      new Error(
+        'testServer: workers: "real" needs workerEntry — the module each cell ' +
+          "worker boots from.\n" +
+          "  It cannot be inferred: under a test the main module is the TEST " +
+          "file, and a worker on it re-runs the test in another thread.\n" +
+          '  Pass workerEntry: import.meta.resolve("./my-app.ts") — a module ' +
+          "that defines the same cells and calls aio.run() when isCellWorker().\n" +
+          "  (docs/testing/prod-parity.md)",
+      ),
+      "HARNESS_OPTION",
     );
   }
   const url = workerEntry instanceof URL ? workerEntry.href : workerEntry;
   if (!url.startsWith("file:")) {
-    throw new Error(
-      `testServer: workerEntry must be a file: URL (a worker cannot be ` +
-        `spawned from "${url}"). Use import.meta.resolve("./my-app.ts").`,
+    throw withRefusalCode(
+      new Error(
+        `testServer: workerEntry must be a file: URL (a worker cannot be ` +
+          `spawned from "${url}"). Use import.meta.resolve("./my-app.ts").`,
+      ),
+      "HARNESS_OPTION",
     );
   }
   try {
     Deno.statSync(new URL(url));
   } catch (e) {
-    throw new Error(
-      `testServer: workerEntry "${url}" does not exist. Without this check ` +
-        `the failure is a 30s "did not become ready" timeout at boot.`,
-      { cause: e },
+    throw withRefusalCode(
+      new Error(
+        `testServer: workerEntry "${url}" does not exist. Without this check ` +
+          `the failure is a 30s "did not become ready" timeout at boot.`,
+        { cause: e },
+      ),
+      "HARNESS_OPTION",
     );
   }
   const workerCells = (config.cells ?? [])
@@ -210,9 +226,12 @@ function resolveWorkerMode(config: TestServerConfig): string | undefined {
     .filter((f) => f.__aio.worker === true)
     .map((f) => f.__aio.id);
   if (workerCells.length === 0) {
-    throw new Error(
-      'testServer: workers: "real" but no cell in `cells` has worker: true — ' +
-        "the option would do nothing. Flag the cell, or drop the option.",
+    throw withRefusalCode(
+      new Error(
+        'testServer: workers: "real" but no cell in `cells` has worker: true — ' +
+          "the option would do nothing. Flag the cell, or drop the option.",
+      ),
+      "HARNESS_OPTION",
     );
   }
   return url;

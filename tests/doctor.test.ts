@@ -3,6 +3,7 @@
 // deno.json fixtures.
 import { assert, assertEquals } from "@std/assert";
 import { runDoctor } from "../src/server/doctor.ts";
+import { _withVersionsDir } from "../src/server/framework-pin.ts";
 import { extractAioVersion } from "../src/testing/internal.ts";
 import { VERSION } from "../src/server/aio-cli.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
@@ -196,8 +197,6 @@ Deno.test("doctor: a version pin is satisfied only from the version store", asyn
   const store = await Deno.makeTempDir();
   const tag = "v1.0.0-alpha42";
   await Deno.mkdir(`${store}/${tag}`);
-  const prev = Deno.env.get("AIO_VERSIONS_DIR");
-  Deno.env.set("AIO_VERSIONS_DIR", store);
   // A same-named directory ELSEWHERE is not the pinned version — doctor used
   // to accept it because it compared basenames.
   const impostorRoot = await Deno.makeTempDir();
@@ -205,18 +204,19 @@ Deno.test("doctor: a version pin is satisfied only from the version store", asyn
   const good = await pinnedApp(tag, `${store}/${tag}`);
   const bad = await pinnedApp(tag, `${impostorRoot}/${tag}`);
   try {
-    assertEquals(
-      named((await runDoctor(good.dir)).checks, "framework pin matches")!.ok,
-      true,
-    );
-    assertEquals(
-      named((await runDoctor(bad.dir)).checks, "framework pin matches")!.ok,
-      false,
-      "a directory that merely shares the pin's NAME is not the pinned version",
-    );
+    // The store for this call path only: the env is the whole process's.
+    await _withVersionsDir(store, async () => {
+      assertEquals(
+        named((await runDoctor(good.dir)).checks, "framework pin matches")!.ok,
+        true,
+      );
+      assertEquals(
+        named((await runDoctor(bad.dir)).checks, "framework pin matches")!.ok,
+        false,
+        "a directory that merely shares the pin's NAME is not the pinned version",
+      );
+    });
   } finally {
-    if (prev === undefined) Deno.env.delete("AIO_VERSIONS_DIR");
-    else Deno.env.set("AIO_VERSIONS_DIR", prev);
     await good.cleanup();
     await bad.cleanup();
     await Deno.remove(store, { recursive: true });

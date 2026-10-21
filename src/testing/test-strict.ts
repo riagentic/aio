@@ -27,6 +27,7 @@
 // everything else here exists for the same reason: three in-process harnesses
 // must not each grow their own, weaker, answer to the same question.
 
+import { withRefusalCode } from "../state/method-rejection.ts";
 import type { CellDef } from "../state/cell-types.ts";
 import { attachMeta } from "../state/cell-catalog.ts";
 
@@ -110,6 +111,7 @@ let _storeBase: string | undefined;
  *  value) and `check:home-clean`'s store diff are the nets for that.
  *  @internal */
 export function _sandboxHomeStores(): void {
+  _oneSuiteFileAtATime();
   try {
     const missing = HOME_STORE_VARS.filter((k) => !Deno.env.get(k));
     if (missing.length === 0) return;
@@ -144,6 +146,78 @@ export function _sandboxHomeStores(): void {
         `feedback writes the REAL per-user store. Fix: run with ` +
         `--allow-env --allow-write, or pin them to a temp dir yourself.`,
     );
+  }
+}
+
+let _liveKey: string | undefined;
+let _overlapSaid = false;
+
+/** aio's own suite, run as workers of ONE process (`deno test --parallel`):
+ *  every file shares `Deno.env` and the cwd with the files running beside it,
+ *  so one file's `GIT_WORK_TREE` or `AIO_VERSIONS_DIR` is every file's — and
+ *  the store sandbox above, cleared at one file's end, is cleared under the
+ *  others (the REAL store then). It failed as unrelated `git` errors in four
+ *  files. Said once, with the way to run it; `scripts/test-shards.ts` (what
+ *  `deno task test` runs) gives each shard its own process, and a plain
+ *  `deno test` runs one file at a time. Observe-only; an app's own tests
+ *  (aio imported from elsewhere) are never judged. @internal */
+function _oneSuiteFileAtATime(): void {
+  try {
+    if (_overlapSaid) return;
+    // This repo's own `tests/` — a suite whose files set `Deno.env` and
+    // `chdir`, on the promise that no other file runs beside them
+    // in-process. Resolved here, never at load: in a browser bundle
+    // `import.meta.url` is a `data:` URL, and a relative URL against it throws.
+    const suite = new URL("../../tests/", import.meta.url).href;
+    if (!Deno.mainModule.startsWith(suite)) return;
+    const key = `AIO_TEST_LIVE_FILE_${Deno.pid}`;
+    const live = Deno.env.get(key);
+    if (live === undefined || live === Deno.mainModule) {
+      if (_liveKey) return;
+      _liveKey = key;
+      Deno.env.set(key, Deno.mainModule);
+      globalThis.addEventListener("unload", () => {
+        if (Deno.env.get(key) === Deno.mainModule) Deno.env.delete(key);
+      });
+      // Two files that LOAD at the same instant both read "nobody" above and
+      // both claim the key — the later write wins. Looked at again when this
+      // file's first test starts (measured: the load-time check alone missed
+      // the overlap in 2 of 3 runs): the key then names the other file.
+      (Deno.test as { beforeEach?: (fn: () => void) => void }).beforeEach?.(
+        () => {
+          const now = Deno.env.get(key);
+          if (!_overlapSaid && now !== undefined && now !== Deno.mainModule) {
+            _sayOverlap(suite, now);
+          }
+        },
+      );
+      return;
+    }
+    _sayOverlap(suite, live);
+  } catch {
+    // aio-ok: no Deno (a browser bundle) or no env permission — the guard
+    // only speaks; nothing depends on it.
+  }
+}
+
+function _sayOverlap(suite: string, live: string): void {
+  try {
+    _overlapSaid = true;
+    console.warn(
+      `[aio:testing] tests/${
+        Deno.mainModule.slice(suite.length)
+      } runs in the same process as ` +
+        `tests/${
+          live.slice(suite.length)
+        } — \`deno test --parallel\` runs files as workers of ONE ` +
+        `process, sharing Deno.env and the cwd, and this suite's files set ` +
+        `both. A failure here may be the other file's. Run ` +
+        `\`deno task test\` (or \`deno run -A scripts/test-shards.ts <files>\`), ` +
+        `or \`deno test\` without --parallel.`,
+    );
+  } catch {
+    // aio-ok: no Deno (a browser bundle) or no env permission — the guard
+    // only speaks; nothing depends on it.
   }
 }
 
@@ -694,14 +768,17 @@ export function _watchInitFailures(
 
 function initFailureError(cell: string, err: unknown): Error {
   const detail = err instanceof Error ? err.message : String(err);
-  const named = new Error(
-    `${cell} onInit threw — ${detail}\n` +
-      `  cause: aio.run reports it as INIT_ERROR and keeps booting the other ` +
-      `cells, so the app runs without whatever this onInit was to set up; ` +
-      `this harness fails the test rather than reporting success.\n` +
-      `  fix: an onInit that starts work dispatches it — ` +
-      `\`app.dispatch({ type: "${cell}:<method>", payload: { args: [] } })\`` +
-      ` — or leaves it to onStart (docs/state/lifecycle.md).`,
+  const named = withRefusalCode(
+    new Error(
+      `${cell} onInit threw — ${detail}\n` +
+        `  cause: aio.run reports it as INIT_ERROR and keeps booting the other ` +
+        `cells, so the app runs without whatever this onInit was to set up; ` +
+        `this harness fails the test rather than reporting success.\n` +
+        `  fix: an onInit that starts work dispatches it — ` +
+        `\`app.dispatch({ type: "${cell}:<method>", payload: { args: [] } })\`` +
+        ` — or leaves it to onStart (docs/state/lifecycle.md).`,
+    ),
+    "INIT_ERROR",
   );
   if (err instanceof Error) named.cause = err;
   return named;
@@ -711,15 +788,18 @@ function initFailureError(cell: string, err: unknown): Error {
  *  harness and every path (raise, late rejection). */
 function unobservedError(method: string, err: unknown): Error {
   const detail = err instanceof Error ? err.message : String(err);
-  const named = new Error(
-    `${method} failed and nothing awaited it — ${detail}\n` +
-      `  cause: the call was made fire-and-forget (the ordinary ` +
-      `\`onClick={() => cell.method()}\` shape), so its rejection reached ` +
-      `no caller. Production logs it and dispatches \`__error\`; this ` +
-      `harness surfaces it rather than reporting success.\n` +
-      `  fix: await the call (or assert on it — \`await assertRejects(() => ` +
-      `cell.method())\`) if the failure is expected; otherwise fix the ` +
-      `method.`,
+  const named = withRefusalCode(
+    new Error(
+      `${method} failed and nothing awaited it — ${detail}\n` +
+        `  cause: the call was made fire-and-forget (the ordinary ` +
+        `\`onClick={() => cell.method()}\` shape), so its rejection reached ` +
+        `no caller. Production logs it and dispatches \`__error\`; this ` +
+        `harness surfaces it rather than reporting success.\n` +
+        `  fix: await the call (or assert on it — \`await assertRejects(() => ` +
+        `cell.method())\`) if the failure is expected; otherwise fix the ` +
+        `method.`,
+    ),
+    "UNOBSERVED_FAILURE",
   );
   if (err instanceof Error) named.cause = err;
   return named;

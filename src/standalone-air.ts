@@ -1,5 +1,6 @@
 // Standalone AIR runtime — signal-based client-side dispatch loop for Android WebView builds
 // Replaces standalone.ts when building with --android + renderer: "aio". Same API, no React.
+import { withRefusalCode } from "./state/method-rejection.ts";
 import { applyCellDefaults, applyLocalFirst } from "./state/cell-defaults.ts";
 import { applyCellFieldFilter } from "./state/state-filter.ts";
 import { type Draft, produce } from "immer";
@@ -212,6 +213,9 @@ export { notify } from "./state/notify.ts";
 /** Present so an app compiles for android too; the WebView has no
  *  Notification API, so it resolves "unsupported" there and says so once. */
 export { requestNotificationPermission } from "./browser/desktop-notify.ts";
+/** `window.print()` in the WebView — present so an app compiles for android
+ *  too. */
+export { print } from "./browser/desktop-print.ts";
 /** `fetch` sent natively by a standalone APK (no Origin, no CORS). */
 export { nativeFetch } from "./browser/native-fetch.ts";
 export type { OwnEffect } from "./state/own.ts";
@@ -2201,8 +2205,11 @@ function _installBackgroundFlush(): void {
  *  @internal */
 export function _seedState(partial: Record<string, unknown>): void {
   if (!_seed) {
-    throw new Error(
-      "[aio] seed: no standalone app is running — seed after the cells boot",
+    throw withRefusalCode(
+      new Error(
+        "[aio] seed: no standalone app is running — seed after the cells boot",
+      ),
+      "CELL_NOT_BOOTED",
     );
   }
   const known = Object.keys(
@@ -2210,11 +2217,14 @@ export function _seedState(partial: Record<string, unknown>): void {
   );
   const unknown = Object.keys(partial).filter((k) => !known.includes(k));
   if (unknown.length > 0) {
-    throw new Error(
-      `[aio] seed: no booted cell named ${
-        unknown.map((u) => `"${u}"`).join(", ")
-      }` +
-        ` — booted cells: ${known.join(", ") || "(none)"}`,
+    throw withRefusalCode(
+      new Error(
+        `[aio] seed: no booted cell named ${
+          unknown.map((u) => `"${u}"`).join(", ")
+        }` +
+          ` — booted cells: ${known.join(", ") || "(none)"}`,
+      ),
+      "CELL_NOT_BOOTED",
     );
   }
   _seed(partial);

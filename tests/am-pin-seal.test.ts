@@ -16,6 +16,7 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join, resolve } from "@std/path";
 import { latestTag, readPin } from "../src/am/am-versions.ts";
 import {
+  _withVersionsDir,
   linkSatisfiesPin,
   pinDisagreementHint,
   versionPath,
@@ -480,21 +481,12 @@ Deno.test("am fix relinks dep/aio when the pin and the link disagree", async () 
     assertStringIncludes(linkOf(r)!.note, s.install); // says what it was
     const link = await Deno.readLink(join(s.app, "dep", "aio"));
     assertStringIncludes(link, join(s.versions, want));
-    // The decider reads the versions dir from the env — this process must see
-    // the sandbox's, exactly as the child `am fix` did.
-    const prevVersions = Deno.env.get("AIO_VERSIONS_DIR");
-    Deno.env.set("AIO_VERSIONS_DIR", s.versions);
-    try {
-      assert(
-        linkSatisfiesPin(want, link),
-        "the pin decider agrees with the link am fix wrote",
-      );
-    } finally {
-      // Restore, never delete: an unset var makes the REAL store the answer
-      // for the rest of the process.
-      if (prevVersions === undefined) Deno.env.delete("AIO_VERSIONS_DIR");
-      else Deno.env.set("AIO_VERSIONS_DIR", prevVersions);
-    }
+    // The decider must read the sandbox's store, exactly as the child
+    // `am fix` did — for this call only: the env is the whole process's.
+    assert(
+      _withVersionsDir(s.versions, () => linkSatisfiesPin(want, link)),
+      "the pin decider agrees with the link am fix wrote",
+    );
 
     // Idempotent: the second run has nothing to say.
     const again = await amFix(s);

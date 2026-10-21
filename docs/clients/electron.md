@@ -944,11 +944,45 @@ The page's own `window.close()` is the same verb: it closes through the window
 destroying the page under it.
 
 **`beforeunload`.** A page that cancels `beforeunload` keeps its window when the
-_user_ closes it or quits the app — Electron's behaviour, with no "Leave site?"
-dialog. It has no say when the _server_ ends the window: on `am stop`, a signal
-to the app, or the server process dying, the window closes whatever the page
+_user_ closes it, reloads it or quits the app — Electron's behaviour, with no
+"Leave site?" dialog, so the ✕ looks dead. aio says so once in the log
+(`the page vetoed leaving …`). Two ways out:
+
+- show your own prompt from the handler (Save / Don't Save / Cancel), then
+  `window.close()` with the veto switched off — the default leaves the page this
+  say;
+- or let aio ask with the native **Leave / Stay** dialog, owned by the window
+  (Electron's recommended `will-prevent-unload` + `showMessageBoxSync`):
+
+```ts
+aio.run({ cells, electron: { confirmUnload: true } });
+```
+
+The page has no say when the _server_ ends the window: on `am stop`, a signal to
+the app, or the server process dying, the window closes whatever the page
 answers (it would have nothing left to talk to), within about 2 s of the
 server's death and 5 s at the latest.
+
+**Shortcuts.** The window binds Ctrl/Cmd+R and Ctrl/Cmd+F5 (hard reload),
+Ctrl/Cmd+P (print the window), F12 / Ctrl+Shift+I (DevTools) and
+Ctrl+Shift+Delete (clear caches); a bound key never reaches the page. A word
+processor wants Ctrl+R for "align right" and its own print, so the reload and
+print bindings can be handed back (each defaults to `true`; an unknown name or a
+non-boolean refuses the boot):
+
+```ts
+aio.run({ cells, electron: { shortcuts: { reload: false, print: false } } });
+```
+
+**Printing.** `window.print()` does nothing in a desktop window on Linux.
+`print()` from `aio/air` opens the print dialog through the window's main
+process there, and is `window.print()` in a browser — `@media print` and
+`beforeprint` apply either way:
+
+```tsx
+import { print } from "aio/air";
+<button onClick={() => print()}>Print</button>;
+```
 
 **The menu.** A desktop window has no application menu — on Linux and Windows
 there is no menu bar at all. macOS always draws one, and its standard shortcuts
@@ -1027,6 +1061,37 @@ size; position is kept. A window closed while **maximized** reopens maximized,
 and un-maximizing it returns to the size and position it had before
 (`window-state.json` stores that normal rect plus `"maximized": true`). Delete
 `window-state.json` only if you want a clean slate for both.
+
+## The first frame (`electron: { backgroundColor }`)
+
+The window is made hidden and shown once its page has painted (Electron's
+`ready-to-show`), so its first frame is the page and never a blank rectangle. A
+page that has not painted 5 s after the window was made is shown anyway, and the
+log says so once (`the window had not painted its page …`). With a
+[splash](../build/targets.md#splash-buildsplash), the window still shows the
+moment it is ready, under the splash.
+`electron: { showWhenPainted: { capMs: 2000 } }` changes that wait;
+`showWhenPainted: false` shows the window the moment it is made (a blank frame
+first, as before 1.0.23). All the desktop windows' options are in one table:
+[desktop window options](../build/targets.md#desktop-window-options).
+
+The window's background is what any area the page has not painted shows: during
+a resize, or while a slow page loads. aio sets it to the page background its
+theme paints (`ui.theme: "full"`, or `"auto"` while the app ships no
+`style.css`), light or dark as the OS is. An app whose own CSS paints the page
+names its colour, so a dark app never shows white:
+
+```ts
+aio.run({ cells, electron: { backgroundColor: "#101418" } });
+// or, following the OS's dark mode:
+aio.run({
+  cells,
+  electron: { backgroundColor: { light: "#ffffff", dark: "#101418" } },
+});
+```
+
+Anything but `"#rrggbb"` or `{ light, dark }` of those refuses the boot. Without
+either, the background is Electron's (white).
 
 ## Thin client (`--server-url=X` / `--connect`)
 

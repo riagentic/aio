@@ -93,11 +93,21 @@ function sourceParses(src: string, flag: string): boolean {
     src.includes(`|${flag})`);
 }
 
+/** am-cmd-process.ts and the modules split out of it. */
+const AM_PROCESS = [
+  "src/am/am-cmd-process.ts",
+  "src/am/am-launch.ts",
+  "src/am/am-cmd-start.ts",
+  "src/am/am-cmd-stop.ts",
+  "src/am/am-cmd-status.ts",
+  "src/am/am-cmd-kill.ts",
+];
+
 /** Where a PASSTHROUGH verb's surplus flags go — the parser that owns them. */
 const PASSTHROUGH_SOURCES: Record<string, string[]> = {
-  start: ["src/am/am-cmd-process.ts"],
-  restart: ["src/am/am-cmd-process.ts"],
-  watch: ["src/am/am-cmd-process.ts"],
+  start: AM_PROCESS,
+  restart: AM_PROCESS,
+  watch: AM_PROCESS,
   dev: ["src/am/am-cmd-build.ts"],
   build: ["src/build-all.ts", "src/am/am-cmd-build.ts"],
   compile: ["src/build-all.ts", "src/am/am-cmd-build.ts"],

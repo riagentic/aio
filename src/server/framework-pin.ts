@@ -23,6 +23,7 @@
 // scripts/check-boundaries.ts) and `am` may import `server`, so this is the
 // side both can share.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { dirname, join, normalize, resolve } from "@std/path";
 import { homedir } from "./paths.ts";
 
@@ -40,9 +41,21 @@ export function pathPinTarget(ref: string): string {
   return ref.slice(PATH_PIN_PREFIX.length);
 }
 
+/** A store named for one async call path only — {@link _withVersionsDir}. */
+const _storeFor = new AsyncLocalStorage<string>();
+
+/** Runs `fn` with `dir` as the version store for everything it awaits, and
+ *  nothing else. A test seam: `AIO_VERSIONS_DIR` is the PROCESS's, so two
+ *  test files that each set it under one-process `deno test --parallel`
+ *  provisioned into each other's stores. Unset, nothing changes. @internal */
+// aio-ok: a test seam — only tests/ reach it, the product never does
+export function _withVersionsDir<T>(dir: string, fn: () => T): T {
+  return _storeFor.run(dir, fn);
+}
+
 /** Where provisioned versions live: `~/.local/lib/aio-versions/<ref>/`. */
 export function versionsDir(): string {
-  return Deno.env.get("AIO_VERSIONS_DIR") ??
+  return _storeFor.getStore() ?? Deno.env.get("AIO_VERSIONS_DIR") ??
     join(homedir(), ".local", "lib", "aio-versions");
 }
 

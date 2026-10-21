@@ -219,7 +219,7 @@ Deno.test({
   async fn() {
     const w = await world();
     try {
-      const s = await w.am("start", "--json");
+      const s = await w.am("start", "--json", "--wait=60");
       assertEquals(s.code, 0, s.out);
       const first = s.json as { pid: number; port: number };
       const child = await w.saveAndAwaitRelaunch();
@@ -259,7 +259,7 @@ Deno.test({
   async fn() {
     const w = await world();
     try {
-      const s = await w.am("start", "--json");
+      const s = await w.am("start", "--json", "--wait=60");
       assertEquals(s.code, 0, s.out);
       await w.saveAndAwaitRelaunch();
       // Force the OTHER outcome: whatever the relaunch left in the lock slot
@@ -280,7 +280,7 @@ Deno.test({
         if (prev[1] === undefined) Deno.env.delete("XDG_RUNTIME_DIR");
         else Deno.env.set("XDG_RUNTIME_DIR", prev[1]);
       }
-      const c = await w.am("start", "--json");
+      const c = await w.am("start", "--json", "--wait=60");
       assertEquals(c.code, 0, c.out);
       const winner = (c.json as { pid: number }).pid;
       const left = await w.settled();
@@ -305,7 +305,7 @@ Deno.test({
   async fn() {
     const w = await world();
     try {
-      const s = await w.am("start", "--json");
+      const s = await w.am("start", "--json", "--wait=60");
       assertEquals(s.code, 0, s.out);
       const first = (s.json as { pid: number }).pid;
       await w.saveAndAwaitRelaunch();
@@ -346,7 +346,7 @@ Deno.test({
     let sampling = true;
     const gaps: number[] = [];
     try {
-      const s = await w.am("start", "--json");
+      const s = await w.am("start", "--json", "--wait=60");
       assertEquals(s.code, 0, s.out);
       // Every few ms: is there a lock? `am restart` / `am status` in a gap
       // read "not running" and started a second instance.

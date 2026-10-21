@@ -868,6 +868,22 @@ aio handles this for you:
   `src/`) belongs to that target: its `*.server.ts` ship elsewhere only when
   this entry's graph reaches them.
 
+- **The app's own server Workers are embedded automatically.**
+  `new Worker(new URL("./render-worker.ts", import.meta.url))` is not an import,
+  so `deno compile` cannot see it: a worker file nothing imports compiled green
+  and answered `Module not found` from the binary (a `*.server.ts` worker
+  survived only through the rule above). The build now reads every module of the
+  entry's graph — and each worker it finds, so a worker that starts another is
+  covered — and embeds each literal worker file. Components (`.tsx`/`.jsx`) are
+  skipped: a browser worker is bundled per target instead. A worker started from
+  a **computed** URL (a template with `${}`, a variable) cannot be followed; the
+  build warns with the line to add:
+
+  ```
+  ! src/app.ts:4 starts a Worker from a computed URL — the binary embeds only the
+    worker files it can see. Name them: deno.json "compile": { "include": ["src/<worker>.ts"] }
+  ```
+
 - **A file a server module reads from beside itself must be embedded — the build
   checks.** `Deno.readTextFile(new URL("../style.css", import.meta.url))` finds
   the file on disk in `deno task dev`; in a compiled binary `import.meta.url`
@@ -1401,11 +1417,14 @@ tag) — see [signing](../deploy/signing.md); [CI](ci.md) has the plain matrix.
   no Electron: it is the app alone (~75% smaller), and on its first start the
   app downloads the Electron its build pinned into one **per-user store** that
   every online app on the machine starts from. An update downloads only the app.
+  A user who is offline on that first start gets no app until the download can
+  run (the app asks Retry / Quit) — ship `"offline"` when a first start may have
+  no network.
 - **`"offline"`** — the package carries its own Electron and opens with no
-  internet. It is what an app with no `electronRuntime` gets, as every app built
-  before the key did. Its Electron is not shared: it is trimmed for that one app
-  (unused translations, optional GPU files, on macOS its name and icon), so it
-  is not a copy another app could start from.
+  internet, first start included. It is what an app with no `electronRuntime`
+  gets, as every app built before the key did. Its Electron is not shared: it is
+  trimmed for that one app (unused translations, optional GPU files, on macOS
+  its name and icon), so it is not a copy another app could start from.
 
 | OS      | The store                                         |
 | ------- | ------------------------------------------------- |
@@ -1450,11 +1469,12 @@ through it.
 
 - **Electron is already in the store** (another app put it there, or this one
   did before): the app opens as fast as a bundled one. Nothing is shown.
-- **It is not**: a window named after the app says _Resolving dependencies_ with
-  a progress bar while Electron (~110–130 MB) downloads, is checked against the
-  release's `SHASUMS256.txt`, and unpacks; then the app opens. Closing that
-  window cancels the start — nothing is installed, and the next start downloads
-  again.
+- **It is not**: a window named after the app says _Getting <title> ready_ —
+  _Downloading Electron 44.9.0 — first start only · 22 / 123 MB_ — with a
+  progress bar and one button, **Cancel**, while Electron (~110–130 MB)
+  downloads, is checked against the release's `SHASUMS256.txt`, and unpacks;
+  then the app opens. Closing that window cancels the start — nothing is
+  installed, and the next start downloads again.
 - **The download fails** (offline, a proxy): a dialog names the reason and
   offers **Retry** or **Quit** (Windows' own box labels Quit **Cancel**) — and,
   right after an update while the version it replaced is kept in `old/`, **Start
@@ -1469,13 +1489,23 @@ through it.
   download instead of making a second one. Closing either window ends that start
   at once.
 
-The window is drawn with what each OS has: Windows Forms (PowerShell) on
-Windows, a Cocoa window (`osascript`) on macOS, `zenity` or `yad` on Linux — and
-with neither, a page in the default browser. A window that cannot be shown at
-all (no interactive desktop, a browser that does not open) is not a cancel: the
-download goes on and the log carries the progress. If the app dies while the
-window is up, the window closes itself within half a minute. `$AIO_DIALOG=none`
-turns it off (log only).
+The window and the question are aio's own, drawn with what each OS has: Windows
+Forms (PowerShell) on Windows, a Cocoa window (`osascript`) on macOS, GTK 3 on
+Linux (drawn by aio, as the splash is). Both wear the app's identity colours —
+the page background, text, bar and track a splash with no colours set would
+have, from the same hash of the appId — light or dark as the OS is (Windows' app
+mode, macOS's appearance, the GTK theme's dark preference), and the bar is drawn
+in them (the native bars take no colours). Both open where the app's window
+will, centred on it: see [Where](#where-every-window-opens). Only where GTK
+cannot draw (no library, no display) does Linux use `zenity` or `yad`, which
+place themselves (the screen under the pointer), in the GTK theme's look, and
+the log says so once with the reason (`yad` has Cancel only; `zenity` keeps its
+own OK, greyed until the window closes — it has no way to drop it); with
+neither, a page in the default browser. A window that cannot be shown at all (no
+interactive desktop, a browser that does not open) is not a cancel: the download
+goes on and the log carries the progress. If the app dies while the window is
+up, the window closes itself within half a minute. `$AIO_DIALOG=none` turns it
+off (log only).
 
 **Updates.** A shared-runtime update downloads only the app. When the new
 version pins a different Electron, the updater fetches that Electron into the
@@ -1558,59 +1588,173 @@ splash natively ([Android](#splash-on-android), below).
 "build": {
   "splash": {
     "image": "assets/splash.png", // required: a PNG, at most 1 MB
-    "text": "Starting {title}…",  // optional; left out or false = the image alone
-    "progress": true,             // optional: a bar while Electron downloads
-    "minMs": 1000,                // optional: it stays at least this long (0–10000)
+    "text": "{title} {version}",  // optional; left out: "{title}"; false = the image alone
+    "downloadText": "Installing dependencies · {got} of {total} MB", // optional, instead of text while Electron downloads; left out: "Getting {title} ready · {got} of {total} MB"
+    "progress": true,             // optional: a bar (and its ✕) while Electron downloads; left out: on; false = no bar, no ✕
+    "minMs": 1000,                // optional: the splash stays at least this long; the window does not wait (0–10000)
     "font": { "family": "Georgia", "size": 13, "weight": "bold" },
-    "color": "#ffffff",           // the text's colour
+    "color": "#ffffff",           // the text's colour; left out, over the image: white or near-black, whichever reads on the image's lower third
     "bar": { "style": "solid", "color": "#3b82f6", "track": "#e5e7eb" } // or "thin"
   }
 }
 ```
 
+Every other key is optional too. Left out, each one takes aio's default below; a
+key the app sets is exactly what it set. (A package built before 1.0.23 keeps
+the look it was built with.)
+
+| Key            | What                                                                                                                                                      | Left out                                                                                                    |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `size`         | `{ "width": 640, "height": 360 }`: the window's size in logical pixels (16–4096)                                                                          | the image's size (`@2x` halved)                                                                             |
+| `fit`          | `"cover"` (fills the size, the overflow cropped) or `"contain"` (the whole image, `background` around it)                                                 | `"cover"`                                                                                                   |
+| `position`     | `"window"`: centred on the app window's saved bounds; `"primary"`: the primary display's centre; `"pointer"`: the centre of the display under the pointer | `"window"` (on a first start, with no saved bounds: the primary display, where Electron opens a new window) |
+| `background`   | `"#rrggbb"` behind a transparent or `contain`ed image and the strip below, in both modes                                                                  | the app's page background, per mode                                                                         |
+| `textPosition` | `"over"` (on the image's lower part), `"below"` (in a strip under the image), `"none"` (no text)                                                          | `"over"`                                                                                                    |
+| `align`        | the text's `"left"`, `"center"` or `"right"`                                                                                                              | centred                                                                                                     |
+| `margin`       | the text's and bar's gap to the window's edges, in px (0–200)                                                                                             | 24 px at the sides, 18 px at the bottom                                                                     |
+| `shadow`       | a soft shadow under the text, `true` or `false`                                                                                                           | on where the OS draws it (macOS, Linux); Windows cannot                                                     |
+| `bar.height`   | the bar's height in px (1–64)                                                                                                                             | `bar.style`: 6 pt (`solid`) or 3 pt (`thin`)                                                                |
+| `bar.position` | `"under-text"` (inside the margins) or `"bottom-edge"` (along the window's bottom edge, full width)                                                       | `"under-text"`                                                                                              |
+| `bar.radius`   | the bar's corner radius in px (0–32)                                                                                                                      | round (half the bar's height), on every OS                                                                  |
+| `radius`       | the window's corner radius in px (0–200)                                                                                                                  | 8                                                                                                           |
+| `border`       | `"#rrggbb"`: a 1 px border                                                                                                                                | none                                                                                                        |
+| `windowShadow` | the window's drop shadow, `true` or `false`                                                                                                               | on where the OS draws it (macOS; on Linux the window manager decides)                                       |
+| `maxMs`        | the longest the splash waits for the window (1000–600000, not under `minMs`); the time does not count while a download runs                               | 30000                                                                                                       |
+| `fadeMs`       | the fade-out (0–2000; 0 = none)                                                                                                                           | 200                                                                                                         |
+| `show`         | `"always"`, `"firstStart"` (only while Electron downloads), or `"never"` (as `false`: no splash)                                                          | `"always"`                                                                                                  |
+| `cancel`       | the ✕ that cancels a download (it shows with the bar), `true` or `false`                                                                                  | `true`                                                                                                      |
+| `followWindow` | with `position: "window"`: once the app's window shows, the splash moves onto where it really is (and follows it if it moves), `true` or `false`          | `true`                                                                                                      |
+
+A key with a value it does not take is refused at build time, by name, with the
+values it takes. That includes a misspelled key. Anything a target cannot draw
+is listed in the table below, and the log says it once when the splash opens. On
+Android and the web, the build says it once.
+
 - **Looks.** The image alone; the image with the text over its lower part; or
-  the image, the text and a small bar under it. The window is the image's size,
-  centred, without a frame, above other windows, and with no taskbar or Dock
+  the image, the text and a small bar under it. The window is the image's size
+  (or `size`), without a frame, above other windows, and with no taskbar or Dock
   entry. Name the file `…@2x.png` when it is drawn for a 2× screen: it is shown
   at half its pixels, so it is sharp there.
+- **Where.** The splash opens where the app's window will open, centred on it —
+  see [Where every window opens](#where-every-window-opens).
 - **Colours.** Colours you leave out are the app's own (the same hue as its icon
   and theme), in light and dark mode. The colour behind a transparent image is
   the app's page background.
-- **Text.** `{title}` is the app's name. `{got}`, `{total}` and `{pct}` are the
-  download's MB and percent (`?` while the size is unknown). Any other `{…}` is
-  refused at build time.
-- **When it closes.** The app's window is made hidden and loads underneath the
-  splash. When its page has mounted and the splash has been on screen for
-  `minMs`, the splash fades out and the window shows, in the same moment. A
-  splash that is not up yet is waited for: it always shows, for `minMs`. The
-  splash also closes when Electron exits or never starts, when the app stops,
-  and after 30 s with no sign of the window; that last case is logged once. The
-  30 s do not count while a download runs. If the splash cannot be drawn, the
-  window shows as soon as its page has mounted. Whatever happens, the window
-  shows by itself `minMs` + 5 s after it is ready, and the log says so.
+- **Text.** `{title}` is the app's name. `{version}` is the app's version,
+  filled in at build time: the string `--version` prints. `{got}`, `{total}` and
+  `{pct}` are the download's MB and percent (`?` while the size is unknown). Any
+  other `{…}` is refused at build time.
+- **`downloadText`** is shown instead of `text` while Electron downloads, and
+  `text` again once it has. Left out, `text` is shown throughout. It takes the
+  same placeholders. It is useful because a `text` that names the download would
+  read `0 of ? MB` on every later start, when nothing downloads. With
+  `"text": false` and a `downloadText`, the image is shown alone except during a
+  download.
+- **When it closes.** The splash and the app's window each keep their own time.
+  The window shows the moment it is ready, as it does without a splash, and
+  opens under the splash. The splash stays above it until it has been on screen
+  for `minMs`, then fades out. If the window is ready later than that, the
+  splash goes when the window is ready. The splash is on screen before the
+  window on every OS and start: on Windows, when Electron is already on the
+  machine (a later start, a run from source, an offline build), Electron's own
+  main process draws it first, before it makes the app's window (see the table
+  below). The splash also closes when Electron exits or never starts, when the
+  app stops, and after 30 s (`maxMs`) with no sign of the window; that last case
+  is logged once. The 30 s do not count while a download runs.
+- **Above the window, never the focus.** The splash stays in front of the app's
+  window until it goes, and never takes the focus: the app's window gets it when
+  it shows. Windows: a TopMost window that is shown without being activated.
+  macOS: the floating window level, without activating. Linux (GTK): keep-above,
+  and raised again every 0.1 s, because a window manager may ignore keep-above
+  (and with no window manager nothing keeps it above); it never accepts the
+  focus. `yad`: `--on-top`. `zenity` cannot stay on top (see the table).
 - **Online apps.** On a first start (`electronRuntime: "online"`), Electron
-  downloads behind the same splash. With `progress: true` the bar shows the
-  download, and a ✕ on the splash cancels it. When no download runs, the bar is
-  hidden. If the download fails, the splash closes and the usual Retry / Quit
-  question is asked.
+  downloads INSIDE the same splash — its image, its colours, its `downloadText`
+  (`{got}` / `{total}` filled), its bar — and no other window opens. The bar
+  shows the download, and a ✕ on the splash cancels it (`progress: false`:
+  neither). When no download runs, the bar is hidden. If the download fails, the
+  splash closes and the usual Retry / Quit question is asked.
+- **"The download in my splash, and no splash otherwise"** is
+  `show: "firstStart"`: the first start (and the first after an update that pins
+  a new Electron) shows the splash for the download, on every OS; every later
+  start shows nothing.
 - **Without `splash`** (or with `false`), nothing changes: there is no splash,
-  and a first download shows the plain progress window.
-- **Runs from source** (`deno task dev`, `--prod`) show no splash. Only a built
-  package does.
-- **Electron is never delayed.** Electron starts and loads its page while the
-  splash opens; only the window's show waits. The log says when each happened:
+  and a first download shows the download window above, in the app's colours.
+- **Runs from source** (`deno task dev`, `--prod`, `am start`) show the same
+  splash. It is read from deno.json at the start, with the same checks as a
+  build, and `{version}` is the version the run reports. A start you make shows
+  it; the dev loop's automatic restart after a save does not (see
+  [Runs from source vs a built package](#runs-from-source-vs-a-built-package)).
+  A `build.splash` that a build would refuse is logged with the build's message,
+  and that start shows no splash.
+- **Nothing waits for the splash.** Electron starts, loads its page and shows
+  its window while the splash is open. The log says when each happened:
   `electron: splash — visible N ms after it was asked for, M ms after the app started`
-  and `electron: splash — the main window shows N ms after the splash appeared`.
+  and
+  `electron: splash — the app is ready N ms after the splash appeared; its window shows now`.
 - **The `web` target** shows it too, as part of the page — see
   [the web splash](#splash-on-the-web).
 
+#### Where every window opens
+
+The app's window, the splash, the download window and the Retry / Quit question
+open on the same display. The splash, the download window and the question are
+centred on the app's window. One rule decides it
+(`src/electron/splash-place.ts`). The Electron main script and the macOS helpers
+run that rule's own code, and the Windows helpers run a PowerShell copy of it
+that tests check against it:
+
+- The window opens at the bounds aio saved for it
+  (`<userData>/window-state.json`), at the saved size while the app's declared
+  `ui.width` / `ui.height` are unchanged, else at the declared size.
+- Bounds no longer inside a display (a monitor unplugged, or smaller now) are
+  moved into the display they overlap most. If they overlap none, they go to the
+  first display.
+- A window larger than its display sits at the display's top-left, so the title
+  bar stays reachable.
+- With no saved position, the window opens in the middle of the primary display.
+- Every window is kept inside its display's work area (no taskbar, no menu bar).
+
+Each process reads the displays itself: Electron's `screen`, GDK's monitors,
+Windows Forms' `Screen.AllScreens`, or Cocoa's `NSScreen`.
+
+**The splash follows the real window.** The rule is a prediction made before the
+window exists. Once the window shows, its main process reports where the window
+really is (and again after each move), and the splash moves onto that window's
+centre: GTK, Windows Forms and Cocoa move it; `yad` and `zenity` cannot, and the
+log says so once. A window that did not open where aio placed it (a window
+manager moved it) is logged once with both rectangles. `followWindow: false`
+turns this off; it applies only with `position: "window"`. The download window
+and the question are not affected: they are shown before Electron runs.
+
+**Windows and display scaling.** The Windows helpers are per-monitor DPI aware
+(set before their first window), so they place in physical pixels — the space
+the main process converts the window into (`screen.dipToScreenRect`), and
+`window-state.json` saves that rect beside the logical one. Each helper sizes
+itself by the scale of the monitor it opens on, so it looks as large as before
+and is drawn sharp instead of stretched. A splash moved onto a monitor with
+another scale keeps the scale it opened at. Windows 7 and 8 have no per-monitor
+API: there the helpers are system-DPI aware.
+
+On Wayland the compositor places every window itself, and none of this applies.
+With `zenity` or `yad` (Linux without GTK) the dialog opens on the screen under
+the pointer. `yad`'s splash is centred on the saved bounds as they are; with no
+saved position it is centred on the screen under the pointer.
+
 What each OS draws:
 
-| OS      | Drawn by                        | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| ------- | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Windows | Windows Forms (PowerShell)      | visible about 650 ms after it is asked for. The text has no shadow. The window takes focus as it opens (Windows Forms cannot cheaply show a window without that). It fades out                                                                                                                                                                                                                                                         |
-| macOS   | Cocoa (JXA)                     | visible about 200 ms after it is asked for. The text has a soft shadow. The window never takes focus, has no Dock icon, and fades out                                                                                                                                                                                                                                                                                                  |
-| Linux   | `yad`, else `zenity`, else none | `yad`: the image at its pixel size (an `@2x` image is not halved), with the text in the bar under it, in the GTK theme's font and colours. With `progress`, the bar is the download's and stays empty when none runs; without `progress`, it pulses. Without `yad`: a plain `zenity` window with the text only; it cannot stay on top, so the app's window covers it once it opens. Without either: no splash. One log line says which |
+| OS      | Drawn by                                                                               | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ------- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Windows | Windows Forms (PowerShell) while Electron downloads; otherwise Electron's main process | Electron present: Electron's main process makes the splash window first — a frameless, transparent, always-on-top window that takes no focus and has no taskbar entry, drawing the same frame (image, text, font, colours, corners, border; the text shadow too, if set) — and the app's window after it. Measured on Windows 11 (10 starts each): on screen 153–214 ms after Electron starts, the app's window 23–40 ms after it (later and offline starts) and 56–201 ms after it (from source); first every time. The Forms helper (about 0.9–2.4 s to paint, PowerShell's own start ~0.4 s) would come after the window, so it draws only the online first start's download, where Electron is not there yet: there every key is drawn except `shadow: true` and `windowShadow: true` (Windows Forms draws neither without compiling code at every start). Rounded corners (`radius`) are not anti-aliased. The window never takes focus. The Forms helper is per-monitor DPI aware: it places in physical pixels. It fades out                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| macOS   | Cocoa (JXA)                                                                            | visible about 200 ms after it is asked for. Every key is drawn. The window never takes focus, has no Dock icon, and fades out                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Linux   | aio itself (GTK 3), else `yad`, else `zenity`, else none                               | aio draws it with GTK 3 (`libgtk-3.so.0`, which Electron needs too, so it is there wherever Electron runs), over FFI, on a worker thread: nothing to install. Every key is drawn except `windowShadow`: the window manager decides that. The `@2x` image is halved. Rounded corners are a window shape and are not anti-aliased. Dark mode follows the GTK theme (its dark preference, or a theme name with "dark" in it). Visible about 80 ms after it is asked for (measured on X11). The window never takes focus. On Wayland, GTK picks the backend itself, and the compositor decides where the window goes, whether it stays on top, and whether the corners are cut. If GTK cannot draw (the library cannot be opened, no FFI permission, no display, no answer within 5 s, or the window does not appear within 5 s), the next helper is used and the log line gives the reason. `yad`: the image at its pixel size (`@2x` is not halved: yad cannot scale it), with the text in the bar under it, in the GTK theme's font and colours (`color`, `font`, `background` and the bar's colours are not drawn). With a saved window, `yad` is centred on it without being kept on a display; without one, it is centred on the display under the pointer (`position: "primary"` is not drawn). `size`, `fit`, `textPosition`, `align`, `margin`, `shadow`, `radius`, `border`, `windowShadow`, `fadeMs`, the `bar` keys and the ✕ are not drawn by `yad`, and the log names the ones the app set. With `progress`, the bar is the download's and stays empty when none runs; without `progress`, it pulses. Without `yad`: a plain `zenity` window with the text only; it cannot stay on top, so the app's window covers it once it opens. Without any of them: no splash. One log line says which |
+| Android | the APK (Kotlin)                                                                       | see below: `maxMs`, `fadeMs`, `background`, `show` and `textPosition: "none"` are drawn. The text is always under the image, centred. `size`, `fit`, `align`, `margin`, `shadow`, `radius` and `border` are not drawn, and the build names the ones the app set. There is no window and no download, so `position`, `windowShadow`, `cancel` and the bar have nothing to apply to. `show: "firstStart"` means no splash                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Web     | the page                                                                               | see [the web splash](#splash-on-the-web): `maxMs`, `fadeMs`, `background`, `shadow`, `radius` and `border` (on the image), `show` and `textPosition: "none"` are drawn. The text is always under the image, centred. `size`, `fit`, `align` and `margin` are not drawn, and the build names the ones the app set. `show: "firstStart"` means no splash                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+
+One drawer per situation. macOS and Linux keep Cocoa and GTK on every start:
+they are on screen about 0.2 s after the app asks, before Electron is even
+started, while a splash drawn by Electron could only come after Electron's own
+start (~0.55 s on Linux, measured).
 
 #### Splash on Android
 
@@ -1620,17 +1764,69 @@ WebView. It is shown from the activity's first frame. On Android 12+ the system
 always shows its own icon splash before that; the APK's theme gives it the same
 background colour, as it does the starting window on Android 10 and 11, so there
 is no flash. It fades out once the page has loaded, never sooner than `minMs`
-after its first frame, and at most 30 s after the start (logged once). "Loaded"
-is the desktop's rule: aio's `#root` has content, or a page without one (the
-client APK's connect form) has been parsed. A WebView too old for the signal
-falls back to the page's `onPageFinished`. There is no download, so `progress`
-and `bar` are accepted and draw nothing, and `{got}`/`{total}`/`{pct}` read
-`0`/`?`/`?`. The colours left out follow the phone's light/dark mode, or
-`android.colorScheme` when it is `"dark"` or `"light"`. Only a cold start shows
-it: a rotation or a reload after a lost renderer does not. Logcat (`aio`) says
-`splash: shown`, `splash: the page has loaded, N ms after it was shown` and
+after its first frame, and at most 30 s (`maxMs`) after the start (logged once).
+It fades out over 200 ms (`fadeMs`). "Loaded" is the desktop's rule: aio's
+`#root` has content, or a page without one (the client APK's connect form) has
+been parsed. A WebView too old for the signal falls back to the page's
+`onPageFinished`. There is no download, so `progress`, `bar` and `downloadText`
+are accepted and draw nothing, and `{got}`/`{total}`/`{pct}` read `0`/`?`/`?`.
+`{version}` is the APK's version, filled in at build time. The colours left out
+follow the phone's light/dark mode, or `android.colorScheme` when it is `"dark"`
+or `"light"`. Only a cold start shows it: a rotation or a reload after a lost
+renderer does not. Logcat (`aio`) says `splash: shown`,
+`splash: the page has loaded, N ms after it was shown` and
 `splash: gone N ms after it was shown`. Without `build.splash`, the APK is
 exactly what it was.
+
+### Desktop window options
+
+Everything the desktop windows do before the app's page is up is the app's to
+decide. Each key has a default (what aio does without it), and a misspelt key or
+a wrong value stops the start (or the build, for `build.*`) with a message that
+names it. The splash's own look keys are in
+[the splash table](#splash-buildsplash).
+
+| Key                                                                        | Default                                                                    | What                                                                                                                  | Per OS                                                                                            |
+| -------------------------------------------------------------------------- | -------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `build.splash`                                                             | none                                                                       | a splash while the app starts; the first start's download runs in it                                                  | Windows Forms, Cocoa, GTK; yad/zenity draw less ([what each OS draws](#where-every-window-opens)) |
+| `build.splash.show`                                                        | `"always"`                                                                 | `"firstStart"`: only while Electron downloads — "the download in my splash, no splash otherwise"                      | every desktop OS; no splash on the web and Android                                                |
+| `build.splash.position`                                                    | `"window"`                                                                 | centred on the app's window, `"primary"` display, or the `"pointer"`'s                                                | yad: no `"primary"`; Wayland: the compositor's                                                    |
+| `build.splash.followWindow`                                                | `true`                                                                     | the splash moves onto where the window really opened, and after each move                                             | GTK, Windows Forms, Cocoa; yad/zenity cannot (said once)                                          |
+| `build.splash.cancel`                                                      | `true`                                                                     | the ✕ that cancels a download                                                                                         | yad: none                                                                                         |
+| `electron.showWhenPainted`                                                 | `true` (`capMs` 5000)                                                      | the window is made hidden and shown once its page has painted, or after `capMs`; `false`: shown the moment it is made | every desktop OS                                                                                  |
+| `electron.backgroundColor`                                                 | the theme's page background, else Electron's                               | the window's colour before the page paints: `"#rrggbb"` or `{ light, dark }`                                          | every desktop OS                                                                                  |
+| `electron.downloadWindow.heading`                                          | `"Getting {title} ready"`                                                  | the download window's heading (with no `build.splash`)                                                                | Windows Forms, Cocoa, GTK, yad, zenity                                                            |
+| `electron.downloadWindow.text`                                             | `"Downloading Electron {version} — first start only · {got} / {total} MB"` | its detail line; `{title}`, `{version}`, `{got}`, `{total}`                                                           | as above                                                                                          |
+| `electron.downloadWindow.question`                                         | aio's (what failed, how to fix it)                                         | the Retry / Quit question's text; `{title}`, `{version}`, `{reason}`                                                  | as above                                                                                          |
+| `electron.downloadWindow.background`, `.color`, `.bar.color`, `.bar.track` | the app's identity colours, light or dark as the OS is                     | the download window's and the question's colours; a colour set is used in both modes                                  | Windows Forms, Cocoa, GTK; yad/zenity: the GTK theme's                                            |
+| `electron.downloadWindow.cancel`                                           | `true`                                                                     | the download window's Cancel button (its close cancels either way)                                                    | zenity keeps its own OK, greyed                                                                   |
+
+`electron.*` keys are `aio.run({ electron: { … } })` options, read when the app
+starts — a packaged app included.
+
+## Runs from source vs a built package
+
+A run from source (`deno task dev`, `deno run -A src/app.ts --prod`, `am start`)
+and a built package behave the same. Each difference is listed here, with the
+reason for it. A difference that is not in this list is a bug.
+
+| Difference                                                               | From source                                                                                                                                                           | Built package                                                                                                             | Why                                                                                                                              |
+| ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| Dev mode                                                                 | `deno task dev` is dev: live reload, the automatic restart after a cell file is saved, and the dev-only refusals that throw (for example a security misconfiguration) | always prod; the same misconfigurations are logged as errors                                                              | dev is allowed to be stricter, never more lenient, so dev and CI catch a problem first. `--prod` from source takes the prod path |
+| The splash on dev's automatic restart                                    | not shown on the restart after a save. A start you make shows it                                                                                                      | every start shows it                                                                                                      | the restart is not a start you made, and the splash would flash on every save                                                    |
+| Where Electron comes from                                                | `node_modules` (`deno install`, installed on first use), or `$ELECTRON_PATH`                                                                                          | the Electron the package carries, or the one its build baked (`dist/electron.json`), fetched once into the per-user cache | a source tree has a package manager. A package has neither npm nor deno                                                          |
+| The online first-start download (`electronRuntime: "online"`)            | never: Electron comes from `node_modules`                                                                                                                             | the first start downloads Electron behind the splash (or the progress window)                                             | only a package is shipped without its Electron                                                                                   |
+| No window could be started                                               | the app keeps serving and the log gives the URL                                                                                                                       | the app stops, and the reason is in `logs/app.log` (unless `--keep-server`)                                               | a source run has a terminal to report to. A package has no other way to show itself                                              |
+| Working directory of the window                                          | the project's                                                                                                                                                         | a neutral directory                                                                                                       | an open program holding the install directory blocked the next update                                                            |
+| Updates                                                                  | detection works. `apply()` refuses, with a message                                                                                                                    | detected and applied                                                                                                      | there is no artifact to swap: the "install" is the `deno` binary                                                                 |
+| The app version                                                          | derived from the repository (`-dirty.<hash>` on a dirty tree)                                                                                                         | the stamp its build embedded                                                                                              | the same rule. A package has no repository                                                                                       |
+| Guest preloads                                                           | the declaration in deno.json                                                                                                                                          | the files the build staged                                                                                                | a package never reads a deno.json, which could only be someone else's                                                            |
+| `assets` mounts                                                          | the project's directories                                                                                                                                             | also the copy embedded in the binary                                                                                      | the binary carries them                                                                                                          |
+| FFI (the Linux splash, the window's peer-credential gate under `--prod`) | needs `--allow-ffi` (`-A` includes it). Without it the splash falls back (logged), and `--prod --client=electron` refuses to start                                    | always granted                                                                                                            | a compiled binary is built with `-A`                                                                                             |
+| V8 flags (`compile.v8Flags`, the heap ceiling)                           | `DENO_V8_FLAGS` and the command line apply                                                                                                                            | baked in at build time; `DENO_V8_FLAGS` is ignored                                                                        | a compiled binary ignores `DENO_V8_FLAGS`                                                                                        |
+| A legacy `Deno.Kv` store (migration)                                     | not imported                                                                                                                                                          | imported into SQLite once                                                                                                 | only a package kept it at a known path                                                                                           |
+| macOS: "Move to Applications?"                                           | never asked                                                                                                                                                           | asked once, when opened from a disk image or Downloads                                                                    | only a package can be moved                                                                                                      |
+| `cli-client`                                                             | announces no version                                                                                                                                                  | announces its stamped version                                                                                             | the server's hello carries the version a source client needs                                                                     |
 
 ## electron-client (thin client AppImage)
 
@@ -1854,12 +2050,13 @@ The same page serves a plain browser tab and the installed Home Screen app, so
 both show it.
 
 - **When it goes.** Once the app has mounted (`#root` has content), and not
-  before `minMs` has passed since the page first painted, it fades out (0.2 s;
-  none with reduced motion) and is removed. Nothing of it stays to block a tap.
-  After 30 s it goes regardless — an app that never mounts shows what it shows
-  then.
-- **No download runs on the web,** so `progress` and `bar` are accepted and
-  ignored, and in `text` `{got}` reads `0` and `{total}` / `{pct}` read `?`.
+  before `minMs` has passed since the page first painted, it fades out (0.2 s,
+  or `fadeMs`; none with reduced motion) and is removed. Nothing of it stays to
+  block a tap. After 30 s (`maxMs`) it goes regardless — an app that never
+  mounts shows what it shows then.
+- **No download runs on the web,** so `progress`, `bar` and `downloadText` are
+  accepted and ignored, and in `text` `{got}` reads `0` and `{total}` / `{pct}`
+  read `?`. `{version}` is the build's version, filled in at build time.
 - **iOS launch images.** iOS shows a Home Screen app's launch image while it
   starts, before the page. The build makes one per iPhone and iPad screen iOS
   15.4 runs on (`apple-splash-<w>x<h>.png`, portrait, each with its exact

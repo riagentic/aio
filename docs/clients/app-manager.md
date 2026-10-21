@@ -681,6 +681,22 @@ takes one path and refuses the rest rather than answering the first. `am state`
 = raw server state. `am state --ui` = what the browser sees (it was spelled
 `am ui` before alpha52 — `am ui` now opens **amui**, the visual app manager).
 
+### A stopped app's saved state (`am state --offline`)
+
+```sh
+deno task am state --offline --app=composer               # what it last persisted
+deno task am state --offline tracks.titles --app=composer # same path syntax
+```
+
+Reads the app's store **read-only** — no boot, no write — through aio's own
+store code, so another app or a script never parses `aio_kv` itself. A running
+app is fine (SQLite WAL lets a reader in beside the writer); stderr then says
+the live value may be one persist window ahead — drop `--offline` for that. What
+it cannot show: `db:`-bound arrays and `sync: true` cells keep their rows in
+their own tables. A missing store, a store written by a newer aio, or one with
+two different documents is refused rather than guessed at. `--home=<dir>` reads
+another home; `--watch`, `--wait` and `--ui` need the running app.
+
 ## Action dispatch
 
 ```sh
@@ -854,6 +870,7 @@ change", which was not true of sync cells.)
 
 ```sh
 deno task am persist                        # flush to SQLite now; "persisted" = on disk (exit 1 if refused)
+deno task am persist --drop=pick            # remove a stored cell this build no longer declares
 deno task am snapshot                       # dump state to stdout
 deno task am snapshot save backup.json      # save to file
 deno task am snapshot load backup.json      # restore from file — "loaded" = restored AND written
@@ -876,6 +893,18 @@ a CLI. A `journal: true` app whose journal cannot be appended to shows up there
 too (`degraded: [{ name: "journal:<appId>" }]`): its state still reaches disk —
 every refused append closes the persist window at once — but the promise the
 option was set for is broken, and health says so from the first refusal.
+
+**`am persist --drop=<cell>`** is for dev debris: a cell declared for a minute
+leaves a stored slice, and every later boot warns
+`stored cell "pick" is not
+declared by this build` (the data is kept on purpose
+— a rename must never lose it). The drop goes through the **running** app, the
+only thing that knows what it declares: a declared cell, a framework `__` slice
+or an unknown name is refused with the list of cells that can be dropped, and a
+stopped app is refused with the command to run after `am start`. The reply comes
+after the write — the row is gone from disk in either `persistMode` — and
+`am migrations` stops listing it. To keep the data instead, migrate it in
+`onRestore` or declare the cell again.
 
 **`am snapshot load` replaces the WHOLE state.** A file whose cell set is not
 this app's is refused by name — both the cells it would destroy (missing from
@@ -1339,6 +1368,42 @@ closes while recording, nothing is written and the frames' folder is named.
 **test** instead, see
 [A video of the test](../testing/ui-testing.md#a-video-of-the-test---video).
 
+**Lining up your own clock (`--json`).** Once frame 0 is taken, `--json` prints
+one line on **stderr** (stdout stays the one final document):
+
+```json
+{ "event": "recording", "file": "demo.mp4", "t0": 1760970000123 }
+```
+
+`t0` is the epoch ms of the video's time zero: something that happened at epoch
+`T` is at `T - t0` ms in the video. The final document carries the same `t0`.
+Taking your own timestamp at the `recording … — Ctrl-C to stop` line is off by
+the screencast's startup; `t0` is not.
+
+**Step markers (`--markers`).** With `--markers`, every `am trigger` aimed at
+the app while it records is written to `<video>.markers.json` (`demo.mp4` →
+`demo.mp4.markers.json`):
+
+```sh
+deno task am shot --video=demo.mp4 --markers --json &   # start the recorder
+deno task am trigger "App:SaveButton" click              # each step is noted
+```
+
+```json
+[{
+  "t": 1840,
+  "path": "App:SaveButton",
+  "action": "click",
+  "rect": { "x": 640, "y": 96, "w": 180, "h": 72 }
+}]
+```
+
+`t` is ms into the video; `rect` is the target's box measured just before the
+action, in **video pixels** (CSS px × the window's device scale), `null` for a
+`window` key. No extra `am surface --rects` round trip, no `innerWidth`
+division. Triggers before frame 0 or after the stop are not in the file. The
+final document says `markers: { file, count }`.
+
 ### Evaluate in the live window (`am eval`)
 
 `am surface` reads the UI **semantically** — components, names, text, values.
@@ -1685,6 +1750,7 @@ deno task am logs --filter=ERROR   # filter log lines
 deno task am logs --follow         # stream (like tail -f), also: -f
 deno task am logs --client         # tail client log (~/.<appId>/logs/client.log)
 deno task am errors               # last transpile error (dev mode)
+deno task am errors --since=reload  # …only errors since the last hot reload (each is tagged with its reload)
 deno task am preview src/Card.tsx --export=Card --props='{"title":"Inbox"}'
 deno task am watch                # restart the app on a .ts/.tsx change under src/
 deno task am watch lib            # …watch another directory (refuses one that isn't there)

@@ -226,3 +226,14 @@ import dgram from "node:dgram";
 const sock = dgram.createSocket({ type: "udp4", reuseAddr: true });
 sock.bind(1900, () => sock.addMembership("239.255.255.250"));
 ```
+
+A multicast **send** can fail with `send UNKNOWN 224.0.0.251:5353` when the
+socket is bound to a LAN address (`bind(0, lanIp)`) or has
+`setMulticastInterface(lanIp)`, while an unbound socket sends — out of the
+default route. Measured with Deno 2.9.7 on Linux: it fails that way on a host
+with a VPN connected (Node 24 fails there too, as `EPERM` — the VPN's firewall
+refuses the packet; Deno reports that errno as `UNKNOWN`), and all of these send
+fine in a network namespace without the VPN. When the default route is a VPN,
+the unbound send goes into the tunnel, so it is no discovery either: send the
+mDNS/SSDP query by unicast to each host you know of as well — that gets past
+VPNs and firewalls that drop multicast.

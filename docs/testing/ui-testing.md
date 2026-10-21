@@ -123,7 +123,10 @@ testUI(App, "add a todo end-to-end", async (ui) => {
   `change` before the `blur` (so an `onChange` handler really runs); a modified
   click (`click({ ctrlKey: true })`) lets the control's own activation behaviour
   toggle a checkbox/radio, exactly as an unmodified click does; `mouseenter`
-  does not bubble.
+  does not bubble. **Dispatching by hand? Dispatch `input` for `onChange`** — on
+  `<input>`/`<textarea>`/`<select>` it listens to `input` (React-compatible;
+  native `change` only for `type="file"` or when `onInput` is also set), so a
+  hand-fired `change` runs nothing. `select("value")` does it for you.
 - Reads: `.text`, `.value`, `.checked`, `.pressed`, `.expanded`, `.disabled`,
   `.readonly`, `.required`, `.attr("…")` (live DOM attribute, `null` when absent
   — for `aria-*` / `data-*` / `role` the surface does not promote, except the
@@ -604,7 +607,8 @@ For the binding every app needs, there is a primitive:
 
 ```tsx
 onGlobalKey("Escape", () => lightbox.close());
-onGlobalKey("k", () => palette.open(), { mod: true }); //  Ctrl/⌘+K
+onGlobalKey("k", () => palette.open(), { mod: true }); //  Ctrl/⌘+K (+ anything)
+onGlobalKey("mod+s", () => doc.save()); // Ctrl/⌘+S exactly — not Ctrl+Shift+S
 ```
 
 It resolves the right document, removes itself on unmount, and ignores the chord

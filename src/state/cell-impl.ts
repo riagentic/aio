@@ -1006,6 +1006,9 @@ export function resetPending(): void {
  *  A fresh full window (rather than the remaining time) errs on the side the
  *  dialog already chose: the human was the delay, not the method. */
 export function pauseCallDeadlines(): () => void {
+  // The clocks this registry does not own pause too — a serverFn's caller
+  // waits on ITS 30 s timer, in the client (server-fns.ts registers it).
+  const resumeOthers = [..._pauseHooks].map((h) => h());
   const paused: Array<{
     id: string;
     entry: {
@@ -1039,7 +1042,15 @@ export function pauseCallDeadlines(): () => void {
       entry.timer = _armCallTimer(entry.expire!, entry.timeoutMs!);
       entry.armHeartbeat?.();
     }
+    for (const r of resumeOthers) r();
   };
+}
+
+const _pauseHooks = new Set<() => () => void>();
+/** Framework-internal: pause a clock this registry does not own whenever
+ *  {@linkcode pauseCallDeadlines} runs. `hook` pauses and returns its resume. */
+export function _onPauseCallDeadlines(hook: () => () => void): void {
+  _pauseHooks.add(hook);
 }
 
 /** A live reference recorded INSIDE a write: the object at state path `ref`

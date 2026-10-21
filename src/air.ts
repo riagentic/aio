@@ -226,6 +226,10 @@ export { useCallback, useEffect, useMemo, useState } from "./air/compat.ts";
 /** Ask for desktop-notification permission from a click handler — the one
  *  place a browser grants it. See `notify()` and docs/clients/notifications.md. */
 export { requestNotificationPermission } from "./browser/desktop-notify.ts";
+/** Open the page's print dialog — through the window's main process in an aio
+ *  desktop window (Linux has no working `window.print()` there),
+ *  `window.print()` elsewhere. See docs/clients/electron.md. */
+export { print } from "./browser/desktop-print.ts";
 /** `fetch`, sent natively by a standalone Android APK (no Origin, no CORS);
  *  plain `fetch` everywhere else. See docs/build/targets.md#native-fetch. */
 export { nativeFetch } from "./browser/native-fetch.ts";

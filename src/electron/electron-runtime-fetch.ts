@@ -65,7 +65,7 @@ import { extractZip } from "../server/zip-extract.ts";
  *  1.7 h old, blocked the whole example suite while 44.4.1 installed cleanly.
  *  When `latest` outruns this floor, the freshness test REPORTS it (see
  *  tests/electron-version-consistency.test.ts) rather than failing a build. */
-export const DEFAULT_ELECTRON_VERSION = "44.7.0";
+export const DEFAULT_ELECTRON_VERSION = "44.9.0";
 
 /** `dist/electron.json` — written by the build, read by the launcher of a
  *  compiled binary. The file name is the contract between the two. */
@@ -263,6 +263,23 @@ export async function bakedElectronRuntime(
     return rec.runtime === "shared" ? "shared" : "bundled";
   } catch {
     return "bundled"; // aio-ok: no record is the bundled default
+  }
+}
+
+/** The client an online, non-Electron binary boots in, from
+ *  `<distDir>/electron.json` (`client`, baked by the build) — or undefined:
+ *  a desktop package, an offline build, or a build before the field. */
+export async function bakedElectronClient(
+  distDir: string | undefined,
+): Promise<string | undefined> {
+  if (!distDir) return undefined;
+  try {
+    const rec = JSON.parse(
+      await Deno.readTextFile(join(distDir, ELECTRON_VERSION_FILE)),
+    ) as { client?: unknown };
+    return typeof rec.client === "string" ? rec.client : undefined;
+  } catch {
+    return undefined; // aio-ok: no record is no baked client
   }
 }
 

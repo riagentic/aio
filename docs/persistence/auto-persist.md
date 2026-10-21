@@ -285,6 +285,26 @@ the old key (`ramBps`) is read, carried across, and then dropped with one
 warning naming it — so the **next** boot, which has no migration left to run,
 finds only declared fields. Deleting it yourself is allowed and changes nothing.
 
+### A whole cell this build no longer declares
+
+A **cell** is never dropped the way a field is: its stored slice is kept, out of
+runtime state, and every boot warns
+`persist: stored cell "pick" is not
+declared by this build — its data is PRESERVED`,
+so a cell rename can never lose data. Three ways out, the warning names all of
+them:
+
+- **migrate it** — the app-level `onRestore` reads `state.pick`, moves what it
+  needs, and `delete`s the key (the row goes with the next write);
+- **declare it again** — the data comes back as it was;
+- **drop it** — a cell that only ever held dev debris: `am persist --drop=pick`.
+  Through the running app, which refuses a cell it declares, and answers after
+  the row is gone from disk
+  ([App Manager](../clients/app-manager.md#persistence-and-snapshots)).
+
+Reading another app's saved state without starting it is
+`am state --offline --app=<id>` (read-only).
+
 ### The case the top-level rules do NOT cover: a field inside a collection
 
 The table above defaults **top-level** keys. Restore is

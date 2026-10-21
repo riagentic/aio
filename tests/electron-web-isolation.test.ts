@@ -857,6 +857,14 @@ Deno.test("web isolation: the connect-mode shell binds its window to the app it 
       this.webContents.loaded.push(u);
     }
     on() {}
+    // Its page paints at once: the show cap's timer is cleared.
+    once(n: string, f: () => void) {
+      if (n === "ready-to-show") queueMicrotask(f);
+    }
+    show() {}
+    isDestroyed() {
+      return false;
+    }
     setResizable() {}
     setSize() {}
     setPosition() {}

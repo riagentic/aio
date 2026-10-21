@@ -6,7 +6,8 @@ builds, disk scans — the class of app where the UI is small and the job is
 everything.
 
 Four framework pieces cover the parts every one of these apps used to write by
-hand: `pickFile` / `pickDirectory`, `spawn`, `long`, and `cancelOn`.
+hand: `pickFile` / `pickDirectory` / `pickSave`, `spawn`, `long`, and
+`cancelOn`.
 
 ```ts
 import { cell } from "aio";
@@ -105,6 +106,27 @@ const files = await pickFile({ multiple: true }); //  string[] | null — never 
 `startIn` accepts a file path as well as a directory (its directory is used), so
 "reopen where the last pick landed" is one line. `filters` take bare extensions;
 a leading dot is tolerated.
+
+### Save as…
+
+`pickSave()` is the native save dialog. It resolves to the path the user chose —
+which may not exist yet — or `null` on cancel; writing the file is yours:
+
+```ts
+const path = await pickSave({
+  title: "Export",
+  defaultPath: "draft.md", //  a name, a directory, or both as one path
+  filters: [{ name: "Markdown", extensions: ["md"] }],
+});
+if (path !== null) await Deno.writeTextFile(path, s.text);
+```
+
+Choosing a file that exists asks the OS "replace it?" first, on every path
+(Electron's `showSaveDialog` with `showOverwriteConfirmation`, zenity
+`--confirm-overwrite`, kdialog, the macOS and Windows save panels), so a path
+that comes back is one the user agreed to overwrite. The endings are the table
+above. The window path and the spawned tools are chosen exactly as for
+`pickFile`; the macOS spawned dialog has no type filter and ignores `filters`.
 
 You can still write your own dialog — nothing here is privileged.
 
@@ -212,10 +234,12 @@ cell("job", {
 ```
 
 - A typo throws at `cell()` time, with the known async methods listed.
-- **A method that opens a picker needs no entry.** `pickFile`/`pickDirectory`
-  lift the ceiling for as long as the dialog is open: waiting on a person is not
-  the app being slow, and thirty seconds is an ordinary time to spend finding a
-  folder.
+- **A method that opens a picker needs no entry.**
+  `pickFile`/`pickDirectory`/`pickSave` lift the ceiling for as long as the
+  dialog is open: waiting on a person is not the app being slow, and thirty
+  seconds is an ordinary time to spend finding a folder. A **serverFn** that
+  opens one gets the same: its caller's 30 s timeout is held while the dialog is
+  open and restarts, full, when it closes.
 - It lifts **both** ceilings — the caller-side `await job.colorize()` and the
   effect tracker's deadline — from one declaration.
 - It applies wherever the cell runs, `testCell` and `testUI` included, so a test

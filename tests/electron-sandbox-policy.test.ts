@@ -27,6 +27,7 @@ import {
 import { electronLaunchFailurePlan } from "../src/server/aio-lifecycle.ts";
 import {
   electronPermissionsRefusal,
+  electronShortcutsRefusal,
   NESTED_CONFIGS,
   SHAPE_VALUES,
   VALID_ELECTRON_KEYS,
@@ -180,9 +181,21 @@ Deno.test("electron config: every key of the block reaches the window's meta", (
     allowLocalPeers: true,
     ignoreDebugEnv: true,
     strictPin: true,
+    shortcuts: { reload: false, print: false }, // every binding off
+    confirmUnload: true,
+    backgroundColor: { light: "#ffffff", dark: "#101418" },
+    showWhenPainted: { capMs: 800 },
+    downloadWindow: { heading: "Setting up {title}", cancel: false },
   };
   const on = electronMetaPolicy(set) as Record<string, unknown>;
   const off = electronMetaPolicy(undefined) as Record<string, unknown>;
+  const defaults: Record<string, unknown> = {
+    permissions: null,
+    shortcuts: { reload: true, print: true }, // the shell's own keys stay bound
+    backgroundColor: null, // Electron's own, or the theme's (windowBackground)
+    showWhenPainted: true, // shown once painted, the 5 s cap
+    downloadWindow: null, // aio's words, the identity colours, Cancel
+  };
   for (const key of VALID_ELECTRON_KEYS) {
     assertEquals(
       on[key],
@@ -191,7 +204,7 @@ Deno.test("electron config: every key of the block reaches the window's meta", (
     );
     assertEquals(
       off[key],
-      key === "permissions" ? null : false,
+      key in defaults ? defaults[key] : false,
       `electron.${key} has no default`,
     );
   }
@@ -217,6 +230,29 @@ Deno.test("electron config: the block is real, nested-validated and shape-checke
   assert(refused({ electron: true }), "a non-object block must be refused");
   assertEquals(SHAPE_VALUES.electron, "object");
   assert("electron" in NESTED_CONFIGS, "the block must be walked as a config");
+});
+
+Deno.test("electron config: shortcuts and confirmUnload — known keys and booleans only, or the boot is refused", () => {
+  const ok = (electron: unknown) => !refused({ electron });
+  assert(ok({ shortcuts: { reload: false, print: false } }));
+  assert(ok({ shortcuts: {} }));
+  assert(ok({ confirmUnload: true }));
+  for (
+    const bad of [
+      { shortcuts: { relaod: false } },
+      { shortcuts: { reload: "false" } },
+      { shortcuts: false },
+      { shortcuts: ["reload"] },
+      { confirmUnload: "yes" },
+    ]
+  ) {
+    assert(!ok(bad), `accepted ${JSON.stringify(bad)}`);
+  }
+  assertEquals(electronShortcutsRefusal(undefined), null);
+  assertStringIncludes(
+    electronShortcutsRefusal({ relaod: false })!,
+    "known: reload, print",
+  );
 });
 
 Deno.test("electron config: permissions — only Electron names, scoped to app, or the boot is refused", () => {

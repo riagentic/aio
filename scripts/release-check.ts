@@ -64,8 +64,10 @@ const CEILING_MIN: Record<string, number> = {
   "test:electron": 45,
   "test:hosts": 20,
   // 347 ledger rows × two `deno test` runs each, 4 workers: ~36 min measured
-  // (187 rows in 20 min on the release cores). Twice that is still a hang.
-  "check:mutations": 60,
+  // (187 rows in 20 min on the release cores). The ledger grew to 1406 rows
+  // (2026-10-21): 1405 done in 144 min on 5 cores, killed on the last one as
+  // a "hang" — the ceiling had stayed at 347 rows' worth. Sized again: ~2×.
+  "check:mutations": 120,
   "lab (fresh ubuntu)": 45,
 };
 

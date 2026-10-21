@@ -5,6 +5,8 @@ import { hash8, slugify } from "../server/single-instance-lock.ts";
 import { appsDirEnv, profileOfHome } from "../server/app-dirs.ts";
 import { homedir } from "../server/paths.ts";
 import { generateHTML } from "../server/server-html-gen.ts";
+import { boundsFromState, centredOn, windowRect } from "./splash-place.ts";
+import type { ElectronSplash } from "./electron-splash.ts";
 import type {
   ElectronPermissions,
   TrayConfig,
@@ -16,6 +18,7 @@ import {
   MOUNT_LINE,
   mountLine,
   RENDERER_TAG,
+  WINDOW_TAG,
 } from "./electron-renderer-log.ts";
 import { upstreamNoiseMatcherSource } from "../diagnostics/upstream-noise.ts";
 import { redactUrlTokenSource } from "../diagnostics/redact.ts";
@@ -85,6 +88,14 @@ export type ShellConfig = {
   nonce?: string;
 };
 
+/** `electron.downloadWindow`'s words and Cancel, as the window gets them. */
+export type DownloadWords = {
+  heading?: string;
+  text?: string;
+  question?: string;
+  cancel?: boolean;
+};
+
 /** Window metadata extracted from config or HTML meta tags */
 export type AioMeta = {
   title?: string;
@@ -121,8 +132,37 @@ export type AioMeta = {
    *  (`handleThinClient`); carried here because this mapping is total over
    *  the block. See ElectronConfig. */
   strictPin?: boolean;
+  /** `electron: { shortcuts }` — which of the window's own shortcuts are
+   *  bound (each on unless `false`). See ElectronConfig. */
+  shortcuts?: { reload: boolean; print: boolean };
+  /** `electron: { confirmUnload }` — a page's unload veto asks Leave/Stay
+   *  natively. See ElectronConfig. */
+  confirmUnload?: boolean;
   /** `ui.chrome` — how much of the window the OS draws. See UiConfig. */
   chrome?: "standard" | "themed" | "none";
+  /** `electron.backgroundColor`, as set (null: not set). See ElectronConfig. */
+  backgroundColor?: string | { light: string; dark: string } | null;
+  /** The window's background, light and dark — `electron.backgroundColor`,
+   *  else the page background of aio's theme when it paints one
+   *  (`windowBackground`). Absent: Electron's own. */
+  background?: { light: string; dark: string };
+  /** The app's identity colours, light and dark (`identityDialogColors`):
+   *  the shared-runtime download window and its Retry / Quit question wear
+   *  them. Absent: the OS's own look. */
+  colors?: {
+    light: { background: string; text: string; bar: string; track: string };
+    dark: { background: string; text: string; bar: string; track: string };
+  };
+  /** `electron.downloadWindow` as set (null: not set). See ElectronConfig:
+   *  the words and Cancel here; its colours are folded into `colors`. */
+  downloadWindow?: DownloadWords | null;
+  /** `electron.showWhenPainted` as set: `false` shows the window the moment
+   *  it is made; `{ capMs }` the cap. true/absent: shown once painted, cap
+   *  5000 ms. */
+  showWhenPainted?: boolean | { capMs: number };
+  /** Set by the launch, never by config: the splash this main process draws
+   *  itself (electron-splash.ts — Windows, Electron already present). */
+  splash?: ElectronSplash | null;
   /** `ui.tray` — a system tray icon, menu and close-to-tray. See UiConfig. */
   tray?: boolean | TrayConfig;
   /** Electron's `app.name` — i.e. WHICH Chromium profile (userData directory)
@@ -166,8 +206,21 @@ export function electronMetaPolicy(
   | "allowLocalPeers"
   | "ignoreDebugEnv"
   | "strictPin"
+  | "shortcuts"
+  | "confirmUnload"
+  | "backgroundColor"
+  | "showWhenPainted"
+  | "downloadWindow"
 > {
   return {
+    shortcuts: {
+      reload: cfg?.shortcuts?.reload !== false,
+      print: cfg?.shortcuts?.print !== false,
+    },
+    confirmUnload: cfg?.confirmUnload === true,
+    backgroundColor: cfg?.backgroundColor ?? null,
+    showWhenPainted: cfg?.showWhenPainted ?? true,
+    downloadWindow: cfg?.downloadWindow ?? null,
     requireSandbox: !!cfg?.requireSandbox,
     unsandboxedChildWindows: !!cfg?.unsandboxedChildWindows,
     webviewTag: !!cfg?.webviewTag,
@@ -266,7 +319,7 @@ export function tmplProfileDir(dir: string | undefined): string {
  *  that one is a warning, so it is tagged `warn`, not `error`. Every line is
  *  token-redacted first (`redactUrlToken`): app.log is copied into reports.
  *  Expects `app` to be in scope. Set `__aioQuitting = true` on window close. */
-export function tmplCrashGuard(): string {
+export function tmplCrashGuard(confirmUnload = false): string {
   return `
 const __aioRedact = ${redactUrlTokenSource()};
 const __aioTag = ${JSON.stringify(MAIN_TAG)};
@@ -296,8 +349,31 @@ app.on('will-quit', () => { __aioQuitting = true; });
 // finished in time. Once. (A user's own close or quit never comes through
 // here and keeps the page's say.)
 let __aioLeaving = false;
+// A veto the PERSON hits (their close, their reload) used to do nothing at
+// all — no dialog, no line: the window's close button looked dead. By default
+// the page keeps its say (an editor may show its own Save / Don't Save) and
+// the first veto is said once; electron.confirmUnload asks Leave / Stay
+// natively, as Electron's docs recommend (preventDefault = leave).
+const __aioConfirmUnload = ${JSON.stringify(confirmUnload)};
+let __aioVetoSaid = false;
 app.on('web-contents-created', (_e, wc) => {
-  wc.on('will-prevent-unload', (e) => { if (__aioLeaving) e.preventDefault(); });
+  wc.on('will-prevent-unload', (e) => {
+    if (__aioLeaving) { e.preventDefault(); return; }
+    if (__aioConfirmUnload) {
+      const { BrowserWindow: __aioBW, dialog: __aioDlg } = require('electron');
+      const owner = __aioBW.fromWebContents(wc);
+      const o = { type: 'question', buttons: ['Leave', 'Stay'], defaultId: 0, cancelId: 1, title: 'Leave this page?', message: 'Changes you made may not be saved.' };
+      let choice = 1;
+      try { choice = owner ? __aioDlg.showMessageBoxSync(owner, o) : __aioDlg.showMessageBoxSync(o); }
+      catch (err) { console.warn('[aio:electron] the Leave / Stay dialog could not open (' + err + ') — the page stays'); }
+      if (choice === 0) e.preventDefault();
+      return;
+    }
+    if (!__aioVetoSaid) {
+      __aioVetoSaid = true;
+      console.warn("[aio:electron] the page vetoed leaving (a beforeunload handler called preventDefault) — the window stays open and NO dialog is shown, so a close button reads as dead. Show your own prompt from the handler, or set electron: { confirmUnload: true } for the native Leave / Stay dialog. (Said once.)");
+    }
+  });
 });
 const __aioLeave = (why, code) => {
   if (__aioLeaving) return;
@@ -788,41 +864,6 @@ const ipcMain = (() => {
  *  (measured: a listener from load time is never called once the app is
  *  ready), and its handler is the cancellable quit above.
  *  Expects `app` and `__aioLeave` (tmplCrashGuard) in scope. */
-/** `build.splash`: the main window is created hidden while the aio process
- *  shows a splash (`$AIO_SPLASH_SHOW` names the file it writes when the
- *  splash goes), loads underneath, and shows when that file appears — or,
- *  whatever the splash does, `$AIO_SPLASH_CAP_MS` after `ready-to-show`, said
- *  once. Without the variable nothing changes. `before` goes ahead of
- *  `new BrowserWindow(b)`; `after` follows it (expects `win`). */
-export function tmplSplashHold(): { before: string; after: string } {
-  return {
-    before: `  if (process.env.AIO_SPLASH_SHOW) b.show = false;`,
-    after: `
-  if (process.env.AIO_SPLASH_SHOW) {
-    const __aioHoldFile = process.env.AIO_SPLASH_SHOW;
-    const __aioHoldCap = Number(process.env.AIO_SPLASH_CAP_MS) || 6000;
-    let __aioHeld = true;
-    const __aioRelease = (why) => {
-      if (!__aioHeld) return;
-      __aioHeld = false;
-      clearInterval(__aioHoldPoll);
-      if (why) {
-        console.warn('splash: the window showed by itself ' + why);
-        // Said back through the same file: the aio side closes the splash,
-        // so the two are never on screen together.
-        try { require('fs').writeFileSync(__aioHoldFile, 'shown'); } catch {}
-      }
-      if (!win.isDestroyed()) win.show();
-    };
-    const __aioHoldPoll = setInterval(() => {
-      if (require('fs').existsSync(__aioHoldFile)) __aioRelease();
-    }, 25);
-    win.once('ready-to-show', () => setTimeout(() => __aioRelease(__aioHoldCap + ' ms after it was ready — the splash never said to'), __aioHoldCap));
-    win.on('closed', () => clearInterval(__aioHoldPoll));
-  }`,
-  };
-}
-
 export function tmplParentWatch(): string {
   return `
 // Decimal digits only — same rule as the server's parentPidOf / AIO_PORT.
@@ -882,73 +923,64 @@ export function tmplBounds(async = false): string {
   return `
 const stateFile = path.join(app.getPath('userData'), 'window-state.json');
 let __aioDw = 800, __aioDh = 600;
-// Set by loadBounds from the saved state; tmplBoundsTracking re-maximizes.
+// Set by loadBounds from the saved state; tmplShowWhenPainted re-maximizes.
 let __aioRestoreMax = false;
+// Where loadBounds placed the window (null: the OS placed it): what the
+// window's real bounds are checked against when it shows.
+let __aioPlaced = null;
+// The screen it was placed on (the splash centres there, kept inside it).
+let __aioPlacedOn = null;
 
 function __aioBoundsPayload(win) {
   const max = win.isMaximized();
   const r = max ? win.getNormalBounds() : win.getBounds();
   const out = { x: r.x, y: r.y, width: r.width, height: r.height, declaredWidth: __aioDw, declaredHeight: __aioDh };
   if (max) out.maximized = true;
+  // Windows: the rect in physical pixels too — where the splash, the
+  // download window and the question place (per-monitor-aware helpers).
+  try {
+    const { screen: __aioScr } = require('electron');
+    if (process.platform === 'win32' && typeof __aioScr.dipToScreenRect === 'function') {
+      out.screen = __aioScr.dipToScreenRect(win, r);
+    }
+  } catch {}
   return out;
 }
 
-// A saved rect can come from a DIFFERENT display than the one this run is on:
-// the same app launched on a 4000x2560 desktop saves y=392 (below a top
-// panel), then a nested Xephyr display that is only 1280x900 tall restores
-// the window hanging off the bottom. Electron restores x/y verbatim and does
-// not clamp, so aio must: anything not fully inside a display's work area is
-// repositioned into the one it overlaps most. An oversized window is pinned
-// to the work-area origin — centred would clip both edges, and the title bar
-// (the part that must stay reachable) is at the top-left.
-function __aioFitBounds(b) {
-  if (typeof b.x !== 'number' || typeof b.y !== 'number') return b;
-  try {
-    const { screen } = require('electron');
-    const ds = screen.getAllDisplays();
-    if (!ds.length) return b;
-    for (const d of ds) {
-      const a = d.workArea;
-      if (b.x >= a.x && b.y >= a.y &&
-          b.x + b.width <= a.x + a.width &&
-          b.y + b.height <= a.y + a.height) return b;
-    }
-    let best = ds[0], bestArea = -1;
-    for (const d of ds) {
-      const a = d.workArea;
-      const ix = Math.max(0, Math.min(b.x + b.width, a.x + a.width) - Math.max(b.x, a.x));
-      const iy = Math.max(0, Math.min(b.y + b.height, a.y + a.height) - Math.max(b.y, a.y));
-      if (ix * iy > bestArea) { bestArea = ix * iy; best = d; }
-    }
-    const a = best.workArea;
-    const x = b.width >= a.width
-      ? a.x
-      : Math.max(a.x, Math.min(b.x, a.x + a.width - b.width));
-    const y = b.height >= a.height
-      ? a.y
-      : Math.max(a.y, Math.min(b.y, a.y + a.height - b.height));
-    return { width: b.width, height: b.height, x: x, y: y };
-  } catch { return b; }
-}
+// WHERE the window opens: THE placement rule (splash-place.ts), as its own
+// source — the same function the splash, the download window and the
+// Retry / Quit question are placed by, so all of them open on one screen. A
+// saved rect from a display that is gone (or smaller now: a 4000x2560 desktop's
+// y=392 on a 1280x900 nested display) moves into the screen it overlaps most;
+// no saved position, the primary's centre. Electron restores x/y verbatim and
+// does not clamp, so aio does.
+const boundsFromState = ${boundsFromState.toString()};
+const windowRect = ${windowRect.toString()};
+const centredOn = ${centredOn.toString()};
 
 function loadBounds(dw, dh) {
   __aioDw = dw; __aioDh = dh;
-  __aioRestoreMax = false;
+  let json = null;
+  try { json = fs.readFileSync(stateFile, 'utf8'); } catch {}
+  const s = boundsFromState(json, dw, dh);
+  // The rect is the NORMAL one (see __aioBoundsPayload); the maximize is
+  // re-applied when the window shows.
+  __aioRestoreMax = s.maximized;
+  let screens, primary;
   try {
-    const d = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-    if (d.width > 0 && d.height > 0) {
-      // The rect is the NORMAL one (see __aioBoundsPayload) — fitted like any
-      // other; the maximize is re-applied after the window exists.
-      __aioRestoreMax = d.maximized === true;
-      const same = d.declaredWidth === dw && d.declaredHeight === dh;
-      // Declared size changed — keep position, take the new size.
-      const out = same ? { width: d.width, height: d.height } : { width: dw, height: dh };
-      if (typeof d.x === 'number') out.x = d.x;
-      if (typeof d.y === 'number') out.y = d.y;
-      return __aioFitBounds(out);
-    }
-  } catch {}
-  return { width: dw, height: dh };
+    const { screen } = require('electron');
+    screens = screen.getAllDisplays().map((d) => d.workArea);
+    primary = screen.getPrimaryDisplay().workArea;
+  } catch (e) {
+    console.warn('[aio:electron] the displays could not be read (' + (e && e.message || e) + ') — the window opens where the OS puts it');
+    const out = { width: s.width, height: s.height };
+    if (typeof s.x === 'number' && typeof s.y === 'number') { out.x = s.x; out.y = s.y; }
+    return out;
+  }
+  const r = windowRect(s, screens, primary);
+  __aioPlaced = { x: r.x, y: r.y, width: r.width, height: r.height };
+  __aioPlacedOn = r.screen;
+  return { width: r.width, height: r.height, x: r.x, y: r.y };
 }
 
 function saveBounds(win) {
@@ -987,22 +1019,113 @@ export function tmplWindowShape(
     `webviewTag: ${JSON.stringify(!!meta?.childWindows || !!meta?.webviewTag)}`,
     ...Object.entries(extra).map(([k, v]) => `${k}: ${v}`),
   ];
+  const bg = meta?.background;
   return `  b.webPreferences = { ${prefs.join(", ")} };
   // ui.chrome: "themed"/"none" drop the OS frame. "themed" gets aio's own
   // title bar back from the page shell (server-html-gen); "none" is a bare
   // canvas and the app draws whatever it wants, including its drag region.
-  b.frame = ${JSON.stringify((meta?.chrome ?? "standard") === "standard")};`;
+  b.frame = ${JSON.stringify((meta?.chrome ?? "standard") === "standard")};
+  // Made hidden, shown once its page has painted (tmplShowWhenPainted): the
+  // first frame is the page, never a blank rectangle.
+  b.show = ${JSON.stringify(meta?.showWhenPainted === false)};
+  // The page's background, where aio knows it (meta.background): what any
+  // area the page has not painted yet shows — light or dark, as the OS is.
+  const __aioBg = ${JSON.stringify(bg ?? null)};
+  const __aioBgNow = () => __aioBg &&
+    (require('electron').nativeTheme.shouldUseDarkColors ? __aioBg.dark : __aioBg.light);
+  if (__aioBg) b.backgroundColor = __aioBgNow();`;
+}
+
+/** How long a window whose page has not painted stays hidden: a page that
+ *  never paints (a load that hangs, a renderer that died) must still show,
+ *  with the OS frame the user can close. Measured on X11 (a source start, the
+ *  page and its modules over aio://, a loaded machine): the page painted
+ *  1.3–2.2 s after the window was made. 5 s is more than twice the slowest,
+ *  so a slow machine is not shown an unpainted window, and still short of the
+ *  point where a user starts the app a second time. */
+export const WINDOW_SHOW_CAP_MS = 5_000;
+
+/** The window shows when its page has painted (Electron's `ready-to-show`),
+ *  or `WINDOW_SHOW_CAP_MS` after it was made if the page never paints — said
+ *  once. A saved maximize is re-applied in that moment: `maximize()` shows a
+ *  hidden window, so applying it earlier would show the unpainted one. The
+ *  background follows the OS's light/dark switch. Nothing else waits: a
+ *  splash stays above the window on its own timeline. Expects `win`,
+ *  `__aioRestoreMax` and `__aioBgNow` in scope. */
+export function tmplShowWhenPainted(
+  /** `electron.showWhenPainted` (meta): true/absent, the default cap. */
+  opt: boolean | { capMs: number } = true,
+): string {
+  const show = opt === false
+    ? false
+    : opt === true
+    ? { capMs: WINDOW_SHOW_CAP_MS }
+    : opt;
+  const capMs = show ? show.capMs : 0;
+  return `  let __aioShown = false;
+  const __aioShow = (capped) => {
+    if (__aioShown || win.isDestroyed()) return;
+    __aioShown = true;
+    clearTimeout(__aioShowCap);
+    if (capped) console.warn('[aio:electron] the window had not painted its page ${capMs} ms after it was made — shown now, before its page');
+    if (__aioRestoreMax) {
+      try { win.maximize(); }
+      catch (e) { console.warn('[aio:electron] could not restore the maximized window:', e); }
+    }
+    win.show();
+    __aioWindowAt(true);
+    // Electron's own splash (electron-splash.ts), where it draws one.
+    if (typeof __aioSplashClose === 'function') win.on('closed', () => __aioSplashClose(''));
+    // A window manager (or the user) moves it: the splash follows.
+    let __aioMv;
+    win.on('move', () => { clearTimeout(__aioMv); __aioMv = setTimeout(() => __aioWindowAt(false), 100); });
+    win.on('closed', () => clearTimeout(__aioMv));
+  };
+  // Where the window IS, for the splash to centre on (WINDOW_TAG); the first
+  // time, a window that is not where aio placed it is said, with both rects.
+  const __aioWindowAt = (first) => {
+    try {
+      if (win.isDestroyed()) return;
+      const b = win.getBounds();
+      const at = { x: b.x, y: b.y, width: b.width, height: b.height };
+      const { screen: __aioScr } = require('electron');
+      if (process.platform === 'win32' && typeof __aioScr.dipToScreenRect === 'function') {
+        at.screen = __aioScr.dipToScreenRect(win, b);
+      }
+      process.stderr.write(${
+    JSON.stringify(WINDOW_TAG)
+  } + JSON.stringify(at) + '\\n');
+      if (typeof __aioSplashOnWindow === 'function') __aioSplashOnWindow(at, first);
+      const p = __aioPlaced;
+      if (first && p && (p.x !== at.x || p.y !== at.y || p.width !== at.width || p.height !== at.height)) {
+        console.warn('[aio:electron] the window opened at ' + JSON.stringify({ x: at.x, y: at.y, width: at.width, height: at.height }) + ', not where aio placed it (' + JSON.stringify(p) + ') — the splash moves onto it');
+      }
+    } catch (e) {
+      console.warn('[aio:electron] the window bounds could not be read (' + (e && e.message || e) + ') — the splash stays where it opened');
+    }
+  };
+${
+    show
+      ? `  const __aioShowCap = setTimeout(() => __aioShow(true), ${capMs});
+  win.once('ready-to-show', () => __aioShow(false));`
+      : `  // electron.showWhenPainted false: shown the moment it is made.
+  const __aioShowCap = undefined;
+  __aioShow(false);`
+  }
+  if (__aioBgNow()) {
+    const { nativeTheme } = require('electron');
+    const onTheme = () => { if (!win.isDestroyed()) win.setBackgroundColor(__aioBgNow()); };
+    nativeTheme.on('updated', onTheme);
+    win.on('closed', () => nativeTheme.removeListener('updated', onTheme));
+  }`;
 }
 
 /** Debounced bounds tracking (resize/move/close) — returns CJS lines to insert
- *  inside ready, right after the window is created. Re-applies a saved
- *  maximize first (loadBounds sets `__aioRestoreMax`). */
+ *  inside ready, right after the window is created. A saved maximize
+ *  (loadBounds sets `__aioRestoreMax`) is re-applied when the window shows
+ *  (tmplShowWhenPainted). */
 export function tmplBoundsTracking(): string {
-  return `  if (__aioRestoreMax) {
-    try { win.maximize(); }
-    catch (e) { console.warn('[aio:electron] could not restore the maximized window:', e); }
-  }
-  let t;
+  return `  let t;
   const save = () => { clearTimeout(t); t = setTimeout(() => saveBounds(win), 500); };
   win.on('resize', save);
   win.on('move', save);
@@ -1054,15 +1177,19 @@ if (process.platform === 'darwin') {
 
 /** Local keyboard shortcuts (Ctrl+F5/Ctrl+R reload, F12 devtools,
  *  Ctrl+Shift+Del clear cache). Plain F5 is deliberately NOT bound — it stays
- *  free for aio apps' own custom shortcuts. */
-export function tmplKeyboardShortcuts(): string {
+ *  free for aio apps' own custom shortcuts. `electron.shortcuts` turns the
+ *  reload and print bindings off: the key then reaches the page. */
+export function tmplKeyboardShortcuts(
+  s: { reload: boolean; print: boolean } = { reload: true, print: true },
+): string {
   return `  // Local keyboard shortcuts (only when window has focus)
+  const __aioKeys = ${JSON.stringify({ reload: s.reload, print: s.print })};
   win.webContents.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown') return;
     const ctrl = input.control || input.meta;
     // Ctrl+F5 / Ctrl+R / Ctrl+Shift+R — hard reload (bypasses cache).
     // Plain F5 is left to the app (custom in-app shortcuts).
-    if ((ctrl && input.key === 'F5') || (ctrl && input.key.toLowerCase() === 'r')) {
+    if (__aioKeys.reload && ((ctrl && input.key === 'F5') || (ctrl && input.key.toLowerCase() === 'r'))) {
       event.preventDefault();
       win.webContents.reloadIgnoringCache();
     }
@@ -1081,7 +1208,7 @@ export function tmplKeyboardShortcuts(): string {
       });
     }
     // Ctrl+P — renderer window.print() is a no-op on Electron 41 Linux, call from main instead
-    if (ctrl && !input.shift && input.key.toLowerCase() === 'p') {
+    if (__aioKeys.print && ctrl && !input.shift && input.key.toLowerCase() === 'p') {
       event.preventDefault();
       win.webContents.print({ silent: false, printBackground: true });
     }

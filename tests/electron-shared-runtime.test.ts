@@ -28,10 +28,12 @@ import {
 import {
   enclosingMacApp,
   ensureSharedElectron,
+  fillWords,
   macWindowBundle,
   plistString,
   PREVIOUS_ANSWER,
   readSharedUses,
+  readyHeading,
   recordSharedUse,
   sharedElectronDir,
   sharedElectronReady,
@@ -48,21 +50,27 @@ import {
   downloadDetail,
   encodedCommand,
   hasDesktop,
-  MAC_ASK_APPLESCRIPT,
+  lookArg,
+  MAC_ASK_JXA,
+  MAC_LOOK_JS,
   MAC_PROGRESS_JXA,
   macAnswer,
   pangoText,
+  powershellCommand,
   type ProgressDialog,
   progressLine,
   type RetryAnswer,
   WINDOWS_ASK_PS,
   WINDOWS_PROGRESS_PS,
   windowsAnswer,
-  windowsAskText,
   zenityAnswer,
   zenityAskArgs,
   zenityEnding,
+  zenityProgressArgs,
 } from "../src/electron/runtime-dialog.ts";
+import { identityDialogColors } from "../src/build/app-theme.ts";
+import { resolveSplash } from "../src/build/splash.ts";
+import { splashSession } from "../src/electron/splash-session.ts";
 import {
   askElectronRuntime,
   classifyElectronRuntimeProbe,
@@ -247,7 +255,7 @@ Deno.test("shared start: downloads into the store with a progress window, fuses 
     if (Deno.build.os !== "darwin") {
       assertEquals(exe, electronBinIn(sharedElectronDir(V, SLUG, root)));
     }
-    assertEquals(ui.seen.opened, ["Notes | Resolving dependencies"]);
+    assertEquals(ui.seen.opened, ["Notes | Getting Notes ready"]);
     assert(
       ui.seen.updates.some((u) =>
         /^Downloading Electron 9\.9\.9/.test(u.detail)
@@ -284,6 +292,173 @@ Deno.test("shared start: downloads into the store with a progress window, fuses 
   } finally {
     await dropTempDir(tmp);
   }
+});
+
+Deno.test("shared start: show \"firstStart\" — the first start's download runs INSIDE the app's splash (its downloadText filled, its bar the download's, no other window); a later start shows nothing at all", async () => {
+  const tmp = await tempDir("shared-firststart-");
+  try {
+    const rel = await release(await runtimeZip(tmp));
+    const root = join(tmp, "store");
+    const png = Uint8Array.from(
+      atob(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAwS2OUAAAAABJRU5ErkJggg==",
+      ),
+      (ch) => ch.charCodeAt(0),
+    );
+    const r = resolveSplash({
+      build: {
+        splash: {
+          image: "s.png",
+          show: "firstStart",
+          downloadText: "Getting {title} ready · {got} / {total} MB",
+          progress: true,
+        },
+      },
+    }, { root: "/p", appId: "com.example.notes", read: () => png });
+    if ("error" in r) throw new Error(r.error);
+    const start = async () => {
+      const seen = {
+        opened: [] as string[],
+        lines: [] as Array<[number | null, string]>,
+      };
+      const log: string[] = [];
+      const ses = splashSession(r.splash!, {
+        title: "Notes",
+        log: { info: (m) => log.push(m), error: (m) => log.push(`! ${m}`) },
+        tickMs: 2,
+        backend: () =>
+          Promise.resolve({
+            name: "fake splash",
+            open(title: string, text: string) {
+              seen.opened.push(`${title} | ${text}`);
+              return Promise.resolve({
+                update: (f: number | null, t: string) =>
+                  void seen.lines.push([f, t]),
+                shown: Promise.resolve(),
+                cancelled: new Promise<void>(() => {}),
+                lost: new Promise<string>(() => {}),
+                close: () => Promise.resolve(),
+              });
+            },
+          }),
+      });
+      ses.open();
+      const plain = fakeDialog();
+      const exe = await sharedRuntimeForStart({
+        version: V,
+        slug: SLUG,
+        execPath: join(tmp, "mount", "app"),
+        title: "Notes",
+        log: quiet,
+        root,
+        fetch: rel.fetch,
+        dialog: plain.backend,
+        splash: ses,
+      });
+      ses.ready(); // the app's window is up
+      await new Promise((r) => setTimeout(r, 10));
+      ses.shutdown();
+      return { exe, seen, log, plain: plain.seen.opened };
+    };
+    const first = await start();
+    assert(first.exe);
+    assertEquals(first.plain, [], "no download window beside the splash");
+    assertEquals(first.seen.opened.length, 1, "the splash, once");
+    assert(
+      first.seen.lines.some(([f, t]) =>
+        f !== null && f > 0 && /^Getting Notes ready · \d+ \/ \d+ MB$/.test(t)
+      ),
+      JSON.stringify(first.seen.lines),
+    );
+    // Its look is the app's identity (no colours set) — the text over the
+    // image the colour that reads on it — its bar shown.
+    const id = identityDialogColors("com.example.notes").light;
+    assertEquals(r.splash!.light, { ...id, text: r.splash!.light.text });
+    assertEquals(r.splash!.light.text, "#ffffff"); // a black 1×1 image
+    assertEquals(r.splash!.progress, true);
+    const later = await start();
+    assert(later.exe);
+    assertEquals([later.seen.opened, later.plain], [[], []], "nothing shown");
+    assert(
+      later.log.some((l) =>
+        l.includes('not shown (show: "firstStart", no download)')
+      ),
+    );
+    assertEquals(rel.state.zipFetches, 1);
+  } finally {
+    await dropTempDir(tmp);
+  }
+});
+
+Deno.test("shared start: electron.downloadWindow's words — the heading, the detail ({got} / {total} filled as it downloads) and the Retry / Quit question ({reason})", async () => {
+  const tmp = await tempDir("shared-words-");
+  try {
+    const rel = await release(await runtimeZip(tmp));
+    const root = join(tmp, "store");
+    const words = {
+      heading: "Setting up {title}",
+      text: "Installing dependencies · {got} of {total} MB",
+      question: "{title} could not get Electron {version}: {reason}",
+    };
+    const ui = fakeDialog();
+    await sharedRuntimeForStart({
+      version: V,
+      slug: SLUG,
+      execPath: join(tmp, "app"),
+      title: "Notes",
+      log: quiet,
+      root,
+      fetch: rel.fetch,
+      dialog: ui.backend,
+      words,
+    });
+    assertEquals(ui.seen.opened, ["Notes | Setting up Notes"]);
+    assert(
+      ui.seen.updates.some((u) =>
+        /^Installing dependencies · \d+ of (\d+|\?) MB$/.test(u.detail)
+      ),
+      JSON.stringify(ui.seen.updates),
+    );
+    // The question, on a failed download.
+    rel.state.fail = true;
+    const q = fakeDialog(["quit"]);
+    await sharedRuntimeForStart({
+      version: V,
+      slug: SLUG,
+      execPath: join(tmp, "app"),
+      title: "Notes",
+      log: quiet,
+      root: join(tmp, "store2"),
+      fetch: rel.fetch,
+      dialog: q.backend,
+      words,
+    });
+    assertEquals(q.seen.asked.length, 1);
+    assert(
+      q.seen.asked[0]!.startsWith("Notes could not get Electron 9.9.9: "),
+      q.seen.asked[0],
+    );
+    assert(!q.seen.asked[0]!.includes("\n"), "the reason's first line only");
+  } finally {
+    await dropTempDir(tmp);
+  }
+});
+
+Deno.test("dialog: fillWords fills {title} {version} {got} {total} {reason}, leaves any other {x}", () => {
+  assertEquals(
+    fillWords("{title} {version} {got}/{total} {reason} {pct}", {
+      title: "N",
+      version: "1.2.3",
+      got: 22e6,
+      total: 123e6,
+      reason: "offline",
+    }),
+    "N 1.2.3 22/123 offline {pct}",
+  );
+  assertEquals(
+    fillWords("{got} of {total}", { title: "", version: "" }),
+    "0 of ?",
+  );
 });
 
 Deno.test("shared start: a failed download asks Retry / Quit — Retry tries again, Quit ends the start", async () => {
@@ -495,20 +670,37 @@ Deno.test("findElectronBin: a shared-runtime binary goes to the store, and the e
       info: () => {},
       error: (m: string) => errors.push(m),
     } as unknown as Log;
-    let asked: { version: string; title: string; installed?: string } | null =
-      null;
+    let asked: {
+      version: string;
+      title: string;
+      installed?: string;
+      colors?: unknown;
+    } | null = null;
+    const colors = identityDialogColors("com.example.notes");
     const bin = await findElectronBin(log, {
       distDir: dist,
       compiled: true,
       execPath,
       title: "Notes",
+      colors,
       sharedRuntime: (o) => {
-        asked = { version: o.version, title: o.title, installed: o.installed };
+        asked = {
+          version: o.version,
+          title: o.title,
+          installed: o.installed,
+          colors: o.colors,
+        };
         return Promise.resolve("/store/electron");
       },
     });
     assertEquals(bin, "/store/electron");
-    assertEquals(asked, { version: V, title: "Notes", installed: execPath });
+    // The app's colours reach the download window and the question.
+    assertEquals(asked, {
+      version: V,
+      title: "Notes",
+      installed: execPath,
+      colors,
+    });
     assertEquals(
       errors.filter((e) => e.includes("ELECTRON_PATH")),
       [],
@@ -766,6 +958,55 @@ Deno.test("update pre-download: a shared build's Electron is fetched before the 
     }) as unknown as typeof ensureSharedElectron,
   });
   assertEquals(pinned, PIN);
+});
+
+Deno.test("update pre-download: a browser-default online binary fetches no Electron; an Electron default still does", async () => {
+  // todo "Owner decides": a plain `binary` of an online app answered
+  // "shared", so every update fetched ~100 MB of Electron for a binary that
+  // only ever opens in a browser. The build now bakes the default client.
+  const fetched: string[] = [];
+  const said: string[] = [];
+  const base = {
+    log: (m: string) => said.push(m),
+    ensure: ((v: string) => {
+      fetched.push(v);
+      return Promise.resolve("/s");
+    }) as unknown as typeof ensureSharedElectron,
+    ready: () => Promise.resolve(false),
+    record: (() => Promise.resolve()) as unknown as typeof recordSharedUse,
+    installed: "/installed/app",
+    slug: "linux-x64",
+  };
+  const answer = (client?: string) => () =>
+    Promise.resolve({
+      kind: "answer" as const,
+      runtime: "shared",
+      version: "45.0.0",
+      sha256: "a".repeat(64),
+      ...(client ? { client } : {}),
+    });
+  for (const client of ["browser", "server-only"]) {
+    await prefetchSharedElectron("/new", { ...base, ask: answer(client) });
+  }
+  assertEquals(fetched, []);
+  assert(said.some((m) => m.includes(`opens as "browser"`)), said.join("\n"));
+  await prefetchSharedElectron("/new", { ...base, ask: answer("electron") });
+  await prefetchSharedElectron("/new", { ...base, ask: answer() }); // pre-field build
+  assertEquals(fetched, ["45.0.0", "45.0.0"]);
+  // A desktop PACKAGE is Electron whatever it says: still fetched.
+  await prefetchSharedElectron("/new", {
+    ...base,
+    ask: answer("browser"),
+    markedShared: true,
+  });
+  assertEquals(fetched.length, 3);
+  // The answer line carries the field through.
+  assertEquals(
+    parseElectronRuntimeAnswer(
+      `{"runtime":"shared","version":"45.0.0","client":"browser"}`,
+    )?.client,
+    "browser",
+  );
 });
 
 Deno.test("pinned checksum: a download is held to the build's pin alone — a forged zip WITH a forged checksum list fails, and the network's list is never needed", async () => {
@@ -1048,11 +1289,11 @@ Deno.test("dialog protocol: the progress line, the download detail, and the fail
   assertEquals(progressLine(7, "x"), "100\tx");
   assertEquals(
     downloadDetail("44.7.0", 45e6, 110e6),
-    "Downloading Electron 44.7.0 — 45 / 110 MB",
+    "Downloading Electron 44.7.0 — first start only · 45 / 110 MB",
   );
   assertEquals(
     downloadDetail("44.7.0", 3e6, 0),
-    "Downloading Electron 44.7.0 — 3 MB",
+    "Downloading Electron 44.7.0 — first start only · 3 MB",
   );
   const msg = sharedFailureMessage(
     "Notes",
@@ -1072,6 +1313,28 @@ Deno.test("dialog: PowerShell's -EncodedCommand is UTF-16LE base64 of the script
     back += String.fromCharCode(bytes[i]! | (bytes[i + 1]! << 8));
   }
   assertEquals(back, "Write-Host 'Ž'");
+});
+
+Deno.test("dialog: PowerShell starts from a short, fixed command line that reads the script from a file — a script's own -EncodedCommand outgrows Windows' 32767-character limit (the splash's did: CreateProcessW 206, no splash)", () => {
+  const exe = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+  const cmd = powershellCommand(exe);
+  assert(cmd.length < 1000, `${cmd.length}`);
+  const enc = cmd.split("-EncodedCommand ")[1]!;
+  const bytes = Uint8Array.from(atob(enc), (c) => c.charCodeAt(0));
+  let boot = "";
+  for (let i = 0; i < bytes.length; i += 2) {
+    boot += String.fromCharCode(bytes[i]! | (bytes[i + 1]! << 8));
+  }
+  assertEquals(
+    boot,
+    "& ([ScriptBlock]::Create([IO.File]::ReadAllText($env:AIO_PS_SCRIPT)))",
+  );
+  // The only encoded command is that bootstrap: no script is encoded whole.
+  const src = Deno.readTextFileSync(
+    new URL("../src/electron/runtime-dialog.ts", import.meta.url),
+  );
+  // (two matches: its definition, and the bootstrap's one call)
+  assertEquals(src.match(/encodedCommand\(/g)?.length, 2);
 });
 
 Deno.test("dialog: Linux needs a display server; Windows and macOS always have a desktop", () => {
@@ -1337,9 +1600,12 @@ Deno.test({
     const tmp = await tempDir("dlg-zenity-");
     const path = Deno.env.get("PATH");
     const display = Deno.env.get("DISPLAY");
+    const wayland = Deno.env.get("WAYLAND_DISPLAY");
     try {
       Deno.env.set("PATH", tmp);
-      Deno.env.set("DISPLAY", ":0");
+      // A display that is not there: GTK cannot draw, zenity takes over.
+      Deno.env.set("DISPLAY", ":98");
+      Deno.env.set("WAYLAND_DISPLAY", "");
       const fake = join(tmp, "zenity");
       for (
         const [body, want] of [
@@ -1354,8 +1620,9 @@ Deno.test({
       ) {
         await Deno.writeTextFile(fake, `#!/bin/sh\n${body}\n`);
         await Deno.chmod(fake, 0o755);
-        const b = await dialogBackend();
-        assertEquals(b?.name, "zenity");
+        const said: string[] = [];
+        const b = await dialogBackend({ log: (m) => said.push(m) });
+        assertEquals(b?.name, "gtk");
         const d = await b!.progress("T", "H");
         const r = await Promise.race([
           d.cancelled.then(() => "cancelled"),
@@ -1363,12 +1630,15 @@ Deno.test({
         ]);
         assertEquals(r, want);
         await d.close();
+        assertStringIncludes(said.join("\n"), "zenity draws it instead");
       }
     } finally {
       if (path === undefined) Deno.env.delete("PATH");
       else Deno.env.set("PATH", path);
       if (display === undefined) Deno.env.delete("DISPLAY");
       else Deno.env.set("DISPLAY", display);
+      if (wayland === undefined) Deno.env.delete("WAYLAND_DISPLAY");
+      else Deno.env.set("WAYLAND_DISPLAY", wayland);
       await dropTempDir(tmp);
     }
   },
@@ -1420,19 +1690,14 @@ Deno.test("shared start: with the version an update replaced still kept, the fai
 });
 
 Deno.test("dialog: the third answer on every backend — Windows Yes/No/Cancel with the text saying which, Cocoa's button, zenity's extra button, yad's code, the browser page's button", async () => {
-  // Windows: no custom labels on a MessageBox.
-  assertEquals(windowsAskText("m"), "m");
-  assertStringIncludes(
-    windowsAskText("m", PREVIOUS_ANSWER),
-    `No: ${PREVIOUS_ANSWER}`,
-  );
+  // Windows: aio's own form, its buttons named.
   assertEquals(
-    ["Retry", "Yes", "No", "Cancel", ""].map(windowsAnswer),
-    ["retry", "retry", "previous", "quit", "quit"],
+    ["retry", "previous", "quit", ""].map(windowsAnswer),
+    ["retry", "previous", "quit", "quit"],
   );
-  assertStringIncludes(WINDOWS_ASK_PS, "$env:AIO_DLG_BUTTONS");
-  // macOS.
-  assertStringIncludes(MAC_ASK_APPLESCRIPT, "(item 3 of argv)");
+  assertStringIncludes(WINDOWS_ASK_PS, "$env:AIO_DLG_PREVIOUS");
+  // macOS: aio's own window, its third button when given.
+  assertStringIncludes(MAC_ASK_JXA, "const previous = argv[3] || '';");
   assertEquals(macAnswer("Retry\n", PREVIOUS_ANSWER), "retry");
   assertEquals(macAnswer(PREVIOUS_ANSWER, PREVIOUS_ANSWER), "previous");
   assertEquals(macAnswer(PREVIOUS_ANSWER), "quit");
@@ -1474,4 +1739,128 @@ Deno.test("dialog: the third answer on every backend — Windows Yes/No/Cancel w
   await (await fetch(`${page}answer?previous`, { method: "POST" })).body
     ?.cancel();
   assertEquals(await asked, "previous");
+});
+
+// ── the default download window: the app's look, its words, Cancel only ──
+
+Deno.test('dialog: the download window\'s words — "Getting <title> ready", what comes down, that later starts skip it, how far', () => {
+  assertEquals(readyHeading("Notes"), "Getting Notes ready");
+  assertEquals(
+    downloadDetail("44.9.0", 22e6, 123e6),
+    "Downloading Electron 44.9.0 — first start only · 22 / 123 MB",
+  );
+});
+
+Deno.test("dialog: the default download window and the question wear the app's identity colours — the splash's defaults exactly, one mode string per OS mode", () => {
+  const c = identityDialogColors("com.example.notes");
+  // The very colours a build.splash with no colours set draws with.
+  const png = Uint8Array.from(
+    atob(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAwS2OUAAAAABJRU5ErkJggg==",
+    ),
+    (ch) => ch.charCodeAt(0),
+  );
+  // (Text below the image, on the strip: the text over it takes the colour
+  // that reads on the image instead.)
+  const r = resolveSplash({
+    build: { splash: { image: "s.png", textPosition: "below" } },
+  }, {
+    root: "/p",
+    appId: "com.example.notes",
+    read: () => png,
+  });
+  if ("error" in r) throw new Error(r.error);
+  assertEquals(c, { light: r.splash!.light, dark: r.splash!.dark });
+  assert(c.light.background !== c.dark.background, "light and dark differ");
+  assertEquals(
+    lookArg(c.light),
+    `${c.light.background} ${c.light.text} ${c.light.bar} ${c.light.track}`,
+  );
+  assertEquals(lookArg(undefined), "", "none: the system's look");
+});
+
+Deno.test("dialog: Windows — the download window and the question take the colours by the app mode Windows is in; a bar of the app's colours; Cancel the one button", () => {
+  for (const ps of [WINDOWS_PROGRESS_PS, WINDOWS_ASK_PS]) {
+    assertStringIncludes(ps, "$env:AIO_DLG_LIGHT");
+    assertStringIncludes(ps, "$env:AIO_DLG_DARK");
+    assertStringIncludes(ps, "AppsUseLightTheme");
+    assertStringIncludes(ps, "$f.BackColor = $bg");
+    assertStringIncludes(ps, "AioButton $");
+  }
+  // Windows Forms' own bar takes no colours: aio's track and fill.
+  assert(!WINDOWS_PROGRESS_PS.includes("Forms.ProgressBar"));
+  assertStringIncludes(WINDOWS_PROGRESS_PS, "$fl.BackColor");
+  // One button, Cancel — the cancel (exit 3), as the close is.
+  assertEquals(
+    WINDOWS_PROGRESS_PS.match(/Forms\.Button\b/g)?.length,
+    1,
+  );
+  assertStringIncludes(WINDOWS_PROGRESS_PS, "$c.Text = 'Cancel'");
+  assertStringIncludes(WINDOWS_PROGRESS_PS, "$f.CancelButton = $c");
+  assertStringIncludes(WINDOWS_PROGRESS_PS, "exit 3");
+  assert(!/'OK'/.test(WINDOWS_PROGRESS_PS));
+});
+
+Deno.test("dialog: macOS — the download window and the question take the colours by macOS's mode; a bar of the app's colours; Cancel the one button", () => {
+  for (const js of [MAC_PROGRESS_JXA, MAC_ASK_JXA]) {
+    assertStringIncludes(js, MAC_LOOK_JS);
+    assertStringIncludes(js, "win.backgroundColor = look.bg");
+  }
+  assertStringIncludes(
+    MAC_PROGRESS_JXA,
+    "aioLook(argv[7] || '', argv[8] || '')",
+  );
+  assertStringIncludes(MAC_ASK_JXA, "aioLook(argv[4] || '', argv[5] || '')");
+  assert(!MAC_PROGRESS_JXA.includes("NSProgressIndicator"));
+  assertEquals(MAC_PROGRESS_JXA.match(/\$\.NSButton\.alloc/g)?.length, 1);
+  assertStringIncludes(MAC_PROGRESS_JXA, "cancel.title = 'Cancel'");
+  assertStringIncludes(
+    MAC_PROGRESS_JXA,
+    "if (Number(cancel.state) === 1) $.exit(3);",
+  );
+  // aioLook picks the mode macOS is in, the colours as given.
+  const made: number[][] = [];
+  const fake = (style: string | null) => ({
+    NSUserDefaults: {
+      standardUserDefaults: {
+        stringForKey: () =>
+          style === null ? null : { isNil: () => false, js: style },
+      },
+    },
+    NSColor: {
+      colorWithSRGBRedGreenBlueAlpha: (r: number, g: number, b: number) => {
+        made.push([r, g, b].map((v) => Math.round(v * 255)));
+        return made.length - 1;
+      },
+    },
+  });
+  const look = (style: string | null, l: string, d: string) =>
+    new Function("$", MAC_LOOK_JS + "\nreturn aioLook;")(fake(style))(l, d);
+  assertEquals(look(null, "", ""), null, "none: the system's look");
+  const L = "#ffffff #000000 #ff0000 #00ff00";
+  const D = "#101010 #f0f0f0 #0000ff #202020";
+  made.length = 0;
+  assertEquals(look("Dark", L, D).isDark, true);
+  assertEquals(made, [[16, 16, 16], [240, 240, 240], [0, 0, 255], [
+    32,
+    32,
+    32,
+  ]]);
+  made.length = 0;
+  assertEquals(look(null, L, D).isDark, false);
+  assertEquals(made[0], [255, 255, 255]);
+});
+
+Deno.test("dialog: yad's download window has Cancel as its one button; zenity cannot drop its OK (said in the docs)", () => {
+  const yad = zenityProgressArgs("yad", "Notes", readyHeading("Notes"));
+  assertEquals(yad.filter((a) => a.startsWith("--button")), [
+    "--button=Cancel:1",
+  ]);
+  assertEquals(zenityEnding(1, ""), { cancelled: true }, "Cancel is exit 1");
+  assert(
+    !zenityProgressArgs("zenity", "Notes", "H").some((a) =>
+      a.startsWith("--button")
+    ),
+  );
+  assertStringIncludes(yad.join(" "), "--text=Getting Notes ready");
 });

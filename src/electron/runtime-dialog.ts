@@ -1,14 +1,16 @@
 /**
  * @module
- * The window a shared-runtime app shows BEFORE it has a window: "Resolving
- * dependencies" with a progress bar while its Electron downloads, and a
- * Retry / Quit question when that fails. Electron cannot draw it — Electron
+ * The window a shared-runtime app shows BEFORE it has a window: "Getting
+ * <title> ready" with a progress bar and a Cancel while its Electron
+ * downloads, and a Retry / Quit question when that fails — both in the
+ * app's identity colours (light or dark, as the OS is). Electron cannot draw it — Electron
  * is the thing being downloaded — so each OS draws it with what it always
  * has:
  *
  *   Windows  PowerShell + Windows Forms (in every Windows since 7)
  *   macOS    osascript, JavaScript for Automation with the Cocoa bridge
  *   Linux    zenity, else yad; with neither, a page in the default browser
+ *            (the splash: GTK 3 over FFI, gtk-splash.ts, before those)
  *
  * With no display at all (a service, an ssh session) there is nothing to
  * draw on: the log carries the progress and a failure ends the start.
@@ -19,7 +21,7 @@
  * helper exiting before it was told to close means the user closed it: the
  * start is cancelled. Each helper also watches the app's process id and
  * closes itself when the app is gone, so an app that died never leaves a
- * "Resolving dependencies" window behind — and a machine that slept is not
+ * "Getting <title> ready" window behind — and a machine that slept is not
  * a death (the app's pid is still there when it wakes).
  *
  * All text reaches the helpers as environment variables or argv, never
@@ -29,7 +31,190 @@ import { join } from "@std/path";
 import { isProcessAlive } from "../server/single-instance-lock.ts";
 import { neutralCwd, startWindowless } from "../server/no-console.ts";
 import { mayOpenExternal, openExternal } from "../server/open-external.ts";
-import { BAR_PT, type SplashSpec } from "./splash.ts";
+import {
+  BAR_PT,
+  helperLook,
+  lookOf,
+  type SplashColors,
+  splashHasText,
+  splashNotDrawn,
+  type SplashSpec,
+} from "./splash.ts";
+import { type Bounds, centredOn, windowRect } from "./splash-place.ts";
+import type { WindowAt } from "./electron-renderer-log.ts";
+import { gtkAsk, gtkProgress, gtkSplash } from "./gtk-splash.ts";
+
+// ── where every window opens ───────────────────────────────────────────────
+
+/** splash-place.ts in PowerShell, line for line: `windowRect` (where the
+ *  app's window opens, on which screen) and `centredOn` (a W×H window
+ *  centred on it, kept inside that screen). `$T`: `[x|null, y|null, width,
+ *  height]`, or `$null` for `$p`'s centre. `$all` / `$p`: the screens' and
+ *  the primary's work areas (`AioAll`, `AioPrimary`). Returns `@(x, y)`.
+ *  JavaScript's Math.round is `Floor(v + 0.5)` here (.NET rounds to even).
+ *  Pinned against the TS rule by tests/window-place.test.ts. */
+export const PS_PLACE = `
+function AioAll { @([System.Windows.Forms.Screen]::AllScreens | ForEach-Object { $_.WorkingArea }) }
+function AioPrimary { [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea }
+function AioFit($v, $lo, $n, $span) { if ($n -ge $span) { $lo } else { [Math]::Max($lo, [Math]::Min($v, $lo + $span - $n)) } }
+function AioPlace($T, $W, $H, $all, $p) {
+  if (@($all).Count -eq 0) { $all = @($p) }
+  if ($null -eq $T) { $s = $p; $rx = $p.X; $ry = $p.Y; $rw = $p.Width; $rh = $p.Height }
+  else {
+    $rw = [int]$T[2]; $rh = [int]$T[3]
+    if ($null -eq $T[0] -or $null -eq $T[1]) {
+      $s = $p
+      $rx = AioFit ($s.X + [Math]::Floor(($s.Width - $rw) / 2)) $s.X $rw $s.Width
+      $ry = AioFit ($s.Y + [Math]::Floor(($s.Height - $rh) / 2)) $s.Y $rh $s.Height
+    } else {
+      $x = [int]$T[0]; $y = [int]$T[1]; $s = $null
+      foreach ($k in $all) { if ($x -ge $k.X -and $y -ge $k.Y -and $x + $rw -le $k.X + $k.Width -and $y + $rh -le $k.Y + $k.Height) { $s = $k; break } }
+      if ($null -ne $s) { $rx = $x; $ry = $y } else {
+        $best = -1
+        foreach ($k in $all) {
+          $ix = [Math]::Max(0, [Math]::Min($x + $rw, $k.X + $k.Width) - [Math]::Max($x, $k.X))
+          $iy = [Math]::Max(0, [Math]::Min($y + $rh, $k.Y + $k.Height) - [Math]::Max($y, $k.Y))
+          if ($ix * $iy -gt $best) { $best = $ix * $iy; $s = $k }
+        }
+        $rx = AioFit $x $s.X $rw $s.Width
+        $ry = AioFit $y $s.Y $rh $s.Height
+      }
+    }
+  }
+  $cx = AioFit ([Math]::Floor($rx + $rw / 2 - $W / 2 + 0.5)) $s.X $W $s.Width
+  $cy = AioFit ([Math]::Floor($ry + $rh / 2 - $H / 2 + 0.5)) $s.Y $H $s.Height
+  return @([int]$cx, [int]$cy)
+}
+`;
+
+/** splash-place.ts for the Cocoa helpers: `windowRect` and `centredOn` AS
+ *  THEIR OWN SOURCE, and the screens in Electron's coordinates (origin at
+ *  the primary's top-left; `NSScreen.screens[0]` is the primary, the one
+ *  with the menu bar). `aioPlace(T, w, h)` — `T` as on Windows — is the
+ *  Cocoa origin of a w×h frame centred where the app's window opens. */
+export const MAC_PLACE_JS = `
+const windowRect = ${windowRect.toString()};
+const centredOn = ${centredOn.toString()};
+function aioPlace(T, w, h) {
+  const scr = $.NSScreen.screens;
+  const PH = scr.objectAtIndex(0).frame.size.height;
+  const areas = [];
+  for (let i = 0; i < scr.count; i++) {
+    const v = scr.objectAtIndex(i).visibleFrame;
+    areas.push({ x: v.origin.x, y: PH - (v.origin.y + v.size.height), width: v.size.width, height: v.size.height });
+  }
+  const p = areas[0];
+  const b = T && (T[0] === null ? { width: T[2], height: T[3] } : { x: T[0], y: T[1], width: T[2], height: T[3] });
+  const o = b ? centredOn(windowRect(b, areas, p), w, h) : centredOn({ x: p.x, y: p.y, width: p.width, height: p.height, screen: p }, w, h);
+  return $.NSMakePoint(o.x, PH - (o.y + h));
+}
+`;
+
+/** Per-monitor DPI awareness for the Windows helpers, set before any
+ *  window exists: their coordinates are then PHYSICAL screen pixels — the
+ *  space the main process converts the app's window into
+ *  (`screen.dipToScreenRect`, the window line's `screen`) and the space
+ *  Windows Forms' `Screen` reports in. Without it Windows virtualises an
+ *  unaware helper per monitor, and on mixed scales its rect and Electron's
+ *  disagree. `AioScaleAt x y`: the effective scale (DPI / 96) of the monitor
+ *  at that physical point — what a helper sizes its contents by, so it looks
+ *  as large as before (crisp now, not bitmap-stretched). Windows 7/8 (no
+ *  per-monitor API): system-aware, scale 1 apart from the system's. */
+export const PS_DPI = `
+Add-Type -WarningAction SilentlyContinue -TypeDefinition @"
+using System; using System.Runtime.InteropServices;
+public static class AioDpi {
+  [StructLayout(LayoutKind.Sequential)] public struct PT { public int X; public int Y; }
+  [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr v);
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll")] public static extern IntPtr MonitorFromPoint(PT p, uint f);
+  [DllImport("shcore.dll")] public static extern int GetDpiForMonitor(IntPtr m, int t, out uint x, out uint y);
+  public static double At(int x, int y) {
+    try {
+      PT p; p.X = x; p.Y = y;
+      uint dx, dy;
+      if (GetDpiForMonitor(MonitorFromPoint(p, 2), 0, out dx, out dy) == 0 && dx > 0) return dx / 96.0;
+    } catch {}
+    return 1.0;
+  }
+}
+"@
+$aioPm = $false
+try { $aioPm = [AioDpi]::SetProcessDpiAwarenessContext([IntPtr](-4)) } catch {}
+if (-not $aioPm) { try { [void][AioDpi]::SetProcessDPIAware() } catch {} }
+function AioScaleAt($x, $y) { if ($aioPm) { [AioDpi]::At([int]$x, [int]$y) } else { 1.0 } }
+# The scale where a window centred on $T (PS_PLACE's [x|null,y|null,w,h])
+# lands: its centre's monitor; no position, the primary's.
+function AioScaleFor($T) {
+  if ($T -and $null -ne $T[0]) { return AioScaleAt ($T[0] + $T[2] / 2) ($T[1] + $T[3] / 2) }
+  $w = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+  AioScaleAt ($w.X + $w.Width / 2) ($w.Y + $w.Height / 2)
+}
+`;
+
+/** The app's look in PowerShell: `$bg $fg $barc $trk` from AIO_DLG_LIGHT /
+ *  AIO_DLG_DARK (`"#bg #text #bar #track"`), as Windows' app mode is light
+ *  or dark — or `$bg = $null` (the system's look) without them. */
+export const PS_LOOK = `
+$bg = $null
+if ($env:AIO_DLG_LIGHT) {
+  $dk = $false
+  try {
+    $dk = (Get-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize' -Name AppsUseLightTheme).AppsUseLightTheme -eq 0
+  } catch {}
+  $cc = $(if ($dk) { $env:AIO_DLG_DARK } else { $env:AIO_DLG_LIGHT }).Split(' ')
+  $bg = [System.Drawing.ColorTranslator]::FromHtml($cc[0])
+  $fg = [System.Drawing.ColorTranslator]::FromHtml($cc[1])
+  $barc = [System.Drawing.ColorTranslator]::FromHtml($cc[2])
+  $trk = [System.Drawing.ColorTranslator]::FromHtml($cc[3])
+}
+function AioButton($b) {
+  if ($bg) {
+    $b.FlatStyle = 'Flat'
+    $b.BackColor = $trk
+    $b.ForeColor = $fg
+    $b.FlatAppearance.BorderColor = $trk
+  }
+}
+`;
+
+/** The app's look for the Cocoa helpers: `aioLook(light, dark)` — each
+ *  `"#bg #text #bar #track"`, "" for the system's look — as NSColors for the
+ *  mode macOS is in, or null. */
+export const MAC_LOOK_JS = `
+function aioLook(light, dark) {
+  if (!light) return null;
+  const st = $.NSUserDefaults.standardUserDefaults.stringForKey('AppleInterfaceStyle');
+  const isDark = !!st && !st.isNil() && st.js === 'Dark';
+  const hex = (h) => $.NSColor.colorWithSRGBRedGreenBlueAlpha(
+    parseInt(h.slice(1, 3), 16) / 255, parseInt(h.slice(3, 5), 16) / 255,
+    parseInt(h.slice(5, 7), 16) / 255, 1);
+  const c = (isDark ? dark : light).split(' ');
+  return { bg: hex(c[0]), fg: hex(c[1]), bar: hex(c[2]), track: hex(c[3]), isDark };
+}
+function aioBox(x, y, w, h, col) {
+  const b = $.NSBox.alloc.initWithFrame($.NSMakeRect(x, y, w, h));
+  b.boxType = 4; // NSBoxCustom
+  b.titlePosition = 0; // NSNoTitle
+  b.borderWidth = 0;
+  b.cornerRadius = h / 2;
+  b.fillColor = col;
+  return b;
+}
+`;
+
+/** `"#bg #text #bar #track"` — one mode as a helper reads it. Pure. */
+export const lookArg = (c: SplashColors | undefined) =>
+  c ? `${c.background} ${c.text} ${c.bar} ${c.track}` : "";
+
+/** The app's identity colours, light and dark (the splash's own). */
+export type DialogColors = { light: SplashColors; dark: SplashColors };
+
+/** The `[x|null, y|null, width, height]` a helper places by: where the
+ *  app's window opens (`windowRect`'s input). Pure. */
+export function placeArg(t: Bounds | null | undefined): string {
+  return t ? JSON.stringify([t.x ?? null, t.y ?? null, t.width, t.height]) : "";
+}
 
 /** A progress window that is showing. */
 export interface ProgressDialog {
@@ -45,6 +230,9 @@ export interface ProgressDialog {
   close(): Promise<void>;
   /** Resolves once the window is on screen, where the helper says so. */
   readonly shown?: Promise<void>;
+  /** Re-centre on where the app's window really is (the splash's
+   *  `followWindow`). Absent: this helper cannot move (yad, zenity). */
+  move?(at: WindowAt): void;
 }
 
 /** What the failure question answered. `"previous"`: the third button,
@@ -59,22 +247,10 @@ export interface DialogBackend {
   ask(title: string, message: string, previous?: string): Promise<RetryAnswer>;
 }
 
-/** The Windows MessageBox has no buttons of its own naming: with a third
- *  answer it is Yes / No / Cancel, and the text says which is which. Pure. */
-export function windowsAskText(message: string, previous?: string): string {
-  return previous
-    ? `${message}\n\nYes: Retry   ·   No: ${previous}   ·   Cancel: Quit`
-    : message;
-}
-
-/** The MessageBox's answer (`[string]` of its DialogResult). Pure. */
+/** The Windows question's answer (what WINDOWS_ASK_PS wrote). Pure. */
 export function windowsAnswer(r: string): RetryAnswer {
   const a = r.trim();
-  return a === "Retry" || a === "Yes"
-    ? "retry"
-    : a === "No"
-    ? "previous"
-    : "quit";
+  return a === "retry" ? "retry" : a === "previous" ? "previous" : "quit";
 }
 
 /** zenity / yad's question: Retry, Quit, and the third button when given.
@@ -127,7 +303,8 @@ export function progressLine(fraction: number | null, detail: string): string {
   return `${pct}\t${detail.replace(/[\r\n\t]+/g, " ")}`;
 }
 
-/** "Downloading Electron 44.7.0 — 45 / 110 MB". Pure. */
+/** "Downloading Electron 44.9.0 — first start only · 45 / 110 MB": what
+ *  comes down, that later starts skip it, and how far it is. Pure. */
 export function downloadDetail(
   version: string,
   got: number,
@@ -135,8 +312,10 @@ export function downloadDetail(
 ): string {
   const mb = (n: number) => (n / 1e6).toFixed(0);
   return total > 0
-    ? `Downloading Electron ${version} — ${mb(got)} / ${mb(total)} MB`
-    : `Downloading Electron ${version} — ${mb(got)} MB`;
+    ? `Downloading Electron ${version} — first start only · ${mb(got)} / ${
+      mb(total)
+    } MB`
+    : `Downloading Electron ${version} — first start only · ${mb(got)} MB`;
 }
 
 // ── shared plumbing ────────────────────────────────────────────────────────
@@ -157,6 +336,9 @@ function fileProgress(
   alive: () => boolean,
   stop: () => void,
   exited?: Promise<unknown>,
+  /** The splash's MOVE file: `[x,y,w,h]` of the app's window, read by the
+   *  helper each tick (`move`). Absent: the helper cannot move. */
+  moveFile?: { path: string; physical: boolean },
 ): ProgressDialog {
   let closing = false;
   let resolveCancel!: () => void;
@@ -198,6 +380,20 @@ function fileProgress(
   }, 25);
   return {
     shown,
+    ...(moveFile
+      ? {
+        move(at: WindowAt) {
+          try {
+            Deno.writeTextFileSync(
+              moveFile.path,
+              moveArg(at, moveFile.physical),
+            );
+          } catch {
+            // aio-ok: a skipped move — the window's next one writes again
+          }
+        },
+      }
+      : {}),
     update(fraction, detail) {
       try {
         Deno.writeTextFileSync(file, progressLine(fraction, detail));
@@ -241,15 +437,17 @@ export const WINDOWS_PROGRESS_PS = `
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+${PS_DPI}
 [System.Windows.Forms.Application]::EnableVisualStyles()
+${PS_LOOK}
 $f = New-Object System.Windows.Forms.Form
 $f.Text = $env:AIO_DLG_TITLE
-$f.ClientSize = New-Object System.Drawing.Size(460, 116)
+$f.ClientSize = New-Object System.Drawing.Size(460, 138)
 $f.FormBorderStyle = 'FixedDialog'
 $f.MaximizeBox = $false
 $f.MinimizeBox = $false
-$f.StartPosition = 'CenterScreen'
 $f.ShowInTaskbar = $true
+if ($bg) { $f.BackColor = $bg; $f.ForeColor = $fg }
 if ($env:AIO_DLG_ICON) {
   try { $f.Icon = [System.Drawing.Icon]::ExtractAssociatedIcon($env:AIO_DLG_ICON) } catch {}
 }
@@ -261,19 +459,48 @@ $h.Font = New-Object System.Drawing.Font($h.Font.FontFamily, 10, [System.Drawing
 $d = New-Object System.Windows.Forms.Label
 $d.Location = New-Object System.Drawing.Point(18, 42)
 $d.Size = New-Object System.Drawing.Size(424, 20)
-$b = New-Object System.Windows.Forms.ProgressBar
-$b.Location = New-Object System.Drawing.Point(18, 72)
-$b.Size = New-Object System.Drawing.Size(424, 24)
-$b.Style = 'Marquee'
-$b.MarqueeAnimationSpeed = 30
-$f.Controls.AddRange(@($h, $d, $b))
+# The bar: a track and its fill (Windows Forms' own bar takes no colours).
+$tr = New-Object System.Windows.Forms.Panel
+$tr.Location = New-Object System.Drawing.Point(18, 74)
+$tr.Size = New-Object System.Drawing.Size(424, 6)
+$tr.BackColor = $(if ($bg) { $trk } else { [System.Drawing.SystemColors]::ControlLight })
+$fl = New-Object System.Windows.Forms.Panel
+$fl.Size = New-Object System.Drawing.Size(127, 6)
+$fl.BackColor = $(if ($bg) { $barc } else { [System.Drawing.SystemColors]::Highlight })
+$tr.Controls.Add($fl)
+# Cancel, the one button: it ends the download, as the window's close does.
+$c = New-Object System.Windows.Forms.Button
+$c.Text = 'Cancel'
+$c.Location = New-Object System.Drawing.Point(354, 96)
+$c.Size = New-Object System.Drawing.Size(88, 26)
+AioButton $c
+$c.Add_Click({ $f.Close() })
+$f.CancelButton = $c
+# electron.downloadWindow.cancel false: no button (the close still cancels).
+$c.Visible = $env:AIO_DLG_CANCEL -ne '0'
+$f.Controls.AddRange(@($h, $d, $tr, $c))
+# Centred where the app's window opens (splash-place.ts: PS_PLACE), at that
+# monitor's scale.
+${PS_PLACE}
+$T = $null
+if ($env:AIO_DLG_TARGET) { $T = $env:AIO_DLG_TARGET | ConvertFrom-Json }
+$K = AioScaleFor $T
+if ($K -ne 1) { $f.Scale((New-Object System.Drawing.SizeF([single]$K, [single]$K))) }
+$TW = $tr.Width
+$o = AioPlace $T $f.Width $f.Height (AioAll) (AioPrimary)
+$f.StartPosition = 'Manual'
+$f.Location = New-Object System.Drawing.Point($o[0], $o[1])
+$script:pulse = $true
 $t = New-Object System.Windows.Forms.Timer
-$t.Interval = 200
+$t.Interval = 50
 $script:n = 0
 $t.Add_Tick({
-  # The app that opened this window is gone: nobody will close it.
   $script:n++
-  if ($script:n % 10 -eq 0 -and -not (Get-Process -Id ([int]$env:AIO_DLG_PARENT) -ErrorAction SilentlyContinue)) {
+  # Unknown size: a segment runs along the track.
+  if ($script:pulse) { $fl.Left = (($script:n * 12 * $K) % ($TW + $fl.Width)) - $fl.Width }
+  if ($script:n % 4 -ne 0) { return }
+  # The app that opened this window is gone: nobody will close it.
+  if ($script:n % 40 -eq 0 -and -not (Get-Process -Id ([int]$env:AIO_DLG_PARENT) -ErrorAction SilentlyContinue)) {
     $t.Stop(); $f.Tag = 'done'; $f.Close(); return
   }
   $s = $null
@@ -281,10 +508,12 @@ $t.Add_Tick({
   if ($s -eq 'close') { $t.Stop(); $f.Tag = 'done'; $f.Close(); return }
   $p = $s.Split([char]9, 2)
   if ($p.Length -lt 2) { return }
-  $n = 0
-  if ([int]::TryParse($p[0], [ref]$n) -and $n -ge 0) {
-    $b.Style = 'Continuous'; $b.Value = [Math]::Min(100, $n)
-  } else { $b.Style = 'Marquee' }
+  $k = 0
+  if ([int]::TryParse($p[0], [ref]$k) -and $k -ge 0) {
+    $script:pulse = $false
+    $fl.Left = 0
+    $fl.Width = [int]($TW * [Math]::Min(100, $k) / 100)
+  } elseif (-not $script:pulse) { $script:pulse = $true; $fl.Width = [int]($TW * 0.3) }
   $d.Text = $p[1]
 })
 $t.Start()
@@ -296,109 +525,265 @@ $f.Add_Shown({
 if ($f.Tag -eq 'done') { exit 0 } else { exit 3 }
 `;
 
-/** The Retry / Quit box (AIO_DLG_BUTTONS: RetryCancel, or YesNoCancel with a
- *  third answer). Writes its answer to AIO_DLG_FILE. */
+/** The Retry / Quit question: the message and its buttons (Quit, the
+ *  third answer when AIO_DLG_PREVIOUS names it, Retry), centred where the
+ *  app's window opens (AIO_DLG_TARGET, PS_PLACE). Writes `retry`,
+ *  `previous` or `quit` (also for its close button) to AIO_DLG_FILE. */
 export const WINDOWS_ASK_PS = `
+$ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
-$r = [System.Windows.Forms.MessageBox]::Show($env:AIO_DLG_TEXT, $env:AIO_DLG_TITLE, $env:AIO_DLG_BUTTONS, 'Error')
-[IO.File]::WriteAllText($env:AIO_DLG_FILE, [string]$r)
+Add-Type -AssemblyName System.Drawing
+${PS_DPI}
+[System.Windows.Forms.Application]::EnableVisualStyles()
+${PS_PLACE}
+${PS_LOOK}
+$f = New-Object System.Windows.Forms.Form
+$f.Text = $env:AIO_DLG_TITLE
+$f.FormBorderStyle = 'FixedDialog'
+$f.MaximizeBox = $false
+$f.MinimizeBox = $false
+$f.ShowInTaskbar = $true
+if ($bg) { $f.BackColor = $bg; $f.ForeColor = $fg }
+$m = New-Object System.Windows.Forms.Label
+$m.Text = $env:AIO_DLG_TEXT
+$m.Location = New-Object System.Drawing.Point(18, 18)
+$m.MaximumSize = New-Object System.Drawing.Size(424, 0)
+$m.AutoSize = $true
+$f.Controls.Add($m)
+$by = $m.Location.Y + $m.PreferredSize.Height + 18
+$names = @(,@('Quit', 'quit'))
+if ($env:AIO_DLG_PREVIOUS) { $names += ,@($env:AIO_DLG_PREVIOUS, 'previous') }
+$names += ,@('Retry', 'retry')
+$x = 442
+for ($i = $names.Count - 1; $i -ge 0; $i--) {
+  $b = New-Object System.Windows.Forms.Button
+  $b.Text = $names[$i][0]
+  $b.Tag = $names[$i][1]
+  $b.AutoSize = $true
+  $b.MinimumSize = New-Object System.Drawing.Size(88, 26)
+  $w = [Math]::Max(88, $b.PreferredSize.Width)
+  $x -= $w
+  $b.Location = New-Object System.Drawing.Point($x, $by)
+  $x -= 8
+  AioButton $b
+  $b.Add_Click({ $f.Tag = $this.Tag; $f.Close() })
+  $f.Controls.Add($b)
+  if ($b.Tag -eq 'retry') { $f.AcceptButton = $b }
+  if ($b.Tag -eq 'quit') { $f.CancelButton = $b }
+}
+$f.ClientSize = New-Object System.Drawing.Size(460, ($by + 26 + 18))
+$T = $null
+if ($env:AIO_DLG_TARGET) { $T = $env:AIO_DLG_TARGET | ConvertFrom-Json }
+# At the scale of the monitor it opens on.
+$K = AioScaleFor $T
+if ($K -ne 1) { $f.Scale((New-Object System.Drawing.SizeF([single]$K, [single]$K))) }
+$o = AioPlace $T $f.Width $f.Height (AioAll) (AioPrimary)
+$f.StartPosition = 'Manual'
+$f.Location = New-Object System.Drawing.Point($o[0], $o[1])
+$f.Add_Shown({ $f.Activate() })
+[void]$f.ShowDialog()
+$a = $(if ($f.Tag) { [string]$f.Tag } else { 'quit' })
+[IO.File]::WriteAllText($env:AIO_DLG_FILE, $a)
 `;
 
 /** The splash (`build.splash`): borderless, the image IS the window (its
- *  size, centred), on top, no taskbar entry; the text and a small bar drawn
- *  over its lower part. Reads AIO_SPL_* and the progress file: a percent of
+ *  size, or `size` with the image fitted), placed where the app's window
+ *  will open (`position`), on top, no taskbar entry; the text and a small
+ *  bar over its lower part (or in a strip below the image). Reads AIO_SPL_*
+ *  (AIO_SPL_LOOK: `helperLook`, JSON) and the progress file: a percent of
  *  0..100 shows the bar (and a ✕ that cancels the download), below 0 hides
  *  it; `close` fades it out. The ack says what was drawn. */
 export const WINDOWS_SPLASH_PS = `
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+${PS_DPI}
+$L = $env:AIO_SPL_LOOK | ConvertFrom-Json
+# Every logical size at the scale of the monitor it opens on (the pointer's
+# for position "pointer").
+$K = $(if ($L.mode -eq 'window') { AioScaleFor $L.target } elseif ($L.mode -eq 'pointer') { $q = [System.Windows.Forms.Cursor]::Position; AioScaleAt $q.X $q.Y } else { AioScaleFor $null })
 $dark = $false
 try {
   $dark = (Get-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize' -Name AppsUseLightTheme).AppsUseLightTheme -eq 0
 } catch {}
 $c = $(if ($dark) { $env:AIO_SPL_DARK } else { $env:AIO_SPL_LIGHT }).Split(' ')
 $fg = [System.Drawing.ColorTranslator]::FromHtml($c[1])
+$bg = [System.Drawing.ColorTranslator]::FromHtml($c[0])
 $clear = [System.Drawing.Color]::Transparent
 $img = [System.Drawing.Image]::FromFile($env:AIO_SPL_IMAGE)
 $sc = [int]$env:AIO_SPL_SCALE
-$FW = [int]($img.Width / $sc)
-$FH = [int]($img.Height / $sc)
-$f = New-Object System.Windows.Forms.Form
+$FW = [int]($img.Width / $sc * $K)
+$FH = [int]($img.Height / $sc * $K)
+if ($L.sized) { $FW = [int]($L.w * $K); $FH = [int]($L.h * $K) }
+function RoundPath($x, $y, $w, $h, $r) {
+  $p = New-Object System.Drawing.Drawing2D.GraphicsPath
+  $d = [Math]::Min([Math]::Min($w, $h), 2 * $r)
+  $p.AddArc($x, $y, $d, $d, 180, 90)
+  $p.AddArc($x + $w - $d, $y, $d, $d, 270, 90)
+  $p.AddArc($x + $w - $d, $y + $h - $d, $d, $d, 0, 90)
+  $p.AddArc($x, $y + $h - $d, $d, $d, 90, 90)
+  $p.CloseFigure()
+  return $p
+}
+# Above every normal window (the app's, shown under it) and never activated:
+# the focus stays where it is and goes to the app's window when it shows.
+Add-Type -WarningAction SilentlyContinue -ReferencedAssemblies System.Windows.Forms -TypeDefinition @"
+public class AioSplashForm : System.Windows.Forms.Form {
+  protected override bool ShowWithoutActivation { get { return true; } }
+  protected override System.Windows.Forms.CreateParams CreateParams {
+    get { var p = base.CreateParams; p.ExStyle |= 0x08000008; return p; }
+  }
+}
+"@
+$f = New-Object AioSplashForm
 $f.Text = $env:AIO_SPL_TITLE
 $f.FormBorderStyle = 'None'
-$f.StartPosition = 'CenterScreen'
+$f.StartPosition = 'Manual'
 $f.ShowInTaskbar = $false
 $f.TopMost = $true
-$f.BackColor = [System.Drawing.ColorTranslator]::FromHtml($c[0])
-$f.ClientSize = New-Object System.Drawing.Size($FW, $FH)
-$f.BackgroundImage = $img
-$f.BackgroundImageLayout = 'Stretch'
+$f.BackColor = $bg
 $bp = 0
 if ([single]$env:AIO_SPL_BAR -gt 0) {
-  $g = $f.CreateGraphics()
-  $bp = [int][Math]::Max(2, [Math]::Round([single]$env:AIO_SPL_BAR * $g.DpiY / 72))
-  $g.Dispose()
+  if ($L.barHeight) { $bp = [int]($L.barHeight * $K) } else {
+    $bp = [int][Math]::Max(2, [Math]::Round([single]$env:AIO_SPL_BAR * 96 * $K / 72))
+  }
 }
-$yb = $FH - 18 - $bp
+$side = [int]($L.side * $K)
+$bottom = [int]($L.bottom * $K)
+$rad = [int]($L.radius * $K)
 $d = $null
+$dh = 0
 if ($env:AIO_SPL_HASTEXT -eq '1') {
   $fam = $(if ($env:AIO_SPL_FONT) { $env:AIO_SPL_FONT } else { [System.Drawing.SystemFonts]::MessageBoxFont.FontFamily.Name })
   $st = $(if ($env:AIO_SPL_BOLD -eq '1') { [System.Drawing.FontStyle]::Bold } else { [System.Drawing.FontStyle]::Regular })
   $d = New-Object System.Windows.Forms.Label
-  $d.Font = New-Object System.Drawing.Font($fam, [single]$env:AIO_SPL_SIZE, $st)
+  # Points at the monitor's scale, in pixels: the process's own DPI is not
+  # the monitor's on a mixed-scale desktop.
+  $d.Font = New-Object System.Drawing.Font($fam, [single]([single]$env:AIO_SPL_SIZE * 96 / 72 * $K), $st, [System.Drawing.GraphicsUnit]::Pixel)
   $d.ForeColor = $fg
   $d.BackColor = $clear
   $d.Text = $env:AIO_SPL_TEXT
+  $d.TextAlign = $(if ($L.align -eq 'center') { 'TopCenter' } elseif ($L.align -eq 'right') { 'TopRight' } else { 'TopLeft' })
   $dh = $d.Font.Height + 4
-  $d.Size = New-Object System.Drawing.Size(($FW - 48), $dh)
-  $d.Location = New-Object System.Drawing.Point(24, ($(if ($bp -gt 0) { $yb - 8 } else { $FH - 18 }) - $dh))
+}
+# Below the image: a strip as tall as what it holds.
+$TH = $FH
+if ($L.below -and $d) {
+  $TH = $FH + 8 + $dh + $bottom + $(if ($bp -gt 0 -and -not $L.barEdge) { 8 + $bp } else { 0 })
+}
+$f.ClientSize = New-Object System.Drawing.Size($FW, $TH)
+if ($L.sized -or $TH -ne $FH) {
+  # The image fitted into its box (cover: cropped; contain: whole, on the
+  # background), the box at the window's top.
+  $bm = New-Object System.Drawing.Bitmap($FW, $TH)
+  $gr = [System.Drawing.Graphics]::FromImage($bm)
+  $gr.Clear($bg)
+  $gr.InterpolationMode = 'HighQualityBicubic'
+  $iw = $img.Width / $sc * $K
+  $ih = $img.Height / $sc * $K
+  $k = $(if (-not $L.sized) { 1 } elseif ($L.fit -eq 'contain') { [Math]::Min($FW / $iw, $FH / $ih) } else { [Math]::Max($FW / $iw, $FH / $ih) })
+  $dw = $iw * $k
+  $dhh = $ih * $k
+  $gr.SetClip((New-Object System.Drawing.RectangleF(0, 0, $FW, $FH)))
+  $gr.DrawImage($img, (New-Object System.Drawing.RectangleF((($FW - $dw) / 2), (($FH - $dhh) / 2), $dw, $dhh)))
+  $gr.Dispose()
+  $f.BackgroundImage = $bm
+  $f.BackgroundImageLayout = 'None'
+} else {
+  $f.BackgroundImage = $img
+  $f.BackgroundImageLayout = 'Stretch'
+}
+$yb = $(if ($L.barEdge) { $TH - $bp } else { $TH - $bottom - $bp })
+$bx = $(if ($L.barEdge) { 0 } else { $side })
+$bw = $(if ($L.barEdge) { $FW } else { $FW - 2 * $side })
+if ($d) {
+  $d.Size = New-Object System.Drawing.Size(($FW - 2 * $side), $dh)
+  $d.Location = New-Object System.Drawing.Point($side, ($(if ($bp -gt 0 -and -not $L.barEdge) { $yb - 8 } else { $TH - $bottom }) - $dh))
   $f.Controls.Add($d)
 }
+if ($rad -gt 0) { $f.Region = New-Object System.Drawing.Region((RoundPath 0 0 $FW $TH $rad)) }
+if ($L.border) {
+  $bpen = New-Object System.Drawing.Pen([System.Drawing.ColorTranslator]::FromHtml($L.border), 1)
+  $f.Add_Paint({
+    param($s, $e)
+    if ($rad -gt 0) { $e.Graphics.SmoothingMode = 'AntiAlias'; $e.Graphics.DrawPath($bpen, (RoundPath 0 0 ($FW - 1) ($TH - 1) $rad)) }
+    else { $e.Graphics.DrawRectangle($bpen, 0, 0, $FW - 1, $TH - 1) }
+  })
+}
+$br = $(if ($null -ne $L.barRadius) { [int]($L.barRadius * $K) } else { [int]($bp / 2) })
+function Rounded($ctl) {
+  if ($br -gt 0 -and $ctl.Width -gt 0) { $ctl.Region = New-Object System.Drawing.Region((RoundPath 0 0 $ctl.Width $ctl.Height $br)) }
+}
 $tr = $null
+$xb = $null
 if ($bp -gt 0) {
   $tr = New-Object System.Windows.Forms.Panel
   $tr.BackColor = [System.Drawing.ColorTranslator]::FromHtml($c[3])
-  $tr.Location = New-Object System.Drawing.Point(24, $yb)
-  $tr.Size = New-Object System.Drawing.Size(($FW - 48), $bp)
+  $tr.Location = New-Object System.Drawing.Point($bx, $yb)
+  $tr.Size = New-Object System.Drawing.Size($bw, $bp)
   $tr.Visible = $false
+  Rounded $tr
   $fl = New-Object System.Windows.Forms.Panel
   $fl.BackColor = [System.Drawing.ColorTranslator]::FromHtml($c[2])
   $fl.Size = New-Object System.Drawing.Size(0, $bp)
   $tr.Controls.Add($fl)
   $f.Controls.Add($tr)
-  # During a download, this cancels it (as a dialog's close button does).
-  $xb = New-Object System.Windows.Forms.Label
-  $xb.Text = [string][char]0x2715
-  $xb.ForeColor = $fg
-  $xb.BackColor = $clear
-  $xb.AutoSize = $true
-  $xb.Cursor = [System.Windows.Forms.Cursors]::Hand
-  $xb.Location = New-Object System.Drawing.Point(($FW - 26), 6)
-  $xb.Visible = $false
-  $xb.Add_Click({ $f.Close() })
-  $f.Controls.Add($xb)
+  if ($L.cancel) {
+    # During a download, this cancels it (as a dialog's close button does).
+    $xb = New-Object System.Windows.Forms.Label
+    $xb.Text = [string][char]0x2715
+    $xb.ForeColor = $fg
+    $xb.BackColor = $clear
+    $xb.AutoSize = $true
+    $xb.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $xb.Location = New-Object System.Drawing.Point(($FW - [int](26 * $K)), [int](6 * $K))
+    $xb.Visible = $false
+    $xb.Add_Click({ $f.Close() })
+    $f.Controls.Add($xb)
+  }
 }
+# Where the app's window opens (splash-place.ts, the same rule: PS_PLACE);
+# pointer: the centre of the screen under it.
+${PS_PLACE}
+$p = AioPrimary
+$T = $null
+if ($L.mode -eq 'window') { $T = $L.target }
+elseif ($L.mode -eq 'pointer') { $p = [System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position).WorkingArea }
+$o = AioPlace $T $FW $TH (AioAll) $p
+$x = $o[0]
+$y = $o[1]
+$f.Location = New-Object System.Drawing.Point($x, $y)
 function Fade {
-  for ($o = 0.85; $o -gt 0.05; $o -= 0.15) {
-    $f.Opacity = $o
+  $n = [int][Math]::Round([int]$L.fadeMs / 16)
+  for ($j = 0; $j -lt $n; $j++) {
+    $f.Opacity = 0.85 * ($n - $j) / $n
     [System.Windows.Forms.Application]::DoEvents()
     Start-Sleep -Milliseconds 16
   }
 }
 $script:n = 0
-$t = New-Object System.Windows.Forms.Timer
-$t.Interval = 100
-$t.Add_Tick({
+$t2 = New-Object System.Windows.Forms.Timer
+$t2.Interval = 100
+$t2.Add_Tick({
   $script:n++
   # The app that opened this window is gone: nobody will close it.
   if ($script:n % 30 -eq 0 -and -not (Get-Process -Id ([int]$env:AIO_SPL_PARENT) -ErrorAction SilentlyContinue)) {
-    $t.Stop(); $f.Tag = 'done'; $f.Close(); return
+    $t2.Stop(); $f.Tag = 'done'; $f.Close(); return
   }
-  $s = $null
-  try { $s = [IO.File]::ReadAllText($env:AIO_SPL_FILE) } catch { return }
-  if ($s -eq 'close') { $t.Stop(); Fade; $f.Tag = 'done'; $f.Close(); return }
-  $p = $s.Split([char]9, 2)
+  # The app's window, where it really is: the splash moves onto it.
+  if ($env:AIO_SPL_AT) {
+    $a2 = $null
+    try { $a2 = [IO.File]::ReadAllText($env:AIO_SPL_AT) } catch {}
+    if ($a2 -and $a2 -ne $script:at) {
+      $script:at = $a2
+      $o2 = AioPlace ($a2 | ConvertFrom-Json) $f.Width $f.Height (AioAll) (AioPrimary)
+      $f.Location = New-Object System.Drawing.Point($o2[0], $o2[1])
+    }
+  }
+  $s2 = $null
+  try { $s2 = [IO.File]::ReadAllText($env:AIO_SPL_FILE) } catch { return }
+  if ($s2 -eq 'close') { $t2.Stop(); Fade; $f.Tag = 'done'; $f.Close(); return }
+  $p = $s2.Split([char]9, 2)
   if ($p.Length -lt 2) { return }
   if ($d) { $d.Text = $p[1] }
   if ($tr) {
@@ -406,19 +791,21 @@ $t.Add_Tick({
     [void][int]::TryParse($p[0], [ref]$k)
     if ($k -ge 0) {
       $fl.Width = [int]($tr.Width * [Math]::Min(100, $k) / 100)
-      $tr.Visible = $true; $xb.Visible = $true
-    } else { $tr.Visible = $false; $xb.Visible = $false }
+      Rounded $fl
+      $tr.Visible = $true; if ($xb) { $xb.Visible = $true }
+    } else { $tr.Visible = $false; if ($xb) { $xb.Visible = $false } }
   }
 })
-$t.Start()
+$t2.Start()
 $f.Add_Shown({
-  $what = "shown splash size=$($FW)x$($FH) scale=$sc dark=$([int]$dark) text=$([int][bool]$d) barpx=$bp colors=$($c -join ',')"
+  $what = "shown splash size=$($FW)x$($TH) scale=$sc dark=$([int]$dark) text=$([int][bool]$d) barpx=$bp at=$($f.Left),$($f.Top) colors=$($c -join ',')"
   try { [IO.File]::WriteAllText($env:AIO_SPL_ACK, $what) } catch {}
 })
 # Closed while PowerShell was starting (the app stopped, or its start failed —
 # a ready app waits for this window): never shown.
 try { if ([IO.File]::ReadAllText($env:AIO_SPL_FILE) -eq 'close') { exit 0 } } catch {}
-[void]$f.ShowDialog()
+# A message loop, not a modal show: that activates the window, whatever it asks.
+[System.Windows.Forms.Application]::Run($f)
 if ($f.Tag -eq 'done') { exit 0 } else { exit 3 }
 `;
 
@@ -440,21 +827,46 @@ function powershellExe(): string {
   return join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 }
 
+/** What PowerShell is started with: a bootstrap that reads the script from
+ *  `$env:AIO_PS_SCRIPT` and runs it as a script block. Never the script
+ *  itself: `-EncodedCommand` is 2.7× a script's length and Windows ends a
+ *  command line at 32767 characters (CreateProcessW error 206 — the splash's
+ *  script crossed it in 1.0.23's development, and no splash showed). A script
+ *  block, not `-File`, so the execution policy treats it as it treated
+ *  `-EncodedCommand`. The same length whatever the script. Pure. */
+export function powershellCommand(exe: string): string {
+  return `"${exe}" -NoProfile -NonInteractive -ExecutionPolicy Bypass ` +
+    `-WindowStyle Hidden -EncodedCommand ${
+      encodedCommand(
+        "& ([ScriptBlock]::Create([IO.File]::ReadAllText($env:AIO_PS_SCRIPT)))",
+      )
+    }`;
+}
+
+/** Starts `script` (written to `dir`, which its caller owns and removes). */
 function startPowershell(
   script: string,
   env: Record<string, string>,
+  dir: string,
 ): number {
-  const exe = powershellExe();
-  const cmd = `"${exe}" -NoProfile -NonInteractive -ExecutionPolicy Bypass ` +
-    `-WindowStyle Hidden -EncodedCommand ${encodedCommand(script)}`;
-  const pid = startWindowless(cmd, { ...Deno.env.toObject(), ...env });
+  const path = join(dir, "dialog.ps1");
+  Deno.writeTextFileSync(path, script);
+  const pid = startWindowless(powershellCommand(powershellExe()), {
+    ...Deno.env.toObject(),
+    ...env,
+    AIO_PS_SCRIPT: path,
+  });
   if (typeof pid === "string") {
     throw new Error(`could not start PowerShell for the dialog: ${pid}`);
   }
   return pid;
 }
 
-const windowsBackend: DialogBackend = {
+const windowsBackend = (
+  target: Bounds | null,
+  colors: DialogColors | null,
+  cancel = true,
+): DialogBackend => ({
   name: "windows-forms",
   async progress(title, heading) {
     const dir = await tempDir();
@@ -468,7 +880,11 @@ const windowsBackend: DialogBackend = {
       AIO_DLG_ACK: ack,
       AIO_DLG_ICON: Deno.execPath(),
       AIO_DLG_PARENT: String(Deno.pid),
-    });
+      AIO_DLG_TARGET: placeArg(target),
+      AIO_DLG_LIGHT: lookArg(colors?.light),
+      AIO_DLG_DARK: lookArg(colors?.dark),
+      AIO_DLG_CANCEL: cancel ? "1" : "0",
+    }, dir);
     return fileProgress(file, dir, ack, () => isProcessAlive(pid), () => {
       try {
         Deno.kill(pid, "SIGKILL");
@@ -483,10 +899,13 @@ const windowsBackend: DialogBackend = {
     try {
       const pid = startPowershell(WINDOWS_ASK_PS, {
         AIO_DLG_TITLE: title,
-        AIO_DLG_TEXT: windowsAskText(message, previous),
-        AIO_DLG_BUTTONS: previous ? "YesNoCancel" : "RetryCancel",
+        AIO_DLG_TEXT: message,
+        AIO_DLG_PREVIOUS: previous ?? "",
         AIO_DLG_FILE: file,
-      });
+        AIO_DLG_TARGET: placeArg(target),
+        AIO_DLG_LIGHT: lookArg(colors?.light),
+        AIO_DLG_DARK: lookArg(colors?.dark),
+      }, dir);
       await waitWhile(() => isProcessAlive(pid), 24 * 3600_000);
       return windowsAnswer(await Deno.readTextFile(file).catch(() => ""));
     } finally {
@@ -495,19 +914,24 @@ const windowsBackend: DialogBackend = {
       });
     }
   },
-};
+});
 
 // ── macOS ──────────────────────────────────────────────────────────────────
 
 /** The progress window, JavaScript for Automation over Cocoa. argv: title,
  *  heading, progress file, icon (may be ""), ack file (written once shown),
- *  the app's pid (the window closes itself once that process is gone). */
+ *  the app's pid (the window closes itself once that process is gone), where
+ *  the app's window opens (`placeArg`; "" — the primary's centre). */
 export const MAC_PROGRESS_JXA = `
 ObjC.import('Cocoa');
 ObjC.import('stdlib');
+${MAC_PLACE_JS}
+${MAC_LOOK_JS}
 function run(argv) {
   const title = argv[0], heading = argv[1], file = argv[2], icon = argv[3], ack = argv[4];
   const parent = argv[5];
+  const look = aioLook(argv[7] || '', argv[8] || '');
+  const withCancel = argv[9] !== '0';
   let ticks = 0;
   const app = $.NSApplication.sharedApplication;
   app.setActivationPolicy($.NSApplicationActivationPolicyRegular);
@@ -515,35 +939,49 @@ function run(argv) {
     const img = $.NSImage.alloc.initWithContentsOfFile(icon);
     if (img && !img.isNil()) app.applicationIconImage = img;
   }
-  const W = 460, H = 124;
+  const W = 460, H = 150, BW = W - 40;
   const win = $.NSWindow.alloc.initWithContentRectStyleMaskBackingDefer(
     $.NSMakeRect(0, 0, W, H),
     $.NSWindowStyleMaskTitled | $.NSWindowStyleMaskClosable,
     $.NSBackingStoreBuffered, false);
   win.title = title;
   win.releasedWhenClosed = false;
+  if (look) win.backgroundColor = look.bg;
   const head = $.NSTextField.labelWithString(heading);
   head.font = $.NSFont.boldSystemFontOfSize(13);
-  head.frame = $.NSMakeRect(20, H - 40, W - 40, 20);
+  head.frame = $.NSMakeRect(20, H - 40, BW, 20);
   const det = $.NSTextField.labelWithString('');
-  det.frame = $.NSMakeRect(20, H - 66, W - 40, 18);
-  const bar = $.NSProgressIndicator.alloc.initWithFrame($.NSMakeRect(20, 22, W - 40, 20));
-  bar.indeterminate = true;
-  bar.minValue = 0;
-  bar.maxValue = 100;
-  bar.startAnimation(null);
-  win.contentView.addSubview(head);
-  win.contentView.addSubview(det);
-  win.contentView.addSubview(bar);
-  win.center;
+  det.frame = $.NSMakeRect(20, H - 66, BW, 18);
+  if (look) { head.textColor = look.fg; det.textColor = look.fg; }
+  // The bar: a track and its fill, in the app's colours.
+  const track = aioBox(20, 64, BW, 6, look ? look.track : $.NSColor.quaternaryLabelColor);
+  const fill = aioBox(20, 64, BW * 0.3, 6, look ? look.bar : $.NSColor.controlAccentColor);
+  // Cancel — the one button: it ends the download, as the window's close does.
+  const cancel = $.NSButton.alloc.initWithFrame($.NSMakeRect(W - 20 - 88, 14, 88, 32));
+  cancel.title = 'Cancel';
+  cancel.bezelStyle = $.NSBezelStyleRounded;
+  cancel.setButtonType($.NSButtonTypePushOnPushOff);
+  cancel.keyEquivalent = '\\u001b';
+  // electron.downloadWindow.cancel false: no button (the close still cancels).
+  cancel.hidden = !withCancel;
+  for (const v of [head, det, track, fill, cancel]) win.contentView.addSubview(v);
+  // Centred where the app's window opens (splash-place.ts, the same source).
+  win.setFrameOrigin(aioPlace(argv[6] ? JSON.parse(argv[6]) : null, win.frame.size.width, win.frame.size.height));
   win.makeKeyAndOrderFront(null);
   app.activateIgnoringOtherApps(true);
   $('shown').writeToFileAtomicallyEncodingError(ack, true, $.NSUTF8StringEncoding, null);
+  let pulse = true;
   function tick() {
-    // Minimized or hidden (Cmd+H) is not closed.
+    // Minimized or hidden (Cmd+H) is not closed. Cancel is the close.
     if (!win.isVisible && !win.isMiniaturized && !app.isHidden) $.exit(3);
+    // JXA hands NSInteger back as a string ("1"), measured on macOS 14.
+    if (Number(cancel.state) === 1) $.exit(3);
+    ticks++;
+    // Unknown size: a segment runs along the track.
+    if (pulse) fill.frame = $.NSMakeRect(20 + ((ticks * 9) % (BW + BW * 0.3)) - BW * 0.3, 64, BW * 0.3, 6);
+    if (ticks % 4 !== 0) return;
     // The app that opened this window is gone: nobody will close it.
-    if (++ticks % 25 === 0 && parent) {
+    if (ticks % 100 === 0 && parent) {
       const k = $.NSTask.launchedTaskWithLaunchPathArguments('/bin/kill', ['-0', parent]);
       k.waitUntilExit;
       if (k.terminationStatus !== 0) $.exit(0);
@@ -555,18 +993,18 @@ function run(argv) {
     const i = str.indexOf('\\t');
     if (i < 0) return;
     const n = parseInt(str.slice(0, i), 10);
-    if (n >= 0) { bar.indeterminate = false; bar.doubleValue = Math.min(100, n); }
-    else { bar.indeterminate = true; bar.startAnimation(null); }
+    pulse = !(n >= 0);
+    if (!pulse) fill.frame = $.NSMakeRect(20, 64, Math.max(1, BW * Math.min(100, n) / 100), 6);
     det.stringValue = str.slice(i + 1);
   }
-  // The event loop, by hand: each turn waits up to 200 ms for an event, then
+  // The event loop, by hand: each turn waits up to 50 ms for an event, then
   // ticks. (An NSTimer needs a target from ObjC.registerSubclass, which never
   // returned on macOS 14 — measured: the window showed and never updated,
   // closed or noticed a Cancel.)
   app.finishLaunching;
   for (;;) {
     const ev = app.nextEventMatchingMaskUntilDateInModeDequeue(
-      $.NSEventMaskAny, $.NSDate.dateWithTimeIntervalSinceNow(0.2),
+      $.NSEventMaskAny, $.NSDate.dateWithTimeIntervalSinceNow(0.05),
       $.NSDefaultRunLoopMode, true);
     if (ev && !ev.isNil()) app.sendEvent(ev);
     tick();
@@ -575,21 +1013,27 @@ function run(argv) {
 `;
 
 /** The splash (`build.splash`) over Cocoa: borderless, the image IS the
- *  window (its point size: an @2x image is crisp on a Retina screen),
- *  centred, floating above other windows without taking focus and without
- *  a Dock icon; the text (with a soft shadow) and a small bar over its lower
- *  part. argv: title, text, has text (1/0), progress file, ack file, the
- *  app's pid, light colours, dark colours, image, scale, font family, size,
- *  bold (1/0), bar points (0 = none). Same file protocol as the Windows
+ *  window (its point size: an @2x image is crisp on a Retina screen; or
+ *  `size`, the image fitted), placed where the app's window will open
+ *  (`position`), floating above other windows without taking focus and
+ *  without a Dock icon; the text (with a soft shadow) and a small bar over
+ *  its lower part, or in a strip below the image. argv: title, text, has
+ *  text (1/0), progress file, ack file, the app's pid, light colours, dark
+ *  colours, image, scale, font family, size, bold (1/0), bar points (0 =
+ *  none), the look (`helperLook`, JSON). Same file protocol as the Windows
  *  splash; `close` fades it out. */
 export const MAC_SPLASH_JXA = `
 ObjC.import('Cocoa');
 ObjC.import('stdlib');
+${MAC_PLACE_JS}
 function run(argv) {
   const text = argv[1], hasText = argv[2] === '1', file = argv[3], ack = argv[4];
   const parent = argv[5], light = argv[6], dark = argv[7], image = argv[8];
   const scale = parseFloat(argv[9]), family = argv[10], size = parseFloat(argv[11]);
   const bold = argv[12] === '1', barPt = parseFloat(argv[13]);
+  const L = JSON.parse(argv[14]);
+  const atFile = argv[15] || '';
+  let lastAt = '';
   let ticks = 0;
   const app = $.NSApplication.sharedApplication;
   // An accessory: no Dock icon, no menu bar, and it never becomes active.
@@ -603,21 +1047,12 @@ function run(argv) {
   const img = $.NSImage.alloc.initWithContentsOfFile(image);
   if (!img || img.isNil()) $.exit(4);
   const rep = img.representations.objectAtIndex(0);
-  const W = Math.round(rep.pixelsWide / scale), H = Math.round(rep.pixelsHigh / scale);
-  img.size = $.NSMakeSize(W, H);
-  const win = $.NSWindow.alloc.initWithContentRectStyleMaskBackingDefer(
-    $.NSMakeRect(0, 0, W, H), $.NSWindowStyleMaskBorderless, $.NSBackingStoreBuffered, false);
-  win.releasedWhenClosed = false;
-  win.backgroundColor = hex(cs[0]);
-  win.hasShadow = true;
-  win.level = 3; // NSFloatingWindowLevel: above the app windows
-  const view = win.contentView;
-  const iv = $.NSImageView.alloc.initWithFrame($.NSMakeRect(0, 0, W, H));
-  iv.imageScaling = 1; // NSImageScaleAxesIndependently: the window has its size
-  iv.image = img;
-  view.addSubview(iv);
-  const yb = 18;
-  let label = null, track = null, fill = null, close = null;
+  const iw = Math.round(rep.pixelsWide / scale), ih = Math.round(rep.pixelsHigh / scale);
+  img.size = $.NSMakeSize(iw, ih);
+  const W = L.sized ? L.w : iw, H = L.sized ? L.h : ih;
+  const bp = barPt > 0 ? (L.barHeight || barPt) : 0;
+  const side = L.side, bottom = L.bottom, edge = L.barEdge;
+  let label = null, lh = 0;
   if (hasText) {
     let f = family ? $.NSFont.fontWithNameSize(family, size) : null;
     if (!f || f.isNil()) f = $.NSFont.systemFontOfSize(size);
@@ -625,54 +1060,130 @@ function run(argv) {
     label = $.NSTextField.labelWithString(text);
     label.font = f;
     label.textColor = hex(cs[1]);
-    const sh = $.NSShadow.alloc.init;
-    sh.shadowColor = $.NSColor.colorWithSRGBRedGreenBlueAlpha(0, 0, 0, 0.45);
-    sh.shadowOffset = $.NSMakeSize(0, -1);
-    sh.shadowBlurRadius = 2;
-    label.shadow = sh;
-    const lh = Math.ceil(label.fittingSize.height);
-    label.frame = $.NSMakeRect(24, (barPt > 0 ? yb + barPt + 8 : yb), W - 48, lh);
+    label.alignment = L.align === 'center' ? 2 : L.align === 'right' ? 1 : 0;
+    if (L.shadow) {
+      const sh = $.NSShadow.alloc.init;
+      sh.shadowColor = $.NSColor.colorWithSRGBRedGreenBlueAlpha(0, 0, 0, 0.45);
+      sh.shadowOffset = $.NSMakeSize(0, -1);
+      sh.shadowBlurRadius = 2;
+      label.shadow = sh;
+    }
+    lh = Math.ceil(label.fittingSize.height);
+  }
+  // Below the image: a strip as tall as what it holds.
+  const TH = L.below && label ? H + 8 + lh + bottom + (bp > 0 && !edge ? 8 + bp : 0) : H;
+  const win = $.NSWindow.alloc.initWithContentRectStyleMaskBackingDefer(
+    $.NSMakeRect(0, 0, W, TH), $.NSWindowStyleMaskBorderless, $.NSBackingStoreBuffered, false);
+  win.releasedWhenClosed = false;
+  win.backgroundColor = hex(cs[0]);
+  win.hasShadow = !!L.windowShadow;
+  win.level = 3; // NSFloatingWindowLevel: above the app windows
+  const view = win.contentView;
+  // Rounded corners and a border: no CGColor (a CGColorRef through the JXA
+  // bridge crashed osascript — measured), so the background and the border
+  // are NSBoxes, and the layer only clips.
+  const frameBox = (fillCol, border) => {
+    const b = $.NSBox.alloc.initWithFrame($.NSMakeRect(0, 0, W, TH));
+    b.boxType = 4; // NSBoxCustom
+    b.titlePosition = 0; // NSNoTitle
+    b.cornerRadius = L.radius;
+    b.fillColor = fillCol;
+    b.borderWidth = border ? 1 : 0;
+    if (border) b.borderColor = hex(border);
+    view.addSubview(b);
+  };
+  if (L.radius > 0) {
+    win.opaque = false;
+    win.backgroundColor = $.NSColor.clearColor;
+    view.wantsLayer = true;
+    view.layer.cornerRadius = L.radius;
+    view.layer.masksToBounds = true;
+    frameBox(hex(cs[0]), null);
+  }
+  if (!L.sized && TH === H) {
+    const iv = $.NSImageView.alloc.initWithFrame($.NSMakeRect(0, 0, W, H));
+    iv.imageScaling = 1; // NSImageScaleAxesIndependently: the window has its size
+    iv.image = img;
+    view.addSubview(iv);
+  } else {
+    // The image fitted into its box at the window's top.
+    const pic = $.NSView.alloc.initWithFrame($.NSMakeRect(0, TH - H, W, H));
+    pic.wantsLayer = true;
+    pic.layer.contents = img;
+    pic.layer.contentsGravity = !L.sized ? 'resize' : L.fit === 'contain' ? 'resizeAspect' : 'resizeAspectFill';
+    pic.layer.masksToBounds = true;
+    view.addSubview(pic);
+  }
+  const yb = edge ? 0 : bottom, bx = edge ? 0 : side, bw = edge ? W : W - 2 * side;
+  const br = L.barRadius === null ? bp / 2 : L.barRadius;
+  let track = null, fill = null, close = null;
+  if (label) {
+    label.frame = $.NSMakeRect(side, (bp > 0 && !edge ? yb + bp + 8 : bottom), W - 2 * side, lh);
     view.addSubview(label);
   }
   const box = (w, col) => {
-    const b = $.NSBox.alloc.initWithFrame($.NSMakeRect(24, yb, w, barPt));
+    const b = $.NSBox.alloc.initWithFrame($.NSMakeRect(bx, yb, w, bp));
     b.boxType = 4; // NSBoxCustom
     b.titlePosition = 0; // NSNoTitle
     b.borderWidth = 0;
-    b.cornerRadius = barPt / 2;
+    b.cornerRadius = br;
     b.fillColor = col;
     b.hidden = true;
     view.addSubview(b);
     return b;
   };
-  if (barPt > 0) {
-    track = box(W - 48, hex(cs[3]));
+  if (bp > 0) {
+    track = box(bw, hex(cs[3]));
     fill = box(0, hex(cs[2]));
-    // During a download, this cancels it. No target: its state is read below.
-    close = $.NSButton.alloc.initWithFrame($.NSMakeRect(W - 30, H - 28, 22, 22));
-    close.title = '\\u2715';
-    close.bordered = false;
-    close.setButtonType(1); // NSButtonTypePushOnPushOff: a click sets state 1
-    close.hidden = true;
-    view.addSubview(close);
+    if (L.cancel) {
+      // During a download, this cancels it. No target: its state is read below.
+      close = $.NSButton.alloc.initWithFrame($.NSMakeRect(W - 30, TH - 28, 22, 22));
+      close.title = '\\u2715';
+      close.bordered = false;
+      close.setButtonType(1); // NSButtonTypePushOnPushOff: a click sets state 1
+      close.hidden = true;
+      view.addSubview(close);
+    }
   }
-  win.center;
+  if (L.border) frameBox($.NSColor.clearColor, L.border); // over everything
+  // Where the app's window opens (splash-place.ts, its own source:
+  // MAC_PLACE_JS); pointer: the centre of the screen under it.
+  if (L.mode === 'pointer') {
+    const scr = $.NSScreen.screens;
+    const PH = scr.objectAtIndex(0).frame.size.height;
+    const m = $.NSEvent.mouseLocation;
+    const p = { x: m.x, y: PH - m.y };
+    let s = null, first = null;
+    for (let i = 0; i < scr.count; i++) {
+      const v = scr.objectAtIndex(i).visibleFrame;
+      const a = { x: v.origin.x, y: PH - (v.origin.y + v.size.height), width: v.size.width, height: v.size.height };
+      if (!first) first = a;
+      if (!s && p.x >= a.x && p.y >= a.y && p.x < a.x + a.width && p.y < a.y + a.height) s = a;
+    }
+    s = s || first;
+    const o = centredOn({ x: s.x, y: s.y, width: s.width, height: s.height, screen: s }, W, TH);
+    win.setFrameOrigin($.NSMakePoint(o.x, PH - (o.y + TH)));
+  } else win.setFrameOrigin(aioPlace(L.mode === 'window' ? L.target : null, W, TH));
+  // Where it landed, in Electron's coordinates (the ack says it).
+  const PH0 = $.NSScreen.screens.objectAtIndex(0).frame.size.height;
+  const X = win.frame.origin.x, Y = PH0 - (win.frame.origin.y + win.frame.size.height);
   // Closed while the helper was starting (the app stopped, or its start
   // failed — a ready app waits for this window): never shown.
   const pre = $.NSString.stringWithContentsOfFileEncodingError(file, $.NSUTF8StringEncoding, null);
   if (pre && !pre.isNil() && pre.js === 'close') $.exit(0);
   win.orderFrontRegardless; // shown, not activated: focus stays where it is
-  $('shown splash size=' + W + 'x' + H + ' scale=' + scale + ' dark=' + (isDark ? 1 : 0) +
-    ' text=' + (hasText ? 1 : 0) + ' barpt=' + barPt + ' colors=' + cs.join(','))
+  $('shown splash size=' + W + 'x' + TH + ' scale=' + scale + ' dark=' + (isDark ? 1 : 0) +
+    ' text=' + (hasText ? 1 : 0) + ' barpt=' + bp + ' at=' + X + ',' + Y + ' colors=' + cs.join(','))
     .writeToFileAtomicallyEncodingError(ack, true, $.NSUTF8StringEncoding, null);
-  const turn = (s) => {
+  const turn = (sec) => {
     const ev = app.nextEventMatchingMaskUntilDateInModeDequeue(
-      $.NSEventMaskAny, $.NSDate.dateWithTimeIntervalSinceNow(s),
+      $.NSEventMaskAny, $.NSDate.dateWithTimeIntervalSinceNow(sec),
       $.NSDefaultRunLoopMode, true);
     if (ev && !ev.isNil()) app.sendEvent(ev);
   };
   const fade = () => {
-    for (let a = 0.85; a > 0.05; a -= 0.15) { win.alphaValue = a; win.displayIfNeeded; turn(0.016); }
+    const n = Math.round(L.fadeMs / 16);
+    for (let j = 0; j < n; j++) { win.alphaValue = 0.85 * (n - j) / n; win.displayIfNeeded; turn(0.016); }
     win.orderOut(null);
   };
   app.finishLaunching;
@@ -680,16 +1191,25 @@ function run(argv) {
   // 14 — measured): each turn waits up to 100 ms for an event, then ticks.
   for (;;) {
     turn(0.1);
-    if (close && close.state === 1) $.exit(3);
+    // JXA hands NSInteger back as a string ("1"), measured on macOS 14.
+    if (close && Number(close.state) === 1) $.exit(3);
+    // The app's window, where it really is: the splash moves onto it.
+    if (atFile) {
+      const av = $.NSString.stringWithContentsOfFileEncodingError(atFile, $.NSUTF8StringEncoding, null);
+      if (av && !av.isNil() && av.js !== lastAt) {
+        lastAt = av.js;
+        win.setFrameOrigin(aioPlace(JSON.parse(lastAt), win.frame.size.width, win.frame.size.height));
+      }
+    }
     // The app that opened this window is gone: nobody will close it.
     if (++ticks % 30 === 0 && parent) {
       const k = $.NSTask.launchedTaskWithLaunchPathArguments('/bin/kill', ['-0', parent]);
       k.waitUntilExit;
       if (k.terminationStatus !== 0) $.exit(0);
     }
-    const s = $.NSString.stringWithContentsOfFileEncodingError(file, $.NSUTF8StringEncoding, null);
-    if (!s || s.isNil()) continue;
-    const str = s.js;
+    const sv = $.NSString.stringWithContentsOfFileEncodingError(file, $.NSUTF8StringEncoding, null);
+    if (!sv || sv.isNil()) continue;
+    const str = sv.js;
     if (str === 'close') { fade(); $.exit(0); }
     const i = str.indexOf('\\t');
     if (i < 0) continue;
@@ -697,24 +1217,76 @@ function run(argv) {
     if (track) {
       const n = parseInt(str.slice(0, i), 10);
       const on = n >= 0;
-      track.hidden = !on; fill.hidden = !on; close.hidden = !on;
-      if (on) fill.frame = $.NSMakeRect(24, yb, Math.round((W - 48) * Math.min(100, n) / 100), barPt);
+      track.hidden = !on; fill.hidden = !on; if (close) close.hidden = !on;
+      if (on) fill.frame = $.NSMakeRect(bx, yb, Math.round(bw * Math.min(100, n) / 100), bp);
     }
   }
 }
 `;
 
-/** The Retry / Quit question. argv: title, message, and the third button's
- *  label when there is one. Prints the button. */
-export const MAC_ASK_APPLESCRIPT = `
-on run argv
-  if (count of argv) > 2 then
-    set r to display dialog (item 2 of argv) with title (item 1 of argv) buttons {"Quit", (item 3 of argv), "Retry"} default button "Retry" with icon caution
-  else
-    set r to display dialog (item 2 of argv) with title (item 1 of argv) buttons {"Quit", "Retry"} default button "Retry" with icon caution
-  end if
-  return button returned of r
-end run
+/** The Retry / Quit question over Cocoa: the message and its buttons
+ *  (Quit, the third answer when given, Retry — the default), centred where
+ *  the app's window opens. argv: title, message, where (`placeArg`; "" —
+ *  the primary's centre), the third button's label (may be absent). Prints
+ *  the button; its close button is Quit. The buttons toggle (on/off push
+ *  buttons) and the loop reads which one is on: a button's action needs a
+ *  target from ObjC.registerSubclass, which never returned on macOS 14 (see
+ *  MAC_PROGRESS_JXA). */
+export const MAC_ASK_JXA = `
+ObjC.import('Cocoa');
+ObjC.import('stdlib');
+${MAC_PLACE_JS}
+${MAC_LOOK_JS}
+function run(argv) {
+  const title = argv[0], message = argv[1], target = argv[2] ? JSON.parse(argv[2]) : null;
+  const previous = argv[3] || '';
+  const look = aioLook(argv[4] || '', argv[5] || '');
+  const app = $.NSApplication.sharedApplication;
+  app.setActivationPolicy($.NSApplicationActivationPolicyRegular);
+  const W = 460;
+  const msg = $.NSTextField.wrappingLabelWithString(message);
+  msg.preferredMaxLayoutWidth = W - 40;
+  const mh = Math.ceil(msg.fittingSize.height);
+  const H = 20 + mh + 20 + 32 + 14;
+  const win = $.NSWindow.alloc.initWithContentRectStyleMaskBackingDefer(
+    $.NSMakeRect(0, 0, W, H),
+    $.NSWindowStyleMaskTitled | $.NSWindowStyleMaskClosable,
+    $.NSBackingStoreBuffered, false);
+  win.title = title;
+  win.releasedWhenClosed = false;
+  if (look) { win.backgroundColor = look.bg; msg.textColor = look.fg; }
+  msg.frame = $.NSMakeRect(20, H - 20 - mh, W - 40, mh);
+  win.contentView.addSubview(msg);
+  const names = ['Quit'].concat(previous ? [previous] : [], ['Retry']);
+  const buttons = [];
+  let x = W - 20;
+  for (let i = names.length - 1; i >= 0; i--) {
+    const b = $.NSButton.alloc.initWithFrame($.NSMakeRect(0, 0, 88, 32));
+    b.title = names[i];
+    b.bezelStyle = $.NSBezelStyleRounded;
+    b.setButtonType($.NSButtonTypePushOnPushOff);
+    if (names[i] === 'Retry') b.keyEquivalent = '\\r';
+    const bw = Math.max(88, Math.ceil(b.fittingSize.width));
+    x -= bw;
+    b.frame = $.NSMakeRect(x, 14, bw, 32);
+    x -= 8;
+    win.contentView.addSubview(b);
+    buttons.push([names[i], b]);
+  }
+  win.setFrameOrigin(aioPlace(target, win.frame.size.width, win.frame.size.height));
+  win.makeKeyAndOrderFront(null);
+  app.activateIgnoringOtherApps(true);
+  app.finishLaunching;
+  for (;;) {
+    const ev = app.nextEventMatchingMaskUntilDateInModeDequeue(
+      $.NSEventMaskAny, $.NSDate.dateWithTimeIntervalSinceNow(0.1),
+      $.NSDefaultRunLoopMode, true);
+    if (ev && !ev.isNil()) app.sendEvent(ev);
+    // JXA hands NSInteger back as a string ("1"), measured on macOS 14.
+    for (const [n, b] of buttons) if (Number(b.state) === 1) return n;
+    if (!win.isVisible && !win.isMiniaturized) return 'Quit';
+  }
+}
 `;
 
 /** What the macOS question answered (the button it printed). Pure. */
@@ -727,7 +1299,12 @@ export function macAnswer(button: string, previous?: string): RetryAnswer {
     : "quit";
 }
 
-const macBackend = (icon: string | null): DialogBackend => ({
+const macBackend = (
+  icon: string | null,
+  target: Bounds | null,
+  colors: DialogColors | null,
+  cancel = true,
+): DialogBackend => ({
   name: "cocoa",
   async progress(title, heading) {
     const dir = await tempDir();
@@ -748,6 +1325,10 @@ const macBackend = (icon: string | null): DialogBackend => ({
         icon ?? "",
         ack,
         String(Deno.pid),
+        placeArg(target),
+        lookArg(colors?.light),
+        lookArg(colors?.dark),
+        cancel ? "1" : "0",
       ],
       stdin: "null",
       stdout: "null",
@@ -765,12 +1346,22 @@ const macBackend = (icon: string | null): DialogBackend => ({
   },
   async ask(title, message, previous) {
     const dir = await tempDir();
-    const script = join(dir, "ask.applescript");
+    const script = join(dir, "ask.js");
     try {
-      await Deno.writeTextFile(script, MAC_ASK_APPLESCRIPT);
+      await Deno.writeTextFile(script, MAC_ASK_JXA);
       const r = await new Deno.Command("/usr/bin/osascript", {
         cwd: neutralCwd(),
-        args: [script, title, message, ...(previous ? [previous] : [])],
+        args: [
+          "-l",
+          "JavaScript",
+          script,
+          title,
+          message,
+          placeArg(target),
+          previous ?? "",
+          lookArg(colors?.light),
+          lookArg(colors?.dark),
+        ],
         stdin: "null",
         stdout: "piped",
         stderr: "null",
@@ -876,20 +1467,34 @@ function stdinProgress(
   };
 }
 
+/** The zenity/yad download window's argv. yad: Cancel is its one button
+ *  (exit 1, as the close). zenity has no way to drop its OK — greyed until
+ *  the window closes — nor to take the app's colours. Pure. */
+export function zenityProgressArgs(
+  bin: "zenity" | "yad",
+  title: string,
+  heading: string,
+  /** `electron.downloadWindow.cancel`: yad then has no button at all. */
+  cancel = true,
+): string[] {
+  return [
+    "--progress",
+    `--title=${title}`,
+    `--text=${pangoText(heading)}`,
+    "--percentage=0",
+    "--width=460",
+    "--auto-close",
+    ...(bin === "yad" ? [cancel ? "--button=Cancel:1" : "--no-buttons"] : []),
+  ];
+}
+
 /** zenity and yad share the progress protocol (see `stdinProgress`). */
-const zenityLike = (bin: "zenity" | "yad"): DialogBackend => ({
+const zenityLike = (bin: "zenity" | "yad", cancel = true): DialogBackend => ({
   name: bin,
   progress(title, heading) {
     return Promise.resolve(stdinProgress(
       bin,
-      [
-        "--progress",
-        `--title=${title}`,
-        `--text=${pangoText(heading)}`,
-        "--percentage=0",
-        "--width=460",
-        "--auto-close",
-      ],
+      zenityProgressArgs(bin, title, heading, cancel),
       (fraction, detail) =>
         (fraction !== null ? `${Math.floor(fraction * 99)}\n` : "") +
         `# ${pangoText(heading)}\\n${
@@ -1127,20 +1732,92 @@ export function hasDesktop(
 /** The backend for this machine, or null when there is nothing to draw on.
  *  `$AIO_DIALOG=none` turns dialogs off (logs only); `$AIO_DIALOG=browser`
  *  forces the browser page on Linux. */
-export async function dialogBackend(
-  opts: { icon?: string | null } = {},
+export function dialogBackend(
+  opts: {
+    icon?: string | null;
+    /** Where the app's window opens (`windowBoundsOf`): every window is
+     *  centred on it, on its screen. */
+    target?: Bounds | null;
+    /** Where a GTK that cannot draw is said (once). */
+    log?: (m: string) => void;
+    /** The app's identity colours, light and dark: every window takes them
+     *  (as the OS is light or dark); absent, the OS's own look. */
+    colors?: DialogColors | null;
+    /** The download window's Cancel button (`electron.downloadWindow`);
+     *  its close cancels either way. Default: true. */
+    cancel?: boolean;
+  } = {},
 ): Promise<DialogBackend | null> {
   const forced = Deno.env.get("AIO_DIALOG");
-  if (forced === "none") return null;
   const os = Deno.build.os;
-  if (!hasDesktop(os, (k) => Deno.env.get(k))) return null;
-  if (os === "windows") return windowsBackend;
-  if (os === "darwin") return macBackend(opts.icon ?? null);
-  if (forced !== "browser") {
-    if (await onPath("zenity")) return zenityLike("zenity");
-    if (await onPath("yad")) return zenityLike("yad");
-  }
-  return browserBackend();
+  const target = opts.target ?? null;
+  const colors = opts.colors ?? null;
+  const cancel = opts.cancel !== false;
+  const fallback = async () =>
+    (await onPath("zenity"))
+      ? zenityLike("zenity", cancel)
+      : (await onPath("yad"))
+      ? zenityLike("yad", cancel)
+      : browserBackend();
+  return Promise.resolve(
+    forced === "none" || !hasDesktop(os, (k) => Deno.env.get(k))
+      ? null
+      : os === "windows"
+      ? windowsBackend(target, colors, cancel)
+      : os === "darwin"
+      ? macBackend(opts.icon ?? null, target, colors, cancel)
+      : forced === "browser"
+      ? browserBackend()
+      : gtkBackend(target, fallback, opts.log ?? (() => {}), colors, cancel),
+  );
+}
+
+/** Linux: the download window and the question drawn by aio over GTK
+ *  (gtk-splash.ts), centred where the app's window opens — zenity, yad or
+ *  the browser page only where GTK cannot draw, and that is said once, with
+ *  why (they place themselves: the screen under the pointer). */
+export function gtkBackend(
+  target: Bounds | null,
+  fallback: () => Promise<DialogBackend>,
+  log: (m: string) => void,
+  colors: DialogColors | null = null,
+  cancel = true,
+): DialogBackend {
+  let other: DialogBackend | null = null;
+  const instead = async (why: string) => {
+    if (!other) {
+      other = await fallback();
+      log(
+        `electron: the dialog is not drawn by aio (GTK: ${why}) — ` +
+          `${other.name} draws it instead, on the screen it picks`,
+      );
+    }
+    return other;
+  };
+  return {
+    name: "gtk",
+    async progress(title, heading) {
+      const d = await gtkProgress(title, heading, { target, colors, cancel });
+      return "why" in d ? (await instead(d.why)).progress(title, heading) : d;
+    },
+    async ask(title, message, previous) {
+      const names = ["Quit", ...(previous ? [previous] : []), "Retry"];
+      const q = await gtkAsk(title, message, names, { target, colors });
+      if ("why" in q) {
+        return (await instead(q.why)).ask(title, message, previous);
+      }
+      const lost = q.lost.then((why) => ({ why }));
+      const i = await Promise.race([q.answer, lost]);
+      if (typeof i !== "number") {
+        return (await instead(i.why)).ask(title, message, previous);
+      }
+      return i === names.length - 1
+        ? "retry"
+        : previous && i === 1
+        ? "previous"
+        : "quit";
+    },
+  };
 }
 
 // ── the splash (`build.splash`) ────────────────────────────────────────────
@@ -1160,6 +1837,14 @@ const colorArg = (c: SplashSpec["light"]) =>
 const barArg = (spec: SplashSpec) =>
   String(spec.progress ? BAR_PT[spec.bar] : 0);
 
+/** The move file's `[x,y,w,h]`: the window's rect in the helper's space —
+ *  physical screen pixels for a per-monitor-aware Windows helper (when the
+ *  main process could convert), else Electron's own. Pure. */
+export function moveArg(at: WindowAt, physical: boolean): string {
+  const r = physical && at.screen ? at.screen : at;
+  return JSON.stringify([r.x, r.y, r.width, r.height]);
+}
+
 /** What a splash helper is handed beside the spec. */
 type SplashArgs = {
   title: string;
@@ -1167,6 +1852,10 @@ type SplashArgs = {
   image: string;
   file: string;
   ack: string;
+  /** The app window's saved bounds (splash-place.ts), or null. */
+  target?: Bounds | null;
+  /** The move file (`moveArg`), or none. */
+  at?: string;
 };
 
 /** The Windows splash script's environment. Pure. */
@@ -1177,7 +1866,7 @@ export function windowsSplashEnv(
   return {
     AIO_SPL_TITLE: a.title,
     AIO_SPL_TEXT: a.text,
-    AIO_SPL_HASTEXT: spec.text === null ? "0" : "1",
+    AIO_SPL_HASTEXT: splashHasText(spec) ? "1" : "0",
     AIO_SPL_FILE: a.file,
     AIO_SPL_ACK: a.ack,
     AIO_SPL_PARENT: String(Deno.pid),
@@ -1189,6 +1878,8 @@ export function windowsSplashEnv(
     AIO_SPL_SIZE: String(spec.font.size),
     AIO_SPL_BOLD: spec.font.weight === "bold" ? "1" : "0",
     AIO_SPL_BAR: barArg(spec),
+    AIO_SPL_LOOK: JSON.stringify(helperLook(spec, "windows", a.target ?? null)),
+    AIO_SPL_AT: a.at ?? "",
   };
 }
 
@@ -1197,7 +1888,7 @@ export function macSplashArgs(spec: SplashSpec, a: SplashArgs): string[] {
   return [
     a.title,
     a.text,
-    spec.text === null ? "0" : "1",
+    splashHasText(spec) ? "1" : "0",
     a.file,
     a.ack,
     String(Deno.pid),
@@ -1209,6 +1900,8 @@ export function macSplashArgs(spec: SplashSpec, a: SplashArgs): string[] {
     String(spec.font.size),
     spec.font.weight === "bold" ? "1" : "0",
     barArg(spec),
+    JSON.stringify(helperLook(spec, "darwin", a.target ?? null)),
+    a.at ?? "",
   ];
 }
 
@@ -1219,8 +1912,16 @@ export function macSplashArgs(spec: SplashSpec, a: SplashArgs): string[] {
  *  it pulses. Pure. */
 export function yadSplash(
   spec: SplashSpec,
-  a: { title: string; image: string },
+  a: { title: string; image: string; target?: Bounds | null },
 ): { args: string[]; line: (f: number | null, text: string) => string } {
+  // yad knows no screens: centred on the app window's saved bounds as they
+  // are (not clamped), else its own --center (the screen under the pointer).
+  const t = lookOf(spec).position === "window" ? a.target : null;
+  const place = t && t.x !== undefined && t.y !== undefined
+    ? `--geometry=${spec.image.w}x${spec.image.h}+${
+      Math.round(t.x + t.width / 2 - spec.image.w / 2)
+    }+${Math.round(t.y + t.height / 2 - spec.image.h / 2)}`
+    : "--center";
   return {
     args: [
       "--progress",
@@ -1232,40 +1933,52 @@ export function yadSplash(
       "--no-buttons",
       "--skip-taskbar",
       "--on-top",
-      "--center",
+      place,
       "--auto-close",
       ...(spec.progress ? ["--percentage=0"] : ["--pulsate"]),
     ],
     line: (f, t) =>
       (spec.progress && f !== null ? `${Math.floor(f * 99)}\n` : "") +
-      (spec.text === null ? "" : `# ${t.replace(/[\r\n]+/g, " ")}\n`),
+      (splashHasText(spec) ? `# ${t.replace(/[\r\n]+/g, " ")}\n` : ""),
   };
 }
 
 /** Which Linux helper draws the splash, and the ONE line that says what was
- *  drawn: yad the image and text; zenity, with no yad, a plain window with
+ *  drawn: aio itself with GTK 3 (`gtk: true`); else — with why GTK could
+ *  not — yad, the image and text; zenity, with no yad, a plain window with
  *  the text only (it cannot show an image); neither, none. Pure. */
 export function linuxSplash(
-  has: { yad: boolean; zenity: boolean },
-): { use: "yad" | "zenity" | null; note: string } {
+  has: { gtk?: true | string; yad: boolean; zenity: boolean },
+): { use: "gtk" | "yad" | "zenity" | null; note: string } {
+  if (has.gtk === true) {
+    return {
+      use: "gtk",
+      note: "electron: splash — drawn by GTK 3 (the image at its size, the " +
+        "text and the bar over it, in the splash's font and colours)",
+    };
+  }
+  const why = has.gtk === undefined
+    ? ""
+    : `GTK could not draw it (${has.gtk}); `;
   if (has.yad) {
     return {
       use: "yad",
-      note: "electron: splash — drawn by yad (the image at its pixel size, " +
-        "the text in the bar under it; font and colours follow the GTK theme)",
+      note: `electron: splash — ${why}drawn by yad (the image at its pixel ` +
+        "size, the text in the bar under it; font and colours follow the GTK " +
+        "theme)",
     };
   }
   if (has.zenity) {
     return {
       use: "zenity",
-      note: "electron: splash — yad is not installed, so the image cannot " +
-        "be shown; drawn: a plain zenity window with the text",
+      note: `electron: splash — ${why}yad is not installed, so the image ` +
+        "cannot be shown; drawn: a plain zenity window with the text",
     };
   }
   return {
     use: null,
-    note: "electron: splash — not shown: this desktop has neither yad nor " +
-      "zenity to draw it",
+    note: `electron: splash — not shown: ${why}this desktop has neither yad ` +
+      "nor zenity to draw it",
   };
 }
 
@@ -1284,26 +1997,44 @@ async function splashFiles(spec: SplashSpec, text: string) {
     image,
     Uint8Array.from(atob(spec.image.png), (ch) => ch.charCodeAt(0)),
   );
-  return { dir, file, ack: join(dir, "shown"), image };
+  return { dir, file, ack: join(dir, "shown"), image, at: join(dir, "at") };
 }
 
 /** The splash opener for this machine, or null when there is nothing to
- *  draw on (no desktop, `$AIO_DIALOG=none`, or Linux with neither helper). */
+ *  draw on (no desktop, `$AIO_DIALOG=none`, or Linux where GTK cannot draw
+ *  and neither helper is installed). */
 export async function splashBackend(
   spec: SplashSpec,
-  opts: { log?: (m: string) => void } = {},
+  opts: {
+    log?: (m: string) => void;
+    /** The app window's saved bounds (`position: "window"`). */
+    target?: Bounds | null;
+  } = {},
 ): Promise<SplashOpener | null> {
   if (Deno.env.get("AIO_DIALOG") === "none") return null;
   const os = Deno.build.os;
   if (!hasDesktop(os, (k) => Deno.env.get(k))) return null;
+  const target = opts.target ?? null;
+  // What the app set that this helper cannot draw: said once, by name.
+  const notDrawn = (h: Parameters<typeof splashNotDrawn>[1], name: string) => {
+    const n = splashNotDrawn(spec, h);
+    if (n.length) {
+      opts.log?.(
+        `electron: splash — ${name} cannot draw ${n.join(", ")} ` +
+          `(docs/build/targets.md, "What each OS draws")`,
+      );
+    }
+  };
   if (os === "windows") {
+    notDrawn("windows", "Windows Forms");
     return {
       name: "windows-forms splash",
       async open(title, text) {
         const f = await splashFiles(spec, text);
         const pid = startPowershell(
           WINDOWS_SPLASH_PS,
-          windowsSplashEnv(spec, { title, text, ...f }),
+          windowsSplashEnv(spec, { title, text, ...f, target }),
+          f.dir,
         );
         return fileProgress(
           f.file,
@@ -1317,11 +2048,14 @@ export async function splashBackend(
               // aio-ok: already gone
             }
           },
+          undefined,
+          { path: f.at, physical: true },
         );
       },
     };
   }
   if (os === "darwin") {
+    notDrawn("cocoa", "Cocoa");
     return {
       name: "cocoa splash",
       async open(title, text) {
@@ -1334,7 +2068,7 @@ export async function splashBackend(
             "-l",
             "JavaScript",
             script,
-            ...macSplashArgs(spec, { title, text, ...f }),
+            ...macSplashArgs(spec, { title, text, ...f, target }),
           ],
           stdin: "null",
           stdout: "null",
@@ -1342,27 +2076,43 @@ export async function splashBackend(
         }).spawn();
         let done = false;
         const exited = child.status.then(() => (done = true));
-        return fileProgress(f.file, f.dir, f.ack, () => !done, () => {
-          try {
-            child.kill("SIGKILL");
-          } catch {
-            // aio-ok: already gone
-          }
-        }, exited);
+        return fileProgress(
+          f.file,
+          f.dir,
+          f.ack,
+          () => !done,
+          () => {
+            try {
+              child.kill("SIGKILL");
+            } catch {
+              // aio-ok: already gone
+            }
+          },
+          exited,
+          { path: f.at, physical: false },
+        );
       },
     };
   }
-  const pick = linuxSplash({
-    yad: await onPath("yad"),
-    zenity: await onPath("zenity"),
-  });
+  // aio draws it itself (GTK over FFI); yad, then zenity, only when GTK
+  // cannot — and the one line says why.
+  const gtk = await gtkSplash(spec, { target });
+  const pick = "why" in gtk
+    ? linuxSplash({
+      gtk: gtk.why,
+      yad: await onPath("yad"),
+      zenity: await onPath("zenity"),
+    })
+    : linuxSplash({ gtk: true, yad: false, zenity: false });
   opts.log?.(pick.note);
+  if (pick.use) notDrawn(pick.use, pick.use === "gtk" ? "GTK" : pick.use);
+  if (!("why" in gtk)) return gtk;
   if (pick.use === "yad") {
     return {
       name: "yad splash",
       async open(title, text) {
         const f = await splashFiles(spec, text);
-        const y = yadSplash(spec, { title, image: f.image });
+        const y = yadSplash(spec, { title, image: f.image, target });
         const d = stdinProgress("yad", y.args, y.line);
         return {
           ...d,
@@ -1385,16 +2135,16 @@ export async function splashBackend(
           [
             "--progress",
             `--title=${title}`,
-            `--text=${pangoText(spec.text === null ? title : text)}`,
+            `--text=${pangoText(splashHasText(spec) && text ? text : title)}`,
             "--pulsate",
             "--no-cancel",
             "--auto-close",
             "--width=360",
           ],
           (_f, t) =>
-            spec.text === null
-              ? ""
-              : `# ${pangoText(t.replace(/[\r\n]+/g, " "))}\n`,
+            splashHasText(spec) && t
+              ? `# ${pangoText(t.replace(/[\r\n]+/g, " "))}\n`
+              : "",
         ));
       },
     };

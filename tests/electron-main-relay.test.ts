@@ -139,7 +139,7 @@ class BrowserWindow {
   // Every window main.cjs constructs, with the webPreferences it asked for —
   // the only way to see what SANDBOX a child window actually got.
   constructor(o) { this.opts = o; this.webContents = webContents; ev({ ev: 'newWindow', opts: o }); }
-  on() {} center() {} setIcon() {} setMenuBarVisibility() {}
+  on() {} once() {} show() {} center() {} setIcon() {} setMenuBarVisibility() {}
   loadURL(u) {
     _curUrl = u; _loadedUrl = _loadedUrl || u; ev({ ev: 'loadURL', url: u });
     // AIO_STUB_SEND_AT_LOAD: the page sends in the very tick main dialled its
@@ -162,6 +162,7 @@ module.exports = {
     whenReady: () => new Promise((r) => setTimeout(r, 0)),
   },
   BrowserWindow,
+  screen: { getAllDisplays: () => [{ workArea: { x: 0, y: 0, width: 1280, height: 900 } }], getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1280, height: 900 } }) },
   // macOS: the generated main builds its menu after whenReady (tmplAppMenu;
   // the menu itself is pinned by electron-window-close-and-menu.test.ts).
   Menu: { setApplicationMenu: () => {}, buildFromTemplate: (t) => t },
@@ -188,6 +189,17 @@ module.exports = {
       return Promise.resolve(o.title === 'cancel'
         ? { canceled: true, filePaths: [] }
         : { canceled: false, filePaths: ['/picked/a.txt', '/picked/b c.txt'] });
+    },
+    // Electron's own shape (electron.d.ts SaveDialogReturnValue): ONE
+    // filePath, '' when cancelled.
+    showSaveDialog: (a, b) => {
+      const owned = b !== undefined;
+      const o = owned ? b : a;
+      ev({ ev: 'saveDialog', owned, ownerIsWindow: owned && a instanceof BrowserWindow, opts: o });
+      if (o.title === 'reject') return Promise.reject(new Error('boom'));
+      return Promise.resolve(o.title === 'cancel'
+        ? { canceled: true, filePath: '' }
+        : { canceled: false, filePath: '/saved/draft one.md' });
     },
   },
   nativeImage: { createFromDataURL: () => ({}) },
@@ -2461,6 +2473,51 @@ Deno.test("electron main: announces dialogs, answers a dialog frame itself, neve
       [],
       "a dialog frame is main's, never the renderer's",
     );
+  });
+});
+
+Deno.test("electron main: a save dialog opens showSaveDialog, owned, with the overwrite confirmation, and answers one path", async () => {
+  await withHarness(async (srv, main) => {
+    await main.waitFor(() => srv.inbound.length > 0);
+    await main.rendererReady();
+    for (
+      const d of [
+        {
+          id: "s1",
+          kind: "save",
+          title: "Save draft",
+          defaultPath: "/home/u/draft.md",
+          filters: [{ name: "Markdown", extensions: ["md"] }],
+        },
+        { id: "s2", kind: "save", title: "cancel" },
+        { id: "s3", kind: "save", title: "reject" },
+      ]
+    ) await srv.writeLine(JSON.stringify({ v: 2, t: "dialog", d }));
+    const results = () =>
+      srv.inbound.map((l) => JSON.parse(l)).filter((f) =>
+        f.t === "dialog-result"
+      );
+    await main.waitFor(() => results().length === 3);
+    const byId = Object.fromEntries(results().map((f) => [f.d.id, f.d]));
+    assertEquals(byId.s1, {
+      id: "s1",
+      canceled: false,
+      paths: ["/saved/draft one.md"],
+    });
+    assertEquals(byId.s2, { id: "s2", canceled: true, paths: [] });
+    assert(/boom/.test(byId.s3.error), JSON.stringify(byId.s3));
+
+    const opened = main.events.filter((e) => e.ev === "saveDialog");
+    assertEquals(opened.length, 3);
+    assertEquals(main.events.filter((e) => e.ev === "dialog").length, 0);
+    assert(opened.every((e) => e.owned && e.ownerIsWindow));
+    assertEquals(opened[0]!.opts, {
+      title: "Save draft",
+      message: "Save draft",
+      properties: ["showOverwriteConfirmation", "createDirectory"],
+      defaultPath: "/home/u/draft.md",
+      filters: [{ name: "Markdown", extensions: ["md"] }],
+    });
   });
 });
 

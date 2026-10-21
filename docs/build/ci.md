@@ -91,6 +91,27 @@ build:
   runs-on: ${{ matrix.os }}
 ```
 
+On a Windows runner, run `am` steps with `shell: pwsh`. `am` is `am.cmd` there,
+and Git Bash (`shell: bash`, the default for a `run:` step in many templates)
+cannot start it. Installing `am` itself is one `pwsh` step:
+
+```yaml
+- if: runner.os == 'Windows'
+  shell: pwsh
+  run: |
+    irm https://raw.githubusercontent.com/riagentic/aio/main/install.ps1 | iex
+    "$env:USERPROFILE\.deno\bin" >> $env:GITHUB_PATH
+```
+
+The second line is there because a later step sees a PATH change only through
+`$GITHUB_PATH`, not through the user PATH the installer writes. The folder is
+`%USERPROFILE%\.deno\bin`, or `%DENO_INSTALL%\bin` when `DENO_INSTALL` is set.
+
+Actions runs a `pwsh` step by dot-sourcing it (`. '{0}'`); `install.ps1` and
+`run.ps1` do their work however they are loaded. Only `AIO_INSTALL_LOAD_ONLY=1`
+/ `AIO_RUN_LOAD_ONLY=1` make a load define the functions without running them,
+which is how aio's own tests reach them.
+
 macOS is the one worth paying for even on a small project: it is the only real
 signal for a `.app` bundle, and nothing on Linux reproduces it. A Linux AppImage
 is the one package that must be built on its own OS and CPU.

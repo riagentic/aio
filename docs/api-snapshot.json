@@ -87,7 +87,7 @@
         },
         "AioMeta": {
           "kind": "typeAlias",
-          "sig": "03aca1811b98cfea",
+          "sig": "ff991fa09c684398",
           "members": {
             "title": "opt:2fb40568533c1a6d",
             "width": "opt:f6522636230fa080",
@@ -101,7 +101,24 @@
             "allowLocalPeers": "opt:0ecca0fe3beba89b",
             "ignoreDebugEnv": "opt:0ecca0fe3beba89b",
             "strictPin": "opt:0ecca0fe3beba89b",
+            "shortcuts": "opt:object",
+            "shortcuts.reload": "req:0ecca0fe3beba89b",
+            "shortcuts.print": "req:0ecca0fe3beba89b",
+            "confirmUnload": "opt:0ecca0fe3beba89b",
             "chrome": "opt:0cb8e5493e58cfb7",
+            "backgroundColor": "opt:object",
+            "backgroundColor.light": "req:2fb40568533c1a6d",
+            "backgroundColor.dark": "req:2fb40568533c1a6d",
+            "background": "opt:object",
+            "background.light": "req:2fb40568533c1a6d",
+            "background.dark": "req:2fb40568533c1a6d",
+            "colors": "opt:object",
+            "colors.light": "req:bf52ff90f977d695",
+            "colors.dark": "req:bf52ff90f977d695",
+            "downloadWindow": "opt:fe6e2a2cd7f68797",
+            "showWhenPainted": "opt:object",
+            "showWhenPainted.capMs": "req:f6522636230fa080",
+            "splash": "opt:ea477d9f8e15434e",
             "tray": "opt:bb7b2f54156b6da6",
             "profileName": "opt:2fb40568533c1a6d",
             "profileDir": "opt:2fb40568533c1a6d",
@@ -111,7 +128,7 @@
             "showFile": "opt:2fb40568533c1a6d"
           },
           "sigs": [
-            "03aca1811b98cfea"
+            "ff991fa09c684398"
           ]
         },
         "AioUser": {
@@ -817,7 +834,7 @@
         },
         "ElectronConfig": {
           "kind": "typeAlias",
-          "sig": "92bd81c562665322",
+          "sig": "bbe4328204a36573",
           "members": {
             "requireSandbox": "opt:0ecca0fe3beba89b",
             "unsandboxedChildWindows": "opt:0ecca0fe3beba89b",
@@ -826,10 +843,27 @@
             "permissions": "opt:d09e2eedb122e382",
             "allowLocalPeers": "opt:0ecca0fe3beba89b",
             "ignoreDebugEnv": "opt:0ecca0fe3beba89b",
-            "strictPin": "opt:0ecca0fe3beba89b"
+            "strictPin": "opt:0ecca0fe3beba89b",
+            "shortcuts": "opt:object",
+            "shortcuts.reload": "opt:0ecca0fe3beba89b",
+            "shortcuts.print": "opt:0ecca0fe3beba89b",
+            "confirmUnload": "opt:0ecca0fe3beba89b",
+            "backgroundColor": "opt:object",
+            "backgroundColor.light": "req:2fb40568533c1a6d",
+            "backgroundColor.dark": "req:2fb40568533c1a6d",
+            "showWhenPainted": "opt:object",
+            "showWhenPainted.capMs": "req:f6522636230fa080",
+            "downloadWindow": "opt:object",
+            "downloadWindow.heading": "opt:2fb40568533c1a6d",
+            "downloadWindow.text": "opt:2fb40568533c1a6d",
+            "downloadWindow.question": "opt:2fb40568533c1a6d",
+            "downloadWindow.background": "opt:2fb40568533c1a6d",
+            "downloadWindow.color": "opt:2fb40568533c1a6d",
+            "downloadWindow.bar": "opt:9bb0eda483161ac6",
+            "downloadWindow.cancel": "opt:0ecca0fe3beba89b"
           },
           "sigs": [
-            "92bd81c562665322"
+            "bbe4328204a36573"
           ]
         },
         "errorCode": {
@@ -2747,6 +2781,16 @@
         "Portal": {
           "kind": "variable",
           "sig": "unpinned"
+        },
+        "print": {
+          "kind": "function",
+          "sig": "ff0cb91d2aded3d3",
+          "members": {
+            "return": "req:b5f6ae1b8a43e31d"
+          },
+          "sigs": [
+            "caa3438d820c60c5"
+          ]
         },
         "reactIsland": {
           "kind": "function",
@@ -5734,6 +5778,17 @@
             "c2f89602c949ad94"
           ]
         },
+        "pickSave": {
+          "kind": "function",
+          "sig": "94ec0a15b1c7fa0b",
+          "members": {
+            "param0": "req:b3ecb08238d07337|",
+            "return": "req:ee5ffe333ca6cb70"
+          },
+          "sigs": [
+            "c6821078fafaea64"
+          ]
+        },
         "QueryResult": {
           "kind": "typeAlias",
           "sig": "4d451b3b1c2af191",
@@ -5889,6 +5944,18 @@
             "b5024fda79f00407"
           ]
         },
+        "SaveOptions": {
+          "kind": "typeAlias",
+          "sig": "bbe460ded2bf3af4",
+          "members": {
+            "title": "opt:2fb40568533c1a6d",
+            "defaultPath": "opt:2fb40568533c1a6d",
+            "filters": "opt:44aad2968a316880"
+          },
+          "sigs": [
+            "bbe460ded2bf3af4"
+          ]
+        },
         "serializeCookie": {
           "kind": "function",
           "sig": "56ee07a753a7333c",
@@ -5900,6 +5967,29 @@
           },
           "sigs": [
             "b831bda452c9df2e"
+          ]
+        },
+        "serveFile": {
+          "kind": "function",
+          "sig": "5d819bd94e44a011",
+          "members": {
+            "param0": "req:657f13e68167aea6|8e53337ed0600874~Request",
+            "param1": "req:f6c2bce213147f9c|336e2b46aff6c271~string",
+            "param2": "req:0c06325b25e5567e|",
+            "return": "req:ea7721aca848e8ac"
+          },
+          "sigs": [
+            "ce213107fcdc5adf"
+          ]
+        },
+        "ServeFileOptions": {
+          "kind": "interface",
+          "sig": "565556554e1e7651",
+          "members": {
+            "type": "opt:2fb40568533c1a6d"
+          },
+          "sigs": [
+            "565556554e1e7651"
           ]
         },
         "spawn": {
@@ -8385,6 +8475,10 @@
           "sig": "value"
         },
         "aio --host": {
+          "kind": "flag",
+          "sig": "value"
+        },
+        "aio --instance": {
           "kind": "flag",
           "sig": "value"
         },

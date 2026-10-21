@@ -148,6 +148,40 @@ exhaustively over the union.
 `undefined` means the failure carries no framework classification -- an error
 the app's own code threw and the framework only relayed.
 
+### Test-harness refusals
+
+What `testUI`, `testCell`, `bootCells` and `testServer` refuse carries a stable
+`code` as well, so a CI gate or an agent reading a wall of failures branches on
+`errorCode(e)` instead of the prose. These are strings outside the
+`AioErrorCode` union, except `INIT_ERROR` and `ACTION_REFUSED`, which are the
+codes the app itself reports for the same failure. The message keeps its prose.
+
+| Code                 | Refused                                                                                                          |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `DEAD_BOOT`          | a call into a torn-down runtime: work a disposed test or mount started                                           |
+| `UNOBSERVED_FAILURE` | a fire-and-forget call that failed and that nothing awaited                                                      |
+| `INIT_ERROR`         | an `onInit` that threw (the app reports it as `INIT_ERROR` and boots on without it)                              |
+| `SETTLE_GAVE_UP`     | `settle()` ran out of rounds: the app never quiesced                                                             |
+| `WORKER_PEER_READ`   | a `worker: true` cell's method reading another cell's state (same code from a real worker)                       |
+| `WORKER_METHOD_CALL` | a method called from inside a `worker: true` cell's method (same code from a real worker)                        |
+| `NOT_CRASHABLE`      | `crashWorker` on a cell that is not a worker cell, or has no live worker                                         |
+| `HARNESS_OPTION`     | a `testServer` `workers` / `workerEntry` combination that cannot work                                            |
+| `NON_JSON_ARGS`      | a call from the UI with arguments JSON cannot carry intact                                                       |
+| `ACTION_REFUSED`     | `useAio().send()` with a type no booted cell has                                                                 |
+| `NATIVE_DIALOG`      | `alert` / `confirm` / `prompt`: a test has no one to answer                                                      |
+| `STORAGE_STUB`       | a `localStorage` stub that does nothing in a browser                                                             |
+| `RELATIVE_FETCH`     | `fetch` of a relative URL — `testUI` has no HTTP server                                                          |
+| `FORMDATA_FILE`      | `new FormData(form)` over a file field                                                                           |
+| `STALE_RENDER`       | a component that threw while re-rendering, so the UI shows stale content                                         |
+| `CONTAINED_THROW`    | a lifecycle hook or effect that threw (production contains it and renders on)                                    |
+| `GLOBAL_LISTENER`    | a DOM event listener on the Deno global, which never fires here                                                  |
+| `UI_LOOKUP`          | a `ui.<Name>` that matches nothing, several elements, or the wrong kind (a component where an element is needed) |
+| `NOT_VISIBLE`        | hovering an element a browser would deliver no event to                                                          |
+| `NOT_A_CELL`         | `ui.expectCell` / `ui.fullState` given something that is not a cell                                              |
+| `CELL_NOT_BOOTED`    | an assertion or `seed` on a cell this mount did not boot                                                         |
+| `UNKNOWN_CELL_KEY`   | an assertion reading a key the cell does not have                                                                |
+| `UNKNOWN_STATE_KEY`  | `t.init()` with a key the cell's state does not have                                                             |
+
 ### Error layer identification
 
 The error code prefix tells you which layer broke:

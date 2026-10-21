@@ -19,6 +19,7 @@ import { freePort } from "../src/testing/server-test.ts";
 import {
   askToStop,
   descendantsIn,
+  inChildEnv,
   processList,
   processParents,
 } from "./proc-helper.ts";
@@ -209,13 +210,15 @@ Deno.test({
           headers: { "WWW-Authenticate": 'Basic realm="r"' },
         }),
     );
-    const prev = Deno.env.get("GIT_ASKPASS");
-    Deno.env.set("GIT_ASKPASS", askpass);
     try {
-      const r = await gitLsRemote(
-        `http://127.0.0.1:${server.addr.port}/repo.git`,
-        "main",
-        10_000,
+      // In a child: an askpass in THIS process's env answers every parallel
+      // test file's git (inChildEnv).
+      const check = new URL("../src/server/updates-check.ts", import.meta.url);
+      const repo = "http://127.0.0.1:" + server.addr.port + "/repo.git";
+      const r = await inChildEnv<{ ok: boolean }>(
+        { GIT_ASKPASS: askpass },
+        `import { gitLsRemote } from ${JSON.stringify(check.href)};`,
+        `return await gitLsRemote(${JSON.stringify(repo)}, "main", 10_000);`,
       );
       assert(!r.ok);
       let asked = true;
@@ -226,8 +229,6 @@ Deno.test({
       }
       assert(!asked, "git ran GIT_ASKPASS — a GUI prompt on every poll");
     } finally {
-      if (prev === undefined) Deno.env.delete("GIT_ASKPASS");
-      else Deno.env.set("GIT_ASKPASS", prev);
       ac.abort();
       await server.finished;
       await dropTempDir(dir);

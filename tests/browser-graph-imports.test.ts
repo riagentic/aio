@@ -18,7 +18,11 @@ const PINNED: Record<string, string[]> = {
   // Reached from `aio/renderer` via `testComponent`. `cell-catalog` is
   // isomorphic core and already in the browser graph; a temp path is built by
   // concatenation precisely so nothing else has to be added here.
-  "src/testing/test-strict.ts": ["../state/cell-catalog.ts"],
+  "src/testing/test-strict.ts": [
+    "../state/cell-catalog.ts",
+    // isomorphic, imports nothing — the refusal codes (withRefusalCode)
+    "../state/method-rejection.ts",
+  ],
 };
 
 Deno.test("browser graph: pinned modules import exactly what they are allowed to", async () => {
@@ -44,4 +48,25 @@ Deno.test("browser graph: pinned modules import exactly what they are allowed to
       `  "no browser client ever connected". If the import is genuinely needed,\n` +
       `  add it to PINNED in this test WITH the reason it is browser-safe.`,
   );
+});
+
+// In a bundle a module's `import.meta.url` is the bundle's — a `data:` URL when
+// the page loads it that way — and `new URL("../x/", import.meta.url)` against
+// one THROWS. At module level that is a throw at load: one such line in
+// test-strict.ts turned every dev page into the diagnostic page ("Invalid URL:
+// '../../tests/' with base 'data:…'"). Read inside a function, it is not.
+Deno.test("browser graph: pinned modules read import.meta.url only inside functions", async () => {
+  const root = fromFileUrl(new URL("../", import.meta.url));
+  const wrong: string[] = [];
+  for (const file of Object.keys(PINNED)) {
+    const src = await Deno.readTextFile(root + file);
+    // A module-level statement starts at column 0; one inside a function
+    // body is indented.
+    for (const [i, line] of src.split("\n").entries()) {
+      if (/^\S/.test(line) && line.includes("import.meta.url")) {
+        wrong.push(`${file}:${i + 1}: ${line.trim()}`);
+      }
+    }
+  }
+  assertEquals(wrong, [], "read at load, it throws in a bundle");
 });

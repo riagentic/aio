@@ -3,7 +3,12 @@
 // transport: an "sfn" envelope out, an "sfnr" envelope back (B4b v2).
 // Fail-loud: server errors reject with the server's message; 30s timeout.
 
-import { enc, type SfnrPayload, wireError } from "../protocol/envelope.ts";
+import {
+  enc,
+  type SfnhPayload,
+  type SfnrPayload,
+  wireError,
+} from "../protocol/envelope.ts";
 import { serializeArgs } from "../protocol/wire-value.ts";
 import type { Remote } from "../protocol/protocol-types.ts";
 import { getConnectedSignal } from "../state-core.ts";
@@ -13,9 +18,27 @@ const SFN_TIMEOUT_MS = 30_000;
 const _pending = new Map<string, {
   resolve: (v: unknown) => void;
   reject: (e: Error) => void;
-  timer: ReturnType<typeof setTimeout>;
+  /** Undefined while the server holds the call (`sfnh`): a person is at a
+   *  picker the function opened. */
+  timer: ReturnType<typeof setTimeout> | undefined;
   what: string;
 }>();
+
+/** Start `cid`'s full timeout. */
+function _arm(cid: string): ReturnType<typeof setTimeout> {
+  return setTimeout(() => {
+    const p = _pending.get(cid);
+    if (!p) return;
+    _pending.delete(cid);
+    p.reject(
+      new Error(
+        `${p.what} timed out after ${
+          SFN_TIMEOUT_MS / 1000
+        }s — the server never replied (the function may still be running)`,
+      ),
+    );
+  }, SFN_TIMEOUT_MS);
+}
 
 // Returns whether the frame actually LEFT. `_sendRaw` has answered that
 // question since it stopped swallowing a refused write, and this module threw
@@ -84,6 +107,21 @@ export function handleSfnResult(data: unknown): boolean {
   if (r.ok) p.resolve(r.value);
   else p.reject(sfnError(r));
   return true;
+}
+
+/** Route a decoded "sfnh" payload: the server says the call waits on a
+ *  person (a picker inside the function — `pauseCallDeadlines`), so its
+ *  timeout stops; when the dialog closes it restarts with a full window, as a
+ *  cell method's ceiling does. Thirty seconds is an ordinary time to spend in
+ *  a Save dialog, and the pick used to be thrown away at 30 s. */
+export function handleSfnHold(data: unknown): void {
+  const r = data as SfnhPayload | undefined;
+  const p = r && typeof r.cid === "string" ? _pending.get(r.cid) : undefined;
+  if (!p) return; // already settled
+  if (r!.hold) {
+    clearTimeout(p.timer);
+    p.timer = undefined;
+  } else if (p.timer === undefined) p.timer = _arm(r!.cid);
 }
 
 /** The rejection for a call whose arguments cannot be encoded at all.
@@ -168,16 +206,7 @@ export function serverFn<T extends FnMap>(ns: string): Remote<T> {
             );
           }
           const cid = `sfn-${++_cid}-${Date.now()}`;
-          const timer = setTimeout(() => {
-            _pending.delete(cid);
-            reject(
-              new Error(
-                `${what} timed out after ${
-                  SFN_TIMEOUT_MS / 1000
-                }s — the server never replied (the function may still be running)`,
-              ),
-            );
-          }, SFN_TIMEOUT_MS);
+          const timer = _arm(cid);
           _pending.set(cid, { resolve, reject, timer, what });
           if (!_send(enc("sfn", { cid, ns, name: prop, args: safeArgs }))) {
             _pending.delete(cid);

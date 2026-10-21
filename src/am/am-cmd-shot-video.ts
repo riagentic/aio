@@ -6,7 +6,7 @@
  * `testUI --video=`.
  */
 
-import { dirname } from "@std/path";
+import { dirname, join } from "@std/path";
 import type { OutputMode } from "./am-types.ts";
 import { out, outError, sayErr } from "./am-output.ts";
 import { parseNumArg } from "./am-utils.ts";
@@ -15,9 +15,15 @@ import type { VideoFormat } from "../media/chunks.ts";
 import { videoFormatOf } from "../media/encoder.ts";
 import {
   encodeRecording,
+  jpegSize,
   type RecordedFrame,
   recordScreencast,
 } from "../media/screencast.ts";
+import {
+  announceRecording,
+  markersFromJournal,
+  markersPathFor,
+} from "./am-markers.ts";
 
 /** What `--video` asked for. */
 export type ShotVideo = {
@@ -25,6 +31,9 @@ export type ShotVideo = {
   format: VideoFormat;
   /** Stop after this long; null = until Ctrl-C. */
   durationMs: number | null;
+  /** `--markers`: write `<video>.markers.json` with every `am trigger` that
+   *  lands while recording (see am-markers.ts). */
+  markers?: true;
 };
 
 /** Flags that shape ONE picture. A video is not one picture, so each is
@@ -52,6 +61,21 @@ export function shotVideoOptions(
   const duration = args.find((a) =>
     a === "--duration" || a.startsWith("--duration=")
   );
+  const mk = args.find((a) => nameOf(a) === "--markers");
+  if (mk !== undefined && mk !== "--markers") {
+    return {
+      ok: false,
+      error: "--markers takes no value (am shot --video --markers)",
+    };
+  }
+  const markers = mk !== undefined;
+  if (!video && markers) {
+    return {
+      ok: false,
+      error: "--markers notes `am trigger` steps in a VIDEO — add --video " +
+        "(am shot --video --markers)",
+    };
+  }
   if (!video) {
     return duration
       ? {
@@ -104,7 +128,10 @@ export function shotVideoOptions(
     if (!n.ok) return { ok: false, error: n.error };
     durationMs = Math.round(n.value * 1000);
   }
-  return { ok: true, value: { path, format, durationMs } };
+  return {
+    ok: true,
+    value: { path, format, durationMs, ...(markers ? { markers: true } : {}) },
+  };
 }
 
 /** `Page.startScreencast` sends one frame as it starts (measured 12–40 ms
@@ -184,12 +211,35 @@ export function shotVideoRecordingLine(
   }`;
 }
 
-/** Record the window behind `cdp` and write the video. Exits 1 on failure. */
+/** The `--json` start event (one stderr line): `t0` is the epoch ms of the
+ *  video's time zero, so a moment `t` ms into the video happened at `t0 + t`
+ *  on the caller's clock. Printed once frame 0 is taken — `performance.now()`
+ *  at the "recording …" line was off by the screencast's startup. */
+export function shotVideoStartEvent(file: string, t0: number): string {
+  return JSON.stringify({ event: "recording", file, t0 });
+}
+
+/** The page's viewport width in CSS px — what a trigger's rect is measured
+ *  in; the first frame's width over it is video px per CSS px. */
+async function cssViewportWidth(cdp: CdpSession): Promise<number | null> {
+  const m = await cdp.call("Page.getLayoutMetrics") as {
+    cssVisualViewport?: { clientWidth?: number };
+    cssLayoutViewport?: { clientWidth?: number };
+  } | null;
+  const w = m?.cssVisualViewport?.clientWidth ??
+    m?.cssLayoutViewport?.clientWidth;
+  return typeof w === "number" && w > 0 ? w : null;
+}
+
+/** Record the window behind `cdp` and write the video. Exits 1 on failure.
+ *  `app` names the app the window belongs to — `--markers` needs it: it is
+ *  where `am trigger` finds this recording. */
 export async function recordShotVideo(
   cdp: CdpSession,
   url: string,
   opts: ShotVideo,
   mode: OutputMode,
+  app?: { appId: string; pid: number },
 ): Promise<void> {
   // Before recording, not after: a path that cannot be written must fail
   // before someone performs a two-minute demo into it.
@@ -197,12 +247,43 @@ export async function recordShotVideo(
   const frameDir = await Deno.makeTempDir({ prefix: "aio-video-" });
   let keepFrames = false;
   const signal = stopSignal(opts.durationMs);
+  let unannounce: (() => Promise<void>) | undefined;
   try {
+    let markers: { journal: string; cssWidth: number } | undefined;
+    if (opts.markers) {
+      const cssWidth = await cssViewportWidth(cdp);
+      if (!app || cssWidth === null) {
+        outError(
+          `--markers: ${
+            app
+              ? "the window did not say its viewport width, so a trigger's " +
+                "rect cannot be put in video pixels"
+              : "no app to take triggers from"
+          } — nothing was recorded`,
+          mode,
+        );
+        Deno.exit(1);
+      }
+      const journal = join(frameDir, "markers.jsonl");
+      await Deno.writeTextFile(journal, "");
+      unannounce = await announceRecording(app.appId, app.pid, journal);
+      markers = { journal, cssWidth };
+    }
     // Said NOW, on stderr in every non-quiet mode — including `--json` — so a
     // script knows the recorder is alive before it drives a scene into it.
     shotVideoProgress(mode, shotVideoRecordingLine(url, opts));
-    const rec = await recordScreencast(cdp, frameDir, signal.stop);
+    const rec = await recordScreencast(
+      cdp,
+      frameDir,
+      signal.stop,
+      mode === "json"
+        ? (t0) => sayErr(shotVideoStartEvent(opts.path, t0))
+        : undefined,
+    );
     signal.dispose();
+    // A trigger after the stop is not in this video.
+    await unannounce?.();
+    unannounce = undefined;
     if (rec.lost) {
       keepFrames = true;
       outError(
@@ -226,6 +307,22 @@ export async function recordShotVideo(
     const started = Date.now();
     const done = await encodeRecording(cdp, rec, opts.format);
     await Deno.writeFile(opts.path, done.bytes);
+    let marked: { file: string; count: number } | undefined;
+    if (markers) {
+      const frameW = jpegSize(await Deno.readFile(rec.frames[0]!.path))
+        ?.width ?? done.width;
+      const list = markersFromJournal(
+        await Deno.readTextFile(markers.journal),
+        rec.t0!,
+        rec.endUs / 1000,
+        frameW / markers.cssWidth,
+      );
+      marked = { file: markersPathFor(opts.path), count: list.length };
+      await Deno.writeTextFile(
+        marked.file,
+        JSON.stringify(list, null, 2) + "\n",
+      );
+    }
     const warning = still
       ? `the window painted nothing after the first frame — nothing changed on ` +
         `screen, or it is hidden, minimised or occluded (a window that is not ` +
@@ -242,6 +339,7 @@ export async function recordShotVideo(
         }s, ${rec.frames.length} frames, ${done.width}×${done.height} ${done.codec}, encoded in ${
           encodeSeconds.toFixed(1)
         }s by ${done.encoder} — ${speed} real time) — ${url}` +
+          (marked ? `\n  markers: ${marked.count} → ${marked.file}` : "") +
           (warning ? `\n  ! ${warning}` : "") +
           (done.fallback ? `\n  ! ${done.fallback}` : "")
         : {
@@ -256,12 +354,15 @@ export async function recordShotVideo(
           encodeSeconds,
           ...(done.fallback ? { encoderFallback: done.fallback } : {}),
           url,
+          t0: rec.t0,
+          ...(marked ? { markers: marked } : {}),
           ...(warning ? { warning } : {}),
         },
       mode,
     );
   } finally {
     signal.dispose();
+    await unannounce?.();
     if (!keepFrames) await Deno.remove(frameDir, { recursive: true });
   }
 }

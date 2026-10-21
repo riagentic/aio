@@ -68,6 +68,9 @@ export type UITriggerRequest = {
     altKey?: boolean;
     shiftKey?: boolean;
   };
+  /** Measure the target before acting and return it as `rect` (CSS px,
+   *  viewport-relative) — `am shot --video --markers`. */
+  rect?: boolean;
 };
 
 /** Result sent back for a trigger request. */
@@ -82,6 +85,8 @@ export type UITriggerResult = {
   /** The fresh serialized surface after the action settled — act → observe in
    *  a single round-trip (the natural agent loop). */
   surface?: UISurfaceNode[];
+  /** The target's rect before the action, when the request asked for it. */
+  rect?: { x: number; y: number; w: number; h: number };
 };
 
 /** Build the live semantic surface of every mounted root. `full` lifts the text
@@ -345,6 +350,12 @@ async function _runUITrigger(
     }
     const info = findByPath(req.path);
     if (!info || !info._el) return unresolved(req.path, base);
+    const box = req.rect
+      ? (info._el as Element).getBoundingClientRect?.()
+      : undefined;
+    const rect = box
+      ? { x: box.left, y: box.top, w: box.width, h: box.height }
+      : undefined;
     if (
       req.action === "type" && cleared === req.path &&
       !takesCharacters(info._el)
@@ -398,7 +409,12 @@ async function _runUITrigger(
       triggerAction(info._el, req.action, req.key, req.mods);
     }
     await settle();
-    return { ...base, ok: true, surface: getSerializedSurfaces() };
+    return {
+      ...base,
+      ok: true,
+      surface: getSerializedSurfaces(),
+      ...(rect ? { rect } : {}),
+    };
   } catch (e) {
     return { ...base, ok: false, error: String(e) };
   }

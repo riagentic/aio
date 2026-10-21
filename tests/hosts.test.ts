@@ -870,7 +870,7 @@ for (const host of HOSTS) {
 
       // 0b. a plain BOOT of this build already took the older build's slice
       //     off the disk — as bytes, the SQLite file and its -wal included,
-      //     read while the app is still running (aio-boot.ts
+      //     read while the app is still running (boot-scrub.ts
       //     \`scrubStaleSlices\`: secure_delete for that delete, then a
       //     VACUUM for the older revisions in free pages, then a WAL
       //     checkpoint). No write of its own has happened yet to hide a
@@ -916,7 +916,7 @@ for (const host of HOSTS) {
       );
       //    …and what the older build left is gone once this one has
       //    booted — as BYTES, SQLite file and -wal included: a delete that
-      //    only unlinks leaves the secret in a free page (aio-boot.ts
+      //    only unlinks leaves the secret in a free page (boot-scrub.ts
       //    \`scrubStaleSlices\`).
       assertEquals(
         filesContaining(data, OLD),

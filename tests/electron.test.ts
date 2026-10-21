@@ -637,10 +637,12 @@ Deno.test("electron bounds: a restored position off the current display is fitte
       }),
     ]
   ) {
-    assertStringIncludes(s, "__aioFitBounds");
+    // THE placement rule, as its own source (splash-place.ts windowRect).
+    assertStringIncludes(s, "function windowRect(b, screens, primary)");
     assertStringIncludes(s, "screen.getAllDisplays");
-    assertStringIncludes(s, "workArea");
-    assertStringIncludes(s, "return __aioFitBounds(out)");
+    assertStringIncludes(s, "screen.getPrimaryDisplay().workArea");
+    assertStringIncludes(s, "const r = windowRect(s, screens, primary);");
+    assert(!s.includes("win.center()"), "no second placement decider");
   }
 });
 
@@ -667,7 +669,12 @@ function boundsHarness(
   };
   const req = (id: string) => {
     if (id === "electron") {
-      return { screen: { getAllDisplays: () => [{ workArea: display }] } };
+      return {
+        screen: {
+          getAllDisplays: () => [{ workArea: display }],
+          getPrimaryDisplay: () => ({ workArea: display }),
+        },
+      };
     }
     if (id === "fs/promises") {
       return {
@@ -789,7 +796,8 @@ Deno.test("electron bounds: the maximized flag survives a fitted rect and a chan
     height: 863,
   });
   assertEquals(api.restoreMax(), false);
-  // No position saved: no position keys invented.
+  // No position saved: the saved size, centred on the primary (the one
+  // placement rule — never Electron's own center()).
   files.set(
     state,
     JSON.stringify({
@@ -799,10 +807,15 @@ Deno.test("electron bounds: the maximized flag survives a fitted rect and a chan
       declaredHeight: 600,
     }),
   );
-  assertEquals(api.loadBounds(800, 600), { width: 900, height: 700 });
+  assertEquals(api.loadBounds(800, 600), {
+    x: 190,
+    y: 100,
+    width: 900,
+    height: 700,
+  });
 });
 
-Deno.test("electron bounds: both shells re-maximize right after creating the window", () => {
+Deno.test("electron bounds: both shells re-maximize when the window shows (maximize shows a hidden window), after creating it", () => {
   for (
     const s of [
       electronMainScript("http://127.0.0.1:1/", { title: "x" }),
@@ -815,10 +828,16 @@ Deno.test("electron bounds: both shells re-maximize right after creating the win
     assertStringIncludes(s, "out.maximized = true");
     const created = s.indexOf("const win = new BrowserWindow(b);");
     const remax = s.indexOf(
-      "if (__aioRestoreMax) {\n    try { win.maximize(); }",
+      "if (__aioRestoreMax) {\n      try { win.maximize(); }",
     );
+    const shown = s.indexOf("    win.show();\n    __aioWindowAt(true);");
     const tracked = s.indexOf("win.on('resize', save);");
-    assertEquals(created > 0 && remax > created && tracked > remax, true);
+    assertEquals(
+      created > 0 && remax > created && shown > remax && tracked > shown,
+      true,
+    );
+    // …and not before it: a maximize at creation would show it unpainted.
+    assertEquals(s.split("try { win.maximize(); }").length, 2);
     new Function(s); // still parses
   }
 });

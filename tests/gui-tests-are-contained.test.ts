@@ -316,7 +316,17 @@ Deno.test("killProcess: a hung app does not orphan the window it opened", async 
 Deno.test("killProcess: there is exactly one implementation", async () => {
   // Two copies had already drifted into agreeing on nothing but their shape:
   // same constants retyped, and neither knew about child processes.
-  const am = await Deno.readTextFile("src/am/am-cmd-process.ts");
+  // am-cmd-process.ts and the modules split out of it.
+  const am = (await Promise.all(
+    [
+      "src/am/am-cmd-process.ts",
+      "src/am/am-launch.ts",
+      "src/am/am-cmd-start.ts",
+      "src/am/am-cmd-stop.ts",
+      "src/am/am-cmd-status.ts",
+      "src/am/am-cmd-kill.ts",
+    ].map((f) => Deno.readTextFile(f)),
+  )).join("\n");
   assert(
     !/^export async function killProcess/m.test(am),
     "am has its own killProcess again — re-export the one in " +

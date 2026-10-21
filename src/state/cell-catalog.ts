@@ -1,5 +1,6 @@
 // cell-catalog.ts — catalog building and cell binding
 
+import { withRefusalCode } from "./method-rejection.ts";
 import type { CellDef, Creators, Msg } from "./cell-types.ts";
 import { checkReservedKeys } from "./cell-types.ts";
 import { randomUuid } from "../rand.ts";
@@ -95,7 +96,10 @@ export function makeUnboundGuard(
       );
     }
     if (_hostedCell !== undefined) {
-      throw new Error(methodCallInWorkerMessage(_hostedCell, cellName, key));
+      throw withRefusalCode(
+        new Error(methodCallInWorkerMessage(_hostedCell, cellName, key)),
+        "WORKER_METHOD_CALL",
+      );
     }
     throw new Error(
       `[${cellName}] ${key}() called before the cell's runtime is booted — ` +

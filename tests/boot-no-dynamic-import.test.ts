@@ -134,6 +134,8 @@ Deno.test("boot: nothing on the boot path dynamically imports a cell module", as
   for (
     const f of [
       "aio.ts",
+      "aio-run-entry.ts",
+      "aio-run-config.ts",
       "aio-lifecycle.ts",
       "updates-boot.ts",
       "feedback-boot.ts",

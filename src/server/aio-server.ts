@@ -228,6 +228,8 @@ export interface ServerSetupDeps<S, A> {
   /** Close the debounce window now; rejects when the cycle reported a
    *  failure. Behind `am persist` / `POST /__aio/trojan/persist`. */
   flushPersist: () => Promise<void>;
+  /** `am persist --drop`: see `PersistenceManager.dropOrphanCell`. */
+  dropStoredCell?: (cell: string) => true | string[];
   /** The verdict of the most recent persist cycle — null when it landed.
    *
    *  `/__aio/health` had NO persistence signal at all: an app whose every
@@ -1259,6 +1261,9 @@ async function setupTransportInner<S, A>(
         // been told was safe. Now the flush itself, awaited, and a refused
         // write rejects (the route turns it into a 500).
         ...(shouldPersist ? { forcePersist: () => deps.flushPersist() } : {}),
+        ...(shouldPersist && deps.dropStoredCell
+          ? { dropStoredCell: deps.dropStoredCell }
+          : {}),
         ...(asyncDb
           ? {
             sqlQuery: async (sql: string) => (await asyncDb!.query(sql)).rows,

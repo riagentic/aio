@@ -143,6 +143,19 @@ function runWatch(parentAlive: () => boolean, withWatch = true) {
   };
 }
 
+/** A user's own close keeps the page's say — Electron's behaviour — and
+ *  the first such veto is said once (no dialog shows, so the close button
+ *  would read as dead). The line is taken off `calls`. */
+function honoured(w: ReturnType<typeof runWatch>) {
+  assertEquals(w.veto(), "honoured");
+  assertEquals(w.calls.length, 1, w.calls.join(" | "));
+  assert(w.calls[0]!.includes("the page vetoed leaving"), w.calls[0]);
+  assert(w.calls[0]!.includes("(Said once.)"), w.calls[0]);
+  w.calls.length = 0;
+  assertEquals(w.veto(), "honoured");
+  assertEquals(w.calls, [], "said once, not per veto");
+}
+
 Deno.test("server gone: the watch quits with the page's veto OFF, says why, and ends the process itself if the quit hangs", () => {
   let alive = true;
   const w = runWatch(() => alive);
@@ -151,7 +164,7 @@ Deno.test("server gone: the watch quits with the page's veto OFF, says why, and 
   tick.fn();
   assertEquals(w.calls, [], "a living server must not close the window");
   // A user's own close keeps the page's say — that is Electron's behaviour.
-  assertEquals(w.veto(), "honoured");
+  honoured(w);
   alive = false;
   tick.fn();
   assertEquals(w.calls.length, 2, w.calls.join(" | "));
@@ -177,7 +190,7 @@ Deno.test("server stop: SIGTERM, SIGINT and SIGHUP take the same exit — regist
     // before Chromium's own handler and must not survive beside this one.
     let early = 0;
     w.sig.set(s, [() => early++]);
-    assertEquals(w.veto(), "honoured");
+    honoured(w);
     w.ready();
     const now = w.sig.get(s)!;
     assertEquals(now.length, 1, `${s}: the load-time listener is still there`);
@@ -198,7 +211,7 @@ Deno.test("server stop: SIGTERM, SIGINT and SIGHUP take the same exit — regist
 Deno.test("main crash: an uncaught exception quits with the page's veto OFF, exit code 1 — in a shell with no parent watch too", () => {
   for (const withWatch of [true, false]) {
     const w = runWatch(() => true, withWatch);
-    assertEquals(w.veto(), "honoured");
+    honoured(w);
     const crash = w.sig.get("uncaughtException")!;
     assertEquals(crash.length, 1);
     crash[0]!(new Error("boom"));

@@ -8,7 +8,9 @@ import {
   frameAncestors,
 } from "./security-headers.ts";
 import type { UiConfig } from "./aio-types.ts";
-import { dirname, join, resolve } from "@std/path";
+import { dirname, fromFileUrl, join, resolve } from "@std/path";
+import { sourceSplash } from "../build/splash.ts";
+import { appDenoJsonLocated } from "./aio-run-helpers.ts";
 import {
   resolveGuestPreloads,
   stagedGuestPreloadDirs,
@@ -51,6 +53,8 @@ import { type Log, log as globalLog } from "../diagnostics/logger-api.ts";
 import type { DB } from "../db/mod.ts";
 import type { ScheduleDef } from "../state/schedule.ts";
 import { appIconLabel, appIconPngBase64 } from "../build/app-icon.ts";
+import { identityDialogColors, windowBackground } from "../build/app-theme.ts";
+import { appHasStylesheet } from "./app-files.ts";
 import { appConfigTitle } from "./deno-json.ts";
 import { artifactPath, ownReplayArgs, relaunch } from "./updates-apply.ts";
 import { isCompiled } from "./paths.ts";
@@ -275,7 +279,7 @@ let _parentWatched = false;
 
 /** Is this bind address reachable from THIS machine only?
  *
- *  Trimmed and lower-cased like {@linkcode _hostIsExposed} (aio.ts): a host
+ *  Trimmed and lower-cased like {@linkcode _hostIsExposed} (aio-run-config.ts): a host
  *  name is case-insensitive, so `--host=LOCALHOST` must get the SAME answer
  *  from both deciders — it used to read "interface only" here and "not
  *  exposed" there, and `--expose --host=LOCALHOST` warned about a network
@@ -359,6 +363,35 @@ export function shareLink(
     };
   }
   return { url, note: "" };
+}
+
+/** A run from source: deno.json `build.splash`, resolved as its build
+ *  would bake it (`sourceSplash`). A spec the build would refuse is said
+ *  with the build's own words, and this start goes on without a splash. */
+function sourceSplashSpec(appId: string, version: string) {
+  const located = appDenoJsonLocated();
+  if (!located || located.dir.protocol !== "file:") return undefined;
+  const r = sourceSplash(located.config, {
+    root: fromFileUrl(located.dir),
+    appId,
+    version,
+    restarted: isSupervisedChild(),
+    read: (p) => {
+      try {
+        return Deno.readFileSync(p);
+      } catch {
+        return null; // aio-ok: the resolver names the missing file
+      }
+    },
+  });
+  if ("error" in r) {
+    globalLog.error(
+      "electron",
+      `${r.error} No splash on this start; a build refuses it.`,
+    );
+    return undefined;
+  }
+  return r.splash ?? undefined;
 }
 
 /** Inputs for lifecycle startup */
@@ -1057,6 +1090,17 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
       // paid for it six times already.
       ...electronMetaPolicy(electronConfig),
       chrome: ui.chrome,
+      // What the window shows before (and wherever) its page paints: the
+      // app's setting, else the page background aio's theme paints.
+      background: windowBackground(
+        electronConfig?.backgroundColor,
+        ui.theme,
+        appHasStylesheet(deps.baseDir, electronDistDir),
+        appId,
+      ),
+      // What a first start's download window and its question wear.
+      colors: identityDialogColors(appId, electronConfig?.downloadWindow),
+
       tray: ui.tray,
       // WHICH Chromium profile this window opens. Two homes of one app are
       // two instances (the lock key says so) and must not share one userData
@@ -1085,6 +1129,9 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
     const launchHooks: LaunchHooks = {
       ...updateWindow?.hooks,
       previous: previous && (async () => (handedOver = await previous())),
+      splash: isCompiled()
+        ? undefined
+        : sourceSplashSpec(appId, deps.appVersion),
     };
     // NOT distDir — that can be the binary's embedded VFS copy, which this
     // (foreign) Electron process cannot open. Undefined ⇒ it loads over HTTP,
@@ -1367,7 +1414,7 @@ export function startLifecycle<S, A>(deps: LifecycleDeps<S, A>): void {
 /** The exit code `aio.stop()` uses under a SERVICE manager. Distinct from 0 on
  *  purpose: the generated unit carries `Restart=always` so an update's clean
  *  exit brings the new build up — which would bring a STOPPED app up too. The
- *  unit lists this code in `RestartPreventExitStatus=` (build-compile.ts), and
+ *  unit lists this code in `RestartPreventExitStatus=` (build-service.ts), and
  *  a unit that does not is told so in the log before the exit. 143 is the
  *  conventional "asked to terminate" status (128 + SIGTERM). */
 export const STOP_EXIT_CODE = 143;

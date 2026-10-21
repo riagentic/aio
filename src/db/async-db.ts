@@ -25,7 +25,7 @@ const DB_WORKER_MISSING = "db worker module is not embedded";
  *  `new Worker(new URL("./db-worker.ts", import.meta.url))` is invisible to
  *  `deno compile`'s module graph, so the worker is in the binary ONLY if it was
  *  passed with `--include`. The framework's own builder always passes it
- *  (`dbWorkerInclude()` in src/build/build-compile.ts, re-exported from
+ *  (`dbWorkerInclude()` in src/build/build-includes.ts, re-exported from
  *  `aio/build`); a hand-rolled `deno compile` of the app's entry does not — and
  *  the resulting binary boots, then dies on the first DB call. The message that
  *  used to reach the user ("Fix permissions or set persist: false") named a

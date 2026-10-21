@@ -96,7 +96,7 @@ export function args<const S extends ArgsSpec>(
   const flagSpecs = spec.flags ?? {};
   // An app that parses its OWN `--profile`/`--home` keeps it: the aio runtime
   // then reads its profile from AIO_PROFILE / AIO_HOME only.
-  for (const n of ["profile", "home"]) {
+  for (const n of ["profile", "home", "instance"]) {
     if (Object.hasOwn(flagSpecs, n)) claimRuntimeFlag(`--${n}`);
   }
   const help = helpText(spec);

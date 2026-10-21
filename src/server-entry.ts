@@ -52,6 +52,8 @@ export {
   pickFile,
   type PickFilter,
   type PickOptions,
+  pickSave,
+  type SaveOptions,
 } from "./server/pick-path.ts";
 
 // A child process an app can stream, pause, resume and CANCEL — with the whole
@@ -81,6 +83,11 @@ export {
   type BlobStore,
   openBlobStore,
 } from "./server/blobs.ts";
+
+// A file already on disk, served with the blob route's Range contract
+// (206/416, inert content type + nosniff, the file closed on cancel) — so a
+// `<video>` can seek without every media app hand-rolling a Range server.
+export { serveFile, type ServeFileOptions } from "./server/serve-file.ts";
 
 /** What the server this client talks to announced in its hello — its aio
  *  version and its app's derived build (`peerHello().app`), so a CLI client can

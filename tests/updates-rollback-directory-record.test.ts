@@ -35,6 +35,7 @@ import {
   setLogger,
 } from "../src/diagnostics/logger-api.ts";
 import { _recordDeps } from "../src/server/install-record.ts";
+import { _renameDeps } from "../src/diagnostics/rename-over.ts";
 import { dropTempDir, tempDir } from "../src/testing/temp-dir.ts";
 
 const quiet = {
@@ -794,6 +795,45 @@ Deno.test("installed.json: a rollback cut between the record and the move, then 
     assertEquals(await recordedVersion(dir, "3.0.0"), "3.0.0");
     assertEquals((await recordLines(said, 1)).length, 1, said.join("\n"));
   } finally {
+    await dropTempDir(dir);
+    await dropTempDir(data);
+  }
+});
+
+// A check asked for while this process's own write of the record is still
+// answering (the file already renamed into place, the write not yet resolved)
+// was dropped — "already writing it" — so a record that changed in that window
+// stayed wrong. Held here at exactly that moment: the check is made once the
+// write in flight has answered.
+Deno.test("installed.json: a check asked for while a write of it is answering is made, not dropped", async () => {
+  const dir = await tempDir("aio-rollback-dir-record-");
+  const data = await tempDir("aio-rollback-dir-record-data-");
+  const renameAsync = _renameDeps.renameAsync;
+  try {
+    const current = join(dir, "notes");
+    const record = join(dir, "installed.json");
+    await Deno.mkdir(current);
+    await Deno.writeTextFile(record, JSON.stringify(notes("2.0.0")));
+    let landed!: () => void;
+    const onDisk = new Promise<void>((r) => landed = r);
+    let release!: () => void;
+    const answered = new Promise<void>((r) => release = r);
+    _renameDeps.renameAsync = async (from, to) => {
+      await renameAsync(from, to);
+      _renameDeps.renameAsync = renameAsync;
+      landed();
+      await answered;
+    };
+    boot(data, NEW_EXE, current, "3.0.0");
+    await onDisk;
+    assertEquals(await recordedVersion(dir, "3.0.0"), "3.0.0");
+    // The next writer of the record, then a check — before the first answers.
+    await Deno.writeTextFile(record, JSON.stringify(notes("2.0.0")));
+    boot(data, NEW_EXE, current, "3.0.0");
+    release();
+    assertEquals(await recordedVersion(dir, "3.0.0"), "3.0.0");
+  } finally {
+    _renameDeps.renameAsync = renameAsync;
     await dropTempDir(dir);
     await dropTempDir(data);
   }

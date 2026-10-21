@@ -150,7 +150,11 @@ export function codesignScript(
     ...(shared ? [] : [
       // 1. helper app binaries, the crashpad handler, and the dylibs
       `for h in ${e}/Frameworks/*.app; do for b in "$h/Contents/MacOS/"*; do sign "$b"; done; done`,
-      `sign ${fwVers}/Helpers/chrome_crashpad_handler`,
+      // every helper the framework carries, by glob — not by name: Electron
+      // 44.9 added `app_shim_loader` beside `chrome_crashpad_handler`, and an
+      // unsigned one fails the framework's seal ("code object is not signed
+      // at all")
+      `for b in ${fwVers}/Helpers/*; do sign "$b"; done`,
       `for d in ${fwVers}/Libraries/*.dylib; do sign "$d"; done`,
       // 2. each framework, then 3. each helper app
       `for fw in ${e}/Frameworks/*.framework; do sign "$fw"; done`,

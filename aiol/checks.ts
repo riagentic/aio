@@ -42,6 +42,7 @@ import {
   VALID_BUILD_TARGET_KEYS,
 } from "../src/server/config.ts";
 import { count } from "../src/diagnostics/fmt.ts";
+import { checkAssetUrls } from "./check-assets.ts";
 
 // ══════════════════════════════════════════════════════════════════════
 // 1. PROJECT CONFIG (deno.json)
@@ -7811,6 +7812,7 @@ export const ALL_CHECKS: Checker[] = [
   checkTesting,
   checkPatterns,
   checkBuild,
+  checkAssetUrls,
   checkInterCell,
   checkScheduling,
   checkMemoUsage,

@@ -33,6 +33,7 @@ import {
 import { resolveSelfAction } from "./self.ts";
 import { inServerOrigin } from "./call-origin.ts";
 import { materializeValue, withDraftDo } from "./cell-impl.ts";
+import { draftCloneError } from "./immutable.ts";
 import { current, type Draft, isDraft } from "immer";
 import { AioError, createAioError } from "../diagnostics/error.ts";
 import { log } from "../diagnostics/logger-api.ts";
@@ -1571,6 +1572,9 @@ export function buildMethodsExecutor(
             }
           })
           .catch((e: Error) => {
+            // `structuredClone(s.x)` on the live view: name the fix (sync
+            // twin: cell-compose-reduce.ts `methodThrew`).
+            e = draftCloneError(e) ?? e;
             // Asked BEFORE the abort below empties the batch: did any of this
             // call's writes commit? Never for a transaction (discarded), yes
             // for an async method that wrote before it threw.

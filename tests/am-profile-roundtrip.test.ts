@@ -79,7 +79,13 @@ await aio.run({ cells: [c], appId: "pr", persist: false, client: "server-only" }
         home: string;
       }[]) ?? [];
     try {
-      const start = await am("start", "--profile", "dev", "--json");
+      const start = await am(
+        "start",
+        "--profile",
+        "dev",
+        "--json",
+        "--wait=60",
+      );
       assertEquals(start.code, 0, start.out);
       let inst = (await list()).filter((i) => i.appId === "pr");
       assertEquals(inst.length, 1, JSON.stringify(inst));
@@ -116,7 +122,7 @@ await aio.run({ cells: [c], appId: "pr", persist: false, client: "server-only" }
       // `am start --home <dir>` — refused before 1.0.10 — now STARTS there,
       // and `--home` stops exactly it.
       const custom = join(dir, "custom-home");
-      const s2 = await am("start", `--home=${custom}`, "--json");
+      const s2 = await am("start", `--home=${custom}`, "--json", "--wait=60");
       assertEquals(s2.code, 0, s2.out);
       inst = (await list()).filter((i) => i.appId === "pr");
       assertEquals(inst.map((i) => i.home), [custom]);

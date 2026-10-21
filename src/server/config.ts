@@ -52,7 +52,7 @@ export const DENO_JSON_READ_KEYS = new Set<string>([
   "entry",
   "build",
   "version",
-  // Read by BOTH: `build-compile.ts` embeds each mount in the binary (and the
+  // Read by BOTH: `build-includes.ts` embeds each mount in the binary (and the
   // web and Android builds package it), and the server serves it
   // (`_servedAssets`), under whatever `aio.run({ assets })` adds.
   "assets",
@@ -180,8 +180,10 @@ export const VALID_BUILD_KEYS = new Set<string>([
   // whether a desktop package carries its Electron or starts from the
   // per-user shared store (electron/shared-runtime.ts).
   "electronRuntime",
-  // `false | { image, text, progress, minMs, font, color, bar }` — read by
-  // build-config.ts (`resolveSplash`, build/splash.ts): the desktop app's
+  // `false | { image, text, downloadText, progress, minMs, font, color,
+  // bar, size, fit, position, background, textPosition, align, margin,
+  // shadow, radius, border, windowShadow, maxMs, fadeMs, show, cancel }` —
+  // read by build-config.ts (`resolveSplash`, build/splash.ts): the app's
   // splash, from its start until its window has loaded.
   "splash",
   // `{ shortcut }` — read by build-config.ts (`resolveWindowsShortcut`):
@@ -596,7 +598,7 @@ export const CONFIG_DOCS: Record<string, [string, string]> = {
   ],
   electron: [
     "{}",
-    "the Electron process's own security decisions — { requireSandbox } refuses to launch rather than fall back to --no-sandbox, { unsandboxedChildWindows } lets openWindow ask for sandbox:false, { webviewTag } enables <webview> without openWindow, { guestDownloads } lets an embedded or child page save files, { permissions } is the app page's exact permission allow-list (guests then get none), { allowLocalPeers } lets other processes of the same OS user open a production app's local socket (off: only the app's own window may), { ignoreDebugEnv } makes an Electron client ignore AIO_CDP / AIO_PORT / AIO_DEFAULT_PORT from the environment (--cdp and --port still work); all default to what aio has always done",
+    "the Electron process's own security decisions — { requireSandbox } refuses to launch rather than fall back to --no-sandbox, { unsandboxedChildWindows } lets openWindow ask for sandbox:false, { webviewTag } enables <webview> without openWindow, { guestDownloads } lets an embedded or child page save files, { permissions } is the app page's exact permission allow-list (guests then get none), { allowLocalPeers } lets other processes of the same OS user open a production app's local socket (off: only the app's own window may), { ignoreDebugEnv } makes an Electron client ignore AIO_CDP / AIO_PORT / AIO_DEFAULT_PORT from the environment (--cdp and --port still work), { shortcuts: { reload: false, print: false } } leaves Ctrl+R / Ctrl+P to the page, { confirmUnload } asks Leave/Stay natively when the page vetoes a close, { backgroundColor: #rrggbb or { light, dark } } is the window's background before the page paints, { showWhenPainted: false or { capMs } } shows the window at once or caps the wait for its first paint, { downloadWindow } sets the first start's download window and Retry / Quit question (heading, text, question, background, color, bar, cancel); all default to what aio has always done",
   ],
   libraryMode: [
     "false",
@@ -1097,6 +1099,50 @@ export function validateConfig(
     ));
     exit(1);
   }
+  const badKeys = label === "electron"
+    ? electronShortcutsRefusal(obj.shortcuts)
+    : null;
+  if (badKeys) {
+    log.error(teachMessage(
+      badKeys,
+      "use { reload: false } and/or { print: false }",
+      "docs/clients/electron.md",
+    ));
+    exit(1);
+  }
+  const badBg = label === "electron"
+    ? electronBackgroundRefusal(obj.backgroundColor)
+    : null;
+  if (badBg) {
+    log.error(teachMessage(
+      badBg,
+      'use "#rrggbb", or { light: "#rrggbb", dark: "#rrggbb" }',
+      "docs/clients/electron.md",
+    ));
+    exit(1);
+  }
+  const badShow = label === "electron"
+    ? electronShowRefusal(obj.showWhenPainted)
+    : null;
+  if (badShow) {
+    log.error(teachMessage(
+      badShow,
+      "use true, false, or { capMs: 5000 }",
+      "docs/build/targets.md",
+    ));
+    exit(1);
+  }
+  const badDw = label === "electron"
+    ? electronDownloadWindowRefusal(obj.downloadWindow)
+    : null;
+  if (badDw) {
+    log.error(teachMessage(
+      badDw,
+      "see the keys of electron.downloadWindow",
+      "docs/build/targets.md",
+    ));
+    exit(1);
+  }
   // ── Couplings between keys that are each individually valid ──────────
   //
   // ── Nested objects, validated as configs in their own right ─────────
@@ -1374,7 +1420,144 @@ export const VALID_ELECTRON_KEYS: Set<string> = new Set([
   "allowLocalPeers",
   "ignoreDebugEnv",
   "strictPin",
+  "shortcuts",
+  "confirmUnload",
+  "backgroundColor",
+  "showWhenPainted",
+  "downloadWindow",
 ]);
+
+/** Every key of `ElectronConfig.shortcuts`. */
+export const VALID_ELECTRON_SHORTCUTS: readonly string[] = ["reload", "print"];
+
+/** Why `v` is not a valid `electron.shortcuts` — `null` when it is, or is
+ *  absent. A misspelled shortcut is a key the app believes it freed and did
+ *  not. Pure. */
+export function electronShortcutsRefusal(v: unknown): string | null {
+  if (v === undefined) return null;
+  if (!v || typeof v !== "object" || Array.isArray(v)) {
+    return "electron.shortcuts must be an object, like { reload: false }";
+  }
+  for (const [k, on] of Object.entries(v)) {
+    if (!VALID_ELECTRON_SHORTCUTS.includes(k)) {
+      return `electron.shortcuts: "${k}" is not a shortcut aio binds (known: ${
+        VALID_ELECTRON_SHORTCUTS.join(", ")
+      })`;
+    }
+    if (typeof on !== "boolean") {
+      return `electron.shortcuts.${k} must be true or false, not ${
+        JSON.stringify(on)
+      }`;
+    }
+  }
+  return null;
+}
+
+/** Why `v` is not a valid `electron.backgroundColor` — `null` when it is,
+ *  or is absent. Pure. */
+export function electronBackgroundRefusal(v: unknown): string | null {
+  if (v === undefined) return null;
+  const hex = (c: unknown) =>
+    typeof c === "string" && /^#[0-9a-fA-F]{6}$/.test(c);
+  if (hex(v)) return null;
+  if (v && typeof v === "object" && !Array.isArray(v)) {
+    const o = v as Record<string, unknown>;
+    const extra = Object.keys(o).find((k) => k !== "light" && k !== "dark");
+    if (extra !== undefined) {
+      return `electron.backgroundColor: "${extra}" is not a mode (known: light, dark)`;
+    }
+    for (const k of ["light", "dark"]) {
+      if (!hex(o[k])) {
+        return `electron.backgroundColor.${k} must be "#rrggbb", not ${
+          JSON.stringify(o[k])
+        }`;
+      }
+    }
+    return null;
+  }
+  return `electron.backgroundColor must be "#rrggbb" or { light, dark }, not ${
+    JSON.stringify(v)
+  }`;
+}
+
+/** Why `v` is not a valid `electron.showWhenPainted` — `null` when it is,
+ *  or is absent. Pure. */
+export function electronShowRefusal(v: unknown): string | null {
+  if (v === undefined || typeof v === "boolean") return null;
+  if (v && typeof v === "object" && !Array.isArray(v)) {
+    const o = v as Record<string, unknown>;
+    const extra = Object.keys(o).find((k) => k !== "capMs");
+    if (extra !== undefined) {
+      return `electron.showWhenPainted: "${extra}" is not a key (known: capMs)`;
+    }
+    const c = o.capMs;
+    if (
+      typeof c === "number" && Number.isInteger(c) && c >= 100 && c <= 60_000
+    ) return null;
+    return `electron.showWhenPainted.capMs must be a whole number of ` +
+      `milliseconds from 100 to 60000, not ${JSON.stringify(c)}`;
+  }
+  return `electron.showWhenPainted must be true, false or { capMs }, not ${
+    JSON.stringify(v)
+  }`;
+}
+
+/** Every key of `electron.downloadWindow`. */
+const DOWNLOAD_WINDOW_KEYS = [
+  "heading",
+  "text",
+  "question",
+  "background",
+  "color",
+  "bar",
+  "cancel",
+];
+
+/** Why `v` is not a valid `electron.downloadWindow` — `null` when it is, or
+ *  is absent. A misspelled key is a look the app believes it set. Pure. */
+export function electronDownloadWindowRefusal(v: unknown): string | null {
+  if (v === undefined) return null;
+  const at = "electron.downloadWindow";
+  if (!v || typeof v !== "object" || Array.isArray(v)) {
+    return `${at} must be an object, like { heading: "Setting up {title}" }`;
+  }
+  const o = v as Record<string, unknown>;
+  const hex = (c: unknown) =>
+    typeof c === "string" && /^#[0-9a-fA-F]{6}$/.test(c);
+  for (const [k, x] of Object.entries(o)) {
+    if (!DOWNLOAD_WINDOW_KEYS.includes(k)) {
+      return `${at}: "${k}" is not a key (known: ${
+        DOWNLOAD_WINDOW_KEYS.join(", ")
+      })`;
+    }
+    if (["heading", "text", "question"].includes(k)) {
+      if (typeof x !== "string" || !x.trim()) {
+        return `${at}.${k} must be a non-empty string, not ${
+          JSON.stringify(x)
+        }`;
+      }
+    } else if (k === "cancel") {
+      if (typeof x !== "boolean") {
+        return `${at}.cancel must be true or false, not ${JSON.stringify(x)}`;
+      }
+    } else if (k === "bar") {
+      if (!x || typeof x !== "object" || Array.isArray(x)) {
+        return `${at}.bar must be an object, like { color: "#14f195" }`;
+      }
+      for (const [bk, bv] of Object.entries(x)) {
+        if (bk !== "color" && bk !== "track") {
+          return `${at}.bar: "${bk}" is not a key (known: color, track)`;
+        }
+        if (!hex(bv)) {
+          return `${at}.bar.${bk} must be "#rrggbb", not ${JSON.stringify(bv)}`;
+        }
+      }
+    } else if (!hex(x)) {
+      return `${at}.${k} must be "#rrggbb", not ${JSON.stringify(x)}`;
+    }
+  }
+  return null;
+}
 
 /** Every permission name Electron's session handlers are asked about — the
  *  union in electron.d.ts (Electron 44), and the names `electron.permissions`
@@ -1550,6 +1733,7 @@ export const SHAPE_VALUES: Record<string, ConfigShape> = {
   localFirst: "boolean",
   showStatus: "boolean",
   layout: "boolean",
+  confirmUnload: "boolean", // electron.confirmUnload
   // ── lists ─────────────────────────────────────────────────────────────
   cells: "array",
   allowedOrigins: "array",

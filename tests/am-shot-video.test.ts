@@ -8,8 +8,11 @@
 import "./store-sandbox.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
+import { liveJournal, noteTrigger } from "../src/am/am-markers.ts";
+import { lockDir } from "../src/server/single-instance-lock.ts";
 import {
   isStillRecording,
+  recordShotVideo,
   shotVideoOptions,
   shotVideoProgress,
   shotVideoRecordingLine,
@@ -370,6 +373,68 @@ Deno.test({
       for (const f of rec.frames) {
         assert((await Deno.stat(f.path)).size > 0, f.path);
       }
+    });
+  },
+});
+
+Deno.test({
+  name:
+    "recordShotVideo --json --markers: the start event's t0 is the video's zero, and a trigger noted mid-recording lands in <video>.markers.json on that clock, in video px",
+  ignore: !CHROME,
+  async fn() {
+    await withBrowser("640,480", null, async (cdp, _browser, dir) => {
+      const path = join(dir, "m.webm");
+      const app = { appId: "mk-video", pid: Deno.pid };
+      await Deno.mkdir(lockDir(), { recursive: true });
+      let noted = 0;
+      const driver = (async () => {
+        let j: string | null = null;
+        for (let i = 0; i < 500; i++) {
+          j = liveJournal(app.appId, app.pid);
+          if (j) break;
+          await new Promise((r) => setTimeout(r, 20));
+        }
+        assert(j, "the recorder never announced itself");
+        await new Promise((r) => setTimeout(r, 300));
+        noted = Date.now();
+        await noteTrigger(j, {
+          at: noted,
+          path: "App:Go",
+          action: "click",
+          rect: { x: 10, y: 20, w: 30, h: 40 },
+        });
+      })();
+      const err: string[] = [];
+      const out: string[] = [];
+      const [e, l] = [console.error, console.log];
+      console.error = (...a: unknown[]) => err.push(a.map(String).join(" "));
+      console.log = (...a: unknown[]) => out.push(a.map(String).join(" "));
+      try {
+        await recordShotVideo(
+          cdp,
+          "http://x/",
+          { path, format: "webm", durationMs: 1500, markers: true },
+          "json",
+          app,
+        );
+      } finally {
+        console.error = e;
+        console.log = l;
+      }
+      await driver;
+      const ev = JSON.parse(err.find((x) => x.startsWith('{"event"'))!);
+      assertEquals(ev.event, "recording");
+      assertEquals(ev.file, path);
+      const doc = JSON.parse(out.at(-1)!);
+      assertEquals(doc.t0, ev.t0);
+      assertEquals(doc.markers, { file: `${path}.markers.json`, count: 1 });
+      const m = JSON.parse(await Deno.readTextFile(`${path}.markers.json`));
+      assertEquals(m.length, 1);
+      assertEquals(m[0].t, noted - ev.t0);
+      assertEquals(m[0].path, "App:Go");
+      // Headless at DPR 1: one video px per CSS px.
+      assertEquals(m[0].rect, { x: 10, y: 20, w: 30, h: 40 });
+      assertEquals(liveJournal(app.appId, app.pid), null, "registry removed");
     });
   },
 });

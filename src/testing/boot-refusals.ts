@@ -14,6 +14,7 @@
 // `check:boundaries` cannot enforce that (root files have unrestricted reach),
 // so it is stated here and in `test-strict.ts`, beside both import lists.
 
+import { withRefusalCode } from "../state/method-rejection.ts";
 import {
   applyCellDefaults,
   applyLocalFirst,
@@ -190,24 +191,30 @@ export function crashWorker(
 ): void {
   const id = cell?.__aio?.id;
   if (cell?.__aio?.worker !== true) {
-    throw new Error(
-      `crashWorker: ${
-        id ? `cell "${id}"` : "the argument"
-      } is not a worker cell — only a cell declared worker: true has a ` +
-        `worker to crash.`,
+    throw withRefusalCode(
+      new Error(
+        `crashWorker: ${
+          id ? `cell "${id}"` : "the argument"
+        } is not a worker cell — only a cell declared worker: true has a ` +
+          `worker to crash.`,
+      ),
+      "NOT_CRASHABLE",
     );
   }
   const why = "crashWorker() in a test";
   if (_crashHostedWorker(id, why)) return;
   const sim = crashSims.get(id);
   if (!sim || sim.dead !== null) {
-    throw new Error(
-      `crashWorker: cell "${id}" has no live worker to crash — ` +
-        (sim
-          ? `it already crashed for good.`
-          : `no testCell, bootCells or testUI is running it, and under ` +
-            `testServer it needs a real one: testServer({ workers: "real", ` +
-            `workerEntry }) (docs/testing/prod-parity.md).`),
+    throw withRefusalCode(
+      new Error(
+        `crashWorker: cell "${id}" has no live worker to crash — ` +
+          (sim
+            ? `it already crashed for good.`
+            : `no testCell, bootCells or testUI is running it, and under ` +
+              `testServer it needs a real one: testServer({ workers: "real", ` +
+              `workerEntry }) (docs/testing/prod-parity.md).`),
+      ),
+      "NOT_CRASHABLE",
     );
   }
   const { err, respawn } = _workerCrash(id, why, sim.times);
@@ -474,7 +481,10 @@ export function _isolateWorkerCellsInProcess(
       const get = function (this: unknown) {
         const hosted = insideWorker();
         if (hosted !== undefined && hosted !== name) {
-          throw new Error(peerReadInWorkerMessage(hosted, name, key));
+          throw withRefusalCode(
+            new Error(peerReadInWorkerMessage(hosted, name, key)),
+            "WORKER_PEER_READ",
+          );
         }
         return prev.get!.call(this);
       };
@@ -498,8 +508,11 @@ export function _isolateWorkerCellsInProcess(
       const call = function (this: unknown, ...args: unknown[]) {
         const hosted = insideWorker();
         if (hosted !== undefined) {
-          throw new Error(
-            methodCallInWorkerMessage(hosted, def.__aio.id, key),
+          throw withRefusalCode(
+            new Error(
+              methodCallInWorkerMessage(hosted, def.__aio.id, key),
+            ),
+            "WORKER_METHOD_CALL",
           );
         }
         return (prev as (...x: unknown[]) => unknown).apply(this, args);

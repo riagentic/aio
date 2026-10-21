@@ -570,6 +570,7 @@ function Invoke-AioRun {
   exit $LASTEXITCODE
 }
 
-# Dot-sourcing defines the helpers WITHOUT running anything — that is how the
-# tests reach them.
-if ($MyInvocation.InvocationName -ne '.') { Invoke-AioRun }
+# AIO_RUN_LOAD_ONLY=1 defines the helpers WITHOUT running anything — that is
+# how the tests reach them. Every other load runs, dot-sourcing included (GitHub
+# Actions runs a `shell: pwsh` step as `. '{0}'`; see install.ps1).
+if ($env:AIO_RUN_LOAD_ONLY -ne '1') { Invoke-AioRun }

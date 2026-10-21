@@ -67,7 +67,7 @@ export const hostOf = (
   pick(["flag", cli.host], ["config", config.host]);
 
 /** `--expose` > `aio.run({ expose })` > off. (A non-loopback `host` is
- *  exposure too — `_exposeOf` in aio.ts combines the two.) */
+ *  exposure too — `_exposeOf` in aio-run-config.ts combines the two.) */
 export const exposeFlagOf = (
   cli: Pick<Flags, "expose">,
   config: { expose?: boolean },
